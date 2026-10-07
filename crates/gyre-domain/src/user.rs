@@ -106,6 +106,10 @@ pub struct User {
     pub global_role: GlobalRole,
     pub preferences: UserPreferences,
     pub roles: Vec<UserRole>,
+    /// Verified `iss` claim of the OIDC provider that last authenticated this
+    /// user (HSI §12 auth provider info). Server-recorded; never client-editable.
+    pub oidc_issuer: Option<String>,
+    /// When the user last authenticated (HSI §12). Server-recorded.
     pub last_login_at: Option<u64>,
     pub created_at: u64,
     pub updated_at: u64,
@@ -127,6 +131,7 @@ impl User {
             global_role: GlobalRole::Member,
             preferences: UserPreferences::default(),
             roles: vec![UserRole::ReadOnly],
+            oidc_issuer: None,
             last_login_at: None,
             created_at: now,
             updated_at: now,

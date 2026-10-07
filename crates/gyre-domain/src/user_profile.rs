@@ -57,30 +57,37 @@ impl UserToken {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JudgmentType {
-    /// spec_approvals table — spec approval
+    /// `spec_approvals` — signed spec approval
     SpecApproval,
-    /// spec_approvals table — spec rejection (revocation)
+    /// `spec_approvals` — spec rejection or revocation
     SpecRejection,
-    /// workspace audit log — trust grant
+    /// `audit_events` (`event_type = 'gate_override'`) — human approved an MR
+    /// despite failed gates
+    GateOverride,
+    /// `audit_events` (`event_type = 'trust_change'`) — trust level transition
     TrustGrant,
-    /// workspace audit log — meta-spec update
+    /// `audit_events` (`event_type = 'meta_spec_publish'`) — meta-spec published
     MetaSpec,
 }
 
 impl JudgmentType {
+    /// Canonical wire/`?type=` string (HSI §12).
     pub fn as_str(&self) -> &'static str {
         match self {
             JudgmentType::SpecApproval => "approval",
             JudgmentType::SpecRejection => "rejection",
+            JudgmentType::GateOverride => "gate",
             JudgmentType::TrustGrant => "trust",
             JudgmentType::MetaSpec => "meta-spec",
         }
     }
 
+    /// Parses the canonical wire string back; inverse of [`JudgmentType::as_str`].
     pub fn from_db_str(s: &str) -> Option<Self> {
         match s {
             "approval" => Some(JudgmentType::SpecApproval),
             "rejection" => Some(JudgmentType::SpecRejection),
+            "gate" => Some(JudgmentType::GateOverride),
             "trust" => Some(JudgmentType::TrustGrant),
             "meta-spec" => Some(JudgmentType::MetaSpec),
             _ => None,

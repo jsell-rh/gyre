@@ -15,6 +15,13 @@ pub enum AuditEventType {
     ContainerCrashed,
     ContainerOom,
     ContainerNetworkBlocked,
+    // Human judgment decisions (HSI §12 Judgment Ledger)
+    /// A workspace trust level transition (`PUT /workspaces/:id`).
+    TrustChange,
+    /// A human approved an MR whose gate results contained a failure.
+    GateOverride,
+    /// A meta-spec (persona/principle/standard) version was published.
+    MetaSpecPublish,
     Custom(String),
 }
 
@@ -30,6 +37,9 @@ impl AuditEventType {
             Self::ContainerCrashed => "container_crashed".to_string(),
             Self::ContainerOom => "container_oom".to_string(),
             Self::ContainerNetworkBlocked => "container_network_blocked".to_string(),
+            Self::TrustChange => "trust_change".to_string(),
+            Self::GateOverride => "gate_override".to_string(),
+            Self::MetaSpecPublish => "meta_spec_publish".to_string(),
             Self::Custom(s) => s.clone(),
         }
     }
@@ -46,6 +56,9 @@ impl AuditEventType {
             "container_crashed" => Self::ContainerCrashed,
             "container_oom" => Self::ContainerOom,
             "container_network_blocked" => Self::ContainerNetworkBlocked,
+            "trust_change" => Self::TrustChange,
+            "gate_override" => Self::GateOverride,
+            "meta_spec_publish" => Self::MetaSpecPublish,
             other => Self::Custom(other.to_string()),
         }
     }
@@ -159,10 +172,21 @@ mod tests {
             AuditEventType::ContainerCrashed,
             AuditEventType::ContainerOom,
             AuditEventType::ContainerNetworkBlocked,
+            AuditEventType::TrustChange,
+            AuditEventType::GateOverride,
+            AuditEventType::MetaSpecPublish,
             AuditEventType::Custom("custom_event".to_string()),
         ];
         for t in &types {
             assert_eq!(AuditEventType::from_str(&t.as_str()), *t);
+        }
+        // The judgment-ledger event types are named variants: falling through to
+        // Custom would still round-trip, so assert the parse arm explicitly.
+        for s in ["trust_change", "gate_override", "meta_spec_publish"] {
+            assert!(
+                !matches!(AuditEventType::from_str(s), AuditEventType::Custom(_)),
+                "{s} must parse to its named variant, not Custom"
+            );
         }
     }
 
