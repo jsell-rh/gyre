@@ -75,9 +75,9 @@ scan_file() {
     }
     # #[cfg(test)] mod tests: adapter tests intentionally query cross-tenant
     # to prove isolation; do not lint them.
-    /^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]+tests\b/ { intests = 1 }
+    /^[[:space:]]*(pub(\([^\)]*\))?[[:space:]]+)?mod[[:space:]]+tests[[:space:]]*\{/ { intests = 1 }
     method != "" {
-        if ($0 ~ /\.(load|load_one|load_all|first|get_result|get_results)[[:space:]]*\(/) has_diesel = 1
+        if ($0 ~ /\.(load|load_one|load_all|first|get_result|get_results)[^a-z_]/) has_diesel = 1
         if ($0 ~ /tenant_id[[:space:]]*[.][[:space:]]*eq[[:space:]]*\(/) has_tenant = 1
     }
     function flush() {
