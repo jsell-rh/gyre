@@ -1539,7 +1539,7 @@ mod tests {
     /// reqwest opens a fresh connection per request). Returns the collected
     /// raw request texts.
     async fn spawn_http_mocks(
-        responses: Vec<(u16, &'static str)>,
+        responses: Vec<(u16, String)>,
     ) -> (u16, tokio::task::JoinHandle<Vec<String>>) {
         use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1569,7 +1569,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_workspace_budget_hits_real_route() {
-        let (port, server) = spawn_http_mocks(vec![(200, WS_BUDGET_JSON)]).await;
+        let (port, server) = spawn_http_mocks(vec![(200, WS_BUDGET_JSON.to_string())]).await;
         let c = GyreClient::new(format!("http://127.0.0.1:{port}"), "tok".to_string());
         let b = c.get_workspace_budget("ws-1").await.unwrap();
         assert_eq!(b.entity_id, "ws-1");
@@ -1593,8 +1593,11 @@ mod tests {
     async fn set_workspace_budget_fetch_merge_put() {
         // GET returns the current config (tokens unset, cost 20.0, agents 5),
         // then PUT must carry the merged body: new tokens + kept current limits.
-        let (port, server) =
-            spawn_http_mocks(vec![(200, WS_BUDGET_CURRENT_JSON), (200, WS_BUDGET_JSON)]).await;
+        let (port, server) = spawn_http_mocks(vec![
+            (200, WS_BUDGET_CURRENT_JSON.to_string()),
+            (200, WS_BUDGET_JSON.to_string()),
+        ])
+        .await;
         let c = GyreClient::new(format!("http://127.0.0.1:{port}"), "tok".to_string());
         let b = c
             .set_workspace_budget("ws-1", Some(500000), None, None, None)
@@ -1627,10 +1630,10 @@ mod tests {
     async fn set_workspace_budget_surfaces_server_error_body() {
         // 403 (non-Admin) and the 400 cascade body must surface verbatim.
         let (port, _server) = spawn_http_mocks(vec![
-            (200, WS_BUDGET_CURRENT_JSON),
+            (200, WS_BUDGET_CURRENT_JSON.to_string()),
             (
                 403,
-                r#"{"error":"only Admin role may update workspace budget limits"}"#,
+                r#"{"error":"only Admin role may update workspace budget limits"}"#.to_string(),
             ),
         ])
         .await;
@@ -1652,7 +1655,7 @@ mod tests {
         let summary = format!(
             r#"{{"tenant_config":{{"max_tokens_per_day":2000000,"max_cost_per_day":500.0,"max_concurrent_agents":20,"max_agent_lifetime_secs":null}},"tenant_usage":{{"entity_type":"tenant","entity_id":"global","tokens_used_today":100,"cost_today":1.25,"active_agents":1,"period_start":1790000000}},"workspaces":[{WS_BUDGET_JSON}]}}"#
         );
-        let (port, server) = spawn_http_mocks(vec![(200, Box::leak(summary.into_boxed_str()))]).await;
+        let (port, server) = spawn_http_mocks(vec![(200, summary)]).await;
         let c = GyreClient::new(format!("http://127.0.0.1:{port}"), "tok".to_string());
         let s = c.budget_summary().await.unwrap();
         assert_eq!(s.tenant_config.max_tokens_per_day, Some(2000000));
