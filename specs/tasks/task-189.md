@@ -5,7 +5,7 @@ depends_on: []
 progress: not-started
 coverage_sections:
   - "platform-model.md §Scope Resolution"
-commits: []
+commits: ["2d1e74d949a55a5b166a317d19f5faf2478490e3"]
 ---
 
 ## Spec Excerpt
