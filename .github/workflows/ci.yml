@@ -60,10 +60,10 @@ jobs:
     steps:                                                                                                                                      
       - uses: actions/checkout@v4                                                                                                               
       - run: bash scripts/check-arch.sh                                                                                                         
-      - name: API auth coverage lint (advisory)
-        run: bash scripts/check-api-auth.sh || true
-      - name: Tenant filter lint (advisory)
-        run: bash scripts/check-tenant-filter.sh || true
+      - name: API auth coverage lint
+        run: bash scripts/check-api-auth.sh
+      - name: Tenant filter lint
+        run: bash scripts/check-tenant-filter.sh
       - name: Hierarchy lint (M34)
         run: GYRE_CHECK_HIERARCHY=1 bash scripts/check-hierarchy.sh
       - name: Dead parameter lint (advisory)
