@@ -101,7 +101,7 @@ async fn evaluate_workspace(
         // Suppress if an active TrustSuggestion already exists for this user/workspace.
         let existing = state
             .notifications
-            .list_for_user(&member.user_id, Some(&ws.id), Some(8), Some(8), None, 20, 0)
+            .list_for_user(&member.user_id, Some(&ws.id), Some(8), Some(8), None, &[], 20, 0)
             .await
             .unwrap_or_default();
 
@@ -388,7 +388,7 @@ mod tests {
                 Some(&Id::new("ws1")),
                 Some(8),
                 Some(8),
-                None,
+                None, &[],
                 10,
                 0,
             )
@@ -441,7 +441,7 @@ mod tests {
                 Some(&Id::new("ws2")),
                 Some(8),
                 Some(8),
-                None,
+                None, &[],
                 10,
                 0,
             )
@@ -490,7 +490,7 @@ mod tests {
                 Some(&Id::new("ws3")),
                 Some(8),
                 Some(8),
-                None,
+                None, &[],
                 10,
                 0,
             )

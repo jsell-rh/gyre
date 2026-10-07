@@ -2828,9 +2828,22 @@ async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: 
             .clone()
             .unwrap_or_else(|| Id::new(auth.agent_id.clone()));
         let ws_id = Id::new(workspace_id);
+        // HSI §12 parity with REST: types the user disabled in preferences are
+        // excluded from the MCP inbox too.
+        let disabled: Vec<String> = match state.user_notification_prefs.list_for_user(&user_id).await {
+            Ok(prefs) => prefs
+                .into_iter()
+                .filter(|p| !p.enabled)
+                .map(|p| p.notification_type)
+                .collect(),
+            Err(e) => {
+                return json!({"error": format!("failed to load notification preferences: {e}")})
+            }
+        };
+        let disabled: Vec<&str> = disabled.iter().map(String::as_str).collect();
         match state
             .notifications
-            .list_for_user(&user_id, Some(&ws_id), min_pri, max_pri, None, 50, 0)
+            .list_for_user(&user_id, Some(&ws_id), min_pri, max_pri, None, &disabled, 50, 0)
             .await
         {
             Ok(notifications) => {

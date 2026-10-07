@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 use tracing::{info, instrument};
 
+use crate::auth::AuthenticatedAgent;
 use crate::AppState;
 
 use super::error::ApiError;
@@ -701,11 +702,12 @@ pub async fn list_comments(
 #[instrument(skip(state, req), fields(mr_id = %id, reviewer = %req.reviewer_agent_id, decision = %req.decision))]
 pub async fn submit_review(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
     Path(id): Path<String>,
     Json(req): Json<SubmitReviewRequest>,
 ) -> Result<(StatusCode, Json<ReviewResponse>), ApiError> {
     let mr_id = Id::new(&id);
-    state
+    let mr = state
         .merge_requests
         .find_by_id(&mr_id)
         .await?
@@ -716,6 +718,50 @@ pub async fn submit_review(
     review.body = req.body;
 
     state.reviews.submit_review(&review).await?;
+
+    // HSI §12 Judgment Ledger: a human (not an agent acting unattended) approving
+    // an MR that has failing gate results is an override — the strongest judgment
+    // signal in the ledger. One event per failed gate result. Failure propagates:
+    // a silently dropped judgment event is audit theatre.
+    if decision == ReviewDecision::Approved && auth.user_id.is_some() {
+        let results = state.gate_results.list_by_mr_id(mr_id.as_str()).await?;
+        for r in results
+            .iter()
+            .filter(|r| r.status == gyre_common::GateStatus::Failed)
+        {
+            let gate = state.quality_gates.find_by_id(r.gate_id.as_str()).await?;
+            let event = gyre_domain::AuditEvent::new(
+                new_id(),
+                gyre_domain::AuditEventType::GateOverride,
+                None,
+                auth.user_id.clone(),
+                None,
+                Some(mr.workspace_id.clone()),
+                gate.as_ref().map(|g| g.repo_id.clone()),
+                "merge_request".to_string(),
+                Some(mr_id.as_str().to_string()),
+                gyre_domain::AuditOutcome::Success,
+                serde_json::json!({
+                    "mr_id": mr_id.as_str(),
+                    "gate_id": r.gate_id.as_str(),
+                    "gate_type": gate.as_ref().map(|g| g.gate_type),
+                    "gate_name": gate.as_ref().map(|g| g.name.clone()),
+                    "from_status": "failed",
+                    // The gate row itself is not mutated by a human approval —
+                    // "overridden" is the honest transition name.
+                    "to_status": "overridden",
+                }),
+                None,
+                None,
+                now_secs(),
+            );
+            state.audit.record(&event).await?;
+            let _ = state
+                .audit_broadcast_tx
+                .send(serde_json::to_string(&event).unwrap_or_default());
+        }
+    }
+
     Ok((StatusCode::CREATED, Json(ReviewResponse::from(review))))
 }
 
