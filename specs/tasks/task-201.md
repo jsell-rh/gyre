@@ -7,7 +7,7 @@ coverage_sections:
   - "search.md §Search Index"
   - "search.md §Technology"
   - "search.md §Index Schema"
-commits: []
+commits: ["1699c6f31cef45a908bc745689e7614ef1e8d8e5"]
 ---
 
 ## Spec Excerpt
