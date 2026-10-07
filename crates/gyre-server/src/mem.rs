@@ -3259,6 +3259,7 @@ fn test_state_inner(
     git_ops: Arc<dyn gyre_ports::GitOpsPort>,
     workspaces: Arc<dyn WorkspaceRepository>,
     policies: Arc<dyn gyre_ports::PolicyRepository>,
+    storage: Option<Arc<dyn gyre_ports::storage::StoragePort>>,
     secrets: Option<Arc<dyn gyre_ports::SecretRepository>>,
 ) -> Arc<crate::AppState> {
     use std::collections::HashMap;
@@ -4295,8 +4296,7 @@ impl gyre_ports::TrustAnchorRepository for MemTrustAnchorRepository {
     }
 }
 
-#[cfg(test)]
-mod secret_contract_tests {
+mod secret_contract_tests_f1 {
     //! F1 (task-097): the mem adapter must enforce the SecretRepository port's
     //! duplicate-rejection contract in code — SQLite enforces it via UNIQUE
     //! constraints, so a mem-only guard is the only thing tests can catch.
