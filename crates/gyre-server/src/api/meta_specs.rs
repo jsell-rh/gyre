@@ -1026,6 +1026,7 @@ pub async fn create_meta_spec_registry(
         .create(&ms)
         .await
         .map_err(ApiError::Internal)?;
+    record_meta_spec_publish(&state, &auth, &ms).await?;
     Ok((StatusCode::CREATED, Json(ms)))
 }
 
@@ -1097,9 +1098,53 @@ pub async fn update_meta_spec_registry(
         .update(&ms)
         .await
         .map_err(ApiError::Internal)?;
+    record_meta_spec_publish(&state, &auth, &ms).await?;
     Ok(Json(ms))
 }
 
+/// HSI §12 Judgment Ledger: publishing a meta-spec version (initial create or
+/// version bump) is human judgment — record it so it surfaces in the
+/// publisher's ledger. Failure propagates: a silently dropped judgment event
+/// is audit theatre.
+async fn record_meta_spec_publish(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    ms: &MetaSpec,
+) -> Result<(), ApiError> {
+    let workspace_id = match ms.scope {
+        MetaSpecScope::Workspace => ms.scope_id.as_ref().map(Id::new),
+        MetaSpecScope::Global => None,
+    };
+    let event = gyre_domain::AuditEvent::new(
+        Id::new(uuid::Uuid::new_v4().to_string()),
+        gyre_domain::AuditEventType::MetaSpecPublish,
+        None,
+        auth.user_id.clone(),
+        None,
+        workspace_id,
+        None,
+        "meta_spec".to_string(),
+        Some(ms.id.as_str().to_string()),
+        gyre_domain::AuditOutcome::Success,
+        serde_json::json!({
+            "kind": ms.kind.as_str(),
+            "name": ms.name,
+            "version": ms.version,
+        }),
+        None,
+        None,
+        now_secs(),
+    );
+    state
+        .audit
+        .record(&event)
+        .await
+        .map_err(ApiError::Internal)?;
+    let _ = state
+        .audit_broadcast_tx
+        .send(serde_json::to_string(&event).unwrap_or_default());
+    Ok(())
+}
 // ---------------------------------------------------------------------------
 // DELETE /api/v1/meta-specs-registry/:id
 // ---------------------------------------------------------------------------

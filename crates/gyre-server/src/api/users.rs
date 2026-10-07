@@ -63,6 +63,11 @@ pub struct UserProfileResponse {
     pub preferences: serde_json::Value,
     pub created_at: u64,
     pub updated_at: u64,
+    /// OIDC issuer that authenticated this user (HSI §12 auth-provider info).
+    /// Null for API-key/legacy provisioned users.
+    pub oidc_issuer: Option<String>,
+    /// Last authenticated-at (Unix secs) of the user (HSI §12).
+    pub last_login_at: Option<u64>,
 }
 
 impl From<User> for UserProfileResponse {
@@ -80,6 +85,8 @@ impl From<User> for UserProfileResponse {
             preferences: prefs,
             created_at: u.created_at,
             updated_at: u.updated_at,
+            oidc_issuer: u.oidc_issuer.clone(),
+            last_login_at: u.last_login_at,
         }
     }
 }
@@ -111,6 +118,8 @@ pub async fn get_me(
         preferences: serde_json::json!({}),
         created_at: 0,
         updated_at: 0,
+        oidc_issuer: None,
+        last_login_at: None,
     };
     Ok(Json(profile))
 }
@@ -298,6 +307,10 @@ pub async fn get_my_notifications(
     let workspace_id = params.workspace_id.as_deref().map(Id::new);
     let limit = params.limit.unwrap_or(50).min(200);
     let offset = params.offset.unwrap_or(0);
+    // HSI §12: types the user disabled via notification preferences are
+    // excluded from the inbox (before limit/offset).
+    let disabled = disabled_notification_types(&state, &user_id).await?;
+    let disabled: Vec<&str> = disabled.iter().map(String::as_str).collect();
     let notifications = state
         .notifications
         .list_for_user(
@@ -306,6 +319,7 @@ pub async fn get_my_notifications(
             params.min_priority,
             params.max_priority,
             params.notification_type.as_deref(),
+            &disabled,
             limit,
             offset,
         )
@@ -329,9 +343,12 @@ pub async fn get_notification_count(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let user_id = resolve_user_id(&auth);
     let workspace_id = params.workspace_id.as_deref().map(Id::new);
+    // Same preference exclusion as the inbox list, so the badge matches it.
+    let disabled = disabled_notification_types(&state, &user_id).await?;
+    let disabled: Vec<&str> = disabled.iter().map(String::as_str).collect();
     let count = state
         .notifications
-        .count_unresolved(&user_id, workspace_id.as_ref())
+        .count_unresolved(&user_id, workspace_id.as_ref(), &disabled)
         .await?;
     Ok(Json(serde_json::json!({ "count": count })))
 }
@@ -880,6 +897,20 @@ pub struct UpdateNotifPrefsRequest {
     pub preferences: Vec<NotifPrefItem>,
 }
 
+/// Canonical type names the user has explicitly disabled (HSI §12).
+/// Used as the inbox/count exclusion set; an empty result filters nothing.
+async fn disabled_notification_types(
+    state: &AppState,
+    user_id: &Id,
+) -> Result<Vec<String>, ApiError> {
+    let prefs = state.user_notification_prefs.list_for_user(user_id).await?;
+    Ok(prefs
+        .into_iter()
+        .filter(|p| !p.enabled)
+        .map(|p| p.notification_type)
+        .collect())
+}
+
 /// PUT /api/v1/users/me/notification-preferences
 pub async fn update_notification_preferences(
     auth: AuthenticatedAgent,
@@ -887,6 +918,16 @@ pub async fn update_notification_preferences(
     Json(req): Json<UpdateNotifPrefsRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let user_id = resolve_user_id(&auth);
+    // Validate canonical type names: a typo here would silently create a
+    // preference that never matches any notification (dead filter).
+    for item in &req.preferences {
+        if NotificationType::parse(&item.notification_type).is_none() {
+            return Err(ApiError::BadRequest(format!(
+                "unknown notification type '{}' (expected canonical name, e.g. \"GateFailure\")",
+                item.notification_type
+            )));
+        }
+    }
     let prefs: Vec<UserNotificationPreference> = req
         .preferences
         .into_iter()

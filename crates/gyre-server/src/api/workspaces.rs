@@ -220,13 +220,14 @@ pub async fn update_workspace(
     if let Some(max_agents) = req.max_agents_per_repo {
         ws.max_agents_per_repo = Some(max_agents);
     }
-    let trust_changed = if let Some(tl) = req.trust_level {
+    let (trust_changed, trust_transition) = if let Some(tl) = req.trust_level {
         let new_trust = TrustLevel::from_db_str(&tl);
         let changed = new_trust != ws.trust_level;
+        let from = ws.trust_level.clone();
         ws.trust_level = new_trust;
-        changed
+        (changed, changed.then(|| (from, new_trust)))
     } else {
-        false
+        (false, None)
     };
     if let Some(model) = req.llm_model {
         ws.llm_model = Some(model);
@@ -260,6 +261,35 @@ pub async fn update_workspace(
                         .to_string(),
                 )
             })?;
+        // HSI §12 Judgment Ledger: a trust transition is human judgment — record
+        // it so it surfaces in the actor's ledger. Failure propagates: a silently
+        // dropped judgment event is audit theatre.
+        if let Some((from, to)) = &trust_transition {
+            let event = gyre_domain::AuditEvent::new(
+                new_id(),
+                gyre_domain::AuditEventType::TrustChange,
+                None,
+                auth.user_id.clone(),
+                None,
+                Some(ws.id.clone()),
+                None,
+                "workspace".to_string(),
+                Some(ws.id.as_str().to_string()),
+                gyre_domain::AuditOutcome::Success,
+                serde_json::json!({
+                    "workspace_id": ws.id.as_str(),
+                    "from": from.to_string(),
+                    "to": to.to_string(),
+                }),
+                None,
+                None,
+                now_secs(),
+            );
+            state.audit.record(&event).await?;
+            let _ = state
+                .audit_broadcast_tx
+                .send(serde_json::to_string(&event).unwrap_or_default());
+        }
     } else {
         // No trust change — only the non-trust workspace fields need updating.
         state.workspaces.update(&ws).await?;
