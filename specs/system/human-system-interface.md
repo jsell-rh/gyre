@@ -1389,10 +1389,16 @@ The User Profile is a **lean settings + judgment ledger** view. It is NOT an act
 **Identity & Access**
 - Display name, avatar, email, timezone, locale (editable via `PUT /api/v1/users/me`)
 - API tokens for CLI and MCP access (create, revoke, list — `POST /api/v1/users/me/tokens`, `DELETE /api/v1/users/me/tokens/:id`, `GET /api/v1/users/me/tokens`)
-- Auth provider info (OIDC issuer, last login — read-only)
+- Auth provider info (OIDC issuer, last login — read-only, served by `GET /api/v1/users/me` as
+  `oidc_issuer` / `last_login_at`). Both are recorded by the server during OIDC/JWT authentication —
+  the issuer is the verified `iss` claim, `last_login_at` the most recent successful OIDC
+  authentication, written at most once per debounce window so per-request token validation does not
+  write a row per request. Never client-editable: `PUT /api/v1/users/me` has no field for either.
+  Users who authenticated only by API key have `null` for both.
 
 **Notification Preferences**
-- Per-notification-type toggles (enable/disable each of the 10 `NotificationType` variants)
+- Per-notification-type toggles (enable/disable any `NotificationType` variant; the stored
+  `notification_type` is the canonical `NotificationType::as_str()` name)
 - Delivery channel preference (in-app only for now; email/webhook are future extension points)
 - Stored in a `user_notification_preferences` table:
 ```sql
@@ -1403,7 +1409,16 @@ CREATE TABLE user_notification_preferences (
     PRIMARY KEY (user_id, notification_type)
 );
 ```
-- The Inbox query filters out disabled notification types before returning results. Default: all enabled.
+- The Inbox query filters out disabled notification types before returning results. Default: all
+  enabled (no preference row = enabled; only an explicit `enabled = 0` disables).
+  The filter is applied in the storage query, not after pagination, so it holds for **both** the
+  inbox list (`GET /api/v1/users/me/notifications`) and the unread badge
+  (`GET /api/v1/users/me/notifications/count`) — a disabled type must never inflate the badge — and
+  for the MCP inbox tool. Background jobs that scan the inbox for de-duplication are exempt: they
+  must see every notification regardless of the recipient's toggles.
+- `PUT /api/v1/users/me/notification-preferences` MUST reject a `notification_type` that
+  `NotificationType::parse` does not recognize (400). A stored typo would never match a real
+  notification, silently making the toggle — and the inbox filter it drives — inert.
 
 **Workspace Memberships**
 - List of workspaces the user belongs to, with their role in each (Owner, Admin, Developer, Viewer)
@@ -1417,7 +1432,27 @@ CREATE TABLE user_notification_preferences (
   - Trust level changes (from → to, workspace)
   - Meta-spec edits published (persona/principle/standard, workspace)
 - This is the human's **compounding asset** — the record of every decision that shaped the system
-- Endpoint: `GET /api/v1/users/me/judgments` — returns a paginated, reverse-chronological list aggregated from existing tables (spec_approvals, gate overrides, workspace audit log, meta-spec commit history). Query params: `?workspace_id=`, `?type=` (approval/gate/trust/meta-spec), `?since=`, `?limit=`, `?offset=`
+- Endpoint: `GET /api/v1/users/me/judgments` — returns a paginated, reverse-chronological list
+  aggregated from the sources below. Query params: `?workspace_id=` (**filters** the result to that
+  workspace — an entry with no known workspace is excluded when it is set), `?type=`
+  (`approval` / `rejection` / `gate` / `trust` / `meta-spec` — exactly the `JudgmentType` wire
+  strings), `?since=`, `?limit=`, `?offset=`. `limit`/`offset` apply to the merged, sorted stream,
+  never per source.
+- Sources (each category must have a real writer, or the category is inert):
+  |Category|Table|Human attribution|Workspace attribution|
+  |---|---|---|---|
+  |`approval` / `rejection`|`spec_approvals` (signed approval store; `rejected_at`/`revoked_at` mark a rejection)|`approver_id`|`spec_ledger_entries.workspace_id` joined on `spec_approvals.spec_path = spec_ledger_entries.path`|
+  |`gate`|`audit_events` where `event_type = 'gate_override'`|`user_id`|`workspace_id` column|
+  |`trust`|`audit_events` where `event_type = 'trust_change'`|`user_id`|`workspace_id` column|
+  |`meta-spec`|`audit_events` where `event_type = 'meta_spec_publish'`|`user_id`|`workspace_id` column (from the meta-spec's own `scope`/`scope_id`)|
+- `audit_events.agent_id` names the *agent* an event is about and `spec_approval_events.approver_id`
+  carries the KeyBinding identity key (`user:<display name>`), so neither is the human attribution
+  key for this ledger; `audit_events.user_id` is the authenticated human.
+- A gate override is recorded when a human approves an MR whose gate results contain a failure: one
+  `gate_override` event per failed gate, carrying `mr_id`, the gate type, and the status transition.
+  A trust change is recorded by `PUT /api/v1/workspaces/:id` on the successful transition only,
+  carrying `from`/`to`. A meta-spec publish is recorded on registry create and update, carrying
+  `kind`, `name`, `version`, `content_hash`.
 - ABAC: per-handler auth (user-scoped, like `/users/me/notifications`)
 
 ### What the Profile Is NOT
