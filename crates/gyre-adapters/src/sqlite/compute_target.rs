@@ -90,10 +90,13 @@ impl ComputeTargetRepository for SqliteStorage {
     async fn get_by_id(&self, id: &Id) -> Result<Option<ComputeTargetEntity>> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<ComputeTargetEntity>> {
             let mut conn = pool.get().context("get db connection")?;
+            // Spec hierarchy-enforcement.md §3: id lookups must verify tenant.
             let result = compute_targets::table
                 .find(id.as_str())
+                .filter(compute_targets::tenant_id.eq(&tenant))
                 .first::<ComputeTargetRow>(&mut *conn)
                 .optional()
                 .context("get compute target by id")?;
