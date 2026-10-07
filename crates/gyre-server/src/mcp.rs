@@ -359,7 +359,7 @@ fn tool_definitions() -> Value {
                         },
                         "payload": {
                             "type": "object",
-                            "description": "Optional structured payload for the message"
+                            "description": "Optional structured payload for the message. Validated against the kind's required fields (message-bus.md §Payload Schemas) — e.g. task_assignment requires payload.task_id, status_update requires payload.status and payload.summary. A missing required field fails the call."
                         },
                         "tier": {
                             "type": "string",
