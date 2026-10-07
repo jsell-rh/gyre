@@ -152,10 +152,15 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/merge-requests/{id}/dependencies` | Get MR dependencies and dependents: `{mr_id, depends_on: [{mr_id, source, reason?},...], dependents: [...]}`. Each dependency includes `source` (`explicit`, `branch-lineage`, `agent-declared`) and optional `reason` (TASK-028, TASK-100) |
 | `DELETE` | `/api/v1/merge-requests/{id}/dependencies/{dep_id}` | Remove a single dependency from an MR; 404 if dep_id not in depends_on; **Developer+ required** (CISO P147-A, TASK-100) |
 | `PUT` | `/api/v1/merge-requests/{id}/atomic-group` | Set atomic group membership: `{group: "<name>"}` (or `null` to clear) — all group members must be ready before any is dequeued; **Developer+ required** (CISO P147-A, TASK-100) |
-| `POST` | `/api/v1/merge-queue/enqueue` | Add approved MR to merge queue; triggers gate execution per repo gates (M12.1) |
+| `POST` | `/api/v1/merge-queue/enqueue` | Add approved MR to merge queue; triggers gate execution per repo gates (M12.1). Rejects non-mergeable MRs: 409 when status is `Merged`/`Closed`/`Reverted` — resubmission after a revert goes through a fresh MR (task-095 R3-F2) |
 | `GET` | `/api/v1/merge-queue` | List merge queue entries (priority ordered) |
 | `DELETE` | `/api/v1/merge-queue/{id}` | Cancel queued entry |
 | `GET` | `/api/v1/merge-queue/graph` | Return full merge queue DAG: `{nodes: [{mr_id, title, status, priority},...], edges: [{from, to},...]}` (TASK-100) |
+| `GET` | `/api/v1/repos/{id}/status` | Repo health: merge-queue pause state (`queue_paused`, `pause_reason`) + `main_green` — post-merge gates re-run against current default-branch HEAD; `null` when no post-merge gates configured; `false` when HEAD cannot be resolved (fails closed, task-095 R3-F3) (platform-model.md §6) |
+| `PUT` | `/api/v1/repos/{id}/queue/pause` | Manually pause the repo's merge queue; body `{reason?}`; merge processor skips all entries (single + atomic-group) while paused (platform-model.md §6) |
+| `PUT` | `/api/v1/repos/{id}/queue/resume` | Resume the merge queue; clears pause state and emits `MergeQueueResumed` |
+| `POST` | `/api/v1/repos/{id}/revert/{mr_id}` | Manual revert of a merged MR (platform-model.md §6 CLI): reverts the MR's recorded `merge_commit_sha` (409 if none recorded; 403 if the MR belongs to another repo), applies recovery side effects (mark `Reverted`, RevertNotification, remediation task, gate-result invalidation), and counts toward the revert circuit breaker |
+| `GET/PUT` | `/api/v1/repos/{id}/post-merge-gates` | List / replace post-merge validation gates (`gate_phase: "post_merge"`, command gates only); PUT body `{gates: [{name, gate_type, command, required?, timeout_secs?}]}` (platform-model.md §6 Post-Merge Validation) |
 | `POST` | `/api/v1/repos/{id}/commits/record` | Record agent-commit mapping |
 | `GET` | `/api/v1/repos/{id}/agent-commits` | Query commits by agent (`?agent_id=`) |
 | `POST/GET` | `/api/v1/repos/{id}/worktrees` | Create / list worktrees; POST: JWT bearers evaluated against repo ABAC policy — returns 403 if no policy matches (G6-A) |

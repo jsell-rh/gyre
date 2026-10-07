@@ -102,6 +102,24 @@ gyre mr create --title "Fix bug" --repo-id <repo-uuid> \
 ```
 
 ---
+## Merge Queue & Rollback (platform-model.md §6)
+
+```bash
+# Repo health: main green/broken + merge queue pause state
+gyre repo status --repo-id <repo-uuid>
+
+# Manual revert of a specific merged MR (reverts that MR's recorded
+# merge commit, marks it Reverted, notifies the author, and creates a
+# remediation task; counts toward the 3-revert circuit breaker)
+gyre repo revert <mr-id> --repo-id <repo-uuid>
+
+# Merge queue control
+gyre repo queue pause  --repo-id <repo-uuid> --reason "investigating red main"
+gyre repo queue resume --repo-id <repo-uuid>
+```
+
+---
+
 
 ## Spec Operations
 
