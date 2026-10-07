@@ -140,6 +140,7 @@ impl MergeRequestRepository for SqliteStorage {
     async fn create(&self, mr: &MergeRequest) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let m = mr.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
             let reviewer_strs: Vec<&str> = m.reviewers.iter().map(|id| id.as_str()).collect();
@@ -160,7 +161,7 @@ impl MergeRequestRepository for SqliteStorage {
                 diff_insertions: m.diff_stats.as_ref().map(|d| d.insertions as i64),
                 diff_deletions: m.diff_stats.as_ref().map(|d| d.deletions as i64),
                 has_conflicts: m.has_conflicts.map(|v| if v { 1i32 } else { 0 }),
-                tenant_id: "default",
+                tenant_id: &tenant,
                 depends_on: &depends_on_json,
                 atomic_group: m.atomic_group.as_deref(),
                 workspace_id: m.workspace_id.as_str(),
