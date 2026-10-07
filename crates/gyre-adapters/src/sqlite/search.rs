@@ -15,7 +15,6 @@ use async_trait::async_trait;
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Double, Nullable, Text};
 use gyre_ports::search::{SearchDocument, SearchPort, SearchQuery, SearchResult};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::SqliteStorage;
@@ -150,7 +149,7 @@ impl SearchPort for SqliteStorage {
 
     async fn search(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
         let pool = Arc::clone(&self.pool);
-        tokio::task::spawn_blocking(move || -> Result<Vec<SearchResult>> {
+        Ok(tokio::task::spawn_blocking(move || -> Result<Vec<SearchResult>> {
             let mut conn = pool.get().context("get db connection")?;
             let match_expr = build_match_expr(&query.query);
             if match_expr.is_empty() {
@@ -198,7 +197,7 @@ impl SearchPort for SqliteStorage {
                 })
                 .collect())
         })
-        .await??
+        .await??)
     }
 
     async fn delete(&self, entity_type: &str, entity_id: &str) -> Result<()> {
@@ -224,7 +223,7 @@ impl SearchPort for SqliteStorage {
         // were dropped. The rebuild-from-domain-entities half of reindex is the
         // server coordinator's job (task-202) — not faked here.
         let pool = Arc::clone(&self.pool);
-        tokio::task::spawn_blocking(move || -> Result<u64> {
+        Ok(tokio::task::spawn_blocking(move || -> Result<u64> {
             let mut conn = pool.get().context("get db connection")?;
             let count = diesel::sql_query("SELECT COUNT(*) AS cnt FROM search_index")
                 .get_result::<CountRow>(&mut conn)?
@@ -233,7 +232,7 @@ impl SearchPort for SqliteStorage {
                 .execute(&mut *conn)?;
             Ok(count as u64)
         })
-        .await??
+        .await??)
     }
 }
 
@@ -241,6 +240,7 @@ impl SearchPort for SqliteStorage {
 mod tests {
     use super::*;
     use gyre_ports::search::SearchQuery;
+    use std::collections::HashMap;
     use tempfile::NamedTempFile;
 
     fn tmp_storage() -> (NamedTempFile, SqliteStorage) {
@@ -261,18 +261,26 @@ mod tests {
         }
     }
 
+    #[derive(diesel::QueryableByName)]
+    struct MasterRow {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        obj_type: String,
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        sql: String,
+    }
+
     #[tokio::test]
     async fn fts5_table_exists_with_specced_schema() {
         // §Index Schema: real FTS5 virtual table, exact columns + porter unicode61.
         let (_f, storage) = tmp_storage();
         let mut conn = storage.pool.get().unwrap();
-        let row: (String, String) = diesel::sql_query(
-            "SELECT type, sql FROM sqlite_master WHERE name = 'search_index'",
+        let row = diesel::sql_query(
+            "SELECT type AS obj_type, sql FROM sqlite_master WHERE name = 'search_index'",
         )
-        .get_result(&mut conn)
+        .get_result::<MasterRow>(&mut conn)
         .unwrap();
-        assert_eq!(row.0, "table");
-        let sql = row.1;
+        assert_eq!(row.obj_type, "table");
+        let sql = row.sql;
         assert!(sql.contains("fts5"), "not an fts5 table: {sql}");
         for col in [
             "entity_type",
