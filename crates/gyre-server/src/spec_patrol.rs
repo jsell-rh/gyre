@@ -33,7 +33,10 @@ pub struct PatrolRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PatrolFinding {
     /// Finding type: `stale_link`, `orphaned_supersession`, `unresolved_conflict`,
-    /// `dangling_implementation`, `deep_dependency_chain`.
+    /// `dangling_implementation`, `deep_dependency_chain`. The spec-lifecycle
+    /// accountability patrol (`spec_lifecycle_patrol`, task-204) additionally
+    /// emits `stale_drift_review_task`, `stale_implementation_backlog`, and
+    /// `spec_without_task` through this same type.
     #[serde(rename = "type")]
     pub finding_type: String,
     /// Severity: `error`, `warning`, or `info`.
@@ -44,6 +47,14 @@ pub struct PatrolFinding {
     pub detail: String,
     /// Suggested remediation action.
     pub suggested_action: String,
+    /// Offending task id, for task-scoped findings (`None` for spec-graph and
+    /// spec-without-task findings).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Workspace the finding belongs to — routes orchestrator escalation.
+    /// `None` means the scope is unknown and the escalation must broadcast.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
 }
 
 /// Response from the patrol endpoint.
@@ -123,6 +134,8 @@ fn check_stale_links(
                         "Review the {} link from '{}' to '{}' and update the target_sha",
                         link.link_type, link.source_path, link.target_path
                     ),
+                    task_id: None,
+                    workspace_id: None,
                 });
             }
         }
@@ -178,6 +191,8 @@ fn check_orphaned_supersessions(
                     "Update the {} link in '{}' to reference '{}' instead of the superseded '{}'",
                     link.link_type, link.source_path, superseder, link.target_path
                 ),
+                task_id: None,
+                workspace_id: None,
             });
         }
     }
@@ -216,6 +231,8 @@ fn check_unresolved_conflicts(
                      from one or remove the conflicts_with link",
                     link.source_path, link.target_path
                 ),
+                task_id: None,
+                workspace_id: None,
             });
         }
     }
@@ -243,6 +260,8 @@ fn check_dangling_implementations(
                      '{}' has been deleted from the manifest",
                     link.source_path, link.target_path
                 ),
+                task_id: None,
+                workspace_id: None,
             });
         }
     }
@@ -288,6 +307,8 @@ fn check_deep_dependency_chains(links: &[SpecLinkEntry], findings: &mut Vec<Patr
                      chains deeper than 5 levels indicate a decomposition smell",
                     start
                 ),
+                task_id: None,
+                workspace_id: None,
             });
         }
     }
@@ -1026,6 +1047,8 @@ mod tests {
             spec_path: "system/spec-a.md".to_string(),
             detail: "Conflicts with 'system/spec-b.md', both approved".to_string(),
             suggested_action: "Resolve the conflict".to_string(),
+            task_id: None,
+            workspace_id: None,
         }];
 
         create_notifications_for_error_findings(&state, &findings, now).await;
@@ -1133,6 +1156,8 @@ mod tests {
                 spec_path: "system/spec-a.md".to_string(),
                 detail: "Implements 'system/deleted-1.md' which no longer exists".to_string(),
                 suggested_action: "Remove or update the link".to_string(),
+                task_id: None,
+                workspace_id: None,
             },
             PatrolFinding {
                 finding_type: "dangling_implementation".to_string(),
@@ -1140,6 +1165,8 @@ mod tests {
                 spec_path: "system/spec-b.md".to_string(),
                 detail: "Implements 'system/deleted-2.md' which no longer exists".to_string(),
                 suggested_action: "Remove or update the link".to_string(),
+                task_id: None,
+                workspace_id: None,
             },
             PatrolFinding {
                 finding_type: "dangling_implementation".to_string(),
@@ -1147,6 +1174,8 @@ mod tests {
                 spec_path: "system/spec-c.md".to_string(),
                 detail: "Implements 'system/deleted-3.md' which no longer exists".to_string(),
                 suggested_action: "Remove or update the link".to_string(),
+                task_id: None,
+                workspace_id: None,
             },
         ];
 
@@ -1215,6 +1244,8 @@ mod tests {
             spec_path: "system/a.md".to_string(),
             detail: "Stale link".to_string(),
             suggested_action: "Review link".to_string(),
+            task_id: None,
+            workspace_id: None,
         }];
 
         create_notifications_for_error_findings(&state, &findings, now).await;
