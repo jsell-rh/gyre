@@ -2,10 +2,10 @@
 title: "Remove My Tasks/MRs/Agents from profile; amend user-management 'My Stuff'"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is NOT"
-commits: ["98fd096e3972e7a6d1df78b700b63ea1dee15fe5"]
+commits: ["98fd096e3972e7a6d1df78b700b63ea1dee15fe5", "ad1121c5093cd2f1f2b3824ed88352ac4e181fd9"]
 ---
 
 ## Spec Excerpt
@@ -97,3 +97,18 @@ After both parts, run the acceptance-criteria greps yourself and fix any straggl
 - **Minor (M22 milestone) addressed:** `specs/milestones/m22-platform-entities.md` M22.8 endpoint list now strikes the three `users/me/{agents,tasks,mrs}` rows with a removal annotation pointing at HSI §12 / task-208. Historical count ("12 REST endpoints") left intact as the M22-era record.
 - Optional reviewer hardening (dist-freshness gate) deliberately not added: it requires a general source↔bundle staleness oracle the repo doesn't have; the F1 class is now closed for this surface, and the source-level guards (six-tab test, 404 route test) fail on reintroduction.
 - Runtime serving check attempted (`SKIP_WEB_BUILD=1` build of `gyre-server`, launched): every TCP `accept` fails with `os error 95` (EOPNOTSUPP) in this sandbox — kernel socket-accept is blocked, so live HTTP probes are impossible here ([INFERENCE]: sandbox restriction, not a server defect; the in-process router test `my_stuff_endpoints_are_removed` still proves the 404 route table without sockets). Embed chain verified at artifact level instead: `spa.rs` has no `debug-embed` (debug reads `web/dist` from disk; release embeds the same committed folder), and the committed folder passes the F1 grep — so the shipped `SKIP_WEB_BUILD`/release artifact serves the new bundle.
+
+## Shipped
+
+- `/profile` renders only the six HSI §12-compliant tabs (info, tokens, memberships, ledger, notif-prefs, notifications); the My Agents / My Tasks / My MRs tabs, tab bodies, state, fetches, and CSS are deleted from `UserProfile.svelte`, and the exact-six-tab guard test fails on any reintroduction.
+- `GET /api/v1/users/me/{agents,tasks,mrs}` deleted end-to-end (handlers, routes, ABAC mappings, `api.js` client methods); the in-process router regression test `my_stuff_endpoints_are_removed` asserts 404 on all three URIs.
+- `specs/system/user-management.md` §"My Stuff" Views amended to record the supersession (ui-navigation.md §2 workspace home is the landing page; no per-user my-stuff surface anywhere); M22.8 completeness row struck; M22 milestone rows annotated; coverage matrices updated (user-management row 22 → `n/a`, HSI row 54 → `implemented`).
+- Committed `web/dist/` regenerated (`ad1121c`) so the RustEmbed'd `SKIP_WEB_BUILD=1` build path serves the six-tab bundle — the shipped artifact no longer contains the forbidden surface.
+
+## Review Round 2 (2026-10-07)
+
+- **F1 verified fixed at artifact level.** `web/dist/index.html` points at `index-KSqzVjd3.js`; the F1 grep over `web/dist/assets/*.js` returns no matches for any forbidden identifier; the compiled tabs array is exactly `{info, tokens, memberships, ledger, notif-prefs, notifications}` with `Promise.allSettled` reduced to the four kept fetches; kept-surface identifiers (`users/me/tokens`, `users/me/judgments`, `notif-prefs`) present; stale `index-fzyK9GaC.js` / old CSS removed. No source drift since `98fd096` (`git diff 98fd096..HEAD --stat -- web/src/ crates/ specs/system/user-management.md` empty).
+- **Scoping fix (this round):** `ad1121c` was absent from the task's `commits:` frontmatter — the attribution gate passed only because its product-surface regex (`^(crates/|web/src|web/tests)`) doesn't cover `web/dist/`, so a task-labeled dist-only commit is invisible to both the gate and review scoping. Appended the SHA to the frontmatter (the review round-1 repair path's explicit requirement; the implementer's `6bc4189` claim of "record dist regen commit" only annotated the M22 milestone). Exemption file untouched (still 3 frozen entries, no task-208 lines).
+- M22 milestone annotation verified (three rows struck with HSI §12 / task-208 pointer, historical count intact).
+- All round-1 probes still green at this HEAD: `my_stuff_endpoints_are_removed` ok, ABAC route-registry + exempt-handlers gates OK, UserProfile.test.js 23/23, attribution gate OK (now including `ad1121c` in frontmatter).
+- Verdict: **complete** — every acceptance criterion holds; the only residual (attribution gate's `web/dist/` blind spot) is a process-script gap outside this task's product scope, recorded here for a process-task owner.
