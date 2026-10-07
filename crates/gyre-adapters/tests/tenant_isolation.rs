@@ -85,9 +85,10 @@ async fn seed(s: &SqliteStorage, tag: &str, tenant: &Id) -> TenantIds {
         "main",
         1000,
     );
-    let _ = label;
-    let _ = expected;
-    let _: Option<F> = None;
+    mr.workspace_id = ids.ws.clone();
+    MergeRequestRepository::create(s, &mr).await.unwrap();
+
+    ids
 }
 
 #[tokio::test]

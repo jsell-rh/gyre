@@ -64,6 +64,14 @@ repos:
         types: [rust]
         pass_filenames: false
 
+      - id: hierarchy
+        name: hierarchy field lint
+        description: Verify domain hierarchy fields are non-optional Id (spec hierarchy-enforcement §2)
+        entry: scripts/check-hierarchy.sh
+        language: script
+        types: [rust]
+        pass_filenames: false
+
       - id: abac-route-registry
         name: ABAC route registry lint
         description: Fail if a registered /api/v1/ route has no ABAC ResourceResolver entry
