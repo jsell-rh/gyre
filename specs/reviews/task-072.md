@@ -58,3 +58,40 @@ All five R1 findings verified at HEAD 02b053fb:
 ### Verdict
 
 needs-revision — F6/F7 are wrong-or-missing `Calls` edges in realistic Go layouts (package name ≠ directory name), which is the core deliverable of this task (§10 Phase 1: Go). F8 is lifecycle churn worth fixing in the same pass but lower severity.
+
+---
+
+## Round: R3
+
+**Reviewer:** Verifier
+**Date:** 2026-10-07
+**Commits reviewed:** 9cf2a5a, e707d31, ea7ba52, 1777385, 756f4b3, 286927a, bd85151 (+ 17c81d5a, on main, style-only)
+**Spec ref:** lsp-call-graph.md §1–6, §10 Phase 1, §11
+
+### R2 fix verification (product code)
+
+- [-] **F6 (resolved R3):** Pass 1 qnames now follow Go's import-path rule. `go_extractor.rs:209-230` derives `<module>/<directory-path>` from the file's repo-relative directory; the package clause is never used (root files get the bare module path). Static cross-check against the binary: `scripts/go-callgraph/main.go:157-183` (`qualifiedName`) emits `pkg.Pkg.Path() + "." + TypeName + "." + MethodName` — the same import-path rule, so the normal case is an exact `by_qname` hit. Regression tests on both sides, constructed independently (`qualified_name_uses_import_path_not_package_clause` on the producer; `resolve_go_import_path_when_package_clause_differs_from_dir` + a divergence test where a clause-derived name is proven non-resolving on the consumer). Verified `cargo test -p gyre-domain go_extractor` 13/13 and `call_graph_resolve` 16/16 at this HEAD.
+- [-] **F7 (resolved R3):** Exactly one ambiguity policy remains in `call_graph_resolve.rs` — the `select` closure (lines 255-260): a suffix match survives only when exactly one candidate is corroborated by the raw name's package hint, else `None`. No branch consults collection ordering; the R2-named `candidates[0]` and two additional dead fallbacks (`by_name` exact-match inside `resolve_go_node`, `c[0]` in `resolve_node`) are gone, with the domination argument documented in comments. Hint matching is boundary-aware (`node_in_pkg`: `strip_prefix(pkg)` + `.`-boundary; `path_contains_segment` for vendored paths), killing the `svc1`/`svc10` prefix-similar wrong-edge class — `resolve_go_prefix_similar_package_is_not_guessed` and the vendored variants would fail on the old code.
+- [-] **F8 (resolved R3):** (a) `sweep_stale_edges` (graph_extraction.rs:634-650) exempts `EdgeType::Calls`, so the Pass 1 sweep can never delete a row the Pass 2 writer owns mid-flight — `sweep_preserves_calls_edges_owned_by_pass2` covers the race. (b) `calls_edge_id` (call_graph_resolve.rs:174-196) derives the edge id from SHA-256 over `repo|source|target|calls`, repo-scoped; both adapters upsert on id and preserve `first_seen_at` (sqlite `graph.rs:442-452` `ON CONFLICT(id) DO UPDATE` without `first_seen_at`; mem adapter mirrors) — `pass2_edge_ids_stable_across_runs` proves id stability and `first_seen_at` preservation across runs. (c) Pass 2 reconciles its own type in `extract_and_persist_call_graph` (graph_extraction.rs:861-917): stale-pair rows and legacy pre-content-id duplicates are soft-deleted, and reconcile is skipped entirely when no toolchain produced output (`extraction_ran` guard) so a missing tool cannot wipe call data — covered by `pass2_reconciles_stale_calls_edges`, `pass2_reconcile_skipped_when_toolchain_unavailable`, `pass2_reconcile_removes_legacy_duplicate_id_rows`.
+
+### R3 verification runs (this HEAD, serial)
+
+- `cargo test -p gyre-domain call_graph_resolve` — 16/16 ok
+- `cargo test -p gyre-domain go_extractor` — 13/13 ok
+- `cargo test -p gyre-server --lib graph_extraction` — 22/22 ok (all five Pass 2 pipeline + lifecycle tests)
+- `cargo test -p gyre-adapters call_graph` — 2/2 ok
+- `scripts/check-arch.sh`, `check-mem-port-contracts.sh`, `check-byte-slice-truncation.sh`, `check-inert-enforcement.sh`, `check-relative-path-defaults.sh` — all pass
+- `cargo fmt --check` — clean on every branch-touched file; repo-wide drift (`git2_ops.rs`, `sqlite/audit.rs`, …) is pre-existing main baseline in files this branch never touches
+
+### Findings
+
+- **F9 (fixed in this round): `commits:` frontmatter dropped `17c81d5a` again, and the exemption entry was removed — attribution gate red.** The controller's recorder commit (`0052e46 process: record task-072 branch commits`) regenerates the list from `main..HEAD` only; `17c81d5a` is already on `main`, so it was dropped. Meanwhile the R3 revision removed its `task-commit-attribution-exemptions.txt` entry (correctly, per the frozen-count-shrink rule) and lowered `FROZEN_EXEMPTION_COUNT` 3→2 — leaving the commit unattributed. `check-task-commit-attribution.sh` failed with `17c81d5a task-072` unlisted. This is the exact regression the task's R3 notes predicted. **Fixed:** re-added `17c81d5a4d8fe8dc93387ba2c8360187a8028737` to `commits:`; gate re-run passes. Root cause is the recorder, not the task file — as long as the recorder keeps rewriting frontmatter from `main..HEAD`, any main-side task-labeled commit will be re-dropped; the durable fix belongs in the recorder (include full-history task-labeled commits, or stop rewriting lists that already contain out-of-branch SHAs).
+
+### Verification limitations (carried from R3 notes, re-confirmed)
+
+- The `go-callgraph` binary cannot execute in this sandbox: `golang.org/x/tools/go/packages.Load` shells out to `go list`, and no Go toolchain exists on PATH (the prebuilt `scripts/go-callgraph/go-callgraph` binary itself runs, but fails at package load with `go command required, not found`). R3's earlier manual binary exercise on a two-package fixture stands as the end-to-end evidence; the name-format alignment between binary and extractor was re-verified statically this round (import-path rule on both sides).
+- HTTP-bound integration suites (`graph_integration`, `auth_integration`) cannot run here (sandbox loopback TCP resets, demonstrated with a pure-Python server/client pair in R3 — no gyre code involved). The controller's deterministic gates on the integrated commit must cover these.
+
+### Verdict
+
+complete — all R1/R2 findings are fixed by real product code verified at this HEAD; the one R3 finding (F9, attribution gate) is fixed in this round and the gate is green. The task's own scope (Go Pass 2 pipeline) is done: port + adapter + pipeline + resolution policy + lifecycle, each with tests that fail on the bugs they guard against.

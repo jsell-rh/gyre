@@ -2,7 +2,7 @@
 title: "LSP Call Graph — Core Pipeline + Go Extractor Integration"
 spec_ref: "lsp-call-graph.md §1–6, §10 Phase 1, §11"
 depends_on: []
-progress: ready-for-review
+progress: complete
 review: specs/reviews/task-072.md
 coverage_sections:
   - "lsp-call-graph.md §1 Problem"
@@ -13,7 +13,7 @@ coverage_sections:
   - "lsp-call-graph.md §6 Extraction Pipeline"
   - "lsp-call-graph.md §10 Implementation Phases (Phase 1)"
   - "lsp-call-graph.md §11 Prerequisites"
-commits: ["9cf2a5a67a0926fa4bef3032c8a20e134453a672", "e707d31b2999d835052ae3d8e19a1687949e65a7", "ea7ba523536e314551c0da3ee3612e0dbb01deb0", "1777385e90664f0c0470d38f62a326a9d62dd6ad", "756f4b356aa5b9cb93be22b6b7691a2859fa75ba", "286927ae62802f7a8b0a7fbd795f10ae0c72b2c7", "bd85151d2d8e5fdd8e74e3347f9f1c107ac3e006"]
+commits: ["9cf2a5a67a0926fa4bef3032c8a20e134453a672", "e707d31b2999d835052ae3d8e19a1687949e65a7", "ea7ba523536e314551c0da3ee3612e0dbb01deb0", "1777385e90664f0c0470d38f62a326a9d62dd6ad", "756f4b356aa5b9cb93be22b6b7691a2859fa75ba", "286927ae62802f7a8b0a7fbd795f10ae0c72b2c7", "bd85151d2d8e5fdd8e74e3347f9f1c107ac3e006", "17c81d5a4d8fe8dc93387ba2c8360187a8028737"]
 ---
 
 ## Spec Excerpt
@@ -68,3 +68,10 @@ Read `specs/system/lsp-call-graph.md` for full context. The Go binary already ex
 - R2 findings F6/F7/F8 are fixed by product code on this branch: Pass 1 qnames built from Go's import-path rule (`go_extractor.rs`); one ambiguity policy — hint-corroborated `select`, no ordering picks (`call_graph_resolve.rs`); `Calls` sweep exemption, content-derived edge ids, and Pass 2 self-reconciliation (`graph_extraction.rs`). Verified green at this HEAD: `cargo test -p gyre-domain go_extractor` 13/13, domain `call_graph_resolve` 14/14, `cargo test -p gyre-adapters call_graph` 2/2, `cargo test -p gyre-server --lib graph_extraction` 22/22 — including every R3 regression (`sync_go_repo_persists_calls_edges_in_graph_store`, `pass2_edge_ids_stable_across_runs`, `sweep_preserves_calls_edges_owned_by_pass2`, `pass2_reconciles_stale_calls_edges`, `pass2_reconcile_skipped_when_toolchain_unavailable`, `pass2_reconcile_removes_legacy_duplicate_id_rows`, `resolve_go_prefix_similar_package_is_not_guessed`). `check-task-commit-attribution.sh`, `check-arch.sh`, `check-mem-port-contracts.sh`, `check-inert-enforcement.sh`, `check-relative-path-defaults.sh` all pass; `rustfmt --check` clean on every branch-touched file (repo-wide `cargo fmt --check` drift is pre-existing main baseline in files this branch never touches).
 - HTTP-bound in-process-server verification CANNOT run in this worker sandbox: loopback TCP data transfer is reset by the sandbox after accept for any process — demonstrated with a pure Python HTTP server/client pair (v4, v6, and raw socket, zero gyre code involved) getting `ConnectionResetError`. All 35 `graph_integration` and all 21 `auth_integration` tests consequently fail on the harness's first request (`reqwest IncompleteMessage`) irrespective of this branch, which touches neither binary nor the router (last change: d7940e8, already on main). Full deterministic gates must run on the integrated commit in an environment with working loopback; the pipeline's own storage-level integration is covered by the 22 lib tests above.
 - `17c81d5a` (task-072 surface style fix that landed on `main`) MUST stay in the `commits:` list: `check-task-commit-attribution.sh` scans full history, while the controller's `process: record task-072 branch commits` recorder regenerates the list from `main..HEAD` only — it dropped this SHA in 64ef557 and re-triggered the gate violation. If the recorder rewrites this frontmatter again, re-add `17c81d5a4d8fe8dc93387ba2c8360187a8028737`.
+
+## Shipped
+
+- Two-pass call-graph pipeline: Pass 1 (tree-sitter) persists nodes and syntax edges immediately; Pass 2 (`do_extract()` step 7) runs the type-checker extraction behind the `CallGraphExtractor` port in a fire-and-forget `tokio::spawn`, persisting complete `Calls` edges via `GraphPort` — the push response is never blocked.
+- Go extraction: `SubprocessCallGraphExtractor` (gyre-adapters) shells out to `scripts/go-callgraph/go-callgraph` with a 60s timeout and graceful degradation to empty output on missing toolchain/timeout/parse failure; Pass 1 qnames follow Go's import-path rule (module + directory) matching the binary's `Pkg.Path()`-based names, so cross-package calls between directories whose package clause ≠ directory name resolve.
+- One resolution policy in `gyre-domain/call_graph_resolve.rs`: exact qualified-name match, else suffix match corroborated by exactly-one package-hint hit (boundary-aware, so `svc1` never claims `svc10` or vendored prefix-similar paths); anything ambiguous is dropped rather than guessed.
+- Stable Pass 2 edge lifecycle: content-derived edge ids (SHA-256 over repo/source/target) upsert in place preserving `first_seen_at`; Pass 1's stale sweep exempts `Calls`; Pass 2 reconciles its own edges (stale pairs and legacy duplicate-id rows) but never wipes call data when the toolchain is unavailable.
