@@ -5,7 +5,7 @@ depends_on: []
 progress: not-started
 coverage_sections:
   - "message-bus.md §Payload Schemas"
-commits: []
+commits: ["9764477d2fcb5226bc866f6ff8c143c39bd715ca"]
 ---
 
 ## Spec Excerpt
