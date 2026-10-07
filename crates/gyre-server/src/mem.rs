@@ -3512,40 +3512,6 @@ impl gyre_ports::SecretRepository for MemSecretRepository {
     }
 }
 
-#[cfg(test)]
-mod secret_contract_tests {
-    use super::*;
-    use gyre_ports::SecretRepository;
-
-    #[tokio::test]
-    async fn create_rejects_duplicate_id_and_scope_name() {
-        let repo = MemSecretRepository::default();
-        let original = gyre_common::Secret {
-            id: Id::new("secret-1"),
-            name: "API_KEY".into(),
-            scope: gyre_common::SecretScope::Repo,
-            scope_id: "repo-1".into(),
-            secret_type: gyre_common::SecretType::Static,
-            created_by: "user-1".into(),
-            created_at: 1,
-            expires_at: None,
-            last_rotated_at: None,
-            tenant_id: "tenant-1".into(),
-        };
-        repo.create(&original, b"first").await.unwrap();
-        let mut duplicate_id = original.clone();
-        duplicate_id.name = "OTHER_KEY".into();
-        assert!(repo.create(&duplicate_id, b"second").await.is_err());
-        let mut duplicate_name = original.clone();
-        duplicate_name.id = Id::new("secret-2");
-        assert!(repo.create(&duplicate_name, b"third").await.is_err());
-        assert_eq!(
-            repo.get_value(&original.id, "tenant-1").await.unwrap(),
-            Some(b"first".to_vec())
-        );
-    }
-}
-
 // ── In-memory TraceRepository ────────────────────────────────────────────────
 
 #[derive(Default)]
@@ -4296,7 +4262,7 @@ impl gyre_ports::TrustAnchorRepository for MemTrustAnchorRepository {
     }
 }
 #[cfg(test)]
-mod secret_contract_tests_f1 {
+mod secret_contract_tests {
     //! F1 (task-097): the mem adapter must enforce the SecretRepository port's
     //! duplicate-rejection contract in code — SQLite enforces it via UNIQUE
     //! constraints, so a mem-only guard is the only thing tests can catch.
