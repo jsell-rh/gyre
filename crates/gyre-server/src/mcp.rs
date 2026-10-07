@@ -1943,6 +1943,12 @@ async fn handle_message_send(state: &AppState, args: &Value, auth: &Authenticate
         }
     }
 
+    // Payload schema validation (message-bus.md §Payload Schemas) — the same
+    // required-field table the REST send path enforces, before signing/store.
+    if let Err(reason) = kind.validate_payload(args.get("payload")) {
+        return tool_error(reason);
+    }
+
     let from = MessageOrigin::Agent(agent_id);
     let created_at = now_ms();
     let msg_id = Id::new(uuid::Uuid::new_v4().to_string());
