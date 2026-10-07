@@ -2,7 +2,7 @@
 title: "Remove My Tasks/MRs/Agents from profile; amend user-management 'My Stuff'"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is NOT"
 commits: ["98fd096e3972e7a6d1df78b700b63ea1dee15fe5"]
@@ -84,3 +84,10 @@ Do NOT touch: the `/@{username}` public profile page scope (task-114), the `?own
 The `users/me/*` endpoints that remain (`/me`, `/me/tokens`, `/me/notifications`, `/me/judgments`, `/me/notification-preferences` if present) are per-handler-auth ABAC-exempt per HSI §2 amendments — do not change their auth model.
 
 After both parts, run the acceptance-criteria greps yourself and fix any stragglers (docs comments in `users.rs` header, i18n keys, test mocks).
+
+## Implementation Notes (2026-10-07)
+
+- Part 1 + Part 2 landed in 98fd096; this round verified every acceptance criterion and added the coverage-matrix record: `human-system-interface.md` row 54 flipped `task-assigned` → `implemented` with landed evidence (was missed by the wip round).
+- Backend: `my_stuff_endpoints_are_removed` regression test (users.rs test mod) asserts 404 on all three URIs — passes. `check-abac-route-registry.sh` and `check-abac-exempt-handlers.sh` pass.
+- Frontend: UserProfile.test.js 23/23, including the exact-six-tab guard (`[role="tab"]` data-id list — fails if any removed tab is reintroduced). `ExplorerCanvas.test.js` / `ExplorerCanvas-performance.test.js` failed only in full-suite runs racing concurrent cargo builds (100ms timing budgets); 147/147 pass in isolation at HEAD and the same files pass at the base commit — pre-existing load flakes, unrelated to this task.
+
