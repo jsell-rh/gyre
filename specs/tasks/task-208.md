@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is NOT"
-commits: ["98fd096e3972e7a6d1df78b700b63ea1dee15fe5", "0d0b956fb4204f91e0f19ab2dde71e18c1f93a13"]
+commits: ["98fd096e3972e7a6d1df78b700b63ea1dee15fe5"]
 ---
 
 ## Spec Excerpt
