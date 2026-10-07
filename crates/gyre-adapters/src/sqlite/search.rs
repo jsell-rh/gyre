@@ -151,6 +151,7 @@ impl SearchPort for SqliteStorage {
     async fn search(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
         let pool = Arc::clone(&self.pool);
         tokio::task::spawn_blocking(move || -> Result<Vec<SearchResult>> {
+            let mut conn = pool.get().context("get db connection")?;
             let match_expr = build_match_expr(&query.query);
             if match_expr.is_empty() {
                 return Ok(vec![]);
