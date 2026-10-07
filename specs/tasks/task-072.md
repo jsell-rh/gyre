@@ -13,7 +13,7 @@ coverage_sections:
   - "lsp-call-graph.md §6 Extraction Pipeline"
   - "lsp-call-graph.md §10 Implementation Phases (Phase 1)"
   - "lsp-call-graph.md §11 Prerequisites"
-commits: ["9cf2a5a67a0926fa4bef3032c8a20e134453a672", "e707d31b2999d835052ae3d8e19a1687949e65a7", "ea7ba523536e314551c0da3ee3612e0dbb01deb0", "1777385e90664f0c0470d38f62a326a9d62dd6ad", "756f4b356aa5b9cb93be22b6b7691a2859fa75ba", "286927ae62802f7a8b0a7fbd795f10ae0c72b2c7", "bd85151d2d8e5fdd8e74e3347f9f1c107ac3e006", "17c81d5a4d8fe8dc93387ba2c8360187a8028737"]
+commits: ["9cf2a5a67a0926fa4bef3032c8a20e134453a672", "e707d31b2999d835052ae3d8e19a1687949e65a7", "ea7ba523536e314551c0da3ee3612e0dbb01deb0", "1777385e90664f0c0470d38f62a326a9d62dd6ad", "756f4b356aa5b9cb93be22b6b7691a2859fa75ba", "286927ae62802f7a8b0a7fbd795f10ae0c72b2c7", "bd85151d2d8e5fdd8e74e3347f9f1c107ac3e006"]
 ---
 
 ## Spec Excerpt
