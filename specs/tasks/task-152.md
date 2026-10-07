@@ -2,7 +2,7 @@
 title: "Implement graph narrative generation (template-based + LLM-synthesized)"
 spec_ref: "realized-model.md §6"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "realized-model.md §6 Narrative Generation"
 commits: ["f88e55b70b980e2f9823a51315097d3e8a8b6334"]
@@ -68,13 +68,13 @@ From `realized-model.md` §6 — Narrative Generation:
 
 ## Acceptance Criteria
 
-- [ ] `generate_template_narrative()` produces human-readable summaries from ArchitecturalDelta
-- [ ] Template narratives include spec governance ("Governed by spec: X") when `governed_by` edges exist
-- [ ] Template narratives include agent attribution ("Produced by agent Y under persona Z") when provenance exists
-- [ ] Timeline endpoint includes `narrative` field in each delta response
-- [ ] LLM narrative function exists and falls back to template on failure
-- [ ] Briefing endpoint uses narratives for architectural change summaries
-- [ ] Tests cover addition, removal, modification, and empty delta cases
+- [x] `generate_template_narrative()` produces human-readable summaries from ArchitecturalDelta
+- [x] Template narratives include spec governance ("Governed by spec: X") when `governed_by` edges exist
+- [x] Template narratives include agent attribution ("Produced by agent Y under persona Z") when provenance exists
+- [x] Timeline endpoint includes `narrative` field in each delta response
+- [x] LLM narrative function exists and falls back to template on failure
+- [x] Briefing endpoint uses narratives for architectural change summaries
+- [x] Tests cover addition, removal, modification, and empty delta cases
 
 ## Agent Instructions
 
