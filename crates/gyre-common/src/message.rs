@@ -283,6 +283,109 @@ impl MessageKind {
         }
     }
 
+    /// Required payload fields for this kind — message-bus.md §Payload Schemas.
+    ///
+    /// An empty slice means "no required fields". Kinds the spec table does not
+    /// list (`SpecApproved`, `ConstraintViolation`, `AtomicGroupFailed`,
+    /// `MrReverted`, `MergeQueuePaused`, `MergeQueueResumed`) are server-emitted
+    /// only and carry no specced schema, so they impose no requirements.
+    fn required_payload_fields(&self) -> &'static [&'static str] {
+        match self {
+            // Directed
+            MessageKind::TaskAssignment => &["task_id"],
+            MessageKind::ReviewRequest => &["mr_id"],
+            MessageKind::StatusUpdate => &["status", "summary"],
+            MessageKind::Escalation => &["reason"],
+            // Events
+            MessageKind::AgentCreated => &["agent_id"],
+            MessageKind::AgentStatusChanged => &["agent_id", "status"],
+            MessageKind::AgentContainerSpawned => {
+                &["agent_id", "container_id", "image", "runtime"]
+            }
+            MessageKind::AgentCompleted => &["agent_id", "task_id"],
+            MessageKind::ReconciliationCompleted => &["workspace_id", "persona_id"],
+            MessageKind::TaskCreated => &["task_id"],
+            MessageKind::TaskTransitioned => &["task_id", "status"],
+            MessageKind::MrCreated => &["mr_id"],
+            MessageKind::MrStatusChanged => &["mr_id", "status"],
+            MessageKind::MrMerged => &["mr_id"],
+            MessageKind::PushRejected => &["repo_id", "branch", "agent_id", "reason"],
+            MessageKind::PushAccepted => &["repo_id", "branch", "agent_id"],
+            MessageKind::SpecChanged => &["repo_id", "spec_path", "change_kind"],
+            MessageKind::GateFailure => &["mr_id", "gate_name"],
+            MessageKind::StaleSpecWarning => {
+                &["mr_id", "repo_id", "spec_path", "spec_sha", "current_sha"]
+            }
+            MessageKind::SpeculativeConflict => &["repo_id", "branch", "conflicting_files"],
+            MessageKind::SpeculativeMergeClean => &["repo_id", "branch"],
+            MessageKind::HotFilesChanged => &["repo_id"],
+            MessageKind::BudgetWarning => &["agent_id", "workspace_id", "usage_pct"],
+            MessageKind::BudgetExhausted => &["agent_id", "workspace_id", "grace_secs"],
+            MessageKind::AgentError => &["agent_id", "error"],
+            // Telemetry
+            MessageKind::ToolCallStart => &["agent_id", "tool_name"],
+            MessageKind::ToolCallEnd => &["agent_id", "tool_name", "duration_ms"],
+            MessageKind::TextMessageContent => &["agent_id", "content"],
+            MessageKind::RunStarted => &["agent_id"],
+            MessageKind::RunFinished => &["agent_id"],
+            MessageKind::StateChanged => &["agent_id", "new_state"],
+            // Spec table lists no required fields.
+            MessageKind::QueueUpdated | MessageKind::DataSeeded => &[],
+            // Outside the spec table (server-emitted only) — no specced schema.
+            MessageKind::SpecApproved
+            | MessageKind::ConstraintViolation
+            | MessageKind::AtomicGroupFailed
+            | MessageKind::MrReverted
+            | MessageKind::MergeQueuePaused
+            | MessageKind::MergeQueueResumed => &[],
+            // Any JSON object; requiredness is permissive.
+            MessageKind::Custom(_) => &[],
+        }
+    }
+
+    /// Validate a payload received from a caller against this kind's schema
+    /// (message-bus.md §Payload Schemas): payload must be a JSON object and must
+    /// carry every required field with a non-null value.
+    ///
+    /// Field *types* are deliberately not checked — the spec table defines
+    /// requiredness only. An absent payload is valid only for kinds with no
+    /// required fields. The `Err` string is a human-readable reason meant to be
+    /// surfaced verbatim to the caller (REST 400 body / MCP `tool_error`).
+    pub fn validate_payload(&self, payload: Option<&Value>) -> Result<(), String> {
+        let required = self.required_payload_fields();
+
+        let obj = match payload {
+            None if !required.is_empty() => {
+                return Err(format!(
+                    "payload for kind '{}' missing required field '{}'",
+                    self.as_str(),
+                    required[0]
+                ));
+            }
+            // Nothing required — an absent payload satisfies the schema.
+            None => return Ok(()),
+            Some(Value::Object(obj)) => obj,
+            Some(_) => {
+                return Err(format!(
+                    "payload for kind '{}' must be a JSON object",
+                    self.as_str()
+                ))
+            }
+        };
+
+        for field in required {
+            // JSON null is treated as missing: no required field is satisfiable by null.
+            if !matches!(obj.get(*field), Some(v) if !v.is_null()) {
+                return Err(format!(
+                    "payload for kind '{}' missing required field '{}'",
+                    self.as_str(),
+                    field
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Parse from a wire string, returning Custom(s) for unknown values.
     fn from_wire(s: &str) -> Self {
         match s {
