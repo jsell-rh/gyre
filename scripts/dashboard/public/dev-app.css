@@ -6,7 +6,7 @@
 }
 .stepper button:hover,.dev-action:hover,.dev-filters button:hover { border-color: var(--pf-info); }
 .stepper .val { min-width: 24px; text-align: center; color: var(--pf-text); font-weight: 700; }
-.dev-metrics { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 12px; margin-bottom: 20px; }
+.dev-metrics { display: grid; grid-template-columns: repeat(6,minmax(0,1fr)); gap: 12px; margin-bottom: 20px; }
 .dev-coverage { display: grid; grid-template-columns: 105px minmax(0,1fr) 260px; align-items: center; gap: 22px; background: var(--pf-surface); border: 1px solid var(--pf-border); border-radius: 12px; padding: 18px 22px; margin-bottom: 14px; }
 .dev-coverage-number { font-size: 29px; font-weight: 700; }
 .dev-coverage .muted { color: var(--pf-text-muted); font-size: 12px; margin-top: 3px; }
@@ -43,6 +43,7 @@
 .dev-health-error { color: var(--pf-danger); font-size: 11px; max-width: 280px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .badge.running,.badge.checking { border-color: var(--pf-info); color: var(--pf-info); }
 .badge.ready,.badge.candidate { border-color: var(--pf-warning); color: var(--pf-warning); }
+.badge.deferred { border-color: var(--pf-warning); color: var(--pf-warning); }
 .badge.failed,.badge.blocked { border-color: var(--pf-danger); color: var(--pf-danger); }
 .badge.merged,.badge.promoting { border-color: var(--pf-success); color: var(--pf-success); }
 .dev-filters { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 12px; }

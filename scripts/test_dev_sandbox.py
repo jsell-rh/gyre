@@ -139,6 +139,29 @@ elif 'delete' in args:
 
 
 class SandboxCreateCleanupTest(unittest.TestCase):
+    def test_capacity_timeout_is_retryable_and_deletes_partial_sandbox(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake = root / "openshell"
+            record = root / "deleted.txt"
+            fake.write_text("""#!/bin/sh
+case " $* " in
+  *" gateway login "*) exit 0 ;;
+  *" sandbox create "*) echo 'ProvisioningTimedOut: waiting for capacity'; exit 1 ;;
+  *" sandbox delete "*) echo "$*" >> "$DELETE_RECORD"; exit 0 ;;
+esac
+exit 1
+""")
+            fake.chmod(0o755)
+            result = subprocess.run(
+                ["bash", str(Path(__file__).with_name("dev-sandbox.sh")), "worker", "task-001",
+                 "devloop/task-001/attempt-1", "origin/main", "0123456789abcdef"],
+                env={**os.environ, "OPENSHELL": str(fake), "DELETE_RECORD": str(record),
+                     "OPENSHELL_OIDC_CLIENT_SECRET": "test", "GYRE_DEV_STATE": str(root)},
+                capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 78, result.stdout + result.stderr)
+            self.assertIn("sandbox delete gyre-001-w-01234567", record.read_text())
+
     def test_partial_create_is_deleted(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

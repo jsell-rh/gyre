@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import random
 import re
 import sqlite3
 import subprocess
@@ -18,6 +19,7 @@ STATE = Path(os.environ.get("GYRE_DEV_STATE", ROOT / ".gyre-dev-controller")).re
 SOURCE = STATE / "source"
 TASK_RE = re.compile(r"^specs/tasks/(task-\d+)\.md$")
 DEP_RE = re.compile(r"task-\d+")
+HOST_GATE_PROCESSES = {}
 
 
 class SourceUnavailable(RuntimeError):
@@ -58,18 +60,96 @@ def db_open():
     CREATE TABLE IF NOT EXISTS tasks (
       name TEXT PRIMARY KEY, progress TEXT NOT NULL, deps TEXT NOT NULL,
       state TEXT NOT NULL, seed TEXT, candidate TEXT, attempts INTEGER NOT NULL DEFAULT 0,
-      retry_baseline INTEGER NOT NULL DEFAULT 0);
+      retry_baseline INTEGER NOT NULL DEFAULT 0,
+      retry_at INTEGER NOT NULL DEFAULT 0, condition TEXT);
     CREATE TABLE IF NOT EXISTS attempts (
       id TEXT PRIMARY KEY, task TEXT NOT NULL, kind TEXT NOT NULL,
       branch TEXT, sha TEXT, base TEXT, merge_sha TEXT,
       state TEXT NOT NULL, pid INTEGER, started INTEGER NOT NULL,
-      ended INTEGER, detail TEXT);
+      ended INTEGER, detail TEXT, ready_observed INTEGER NOT NULL DEFAULT 0,
+      host_pid INTEGER);
     CREATE TABLE IF NOT EXISTS events (
       id INTEGER PRIMARY KEY, at INTEGER NOT NULL, task TEXT, message TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS controller_health (
+      id INTEGER PRIMARY KEY CHECK (id=1), failures INTEGER NOT NULL DEFAULT 0,
+      retry_at INTEGER NOT NULL DEFAULT 0, admission INTEGER NOT NULL DEFAULT 1,
+      condition TEXT NOT NULL DEFAULT 'Healthy');
+    INSERT OR IGNORE INTO controller_health(id) VALUES(1);
     """)
     if "retry_baseline" not in {row[1] for row in db.execute("PRAGMA table_info(tasks)")}:
         db.execute("ALTER TABLE tasks ADD COLUMN retry_baseline INTEGER NOT NULL DEFAULT 0")
+    for column, definition in (("retry_at", "INTEGER NOT NULL DEFAULT 0"), ("condition", "TEXT")):
+        if column not in {row[1] for row in db.execute("PRAGMA table_info(tasks)")}:
+            db.execute(f"ALTER TABLE tasks ADD COLUMN {column} {definition}")
+    if "ready_observed" not in {row[1] for row in db.execute("PRAGMA table_info(attempts)")}:
+        db.execute("ALTER TABLE attempts ADD COLUMN ready_observed INTEGER NOT NULL DEFAULT 0")
+    if "host_pid" not in {row[1] for row in db.execute("PRAGMA table_info(attempts)")}:
+        db.execute("ALTER TABLE attempts ADD COLUMN host_pid INTEGER")
     return db
+
+
+def health(db):
+    return db.execute("SELECT * FROM controller_health WHERE id=1").fetchone()
+
+
+def backoff_seconds(failures):
+    return min(900, 30 * 2 ** min(max(failures - 1, 0), 5))
+
+
+def defer_infrastructure(db, task, reason, worker=False, now=None):
+    """Keep code progress, but make gateway pressure a retryable condition."""
+    now = int(time.time()) if now is None else now
+    previous = health(db)
+    failures = previous["failures"] + 1
+    delay = min(900, max(1, round(backoff_seconds(failures) * random.uniform(0.8, 1.2))))
+    retry_at = max(previous["retry_at"], now + delay)
+    db.execute("UPDATE controller_health SET failures=?,retry_at=?,admission=1,condition=? WHERE id=1",
+               (failures, retry_at, reason))
+    db.execute("""UPDATE tasks SET state='deferred',retry_at=?,condition=?,
+               retry_baseline=retry_baseline+? WHERE name=?""",
+               (retry_at, reason, int(worker), task["name"]))
+    event(db, task["name"], f"{reason}; waiting for gateway recovery, retry after {retry_at} (backoff {delay}s)")
+
+
+def observe_ready(db):
+    """Ramp admission only after a sandbox actually reaches Ready."""
+    for attempt in db.execute("SELECT * FROM attempts WHERE state='running' AND ready_observed=0").fetchall():
+        marker = STATE / "attempts" / attempt["id"] / "sandbox.ready"
+        if not marker.exists():
+            continue
+        db.execute("UPDATE attempts SET ready_observed=1 WHERE id=?", (attempt["id"],))
+        current = health(db)
+        if current["condition"] == "ConfigurationInvalid":
+            db.commit()
+            continue
+        db.execute("UPDATE controller_health SET failures=0,retry_at=0,admission=?,condition='Healthy' WHERE id=1",
+                   (min(current["admission"] + 1, 1000),))
+        event(db, attempt["task"], "sandbox Ready; gateway admission increased")
+
+
+def recover_prior_infrastructure_failures(db):
+    """Migrate the old explicit-retry failures using evidence in their local logs."""
+    for task in db.execute("SELECT * FROM tasks WHERE state='failed'").fetchall():
+        attempt = db.execute("SELECT * FROM attempts WHERE task=? ORDER BY rowid DESC LIMIT 1",
+                             (task["name"],)).fetchone()
+        if not attempt or attempt["detail"] not in ("exit=75", "exit=77"):
+            continue
+        path = STATE / "attempts" / attempt["id"] / "output.log"
+        try:
+            log = path.read_text(errors="replace")
+        except OSError:
+            continue
+        if "ConfigurationInvalid" in log:
+            continue
+        if not any(marker in log.lower() for marker in
+                   ("configurationpending", "provisioningtimedout", "h2 protocol error",
+                    "tls handshake eof", "failed to connect to gateway", "transport interrupted persisted")):
+            continue
+        db.execute("UPDATE tasks SET state='deferred',retry_at=0,condition='Gateway recovery' WHERE name=?",
+                   (task["name"],))
+        if attempt["kind"] == "worker":
+            db.execute("UPDATE tasks SET retry_baseline=attempts WHERE name=?", (task["name"],))
+        event(db, task["name"], "recovered prior gateway failure; queued for automatic retry")
 
 
 def event(db, task, message):
@@ -126,7 +206,7 @@ def sync(db):
             "git", "merge-base", "--is-ancestor", seed, "origin/main", check=False).returncode != 0 else None
         if progress == "complete":
             state = "merged"
-        elif old and old["state"] in ("running", "checking", "promoting", "candidate", "failed"):
+        elif old and old["state"] in ("running", "checking", "promoting", "candidate", "failed", "deferred"):
             state = old["state"]
             candidate = old["candidate"] or candidate
             seed = old["seed"] or seed
@@ -180,7 +260,8 @@ def spawn(db, task, kind, branch=None, sha=None, base=None):
                              stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     db.execute("INSERT INTO attempts(id,task,kind,branch,sha,base,state,pid,started) VALUES(?,?,?,?,?,?,?,?,?)",
                (ident, task["name"], kind, branch, sha, base, "running", p.pid, int(time.time())))
-    db.execute("UPDATE tasks SET state=? WHERE name=?", ("running" if kind == "worker" else "checking", task["name"]))
+    db.execute("UPDATE tasks SET state=?,condition=NULL,retry_at=0 WHERE name=?",
+               ("running" if kind == "worker" else "checking", task["name"]))
     db.commit()
     event(db, task["name"], f"{kind} {ident} pid={p.pid} branch={branch or '-'} sha={sha or '-'}")
 
@@ -200,14 +281,22 @@ def reap(db):
             continue
         rc = int(exit_file.read_text().strip()) if exit_file.exists() else 255
         task = db.execute("SELECT * FROM tasks WHERE name=?", (attempt["task"],)).fetchone()
+        outcome = "done" if rc == 0 else "deferred" if rc in (77, 78) else "failed"
         db.execute("UPDATE attempts SET state=?,ended=?,detail=? WHERE id=?",
-                   ("done" if rc == 0 else "failed", int(time.time()), f"exit={rc}", attempt["id"]))
-        if attempt["kind"] == "worker" and rc in (75, 76, 77):
+                   (outcome, int(time.time()), f"exit={rc}", attempt["id"]))
+        if rc in (77, 78):
+            reason = "Capacity unavailable" if rc == 78 else "Gateway transport unavailable"
+            defer_infrastructure(db, task, reason, worker=attempt["kind"] == "worker")
+        elif rc == 79:
+            db.execute("UPDATE tasks SET state='failed',condition='Sandbox configuration invalid' WHERE name=?", (task["name"],))
+            db.execute("UPDATE controller_health SET condition='ConfigurationInvalid',admission=1 WHERE id=1")
+            event(db, task["name"], "sandbox configuration invalid; inspect attempt log and repair gateway configuration")
+        elif attempt["kind"] == "worker" and rc in (75, 76):
             # Bootstrap and push failures already retried inside this sandbox.
             # A push failure may have a local recovery.patch; never provision
             # another heavy sandbox automatically for the same outage.
             db.execute("UPDATE tasks SET state='failed' WHERE name=?", (task["name"],))
-            reason = {75: "sandbox bootstrap", 76: "branch push", 77: "gateway transport"}[rc]
+            reason = {75: "sandbox bootstrap", 76: "branch push"}[rc]
             event(db, task["name"], f"{reason} failed; inspect log/recovery.patch and retry explicitly")
         elif attempt["kind"] == "worker":
             # A crashed driver may have pushed useful progress. Always inspect its exact ref.
@@ -259,7 +348,7 @@ def gc_sandboxes(db):
         name = f"gyre-{attempt['task'][5:]}-{attempt['kind'][0]}-{attempt['id'][:8]}"
         known[name] = attempt["state"]
     stale = [line.strip() for line in listing.stdout.splitlines()
-             if known.get(line.strip()) in ("done", "failed")]
+             if known.get(line.strip()) in ("done", "failed", "deferred")]
     def delete(name):
         try:
             deleted = subprocess.run([openshell, "-g", "gyre-gyre", "sandbox", "delete", name],
@@ -305,10 +394,20 @@ def promote(db):
             raise RuntimeError("verified integration ref does not match checked base/candidate")
         db.execute("UPDATE attempts SET merge_sha=? WHERE id=?", (merge_sha, check["id"]))
         db.commit()
-        event(db, task["name"], f"host full-suite gate for {merge_sha}")
-        if not host_test_verified(merge_sha, check["id"]):
+        gate_dir = STATE / "attempts" / check["id"]
+        gate_exit = gate_dir / "host-tests.exit"
+        gate_ok = gate_dir / "host-tests.ok"
+        if not gate_ok.exists() or gate_ok.read_text().strip() != merge_sha:
+            if not gate_exit.exists() and check["host_pid"] and alive(check["host_pid"]):
+                return  # keep reconciling other tasks while the host gate runs
+            if not gate_exit.exists() and not check["host_pid"]:
+                start_host_gate(db, check["id"], merge_sha)
+                event(db, task["name"], f"host full-suite gate started for {merge_sha}")
+                return
+            # A process that vanished without an exit record also fails closed.
+            result = gate_exit.read_text().strip() if gate_exit.exists() else "missing"
             db.execute("UPDATE tasks SET state='failed' WHERE name=?", (task["name"],))
-            event(db, task["name"], f"host full-suite gate failed; see attempts/{check['id']}/host-tests.log")
+            event(db, task["name"], f"host full-suite gate failed (exit={result}); see attempts/{check['id']}/host-tests.log")
             continue
         try:
             push = run("git", "push", "origin", f"{merge_sha}:refs/heads/main", check=False, timeout=90)
@@ -368,7 +467,29 @@ def host_test_verified(merge_sha, check_id):
     return passed
 
 
+def start_host_gate(db, check_id, merge_sha):
+    gate_dir = STATE / "attempts" / check_id
+    gate_dir.mkdir(parents=True, exist_ok=True)
+    with (gate_dir / "host-process.log").open("ab", buffering=0) as log:
+        p = subprocess.Popen([str(ROOT / "scripts/dev-process.sh"), str(gate_dir / "host-tests.exit"),
+                              sys.executable, str(ROOT / "scripts/dev-controller.py"), "host-gate",
+                              "--merge-sha", merge_sha, "--check-id", check_id],
+                             cwd=ROOT, env={**os.environ, "GYRE_DEV_STATE": str(STATE)},
+                             stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    db.execute("UPDATE attempts SET host_pid=? WHERE id=?", (p.pid, check_id))
+    db.commit()
+    HOST_GATE_PROCESSES[check_id] = p
+
+
+def reap_host_processes():
+    for check_id, process in list(HOST_GATE_PROCESSES.items()):
+        if process.poll() is not None:
+            HOST_GATE_PROCESSES.pop(check_id)
+
+
 def schedule(db, slots, max_attempts, only_task=None, launch_burst=8):
+    now = int(time.time())
+    gate = health(db)
     rows = db.execute("SELECT * FROM tasks ORDER BY CASE progress WHEN 'needs-revision' THEN 0 ELSE 1 END,name").fetchall()
     # Surface exhausted tasks even when every slot is occupied or dispatch is
     # drained; otherwise they stay misleadingly ready until a slot opens.
@@ -379,7 +500,8 @@ def schedule(db, slots, max_attempts, only_task=None, launch_burst=8):
         event(db, name, f"attempt limit {max_attempts} reached; inspect logs and retry explicitly")
     running = db.execute("SELECT count(*) FROM attempts WHERE state='running'").fetchone()[0]
     launches = 0
-    if running >= slots:
+    effective_slots = min(slots, gate["admission"])
+    if running >= effective_slots or now < gate["retry_at"] or gate["condition"] == "ConfigurationInvalid":
         return
     merged = {r["name"] for r in rows if r["state"] == "merged"}
     for task in rows:
@@ -387,9 +509,10 @@ def schedule(db, slots, max_attempts, only_task=None, launch_burst=8):
             continue
         if only_task and task["name"] != only_task:
             continue
-        if running >= slots or launches >= launch_burst:
+        if running >= effective_slots or launches >= launch_burst:
             break
-        if task["state"] == "candidate" and set(json.loads(task["deps"])) <= merged:
+        is_due = task["state"] == "deferred" and task["retry_at"] <= now
+        if (task["state"] == "candidate" or (is_due and task["candidate"])) and set(json.loads(task["deps"])) <= merged:
             source()
             sha = task["candidate"]
             base = ref_sha("origin/main")
@@ -400,7 +523,7 @@ def schedule(db, slots, max_attempts, only_task=None, launch_burst=8):
             spawn(db, task, "check", sha=sha, base=base)
             running += 1
             launches += 1
-        elif task["state"] == "ready" and task["progress"] in ("not-started", "needs-revision") and set(json.loads(task["deps"])) <= merged:
+        elif (task["state"] == "ready" or is_due) and task["progress"] in ("not-started", "needs-revision") and set(json.loads(task["deps"])) <= merged:
             attempt_no = task["attempts"] + 1
             branch = f"devloop/{task['name']}/attempt-{attempt_no}"
             db.execute("UPDATE tasks SET attempts=? WHERE name=?", (attempt_no, task["name"]))
@@ -456,10 +579,12 @@ def status_snapshot(db):
     counts = {}
     for task in tasks:
         counts[task["state"]] = counts.get(task["state"], 0) + 1
+    gate = dict(health(db))
+    gate["effective_slots"] = min(configured_slots() or 0, gate["admission"])
     return {"tasks": tasks, "attempts": attempts, "events": events,
             "counts": counts, "eligible": eligible,
             "running": sum(a["state"] == "running" for a in attempts),
-            "slots": configured_slots()}
+            "slots": configured_slots(), "health": gate}
 
 
 def retry_failed_task(db, task):
@@ -480,12 +605,15 @@ def retry_failed_task(db, task):
         db.rollback()
         return False
     event(db, task["name"], f"operator requested retry from {seed or task['seed']}")
+    if task["condition"] == "Sandbox configuration invalid":
+        db.execute("UPDATE controller_health SET condition='Healthy',failures=0,retry_at=0 WHERE id=1")
+        db.commit()
     return True
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("sync", "status", "run", "retry", "retry-all"))
+    parser.add_argument("command", choices=("sync", "status", "run", "retry", "retry-all", "host-gate"))
     parser.add_argument("task", nargs="?", help="task name for retry")
     parser.add_argument("--slots", type=int, default=1)
     parser.add_argument("--launch-burst", type=int, default=int(os.environ.get("GYRE_DEV_LAUNCH_BURST", "8")),
@@ -495,11 +623,17 @@ def main():
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--json", action="store_true", help="machine-readable status")
     parser.add_argument("--only-task", help="dispatch only this task (task-NNN)")
+    parser.add_argument("--merge-sha", help=argparse.SUPPRESS)
+    parser.add_argument("--check-id", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.slots < 0 or args.interval < 1 or args.max_attempts < 1 or args.launch_burst < 1:
         parser.error("slots must be nonnegative; interval, max-attempts, and launch-burst must be positive")
     if args.only_task and not re.fullmatch(r"task-\d+", args.only_task):
         parser.error("--only-task requires task-NNN")
+    if args.command == "host-gate":
+        if not re.fullmatch(r"[0-9a-f]{40}", args.merge_sha or "") or not re.fullmatch(r"[0-9a-f]{1,32}", args.check_id or ""):
+            parser.error("host-gate requires a merge SHA and check id")
+        sys.exit(0 if host_test_verified(args.merge_sha, args.check_id) else 1)
     db = db_open()
     if args.command == "status":
         if args.json:
@@ -546,12 +680,15 @@ def main():
         (STATE / "slots").write_text(str(args.slots) + "\n")
     last_gc = 0
     source_error = None
+    recover_prior_infrastructure_failures(db)
     while True:
         old = legacy_running()
         if old:
             raise RuntimeError(f"existing loop started during this run: {old}; controller halted")
         try:
             sync(db)
+            reap_host_processes()
+            observe_ready(db)
             reap(db)
             if time.time() - last_gc >= 60:
                 gc_sandboxes(db)

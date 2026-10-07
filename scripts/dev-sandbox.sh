@@ -37,7 +37,7 @@ osrun() {
     -- bash /tmp/stage/dev-remote.sh "$MODE" "$TASK" "$ARG1" "$ARG2" "$ARG3"
 }
 stage_bundle() {
-  local bundle stage_rc retry role
+  local bundle stage_rc retry role stage_log
   bundle=$(mktemp -d "${TMPDIR:-/tmp}/gyre-stage.XXXXXX")
   cp "$ROOT/scripts/dev-remote.sh" "$ROOT/scripts/dev-round.sh" \
     "$ROOT/scripts/dev-stream.mjs" "$ROOT/scripts/dev-check.sh" \
@@ -49,25 +49,33 @@ stage_bundle() {
   cp "${MODELS_YML:-/tmp/sbx-models.yml}" "$bundle/models.yml"
   cp "${CONFIG_YML:-$HOME/.pi/agent/config.yml}" "$bundle/config.yml"
   stage_rc=1
+  stage_log=$(mktemp "${TMPDIR:-/tmp}/gyre-stage-log.XXXXXX")
   for retry in 1 2 3; do
     reauth
     set +e
     tar -C "$bundle" -cf - . | timeout 120 "$OS" -g gyre-gyre sandbox exec -n "$SANDBOX" \
-      --no-login-shell --workdir /tmp -- bash -c 'mkdir -p /tmp/stage && tar -C /tmp/stage -xf -' >/dev/null
+      --no-login-shell --workdir /tmp -- bash -c 'mkdir -p /tmp/stage && tar -C /tmp/stage -xf -' >"$stage_log" 2>&1
     stage_rc=${PIPESTATUS[1]}
     set -e
     [ "$stage_rc" -eq 0 ] && break
+    cat "$stage_log" >&2
     echo "sandbox staging interrupted; retrying in $SANDBOX ($retry/3)" >&2
     sleep "$((retry * 5))"
   done
   rm -rf "$bundle"
+  if [ "$stage_rc" -ne 0 ] && grep -Eiq 'h2 protocol error|tls handshake eof|peer closed connection|failed to connect to gateway|timed out' "$stage_log"; then
+    rm -f "$stage_log"
+    return 77
+  fi
+  rm -f "$stage_log"
   return "$stage_rc"
 }
 # shellcheck disable=SC2329 # invoked by the EXIT trap
 cleanup() {
   rc=$?
   trap - EXIT
-  if [ "$rc" -ne 0 ] && ! grep -q 'GYRE_BOOTSTRAP_COMPLETE' "${transport_log:-/dev/null}" 2>/dev/null; then
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 77 ] && [ "$rc" -ne 78 ] && [ "$rc" -ne 79 ] &&
+     ! grep -q 'GYRE_BOOTSTRAP_COMPLETE' "${transport_log:-/dev/null}" 2>/dev/null; then
     rc=75
   fi
   if [ "${CREATED:-0}" != 1 ]; then exit "$rc"; fi
@@ -91,11 +99,28 @@ trap cleanup EXIT
 CREATED=0
 reauth
 CREATED=1 # create may provision compute before its response fails
+create_log=$(mktemp "${TMPDIR:-/tmp}/gyre-create.XXXXXX")
+set +e
 timeout 600 "$OS" -g gyre-gyre sandbox create --name "$SANDBOX" \
   --from "${GYRE_DEV_IMAGE:-ghcr.io/jsell-rh/gyre-worker@sha256:0c4a04a340e20c91e89f855c5d75d940b8550798441990ca823c7b8ebb8cbcec}" \
   --provider gyre-pricetag --provider gyre-github-rw \
   --policy "${GYRE_DEV_POLICY:-$ROOT/docker/dev-worker/policy.yaml}" \
-  --detach -- bash -c 'while true; do sleep 3600; done'
+  --detach -- bash -c 'while true; do sleep 3600; done' 2>&1 | tee "$create_log"
+create_rc=${PIPESTATUS[0]}
+set -e
+if [ "$create_rc" -ne 0 ]; then
+  if grep -Eiq 'ConfigurationInvalid|invalid policy|invalid configuration' "$create_log"; then
+    rm -f "$create_log"; echo "sandbox configuration invalid" >&2; exit 79
+  fi
+  if grep -Eiq 'ProvisioningTimedOut|ConfigurationPending|insufficient|capacity|resource exhausted|timed out|timedout' "$create_log" || [ "$create_rc" -eq 124 ]; then
+    rm -f "$create_log"; echo "sandbox provisioning deferred for capacity" >&2; exit 78
+  fi
+  if grep -Eiq 'h2 protocol error|tls handshake eof|peer closed connection|failed to connect to gateway' "$create_log"; then
+    rm -f "$create_log"; echo "gateway transport unavailable during create" >&2; exit 77
+  fi
+  rm -f "$create_log"; exit 75
+fi
+rm -f "$create_log"
 ready=0
 for try in $(seq 1 40); do
   reauth
@@ -103,10 +128,15 @@ for try in $(seq 1 40); do
   if [[ "$phase" == *"Phase: Ready"* ]]; then
     ready=1; break
   fi
+  if [[ "$phase" == *"ConfigurationInvalid"* ]]; then
+    echo "sandbox configuration invalid: $phase" >&2
+    exit 79
+  fi
   echo "waiting for sandbox Ready ($try/40)" >&2
   sleep 15
 done
-[ "$ready" -eq 1 ] || { echo "sandbox never became Ready" >&2; exit 1; }
+[ "$ready" -eq 1 ] || { echo "sandbox never became Ready" >&2; exit 78; }
+touch "${GYRE_DEV_STATE:-$ROOT/.gyre-dev-controller}/attempts/$ARG3/sandbox.ready"
 stage_bundle
 transport_log="${GYRE_DEV_STATE:-$ROOT/.gyre-dev-controller}/attempts/$ARG3/transport.log"
 remote_rc=74

@@ -14,6 +14,7 @@ SPEC = importlib.util.spec_from_file_location("dev_controller", Path(__file__).w
 controller = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(controller)
 REAL_HOST_TEST = controller.host_test_verified
+REAL_START_HOST_GATE = controller.start_host_gate
 
 
 def git(cwd, *args):
@@ -47,6 +48,16 @@ class ControllerGitTest(unittest.TestCase):
         host_gate = patch.object(controller, "host_test_verified", return_value=True)
         self.host_gate = host_gate.start()
         self.addCleanup(host_gate.stop)
+        def fake_host_gate(db, check_id, merge_sha):
+            passed = controller.host_test_verified(merge_sha, check_id)
+            directory = controller.STATE / "attempts" / check_id
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "host-tests.exit").write_text("0\n" if passed else "1\n")
+            if passed:
+                (directory / "host-tests.ok").write_text(merge_sha + "\n")
+        host_start = patch.object(controller, "start_host_gate", side_effect=fake_host_gate)
+        host_start.start()
+        self.addCleanup(host_start.stop)
 
     def write_task(self, progress):
         (self.work / "specs/tasks/task-001.md").write_text(
@@ -87,7 +98,7 @@ class ControllerGitTest(unittest.TestCase):
 
     def test_bootstrap_and_push_failures_require_explicit_retry(self):
         controller.sync(self.db)
-        for code in (75, 76, 77):
+        for code in (75, 76):
             with self.subTest(exit_code=code):
                 ident = f"failure{code}"
                 directory = controller.STATE / "attempts" / ident
@@ -117,9 +128,84 @@ class ControllerGitTest(unittest.TestCase):
             self.db.execute("INSERT INTO tasks(name,progress,deps,state,attempts) VALUES(?, 'not-started', '[]', 'ready', 0)",
                             (name,))
         self.db.commit()
+        self.db.execute("UPDATE controller_health SET admission=2 WHERE id=1")
         with patch.object(controller, "spawn") as spawn:
             controller.schedule(self.db, slots=50, max_attempts=3, launch_burst=2)
         self.assertEqual([call.args[1]["name"] for call in spawn.call_args_list], ["task-001", "task-002"])
+
+    def test_capacity_failure_backs_off_without_using_task_budget_and_survives_restart(self):
+        self.assertEqual([controller.backoff_seconds(n) for n in (1, 2, 3, 7)], [30, 60, 120, 900])
+        controller.sync(self.db)
+        directory = controller.STATE / "attempts" / "capacity"
+        directory.mkdir(parents=True)
+        (directory / "exit").write_text("78\n")
+        self.db.execute("""INSERT INTO attempts(id,task,kind,branch,state,pid,started)
+                           VALUES('capacity','task-001','worker','devloop/task-001/attempt-1','running',999999,1)""")
+        self.db.execute("UPDATE tasks SET state='running',attempts=1 WHERE name='task-001'")
+        self.db.commit()
+        with patch.object(controller.random, "uniform", return_value=1), patch.object(controller.time, "time", return_value=1000):
+            controller.reap(self.db)
+        task = self.db.execute("SELECT * FROM tasks WHERE name='task-001'").fetchone()
+        self.assertEqual((task["state"], task["retry_at"], task["retry_baseline"]), ("deferred", 1030, 1))
+        self.assertEqual(self.db.execute("SELECT state FROM attempts WHERE id='capacity'").fetchone()[0], "deferred")
+        self.assertEqual(controller.health(self.db)["admission"], 1)
+        with patch.object(controller, "spawn") as spawn, patch.object(controller.time, "time", return_value=1029):
+            controller.schedule(self.db, 50, 3)
+            spawn.assert_not_called()
+        reopened = controller.db_open()
+        self.addCleanup(reopened.close)
+        with patch.object(controller, "spawn") as spawn, patch.object(controller.time, "time", return_value=1030):
+            controller.schedule(reopened, 50, 3)
+            spawn.assert_called_once()
+            self.assertEqual(spawn.call_args.kwargs["branch"], "devloop/task-001/attempt-2")
+
+    def test_ready_signal_recovers_gateway_and_ramps_one_slot(self):
+        controller.sync(self.db)
+        directory = controller.STATE / "attempts" / "ready"
+        directory.mkdir(parents=True)
+        (directory / "sandbox.ready").touch()
+        self.db.execute("""INSERT INTO attempts(id,task,kind,state,pid,started)
+                           VALUES('ready','task-001','worker','running',999999,1)""")
+        self.db.execute("UPDATE controller_health SET failures=4,retry_at=5000,condition='Capacity unavailable' WHERE id=1")
+        self.db.commit()
+        controller.observe_ready(self.db)
+        self.assertEqual(tuple(controller.health(self.db)[k] for k in ("failures", "retry_at", "admission", "condition")),
+                         (0, 0, 2, "Healthy"))
+        controller.observe_ready(self.db)
+        self.assertEqual(controller.health(self.db)["admission"], 2)
+
+    def test_prior_gateway_failure_migrates_but_clone_failure_stays_failed(self):
+        controller.sync(self.db)
+        for name, log in (("task-001", "ProvisioningTimedOut"),
+                          ("task-002", "bootstrap fetch failed")):
+            ident = name[-3:]
+            directory = controller.STATE / "attempts" / ident
+            directory.mkdir(parents=True)
+            (directory / "output.log").write_text(log)
+            if name == "task-002":
+                self.db.execute("INSERT INTO tasks(name,progress,deps,state,attempts) VALUES(?, 'not-started','[]','failed',1)", (name,))
+            self.db.execute("INSERT INTO attempts(id,task,kind,state,started,detail) VALUES(?,?,'worker','failed',1,'exit=75')", (ident, name))
+        self.db.execute("UPDATE tasks SET state='failed',attempts=1 WHERE name='task-001'")
+        self.db.commit()
+        controller.recover_prior_infrastructure_failures(self.db)
+        self.assertEqual(self.db.execute("SELECT state FROM tasks WHERE name='task-001'").fetchone()[0], "deferred")
+        self.assertEqual(self.db.execute("SELECT state FROM tasks WHERE name='task-002'").fetchone()[0], "failed")
+
+    def test_invalid_configuration_halts_new_sandbox_admission(self):
+        controller.sync(self.db)
+        directory = controller.STATE / "attempts" / "invalid"
+        directory.mkdir(parents=True)
+        (directory / "exit").write_text("79\n")
+        self.db.execute("INSERT INTO attempts(id,task,kind,state,pid,started) VALUES('invalid','task-001','worker','running',999999,1)")
+        self.db.execute("UPDATE tasks SET state='running' WHERE name='task-001'")
+        self.db.commit()
+        controller.reap(self.db)
+        self.assertEqual(controller.health(self.db)["condition"], "ConfigurationInvalid")
+        self.db.execute("INSERT INTO tasks(name,progress,deps,state) VALUES('task-002','not-started','[]','ready')")
+        self.db.commit()
+        with patch.object(controller, "spawn") as spawn:
+            controller.schedule(self.db, 50, 3)
+            spawn.assert_not_called()
 
     def test_spawn_snapshots_driver_before_launch(self):
         controller.sync(self.db)
@@ -208,6 +294,8 @@ class ControllerGitTest(unittest.TestCase):
                            VALUES('deadbeef12345678','task-001','worker','failed',1)""")
         self.db.execute("""INSERT INTO attempts(id,task,kind,state,started)
                            VALUES('feedface12345678','task-001','worker','running',1)""")
+        self.db.execute("""INSERT INTO attempts(id,task,kind,state,started)
+                           VALUES('cabecafe12345678','task-001','worker','deferred',1)""")
         self.db.commit()
         fake = Path(self.temp.name) / "fake-openshell"
         record = Path(self.temp.name) / "deleted.txt"
@@ -217,6 +305,7 @@ args = sys.argv[1:]
 if 'list' in args:
     print('gyre-001-w-deadbeef')
     print('gyre-001-w-feedface')
+    print('gyre-001-w-cabecafe')
 elif 'delete' in args:
     with open(os.environ['GYRE_GC_RECORD'], 'a') as out:
         out.write(args[-1] + '\\n')
@@ -225,7 +314,7 @@ elif 'delete' in args:
         with patch.dict("os.environ", {"OPENSHELL_OIDC_CLIENT_SECRET": "test",
                                     "OPENSHELL": str(fake), "GYRE_GC_RECORD": str(record)}):
             controller.gc_sandboxes(self.db)
-        self.assertEqual(record.read_text().splitlines(), ["gyre-001-w-deadbeef"])
+        self.assertCountEqual(record.read_text().splitlines(), ["gyre-001-w-deadbeef", "gyre-001-w-cabecafe"])
 
     def test_promotion_requires_checked_base_and_candidate(self):
         sha = self.candidate()
@@ -263,6 +352,8 @@ elif 'delete' in args:
         self.db.execute("UPDATE tasks SET state='promoting' WHERE name='task-001'")
         self.db.commit()
         controller.promote(self.db)
+        self.assertEqual(self.db.execute("SELECT state FROM tasks WHERE name='task-001'").fetchone()[0], "promoting")
+        controller.promote(self.db)
         self.host_gate.assert_called_once_with(merge, "check1")
         self.assertEqual(git(self.remote, "rev-parse", "main"), merge)
         self.assertEqual(self.db.execute("SELECT state FROM tasks WHERE name='task-001'").fetchone()[0], "merged")
@@ -281,6 +372,7 @@ elif 'delete' in args:
         self.db.execute("UPDATE tasks SET state='promoting' WHERE name='task-001'")
         self.db.commit()
         self.host_gate.return_value = False
+        controller.promote(self.db)
         controller.promote(self.db)
         self.host_gate.assert_called_once_with(merge, "check1")
         self.assertEqual(git(self.remote, "rev-parse", "main"), base)
@@ -310,6 +402,34 @@ elif 'delete' in args:
         self.assertIn("$ npm test", log)
         self.assertFalse((controller.STATE / "attempts/check1/host-tests.ok").exists())
 
+    def test_host_gate_process_records_result_without_blocking_controller(self):
+        (self.work / "web").mkdir()
+        (self.work / "web/package.json").write_text('{}\n')
+        git(self.work, "add", ".")
+        git(self.work, "commit", "-m", "add frontend")
+        git(self.work, "push", "origin", "main")
+        controller.source()
+        sha = git(self.work, "rev-parse", "HEAD")
+        fake_bin = Path(self.temp.name) / "bin"
+        fake_bin.mkdir()
+        for name in ("cargo", "npm"):
+            path = fake_bin / name
+            path.write_text("#!/bin/sh\nexit 0\n")
+            path.chmod(0o755)
+        check_id = "a" * 16
+        self.db.execute("INSERT INTO attempts(id,task,kind,state,started) VALUES(?, 'task-001','check','done',1)", (check_id,))
+        self.db.commit()
+        with patch.dict(os.environ, {"PATH": f"{fake_bin}:{os.environ['PATH']}"}), \
+             patch.object(controller, "start_host_gate", REAL_START_HOST_GATE):
+            controller.start_host_gate(self.db, check_id, sha)
+        exit_file = controller.STATE / "attempts" / check_id / "host-tests.exit"
+        deadline = time.monotonic() + 10
+        while not exit_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(exit_file.read_text().strip(), "0")
+        self.assertEqual((exit_file.parent / "host-tests.ok").read_text().strip(), sha)
+        controller.reap_host_processes()
+
     def test_ambiguous_push_timeout_checks_remote_before_retrying(self):
         sha = self.candidate()
         controller.sync(self.db)
@@ -330,6 +450,7 @@ elif 'delete' in args:
             return real_run(*args, **kwargs)
 
         with patch.object(controller, "run", side_effect=timeout_push):
+            controller.promote(self.db)
             with self.assertRaises(controller.SourceUnavailable):
                 controller.promote(self.db)
         self.assertEqual(self.db.execute("SELECT state FROM tasks WHERE name='task-001'").fetchone()[0], "promoting")

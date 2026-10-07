@@ -290,14 +290,22 @@ It requires the OpenShell `gyre-gyre` gateway, `gyre-pricetag` and
 `.gyre-dev-controller/state.sqlite3` (SQLite WAL); attempts and logs are in
 `.gyre-dev-controller/attempts/`. Keep this directory when restarting the
 controller. Only one controller process may run at a time. `--slots` is the
-maximum concurrent attempts; `--launch-burst` limits new sandbox launches per
-30-second scheduling cycle so a high slot limit does not flood the gateway.
+desired upper bound; `--launch-burst` limits starts per scheduling cycle.
+Gateway admission starts at one and increases by one whenever a sandbox
+reaches Ready. Provisioning timeouts and gateway transport failures cut
+admission back to one and impose durable, jittered exponential backoff
+(30 seconds to 15 minutes). The next launch probes gateway recovery.
+An explicit `ConfigurationInvalid` response pauses admission until the
+configuration is repaired and its failed task is retried.
 The cockpit reads
 the ledger, shows task dependencies, attempt history and logs, and writes the
 live `.gyre-dev-controller/slots` control. Set slots to `0` to drain; running
 attempts finish. `--max-attempts` limits worker attempts per retry cycle.
-The cockpit's Needs attention section offers Retry and Retry all; an explicit
-retry grants a fresh attempt budget. A failed
+The cockpit shows desired and admitted slots, gateway condition, next retry
+time, and tasks waiting for infrastructure. Infrastructure failures do not
+consume work-attempt budget; they retry automatically after backoff. The
+Needs attention section offers Retry and Retry all for task or configuration
+failures; an explicit retry grants a fresh attempt budget. A failed
 checker stays failed until explicitly retried, with its output in the attempt
 log. The overview shows current coverage from the coverage matrix and its
 history from `specs/coverage/SUMMARY.md` commits. The task table and detail
@@ -336,13 +344,16 @@ the static and frontend build gates there. Performance tests also need stable
 host resources. Before promotion, the controller runs `cargo test --all` and the
 full frontend suite in an isolated host worktree at the exact verified merge SHA.
 Its result is recorded in `attempts/<id>/host-tests.log`; a failure blocks the
-push to `main`.
+push to `main`. The host gate runs as a separate recorded process, so the
+controller continues scheduling, reaping, and deleting sandboxes while it runs.
 
 Every finished sandbox is deleted, including failed attempts. The controller
 periodically retries deletion if a driver crashes or gateway deletion fails.
 A Git clone/bootstrap failure retries within its existing sandbox and then
 marks the task failed for explicit retry; it does not provision another
-sandbox automatically. Set slots to `0` while diagnosing gateway outages.
+sandbox automatically. Prior failed attempts with clear provisioning or
+gateway transport evidence migrate to automatic waiting on controller start.
+Set slots to `0` to drain dispatch.
 
 Each worker gets a unique `devloop/task-NNN/attempt-N` branch and may resume
 from an old worker branch or a previous attempt. It checkpoints after each

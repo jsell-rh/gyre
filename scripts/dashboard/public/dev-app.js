@@ -47,6 +47,10 @@ function ago(seconds) {
   const n = Math.max(0, Math.floor(Date.now() / 1000 - seconds));
   return n < 60 ? `${n}s` : n < 3600 ? `${Math.floor(n / 60)}m` : n < 86400 ? `${Math.floor(n / 3600)}h` : `${Math.floor(n / 86400)}d`;
 }
+function until(seconds) {
+  const remaining = Math.max(0, Math.ceil(seconds - Date.now() / 1000));
+  return remaining < 60 ? `${remaining}s` : remaining < 3600 ? `${Math.ceil(remaining / 60)}m` : `${Math.ceil(remaining / 3600)}h`;
+}
 const relativeTime = new Intl.RelativeTimeFormat(undefined, { numeric: "always" });
 function agentTime(at) {
   const seconds = Math.max(0, Math.floor((Date.now() - at) / 1000));
@@ -98,13 +102,14 @@ function renderHealth() {
   const s = snapshot || {};
   const online = s.online;
   const value = s.slots ?? 0;
+  const gate = s.health || {};
   nodes.health.hidden = false;
   nodes.health.replaceChildren(
     e("span", {}, e("span", { class: `dot ${online ? "ok" : "down"}` }), online ? " controller online" : " controller offline"),
     e("span", { class: "sep", text: "|" }),
-    e("span", { text: `${s.running ?? 0} running / ${value} slots` }),
+    e("span", { text: `${s.running ?? 0} running / ${gate.effective_slots ?? value} admitted / ${value} desired` }),
     e("span", { class: "sep", text: "|" }),
-    e("span", { text: `${s.eligible ?? 0} eligible · ${s.counts?.failed ?? 0} failed · ${s.counts?.merged ?? 0} merged` }),
+    e("span", { text: `${s.eligible ?? 0} eligible · ${s.counts?.deferred ?? 0} waiting · ${s.counts?.failed ?? 0} failed · ${s.counts?.merged ?? 0} merged` }),
     e("span", { class: "health-spacer" }),
     e("span", { class: "stepper" },
       e("span", { text: "sandboxes " }),
@@ -166,11 +171,13 @@ function renderOverview() {
   const tasks = s.tasks || [];
   const active = tasks.filter((t) => ["running", "checking", "promoting"].includes(t.state));
   const failed = tasks.filter((t) => t.state === "failed");
+  const deferred = tasks.filter((t) => t.state === "deferred");
+  const gate = s.health || {};
   const candidate = tasks.filter((t) => t.state === "candidate");
   const cards = [
     ["Eligible", s.eligible ?? 0], ["Running", s.running ?? 0],
     ["Candidates", candidate.length + (s.counts?.checking || 0)],
-    ["Failed", failed.length], ["Merged", s.counts?.merged || 0],
+    ["Waiting", deferred.length], ["Failed", failed.length], ["Merged", s.counts?.merged || 0],
   ];
   const coverage = s.coverage || {};
   const covered = (coverage.implemented || 0) + (coverage.verified || 0);
@@ -184,7 +191,8 @@ function renderOverview() {
     e("div", { class: "dev-metric" }, e("div", { class: "label", text: label }), e("div", { class: "number", text: count }))));
   const control = e("section", { class: "dev-panel" },
     e("h2", { text: "Controller" }),
-    e("p", { text: s.online ? "Dispatching and checking against the durable ledger." : s.present ? "Stopped. Run: python3 scripts/dev-controller.py run --slots 8" : "No ledger yet. Run: python3 scripts/dev-controller.py sync" }),
+    e("p", { text: s.online ? `Reconciling specs to code · ${gate.condition || "Healthy"}` : s.present ? "Stopped. Run: python3 scripts/dev-controller.py run --slots 8" : "No ledger yet. Run: python3 scripts/dev-controller.py sync" }),
+    e("p", { class: "muted", text: gate.condition === "ConfigurationInvalid" ? "Admission paused: repair gateway configuration, then retry the failed task." : gate.retry_at > Date.now() / 1000 ? `Gateway backoff: next admission probe in ${until(gate.retry_at)} · ${gate.failures} consecutive infrastructure failures` : `Gateway admission: ${gate.effective_slots ?? 0} of ${s.slots ?? 0} desired slots · expands as sandboxes become Ready` }),
     e("p", { class: "muted", text: "Set sandboxes to 0 to drain. Active attempts finish and keep their checkpoints." }),
     e("div", { class: "dev-control-line", text: `${(s.attempts || []).filter((a) => a.state === "running" && a.kind === "worker").length} implementing · ${(s.attempts || []).filter((a) => a.state === "running" && a.kind === "check").length} checking · ${s.slots ?? "—"} slots` }));
   const live = e("section", { class: "dev-panel" }, e("h2", { text: `Active attempts · ${active.length}` }),
@@ -199,14 +207,18 @@ function renderOverview() {
     failed.length ? failed.slice(0, 12).map((task) => e("div", { class: "dev-attention-row" }, taskButton(task, latestAttempt(task.name)?.detail || ""),
       e("button", { class: "dev-action", onclick: () => retry(task.name), text: "Retry" })))
       : e("p", { class: "muted", text: "No failed tasks." }));
+  const waiting = e("section", { class: "dev-panel" }, e("h2", { text: `Waiting for infrastructure · ${deferred.length}` }),
+    deferred.length ? deferred.slice(0, 12).map((task) => taskButton(task,
+      `${task.condition || "Gateway unavailable"} · retry ${task.retry_at > Date.now() / 1000 ? `in ${until(task.retry_at)}` : "on next reconciliation"}`))
+      : e("p", { class: "muted", text: "No task is waiting for infrastructure." }));
   nodes.overview.replaceChildren(coverageBar, metrics, errorText || s.error ? e("div", { class: "dev-error", text: errorText || s.error }) : "",
-    e("div", { class: "dev-overview-grid" }, e("div", {}, control, live), attention),
+    e("div", { class: "dev-overview-grid" }, e("div", {}, control, live, waiting), attention),
     e("section", { class: "dev-panel" }, e("h2", { text: `Waiting candidates · ${candidate.length}` }),
       candidate.length ? candidate.slice(0, 10).map((task) => taskButton(task, `candidate ${task.candidate?.slice(0, 12) || ""}`))
         : e("p", { class: "muted", text: "No candidate waiting for verification." })));
 }
 
-const FILTERS = ["active", "eligible", "blocked", "failed", "candidate", "merged", "all"];
+const FILTERS = ["active", "eligible", "deferred", "blocked", "failed", "candidate", "merged", "all"];
 function matches(task) {
   const value = state(task);
   if (filter === "active" && !["running", "checking", "promoting"].includes(value)) return false;
@@ -432,6 +444,7 @@ function renderDrawer() {
       e("span", { text: "Candidate" }), e("span", { class: "mono", text: task.candidate || "—" }),
       e("span", { text: "Seed" }), e("span", { class: "mono", text: task.seed || "—" }),
       e("span", { text: "Prerequisites" }), e("span", { text: (task.deps || []).join(", ") || "none" })),
+    task.state === "deferred" ? e("p", { text: `${task.condition || "Infrastructure unavailable"}. Automatic retry ${task.retry_at > Date.now() / 1000 ? `in ${until(task.retry_at)}` : "on the next reconciliation"}.` }) : null,
     task.state === "failed" ? e("button", { class: "dev-action", onclick: () => retry(task.name), text: "Retry task" }) : null,
     e("h3", { text: `Attempts · ${attempts.length} recent` }),
     ...attempts.map((a) => e("button", { class: "dev-history", onclick: () => { tab = "raw"; logAttempt = a.id; renderDrawer(); } },
