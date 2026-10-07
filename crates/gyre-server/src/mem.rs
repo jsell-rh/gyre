@@ -4295,7 +4295,7 @@ impl gyre_ports::TrustAnchorRepository for MemTrustAnchorRepository {
         Ok(())
     }
 }
-
+#[cfg(test)]
 mod secret_contract_tests_f1 {
     //! F1 (task-097): the mem adapter must enforce the SecretRepository port's
     //! duplicate-rejection contract in code — SQLite enforces it via UNIQUE
