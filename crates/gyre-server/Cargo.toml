@@ -53,8 +53,12 @@ tonic = { version = "0.12", default-features = false, features = ["transport", "
 opentelemetry-proto = { version = "0.27", default-features = false, features = ["gen-tonic", "trace"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 parking_lot = "0.12"
+# Sigstore/Fulcio verification: X.509 chain parsing + signature validation (task-107).
+x509-parser = { version = "0.18", features = ["verify"] }
 
 [dev-dependencies]
+# Mock Fulcio/Rekor stack for signing tests: test-only CA issuing real X.509 chains.
+rcgen = "0.14"
 tokio-tungstenite = "0.24"
 http = "1"
 tower = { workspace = true, features = ["util"] }
