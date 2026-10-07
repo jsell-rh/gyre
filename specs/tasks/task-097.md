@@ -2,7 +2,7 @@
 title: "Platform Model Secrets Domain Types + Port"
 spec_ref: "platform-model.md §7 Secrets Delivery"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 coverage_sections:
   - "platform-model.md §7 Secrets Delivery"
   - "platform-model.md §7 Principle"
@@ -10,7 +10,7 @@ coverage_sections:
   - "platform-model.md §7 Secret Scoping"
   - "platform-model.md §7 Secret Types"
   - "platform-model.md §7 Storage Backend"
-commits: ["16b1e2f78d2713b0b6bdea92ab115222e41139c8", "befecd354769fd176390921bc8e2e3da0bea1bd9"]
+commits: ["3a5be015d2fa96ef14a55109098fe869cf56ae13", "a38170c9c866a05033b23238398660b35e333eee", "a3fde958cd56d6f760d5e59b84927601ba708f17", "d5fe703aa9771f0c53f82e8091e936a9a1cc4e18", "7968dcf1102093b06a85b9c7d5c79cb91fe64012"]
 review: specs/reviews/task-097.md
 ---
 
@@ -104,3 +104,15 @@ Default: secrets encrypted at rest with SOPS in database. Optional Vault integra
 ## Agent Instructions
 
 Read `specs/system/platform-model.md` §7 "Secrets Delivery" for the full spec. The current credential injection is in `gyre-server/src/api/spawn.rs` around lines 603-637 (GYRE_CRED_* prefix). Follow the hexagonal pattern: types in gyre-common, port in gyre-ports, adapter in gyre-adapters. Use `ring` for encryption (already a dependency for Ed25519 in key_binding.rs). The migration numbering is currently at 000038 — check the latest migration number before creating yours.
+
+## Revision Round 1 (findings F1–F5, specs/reviews/task-097.md)
+
+Product fixes in `d5fe703a` (+ `7968dcf1` test-import fix):
+
+- **F1 (mem uniqueness contract):** `MemSecretRepository::create` now rejects duplicates mirroring the SQLite `UNIQUE(id)` + `UNIQUE(tenant, scope, scope_id, name)` failure mode; contract tests in `mem.rs` (`secret_contract_tests`: reject dup id, reject dup scope/name same tenant, allow same name cross-tenant, allow diff name same scope). `mem-port-contracts-exemptions.txt` drained to 0 (frozen count lowered 1→0).
+- **F2 (spawn integration coverage):** five spawn-level tests in `api/spawn.rs` deliver secrets through a real spawned process (env-dump compute target): all four scopes delivered, nearest-scope-wins, unresolvable workspace skips all injection, non-UTF-8 secret skipped while others deliver, resolve-error does not fail spawn.
+- **F3 (fabricated "default" tenant):** spawn resolves the tenant from the workspace record and skips (warns on) all scoped secret resolution when the workspace is unresolvable — no `"default"` fallback. Same-class sibling in `constraint_check.rs::create_violation_notifications` fixed the same way. `fabricated-scope-defaults-exemptions.txt` drained 8→6 (both task-097-owned lines removed, frozen count lowered).
+- **F4 (lossy secret conversion):** injection path uses fallible `String::from_utf8`; non-UTF-8 values are skipped with a warn naming the secret, never the value. `lossy-secret-conversion-exemptions.txt` drained 1→0.
+- **F5 (silent key downgrade):** `load_encryption_key` emits a startup `warn!` (both fresh-generation and existing-persisted-key paths) stating that encryption-at-rest degrades to obfuscation when `GYRE_SECRET_ENCRYPTION_KEY` is unset, with remediation. No spec amendment needed — spec wording "encrypted at rest" still holds; the degraded default is now operator-visible.
+
+`commits:` now lists the five task-labeled product commits reachable from main (the previous entries were unreachable rebase duplicates, invisible to review scoping). A temporary `[patch.crates-io]` pq-sys build shim added during the round was reverted in `7968dcf1` (confirmed absent from Cargo.toml).
