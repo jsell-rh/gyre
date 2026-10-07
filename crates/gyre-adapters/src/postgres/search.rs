@@ -132,6 +132,7 @@ impl SearchPort for PgStorage {
     async fn search(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
         let pool = Arc::clone(&self.pool);
         tokio::task::spawn_blocking(move || -> Result<Vec<SearchResult>> {
+            let mut conn = pool.get().context("get db connection")?;
             if query.query.trim().is_empty() {
                 return Ok(vec![]);
             }
