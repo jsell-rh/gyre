@@ -1934,6 +1934,15 @@
     if (!activeQuery?.scope) return null;
     const scope = activeQuery.scope;
 
+    // Scope "all" (spec §2 "Show everything"): the result set is every node,
+    // so emphasis, edge restriction, zoom:"fit" and {{count}}/{{group_count}}
+    // all operate against the full graph instead of falling through to null.
+    if (scope.type === 'all') {
+      const dm = new Map();
+      for (const n of nodes) dm.set(n.id, 0);
+      return dm.size > 0 ? dm : null;
+    }
+
     if (scope.type === 'focus' && scope.node) {
       // $selected: resolves to current selection (one-time)
       // $clicked: resolves via interactiveQueryTemplate (re-runs on each click)
@@ -2023,15 +2032,44 @@
       return dm.size > 0 ? dm : null;
     }
 
-    // Diff scope: highlight nodes changed between two commits
+    // Diff scope: nodes changed between two commits. Semantics mirror the
+    // server resolver (gyre-domain view_query_resolver.rs Scope::Diff) and
+    // read the fields GraphNodeResponse actually serializes: created_sha,
+    // last_modified_sha, created_at, last_modified_at.
     if (scope.type === 'diff') {
-      // Diff requires commit_sha on nodes; filter to nodes changed since scope.from_commit
-      const fromCommit = scope.from_commit;
-      if (!fromCommit) return null;
+      const fromCommit = (scope.from_commit ?? '').toLowerCase();
+      const toCommit = (scope.to_commit ?? '').toLowerCase();
+      if (!fromCommit || !toCommit) return null;
+      // "~<epoch>" refs select a temporal half-open range (from, to]
+      const epochRef = (s) => {
+        const m = /^~(\d+)$/.exec(s);
+        return m ? Number(m[1]) : null;
+      };
+      const fromTs = epochRef(fromCommit);
+      const toTs = epochRef(toCommit);
       const matched = new Map();
-      for (const n of nodes) {
-        if (n.last_commit_sha && n.last_commit_sha !== fromCommit) {
-          matched.set(n.id, 0);
+      if (fromTs !== null && toTs !== null) {
+        // Temporal diff: created or modified within (fromTs, toTs]
+        for (const n of nodes) {
+          const created = n.created_at ?? 0;
+          const modified = n.last_modified_at ?? 0;
+          if ((created > fromTs && created <= toTs) || (modified > fromTs && modified <= toTs)) {
+            matched.set(n.id, 0);
+          }
+        }
+      } else {
+        // SHA diff: to_commit must be a ≥7-char prefix of the node's
+        // created_sha/last_modified_sha (short-prefix false-positive guard);
+        // nodes already unchanged at from_commit (BOTH shas match from) are
+        // excluded. Matches server heuristic including its limitations.
+        const shaMatches = (sha, target) => {
+          if (!sha || target.length < 7) return false;
+          return String(sha).toLowerCase().startsWith(target);
+        };
+        for (const n of nodes) {
+          const matchesTo = shaMatches(n.created_sha, toCommit) || shaMatches(n.last_modified_sha, toCommit);
+          const unchangedAtFrom = shaMatches(n.created_sha, fromCommit) && shaMatches(n.last_modified_sha, fromCommit);
+          if (matchesTo && !unchangedAtFrom) matched.set(n.id, 0);
         }
       }
       return matched.size > 0 ? matched : null;
