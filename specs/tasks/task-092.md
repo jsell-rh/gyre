@@ -2,11 +2,11 @@
 title: "HSI Conflict Prevention — Concurrent Spec Editing Warning"
 spec_ref: "human-system-interface.md §7 Conflict Prevention"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 review: specs/reviews/task-092.md
 coverage_sections:
   - "human-system-interface.md §7 Conflict Prevention"
-commits: ["ab29992e160d0c0a65257743417fd3e7e75d331c", "2dceab9a474796df0196f47afaf561d39d56d9be", "d0452d28a2166ec68e9270aa2e76d53107748cba"]
+commits: ["1ac154183d15bf3b14b8f16046683d9181940b72", "eee00dbaaac1978e4e2c6e513e7e7c17c92770d5", "a0e6632156461e10bea26f4acc8e24585986831a", "f75be9e26f8518ae965d536b18be1195c018d097", "3a8b47b66c09b2177b1ede837425d8a7b59f0ff7"]
 ---
 
 ## Spec Excerpt
