@@ -2,7 +2,7 @@
 title: "Dep Graph — Wire persistent DependencyRepository into AppState"
 spec_ref: "dependency-graph.md §Dependency Entity"
 depends_on: []
-progress: not-started
+progress: in-progress
 coverage_sections:
   - "dependency-graph.md §Dependency Entity"
 commits: []
