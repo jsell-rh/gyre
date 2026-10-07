@@ -2,10 +2,10 @@
 title: "Message bus — per-kind payload schema validation (reject invalid payloads with 400)"
 spec_ref: "message-bus.md §Payload Schemas"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "message-bus.md §Payload Schemas"
-commits: ["c0cbeac214b48bb791bc3a64b0ede2d81a044083", "41846588861b3ba22bc04077ce768bd98cf8cf8c", "9764477d2fcb5226bc866f6ff8c143c39bd715ca"]
+commits: ["e71d72fd103f5c0bfa657f5a4133a85e0ff89bd0", "c0cbeac214b48bb791bc3a64b0ede2d81a044083", "41846588861b3ba22bc04077ce768bd98cf8cf8c", "9764477d2fcb5226bc866f6ff8c143c39bd715ca"]
 ---
 
 ## Spec Excerpt
@@ -102,3 +102,13 @@ There is no `validate_payload` / schema module. Missing-required-field enforceme
 - Follow hexagonal boundaries: `gyre-common` has no infra deps; `validate_payload` returns a plain `Result<(), String>` (no `ApiError` in common). The server layer maps the string to `ApiError::BadRequest` / `tool_error`.
 - Confirm `ApiError::BadRequest` → 400 in `crates/gyre-server/src/api/error.rs` before relying on it.
 - Skip formatters/linters and project-wide suites; run only the targeted tests above. Conventional commit, author `Project Manager` is NOT you — commit under your worker identity per repo convention.
+
+## Implementation Notes
+
+- **Shared table** — `MessageKind::required_payload_fields()` + `validate_payload()` in `crates/gyre-common/src/message.rs` encode message-bus.md §Payload Schemas once; both receipt paths call it, so the two cannot drift.
+- **Receipt paths wired** — `api/messages.rs::send_message` maps `Err` → `ApiError::BadRequest` (→ 400, `api/error.rs:56`), `mcp.rs::handle_message_send` maps `Err` → `tool_error`. Both run after the tier/destination/scoping guards and before signing/persistence, so a rejected payload is never stored.
+- **Explicit `null` payload ≡ absent payload** — normalized inside `validate_payload`. The REST body types the field `Option<Value>` (serde maps `"payload": null` → `None`) while the MCP argument map hands over `Some(Value::Null)`; without the normalization the identical wire payload was 400 on one path and accepted on the other. A required field is still unsatisfied by null, whether the payload itself is null or the required key holds null.
+- **Non-spec variants** (`SpecApproved`, `ConstraintViolation`, `AtomicGroupFailed`, `MrReverted`, `MergeQueuePaused`, `MergeQueueResumed`) are outside the spec table and server-emitted only, so they impose no required fields — they are listed explicitly in the `match` so adding a spec row for one is a visible edit, not a silent default arm.
+- **Server-internal emit paths untouched** per plan (`emit_event`, `build_agent_completed_payload`, `gyre_record_activity`): the spec scopes validation to receipt. `gyre_record_activity`'s payload-shape mismatch against §Payload Schemas is tracked separately in `specs/reviews/task-001.md` F6 — it is a distinct defect, not papered over here.
+- **Tests** — `message::tests::validate_payload_enforces_required_fields` and `validate_payload_treats_explicit_null_as_absent` (gyre-common); `api::messages::tests::send_message_rejects_payload_missing_required_field` asserts 400 + reason naming `summary`, 400 for absent payload, 201 when complete; `mcp::tests::mcp_message_send_rejects_payload_missing_required_field` asserts `isError` + reason naming `task_id` **and** that nothing was persisted (`list_unacked` == 0), then that the valid payload persists (== 1). All fail if the validation call is removed.
+- **Contract surfaced where hit** — MCP `gyre_message_send` payload description and `docs/api-reference.md` now name the per-kind required fields and the 400 behavior.
