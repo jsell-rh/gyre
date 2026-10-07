@@ -573,6 +573,61 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn validate_payload_enforces_required_fields() {
+        // Absent payload cannot satisfy a kind with required fields.
+        assert!(MessageKind::TaskAssignment.validate_payload(None).is_err());
+        // Empty object: task_id missing.
+        assert!(MessageKind::TaskAssignment
+            .validate_payload(Some(&json!({})))
+            .is_err());
+        // Explicit JSON null counts as missing.
+        assert!(MessageKind::TaskAssignment
+            .validate_payload(Some(&json!({"task_id": serde_json::Value::Null})))
+            .is_err());
+        // Present satisfies the schema (value type is not validated).
+        assert!(MessageKind::TaskAssignment
+            .validate_payload(Some(&json!({"task_id": "TASK-1", "spec_ref": "specs/x.md"})))
+            .is_ok());
+
+        // Both required: `status` alone must fail, naming the missing field + kind.
+        let err = MessageKind::StatusUpdate
+            .validate_payload(Some(&json!({"status": "in_progress"})))
+            .expect_err("status_update requires summary");
+        assert!(
+            err.contains("status_update") && err.contains("summary"),
+            "reason must name kind and field: {err}"
+        );
+
+        // Multi-field kind reports the first field it cannot find.
+        let err = MessageKind::PushRejected
+            .validate_payload(Some(&json!({"repo_id": "r1", "branch": "main"})))
+            .expect_err("push_rejected requires agent_id and reason");
+        assert!(err.contains("agent_id"), "reason: {err}");
+
+        // Non-object payload is never a valid payload.
+        assert!(MessageKind::TaskAssignment
+            .validate_payload(Some(&json!("TASK-1")))
+            .is_err());
+        assert!(MessageKind::Custom("my_event".to_string())
+            .validate_payload(Some(&json!(["a"])))
+            .is_err());
+
+        // Custom: any object (or none), no required fields.
+        assert!(MessageKind::Custom("my_event".to_string())
+            .validate_payload(Some(&json!({"anything": 1})))
+            .is_ok());
+        assert!(MessageKind::Custom("my_event".to_string())
+            .validate_payload(None)
+            .is_ok());
+
+        // Kinds the spec lists with no payload fields accept anything.
+        assert!(MessageKind::QueueUpdated.validate_payload(None).is_ok());
+        assert!(MessageKind::DataSeeded
+            .validate_payload(Some(&json!({"anything": true})))
+            .is_ok());
+    }
+
     fn make_telemetry(workspace_id: Option<Id>) -> Message {
         Message {
             id: Id::new("msg-1"),
