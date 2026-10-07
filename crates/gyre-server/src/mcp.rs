@@ -463,6 +463,19 @@ fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "search",
+                "description": "Full-text search across the knowledge graph. Searches node names, qualified names, doc comments, file paths, and spec paths. Returns up to 50 matching nodes.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_id": { "type": "string", "description": "Repository ID" },
+                        "query": { "type": "string", "description": "Search term (case-insensitive substring match)" },
+                        "limit": { "type": "integer", "description": "Max results to return (default 30, max 50)" }
+                    },
+                    "required": ["repo_id", "query"]
+                }
+            },
+            {
                 "name": "node_provenance",
                 "description": "Get provenance (creation/modification history) for specific nodes. Shows who created or modified the node, when, and in which commit.",
                 "inputSchema": {
@@ -2309,6 +2322,65 @@ async fn handle_graph_edges(state: &AppState, args: &Value) -> Value {
     ))
 }
 
+/// §9/§23 `search` MCP tool: full-text search across the knowledge graph.
+/// Matches node names, qualified names, file paths, doc comments, and spec
+/// paths — the same contract as the explorer agent's inline `search` tool,
+/// exposed over the MCP protocol so the Claude Agent SDK subprocess can call it.
+async fn handle_graph_search(state: &AppState, args: &Value) -> Value {
+    let repo_id = match require_str(args, "repo_id") {
+        Ok(r) => r.to_string(),
+        Err(_) => return tool_error("missing required field: repo_id"),
+    };
+    let query = match require_str(args, "query") {
+        Ok(q) => q.to_lowercase(),
+        Err(_) => return tool_error("missing required field: query"),
+    };
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(30)
+        .min(50) as usize;
+    let rid = Id::new(&repo_id);
+    let nodes = match state.graph_store.list_nodes(&rid, None).await {
+        Ok(n) => n,
+        Err(e) => return tool_error(format!("Failed to load graph nodes: {e}")),
+    };
+    let results: Vec<serde_json::Value> = nodes
+        .iter()
+        .filter(|n| n.deleted_at.is_none())
+        .filter(|n| {
+            n.name.to_lowercase().contains(&query)
+                || n.qualified_name.to_lowercase().contains(&query)
+                || n.file_path.to_lowercase().contains(&query)
+                || n.doc_comment
+                    .as_ref()
+                    .map_or(false, |d| d.to_lowercase().contains(&query))
+                || n.spec_path
+                    .as_ref()
+                    .map_or(false, |s| s.to_lowercase().contains(&query))
+        })
+        .take(limit)
+        .map(|n| {
+            json!({
+                "id": n.id.to_string(),
+                "name": n.name,
+                "qualified_name": n.qualified_name,
+                "node_type": format!("{:?}", n.node_type).to_lowercase(),
+                "file_path": n.file_path,
+                "spec_path": n.spec_path,
+                "doc_comment": n.doc_comment
+                    .as_deref()
+                    .map(|d| d.chars().take(100).collect::<String>()),
+            })
+        })
+        .collect();
+    tool_result(format!(
+        "{} results:\n{}",
+        results.len(),
+        serde_json::to_string_pretty(&results).unwrap_or_default()
+    ))
+}
+
 async fn handle_node_provenance(state: &AppState, args: &Value) -> Value {
     let repo_id = match require_str(args, "repo_id") {
         Ok(r) => r.to_string(),
@@ -3033,6 +3105,7 @@ pub async fn mcp_handler(
                 "graph_query_dryrun" => handle_graph_query_dryrun(&state, &args).await,
                 "graph_nodes" => handle_graph_nodes(&state, &args).await,
                 "graph_edges" => handle_graph_edges(&state, &args).await,
+                "search" => handle_graph_search(&state, &args).await,
                 "node_provenance" => handle_node_provenance(&state, &args).await,
                 "graph_concept" => handle_graph_concept(&state, &args).await,
                 "spec_assist" => handle_spec_assist(&state, &args, &auth).await,
