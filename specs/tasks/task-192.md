@@ -5,7 +5,7 @@ depends_on: []
 progress: not-started
 coverage_sections:
   - "platform-model.md §CLI"
-commits: []
+commits: ["24b9104c7a1218d18efd3bf8dc04b4de6f751a09"]
 ---
 
 ## Spec Excerpt
