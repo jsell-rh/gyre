@@ -5,7 +5,7 @@ depends_on: []
 progress: not-started
 coverage_sections:
   - "platform-model.md §Budget Tracking"
-commits: []
+commits: ["21986645c231814dffef3c9e5c6670e47bf8a690"]
 ---
 
 ## Spec Excerpt
