@@ -5,7 +5,7 @@ depends_on: []
 progress: not-started
 coverage_sections:
   - "spec-lifecycle.md §Accountability Integration"
-commits: []
+commits: ["dd25029e12d4ee953338c54e6ac1a9907ba41949"]
 ---
 
 ## Spec Excerpt
