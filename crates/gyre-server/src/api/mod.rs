@@ -673,17 +673,6 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/workspaces/:id/orchestrator/spawn",
             post(orchestrator::spawn_workspace_orchestrator),
         )
-        // Meta-spec preview loop (S4.6 — §5 of meta-spec-reconciliation.md)
-        // NOTE: the status route must be registered before the POST route to avoid
-        // axum matching the preview_id segment as a method collision.
-        .route(
-            "/api/v1/workspaces/:id/meta-specs/preview",
-            post(meta_specs::post_meta_spec_preview),
-        )
-        .route(
-            "/api/v1/workspaces/:id/meta-specs/preview/:preview_id",
-            get(meta_specs::get_meta_spec_preview_status),
-        )
         // LLM function config (LLM integration §4)
         .route(
             "/api/v1/workspaces/:id/llm/config",
@@ -736,6 +725,18 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/meta-specs/:path/blast-radius",
             get(meta_specs::get_meta_spec_blast_radius),
+        )
+        // Meta-spec preview mode (§5 of meta-spec-reconciliation.md). Global
+        // (not workspace-scoped): a preview targets repos across workspaces, so
+        // the scope is derived per target from the repo record and checked with
+        // ABAC + tenant containment in the handlers. The static `preview`
+        // segment outranks the `:path` wildcard above, so a meta-spec whose path
+        // is literally `preview` has no reachable blast-radius lookup.
+        .route("/api/v1/meta-specs/preview", post(meta_specs::post_meta_spec_preview))
+        .route(
+            "/api/v1/meta-specs/preview/:preview_id",
+            get(meta_specs::get_meta_spec_preview_status)
+                .delete(meta_specs::delete_meta_spec_preview),
         )
         // Meta-spec registry CRUD (agent-runtime spec §2)
         // NOTE: /:id/versions must be registered before /:id to prevent axum from

@@ -67,6 +67,14 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
+    // Meta-spec preview GC (§5 of meta-spec-reconciliation.md): expire preview
+    // runs so throwaway branches, worktrees and tokens cannot outlive their TTL.
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "meta_spec_preview_gc".to_string(),
+        Arc::clone(&state),
+    );
+
     // Background tasks.
     spawn_stale_agent_detector(state.clone());
     spawn_stale_peer_detector(state.clone());
