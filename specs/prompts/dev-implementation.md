@@ -11,6 +11,11 @@ when it can fail on the old behavior. Run focused checks while working. The
 controller runs the full deterministic gates on the integrated commit.
 
 If an existing review reports defects, address each concrete finding. Record
+integration and full-suite failures from the supplied repair handoff as
+concrete findings too. Reproduce them before editing; compare with current
+main if they appear unrelated. Preserve the spec and verification gates.
+Do not silence failures by deleting tests, weakening checks, growing
+exemption files, or marking unfinished requirements complete. Record
 task-labeled product commits in the task's `commits:` field. When implementation
 is ready for an independent review, set `progress: ready-for-review`; never set
 `complete` in an implementation round. Explain any unresolved gap in the task.

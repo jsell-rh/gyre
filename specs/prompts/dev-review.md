@@ -7,6 +7,10 @@ tests that could pass without the behavior. Run focused probes where they can
 settle a material doubt. The controller separately runs deterministic gates
 on the eventual integration commit.
 
+If a repair handoff is supplied, independently check each reported failure
+and its reproduction. Reject gate weakening, deleted meaningful tests, new
+exemptions, and unrelated changes made just to obtain a passing result.
+
 Write concrete findings with file and behavior evidence to the task's review
 file. If any material gap remains, set `progress: needs-revision` and leave a
 clear repair path. Set `progress: complete` only when the task really meets the

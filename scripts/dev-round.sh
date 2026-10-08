@@ -14,9 +14,9 @@ run_prompt() {
   local session_dir="/tmp/stage/omp-sessions/$role"
   local session_file compact_note=''
   local -a resume=()
-  local -a model=()
+  local -a model=(--model "${GYRE_DEV_MODEL:-enmaas-glm-5-3/rits/zai-org/glm-5-3}")
   if [ "$role" = implementation ]; then
-    model=(--model "${GYRE_DEV_IMPLEMENTATION_MODEL:-Inferact/Qwen3.8-Flash-Next-NVFP4}")
+    model=(--model "${GYRE_DEV_IMPLEMENTATION_MODEL:-${GYRE_DEV_MODEL:-enmaas-glm-5-3/rits/zai-org/glm-5-3}}")
   fi
   mkdir -p "$session_dir"
   session_file=$(find "$session_dir" -maxdepth 1 -name '*.jsonl' -print | sort | tail -n 1)
@@ -59,6 +59,14 @@ PY
     fi
     printf '\n## Assigned task\n\n'
     cat "$file"
+    if [ -f /tmp/stage/audit-contract.json ]; then
+      printf '\n## Mechanically enforced fidelity scope\n\n'
+      cat /tmp/stage/audit-contract.json
+    fi
+    if [ -f /tmp/stage/repair.md ]; then
+      printf '\n## Findings from the rejected integration\n\n'
+      cat /tmp/stage/repair.md
+    fi
     review=$(bash scripts/task-field.sh "$file" review)
     if [ -n "$review" ] && [ -f "$review" ]; then
       printf '\n## Existing review\n\n'
@@ -72,7 +80,7 @@ PY
 progress=$(bash scripts/task-field.sh "$file" progress)
 case "$progress" in
   complete) echo "already complete"; exit 0;;
-  not-started|needs-revision|ready-for-review) ;;
+  not-started|in-progress|needs-revision|ready-for-review) ;;
   *) echo "unsupported task progress: $progress" >&2; exit 1;;
 esac
 
@@ -89,8 +97,21 @@ if ! git rebase --autostash origin/main; then
   git merge-base --is-ancestor origin/main HEAD || { echo "resolver did not finish rebase onto main" >&2; exit 1; }
 fi
 
+progress=$(bash scripts/task-field.sh "$file" progress)
+if [ -f /tmp/stage/audit-contract.json ]; then
+  python3 /tmp/stage/dev-audit-check.py /tmp/stage/audit-contract.json --generation-only || exit 80
+fi
 if [ "$progress" = ready-for-review ]; then
-  run_prompt review
+  if [ -f /tmp/stage/audit-contract.json ]; then
+    run_prompt audit-review
+    python3 /tmp/stage/dev-audit-check.py /tmp/stage/audit-contract.json --base origin/main --replay
+  else
+    run_prompt review
+  fi
+  if [ "$(bash scripts/task-field.sh "$file" progress)" = complete ]; then
+    touch /tmp/stage/review-approved
+  fi
 else
-  run_prompt implementation
+  rm -f /tmp/stage/review-approved
+  if [ -f /tmp/stage/audit-contract.json ]; then run_prompt audit; else run_prompt implementation; fi
 fi

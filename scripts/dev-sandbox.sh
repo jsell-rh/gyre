@@ -9,15 +9,39 @@ esac
 ROOT=${GYRE_DEV_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
 [[ "$ARG3" =~ ^[a-f0-9]{16}$ ]] || { echo "invalid attempt id" >&2; exit 2; }
 SANDBOX="gyre-${TASK#task-}-${MODE:0:1}-${ARG3:0:8}"
+if [ "${#SANDBOX}" -gt 19 ]; then
+  SANDBOX=$(python3 - "$TASK" "$MODE" "$ARG3" <<'PY'
+import sys
+number, encoded = int(sys.argv[1][5:]), ''
+while number:
+    number, digit = divmod(number, 36)
+    encoded = '0123456789abcdefghijklmnopqrstuvwxyz'[digit] + encoded
+name = f'gyr-z{encoded or "0"}-{sys.argv[2][0]}-{sys.argv[3][:8]}'
+if len(name) > 19:
+    raise SystemExit('task ID exceeds compact sandbox naming capacity')
+print(name)
+PY
+  )
+fi
 OS=${OPENSHELL:-openshell}
 GATEWAY_LOCK="${GYRE_DEV_STATE:-$ROOT/.gyre-dev-controller}/gateway-login.lock"
 export OPENSHELL_GATEWAY_INSECURE=true OPENSHELL_WORKSPACE=default
+report_phase() {
+  python3 - "${GYRE_DEV_STATE:-$ROOT/.gyre-dev-controller}/attempts/$ARG3/phase.json" "$1" "${2:-}" "${3:-0}" <<'PY'
+import json, os, pathlib, sys, time
+path = pathlib.Path(sys.argv[1]); path.parent.mkdir(parents=True, exist_ok=True)
+temporary = path.with_suffix('.tmp')
+temporary.write_text(json.dumps({'phase': sys.argv[2], 'reason': sys.argv[3][-1000:],
+                                'at': int(time.time()), 'retry_at': int(sys.argv[4])}))
+os.replace(temporary, path)
+PY
+}
 reauth() {
   # OpenShell writes shared credentials; serialize logins across attempts.
   (
-    flock -x 8
+    flock -x -w 30 8 || exit 77
     OPENSHELL_OIDC_CLIENT_SECRET="${OPENSHELL_OIDC_CLIENT_SECRET:?}" OPENSHELL_NO_BROWSER=1 \
-      "$OS" gateway login gyre-gyre >/dev/null
+      timeout 30 "$OS" gateway login gyre-gyre >/dev/null || exit 77
   ) 8>"$GATEWAY_LOCK"
 }
 osrun() {
@@ -32,7 +56,8 @@ osrun() {
     --env GYRE_DEV_ROUND_TIMEOUT="${GYRE_DEV_ROUND_TIMEOUT:-1800}" \
     --env GYRE_DEV_COMPACT_BYTES="${GYRE_DEV_COMPACT_BYTES:-400000}" \
     --env GYRE_DEV_GATE_TIMEOUT="${GYRE_DEV_GATE_TIMEOUT:-1800}" \
-    --env GYRE_DEV_IMPLEMENTATION_MODEL="${GYRE_DEV_IMPLEMENTATION_MODEL:-Inferact/Qwen3.8-Flash-Next-NVFP4}" \
+    --env GYRE_DEV_MODEL="${GYRE_DEV_MODEL:-enmaas-glm-5-3/rits/zai-org/glm-5-3}" \
+    --env GYRE_DEV_IMPLEMENTATION_MODEL="${GYRE_DEV_IMPLEMENTATION_MODEL:-${GYRE_DEV_MODEL:-enmaas-glm-5-3/rits/zai-org/glm-5-3}}" \
     --env GYRE_DEV_REPO_URL="${GYRE_DEV_REPO_URL:-https://github.com/jsell-rh/gyre.git}" \
     -- bash /tmp/stage/dev-remote.sh "$MODE" "$TASK" "$ARG1" "$ARG2" "$ARG3"
 }
@@ -42,12 +67,23 @@ stage_bundle() {
   cp "$ROOT/scripts/dev-remote.sh" "$ROOT/scripts/dev-round.sh" \
     "$ROOT/scripts/dev-stream.mjs" "$ROOT/scripts/dev-check.sh" \
     "$ROOT/scripts/dev-merge-message.py" \
+    "$ROOT/scripts/dev-static-gate.py" \
+    "$ROOT/scripts/dev-coverage.py" "$ROOT/scripts/dev-audit-check.py" \
     "$ROOT/scripts/check-rustfmt-diff.py" "$ROOT/scripts/check-clippy-diff.py" "$bundle/"
-  for role in implementation review rebase integration-review; do
+  for role in implementation review rebase integration-review audit audit-review; do
     cp "$ROOT/specs/prompts/dev-$role.md" "$bundle/dev-$role.md"
   done
-  cp "${MODELS_YML:-/tmp/sbx-models.yml}" "$bundle/models.yml"
-  cp "${CONFIG_YML:-$HOME/.pi/agent/config.yml}" "$bundle/config.yml"
+  cp "${MODELS_YML:-$ROOT/docker/dev-worker/models.yml}" "$bundle/models.yml"
+  cp "${CONFIG_YML:-$ROOT/docker/dev-worker/config.yml}" "$bundle/config.yml"
+  if [ -f "${GYRE_DEV_STATE:-$ROOT/.gyre-dev-controller}/attempts/$ARG3/repair.md" ]; then
+    cp "${GYRE_DEV_STATE:-$ROOT/.gyre-dev-controller}/attempts/$ARG3/repair.md" "$bundle/repair.md"
+  fi
+  if [ -f "${GYRE_DEV_STATE:-$ROOT/.gyre-dev-controller}/attempts/$ARG3/task.md" ]; then
+    cp "${GYRE_DEV_STATE:-$ROOT/.gyre-dev-controller}/attempts/$ARG3/task.md" "$bundle/task.md"
+  fi
+  if [ -f "${GYRE_DEV_STATE:-$ROOT/.gyre-dev-controller}/attempts/$ARG3/audit-contract.json" ]; then
+    cp "${GYRE_DEV_STATE:-$ROOT/.gyre-dev-controller}/attempts/$ARG3/audit-contract.json" "$bundle/audit-contract.json"
+  fi
   stage_rc=1
   stage_log=$(mktemp "${TMPDIR:-/tmp}/gyre-stage-log.XXXXXX")
   for retry in 1 2 3; do
@@ -79,6 +115,7 @@ cleanup() {
     rc=75
   fi
   if [ "${CREATED:-0}" != 1 ]; then exit "$rc"; fi
+  report_phase Deleting "attempt finished (exit=$rc)"
   # Attempt output is already stored locally. Sandboxes are expensive; delete
   # on success and failure. The controller retries cleanup after driver crashes.
   if reauth; then
@@ -99,30 +136,42 @@ trap cleanup EXIT
 CREATED=0
 reauth
 CREATED=1 # create may provision compute before its response fails
+report_phase Provisioning
 create_log=$(mktemp "${TMPDIR:-/tmp}/gyre-create.XXXXXX")
 set +e
 timeout 600 "$OS" -g gyre-gyre sandbox create --name "$SANDBOX" \
   --from "${GYRE_DEV_IMAGE:-ghcr.io/jsell-rh/gyre-worker@sha256:0c4a04a340e20c91e89f855c5d75d940b8550798441990ca823c7b8ebb8cbcec}" \
-  --provider gyre-pricetag --provider gyre-github-rw \
+  --provider gyre-enmaas --provider gyre-github-rw \
+  --label "gyre.dev/controller=${GYRE_DEV_OWNER:-unregistered}" --label "gyre.dev/attempt=$ARG3" --label "gyre.dev/task=$TASK" \
   --policy "${GYRE_DEV_POLICY:-$ROOT/docker/dev-worker/policy.yaml}" \
   --detach -- bash -c 'while true; do sleep 3600; done' 2>&1 | tee "$create_log"
 create_rc=${PIPESTATUS[0]}
 set -e
 if [ "$create_rc" -ne 0 ]; then
-  if grep -Eiq 'ConfigurationInvalid|invalid policy|invalid configuration' "$create_log"; then
+  if grep -Eiq 'ConfigurationInvalid|invalid policy|invalid configuration|provider .*not found' "$create_log"; then
     rm -f "$create_log"; echo "sandbox configuration invalid" >&2; exit 79
   fi
   if grep -Eiq 'ProvisioningTimedOut|ConfigurationPending|insufficient|capacity|resource exhausted|timed out|timedout' "$create_log" || [ "$create_rc" -eq 124 ]; then
-    rm -f "$create_log"; echo "sandbox provisioning deferred for capacity" >&2; exit 78
-  fi
-  if grep -Eiq 'h2 protocol error|tls handshake eof|peer closed connection|failed to connect to gateway' "$create_log"; then
+    # A timed-out response may still have allocated a pending object. Keep
+    # reconciling that same name while the autoscaler supplies its capacity.
+    if timeout 30 "$OS" -g gyre-gyre sandbox get "$SANDBOX" >/dev/null 2>&1; then
+      echo "create timed out; existing sandbox will continue provisioning" >&2
+    else
+      rm -f "$create_log"; echo "sandbox provisioning deferred for capacity" >&2; exit 78
+    fi
+  elif grep -Eiq 'h2 protocol error|tls handshake eof|peer closed connection|failed to connect to gateway' "$create_log"; then
     rm -f "$create_log"; echo "gateway transport unavailable during create" >&2; exit 77
+  else
+    rm -f "$create_log"; exit 75
   fi
-  rm -f "$create_log"; exit 75
 fi
 rm -f "$create_log"
 ready=0
-for try in $(seq 1 40); do
+deadline=$(( $(date +%s) + ${GYRE_DEV_READY_TIMEOUT:-1800} ))
+delay=${GYRE_DEV_READY_POLL:-15}
+try=0
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  try=$((try + 1))
   reauth
   phase=$(timeout 60 "$OS" -g gyre-gyre sandbox get "$SANDBOX" 2>/dev/null) || phase=""
   if [[ "$phase" == *"Phase: Ready"* ]]; then
@@ -132,15 +181,21 @@ for try in $(seq 1 40); do
     echo "sandbox configuration invalid: $phase" >&2
     exit 79
   fi
-  echo "waiting for sandbox Ready ($try/40)" >&2
-  sleep 15
+  retry_at=$(( $(date +%s) + delay ))
+  report_phase Pending "${phase:-gateway status unavailable}" "$retry_at"
+  echo "waiting for sandbox Ready (poll=$try, next=${delay}s, existing=$SANDBOX)" >&2
+  sleep "$delay"
+  [ "$delay" -ge 120 ] || delay=$((delay * 2))
+  [ "$delay" -le 120 ] || delay=120
 done
 [ "$ready" -eq 1 ] || { echo "sandbox never became Ready" >&2; exit 78; }
 touch "${GYRE_DEV_STATE:-$ROOT/.gyre-dev-controller}/attempts/$ARG3/sandbox.ready"
+report_phase Staging
 stage_bundle
 transport_log="${GYRE_DEV_STATE:-$ROOT/.gyre-dev-controller}/attempts/$ARG3/transport.log"
 remote_rc=74
 for reconnect in 1 2 3 4; do
+  report_phase "${MODE^}" "exec reconnect=$reconnect"
   run_log=$(mktemp "${TMPDIR:-/tmp}/gyre-run.XXXXXX")
   set +e
   osrun 2>&1 | tee -a "$transport_log" "$run_log"

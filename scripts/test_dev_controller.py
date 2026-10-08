@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Local Git integration checks for the durable controller; no cloud access."""
 import importlib.util
+import json
+import fcntl
 import os
 from pathlib import Path
 import subprocess
@@ -15,17 +17,78 @@ controller = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(controller)
 REAL_HOST_TEST = controller.host_test_verified
 REAL_START_HOST_GATE = controller.start_host_gate
+REAL_ENSURE_PR = controller.ensure_pull_request
 
 
 def git(cwd, *args):
     return subprocess.check_output(["git", *args], cwd=cwd, text=True, stderr=subprocess.DEVNULL).strip()
 
 
+class ProviderPrerequisitesTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="gyre-provider-test-")
+        self.addCleanup(self.temp.cleanup)
+        override = patch.object(controller, "STATE", Path(self.temp.name))
+        override.start()
+        self.addCleanup(override.stop)
+        self.db = controller.db_open()
+        self.addCleanup(self.db.close)
+
+    def test_missing_shared_provider_blocks_dispatch_then_recovers(self):
+        def run(command, **kwargs):
+            return subprocess.CompletedProcess(command, 0,
+                "gyre-enmaas\n" if "list" in command else "", "")
+        with patch.object(controller.subprocess, "run", side_effect=run):
+            self.assertFalse(controller.providers_ready(self.db))
+        self.assertEqual(controller.health(self.db)["condition"], "MissingProviders: gyre-github-rw")
+        self.assertEqual(controller.effective_admission(self.db, 50, 4), 4)
+        with patch.object(controller.subprocess, "run", return_value=
+                          subprocess.CompletedProcess([], 0, "gyre-enmaas\ngyre-github-rw\n", "")):
+            self.assertTrue(controller.providers_ready(self.db))
+        self.assertEqual(controller.health(self.db)["condition"], "Healthy")
+
+    def test_provider_failure_does_not_consume_work_budget_or_require_manual_retry(self):
+        self.db.execute("INSERT INTO tasks(name,progress,deps,state,attempts) VALUES('task-001','not-started','[]','failed',1)")
+        self.db.execute("INSERT INTO attempts(id,task,kind,state,started,detail) VALUES('missing','task-001','worker','failed',1,'exit=75')")
+        self.db.commit()
+        directory = controller.STATE / "attempts/missing"
+        directory.mkdir(parents=True)
+        (directory / "output.log").write_text("provider 'gyre-github-rw' not found and no provider profile available")
+        controller.recover_prior_infrastructure_failures(self.db)
+        task = self.db.execute("SELECT state,retry_baseline FROM tasks WHERE name='task-001'").fetchone()
+        self.assertEqual(tuple(task), ("deferred", 1))
+        controller.recover_prior_infrastructure_failures(self.db)
+        self.assertEqual(self.db.execute("SELECT retry_baseline FROM tasks").fetchone()[0], 1)
+
+
+class ControllerLockTest(unittest.TestCase):
+    def test_second_controller_preserves_lock_owner_pid(self):
+        with tempfile.TemporaryDirectory(prefix="gyre-lock-test-") as directory:
+            lock_path = Path(directory) / "controller.lock"
+            with lock_path.open("w+") as lock:
+                lock.write("123456\n")
+                lock.flush()
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                result = subprocess.run(
+                    [sys.executable, str(Path(__file__).with_name("dev-controller.py")), "run", "--once", "--slots", "0"],
+                    env={**os.environ, "GYRE_DEV_STATE": directory},
+                    capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("another dev controller is running (PID 123456)", result.stderr)
+                self.assertEqual(lock_path.read_text(), "123456\n")
+
 class ControllerGitTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         root = Path(self.temp.name)
+        def stop_gateway_jobs():
+            for name, process in list(controller.GATEWAY_PROCESSES.items()):
+                if process.poll() is None:
+                    os.killpg(process.pid, 15)
+                process.wait(timeout=5)
+                controller.GATEWAY_PROCESSES.pop(name)
+        self.addCleanup(stop_gateway_jobs)
         self.remote = root / "remote.git"
         self.work = root / "work"
         controller.STATE = root / "state"
@@ -34,6 +97,8 @@ class ControllerGitTest(unittest.TestCase):
         git(root, "clone", str(self.remote), str(self.work))
         git(self.work, "config", "user.name", "Test")
         git(self.work, "config", "user.email", "test@example.com")
+        git(self.work, "config", "commit.gpgsign", "false")
+        git(self.work, "config", "core.hooksPath", "/dev/null")
         git(self.work, "checkout", "-b", "main")
         (self.work / "specs/tasks").mkdir(parents=True)
         self.write_task("not-started")
@@ -45,6 +110,9 @@ class ControllerGitTest(unittest.TestCase):
         git(root, "clone", "--no-checkout", str(self.remote), str(controller.SOURCE))
         self.db = controller.db_open()
         self.addCleanup(self.db.close)
+        publisher = patch.object(controller, "ensure_pull_request", return_value={"url": "https://github.com/example/gyre/pull/1", "number": 1})
+        publisher.start()
+        self.addCleanup(publisher.stop)
         host_gate = patch.object(controller, "host_test_verified", return_value=True)
         self.host_gate = host_gate.start()
         self.addCleanup(host_gate.stop)
@@ -62,6 +130,77 @@ class ControllerGitTest(unittest.TestCase):
     def write_task(self, progress):
         (self.work / "specs/tasks/task-001.md").write_text(
             f"---\nprogress: {progress}\ndepends_on: []\n---\n\nImplement the task.\n")
+
+    def test_fidelity_discovery_reserves_ids_and_preserves_open_gaps(self):
+        self.write_task('complete')
+        matrix = self.work / 'specs/coverage/system/example.md'
+        matrix.parent.mkdir(parents=True)
+        matrix.write_text('| # | Section | Depth | Status | Task | Notes |\n'
+                          '| 1 | Enforcement | 2 | implemented | task-001 | claimed |\n'
+                          '| 2 | Missing behavior | 2 | not-started | — | open |\n')
+        spec = self.work / 'specs/system/example.md'; spec.parent.mkdir(parents=True)
+        spec.write_text('# Enforcement\nReal required behavior.\n')
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-m', 'coverage claims')
+        git(self.work, 'push', 'origin', 'main')
+        controller.sync(self.db)
+        controller.plan_audits(self.db)
+        controller.plan_audits(self.db)
+        audit = self.db.execute('SELECT * FROM tasks WHERE audit_contract IS NOT NULL').fetchall()
+        self.assertEqual(len(audit), 1)
+        scoped = json.loads(Path(audit[0]['audit_contract']).read_text())
+        self.assertEqual([row['id'] for row in scoped['rows']], [1, 2])
+        self.assertEqual(len(set(scoped['reserved_tasks'])), 4)
+        self.assertTrue(all(int(name[5:]) > int(audit[0]['name'][5:]) for name in scoped['reserved_tasks']))
+        self.assertEqual(self.db.execute('SELECT count(*) FROM task_reservations').fetchone()[0], 5)
+        self.assertEqual(audit[0]['state'], 'ready')
+        self.assertIn('Missing behavior', git(controller.SOURCE, 'show', 'origin/main:specs/coverage/system/example.md'))
+        controller.source()
+        self.assertFalse(controller.stale_audit(audit[0]))
+        code = self.work / 'crates/example'; code.mkdir(parents=True); (code / 'lib.rs').write_text('fn changed() {}\n')
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-m', 'production changed')
+        git(self.work, 'push', 'origin', 'main')
+        controller.source()
+        controller.plan_audits(self.db)
+        self.assertEqual(self.db.execute('SELECT state FROM tasks WHERE name=?', (audit[0]['name'],)).fetchone()[0], 'superseded')
+        self.assertEqual(self.db.execute("SELECT count(*) FROM tasks WHERE audit_contract IS NOT NULL AND state='ready'").fetchone()[0], 1)
+
+    def test_baseline_failure_creates_one_scoped_task_without_spending_feature_repairs(self):
+        controller.sync(self.db)
+        base = git(self.work, 'rev-parse', 'main')
+        log = controller.STATE / 'baseline.log'; log.write_text('existing main defect\n')
+        classified = {'base': base, 'environment': 'environment', 'baseline_log': str(log)}
+        name = controller.propose_baseline_repair(self.db, {'base': base}, classified)
+        self.db.commit()
+        self.db.execute('UPDATE tasks SET condition=NULL WHERE name=?', (name,)); self.db.commit()
+        self.assertEqual(controller.propose_baseline_repair(self.db, {'base': base}, classified), name)
+        self.assertEqual(self.db.execute('SELECT repairs FROM tasks WHERE name="task-001"').fetchone()[0], 0)
+        proposed = self.db.execute('SELECT * FROM tasks WHERE name=?', (name,)).fetchone()
+        self.assertIn('existing main defect', Path(proposed['definition_path']).read_text())
+
+    def test_cloud_baseline_failure_blocks_candidate_and_proposes_prerequisite(self):
+        sha = self.candidate(); controller.sync(self.db)
+        base = git(self.work, 'rev-parse', 'main')
+        directory = controller.STATE / 'attempts/cloudbaseline'; directory.mkdir(parents=True)
+        (directory / 'exit').write_text('81\n')
+        evidence = {'base': base, 'environment': 'cloud', 'probe': ['bash', 'scripts/check-arch.sh'], 'log': 'existing production defect\n'}
+        (directory / 'output.log').write_text('GYRE_BASELINE_FAILURE_JSON ' + json.dumps(evidence) + '\n')
+        self.db.execute("INSERT INTO attempts(id,task,kind,sha,base,state,started) VALUES('cloudbaseline','task-001','check',?,?,'running',1)", (sha, base))
+        self.db.execute("UPDATE tasks SET state='checking' WHERE name='task-001'"); self.db.commit()
+        controller.reap(self.db)
+        task = self.db.execute("SELECT * FROM tasks WHERE name='task-001'").fetchone()
+        self.assertEqual((task['state'], task['repairs'], task['candidate']), ('blocked', 0, sha))
+        self.assertEqual(self.db.execute("SELECT count(*) FROM tasks WHERE origin_key LIKE 'baseline:%'").fetchone()[0], 1)
+
+    def test_backlog_limits_new_workers_but_keeps_integration_admissible(self):
+        controller.sync(self.db)
+        self.db.execute("UPDATE tasks SET state='candidate',candidate='missing' WHERE name='task-001'")
+        self.db.execute("INSERT INTO tasks(name,progress,deps,state) VALUES('task-002','not-started','[]','ready')")
+        self.db.execute('UPDATE controller_health SET admission=5'); self.db.commit()
+        with patch.dict(os.environ, {'GYRE_DEV_MAX_CANDIDATES': '1'}), patch.object(controller, 'ref_exists', return_value=True), patch.object(controller, 'spawn') as dispatch:
+            controller.schedule(self.db, 5, 3)
+            self.assertEqual([call.args[2] for call in dispatch.call_args_list], ['check'])
 
     def candidate(self):
         git(self.work, "checkout", "-b", "worker/task-001")
@@ -122,13 +261,35 @@ class ControllerGitTest(unittest.TestCase):
             spawn.assert_called_once()
             self.assertEqual(spawn.call_args.args[1]["name"], "task-001")
 
+    def test_every_multiline_dependency_blocks_dispatch_until_merged(self):
+        task = self.work / "specs/tasks/task-001.md"
+        task.write_text("---\nprogress: not-started\ndepends_on:\n  - task-002\n  - task-003\n---\nImplement after both prerequisites.\n")
+        for name, progress in (("task-002", "complete"), ("task-003", "not-started")):
+            (self.work / "specs/tasks" / f"{name}.md").write_text(f"---\nprogress: {progress}\ndepends_on: []\n---\nPrerequisite.\n")
+        git(self.work, "add", ".")
+        git(self.work, "commit", "-m", "declare prerequisites")
+        git(self.work, "push", "origin", "main")
+        controller.sync(self.db)
+        import json
+        self.assertEqual(json.loads(self.db.execute("SELECT deps FROM tasks WHERE name='task-001'").fetchone()[0]), ["task-002", "task-003"])
+        self.db.commit()
+        with patch.object(controller, "spawn") as dispatch:
+            controller.schedule(self.db, 1, 3, only_task="task-001")
+            dispatch.assert_not_called()
+            self.db.execute("UPDATE tasks SET state='merged' WHERE name='task-003'")
+            self.db.commit()
+            controller.schedule(self.db, 1, 3, only_task="task-001")
+            dispatch.assert_called_once()
+        self.assertEqual(controller.deps("---\ndepends_on: [task-002, task-003]\n---\n"), ["task-002", "task-003"])
+        self.assertEqual(controller.deps("---\ndepends_on: []\nprogress: not-started\n---\n"), [])
+
     def test_launch_burst_ramps_sandbox_creation(self):
         controller.sync(self.db)
         for name in ("task-002", "task-003"):
             self.db.execute("INSERT INTO tasks(name,progress,deps,state,attempts) VALUES(?, 'not-started', '[]', 'ready', 0)",
                             (name,))
         self.db.commit()
-        self.db.execute("UPDATE controller_health SET admission=2 WHERE id=1")
+        self.db.execute("UPDATE controller_health SET admission=3 WHERE id=1")
         with patch.object(controller, "spawn") as spawn:
             controller.schedule(self.db, slots=50, max_attempts=3, launch_burst=2)
         self.assertEqual([call.args[1]["name"] for call in spawn.call_args_list], ["task-001", "task-002"])
@@ -231,7 +392,127 @@ class ControllerGitTest(unittest.TestCase):
         snapshot = Path(command[2])
         self.assertEqual(snapshot.read_bytes(),
                          (controller.ROOT / "scripts/dev-sandbox.sh").read_bytes())
-        self.assertEqual(popen.call_args.kwargs["env"]["GYRE_DEV_ROOT"], str(controller.ROOT))
+        bundle = Path(popen.call_args.kwargs["env"]["GYRE_DEV_ROOT"])
+        self.assertEqual(bundle, snapshot.parent / "bundle")
+        self.assertEqual((bundle / "specs/prompts/dev-implementation.md").read_bytes(),
+                         (controller.ROOT / "specs/prompts/dev-implementation.md").read_bytes())
+        self.assertTrue((snapshot.parent / "bundle.json").exists())
+
+    def test_launch_intent_is_durable_before_child_can_allocate_resources(self):
+        controller.sync(self.db)
+        task = self.db.execute("SELECT * FROM tasks").fetchone()
+        def launching(*args, **kwargs):
+            separate = controller.db_open()
+            try:
+                row = separate.execute("SELECT state,bundle_sha,generation FROM attempts").fetchone()
+                self.assertEqual(row["state"], "launching")
+                self.assertEqual(len(row["bundle_sha"]), 64)
+                self.assertEqual(row["generation"], task["generation"])
+            finally:
+                separate.close()
+            from unittest.mock import Mock
+            return Mock(pid=12345)
+        with patch.object(controller.subprocess, "Popen", side_effect=launching):
+            controller.spawn(self.db, task, "worker", branch="devloop/task-001/attempt-1")
+
+    def test_remote_deletion_debt_prevents_replacement_sandbox(self):
+        controller.sync(self.db)
+        self.db.execute("INSERT INTO resources(name,present,delete_pending) VALUES('owned-orphan',1,1)")
+        self.db.commit()
+        with patch.object(controller, "spawn") as dispatch:
+            controller.schedule(self.db, 1, 3)
+        dispatch.assert_not_called()
+
+    def test_spec_change_reopens_completed_task_without_trusting_old_completion(self):
+        (self.work / "specs/system").mkdir()
+        spec = self.work / "specs/system/example.md"
+        spec.write_text("# Example\nReject invalid input.\n")
+        task = self.work / "specs/tasks/task-001.md"
+        task.write_text('---\ntitle: "Example"\nspec_ref: "example.md §1"\nprogress: complete\ndepends_on: []\n---\nImplement real input validation.\n')
+        git(self.work, "add", "."); git(self.work, "commit", "-m", "existing implementation contract")
+        git(self.work, "push", "origin", "main")
+        controller.sync(self.db)
+        original = self.db.execute("SELECT * FROM tasks").fetchone()
+        self.assertEqual(original["state"], "merged")
+        spec.write_text("# Example\nReject invalid input and persist rejection reasons.\n")
+        git(self.work, "add", "."); git(self.work, "commit", "-m", "change spec requirement")
+        git(self.work, "push", "origin", "main")
+        controller.sync(self.db)
+        row = self.db.execute("SELECT * FROM tasks").fetchone()
+        self.assertEqual((row["state"], row["condition"]), ("ready", "SpecChanged"))
+        self.assertNotEqual(row["generation"], original["observed_generation"])
+        controller.sync(self.db)
+        self.assertEqual(self.db.execute("SELECT state FROM tasks").fetchone()[0], "ready")
+        with patch.object(controller, "spawn") as dispatch:
+            controller.schedule(self.db, 1, 3)
+        self.assertEqual(dispatch.call_args.args[2], "worker")
+
+    def test_generations_ignore_completion_claims_and_shipped_notes(self):
+        body = '---\ntitle: "Example"\nspec_ref: "example.md §1"\nprogress: not-started\ncommits: []\n---\nImplement validation.\n'
+        completed = body.replace("not-started", "complete").replace("commits: []", "commits: [deadbeef]") + "\n## Shipped\n\n- Input validation.\n"
+        self.assertEqual(controller.contract.generation(body, {}), controller.contract.generation(completed, {}))
+
+    def test_cycles_have_explicit_diagnostics(self):
+        errors = controller.contract.graph_errors({"task-001": ["task-002"], "task-002": ["task-001"], "task-003": ["task-999"]})
+        self.assertIn("Dependency cycle", errors["task-001"])
+        self.assertIn("task-999", errors["task-003"])
+
+    def test_process_identity_rejects_a_reused_pid(self):
+        identity = Path(self.temp.name) / "process.json"
+        identity.write_text(json.dumps({"pid": os.getpid(), "start": "impossible-start", "boot": "wrong-boot"}))
+        self.assertTrue(controller.alive(os.getpid()))
+        self.assertFalse(controller.alive(os.getpid(), identity))
+
+    def test_pr_publication_is_idempotent_and_confirms_exact_head(self):
+        sha = self.candidate(); controller.sync(self.db)
+        self.db.execute("INSERT INTO attempts(id,task,kind,sha,base,state,started) VALUES('publish','task-001','check',?,?,'done',1)", (sha, sha))
+        self.db.commit()
+        (controller.STATE / "attempts/publish").mkdir(parents=True)
+        task = self.db.execute("SELECT * FROM tasks").fetchone()
+        check = self.db.execute("SELECT * FROM attempts").fetchone()
+        pr = {"url": "https://github.com/example/gyre/pull/42", "number": 42, "state": "OPEN", "headRefOid": sha, "baseRefName": "main"}
+        calls, created = [], []
+        real_run = controller.run
+        def github(*args, **kwargs):
+            if args[0] != "gh":
+                return real_run(*args, **kwargs)
+            calls.append(args)
+            if args[2] == "list":
+                output = json.dumps([pr] if created else [])
+            elif args[2] == "create":
+                created.append(True); output = pr["url"]
+            else:
+                output = json.dumps(pr)
+            return subprocess.CompletedProcess(args, 0, output, "")
+        with patch.dict(os.environ, {"GYRE_DEV_GITHUB_REPO": "example/gyre"}), patch.object(controller, "run", side_effect=github):
+            for _ in range(2):
+                self.assertEqual(REAL_ENSURE_PR(self.db, task, check, sha)["url"], pr["url"])
+            pr["headRefOid"] = "0" * 40
+            with self.assertRaisesRegex(controller.SourceUnavailable, "verified head"):
+                REAL_ENSURE_PR(self.db, task, check, sha)
+        self.assertEqual(sum(call[2] == "create" for call in calls), 1)
+        self.assertEqual(self.db.execute("SELECT pr_url FROM tasks").fetchone()[0], "https://github.com/example/gyre/pull/42")
+        row = self.db.execute('SELECT condition,retry_at,repairs FROM tasks').fetchone()
+        self.assertEqual((row['condition'], row['repairs']), ('PublicationUnavailable', 0))
+        self.assertGreater(row['retry_at'], time.time())
+
+    def test_pr_mode_publishes_verified_commit_without_pushing_main(self):
+        sha = self.candidate(); controller.sync(self.db)
+        base = git(self.work, 'rev-parse', 'main')
+        git(self.work, 'checkout', 'main'); git(self.work, 'merge', '--no-ff', '--no-edit', 'worker/task-001')
+        merge = git(self.work, 'rev-parse', 'HEAD')
+        git(self.work, 'push', 'origin', f'{merge}:refs/heads/devloop/verified/check1')
+        self.db.execute("INSERT INTO attempts(id,task,kind,sha,base,state,started) VALUES('check1','task-001','check',?,?,'done',1)", (sha, base))
+        self.db.execute("UPDATE tasks SET state='promoting' WHERE name='task-001'"); self.db.commit()
+        with patch.object(controller, 'PUBLICATION_MODE', 'pr'):
+            controller.promote(self.db); controller.promote(self.db)
+        self.assertEqual(git(self.remote, 'rev-parse', 'main'), base)
+        self.assertEqual(self.db.execute('SELECT state FROM tasks').fetchone()[0], 'published')
+        controller.sync(self.db)
+        self.assertEqual(self.db.execute('SELECT state FROM tasks').fetchone()[0], 'published')
+        controller.promote(self.db)
+        self.assertEqual(self.db.execute('SELECT state FROM tasks').fetchone()[0], 'merged')
+        self.assertEqual(git(self.remote, 'rev-parse', 'main'), merge)
 
     def test_sync_keeps_checkpoint_seed_for_ready_task(self):
         controller.sync(self.db)
@@ -314,12 +595,11 @@ class ControllerGitTest(unittest.TestCase):
         fake = Path(self.temp.name) / "fake-openshell"
         record = Path(self.temp.name) / "deleted.txt"
         fake.write_text("""#!/usr/bin/env python3
-import os, sys
+import json, os, sys
 args = sys.argv[1:]
 if 'list' in args:
-    print('gyre-001-w-deadbeef')
-    print('gyre-001-w-feedface')
-    print('gyre-001-w-cabecafe')
+    print(json.dumps({'sandboxes': [{'name': name, 'labels': {}} for name in
+          ('gyre-001-w-deadbeef','gyre-001-w-feedface','gyre-001-w-cabecafe')]}))
 elif 'delete' in args:
     with open(os.environ['GYRE_GC_RECORD'], 'a') as out:
         out.write(args[-1] + '\\n')
@@ -327,7 +607,12 @@ elif 'delete' in args:
         fake.chmod(0o755)
         with patch.dict("os.environ", {"OPENSHELL_OIDC_CLIENT_SECRET": "test",
                                     "OPENSHELL": str(fake), "GYRE_GC_RECORD": str(record)}):
-            controller.gc_sandboxes(self.db)
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                controller.gc_sandboxes(self.db)
+                if record.exists() and len(record.read_text().splitlines()) == 2:
+                    break
+                time.sleep(0.05)
         self.assertCountEqual(record.read_text().splitlines(), ["gyre-001-w-deadbeef", "gyre-001-w-cabecafe"])
 
     def test_promotion_requires_checked_base_and_candidate(self):
@@ -352,6 +637,20 @@ elif 'delete' in args:
         controller.promote(self.db)
         self.assertEqual(self.db.execute("SELECT state FROM tasks WHERE name='task-001'").fetchone()[0], "candidate")
         self.assertNotEqual(git(self.remote, "rev-parse", "main"), merge)
+
+    def test_old_inflight_check_cannot_promote_with_an_unmerged_dependency(self):
+        sha = self.candidate()
+        controller.sync(self.db)
+        base = git(self.work, "rev-parse", "main")
+        self.db.execute("INSERT INTO tasks(name,progress,deps,state) VALUES('task-002','not-started','[]','ready')")
+        self.db.execute("UPDATE tasks SET state='promoting',deps='[\"task-002\"]' WHERE name='task-001'")
+        self.db.execute("INSERT INTO attempts(id,task,kind,sha,base,state,started) VALUES('old-check','task-001','check',?,?,'done',1)", (sha, base))
+        self.db.commit()
+        controller.promote(self.db)
+        self.assertEqual(git(self.remote, "rev-parse", "main"), base)
+        self.assertEqual(tuple(self.db.execute("SELECT state,condition FROM tasks WHERE name='task-001'").fetchone()),
+                         ("candidate", "DependenciesPending"))
+        self.host_gate.assert_not_called()
 
     def test_promotes_only_the_verified_merge_commit(self):
         sha = self.candidate()
@@ -390,7 +689,156 @@ elif 'delete' in args:
         controller.promote(self.db)
         self.host_gate.assert_called_once_with(merge, "check1")
         self.assertEqual(git(self.remote, "rev-parse", "main"), base)
-        self.assertEqual(self.db.execute("SELECT state FROM tasks WHERE name='task-001'").fetchone()[0], "failed")
+        self.assertEqual(self.db.execute("SELECT state FROM tasks WHERE name='task-001'").fetchone()[0], "ready")
+        task = self.db.execute("SELECT * FROM tasks WHERE name='task-001'").fetchone()
+        self.assertEqual(task["seed"], sha)
+        self.assertIsNone(task["candidate"])
+        self.assertEqual(task["condition"], "RepairPending")
+
+    def test_host_environment_outage_retries_local_gate_without_new_sandbox(self):
+        sha = self.candidate(); controller.sync(self.db)
+        base = git(self.work, 'rev-parse', 'main')
+        git(self.work, 'checkout', 'main'); git(self.work, 'merge', '--no-ff', '--no-edit', 'worker/task-001')
+        merge = git(self.work, 'rev-parse', 'HEAD')
+        git(self.work, 'push', 'origin', f'{merge}:refs/heads/devloop/verified/check1')
+        self.db.execute("INSERT INTO attempts(id,task,kind,sha,base,state,started,host_pid) VALUES('check1','task-001','check',?,?,'done',1,999999)", (sha, base))
+        self.db.execute("UPDATE tasks SET state='promoting' WHERE name='task-001'"); self.db.commit()
+        directory = controller.STATE / 'attempts/check1'; directory.mkdir(parents=True)
+        (directory / 'host-tests.exit').write_text('1\n')
+        (directory / 'host-tests.result.json').write_text(json.dumps({'status': 'unavailable'}))
+        controller.promote(self.db)
+        row = self.db.execute('SELECT * FROM tasks').fetchone()
+        self.assertEqual((row['state'], row['repairs'], row['condition']), ('promoting', 0, 'HostEnvironmentUnavailable'))
+        self.assertGreater(row['retry_at'], time.time())
+        self.assertFalse((directory / 'host-tests.exit').exists())
+        with patch.object(controller, 'spawn') as cloud:
+            controller.promote(self.db)
+            cloud.assert_not_called()
+        with patch.object(controller.time, 'time', return_value=row['retry_at'] + 1):
+            controller.promote(self.db)
+            controller.promote(self.db)
+        self.assertEqual(git(self.remote, 'rev-parse', 'main'), merge)
+
+    def test_failed_check_repairs_a_new_candidate_then_pushes_exact_merge(self):
+        rejected = self.candidate()
+        controller.sync(self.db)
+        base = git(self.work, "rev-parse", "main")
+        directory = controller.STATE / "attempts" / "rejected"
+        directory.mkdir(parents=True)
+        (directory / "exit").write_text("1\n")
+        (directory / "output.log").write_text("error: production behavior rejects valid inputs\n")
+        self.db.execute("""INSERT INTO attempts(id,task,kind,sha,base,state,pid,started)
+                           VALUES('rejected','task-001','check',?,?,'running',999999,1)""", (rejected, base))
+        self.db.execute("UPDATE tasks SET state='checking',attempts=3 WHERE name='task-001'")
+        self.db.commit()
+        controller.reap(self.db)
+        # Restart and sync must retain the repair, rather than reimport the
+        # completed legacy candidate and check it unchanged.
+        controller.sync(self.db)
+        task = self.db.execute("SELECT * FROM tasks WHERE name='task-001'").fetchone()
+        self.assertEqual((task["state"], task["candidate"], task["seed"]), ("ready", None, rejected))
+        self.assertIn("rejects valid inputs", Path(task["feedback"]).read_text())
+        with patch.object(controller, "spawn") as dispatch:
+            controller.schedule(self.db, 1, 3)
+        self.assertEqual(dispatch.call_args.args[2], "worker")
+        self.assertEqual(dispatch.call_args.args[1]["feedback"], task["feedback"])
+
+        git(self.work, "checkout", "-b", "devloop/task-001/attempt-4")
+        (self.work / "implementation.txt").write_text("repaired production behavior\n")
+        git(self.work, "add", ".")
+        git(self.work, "commit", "-m", "fix(task-001): handle valid inputs")
+        repaired = git(self.work, "rev-parse", "HEAD")
+        git(self.work, "push", "origin", "devloop/task-001/attempt-4")
+        worker = controller.STATE / "attempts" / "repaired"
+        worker.mkdir(parents=True)
+        (worker / "exit").write_text("0\n")
+        self.db.execute("""INSERT INTO attempts(id,task,kind,branch,state,pid,started)
+                           VALUES('repaired','task-001','worker','devloop/task-001/attempt-4','running',999999,2)""")
+        self.db.execute("UPDATE tasks SET state='running' WHERE name='task-001'")
+        self.db.commit()
+        controller.reap(self.db)
+        self.assertEqual(self.db.execute("SELECT candidate FROM tasks").fetchone()[0], repaired)
+        git(self.work, "checkout", "main")
+        git(self.work, "merge", "--no-ff", "--no-edit", repaired)
+        merge = git(self.work, "rev-parse", "HEAD")
+        git(self.work, "push", "origin", f"{merge}:refs/heads/devloop/verified/passed")
+        checked = controller.STATE / "attempts" / "passed"
+        checked.mkdir(parents=True)
+        (checked / "exit").write_text("0\n")
+        self.db.execute("""INSERT INTO attempts(id,task,kind,sha,base,state,pid,started)
+                           VALUES('passed','task-001','check',?,?,'running',999999,3)""", (repaired, base))
+        self.db.execute("UPDATE tasks SET state='checking' WHERE name='task-001'")
+        self.db.commit()
+        controller.reap(self.db)
+        controller.promote(self.db)
+        controller.promote(self.db)
+        self.assertEqual(git(self.remote, "rev-parse", "main"), merge)
+        self.assertEqual(git(self.remote, "show", "main:implementation.txt"), "repaired production behavior")
+        self.assertEqual(controller.status_snapshot(self.db)["confirmed_merges"], 1)
+
+    def test_repair_limit_requires_attention_and_explicit_retry_keeps_findings(self):
+        sha = self.candidate()
+        controller.sync(self.db)
+        self.db.execute("UPDATE tasks SET repairs=? WHERE name='task-001'", (controller.MAX_REPAIRS,))
+        self.db.execute("""INSERT INTO attempts(id,task,kind,sha,base,state,started,detail)
+                           VALUES('limit','task-001','check',?,?,'failed',1,'exit=1')""", (sha, sha))
+        self.db.commit()
+        task = self.db.execute("SELECT * FROM tasks").fetchone()
+        attempt = self.db.execute("SELECT * FROM attempts").fetchone()
+        controller.queue_repair(self.db, task, attempt)
+        task = self.db.execute("SELECT * FROM tasks").fetchone()
+        self.assertEqual((task["state"], task["condition"]), ("failed", "RepairLimitExceeded"))
+        controller.retry_failed_task(self.db, task)
+        task = self.db.execute("SELECT * FROM tasks").fetchone()
+        self.assertEqual((task["state"], task["candidate"], task["repairs"]), ("ready", None, 0))
+        self.assertTrue(Path(task["feedback"]).exists())
+
+    def test_source_outage_does_not_consume_finished_worker_outcome(self):
+        controller.sync(self.db)
+        directory = controller.STATE / "attempts" / "offline"
+        directory.mkdir(parents=True)
+        (directory / "exit").write_text("0\n")
+        self.db.execute("INSERT INTO attempts(id,task,kind,state,pid,started) VALUES('offline','task-001','worker','running',999999,1)")
+        self.db.execute("UPDATE tasks SET state='running' WHERE name='task-001'")
+        self.db.commit()
+        with patch.object(controller, "source", side_effect=controller.SourceUnavailable("offline")):
+            with self.assertRaises(controller.SourceUnavailable):
+                controller.reap(self.db)
+        self.assertEqual(self.db.execute("SELECT state FROM attempts").fetchone()[0], "running")
+        self.assertEqual(self.db.execute("SELECT state FROM tasks").fetchone()[0], "running")
+
+    def test_candidates_take_priority_and_only_one_checker_is_dispatched(self):
+        sha = self.candidate()
+        controller.sync(self.db)
+        self.db.execute("INSERT INTO tasks(name,progress,deps,state,candidate) VALUES('task-002','not-started','[]','candidate',?)", (sha,))
+        self.db.execute("INSERT INTO tasks(name,progress,deps,state) VALUES('task-003','not-started','[]','ready')")
+        self.db.execute("UPDATE controller_health SET admission=50 WHERE id=1")
+        self.db.commit()
+        with patch.object(controller, "spawn") as dispatch:
+            controller.schedule(self.db, 50, 3)
+        self.assertEqual([call.args[2] for call in dispatch.call_args_list], ["check", "worker"])
+        self.assertEqual(dispatch.call_args_list[0].args[1]["name"], "task-001")
+
+    def test_running_host_gate_reserves_capacity_for_next_integration(self):
+        controller.sync(self.db)
+        self.db.execute("UPDATE tasks SET state='promoting' WHERE name='task-001'")
+        for number in range(2, 5):
+            self.db.execute("INSERT INTO tasks(name,progress,deps,state) VALUES(?,'not-started','[]','ready')", (f"task-{number:03}",))
+        self.db.execute("UPDATE controller_health SET admission=3 WHERE id=1")
+        self.db.commit()
+        with patch.object(controller, "spawn") as dispatch:
+            controller.schedule(self.db, 3, 3)
+        self.assertEqual(len(dispatch.call_args_list), 2)
+
+    def test_prior_quality_failure_migrates_once_to_implementation(self):
+        sha = self.candidate()
+        controller.sync(self.db)
+        self.db.execute("UPDATE tasks SET state='failed' WHERE name='task-001'")
+        self.db.execute("INSERT INTO attempts(id,task,kind,sha,state,started,detail) VALUES('old','task-001','check',?,'failed',1,'exit=1')", (sha,))
+        self.db.commit()
+        controller.recover_prior_quality_failures(self.db)
+        controller.recover_prior_quality_failures(self.db)
+        self.assertEqual(tuple(self.db.execute("SELECT state,repairs,seed FROM tasks").fetchone()), ("ready", 1, sha))
 
     def test_host_gate_runs_frontend_suite_and_rejects_its_failure(self):
         self.candidate()
@@ -415,6 +863,31 @@ elif 'delete' in args:
         self.assertIn("$ cargo test --all --quiet", log)
         self.assertIn("$ npm test", log)
         self.assertFalse((controller.STATE / "attempts/check1/host-tests.ok").exists())
+
+    def test_host_gate_distinguishes_main_failure_from_candidate_regression(self):
+        (self.work / 'web').mkdir(); (self.work / 'web/package.json').write_text('{}\n')
+        marker = self.work / 'broken.txt'; marker.write_text('preexisting\n')
+        git(self.work, 'add', '.'); git(self.work, 'commit', '-m', 'broken baseline')
+        git(self.work, 'push', 'origin', 'main')
+        base = git(self.work, 'rev-parse', 'HEAD')
+        sha = self.candidate()
+        controller.sync(self.db)
+        fake_bin = Path(self.temp.name) / 'bin'; fake_bin.mkdir()
+        for name, script in [('cargo', '#!/bin/sh\n[ "$1" = --version ] && { echo cargo-version; exit 0; }\n[ ! -f broken.txt ]\n'),
+                             ('npm', '#!/bin/sh\nexit 0\n')]:
+            path = fake_bin / name; path.write_text(script); path.chmod(0o755)
+        with patch.dict(os.environ, {'PATH': str(fake_bin) + ':' + os.environ['PATH']}), patch.object(controller, 'host_test_verified', REAL_HOST_TEST):
+            for check_id, expected in [('baselinecheck', 'baseline_failed'), ('regressioncheck', 'candidate_failed')]:
+                if expected == 'candidate_failed':
+                    git(self.work, 'checkout', 'main'); marker.unlink()
+                    git(self.work, 'add', '.'); git(self.work, 'commit', '-m', 'repair main baseline')
+                    git(self.work, 'push', 'origin', 'main'); base = git(self.work, 'rev-parse', 'HEAD')
+                    controller.source()
+                self.db.execute("INSERT INTO attempts(id,task,kind,state,started,base) VALUES(?,'task-001','check','done',1,?)", (check_id, base)); self.db.commit()
+                self.assertFalse(controller.host_test_verified(sha, check_id))
+                result = json.loads((controller.STATE / 'attempts' / check_id / 'host-tests.result.json').read_text())
+                self.assertEqual(result['status'], expected)
+                self.assertEqual(result['base'], base)
 
     def test_host_gate_process_records_result_without_blocking_controller(self):
         (self.work / "web").mkdir()
@@ -471,6 +944,10 @@ elif 'delete' in args:
         self.assertEqual(self.db.execute("SELECT merge_sha FROM attempts WHERE id='check1'").fetchone()[0], merge)
         git(self.work, "push", "origin", f"{merge}:refs/heads/main")
         controller.promote(self.db)
+        self.assertEqual(self.db.execute("SELECT state FROM tasks WHERE name='task-001'").fetchone()[0], 'promoting')
+        retry_at = self.db.execute("SELECT retry_at FROM tasks WHERE name='task-001'").fetchone()[0]
+        with patch.object(controller.time, 'time', return_value=retry_at + 1):
+            controller.promote(self.db)
         self.assertEqual(self.db.execute("SELECT state FROM tasks WHERE name='task-001'").fetchone()[0], "merged")
 
 

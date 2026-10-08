@@ -18,12 +18,10 @@ filesystem_policy:
 landlock:
   compatibility: best_effort
 network_policies:
-  # Anthropic-Messages inference via PriceTag gateway (provider gyre-pricetag
-  # composes its own rules; this explicit rule is the fallback for curl/node
-  # direct calls not covered by provider binaries).
-  pricetag_inference:
+  # OpenAI completions inference; gyre-enmaas injects Bearer credentials.
+  enmaas_inference:
     endpoints:
-      - host: ai-gateway-unified-ai-gateway-dogfood.dogfood-us-south-1-bxf-4x-f196230f74f7ff44a5b4eeb1003c5bd5-0000.us-south.containers.appdomain.cloud
+      - host: api.enmaas.devshift.net
         port: 443
         protocol: rest
         access: read-write

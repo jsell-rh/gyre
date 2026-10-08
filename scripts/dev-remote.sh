@@ -48,6 +48,32 @@ if [ "$MODE" = worker ]; then
     git checkout -q -b "$BRANCH" "$SEED"
   fi
   echo "GYRE_BOOTSTRAP_COMPLETE task=$TASK"
+  if [ -f /tmp/stage/task.md ] && [ ! -f "specs/tasks/$TASK.md" ]; then
+    cp /tmp/stage/task.md "specs/tasks/$TASK.md"
+    git add "specs/tasks/$TASK.md"
+    git commit -q -m "process: add scoped task $TASK" --no-verify
+  fi
+  # A completed seed rejected by integration must actually return to
+  # implementation. Task frontmatter alone otherwise skips every agent round.
+  if [ ! -f /tmp/stage/worker.initialized ]; then
+    if [ -f /tmp/stage/repair.md ]; then
+      python3 - "$TASK" <<'PY'
+import pathlib, re, sys
+path = pathlib.Path(f"specs/tasks/{sys.argv[1]}.md")
+parts = path.read_text().split("---", 2)
+parts[1], count = re.subn(r"^progress:.*$", "progress: needs-revision", parts[1], flags=re.M)
+if count != 1:
+    raise SystemExit("task must have exactly one progress field")
+path.write_text("---".join(parts))
+PY
+      rm -f /tmp/stage/review-approved
+    elif [ "$(bash scripts/task-field.sh "specs/tasks/$TASK.md" progress)" = complete ]; then
+      # A complete checkpoint still needs a fresh, successful review in this
+      # worker before it can be nominated as a new candidate.
+      sed -i 's/^progress: complete$/progress: ready-for-review/' "specs/tasks/$TASK.md"
+    fi
+    touch /tmp/stage/worker.initialized
+  fi
   rounds="${GYRE_DEV_WORKER_ROUNDS:-6}"
   [[ "$rounds" =~ ^[1-9][0-9]*$ ]] || exit 2
   for round in $(seq 1 "$rounds"); do
@@ -55,6 +81,12 @@ if [ "$MODE" = worker ]; then
     bash /tmp/stage/dev-round.sh "$TASK"
     worker_rc=$?
     set -e
+    [ "$worker_rc" -ne 80 ] || { echo 'audit generation changed; requesting a fresh assignment' >&2; exit 80; }
+    if [ "$(bash scripts/task-field.sh "specs/tasks/$TASK.md" progress)" = complete ] &&
+       { [ "$worker_rc" -ne 0 ] || [ ! -f /tmp/stage/review-approved ]; }; then
+      echo "completion has no successful review; returning to review" >&2
+      sed -i 's/^progress: complete$/progress: ready-for-review/' "specs/tasks/$TASK.md"
+    fi
     # build.rs regenerates committed web/dist during Rust tests. It is a build
     # artifact, not task work, and must not be swept into checkpoint commits.
     git restore --worktree -- web/dist
@@ -130,7 +162,15 @@ elif [ "$MODE" = check ]; then
   [[ "$ARG3" =~ ^[a-f0-9]{16}$ ]] || exit 2
   git fetch --quiet origin "$CANDIDATE" "$BASE"
   git checkout -q --detach "$BASE"
+  echo "GYRE_BOOTSTRAP_COMPLETE task=$TASK"
+  if [ -f /tmp/stage/audit-contract.json ]; then
+    python3 /tmp/stage/dev-audit-check.py /tmp/stage/audit-contract.json --generation-only || exit 80
+  fi
   git merge --no-ff --no-commit "$CANDIDATE"
+  if [ -n "$(git diff --cached --name-only "$BASE" -- specs/coverage)" ]; then
+    python3 /tmp/stage/dev-coverage.py
+    git add specs/coverage/SUMMARY.md
+  fi
   python3 /tmp/stage/dev-merge-message.py "$TASK" "$CANDIDATE" > /tmp/stage/merge-message.txt
   git commit -F /tmp/stage/merge-message.txt
   echo "GYRE_BOOTSTRAP_COMPLETE task=$TASK"
@@ -138,11 +178,15 @@ elif [ "$MODE" = check ]; then
   [ "$(git rev-parse HEAD^1)" = "$BASE" ]
   git merge-base --is-ancestor "$CANDIDATE" HEAD
   [ "$(bash scripts/task-field.sh "specs/tasks/$TASK.md" progress)" = complete ]
+  if [ -f /tmp/stage/audit-contract.json ]; then
+    python3 /tmp/stage/dev-audit-check.py /tmp/stage/audit-contract.json --base "$BASE" --replay
+  fi
   bash /tmp/stage/dev-check.sh
   # A separate agent reviews the exact integration tree after deterministic gates.
   verdict_file=/tmp/stage/integration-verdict.txt
-  { cat /tmp/stage/dev-integration-review.md; printf '\nTask: %s\nBase SHA: %s\nCandidate SHA: %s\n' "$TASK" "$BASE" "$CANDIDATE"; } \
-    | omp -p --no-session --mode=json --approval-mode yolo \
+  { cat /tmp/stage/dev-integration-review.md; if [ -f /tmp/stage/audit-contract.json ]; then printf '\nThis is a metadata fidelity audit: verify evidence and follow-up tasks within its contract; product gaps must remain open.\n'; cat /tmp/stage/audit-contract.json; fi; printf '\nTask: %s\nBase SHA: %s\nCandidate SHA: %s\n' "$TASK" "$BASE" "$CANDIDATE"; } \
+    | timeout --signal=INT --kill-after=30s "${GYRE_DEV_ROUND_TIMEOUT:-1800}" \
+      omp -p --model "${GYRE_DEV_MODEL:-enmaas-glm-5-3/rits/zai-org/glm-5-3}" --no-session --mode=json --approval-mode yolo \
     | node /tmp/stage/dev-stream.mjs integration-review "$verdict_file"
   [ "$(tail -n 1 "$verdict_file")" = 'VERDICT: PASS' ] || {
     echo "integration review did not pass" >&2; exit 1;
@@ -161,7 +205,7 @@ elif [ "$MODE" = check ]; then
   fi
   # Push a ref named for this exact merge SHA; controller validates both parents.
   MERGE=$(git rev-parse HEAD)
-  git push origin "$MERGE:refs/heads/devloop/verified/$ARG3"
+  git push origin "$MERGE:refs/heads/devloop/verified/$ARG3" || exit 76
   echo "verified integration $MERGE"
 else
   exit 2

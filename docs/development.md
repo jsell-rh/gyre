@@ -284,13 +284,19 @@ python3 scripts/dev-controller.py retry-all             # retry every failed tas
 node scripts/loop-dashboard.mjs                         # cockpit: http://127.0.0.1:7690
 ```
 
-It requires the OpenShell `gyre-gyre` gateway, `gyre-pricetag` and
+It requires the OpenShell `gyre-gyre` gateway, `gyre-enmaas` and
 `gyre-github-rw` providers, `docker/dev-worker/policy.yaml`, the worker image,
-`OPENSHELL_OIDC_CLIENT_SECRET`, and local OMP model configuration. Runtime state is kept in
+`OPENSHELL_OIDC_CLIENT_SECRET`, and the committed worker model configuration. Runtime state is kept in
 `.gyre-dev-controller/state.sqlite3` (SQLite WAL); attempts and logs are in
 `.gyre-dev-controller/attempts/`. Keep this directory when restarting the
 controller. Only one controller process may run at a time. `--slots` is the
 desired upper bound; `--launch-burst` limits starts per scheduling cycle.
+Implementation workers run concurrently. Final integration uses one lane
+(sandbox checks, host suites, upstream promotion), so candidates are checked
+against successive main commits instead of invalidating concurrent checks.
+With more than one admitted slot, one slot is reserved for integration;
+with one slot, implementation and integration take turns. Candidates have
+dispatch priority over new implementation work.
 Gateway admission starts at one and increases by one whenever a sandbox
 reaches Ready. Provisioning timeouts and gateway transport failures impose
 durable, jittered exponential backoff (30 seconds to 15 minutes). Existing
@@ -306,9 +312,20 @@ The cockpit shows desired and admitted slots, gateway condition, next retry
 time, and tasks waiting for infrastructure. Infrastructure failures do not
 consume work-attempt budget; they retry automatically after backoff. The
 Needs attention section offers Retry and Retry all for task or configuration
-failures; an explicit retry grants a fresh attempt budget. A failed
-checker stays failed until explicitly retried, with its output in the attempt
-log. The overview shows current coverage from the coverage matrix and its
+failures; an explicit retry grants a fresh attempt budget. A checker exiting
+with a code failure, or a failed host suite, returns its candidate to an
+implementation worker with a durable `attempts/<check-id>/repair.md` handoff.
+It includes the candidate/base SHAs and the last 64 KiB of the failed gate's
+log. The seed task is reopened as `needs-revision`; both implementation and
+independent review receive the findings. Three automatic repair cycles are
+allowed before operator attention is required. A manual retry retains the
+findings and resets the budget. Existing checker failures are migrated into
+this repair path at startup. Operational failures without evidence of a code
+failure remain distinct and can require an explicit retry.
+The cockpit distinguishes tasks already complete on upstream main from
+recorded merges shipped by this controller. These counts measure different
+things; imported completion is not evidence of controller throughput.
+The overview shows current coverage from the coverage matrix and its
 history from `specs/coverage/SUMMARY.md` commits. The task table and detail
 drawer link GitHub PRs whose branch, title, or explicit body task reference
 matches a task. PR lookup uses `gh` and refreshes once per minute.
@@ -331,9 +348,90 @@ so a timed-out round can continue its prior inspection without contaminating
 the independent review. When a session exceeds 400 KB, the next round archives
 it and starts from a bounded handoff: the last three agent text messages,
 current task, and branch diff summary. This keeps long tool transcripts out of
-the next model request. Implementation rounds use the configured Qwen Flash
-model by default (`GYRE_DEV_IMPLEMENTATION_MODEL` overrides it); review rounds
-remain on the independent default model.
+the next model request.
+
+New worker candidates require a successful review round before completion
+can be nominated. Integration additionally runs the upstream static verifier
+against the candidate code, followed by the candidate's verifier, and rejects
+new entries in frozen exemption files. Candidate scripts are restored before
+the integration reviewer sees the merge tree. Full Rust and frontend suites
+still run on the exact merge SHA on the host before any upstream push.
+
+The controller hashes task requirements and cited specs, retaining desired and
+observed generations. Changed requirements reopen stale completion; a candidate
+from the previous generation cannot ship. Missing dependencies and cycles are
+reported explicitly. Frozen attempt bundles contain the scripts, prompts,
+policy and model configuration, with a persisted SHA256 manifest.
+
+Admission requires a complete recent remote inventory. Owned pending objects,
+orphans, live attempts and deletion-pending objects all consume the slot budget.
+Deletion runs in a bounded asynchronous queue; a delete response does not free
+capacity until inventory confirms absence. Create timeouts retain an existing
+pending sandbox while the autoscaler catches up, with increasing polling delays
+and a 30-minute overall deadline (`GYRE_DEV_READY_TIMEOUT`).
+
+`GYRE_DEV_MAX_CANDIDATES` (default 8) caps the integration backlog. The cockpit
+reports queue age, gate pass rate, repair count and recorded deliveries/hour.
+A failed cloud gate is reproduced on main in the same sandbox; a failing host
+suite triggers the same full suites on its main base. Proven
+baseline defects get a separately scoped prerequisite task; host infrastructure
+outages retry the verified tree locally with backoff and no new sandbox.
+
+When runnable implementation work drains, bounded fidelity auditors inspect up
+to four sections at a time, at most two audit tasks concurrently. They record
+production entry points and replayable acceptance probes, correct hollow claims
+and reopen/create scoped implementation tasks. New task IDs are reserved in the
+ledger. An auditor leases its coverage matrix and referenced task files; ordinary
+implementation remains concurrent. The integrator regenerates the coverage
+summary. Audit delivery is counted separately from product delivery; an empty
+queue alone never proves GOAL is met. See [the controller audit](dev-loop-audit.md)
+for the live verification limits.
+
+All agent roles pin `enmaas-glm-5-3/rits/zai-org/glm-5-3` explicitly against
+`https://api.enmaas.devshift.net/v1` using OpenAI completions. The model entry
+is committed in `docker/dev-worker/models.yml`, including its 262144-token
+context, 65536-token output limit, and disabled developer role. No model
+discovery request is required. `GYRE_DEV_MODEL` overrides all roles;
+`GYRE_DEV_IMPLEMENTATION_MODEL` overrides implementation only. The worker
+stages the committed `config.yml` beside the model entry (`MODELS_YML` and
+`CONFIG_YML` can override the files). No repetition or frequency penalty is
+enabled.
+
+Before starting the loop with this provider, run in your desktop session:
+
+```bash
+source .gyre-dev-controller/gateway.env
+python3 scripts/dev-gateway.py --inference
+```
+
+`dev-gateway.py` replaces the local `gyre-gyre` registration with the current
+spoke gateway and OIDC client, authenticates, and checks the service account
+subject. It reads `OPENSHELL_OIDC_CLIENT_SECRET`, falling back to the ignored
+`OPENSHELL-GOAL.md` note. The ignored `gateway.env` file supplies the credential
+to subsequent controller runs in the same shell. `--inference` also runs the
+GitHub and EnMaaS setup below. GitHub credentials come from `GITHUB_TOKEN`,
+`GH_TOKEN`, or `gh auth token`. The committed `github.yaml` profile permits
+Git clone/fetch/push, including POST to `git-receive-pack`. To repair only this
+provider on an authenticated gateway, run
+`python3 scripts/dev-inference.py --github-only`. To update only inference, use
+`python3 scripts/dev-inference.py --smoke`.
+
+Before dispatching new sandboxes, the controller checks that both required
+providers exist. Missing providers pause admission as a shared controller
+condition; they do not exhaust individual task budgets. Prior failed attempts
+whose logs report a required provider missing return to the retry queue on
+restart. Admission resumes automatically when the providers are available.
+
+This reads `secret-tool lookup service pricetag key api-token`, imports or
+updates the committed OpenShell profile, and creates or updates `gyre-enmaas`
+with that credential. Authenticate `gyre-gyre` first if its login has expired.
+The setup command never writes the API key to disk or puts it in command
+arguments. The gateway injects Bearer authentication for EnMaaS; sandbox model
+configuration resolves `ENMAAS_API_KEY` from the attached provider. `--smoke`
+tests the pinned model using the worker's OMP configuration. `--smoke-only`
+checks inference without changing the gateway. Existing sandboxes continue
+with their staged configuration; new attempts use EnMaaS.
+
 Bootstrap files are staged as one retryable bundle. Sandbox Cargo commands use
 `cc`/`lld` and `/tmp/gyre-target`, overriding the checkout's `clang`/`mold`
 linker settings.
@@ -370,7 +468,14 @@ summary from the task file (or existing implementation notes for older tasks).
 The cockpit task drawer links the shipped commit directly to GitHub.
 The controller then
 runs the full Rust and frontend suites on that exact merge SHA on the host and
-blocks promotion if either fails. The controller checks the candidate
+blocks promotion if either fails. It creates a GitHub PR for the verified ref,
+with the shipped summary, exact head/base, gates and bundle digest, and confirms
+GitHub has that exact head. The cockpit links it immediately. `gh` must be
+installed and authenticated in the controller environment. Default publication
+then pushes the exact merge to main. `--publication pr` leaves it open for human
+review; returning to default mode resumes promotion with the usual rechecks.
+Publication retries preserve the verified commit and use exponential backoff.
+The controller checks the candidate
 and base SHAs again before a non-force push to `main`; if `main` moved, it
 checks again on the new base. An attempt whose process exits while the
 controller is down is recovered from its recorded exit status and remote branch

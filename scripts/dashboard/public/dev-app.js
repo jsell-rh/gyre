@@ -39,7 +39,11 @@ function e(tag, props = {}, ...children) {
 function badge(text, kind = text) { return e("span", { class: `badge ${kind}`, text: text || "—" }); }
 function title(task) { return snapshot?.titles?.[task.name]?.title || task.name; }
 function spec(task) { return snapshot?.titles?.[task.name]?.specRef || ""; }
-function prs(task) { return snapshot?.prs?.[task.name] || []; }
+function prs(task) {
+  const found = snapshot?.prs?.[task.name] || [];
+  return task.pr_url && !found.some((pr) => pr.url === task.pr_url)
+    ? [{ url: task.pr_url, number: task.pr_number, state: task.state === "merged" ? "MERGED" : "OPEN" }, ...found] : found;
+}
 function latestAttempt(name) { return (snapshot?.attempts || []).find((a) => a.task === name) || null; }
 function taskEvents(name) { return (snapshot?.events || []).filter((event) => event.task === name); }
 function ago(seconds) {
@@ -71,6 +75,7 @@ function missingDeps(task) {
 }
 function state(task) { return task.state === "ready" && missingDeps(task).length ? "blocked" : task.state; }
 function infrastructureQueueReason(task) {
+  if (/^(MissingProviders:|ProviderCheckUnavailable:)/.test(snapshot?.health?.condition || "")) return "Waiting for required gateway providers";
   if (missingDeps(task).length) return "Waiting for prerequisites";
   if (task.retry_at > Date.now() / 1000) return `Backoff · retry in ${until(task.retry_at)}`;
   return snapshot?.health?.failures ? "Ready to retry · queued behind capacity probe" : "Ready to retry · queued for admitted slot";
@@ -114,7 +119,7 @@ function renderHealth() {
     e("span", { class: "sep", text: "|" }),
     e("span", { text: `${s.running ?? 0} running / ${gate.effective_slots ?? value} admitted / ${value} desired` }),
     e("span", { class: "sep", text: "|" }),
-    e("span", { text: `${s.eligible ?? 0} eligible · ${s.counts?.deferred ?? 0} queued · ${s.counts?.failed ?? 0} failed · ${s.counts?.merged ?? 0} merged` }),
+    e("span", { text: `${s.eligible ?? 0} eligible · ${s.counts?.deferred ?? 0} queued · ${s.counts?.failed ?? 0} failed · ${s.counts?.merged ?? 0} upstream complete · ${s.confirmed_merges ?? 0} shipped by controller` }),
     e("span", { class: "health-spacer" }),
     e("span", { class: "stepper" },
       e("span", { text: "sandboxes " }),
@@ -179,10 +184,13 @@ function renderOverview() {
   const deferred = tasks.filter((t) => t.state === "deferred");
   const gate = s.health || {};
   const candidate = tasks.filter((t) => t.state === "candidate");
+  const blocked = tasks.filter((t) => t.state === "blocked");
+  const published = tasks.filter((t) => t.state === "published");
   const cards = [
     ["Eligible", s.eligible ?? 0], ["Running", s.running ?? 0],
     ["Candidates", candidate.length + (s.counts?.checking || 0)],
-    ["Infra queue", deferred.length], ["Failed", failed.length], ["Merged", s.counts?.merged || 0],
+    ["Infra queue", deferred.length], ["Failed", failed.length], ["Shipped by controller", s.confirmed_merges || 0],
+    ["Sandboxes charged", s.resources?.used ?? s.running ?? 0], ["Deletion pending", s.resources?.deletion_pending || 0],
   ];
   const coverage = s.coverage || {};
   const covered = (coverage.implemented || 0) + (coverage.verified || 0);
@@ -197,13 +205,16 @@ function renderOverview() {
   const control = e("section", { class: "dev-panel" },
     e("h2", { text: "Controller" }),
     e("p", { text: s.online ? `Reconciling specs to code · ${gate.condition || "Healthy"}` : s.present ? "Stopped. Run: python3 scripts/dev-controller.py run --slots 8" : "No ledger yet. Run: python3 scripts/dev-controller.py sync" }),
-    e("p", { class: "muted", text: gate.condition === "ConfigurationInvalid" ? "Admission paused: repair gateway configuration, then retry the failed task." : gate.retry_at > Date.now() / 1000 ? `Gateway backoff: next admission probe in ${until(gate.retry_at)} · ${gate.failures} consecutive infrastructure failures` : gate.failures ? `Gateway capacity probe ${gate.effective_slots > s.running ? "due on next cycle" : "running"} · existing sandboxes continue working` : `Gateway admission: ${gate.effective_slots ?? 0} of ${s.slots ?? 0} desired slots · expands as sandboxes become Ready` }),
+    e("p", { class: "muted", text: s.resources?.inventory_ready ? `Remote resource inventory current · ${s.resources.used} charged · ${s.resources.deletion_pending} awaiting deletion` : "Admission waits for a complete remote sandbox inventory." }),
+    gate.inventory_error ? e("p", { class: "muted", text: `Inventory: ${gate.inventory_error}` }) : null,
+    e("p", { class: "muted", text: `${(s.metrics?.deliveries_per_hour || 0).toFixed(2)} recorded deliveries/hour · ${s.metrics?.candidate_backlog || 0} candidates awaiting delivery · ${s.metrics?.automatic_repairs || 0} automatic repairs` }),
+    e("p", { class: "muted", text: /^(MissingProviders:|ProviderCheckUnavailable:)/.test(gate.condition || "") ? "Admission paused: required gateway providers are missing or unavailable. Setup is checked again each cycle." : gate.condition === "ConfigurationInvalid" ? "Admission paused: repair gateway configuration, then retry the failed task." : gate.retry_at > Date.now() / 1000 ? `Gateway backoff: next admission probe in ${until(gate.retry_at)} · ${gate.failures} consecutive infrastructure failures` : gate.failures ? `Gateway capacity probe ${gate.effective_slots > s.running ? "due on next cycle" : "running"} · existing sandboxes continue working` : `Gateway admission: ${gate.effective_slots ?? 0} of ${s.slots ?? 0} desired slots · expands as sandboxes become Ready` }),
     e("p", { class: "muted", text: "Set sandboxes to 0 to drain. Active attempts finish and keep their checkpoints." }),
     e("div", { class: "dev-control-line", text: `${(s.attempts || []).filter((a) => a.state === "running" && a.kind === "worker").length} implementing · ${(s.attempts || []).filter((a) => a.state === "running" && a.kind === "check").length} checking · ${s.slots ?? "—"} slots` }));
   const live = e("section", { class: "dev-panel" }, e("h2", { text: `Active attempts · ${active.length}` }),
     active.length ? active.map((task) => {
       const a = latestAttempt(task.name);
-      return taskButton(task, a ? `${a.kind} · ${ago(a.started)} · ${a.branch || a.sha?.slice(0, 12) || ""}` : "starting");
+      return taskButton(task, a ? `${a.phase || a.kind} · ${a.reason || task.condition || ""} · ${ago(a.started)} · ${a.branch || a.sha?.slice(0, 12) || ""}` : "starting");
     }) : e("p", { class: "muted", text: s.online ? "No attempt is active. Eligible work starts on the next controller cycle." : "Controller is offline." }));
   const attention = e("section", { class: "dev-panel" },
     e("div", { class: "dev-panel-heading" }, e("h2", { text: `Needs attention · ${failed.length}` }),
@@ -217,12 +228,16 @@ function renderOverview() {
       : e("p", { class: "muted", text: "No task is queued after an infrastructure failure." }));
   nodes.overview.replaceChildren(coverageBar, metrics, errorText || s.error ? e("div", { class: "dev-error", text: errorText || s.error }) : "",
     e("div", { class: "dev-overview-grid" }, e("div", {}, control, live, waiting), attention),
+    blocked.length ? e("section", { class: "dev-panel" }, e("h2", { text: `Blocked delivery · ${blocked.length}` }),
+      blocked.map((task) => taskButton(task, task.condition || "Waiting for prerequisite repair"))) : null,
+    published.length ? e("section", { class: "dev-panel" }, e("h2", { text: `Pull requests ready · ${published.length}` }),
+      published.map((task) => e("div", {}, taskButton(task, "Verified and published for review"), prLinks(task)))) : null,
     e("section", { class: "dev-panel" }, e("h2", { text: `Waiting candidates · ${candidate.length}` }),
       candidate.length ? candidate.slice(0, 10).map((task) => taskButton(task, `candidate ${task.candidate?.slice(0, 12) || ""}`))
         : e("p", { class: "muted", text: "No candidate waiting for verification." })));
 }
 
-const FILTERS = ["active", "eligible", "deferred", "blocked", "failed", "candidate", "merged", "all"];
+const FILTERS = ["active", "eligible", "deferred", "blocked", "failed", "candidate", "published", "merged", "all"];
 function matches(task) {
   const value = state(task);
   if (filter === "active" && !["running", "checking", "promoting"].includes(value)) return false;
@@ -449,6 +464,8 @@ function renderDrawer() {
       e("span", { text: "Seed" }), e("span", { class: "mono", text: task.seed || "—" }),
       e("span", { text: "Prerequisites" }), e("span", { text: (task.deps || []).join(", ") || "none" })),
     task.state === "deferred" ? e("p", { text: `${task.condition || "Infrastructure unavailable"}. ${infrastructureQueueReason(task)}.` }) : null,
+    task.feedback ? e("p", { text: `${task.condition === "RepairLimitExceeded" ? "Repair limit reached" : "Integration repair"} · ${task.repairs || 0}/3 automatic repairs. Gate findings are retained and supplied to the next implementation and review rounds.` }) : null,
+    task.generation ? e("p", { class: "muted", text: `Desired generation ${task.generation.slice(0, 12)} · observed ${task.observed_generation?.slice(0, 12) || "pending"}` }) : null,
     task.state === "failed" ? e("button", { class: "dev-action", onclick: () => retry(task.name), text: "Retry task" }) : null,
     e("h3", { text: `Attempts · ${attempts.length} recent` }),
     ...attempts.map((a) => e("button", { class: "dev-history", onclick: () => { tab = "raw"; logAttempt = a.id; renderDrawer(); } },
