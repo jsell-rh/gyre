@@ -12,7 +12,7 @@ coverage_sections:
   - "view-query-grammar.md §7 5. Zoom"
   - "view-query-grammar.md §8 6. Annotation"
   - "view-query-grammar.md §9 7. Interactive Bindings"
-commits: ["dce939efa24c43ae42a1b9ed434aac049f8a3372", "7b02dabdf4f0161b6d19c043d8893f8d47a32b62"]
+commits: ["f16603bb9f4a5f716cd76f35811c42e9d33015cd", "dce939efa24c43ae42a1b9ed434aac049f8a3372", "7b02dabdf4f0161b6d19c043d8893f8d47a32b62"]
 ---
 
 ## Spec Excerpt
