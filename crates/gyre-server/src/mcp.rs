@@ -3925,7 +3925,6 @@ mod tests {
         // required-field table as the REST path. `task_assignment` requires
         // `task_id`; a payload carrying only `spec_ref` must be a tool error and
         // must NOT reach the message store.
-        use gyre_ports::MessageRepository as _;
         let state = test_state();
         let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
         sender.workspace_id = Id::new("ws-schema");

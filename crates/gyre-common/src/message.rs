@@ -544,18 +544,18 @@ impl MessageKind {
             FieldType::F64 => value.as_f64().is_some(),
             FieldType::StrArray => value
                 .as_array()
-                .map_or(false, |arr| arr.iter().all(|v| v.is_string())),
-            FieldType::Decisions => value.as_array().map_or(false, |arr| {
+                .is_some_and(|arr| arr.iter().all(|v| v.is_string())),
+            FieldType::Decisions => value.as_array().is_some_and(|arr| {
                 arr.iter().all(|v| {
-                    v.as_object().map_or(false, |o| {
-                        o.get("what").map_or(false, |x| x.is_string())
-                            && o.get("why").map_or(false, |x| x.is_string())
-                            && o.get("confidence").map_or(false, |x| x.is_string())
+                    v.as_object().is_some_and(|o| {
+                        o.get("what").is_some_and(|x| x.is_string())
+                            && o.get("why").is_some_and(|x| x.is_string())
+                            && o.get("confidence").is_some_and(|x| x.is_string())
                             && match o.get("alternatives_considered") {
                                 None | Some(Value::Null) => true,
                                 Some(a) => a
                                     .as_array()
-                                    .map_or(false, |arr| arr.iter().all(|x| x.is_string())),
+                                    .is_some_and(|arr| arr.iter().all(|x| x.is_string())),
                             }
                     })
                 })
