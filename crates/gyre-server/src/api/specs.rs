@@ -22,6 +22,8 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use gyre_common::Id;
+use gyre_domain::AnalyticsEvent;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -676,6 +678,41 @@ pub async fn approve_spec(
             entry.approval_status = ApprovalStatus::Approved;
             entry.updated_at = now;
             let _ = state.spec_ledger.save(&entry).await;
+
+            // Auto-track spec approval (analytics.md §Auto-Emitted Events).
+            {
+                let approver_agent_id = if event.approver_type == "agent" {
+                    event.approver_id.strip_prefix("agent:").map(|s| s.to_string())
+                } else {
+                    None
+                };
+                let approver_user_id = if event.approver_type == "human" {
+                    Some(Id::new(
+                        event
+                            .approver_id
+                            .trim_start_matches("user:")
+                            .to_string(),
+                    ))
+                } else {
+                    None
+                };
+                let ws_id = entry.workspace_id.as_deref().map(Id::new);
+                let repo_id = entry.repo_id.as_deref().map(Id::new);
+                let ev = AnalyticsEvent::new(
+                    new_id(),
+                    "spec.approved",
+                    approver_agent_id,
+                    serde_json::json!({
+                        "spec_path": spec_path,
+                        "approver_type": event.approver_type,
+                        "approval_mode": entry.approval_mode,
+                    }),
+                    now,
+                )
+                .with_scope(approver_user_id.as_ref(), None, ws_id.as_ref(), repo_id.as_ref());
+                let _ = state.analytics.record(&ev).await;
+            }
+
 
             // Emit SpecApproved event on the message bus (agent-runtime.md §1).
             // This is the single trigger for all agent work via the signal chain:

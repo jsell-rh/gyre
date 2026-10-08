@@ -640,14 +640,56 @@ pub async fn transition_mr_status(
             .await;
     }
 
-    // Auto-track mr.merged analytics event
-    if is_merge {
+    // Auto-track mr.merged / mr.closed analytics events (analytics.md §Auto-Emitted Events).
+    if is_merge || is_close {
+        // gate_count: number of gate results recorded for this MR.
+        let gate_count = state
+            .gate_results
+            .list_by_mr_id(mr.id.as_str())
+            .await
+            .map(|rs| rs.len() as u64)
+            .unwrap_or(0);
+        // queue_wait_secs: time from merge-queue enqueue to now, if the MR
+        // passed through the queue.
+        let queue_wait_secs = state
+            .merge_queue
+            .list_queue()
+            .await
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .into_iter()
+                    .find(|e| e.merge_request_id == mr.id)
+                    .map(|e| ts.saturating_sub(e.enqueued_at))
+            });
+
+        let event_name = if is_merge { "mr.merged" } else { "mr.closed" };
+        let properties = if is_merge {
+            serde_json::json!({
+                "mr_id": mr.id.to_string(),
+                "repo_id": mr.repository_id.to_string(),
+                "gate_count": gate_count,
+                "queue_wait_secs": queue_wait_secs,
+            })
+        } else {
+            serde_json::json!({
+                "mr_id": mr.id.to_string(),
+                "repo_id": mr.repository_id.to_string(),
+                "reason": "closed_without_merge",
+            })
+        };
         let ev = AnalyticsEvent::new(
             new_id(),
-            "mr.merged",
+            event_name,
             mr.author_agent_id.as_ref().map(|id| id.to_string()),
-            serde_json::json!({ "mr_id": mr.id.to_string() }),
+            properties,
             ts,
+        )
+        .with_scope(
+            None,
+            None,
+            Some(&mr.workspace_id),
+            Some(&mr.repository_id),
         );
         let _ = state.analytics.record(&ev).await;
     }

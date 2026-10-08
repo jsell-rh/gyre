@@ -132,18 +132,27 @@ async fn spawn_orchestrator(
     // children (authorization-provenance.md §4.5).
     bootstrap_agent_keypair(state, &agent.id.to_string(), now).await;
 
-    // Auto-track spawn.
+    // Auto-track spawn (analytics.md §Auto-Emitted Events).
+    let persona_name = match orchestrator_type {
+        OrchestratorType::Worker => "default-worker",
+        OrchestratorType::WorkspaceOrchestrator => "workspace-orchestrator",
+        OrchestratorType::RepoOrchestrator => "repo-orchestrator",
+    };
     let ev = AnalyticsEvent::new(
         new_id(),
         "agent.spawned",
         Some(agent.id.to_string()),
         serde_json::json!({
+            "task_id": agent.id.to_string(),
+            "compute_target": "local",
+            "persona": persona_name,
             "orchestrator_type": orchestrator_type.to_string(),
             "workspace_id": workspace_id.to_string(),
             "repo_id": repo_id.map(|r| r.to_string()),
         }),
         now,
-    );
+    )
+    .with_scope(None, None, Some(workspace_id), repo_id);
     let _ = state.analytics.record(&ev).await;
 
     budget::increment_active_agents(state, &workspace_id.to_string()).await;

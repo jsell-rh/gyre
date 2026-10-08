@@ -332,6 +332,22 @@ pub async fn admin_kill_agent(
     crate::api::spawn::cleanup_interrogation_policies(&state, &id).await;
     let _ = state.kv_store.kv_remove("interrogation_context", &id).await;
 
+    // Auto-track agent kill (analytics.md §Auto-Emitted Events: agent.failed
+    // covers "fails or is killed").
+    let ev = gyre_domain::AnalyticsEvent::new(
+        crate::api::new_id(),
+        "agent.failed",
+        Some(agent.id.to_string()),
+        serde_json::json!({
+            "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+            "reason": "force-killed by admin",
+            "duration_secs": now.saturating_sub(agent.spawned_at),
+        }),
+        now,
+    )
+    .with_scope(None, None, Some(&agent.workspace_id), agent.repo_id.as_ref());
+    let _ = state.analytics.record(&ev).await;
+
     Ok(StatusCode::NO_CONTENT)
 }
 

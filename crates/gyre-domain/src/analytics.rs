@@ -2,11 +2,20 @@ use gyre_common::Id;
 use serde::{Deserialize, Serialize};
 
 /// A product analytics event, e.g. "task.completed", "mr.merged", "agent.spawned".
+///
+/// Scope fields (`user_id`, `session_id`, `workspace_id`, `repo_id`) follow the
+/// spec schema (analytics.md §Event Schema) and enable per-scope filtering in
+/// the query API. They are optional: platform-internal events may lack a
+/// human user or session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalyticsEvent {
     pub id: Id,
     pub event_name: String,
     pub agent_id: Option<String>,
+    pub user_id: Option<String>,
+    pub session_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub repo_id: Option<String>,
     pub properties: serde_json::Value,
     pub timestamp: u64,
 }
@@ -23,9 +32,29 @@ impl AnalyticsEvent {
             id,
             event_name: event_name.into(),
             agent_id,
+            user_id: None,
+            session_id: None,
+            workspace_id: None,
+            repo_id: None,
             properties,
             timestamp,
         }
+    }
+
+    /// Attach scope identifiers to an event (builder-style).
+    /// `Id` inputs are stringified; analytics stores ids as text.
+    pub fn with_scope(
+        mut self,
+        user_id: Option<&Id>,
+        session_id: Option<String>,
+        workspace_id: Option<&Id>,
+        repo_id: Option<&Id>,
+    ) -> Self {
+        self.user_id = user_id.map(|id| id.to_string());
+        self.session_id = session_id;
+        self.workspace_id = workspace_id.map(|id| id.to_string());
+        self.repo_id = repo_id.map(|id| id.to_string());
+        self
     }
 }
 

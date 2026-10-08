@@ -4,7 +4,7 @@ use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Text};
 use gyre_common::Id;
 use gyre_domain::{AnalyticsEvent, CostEntry};
-use gyre_ports::analytics::{AnalyticsRepository, CostRepository};
+use gyre_ports::analytics::{AnalyticsQueryFilter, AnalyticsRepository, CostRepository};
 use std::sync::Arc;
 
 use super::PgStorage;
@@ -17,6 +17,10 @@ struct AnalyticsEventRow {
     id: String,
     event_name: String,
     agent_id: Option<String>,
+    user_id: Option<String>,
+    session_id: Option<String>,
+    workspace_id: Option<String>,
+    repo_id: Option<String>,
     properties: String,
     timestamp: i64,
     #[allow(dead_code)]
@@ -31,6 +35,10 @@ impl From<AnalyticsEventRow> for AnalyticsEvent {
             id: Id::new(r.id),
             event_name: r.event_name,
             agent_id: r.agent_id,
+            user_id: r.user_id,
+            session_id: r.session_id,
+            workspace_id: r.workspace_id,
+            repo_id: r.repo_id,
             properties,
             timestamp: r.timestamp as u64,
         }
@@ -43,6 +51,10 @@ struct AnalyticsEventRecord<'a> {
     id: &'a str,
     event_name: &'a str,
     agent_id: Option<&'a str>,
+    user_id: Option<&'a str>,
+    session_id: Option<&'a str>,
+    workspace_id: Option<&'a str>,
+    repo_id: Option<&'a str>,
     properties: String,
     timestamp: i64,
     tenant_id: &'a str,
@@ -110,6 +122,10 @@ impl AnalyticsRepository for PgStorage {
                 id: e.id.as_str(),
                 event_name: &e.event_name,
                 agent_id: e.agent_id.as_deref(),
+                user_id: e.user_id.as_deref(),
+                session_id: e.session_id.as_deref(),
+                workspace_id: e.workspace_id.as_deref(),
+                repo_id: e.repo_id.as_deref(),
                 properties: props,
                 timestamp: e.timestamp as i64,
                 tenant_id: "default",
@@ -137,7 +153,7 @@ impl AnalyticsRepository for PgStorage {
             if let Some(s) = since {
                 query = query.filter(analytics_events::timestamp.ge(s as i64));
             }
-            if let Some(ref name) = event_name {
+            if let Some(name) = &event_name {
                 query = query.filter(analytics_events::event_name.eq(name.as_str()));
             }
             let rows = query
@@ -149,6 +165,50 @@ impl AnalyticsRepository for PgStorage {
         })
         .await?
     }
+
+    async fn query_filtered(&self, filter: &AnalyticsQueryFilter) -> Result<Vec<AnalyticsEvent>> {
+        let pool = Arc::clone(&self.pool);
+        let filter = filter.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<AnalyticsEvent>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let mut query = analytics_events::table.into_boxed();
+            if let Some(name) = &filter.event_name {
+                // Exact or trailing-`*` prefix match (analytics.md §Query Parameters).
+                if let Some(prefix) = name.strip_suffix('*') {
+                    query =
+                        query.filter(analytics_events::event_name.like(format!("{}%", prefix)));
+                } else {
+                    query = query.filter(analytics_events::event_name.eq(name.as_str()));
+                }
+            }
+            if let Some(id) = &filter.agent_id {
+                query = query.filter(analytics_events::agent_id.eq(id.as_str()));
+            }
+            if let Some(id) = &filter.user_id {
+                query = query.filter(analytics_events::user_id.eq(id.as_str()));
+            }
+            if let Some(id) = &filter.workspace_id {
+                query = query.filter(analytics_events::workspace_id.eq(id.as_str()));
+            }
+            if let Some(id) = &filter.repo_id {
+                query = query.filter(analytics_events::repo_id.eq(id.as_str()));
+            }
+            if let Some(s) = filter.since {
+                query = query.filter(analytics_events::timestamp.ge(s as i64));
+            }
+            if let Some(u) = filter.until {
+                query = query.filter(analytics_events::timestamp.le(u as i64));
+            }
+            let rows = query
+                .order(analytics_events::timestamp.desc())
+                .limit(filter.limit as i64)
+                .load::<AnalyticsEventRow>(&mut *conn)
+                .context("query analytics_events (filtered)")?;
+            Ok(rows.into_iter().map(AnalyticsEvent::from).collect())
+        })
+        .await?
+    }
+
 
     async fn count(&self, event_name: &str, since: u64, until: u64) -> Result<u64> {
         let pool = Arc::clone(&self.pool);

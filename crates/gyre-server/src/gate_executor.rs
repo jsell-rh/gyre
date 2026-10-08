@@ -96,6 +96,53 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
         "gate execution complete"
     );
 
+    // Auto-track gate outcome (analytics.md §Auto-Emitted Events).
+    let gate_type_str = format!("{:?}", gate.gate_type);
+    let duration_secs = finished_at.saturating_sub(started_at);
+    let (event_name, props) = if status == GateStatus::Failed {
+        (
+            "gate.failed",
+            serde_json::json!({
+                "gate_id": gate.id.to_string(),
+                "gate_type": gate_type_str,
+                "mr_id": mr_id.to_string(),
+                "output_snippet": truncate_bytes(&output, 512),
+            }),
+        )
+    } else {
+        (
+            "gate.passed",
+            serde_json::json!({
+                "gate_id": gate.id.to_string(),
+                "gate_type": gate_type_str,
+                "mr_id": mr_id.to_string(),
+                "duration_secs": duration_secs,
+            }),
+        )
+    };
+    let scope = state
+        .merge_requests
+        .find_by_id(&mr_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|mr| (mr.workspace_id, mr.repository_id));
+    let ev = gyre_domain::AnalyticsEvent::new(
+        gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+        event_name,
+        None,
+        props,
+        finished_at,
+    )
+    .with_scope(
+        None,
+        None,
+        scope.as_ref().map(|(ws, _)| ws),
+        scope.as_ref().map(|(_, repo)| repo),
+    );
+    let _ = state.analytics.record(&ev).await;
+
+
     // Emit GateFailure event so the MR's author agent can react immediately.
     if status == GateStatus::Failed {
         let gate_type_str = format!("{:?}", gate.gate_type);
