@@ -6,7 +6,7 @@ depends_on:
 progress: not-started
 coverage_sections:
   - "human-system-interface.md §1.5 What Each Nav Item Shows at Each Scope"
-commits: ["fc3a982e2b2901d12ae7a35cac9da7f4b6d146f4", "dd3e688e0331d333bcde0d81bb45f91b07bc118f"]
+commits: ["1c04f6dee9c97a744819d835b34ea3ac62d4ad0d", "fc3a982e2b2901d12ae7a35cac9da7f4b6d146f4", "dd3e688e0331d333bcde0d81bb45f91b07bc118f"]
 ---
 
 ## Spec Excerpt
