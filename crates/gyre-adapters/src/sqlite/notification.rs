@@ -270,6 +270,7 @@ impl NotificationRepository for SqliteStorage {
         let ws_id = workspace_id.clone();
         let uid = user_id.clone();
         let ntype = notification_type.to_string();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<bool> {
             let mut conn = pool.get().context("get db connection")?;
             let cutoff = std::time::SystemTime::now()
@@ -278,6 +279,7 @@ impl NotificationRepository for SqliteStorage {
                 .as_secs() as i64
                 - (days as i64 * 86400);
             let count = notifications::table
+                .filter(notifications::tenant_id.eq(&tenant))
                 .filter(notifications::workspace_id.eq(ws_id.as_str()))
                 .filter(notifications::user_id.eq(uid.as_str()))
                 .filter(notifications::notification_type.eq(&ntype))
@@ -363,12 +365,9 @@ mod tests {
             .unwrap();
         // old + unread → only deleted past the 365d unread cutoff; this one
         // is past 90d but within 365d → kept.
-        NotificationRepository::create(
-            &s,
-            &make("mid-unread", (read_cutoff - 1) as i64, false),
-        )
-        .await
-        .unwrap();
+        NotificationRepository::create(&s, &make("mid-unread", (read_cutoff - 1) as i64, false))
+            .await
+            .unwrap();
         // ancient + unread → deleted (past the 365d unread cutoff).
         NotificationRepository::create(
             &s,
@@ -383,7 +382,9 @@ mod tests {
         // dismissed counts as read too.
         let mut dismissed = make("old-dismissed", (read_cutoff - 1) as i64, false);
         dismissed.dismissed_at = Some(read_cutoff as i64 - 5);
-        NotificationRepository::create(&s, &dismissed).await.unwrap();
+        NotificationRepository::create(&s, &dismissed)
+            .await
+            .unwrap();
 
         let deleted = NotificationRepository::delete_older_than(&s, read_cutoff, unread_cutoff)
             .await

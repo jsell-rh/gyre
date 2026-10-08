@@ -176,9 +176,14 @@ impl ComputeTargetRepository for PgStorage {
     async fn has_workspace_references(&self, id: &Id) -> Result<bool> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<bool> {
             let mut conn = pool.get().context("get db connection")?;
+            // Spec hierarchy-enforcement.md §3: every read filters by tenant_id.
+            // The count is scoped to the storage's tenant: a compute target is
+            // tenant-owned, so only same-tenant workspaces can reference it.
             let count: i64 = workspaces::table
+                .filter(workspaces::tenant_id.eq(&tenant))
                 .filter(workspaces::compute_target_id.eq(id.as_str()))
                 .count()
                 .get_result(&mut *conn)
