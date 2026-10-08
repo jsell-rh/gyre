@@ -118,7 +118,8 @@ pub use trace::{SpanPayload, TraceRepository};
 pub use trust_anchor::TrustAnchorRepository;
 pub use user::{ApiKeyRepository, UserRepository};
 pub use user_profile::{
-    JudgmentLedgerRepository, UserNotificationPreferenceRepository, UserTokenRepository,
+    JudgmentLedgerRepository, SessionRepository, UserNotificationPreferenceRepository,
+    UserTokenRepository,
 };
 pub use user_workspace_state::UserWorkspaceStateRepository;
 pub use workspace::{PersonaRepository, WorkspaceRepository};

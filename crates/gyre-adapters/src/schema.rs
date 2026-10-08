@@ -204,6 +204,20 @@ diesel::table! {
 }
 
 diesel::table! {
+    user_sessions (id) {
+        id -> Text,
+        user_id -> Text,
+        token_hash -> Text,
+        ip_address -> Text,
+        user_agent -> Text,
+        created_at -> BigInt,
+        last_active_at -> BigInt,
+        expires_at -> BigInt,
+        revoked -> Integer,
+    }
+}
+
+diesel::table! {
     api_keys (key) {
         key -> Text,
         user_id -> Text,
@@ -681,6 +695,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     users,
     user_notification_preferences,
     user_tokens,
+    user_sessions,
     api_keys,
     analytics_events,
     cost_entries,
