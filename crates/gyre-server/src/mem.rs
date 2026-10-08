@@ -3250,6 +3250,7 @@ fn test_state_inner(
 ) -> Arc<crate::AppState> {
     use std::collections::HashMap;
     use tokio::sync::{broadcast, Mutex};
+    let (message_dispatch_tx, message_dispatch_rx) = tokio::sync::mpsc::channel(256);
     Arc::new(crate::AppState {
         auth_token: "test-token".to_string(),
         base_url: "http://localhost:3000".to_string(),
@@ -3333,14 +3334,8 @@ fn test_state_inner(
         meta_spec_bindings: Arc::new(MemMetaSpecBindingRepository::default()),
         meta_spec_sets: Arc::new(MemMetaSpecSetRepository::default()),
         messages: Arc::new(MemMessageRepository::default()),
-        message_dispatch_tx: {
-            let (tx, rx) = tokio::sync::mpsc::channel(256);
-            tokio::spawn(async move {
-                let mut rx = rx;
-                while rx.recv().await.is_some() {}
-            });
-            tx
-        },
+        message_dispatch_tx,
+        message_dispatch_rx: tokio::sync::Mutex::new(Some(message_dispatch_rx)),
         agent_inbox_max: 1000,
         user_workspace_state: Arc::new(MemUserWorkspaceStateRepository::default()),
         last_seen_debounce: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),

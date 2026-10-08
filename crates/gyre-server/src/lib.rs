@@ -26,6 +26,7 @@ pub mod llm_rate_limit;
 pub(crate) mod mcp;
 pub(crate) mod mem;
 pub mod merge_processor;
+pub mod message_dispatcher;
 pub(crate) mod messages;
 pub mod metrics;
 pub mod middleware;
@@ -351,6 +352,9 @@ pub struct AppState {
     pub messages: Arc<dyn gyre_ports::MessageRepository>,
     /// Bounded mpsc sender for background message consumer dispatch.
     pub message_dispatch_tx: tokio::sync::mpsc::Sender<gyre_common::message::Message>,
+    /// Receiver half of the dispatch channel. `None` once the consumer task
+    /// took ownership — exactly one dispatcher may drain the bus.
+    message_dispatch_rx: tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<gyre_common::message::Message>>>,
     /// Max unacked Directed messages per agent before 429. Configurable via GYRE_AGENT_INBOX_MAX.
     pub agent_inbox_max: u64,
     /// Per-user, per-workspace last-seen tracking (HSI §1).
@@ -515,8 +519,28 @@ impl AppState {
         }
         // Broadcast to WebSocket clients.
         let _ = self.message_broadcast_tx.send(msg.clone());
-        // Dispatch to consumers (notification system, etc.).
-        let _ = self.message_dispatch_tx.try_send(msg);
+        // Dispatch to consumers (notification system, etc.). Consumer drops under
+        // backpressure are logged, never block the send path (message-bus.md
+        // §Relationship to Notifications).
+        match self.message_dispatch_tx.try_send(msg) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!(
+                    "message dispatch channel full; consumer dropped a message (best-effort tier)"
+                );
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                tracing::debug!("message dispatch channel closed; no consumers registered");
+            }
+        }
+    }
+
+    /// Take ownership of the message-dispatch receiver. Returns `None` if the
+    /// dispatcher already took it — only one consumer task may drain the bus.
+    pub async fn take_message_dispatch_rx(
+        &self,
+    ) -> Option<tokio::sync::mpsc::Receiver<gyre_common::message::Message>> {
+        self.message_dispatch_rx.lock().await.take()
     }
 
     /// Emit a Telemetry-tier message: push to TelemetryBuffer and broadcast to WS clients.
@@ -777,6 +801,7 @@ pub fn build_state(
     base_url: &str,
     jwt_config: Option<Arc<JwtConfig>>,
 ) -> Arc<AppState> {
+    let (message_dispatch_tx, message_dispatch_rx) = tokio::sync::mpsc::channel(256);
     let (message_broadcast_tx, _) = broadcast::channel(256);
     let (audit_broadcast_tx, _) = broadcast::channel(1024);
     let telemetry_buffer = Arc::new(TelemetryBuffer::new(
@@ -1036,19 +1061,8 @@ pub fn build_state(
             mem::MemMetaSpecSetRepository::default()
         ),
         messages: Arc::new(mem::MemMessageRepository::default()),
-        message_dispatch_tx: {
-            let (tx, rx) = tokio::sync::mpsc::channel(256);
-            // Drain the channel so the receiver is not dropped.
-            // ReconciliationCompleted → MetaSpecDrift notification creation happens
-            // synchronously in emit_reconciliation_completed() helper, not here.
-            tokio::spawn(async move {
-                let mut rx = rx;
-                while let Some(_msg) = rx.recv().await {
-                    // No-op drain. Consumers can be wired via spawn_message_consumer().
-                }
-            });
-            tx
-        },
+        message_dispatch_tx: message_dispatch_tx.clone(),
+        message_dispatch_rx: tokio::sync::Mutex::new(Some(message_dispatch_rx)),
         agent_inbox_max: std::env::var("GYRE_AGENT_INBOX_MAX")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -1167,87 +1181,26 @@ pub fn spawn_presence_eviction(state: Arc<AppState>) {
     });
 }
 
-/// Emit a `ReconciliationCompleted` Event-tier message and create priority-6
-/// `MetaSpecDrift` notifications for all Admin/Developer/Owner workspace members (HSI §4).
+/// Emit a `ReconciliationCompleted` Event-tier message (HSI §4 /
+/// meta-spec-reconciliation.md §11).
 ///
-/// This is the "MessageConsumer path" for ReconciliationCompleted: the spec says p6 is
-/// "async acceptable", so we create notifications inline alongside the event emission.
-/// This avoids the complexity of a separate consumer while meeting the spec requirement.
+/// The priority-6 `MetaSpecDrift` notifications are created downstream by the
+/// notification bridge (`NotificationBridge` in `message_dispatcher.rs`), per
+/// HSI §8 p6: "Via `MessageConsumer` consuming `ReconciliationCompleted`
+/// events". This function only emits the event.
 pub async fn emit_reconciliation_completed(
     state: &Arc<AppState>,
     workspace_id: Id,
     payload: Option<serde_json::Value>,
 ) {
-    use gyre_common::{Notification, NotificationType};
-    use gyre_domain::WorkspaceRole;
-
-    // Emit Event-tier message.
     state
         .emit_event(
             Some(workspace_id.clone()),
-            Destination::Workspace(workspace_id.clone()),
+            Destination::Workspace(workspace_id),
             MessageKind::ReconciliationCompleted,
             payload,
         )
         .await;
-
-    // Resolve tenant_id from workspace record (avoid hardcoding "default").
-    let tenant_id = match state.workspaces.find_by_id(&workspace_id).await {
-        Ok(Some(ws)) => ws.tenant_id.to_string(),
-        Ok(None) => {
-            tracing::warn!("emit_reconciliation_completed: workspace {workspace_id} not found; skipping notifications");
-            return;
-        }
-        Err(e) => {
-            tracing::warn!(
-                "emit_reconciliation_completed: failed to resolve workspace tenant: {e}"
-            );
-            return;
-        }
-    };
-
-    // Create priority-6 MetaSpecDrift notifications for all Admin/Developer/Owner members.
-    let members = match state
-        .workspace_memberships
-        .list_by_workspace(&workspace_id)
-        .await
-    {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!("emit_reconciliation_completed: failed to list members: {e}");
-            return;
-        }
-    };
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-
-    for member in &members {
-        if !matches!(
-            member.role,
-            WorkspaceRole::Admin | WorkspaceRole::Developer | WorkspaceRole::Owner
-        ) {
-            continue;
-        }
-        let notif_id = Id::new(uuid::Uuid::new_v4().to_string());
-        let notif = Notification::new(
-            notif_id,
-            workspace_id.clone(),
-            member.user_id.clone(),
-            NotificationType::MetaSpecDrift,
-            "Meta-spec reconciliation completed — workspace specs may have drifted",
-            &tenant_id,
-            now,
-        );
-        if let Err(e) = state.notifications.create(&notif).await {
-            tracing::warn!(
-                "emit_reconciliation_completed: failed to create MetaSpecDrift notification for {}: {e}",
-                member.user_id
-            );
-        }
-    }
 }
 
 /// Delegate to keep backwards-compatibility. New code should use stale_agents::spawn_stale_agent_detector.
