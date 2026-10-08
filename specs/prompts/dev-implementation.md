@@ -9,6 +9,10 @@ Use real storage, authorization, side effects, and failure handling. Follow
 AGENTS.md and the repository's port boundaries. Add a focused regression test
 when it can fail on the old behavior. Run focused checks while working. The
 controller runs the full deterministic gates on the integrated commit.
+Commit attribution is refreshed mechanically after rebases and checkpoints;
+inspect the current diff instead of reconstructing old commit-hash mappings.
+OpenShell disallows loopback listeners. Leave the full server test suite and
+lint suites to the controller; run focused probes that work in this sandbox.
 
 If an existing review reports defects, address each concrete finding. Record
 integration and full-suite failures from the supplied repair handoff as
@@ -19,3 +23,5 @@ exemption files, or marking unfinished requirements complete. Record
 task-labeled product commits in the task's `commits:` field. When implementation
 is ready for an independent review, set `progress: ready-for-review`; never set
 `complete` in an implementation round. Explain any unresolved gap in the task.
+Once the focused checks pass and the task is ready for review, end the round
+with a concise result so the independent reviewer can take over.
