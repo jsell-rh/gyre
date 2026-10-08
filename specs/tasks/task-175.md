@@ -9,7 +9,7 @@ coverage_sections:
   - "ui-layout.md §Item Structure"
   - "ui-layout.md §Action Buttons per Item Type"
   - "ui-layout.md §8. Briefing Layout"
-commits: ["8eef864e42b5283258fb46aa090c4991d7d333de", "dd037ee3d9fb3d1808d25dbc775c7e19bbd80458"]
+commits: ["4837a65c402e2043be3253f60c25f08d5cf69163", "8eef864e42b5283258fb46aa090c4991d7d333de", "dd037ee3d9fb3d1808d25dbc775c7e19bbd80458"]
 ---
 
 ## Spec Excerpt
