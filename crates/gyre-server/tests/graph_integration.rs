@@ -1989,7 +1989,7 @@ async fn test_mcp_graph_edges() {
         "one edge should be returned, got: {content}"
     );
     assert!(
-        content.contains(n2.id.to_string()),
+        content.contains(&n2.id.to_string()),
         "edge target should be included, got: {content}"
     );
     assert!(
