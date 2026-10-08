@@ -1078,13 +1078,26 @@ pub(crate) async fn spawn_agent_core(
         .await;
     }
 
-    // Auto-track agent spawn
+    // Auto-track agent spawn (analytics.md §Auto-Emitted Events).
+    // Workers run the `default-worker` persona (agent-runtime.md §Bootstrap);
+    // orchestrators report their tier via the orchestrator spawn path.
     let ev = AnalyticsEvent::new(
         new_id(),
         "agent.spawned",
         Some(agent.id.to_string()),
-        serde_json::json!({ "task_id": req.task_id }),
+        serde_json::json!({
+            "task_id": req.task_id,
+            "compute_target": compute_target_label,
+            "persona": "default-worker",
+            "orchestrator_type": "worker",
+        }),
         now,
+    )
+    .with_scope(
+        None,
+        None,
+        Some(&repo.workspace_id),
+        Some(&repo.id),
     );
     let _ = state.analytics.record(&ev).await;
 
@@ -1304,23 +1317,23 @@ pub async fn complete_agent(
         );
     }
 
-    // Auto-track agent completion
+    let duration_secs = now.saturating_sub(agent.spawned_at);
     let ev = AnalyticsEvent::new(
         new_id(),
         "agent.completed",
         Some(agent.id.to_string()),
-        serde_json::json!({ "mr_id": mr.id.to_string() }),
+        serde_json::json!({
+            "mr_id": mr.id.to_string(),
+            "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+            "duration_secs": duration_secs,
+        }),
         now,
-    );
-    let _ = state.analytics.record(&ev).await;
-
-    // Auto-track MR creation
-    let ev = AnalyticsEvent::new(
-        new_id(),
-        "mr.created",
-        Some(agent.id.to_string()),
-        serde_json::json!({ "mr_id": mr.id.to_string(), "source_branch": mr.source_branch }),
-        now,
+    )
+    .with_scope(
+        None,
+        None,
+        Some(&mr.workspace_id),
+        Some(&mr.repository_id),
     );
     let _ = state.analytics.record(&ev).await;
 
@@ -1445,6 +1458,24 @@ pub async fn fail_agent(
     let workspace_id = agent.workspace_id.to_string();
     super::budget::decrement_active_agents(&state, &workspace_id).await;
 
+    // Auto-track agent failure (analytics.md §Auto-Emitted Events).
+    let now = now_secs();
+    let duration_secs = now.saturating_sub(agent.spawned_at);
+    let ev = AnalyticsEvent::new(
+        new_id(),
+        "agent.failed",
+        Some(agent.id.to_string()),
+        serde_json::json!({
+            "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+            "reason": "non-recoverable error",
+            "duration_secs": duration_secs,
+        }),
+        now,
+    )
+    .with_scope(None, None, Some(&agent.workspace_id), agent.repo_id.as_ref());
+    let _ = state.analytics.record(&ev).await;
+
+
     // Notify the spawning user that the agent failed (HSI §2).
     if let Some(ref spawned_by) = agent.spawned_by {
         crate::notifications::notify(
@@ -1512,6 +1543,23 @@ pub async fn stop_agent(
     // M22.2: Decrement budget active-agent counter.
     let workspace_id = agent.workspace_id.to_string();
     super::budget::decrement_active_agents(&state, &workspace_id).await;
+
+    // Auto-track agent kill (analytics.md §Auto-Emitted Events: agent.failed
+    // covers "fails or is killed").
+    let now = now_secs();
+    let ev = AnalyticsEvent::new(
+        new_id(),
+        "agent.failed",
+        Some(agent.id.to_string()),
+        serde_json::json!({
+            "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+            "reason": "killed",
+            "duration_secs": now.saturating_sub(agent.spawned_at),
+        }),
+        now,
+    )
+    .with_scope(None, None, Some(&agent.workspace_id), agent.repo_id.as_ref());
+    let _ = state.analytics.record(&ev).await;
 
     Ok(StatusCode::OK)
 }

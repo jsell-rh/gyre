@@ -5,6 +5,7 @@ use axum::{
 };
 use gyre_common::Id;
 use gyre_domain::{AnalyticsEvent, CostEntry};
+use gyre_ports::analytics::AnalyticsQueryFilter;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -19,14 +20,27 @@ use super::{new_id, now_secs};
 pub struct RecordEventRequest {
     pub event_name: String,
     pub agent_id: Option<String>,
+    pub user_id: Option<String>,
+    pub session_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub repo_id: Option<String>,
     pub properties: Option<serde_json::Value>,
 }
 
+/// GET /api/v1/analytics/events parameters (analytics.md §Query Parameters).
 #[derive(Deserialize)]
 pub struct QueryEventsParams {
     pub event_name: Option<String>,
+    pub agent_id: Option<String>,
+    pub user_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub repo_id: Option<String>,
     pub since: Option<u64>,
+    pub until: Option<u64>,
     pub limit: Option<usize>,
+    /// Aggregate by field instead of returning raw events:
+    /// `event_name`, `agent_id`, `workspace_id`, `day`.
+    pub group_by: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -48,6 +62,10 @@ pub struct AnalyticsEventResponse {
     pub id: String,
     pub event_name: String,
     pub agent_id: Option<String>,
+    pub user_id: Option<String>,
+    pub session_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub repo_id: Option<String>,
     pub properties: serde_json::Value,
     pub timestamp: u64,
 }
@@ -58,16 +76,14 @@ impl From<AnalyticsEvent> for AnalyticsEventResponse {
             id: e.id.to_string(),
             event_name: e.event_name,
             agent_id: e.agent_id,
+            user_id: e.user_id,
+            session_id: e.session_id,
+            workspace_id: e.workspace_id,
+            repo_id: e.repo_id,
             properties: e.properties,
             timestamp: e.timestamp,
         }
     }
-}
-
-#[derive(Serialize)]
-pub struct DayCount {
-    pub date: String,
-    pub count: u64,
 }
 
 pub async fn record_event(
@@ -81,6 +97,12 @@ pub async fn record_event(
         req.properties
             .unwrap_or(serde_json::Value::Object(Default::default())),
         now_secs(),
+    )
+    .with_scope(
+        req.user_id.as_deref().map(Id::new).as_ref(),
+        req.session_id,
+        req.workspace_id.as_deref().map(Id::new).as_ref(),
+        req.repo_id.as_deref().map(Id::new).as_ref(),
     );
     state.analytics.record(&event).await?;
     Ok((
@@ -92,13 +114,89 @@ pub async fn record_event(
 pub async fn query_events(
     State(state): State<Arc<AppState>>,
     Query(params): Query<QueryEventsParams>,
-) -> Result<Json<Vec<AnalyticsEventResponse>>, ApiError> {
-    let limit = params.limit.unwrap_or(100).min(1000);
-    let events = state
-        .analytics
-        .query(params.event_name.as_deref(), params.since, limit)
-        .await?;
-    Ok(Json(events.into_iter().map(Into::into).collect()))
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let limit = params.limit.unwrap_or(100).min(10_000);
+    let filter = AnalyticsQueryFilter {
+        event_name: params.event_name.clone(),
+        agent_id: params.agent_id.clone(),
+        user_id: params.user_id.clone(),
+        workspace_id: params.workspace_id.clone(),
+        repo_id: params.repo_id.clone(),
+        since: params.since,
+        until: params.until,
+        limit,
+    };
+    let events = state.analytics.query_filtered(&filter).await?;
+
+    // group_by aggregation (analytics.md §Query Parameters): event_name,
+    // agent_id, workspace_id, day. Falls back to raw event list.
+    if let Some(field) = params.group_by.as_deref() {
+        let counts: serde_json::Map<String, serde_json::Value> = match field {
+            "event_name" => {
+                let mut m = std::collections::BTreeMap::new();
+                for e in &events {
+                    *m.entry(e.event_name.clone()).or_insert(0u64) += 1;
+                }
+                m.into_iter().map(|(k, v)| (k, serde_json::Value::from(v))).collect()
+            }
+            "agent_id" => {
+                let mut m = std::collections::BTreeMap::new();
+                for e in &events {
+                    *m.entry(e.agent_id.clone().unwrap_or_else(|| "(none)".into()))
+                        .or_insert(0u64) += 1;
+                }
+                m.into_iter().map(|(k, v)| (k, serde_json::Value::from(v))).collect()
+            }
+            "workspace_id" => {
+                let mut m = std::collections::BTreeMap::new();
+                for e in &events {
+                    *m.entry(e.workspace_id.clone().unwrap_or_else(|| "(none)".into()))
+                        .or_insert(0u64) += 1;
+                }
+                m.into_iter().map(|(k, v)| (k, serde_json::Value::from(v))).collect()
+            }
+            "day" => {
+                let mut m = std::collections::BTreeMap::new();
+                for e in &events {
+                    let day = epoch_day_string(e.timestamp);
+                    *m.entry(day).or_insert(0u64) += 1;
+                }
+                m.into_iter().map(|(k, v)| (k, serde_json::Value::from(v))).collect()
+            }
+            other => {
+                return Err(ApiError::InvalidInput(format!(
+                    "unsupported group_by field: {other} (expected event_name, agent_id, workspace_id, day)"
+                )))
+            }
+        };
+        return Ok(Json(serde_json::Value::Object(counts)));
+    }
+
+    Ok(Json(serde_json::Value::Array(
+        events.into_iter().map(|e| serde_json::to_value(e).unwrap_or_default()).collect(),
+    )))
+}
+
+/// Format a unix-seconds timestamp as a UTC `YYYY-MM-DD` day key.
+fn epoch_day_string(ts: u64) -> String {
+    let days = ts / 86_400;
+    let (y, m, d) = epoch_days_to_ymd(days as i64);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Civil-from-days algorithm (Howard Hinnant) — same math as mem.rs.
+fn epoch_days_to_ymd(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
 
 pub async fn count_events(
@@ -112,6 +210,12 @@ pub async fn count_events(
     Ok(Json(
         serde_json::json!({ "event_name": params.event_name, "count": count }),
     ))
+}
+
+#[derive(Serialize)]
+pub struct DayCount {
+    pub date: String,
+    pub count: u64,
 }
 
 pub async fn daily_events(

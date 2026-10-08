@@ -241,6 +241,53 @@ pub async fn budget_summary(
 
 // ── Internal helpers (called from spawn handler and cost recording) ───────────
 
+/// Emit a `budget.warning` analytics event when a workspace budget metric
+/// crosses the warning threshold (analytics.md §Auto-Emitted Events).
+///
+/// Threshold: 80% of the configured limit. Emitted from the budget check and
+/// usage-recording paths; the event carries the metric, threshold pct, and
+/// current usage so consumers can trend consumption. Emission is best-effort.
+const BUDGET_WARNING_THRESHOLD_PCT: f64 = 80.0;
+
+async fn emit_budget_warning(
+    state: &AppState,
+    project_id: &str,
+    metric: &str,
+    used: f64,
+    limit: f64,
+) {
+    if limit <= 0.0 {
+        return;
+    }
+    let threshold_pct = BUDGET_WARNING_THRESHOLD_PCT;
+    let used_pct = (used / limit) * 100.0;
+    if used_pct < threshold_pct {
+        return;
+    }
+    let now = now_secs();
+    let ev = gyre_domain::AnalyticsEvent::new(
+        gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+        "budget.warning",
+        None,
+        serde_json::json!({
+            "workspace_id": project_id,
+            "metric": metric,
+            "threshold_pct": threshold_pct,
+            "used_pct": used_pct,
+            "used": used,
+            "limit": limit,
+        }),
+        now,
+    )
+    .with_scope(
+        None,
+        None,
+        Some(&gyre_common::Id::new(project_id.to_string())),
+        None,
+    );
+    let _ = state.analytics.record(&ev).await;
+}
+
 /// Check if spawning another agent would exceed workspace/tenant budget limits.
 pub async fn check_spawn_budget(state: &AppState, project_id: &str) -> Result<(), String> {
     let key = workspace_key(project_id);
@@ -255,6 +302,14 @@ pub async fn check_spawn_budget(state: &AppState, project_id: &str) -> Result<()
             .unwrap_or_else(|| new_ws_usage(project_id));
 
         if let Some(max) = config.max_concurrent_agents {
+            emit_budget_warning(
+                state,
+                project_id,
+                "agents",
+                usage.active_agents as f64,
+                max as f64,
+            )
+            .await;
             if usage.active_agents >= max {
                 return Err(format!(
                     "workspace budget exceeded: max_concurrent_agents={max} ({} active)",
@@ -263,6 +318,14 @@ pub async fn check_spawn_budget(state: &AppState, project_id: &str) -> Result<()
             }
         }
         if let Some(max_tokens) = config.max_tokens_per_day {
+            emit_budget_warning(
+                state,
+                project_id,
+                "tokens",
+                usage.tokens_used_today as f64,
+                max_tokens as f64,
+            )
+            .await;
             if usage.tokens_used_today >= max_tokens {
                 return Err(format!(
                     "workspace budget exceeded: max_tokens_per_day={max_tokens} (used {} today)",
@@ -271,6 +334,14 @@ pub async fn check_spawn_budget(state: &AppState, project_id: &str) -> Result<()
             }
         }
         if let Some(max_cost) = config.max_cost_per_day {
+            emit_budget_warning(
+                state,
+                project_id,
+                "cost",
+                usage.cost_today,
+                max_cost,
+            )
+            .await;
             if usage.cost_today >= max_cost {
                 return Err(format!(
                     "workspace budget exceeded: max_cost_per_day=${max_cost:.4} (spent ${:.4})",
@@ -323,7 +394,8 @@ pub async fn decrement_active_agents(state: &AppState, project_id: &str) {
     let _ = state.budget_usages.decrement_active(tenant_key()).await;
 }
 
-/// Add token/cost usage to workspace and tenant budgets.
+/// Add token/cost usage to workspace and tenant budgets, then evaluate
+/// warning thresholds against the new totals.
 pub async fn record_budget_usage(state: &AppState, project_id: &str, tokens: u64, cost_usd: f64) {
     let ws_key = workspace_key(project_id);
     let now = now_secs();
@@ -335,6 +407,24 @@ pub async fn record_budget_usage(state: &AppState, project_id: &str, tokens: u64
         .budget_usages
         .add_tokens_cost(tenant_key(), "tenant", "global", now, tokens, cost_usd)
         .await;
+    emit_usage_warnings(state, project_id).await;
+}
+
+/// Evaluate warning thresholds against current workspace usage totals.
+async fn emit_usage_warnings(state: &AppState, project_id: &str) {
+    let key = workspace_key(project_id);
+    let Ok(Some(config)) = state.budget_configs.get_config(&key).await else {
+        return;
+    };
+    let Ok(Some(usage)) = state.budget_usages.get_usage(&key).await else {
+        return;
+    };
+    if let (Some(max_tokens), used) = (config.max_tokens_per_day, usage.tokens_used_today) {
+        emit_budget_warning(state, project_id, "tokens", used as f64, max_tokens as f64).await;
+    }
+    if let (Some(max_cost), used) = (config.max_cost_per_day, usage.cost_today) {
+        emit_budget_warning(state, project_id, "cost", used, max_cost).await;
+    }
 }
 
 /// Reset daily counters to zero. Called at midnight UTC by background job.

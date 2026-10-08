@@ -326,7 +326,8 @@ pub async fn transition_task_status(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("task {id} not found")))?;
     let new_status = parse_task_status(&req.status)?;
-    task.transition_status(new_status)
+    let old_status = task.status.clone();
+    task.transition_status(new_status.clone())
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
     let ts = now_secs();
     task.updated_at = ts;
@@ -347,10 +348,13 @@ pub async fn transition_task_status(
         task.assigned_to.as_ref().map(|id| id.to_string()),
         serde_json::json!({
             "task_id": task.id.to_string(),
-            "new_status": req.status,
+            "old_status": format!("{:?}", old_status),
+            "new_status": format!("{:?}", new_status),
+            "assigned_to": task.assigned_to.as_ref().map(|id| id.to_string()),
         }),
         ts,
-    );
+    )
+    .with_scope(None, None, Some(&task.workspace_id), None);
     let _ = state.analytics.record(&event).await;
 
     Ok(Json(TaskResponse::from(task)))
