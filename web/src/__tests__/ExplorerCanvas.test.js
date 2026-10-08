@@ -436,9 +436,43 @@ describe('ExplorerCanvas — view query opacity resolution', () => {
     }
 
     if (scope.type === 'diff') {
+      // Mirrors ExplorerCanvas.svelte diff scope, which mirrors the server
+      // resolver (gyre-domain view_query_resolver.rs Scope::Diff). Reads the
+      // fields GraphNodeResponse actually serializes: created_sha,
+      // last_modified_sha, created_at, last_modified_at. There is no
+      // last_commit_sha field in production data.
+      const fromCommit = (scope.from_commit ?? '').toLowerCase();
+      const toCommit = (scope.to_commit ?? '').toLowerCase();
+      if (!fromCommit || !toCommit) return new Set();
+      const epochRef = (s) => {
+        const m = /^~(\d+)$/.exec(s);
+        return m ? Number(m[1]) : null;
+      };
+      const fromTs = epochRef(fromCommit);
+      const toTs = epochRef(toCommit);
       const matched = new Set();
-      for (const n of nodes) {
-        if (n.last_commit_sha && n.last_commit_sha !== scope.from_commit) matched.add(n.id);
+      if (fromTs !== null && toTs !== null) {
+        // Temporal diff: created or modified within (fromTs, toTs]
+        for (const n of nodes) {
+          const created = n.created_at ?? 0;
+          const modified = n.last_modified_at ?? 0;
+          if ((created > fromTs && created <= toTs) || (modified > fromTs && modified <= toTs)) {
+            matched.add(n.id);
+          }
+        }
+      } else {
+        // SHA diff: to_commit must be a >=7-char prefix of created_sha or
+        // last_modified_sha; nodes unchanged at from_commit (BOTH shas match
+        // from) are excluded.
+        const shaMatches = (sha, target) => {
+          if (!sha || target.length < 7) return false;
+          return String(sha).toLowerCase().startsWith(target);
+        };
+        for (const n of nodes) {
+          const matchesTo = shaMatches(n.created_sha, toCommit) || shaMatches(n.last_modified_sha, toCommit);
+          const unchangedAtFrom = shaMatches(n.created_sha, fromCommit) && shaMatches(n.last_modified_sha, fromCommit);
+          if (matchesTo && !unchangedAtFrom) matched.add(n.id);
+        }
       }
       return matched;
     }
@@ -545,14 +579,60 @@ describe('ExplorerCanvas — view query opacity resolution', () => {
     expect(matched.has('fn2')).toBe(false); // no call connection to User
   });
 
-  it('diff scope: highlights nodes with different commit SHA', () => {
-    const nodesWithCommit = [
-      ...NODES.map(n => ({ ...n, last_commit_sha: n.id === 'fn1' ? 'newsha' : 'abc123' })),
-    ];
-    const matched = resolveQueryMatch(nodesWithCommit, EDGES, { type: 'diff', from_commit: 'abc123' });
+  it('diff scope (SHA): nodes modified at to_commit, excluding unchanged at from_commit', () => {
+    // Fields GraphNodeResponse actually serializes: created_sha/last_modified_sha
+    const nodesWithSha = NODES.map(n => {
+      // fn1: modified at to_commit, created elsewhere -> included
+      if (n.id === 'fn1') return { ...n, created_sha: '1111111111111111', last_modified_sha: 'abcdef1234567890' };
+      // fn2: created AND last-modified at from_commit (both shas prefix-match
+      // from) -> excluded even though created_sha also matches to_commit
+      if (n.id === 'fn2') return { ...n, created_sha: 'abcdef1234567890', last_modified_sha: 'abcdef1999999999' };
+      return { ...n, created_sha: '0000000aaaaaaaa', last_modified_sha: '0000000bbbbbbbb' };
+    });
+    const matched = resolveQueryMatch(nodesWithSha, EDGES, { type: 'diff', from_commit: 'abcdef1', to_commit: 'abcdef12' });
 
-    expect(matched.has('fn1')).toBe(true); // different SHA
-    expect(matched.has('fn2')).toBe(false); // same SHA
+    expect(matched.has('fn1')).toBe(true); // last_modified_sha matches to_commit prefix
+    expect(matched.has('fn2')).toBe(false); // unchanged at from_commit -> excluded
+    expect(matched.has('type1')).toBe(false); // never matched to_commit
+  });
+
+  it('diff scope (SHA): requires >=7-char to_commit prefix', () => {
+    // 'c0ffee' is only 6 chars: below the false-positive guard, so no match
+    const nodesWithSha = NODES.map(n => ({
+      ...n,
+      created_sha: 'aaaaaa1aaaaaa',
+      last_modified_sha: 'c0ffee000000',
+    }));
+    const matched = resolveQueryMatch(nodesWithSha, EDGES, { type: 'diff', from_commit: 'aaaaaa1aaaaaa', to_commit: 'c0ffee' });
+    expect(matched.size).toBe(0);
+  });
+
+  it('diff scope (temporal): nodes created or modified within (from, to]', () => {
+    const nodesWithTs = [
+      ...NODES.map(n => ({ ...n, created_at: 100, last_modified_at: 100 })),
+      { ...NODES[2], created_at: 100, last_modified_at: 150 }, // fn1 modified inside (100,200]
+      { ...NODES[3], created_at: 150, last_modified_at: 100 }, // fn2 created inside range
+      { ...NODES[5], created_at: 100, last_modified_at: 250 }, // type1 modified after to
+    ];
+    const matched = resolveQueryMatch(nodesWithTs, EDGES, { type: 'diff', from_commit: '~100', to_commit: '~200' });
+    expect(matched.has('fn1')).toBe(true);
+    expect(matched.has('fn2')).toBe(true);
+    expect(matched.has('type1')).toBe(false);
+    expect(matched.has('pkg1')).toBe(false); // created_at = 100 is NOT > fromTs (half-open)
+    expect(matched.has('test1')).toBe(false);
+  });
+
+  it('diff scope: missing to_commit resolves to no nodes', () => {
+    // The old client implementation read a nonexistent field (last_commit_sha)
+    // and ignored to_commit; with real data it matched nothing. The component
+    // requires both commits, mirroring the server resolver.
+    const nodesWithSha = NODES.map(n => ({
+      ...n,
+      created_sha: 'aaaaaa1aaaaaa',
+      last_modified_sha: 'c0ffee000000',
+    }));
+    const matched = resolveQueryMatch(nodesWithSha, EDGES, { type: 'diff', from_commit: 'aaaaaa1aaaaaa' });
+    expect(matched.size).toBe(0);
   });
 
   it('returns empty set for focus scope with non-existent node', () => {
