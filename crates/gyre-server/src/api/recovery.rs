@@ -375,6 +375,7 @@ pub async fn set_post_merge_gates(
             gate_phase: GatePhase::PostMerge,
             timeout_secs: dto.timeout_secs,
             created_at: now,
+            position: 0,
         };
         state.quality_gates.save(&gate).await?;
     }

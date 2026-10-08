@@ -38,6 +38,9 @@ pub struct CreateGateRequest {
     pub gate_phase: Option<GatePhase>,
     /// Command timeout in seconds. Defaults to the system default (300s).
     pub timeout_secs: Option<u64>,
+    /// Position in the gate chain (repo-lifecycle.md §3 Gates — drag to
+    /// reorder). Defaults to the end of the list.
+    pub position: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -53,6 +56,8 @@ pub struct UpdateGateRequest {
     pub required: Option<bool>,
     /// Command timeout in seconds.
     pub timeout_secs: Option<u64>,
+    /// New position in the gate chain.
+    pub position: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -70,6 +75,8 @@ pub struct GateResponse {
     pub gate_phase: String,
     /// Command timeout in seconds (None = system default).
     pub timeout_secs: Option<u64>,
+    /// Position in the gate chain (lower runs first).
+    pub position: u32,
     pub created_at: u64,
 }
 
@@ -86,6 +93,7 @@ impl From<QualityGate> for GateResponse {
             required: g.required,
             gate_phase: g.gate_phase.as_str().to_string(),
             timeout_secs: g.timeout_secs,
+            position: g.position,
             created_at: g.created_at,
         }
     }
@@ -228,6 +236,21 @@ pub async fn create_gate(
         }
     }
 
+    // Default position: append to the end of the repo's gate chain
+    // (repo-lifecycle.md §3 Gates — ordering is explicit).
+    let position = match req.position {
+        Some(p) => p,
+        None => {
+            let existing = state.quality_gates.list_by_repo_id(&repo_id).await?;
+            existing
+                .iter()
+                .map(|g| g.position)
+                .max()
+                .unwrap_or(0)
+                + 1
+        }
+    };
+
     let gate = QualityGate {
         id: new_id(),
         repo_id: Id::new(repo_id),
@@ -240,6 +263,7 @@ pub async fn create_gate(
         gate_phase: req.gate_phase.unwrap_or_default(),
         timeout_secs: req.timeout_secs,
         created_at: now_secs(),
+        position,
     };
 
     state.quality_gates.save(&gate).await?;
@@ -259,7 +283,7 @@ pub async fn list_gates(
         .into_iter()
         .map(GateResponse::from)
         .collect();
-    result.sort_by_key(|g| g.created_at);
+    result.sort_by(|a, b| a.position.cmp(&b.position).then(a.created_at.cmp(&b.created_at)));
     Ok(Json(result))
 }
 
@@ -353,6 +377,9 @@ pub async fn update_gate(
     }
     if let Some(timeout_secs) = req.timeout_secs {
         gate.timeout_secs = Some(timeout_secs);
+    }
+    if let Some(position) = req.position {
+        gate.position = position;
     }
 
     state.quality_gates.save(&gate).await?;
