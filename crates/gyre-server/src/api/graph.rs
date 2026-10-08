@@ -228,6 +228,10 @@ pub struct GraphDiffResponse {
 #[derive(Deserialize)]
 pub struct BriefingQuery {
     pub since: Option<u64>,
+    /// Optional repo filter — narrows the briefing to a single repo (HSI §1.5
+    /// repo-scope Briefing row / §9 "Briefing endpoint"). Must belong to the
+    /// path workspace; otherwise 404 (no repo-existence leak).
+    pub repo_id: Option<String>,
 }
 
 /// One completed-agent entry for the Briefing "Completed" section (HSI §4).
@@ -805,11 +809,11 @@ pub async fn get_workspace_graph(
 }
 
 /// Core briefing assembly logic shared by both REST and MCP handlers.
-/// Collects MRs, tasks, completed agents, and builds the summary string.
 pub async fn assemble_briefing(
     state: &AppState,
     workspace_id: &str,
     since: u64,
+    repo_filter: Option<&str>,
 ) -> Result<BriefingResponse, ApiError> {
     // caller-scope:ok — all iterated entities pre-filtered to same workspace via list_by_workspace
     let ws_id = Id::new(workspace_id);
@@ -824,8 +828,22 @@ pub async fn assemble_briefing(
         .await
         .unwrap_or_default();
 
+    // Repo filter (HSI §1.5 repo-scope Briefing): MRs carry repository_id,
+    // tasks carry repo_id. Applied uniformly to every repo-derived section.
+    let repo_match = |mr_repo: &Id, filter: Option<&str>| -> bool {
+        filter.map_or(true, |f| mr_repo.as_str() == f)
+    };
+    let mrs: Vec<_> = all_mrs
+        .iter()
+        .filter(|mr| repo_match(&mr.repository_id, repo_filter))
+        .collect();
+    let tasks: Vec<_> = all_tasks
+        .iter()
+        .filter(|t| repo_match(&t.repo_id, repo_filter))
+        .collect();
+
     // Section: completed — MRs with status Merged updated since `since`.
-    let completed: Vec<BriefingItem> = all_mrs
+    let completed: Vec<BriefingItem> = mrs
         .iter()
         .filter(|mr| mr.status == MrStatus::Merged && mr.updated_at >= since)
         .map(|mr| BriefingItem {
@@ -844,7 +862,7 @@ pub async fn assemble_briefing(
         .collect();
 
     // Section: in_progress — tasks with status InProgress or Review updated since `since`.
-    let in_progress: Vec<BriefingItem> = all_tasks
+    let in_progress: Vec<BriefingItem> = tasks
         .iter()
         .filter(|t| {
             (t.status == TaskStatus::InProgress || t.status == TaskStatus::Review)
@@ -885,7 +903,11 @@ pub async fn assemble_briefing(
                         .target_repo_id
                         .as_ref()
                         .is_some_and(|tid| !ws_repo_ids.contains(tid))
-                    && (link.created_at >= since || link.stale_since.is_some_and(|t| t >= since))
+                    && (link.created_at >= since
+                        || link.stale_since.is_some_and(|t| t >= since))
+                    && repo_filter.map_or(true, |f| {
+                        link.source_repo_id.as_deref() == Some(f)
+                    })
             })
             .map(|link| BriefingItem {
                 title: format!("Cross-workspace dependency: {}", link.target_path),
@@ -920,7 +942,7 @@ pub async fn assemble_briefing(
         let mut items = Vec::new();
 
         // 1. Gate failures: failed gate results for workspace MRs since `since`.
-        for mr in all_mrs.iter().filter(|mr| mr.updated_at >= since) {
+        for mr in mrs.iter().filter(|mr| mr.updated_at >= since) {
             let results = state
                 .gate_results
                 .list_by_mr_id(&mr.id.to_string())
@@ -964,6 +986,8 @@ pub async fn assemble_briefing(
             n.notification_type == gyre_common::NotificationType::SpecAssertionFailure
                 && n.workspace_id == ws_id
                 && n.created_at >= since as i64
+                && repo_filter
+                    .map_or(true, |f| n.repo_id.as_deref() == Some(f))
         }) {
             items.push(BriefingItem {
                 title: n.title.clone(),
@@ -982,7 +1006,7 @@ pub async fn assemble_briefing(
         }
 
         // 3. MR reverts: MRs with Reverted status since `since`.
-        for mr in all_mrs
+        for mr in mrs
             .iter()
             .filter(|mr| mr.status == MrStatus::Reverted && mr.updated_at >= since)
         {
@@ -1033,8 +1057,51 @@ pub async fn assemble_briefing(
         .await
         .unwrap_or_default();
 
+    // Repo filter for completed agents: resolve each agent's repo binding.
+    // Agents bound to no repo (workspace orchestrators) are excluded when a
+    // repo filter is set — they are not "for this repo".
+    let agent_repo: Option<std::collections::HashMap<String, String>> = if repo_filter.is_some() {
+        let mut m = std::collections::HashMap::new();
+        for msg in completed_msgs.iter() {
+            let Some(aid) = msg
+                .payload
+                .as_ref()
+                .and_then(|p| p.get("agent_id"))
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            if m.contains_key(aid) {
+                continue;
+            }
+            if let Ok(Some(agent)) = state.agents.find_by_id(&Id::new(aid)).await {
+                if let Some(rid) = agent.repo_id {
+                    m.insert(aid.to_string(), rid.to_string());
+                }
+            }
+        }
+        Some(m)
+    } else {
+        None
+    };
+
     let completed_agents: Vec<BriefingCompletedAgent> = completed_msgs
         .into_iter()
+        .filter(|msg| {
+            let agent_id = msg
+                .payload
+                .as_ref()
+                .and_then(|p| p.get("agent_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            match (&agent_id, &agent_repo) {
+                // No filter: include all.
+                (_, None) => true,
+                // Filter set: include only agents bound to the filtered repo.
+                (Some(aid), Some(repos)) => repos.get(aid).map(String::as_str) == repo_filter,
+                (None, Some(_)) => false,
+            }
+        })
         .filter_map(|msg| {
             let payload = msg.payload?;
             let agent_id = payload.get("agent_id")?.as_str()?.to_string();
@@ -1116,6 +1183,7 @@ pub async fn assemble_briefing(
 /// Returns the HSI-defined briefing for a workspace (HSI §9).
 /// When `?since=` is omitted, uses `last_seen_at` from `user_workspace_state` as default.
 /// Falls back to 24 hours ago if no row exists (first visit). Always returns 200.
+/// `?repo_id=` narrows every section to a single repo (HSI §1.5 repo-scope Briefing).
 pub async fn get_workspace_briefing(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
@@ -1123,6 +1191,25 @@ pub async fn get_workspace_briefing(
     Query(q): Query<BriefingQuery>,
 ) -> Result<Json<BriefingResponse>, ApiError> {
     require_workspace(&state, &id).await?;
+
+    // Validate repo filter: repo must exist AND belong to the path workspace.
+    let repo_filter = match &q.repo_id {
+        Some(rid) => {
+            let repo = state
+                .repos
+                .find_by_id(&Id::new(rid))
+                .await
+                .map_err(ApiError::Internal)?
+                .ok_or_else(|| ApiError::NotFound(format!("repo {rid} not found")))?;
+            if repo.workspace_id != Id::new(&id) {
+                return Err(ApiError::Forbidden(format!(
+                    "repo {rid} does not belong to workspace {id}"
+                )));
+            }
+            Some(repo.id.to_string())
+        }
+        None => None,
+    };
 
     // Resolve `since`: explicit param > last_seen_at from user_workspace_state > 24h fallback.
     let since: u64 = if let Some(s) = q.since {
@@ -1140,7 +1227,7 @@ pub async fn get_workspace_briefing(
         now_secs().saturating_sub(24 * 3600)
     };
 
-    let briefing = assemble_briefing(&state, &id, since).await?;
+    let briefing = assemble_briefing(&state, &id, since, repo_filter.as_deref()).await?;
     Ok(Json(briefing))
 }
 
@@ -1962,7 +2049,7 @@ mod tests {
             });
         }
 
-        let briefing = assemble_briefing(&state, &ws_id, 1500)
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
             .await
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
@@ -2008,7 +2095,7 @@ mod tests {
             });
         }
 
-        let briefing = assemble_briefing(&state, &ws_id, 1500)
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
             .await
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
@@ -2043,7 +2130,7 @@ mod tests {
             });
         }
 
-        let briefing = assemble_briefing(&state, &ws_id, 1500)
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
             .await
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
@@ -2084,7 +2171,7 @@ mod tests {
             });
         }
 
-        let briefing = assemble_briefing(&state, &ws_id, 1500)
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
             .await
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
@@ -2124,7 +2211,7 @@ mod tests {
         };
         state.gate_results.save(&gr).await.unwrap();
 
-        let briefing = assemble_briefing(&state, &ws_id, 1500)
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
             .await
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
@@ -2172,7 +2259,7 @@ mod tests {
         };
         state.gate_results.save(&gr).await.unwrap();
 
-        let briefing = assemble_briefing(&state, &ws_id, 1500)
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
             .await
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
@@ -2204,7 +2291,7 @@ mod tests {
         );
         state.notifications.create(&notif).await.unwrap();
 
-        let briefing = assemble_briefing(&state, &ws_id, 1500)
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
             .await
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
@@ -2241,7 +2328,7 @@ mod tests {
         mr.revert("f".repeat(40).to_string(), 2100).unwrap();
         state.merge_requests.create(&mr).await.unwrap();
 
-        let briefing = assemble_briefing(&state, &ws_id, 1500)
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
             .await
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
@@ -2263,7 +2350,7 @@ mod tests {
         let state = test_state();
         let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
 
-        let briefing = assemble_briefing(&state, &ws_id, 1500)
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
             .await
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
@@ -2313,7 +2400,7 @@ mod tests {
         mr.revert("0".repeat(40).to_string(), 500).unwrap();
         state.merge_requests.create(&mr).await.unwrap();
 
-        let briefing = assemble_briefing(&state, &ws_id, 1500)
+        let briefing = assemble_briefing(&state, &ws_id, 1500, None)
             .await
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
@@ -2325,5 +2412,220 @@ mod tests {
             briefing.exceptions.is_empty(),
             "old MR reverts should be filtered out"
         );
+    }
+
+    // ── Repo-scoped briefing (?repo_id= filter, HSI §1.5 / task-083) ──────
+
+    /// Two repos in one workspace: MRs/tasks in both; filter by one repo.
+    #[tokio::test]
+    async fn briefing_repo_filter_narrows_sections_to_that_repo() {
+        let state = test_state();
+        let (ws_id, _repo1) = setup_workspace_and_repo(&state).await;
+
+        // Second repo in the same workspace.
+        let repo2 = gyre_domain::Repository {
+            id: Id::new("repo-2"),
+            workspace_id: Id::new("ws-briefing"),
+            name: "payments-service".to_string(),
+            path: "/repos/payments-service".to_string(),
+            default_branch: "main".to_string(), // hardcoded-default:ok — test fixture
+            is_mirror: false,
+            mirror_url: None,
+            mirror_interval_secs: None,
+            last_mirror_sync: None,
+            description: None,
+            status: gyre_domain::RepoStatus::Active,
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        state.repos.create(&repo2).await.unwrap();
+
+        // Merged MR in repo-1 (should appear when filtering repo-1, not repo-2).
+        let mut mr1 = gyre_domain::MergeRequest::new(
+            Id::new("mr-r1"),
+            Id::new("repo-1"),
+            "repo-1 merged work",
+            "feat/one",
+            "main",
+            2000,
+        );
+        mr1.workspace_id = Id::new("ws-briefing");
+        mr1.updated_at = 2000;
+        mr1.status = gyre_domain::MrStatus::Merged;
+        state.merge_requests.create(&mr1).await.unwrap();
+
+        // Merged MR in repo-2.
+        let mut mr2 = gyre_domain::MergeRequest::new(
+            Id::new("mr-r2"),
+            Id::new("repo-2"),
+            "repo-2 merged work",
+            "feat/two",
+            "main",
+            2000,
+        );
+        mr2.workspace_id = Id::new("ws-briefing");
+        mr2.updated_at = 2000;
+        mr2.status = gyre_domain::MrStatus::Merged;
+        state.merge_requests.create(&mr2).await.unwrap();
+
+        // In-progress task in repo-1.
+        let mut t1 = gyre_domain::Task::new(Id::new("task-r1"), "repo-1 in-progress task", 2000);
+        t1.workspace_id = Id::new("ws-briefing");
+        t1.repo_id = Id::new("repo-1");
+        t1.status = gyre_domain::TaskStatus::InProgress;
+        t1.updated_at = 2000;
+        state.tasks.create(&t1).await.unwrap();
+
+        // In-progress task in repo-2.
+        let mut t2 = gyre_domain::Task::new(Id::new("task-r2"), "repo-2 in-progress task", 2000);
+        t2.workspace_id = Id::new("ws-briefing");
+        t2.repo_id = Id::new("repo-2");
+        t2.status = gyre_domain::TaskStatus::InProgress;
+        t2.updated_at = 2000;
+        state.tasks.create(&t2).await.unwrap();
+
+        // Cross-workspace link sourced from repo-1.
+        {
+            let mut links = state.spec_links_store.lock().await;
+            links.push(crate::spec_registry::SpecLinkEntry {
+                id: "link-r1".to_string(),
+                source_path: "system/payment-retry.md".to_string(),
+                source_repo_id: Some("repo-1".to_string()),
+                link_type: crate::spec_registry::SpecLinkType::DependsOn,
+                target_path: "system/idempotent-api.md".to_string(),
+                target_repo_id: Some("external-repo".to_string()),
+                target_display: Some("@platform-core/api-svc/system/idempotent-api.md".to_string()),
+                target_sha: None,
+                reason: None,
+                status: "active".to_string(),
+                created_at: 2000,
+                stale_since: None,
+            });
+            links.push(crate::spec_registry::SpecLinkEntry {
+                id: "link-r2".to_string(),
+                source_path: "system/auth.md".to_string(),
+                source_repo_id: Some("repo-2".to_string()),
+                link_type: crate::spec_registry::SpecLinkType::DependsOn,
+                target_path: "system/sso.md".to_string(),
+                target_repo_id: Some("external-repo".to_string()),
+                target_display: Some("@platform-core/api-svc/system/sso.md".to_string()),
+                target_sha: None,
+                reason: None,
+                status: "active".to_string(),
+                created_at: 2000,
+                stale_since: None,
+            });
+        }
+
+        // Filtered to repo-1: only repo-1 items appear in every section.
+        let b1 = assemble_briefing(&state, &ws_id, 1500, Some("repo-1"))
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert_eq!(b1.completed.len(), 1, "only repo-1 merged MR");
+        assert_eq!(b1.completed[0].entity_id.as_deref(), Some("mr-r1"));
+        assert_eq!(b1.in_progress.len(), 1, "only repo-1 task");
+        assert_eq!(b1.in_progress[0].entity_id.as_deref(), Some("task-r1"));
+        assert_eq!(b1.cross_workspace.len(), 1, "only repo-1 sourced link");
+        assert_eq!(b1.cross_workspace[0].entity_id.as_deref(), Some("link-r1"));
+
+        // Filtered to repo-2: only repo-2 items appear.
+        let b2 = assemble_briefing(&state, &ws_id, 1500, Some("repo-2"))
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert_eq!(b2.completed.len(), 1, "only repo-2 merged MR");
+        assert_eq!(b2.completed[0].entity_id.as_deref(), Some("mr-r2"));
+        assert_eq!(b2.in_progress.len(), 1, "only repo-2 task");
+        assert_eq!(b2.in_progress[0].entity_id.as_deref(), Some("task-r2"));
+        assert_eq!(b2.cross_workspace.len(), 1, "only repo-2 sourced link");
+        assert_eq!(b2.cross_workspace[0].entity_id.as_deref(), Some("link-r2"));
+
+        // No filter: both repos' items appear (workspace scope unchanged).
+        let ball = assemble_briefing(&state, &ws_id, 1500, None)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert_eq!(ball.completed.len(), 2);
+        assert_eq!(ball.in_progress.len(), 2);
+        assert_eq!(ball.cross_workspace.len(), 2);
+    }
+
+    /// Completed agents section respects the repo filter via agent.repo_id.
+    #[tokio::test]
+    async fn briefing_repo_filter_completed_agents_by_agent_binding() {
+        let state = test_state();
+        let (ws_id, _repo1) = setup_workspace_and_repo(&state).await;
+
+        // Agent bound to repo-1.
+        let mut a1 = gyre_domain::Agent::new(Id::new("agent-r1"), "worker-1", 2000);
+        a1.workspace_id = Id::new("ws-briefing");
+        a1.repo_id = Some(Id::new("repo-1"));
+        state.agents.create(&a1).await.unwrap();
+
+        // Agent bound to repo-2 (repo created inline; workspace-scoped agents
+        // with repo_id None must be excluded under a repo filter).
+        let repo2 = gyre_domain::Repository {
+            id: Id::new("repo-2"),
+            workspace_id: Id::new("ws-briefing"),
+            name: "payments-service".to_string(),
+            path: "/repos/payments-service".to_string(),
+            default_branch: "main".to_string(), // hardcoded-default:ok — test fixture
+            is_mirror: false,
+            mirror_url: None,
+            mirror_interval_secs: None,
+            last_mirror_sync: None,
+            description: None,
+            status: gyre_domain::RepoStatus::Active,
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        state.repos.create(&repo2).await.unwrap();
+        let mut a2 = gyre_domain::Agent::new(Id::new("agent-r2"), "worker-2", 2000);
+        a2.workspace_id = Id::new("ws-briefing");
+        a2.repo_id = Some(Id::new("repo-2"));
+        state.agents.create(&a2).await.unwrap();
+
+        // Workspace orchestrator bound to no repo.
+        let mut a3 = gyre_domain::Agent::new(Id::new("agent-ws"), "orchestrator", 2000);
+        a3.workspace_id = Id::new("ws-briefing");
+        a3.repo_id = None;
+        state.agents.create(&a3).await.unwrap();
+
+        // agent_completed messages for all three.
+        let mk_msg = |agent_id: &str, created_at: u64| gyre_common::Message {
+            id: Id::new(&format!("msg-{agent_id}")),
+            tenant_id: Id::new("tenant-1"),
+            from: gyre_common::MessageOrigin::Agent(Id::new(agent_id)),
+            workspace_id: Some(Id::new("ws-briefing")),
+            to: gyre_common::Destination::Broadcast,
+            kind: gyre_common::MessageKind::AgentCompleted,
+            payload: Some(serde_json::json!({ "agent_id": agent_id })),
+            created_at,
+            signature: None,
+            pub_key_id: None,
+        };
+        for (agent_id, at) in [("agent-r1", 2_000_000u64), ("agent-r2", 2_000_000), ("agent-ws", 2_000_000)] {
+            state
+                .messages
+                .create(&mk_msg(agent_id, at))
+                .await
+                .unwrap();
+        }
+
+        // Filtered to repo-1: only agent-r1.
+        let b1 = assemble_briefing(&state, &ws_id, 1500, Some("repo-1"))
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert_eq!(b1.completed_agents.len(), 1);
+        assert_eq!(b1.completed_agents[0].agent_id, "agent-r1");
+
+        // No filter: all three (workspace scope unchanged).
+        let ball = assemble_briefing(&state, &ws_id, 1500, None)
+            .await
+            .map_err(|_| "assemble_briefing failed")
+            .unwrap();
+        assert_eq!(ball.completed_agents.len(), 3);
     }
 }
