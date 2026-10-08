@@ -58,10 +58,18 @@ for const_name in $PROMPT_CONSTS; do
         END_LINE=$(wc -l < "$DEFAULTS_FILE")
     fi
 
-    # Extract all {{...}} variables from the constant body
+    # Extract all {{...}} variables from the constant body. Comment lines
+    # are stripped first: the span ends just before the next `pub const`,
+    # so it always includes the NEXT constant's `/// Variables:` doc block,
+    # whose placeholders belong to that constant — they are documentation,
+    # never part of this constant's value. Only a placeholder in the string
+    # value itself can reach an LLM prompt, so only those are enforced.
+    # (Span bug found in specs/reviews/task-152.md round 2: the unfiltered
+    # window attributed PROMPT_SPECS_ASSIST's doc vars to its neighbors.)
     TEMPLATE_VARS=$(sed -n "${CONST_LINE},${END_LINE}p" "$DEFAULTS_FILE" \
+        | grep -v '^[[:space:]]*//' \
         | grep -oP '\{\{[a-z_]+\}\}' \
-        | sort -u)
+        | sort -u || true)
 
     [ -z "$TEMPLATE_VARS" ] && continue
 
