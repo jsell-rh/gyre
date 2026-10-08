@@ -127,4 +127,43 @@ mod tests {
         assert_eq!(c.amount, 1500.0);
         assert_eq!(c.currency, "tokens");
     }
+
+    /// analytics.md §Event Schema: the struct must carry every spec field —
+    /// id, event_name, agent_id, user_id, session_id, workspace_id, repo_id,
+    /// properties, timestamp — and with_scope() must populate the scope ids.
+    #[test]
+    fn analytics_event_matches_spec_schema() {
+        let e = AnalyticsEvent::new(
+            Id::new("e-spec"),
+            "mr.merged",
+            Some("agent-1".to_string()),
+            serde_json::json!({ "mr_id": "mr-1" }),
+            1000,
+        )
+        .with_scope(
+            Some(&Id::new("user-7")),
+            Some("session-42".to_string()),
+            Some(&Id::new("ws-3")),
+            Some(&Id::new("repo-9")),
+        );
+
+        assert_eq!(e.id, Id::new("e-spec"));
+        assert_eq!(e.event_name, "mr.merged");
+        assert_eq!(e.agent_id.as_deref(), Some("agent-1"));
+        assert_eq!(e.user_id.as_deref(), Some("user-7"));
+        assert_eq!(e.session_id.as_deref(), Some("session-42"));
+        assert_eq!(e.workspace_id.as_deref(), Some("ws-3"));
+        assert_eq!(e.repo_id.as_deref(), Some("repo-9"));
+        assert_eq!(e.properties["mr_id"], "mr-1");
+        assert_eq!(e.timestamp, 1000);
+
+        // Round-trips through serde with all fields intact (storage layer
+        // serializes events as JSON).
+        let json = serde_json::to_value(&e).unwrap();
+        let back: AnalyticsEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(back.user_id, e.user_id);
+        assert_eq!(back.session_id, e.session_id);
+        assert_eq!(back.workspace_id, e.workspace_id);
+        assert_eq!(back.repo_id, e.repo_id);
+    }
 }
