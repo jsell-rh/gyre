@@ -510,8 +510,9 @@ pub async fn generate_explorer_view(
     // Explorer view generation involves structured JSON output and multi-step
     // reasoning, so we apply a 3x multiplier to the base estimate.
     // Split into input/output for the per-call budget record
-    // (platform-model.md §Budget Tracking): the prompt estimate is input,
-    // the overhead + multiplier lands on the output side.
+    // (platform-model.md §Budget Tracking) so that input + output equals the
+    // analytics estimate above: the prompt estimate is input, the remainder
+    // (overhead + reasoning multiplier) lands on the output side.
     let estimated_input = (user_prompt.len() + system_prompt.len()) / 4;
     let base_estimate = (estimated_input as f64 + 500.0) * 3.0;
     let cost_entry = CostEntry::new(
@@ -540,7 +541,7 @@ pub async fn generate_explorer_view(
                 task_id: None,
                 usage_type: "llm_query".to_string(),
                 input_tokens: estimated_input as u64,
-                output_tokens: base_estimate as u64,
+                output_tokens: (base_estimate - estimated_input as f64) as u64,
                 cost_usd: 0.0,
                 model: model.clone(),
             },

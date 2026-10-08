@@ -2539,16 +2539,18 @@ async fn handle_spec_assist(state: &AppState, args: &Value, auth: &Authenticated
 
     // Budget tracking: charge workspace for LLM usage (ui-layout.md §3 line 158,
     // platform-model.md §Budget Tracking). The LlmPort does not return actual
-    // usage, so keep the existing estimate, split into input/output.
+    // usage, so keep the existing estimate — ~4 chars per token for the
+    // prompts plus response overhead and a 3x reasoning multiplier — and
+    // split it into input/output for the per-call budget record so that
+    // input + output equals the estimate.
     let estimated_input = (user_prompt.len() + system_prompt.len()) / 4;
     let base_estimate = (estimated_input as f64 + 500.0) * 3.0;
-    let estimated_output = full_text.len() / 4;
     let cost_entry = CostEntry::new(
         new_id(),
         Id::new(auth.agent_id.clone()),
         None,
         "llm_query",
-        base_estimate + estimated_output as f64,
+        base_estimate,
         "tokens",
         now_secs(),
     );
@@ -2575,7 +2577,7 @@ async fn handle_spec_assist(state: &AppState, args: &Value, auth: &Authenticated
                 task_id: None,
                 usage_type: "llm_query".to_string(),
                 input_tokens: estimated_input as u64,
-                output_tokens: (base_estimate as u64).saturating_add(estimated_output as u64),
+                output_tokens: (base_estimate - estimated_input as f64) as u64,
                 cost_usd: 0.0,
                 model: model.clone(),
             },
@@ -2587,6 +2589,7 @@ async fn handle_spec_assist(state: &AppState, args: &Value, auth: &Authenticated
             "MCP spec_assist budget recording skipped: workspace not found"
         );
     }
+
 
     // Validate LLM response: parse JSON, check diff+explanation fields, validate diff ops.
     // Must match REST handler validation (specs_assist.rs) per HSI §11 MCP parity.
