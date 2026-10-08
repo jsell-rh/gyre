@@ -374,11 +374,33 @@
                   <th scope="col">{$t('moldable_view.col_churn')}</th>
                 </tr>
               </thead>
+              <tbody>
+                {#each filteredNodes as node}
+                  <tr
+                    class="list-row"
+                    tabindex="0"
+                    aria-label={$t('moldable_view.select_node', { values: { name: node.name } })}
+                    onclick={() => onSelectNode?.(node)}
+                    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectNode?.(node); } }}
+                  >
+                    <td><Badge variant={typeVariant(node.node_type)} value={node.node_type ?? '?'} /></td>
+                    <td class="mono">{node.name}</td>
+                    <td class="mono muted">{node.file_path ?? ''}{node.line_start ? `:${node.line_start}` : ''}</td>
+                    <td>
+                      {#if node.spec_path}
+                        <span class="spec-tag">{node.spec_path.split('/').pop()}</span>
+                      {:else}
+                        <span class="muted-dash">—</span>
+                      {/if}
+                    </td>
+                    <td class="mono">{node.churn_count_30d ?? 0}</td>
+                  </tr>
+                {/each}
+              </tbody>
             </table>
           {/if}
         </div>
       </div>
-
 
     {:else if activeView === 'timeline'}
       <div class="timeline-view" aria-busy={timelineLoading}>
