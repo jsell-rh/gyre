@@ -1,9 +1,10 @@
 use anyhow::Result;
 use gyre_server::{
     abac_middleware, audit_simulator, build_router, build_state, jobs, merge_processor,
-    procfs_monitor, register_default_compute_target, seed_builtin_meta_specs, siem,
-    spawn_budget_daily_reset, spawn_llm_rate_limiter_cleanup, spawn_presence_eviction,
-    spawn_stale_agent_detector, spawn_stale_peer_detector, telemetry, JwtConfig,
+    procfs_monitor, register_default_compute_target, seed_builtin_meta_specs,
+    seed_builtin_personas, siem, spawn_budget_daily_reset, spawn_llm_rate_limiter_cleanup,
+    spawn_presence_eviction, spawn_stale_agent_detector, spawn_stale_peer_detector, telemetry,
+    JwtConfig,
 };
 use std::sync::Arc;
 use tracing::info;
@@ -48,6 +49,10 @@ async fn main() -> Result<()> {
 
     // Seed built-in meta-specs on first startup (agent-runtime spec §2).
     seed_builtin_meta_specs(&state).await;
+
+    // Seed the four built-in personas at tenant level (platform-model.md §2).
+    // Idempotent per tenant: existing slug+Tenant-scope personas are kept.
+    seed_builtin_personas(&state).await;
 
     // Load persisted retention policies from KV (or seed defaults on first
     // boot) before the job registry registers the nightly cleanup handler.

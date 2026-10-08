@@ -74,6 +74,10 @@ pub async fn create_tenant(
     t.budget = req.budget;
     t.max_workspaces = req.max_workspaces;
     state.tenants.create(&t).await?;
+    // Platform-model.md §2: every tenant ships with the four built-in
+    // personas, pre-approved at tenant scope. Idempotent (skips existing
+    // slug+scope) so re-running on the same tenant is a no-op.
+    crate::seed_builtin_personas_for_tenant(&state, &t.id).await;
     Ok((StatusCode::CREATED, Json(TenantResponse::from(t))))
 }
 
@@ -332,6 +336,66 @@ mod tests {
         let update_resp = app
             .clone()
             .oneshot(
+
+    /// platform-model.md §2: creating a tenant seeds the four built-in
+    /// personas at that tenant's scope, pre-approved.
+    #[tokio::test]
+    async fn create_tenant_seeds_builtin_personas() {
+        let state = crate::mem::test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let body = serde_json::json!({ "name": "Acme Corp", "slug": "acme-corp" });
+        let create_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tenants")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let created = body_json(create_resp).await;
+        let tenant_id = created["id"].as_str().unwrap().to_string();
+
+        // List personas at the new tenant's scope.
+        let list_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/personas?scope=tenant&scope_id={tenant_id}"
+                    ))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list = body_json(list_resp).await;
+        let mut slugs: Vec<String> = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["slug"].as_str().unwrap().to_string())
+            .collect();
+        slugs.sort();
+        assert_eq!(
+            slugs,
+            vec![
+                "accountability",
+                "repo-orchestrator",
+                "security",
+                "workspace-orchestrator"
+            ]
+        );
+        for p in list.as_array().unwrap() {
+            assert_eq!(p["approval_status"], "Approved");
+        }
+    }
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/tenants/{id}"))

@@ -442,6 +442,10 @@ pub async fn admin_seed(
         now,
     );
     let _ = state.workspaces.create(&workspace).await;
+    // Platform-model.md §2: the demo tenant also gets the four built-in
+    // personas (idempotent — skipped if already present).
+    crate::seed_builtin_personas_for_tenant(&state, &tenant.id).await;
+
 
     // ── Repos ─────────────────────────────────────────────────────────────────
     let repo1 = Repository::new(
