@@ -313,8 +313,10 @@ pub struct AppState {
     pub spec_ledger: Arc<dyn gyre_ports::SpecLedgerRepository>,
     /// Spec approval event history (persisted).
     pub spec_approval_history: Arc<dyn gyre_ports::SpecApprovalEventRepository>,
-    /// Spec links graph: all inter-spec links from manifests (M22.3).
-    pub spec_links_store: spec_registry::SpecLinksStore,
+    /// Spec link graph repository (spec-links.md §Forge-Maintained Spec Graph).
+    /// Durable source of truth; `spec_links_store` is the hot in-memory cache
+    /// loaded from this at boot and written through on every mutation.
+    pub spec_link_repo: Arc<dyn gyre_ports::SpecLinkRepository>,
     /// Budget limits per entity: entity_key -> BudgetConfig (M22.2).
     pub budget_configs: Arc<dyn BudgetRepository>,
     /// Real-time budget usage per entity: entity_key -> BudgetUsage (M22.2).
@@ -851,6 +853,17 @@ pub fn build_state(
     // come from the same storage struct, so this store is unused.
     let mem_policy_store = Arc::new(Mutex::new(HashMap::new()));
 
+    // Spec-link graph persistence (spec-links.md §Forge-Maintained Spec Graph).
+    // The SQL table is authoritative; the in-memory store is a hot cache,
+    // loaded here at boot so the graph survives restarts without re-push.
+    let spec_link_repo: Arc<dyn gyre_ports::SpecLinkRepository> = store!(
+        dyn gyre_ports::SpecLinkRepository,
+        mem::MemSpecLinkRepository::default()
+    );
+    let spec_links_store: spec_registry::SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+    load_spec_links_into_store(&spec_link_repo, &spec_links_store);
+
+
     Arc::new(AppState {
         auth_token: auth_token.to_string(),
         base_url: base_url.to_string(),
@@ -982,7 +995,8 @@ pub fn build_state(
             dyn SpecApprovalEventRepository,
             mem::MemSpecApprovalEventRepository::default()
         ),
-        spec_links_store: Arc::new(Mutex::new(Vec::new())),
+        spec_link_repo,
+        spec_links_store,
         budget_configs: store!(
             dyn BudgetRepository,
             mem::MemBudgetConfigRepository::default()
@@ -1121,6 +1135,50 @@ pub fn build_state(
             }
         },
     })
+}
+
+/// Load the persisted spec-link graph into the in-memory hot cache
+/// (spec-links.md §Forge-Maintained Spec Graph).
+///
+/// Runs on a dedicated thread with its own single-threaded runtime: callers
+/// are sync constructors (`build_state`) that may already be inside a tokio
+/// runtime, where `Handle::block_on` would panic. On read failure the cache
+/// stays empty and the error is surfaced — an unreadable graph must not
+/// silently masquerade as "no links" to staleness checks and gates.
+pub fn load_spec_links_into_store(
+    repo: &Arc<dyn gyre_ports::SpecLinkRepository>,
+    store: &spec_registry::SpecLinksStore,
+) {
+    let repo = Arc::clone(repo);
+    let store = Arc::clone(store);
+    let handle = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime for spec link load")
+            .block_on(async {
+                match repo.list_all().await {
+                    Ok(persisted) => {
+                        if !persisted.is_empty() {
+                            tracing::info!(
+                                count = persisted.len(),
+                                "spec-links: loaded persisted spec link graph"
+                            );
+                        }
+                        *store.lock().await = persisted;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "spec-links: failed to load persisted spec link graph: {e}"
+                        );
+                    }
+                }
+            });
+    })
+    .join();
+    if let Err(e) = handle {
+        tracing::error!("spec-links: spec link load thread panicked: {e:?}");
+    }
 }
 
 /// Spawn a background task that evicts stale presence entries every 30 seconds.
