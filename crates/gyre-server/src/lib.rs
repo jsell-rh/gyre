@@ -11,7 +11,6 @@ pub mod commit_signatures;
 pub(crate) mod constraint_check;
 pub mod container_audit;
 pub mod dep_staleness;
-pub mod domain_events;
 pub mod gate_executor;
 pub(crate) mod git_http;
 pub mod git_refs;
@@ -39,8 +38,9 @@ pub mod siem;
 pub(crate) mod signing;
 pub(crate) mod snapshot;
 pub(crate) mod spa;
-pub mod spec_link_staleness;
+pub mod reconciliation;
 pub mod spec_patrol;
+pub mod spec_link_staleness;
 pub mod spec_registry;
 pub mod speculative_merge;
 // sqlite.rs (rusqlite) removed — use gyre_adapters::SqliteStorage (Diesel) instead.

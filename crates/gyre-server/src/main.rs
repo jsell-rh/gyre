@@ -67,6 +67,14 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
+    // Meta-spec conformance sweep (meta-spec-reconciliation.md §10) — daily by
+    // default, configurable via GYRE_META_SPEC_SWEEP_INTERVAL_SECS.
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "meta_spec_conformance_sweep".to_string(),
+        Arc::clone(&state),
+    );
+
     // Background tasks.
     spawn_stale_agent_detector(state.clone());
     spawn_stale_peer_detector(state.clone());
