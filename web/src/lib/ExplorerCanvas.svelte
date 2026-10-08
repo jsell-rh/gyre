@@ -23,8 +23,8 @@
     nodes = [],
     edges = [],
     activeQuery = /** @type {import('./types/view-query.ts').ViewQuery | null} */ (null),
-    filter = 'all',
-    lens = 'structural',
+    filter = $bindable('all'),
+    lens = $bindable('structural'),
     canvasState = $bindable({ selectedNode: null, zoom: 1, visibleGroups: [], breadcrumb: [] }),
     onNodeDetail = () => {},
     onInteractiveQuery = () => {},
@@ -1532,18 +1532,40 @@
 
   // shouldShowChildren removed — dead code. Use isSummaryMode() (threshold 450px) instead.
 
-  // ── Filter visibility ─────────────────────────────────────────────
-  // Pre-compute call edge index
-  let nodesWithCallsEdges = $derived.by(() => {
+  // ── Filter presets (explorer-implementation.md §25 Phase 1: All, Endpoints,
+  // Types, Calls, Dependencies) — the toolbar buttons driving the `filter` prop.
+  // Labels match the spec's preset names; values feed filterOpacity/filterEdge.
+  const FILTER_PRESETS = [
+    ['all', 'All'],
+    ['endpoints', 'Endpoints'],
+    ['types', 'Types'],
+    ['calls', 'Calls'],
+    ['dependencies', 'Dependencies'],
+  ];
+
+  function setFilter(value) {
+    if (filter === value) return;
+    filter = value;
+    syncCanvasState();
+    scheduleRedraw();
+  }
+
+  // Pre-computed node participants of 'calls' and 'depends_on' edges.
+  // 'calls' feeds the Calls preset; both feed the Dependencies preset
+  // (edgePassesFilter('dependencies') renders depends_on + calls edges).
+  let nodesWithCallsEdges = $derived.by(() => edgeParticipants('calls'));
+  let nodesWithDependencyEdges = $derived.by(() => edgeParticipants('depends_on'));
+
+  function edgeParticipants(type) {
     const s = new Set();
     for (const e of edges) {
-      if ((e.edge_type ?? e.type ?? '').toLowerCase() === 'calls') {
+      if ((e.edge_type ?? e.type ?? '').toLowerCase() === type) {
         s.add(edgeSrc(e));
         s.add(edgeTgt(e));
       }
     }
     return s;
-  });
+  }
 
   // Map filter-panel categories to node_type sets
   const CATEGORY_NODE_TYPES = {
@@ -1604,7 +1626,7 @@
       case 'endpoints': return ln.node.node_type === 'endpoint' ? 1.0 : 0.1;
       case 'types': return (ln.node.node_type === 'type' || ln.node.node_type === 'interface' || ln.node.node_type === 'field') ? 1.0 : 0.1;
       case 'calls': return nodesWithCallsEdges.has(ln.node.id) ? 1.0 : 0.1;
-      case 'dependencies': return 0.1;
+      case 'dependencies': return (nodesWithDependencyEdges.has(ln.node.id) || nodesWithCallsEdges.has(ln.node.id)) ? 1.0 : 0.1;
       default: return 1.0;
     }
   }
@@ -5003,12 +5025,25 @@
     </div>
   {/if}
 
-  <!-- Toolbar — filter presets removed per spec: use ExplorerFilterPanel or view queries for filtering -->
+  <!-- Toolbar — lens toggle + filter presets (explorer-implementation.md §25 Phase 1) -->
   <div class="treemap-toolbar">
     <div class="lens-group" role="group" aria-label="Lens toggle">
       <button class="tb-btn" class:active={lens === 'structural'} onclick={() => { lens = 'structural'; onLensChange('structural'); }} aria-pressed={lens === 'structural'} type="button">Structural</button>
       <button class="tb-btn" class:active={lens === 'evaluative'} onclick={() => { lens = 'evaluative'; onLensChange('evaluative'); }} aria-pressed={lens === 'evaluative'} title="Overlay test/trace data on the structural topology" type="button">Evaluative</button>
       <button class="tb-btn tb-btn-observable" type="button" disabled title="Observable lens is disabled — pending production OpenTelemetry collector integration" onclick={() => { observableBannerVisible = !observableBannerVisible; }} aria-disabled="true">Observable <span class="observable-coming-soon">(coming soon)</span></button>
+    </div>
+
+    <div class="filter-preset-group" role="group" aria-label={$t('explorer_treemap.filter_presets')}>
+      {#each FILTER_PRESETS as [value, label]}
+        <button
+          class="tb-btn tb-btn-filter"
+          class:active={filter === value}
+          onclick={() => setFilter(value)}
+          aria-pressed={filter === value}
+          title={`Filter preset: ${label}`}
+          type="button"
+        >{label}</button>
+      {/each}
     </div>
 
     {#if lens === 'evaluative'}
