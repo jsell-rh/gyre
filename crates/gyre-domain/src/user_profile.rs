@@ -55,7 +55,7 @@ impl UserToken {
 
 // ─── Judgment Ledger ─────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JudgmentType {
     /// `spec_approvals` — signed spec approval
     SpecApproval,

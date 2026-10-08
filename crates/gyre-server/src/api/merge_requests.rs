@@ -699,7 +699,7 @@ pub async fn list_comments(
     ))
 }
 
-#[instrument(skip(state, req), fields(mr_id = %id, reviewer = %req.reviewer_agent_id, decision = %req.decision))]
+#[instrument(skip(state, auth, req), fields(mr_id = %id, reviewer = %req.reviewer_agent_id, decision = %req.decision))]
 pub async fn submit_review(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
@@ -714,7 +714,13 @@ pub async fn submit_review(
         .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
 
     let decision = parse_review_decision(&req.decision)?;
-    let mut review = Review::new(new_id(), mr_id, req.reviewer_agent_id, decision, now_secs());
+    let mut review = Review::new(
+        new_id(),
+        mr_id.clone(),
+        req.reviewer_agent_id,
+        decision.clone(),
+        now_secs(),
+    );
     review.body = req.body;
 
     state.reviews.submit_review(&review).await?;
@@ -744,7 +750,7 @@ pub async fn submit_review(
                 serde_json::json!({
                     "mr_id": mr_id.as_str(),
                     "gate_id": r.gate_id.as_str(),
-                    "gate_type": gate.as_ref().map(|g| g.gate_type),
+                    "gate_type": gate.as_ref().map(|g| g.gate_type.clone()),
                     "gate_name": gate.as_ref().map(|g| g.name.clone()),
                     "from_status": "failed",
                     // The gate row itself is not mutated by a human approval —
