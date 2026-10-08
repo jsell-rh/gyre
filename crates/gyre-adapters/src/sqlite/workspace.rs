@@ -123,7 +123,6 @@ impl WorkspaceRepository for SqliteStorage {
         .await?
     }
 
-
     async fn find_by_slug(&self, tenant_id: &Id, slug: &str) -> Result<Option<Workspace>> {
         let pool = Arc::clone(&self.pool);
         let tid = tenant_id.clone();

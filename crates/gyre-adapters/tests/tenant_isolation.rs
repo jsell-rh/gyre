@@ -56,7 +56,13 @@ async fn seed(s: &SqliteStorage, tag: &str, tenant: &Id) -> TenantIds {
         .await
         .unwrap();
 
-    let ws = Workspace::new(ids.ws.clone(), tenant.clone(), format!("ws {tag}"), tag, 1000);
+    let ws = Workspace::new(
+        ids.ws.clone(),
+        tenant.clone(),
+        format!("ws {tag}"),
+        tag,
+        1000,
+    );
     WorkspaceRepository::create(s, &ws).await.unwrap();
 
     let repo = Repository::new(
@@ -119,7 +125,10 @@ async fn tenant_reads_never_see_another_tenants_rows() {
         "find_by_id leaked tenant A's workspace id to tenant B"
     );
     // positive control: each tenant still sees its own row
-    assert!(WorkspaceRepository::find_by_id(&sa, &a.ws).await.unwrap().is_some());
+    assert!(WorkspaceRepository::find_by_id(&sa, &a.ws)
+        .await
+        .unwrap()
+        .is_some());
 
     // ── repositories ──────────────────────────────────────────────────────
     let ra = RepoRepository::list(&sa).await.unwrap();
@@ -128,9 +137,18 @@ async fn tenant_reads_never_see_another_tenants_rows() {
         vec!["repo-a"],
         "tenant A's repo list leaked another tenant's repos (create() tenant stamp broken?)"
     );
-    assert!(RepoRepository::find_by_id(&sa, &b.repo).await.unwrap().is_none());
-    assert!(RepoRepository::find_by_id(&sb, &a.repo).await.unwrap().is_none());
-    assert!(RepoRepository::find_by_id(&sb, &b.repo).await.unwrap().is_some());
+    assert!(RepoRepository::find_by_id(&sa, &b.repo)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(RepoRepository::find_by_id(&sb, &a.repo)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(RepoRepository::find_by_id(&sb, &b.repo)
+        .await
+        .unwrap()
+        .is_some());
 
     // ── tasks ─────────────────────────────────────────────────────────────
     let ta = TaskRepository::list(&sa).await.unwrap();
@@ -139,9 +157,18 @@ async fn tenant_reads_never_see_another_tenants_rows() {
         vec!["task-a"],
         "tenant A's task list leaked another tenant's tasks"
     );
-    assert!(TaskRepository::find_by_id(&sa, &b.task).await.unwrap().is_none());
-    assert!(TaskRepository::find_by_id(&sb, &a.task).await.unwrap().is_none());
-    let tb_task = TaskRepository::find_by_id(&sb, &b.task).await.unwrap().unwrap();
+    assert!(TaskRepository::find_by_id(&sa, &b.task)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(TaskRepository::find_by_id(&sb, &a.task)
+        .await
+        .unwrap()
+        .is_none());
+    let tb_task = TaskRepository::find_by_id(&sb, &b.task)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         tb_task.workspace_id, b.ws,
         "task row lost its hierarchy edge across the storage boundary"
@@ -154,8 +181,14 @@ async fn tenant_reads_never_see_another_tenants_rows() {
         vec!["agent-a"],
         "tenant A's agent list leaked another tenant's agents"
     );
-    assert!(AgentRepository::find_by_id(&sa, &b.agent).await.unwrap().is_none());
-    assert!(AgentRepository::find_by_id(&sb, &a.agent).await.unwrap().is_none());
+    assert!(AgentRepository::find_by_id(&sa, &b.agent)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(AgentRepository::find_by_id(&sb, &a.agent)
+        .await
+        .unwrap()
+        .is_none());
 
     // ── merge requests ────────────────────────────────────────────────────
     let ma = MergeRequestRepository::list(&sa).await.unwrap();
@@ -171,8 +204,14 @@ async fn tenant_reads_never_see_another_tenants_rows() {
             .is_none(),
         "find_by_id leaked tenant B's MR id to tenant A (unfiltered find_by_id)"
     );
-    assert!(MergeRequestRepository::find_by_id(&sb, &a.mr).await.unwrap().is_none());
-    assert!(MergeRequestRepository::find_by_id(&sb, &b.mr).await.unwrap().is_some());
+    assert!(MergeRequestRepository::find_by_id(&sb, &a.mr)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(MergeRequestRepository::find_by_id(&sb, &b.mr)
+        .await
+        .unwrap()
+        .is_some());
 }
 
 #[tokio::test]
@@ -197,13 +236,25 @@ async fn create_under_tenant_a_is_invisible_to_a_default_scoped_handle() {
 
     // Same tenant via a fresh handle: must see it.
     let sa2 = base.with_tenant("tenant-a");
-    assert!(RepoRepository::find_by_id(&sa2, &Id::new("repo-x")).await.unwrap().is_some());
-    assert!(MergeRequestRepository::find_by_id(&sa2, &Id::new("mr-x")).await.unwrap().is_some());
+    assert!(RepoRepository::find_by_id(&sa2, &Id::new("repo-x"))
+        .await
+        .unwrap()
+        .is_some());
+    assert!(MergeRequestRepository::find_by_id(&sa2, &Id::new("mr-x"))
+        .await
+        .unwrap()
+        .is_some());
 
     // A different scope ("default") must NOT see it.
-    assert!(RepoRepository::find_by_id(&base, &Id::new("repo-x")).await.unwrap().is_none());
+    assert!(RepoRepository::find_by_id(&base, &Id::new("repo-x"))
+        .await
+        .unwrap()
+        .is_none());
     assert!(
-        MergeRequestRepository::find_by_id(&base, &Id::new("mr-x")).await.unwrap().is_none(),
+        MergeRequestRepository::find_by_id(&base, &Id::new("mr-x"))
+            .await
+            .unwrap()
+            .is_none(),
         "MR create() stamped a fabricated tenant, not the storage's tenant"
     );
 }

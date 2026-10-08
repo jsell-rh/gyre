@@ -6,11 +6,12 @@
 # including find_by_id(), so a leaked UUID cannot cross tenants.
 #
 # The scan: for each fn whose name marks a read (list*/find*/get*/query*/
-# search*/count*/load*) that builds a Diesel query (a terminal .load/.first/
-# .get_result/... call in its body), require the pattern `tenant_id.eq(`
-# (or raw-SQL `tenant_id = ?/$n`) somewhere in the method body whenever the
-# body touches a table that HAS a tenant_id column. Which tables have the
-# column is not hand-maintained: it is derived from the migrations
+# search*/count*/load*, plus the read-by-behavior prefixes has*/total*/
+# aggregate*/since*/stats*/next*) that builds a Diesel query (a terminal
+# .load/.first/.get_result/... call in its body), require the pattern
+# `tenant_id.eq(` (or raw-SQL `tenant_id = ?/$n`) somewhere in the method
+# body whenever the body touches a table that HAS a tenant_id column. Which
+# tables have the column is not hand-maintained: it is derived from the migrations
 # themselves (CREATE TABLE blocks, `ADD COLUMN tenant_id` ALTERs, minus
 # DROP TABLEs) — the migrations are the ground truth for what the column
 # physically exists on. A query method on a table WITHOUT the column cannot
@@ -203,7 +204,13 @@ scan_file() {
         start = NR
         has_diesel = 0; has_tenant = 0; tt_ref = 0
         delete ntt_ref
-        is_read = (method ~ /^(list|find|get|query|search|count|load)/)
+        # Read-by-name heuristic, extended by review round 2: has_/total_/
+        # aggregate_/since_/stats_/next_ are reads by behavior (boolean
+        # probes, sums, date-window pulls, queue head) that the original
+        # list/find/get prefix set silently skipped (found live:
+        # has_workspace_references on workspaces, has_recent_dismissal on
+        # notifications — both tenant-column tables, both unfiltered).
+        is_read = (method ~ /^(list|find|get|query|search|count|load|has|total|aggregate|since|stats|next)/)
         if (method ~ /^test_/ || intests) is_read = 0
         next
     }
