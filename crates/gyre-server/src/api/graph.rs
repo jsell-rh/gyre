@@ -1211,6 +1211,16 @@ pub async fn briefing_ask(
     Json(req): Json<BriefingAskRequest>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError>
 {
+    require_workspace(&state, &id).await?;
+
+    // HSI §1325: history is capped at 20 entries — the server REJECTS requests
+    // with more than 20 entries (the client drops older ones). Do not truncate.
+    // Checked before the rate limiter so invalid requests never consume budget.
+    if req.history.as_ref().is_some_and(|h| h.len() > 20) {
+        return Err(ApiError::InvalidInput(
+            "history must contain at most 20 entries".to_string(),
+        ));
+    }
 
     // Per-user/workspace sliding-window rate limit (HSI §6): 10 req/60 s.
     {
@@ -1224,14 +1234,6 @@ pub async fn briefing_ask(
         ) {
             return Err(ApiError::RateLimited(retry_after));
         }
-    }
-
-    // HSI §1325: history is capped at 20 entries — the server REJECTS requests
-    // with more than 20 entries (the client drops older ones). Do not truncate.
-    if req.history.as_ref().is_some_and(|h| h.len() > 20) {
-        return Err(ApiError::InvalidInput(
-            "history must contain at most 20 entries".to_string(),
-        ));
     }
 
     // Require LLM to be configured.
