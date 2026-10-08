@@ -180,8 +180,6 @@ const fn f(name: &'static str, ty: FieldType, required: bool) -> FieldSpec {
     FieldSpec { name, ty, required }
 }
 
-
-
 impl MessageKind {
     /// Returns the snake_case wire name for this kind.
     pub fn as_str(&self) -> &str {
@@ -327,152 +325,201 @@ impl MessageKind {
         use FieldType::*;
         match self {
             // Directed
-            MessageKind::TaskAssignment => Some(&(const { [
-                f("task_id", Str, true),
-                f("spec_ref", Str, false),
-            ] })),
+            MessageKind::TaskAssignment => {
+                Some(&(const { [f("task_id", Str, true), f("spec_ref", Str, false)] }))
+            }
             MessageKind::ReviewRequest => Some(&(const { [f("mr_id", Str, true)] })),
-            MessageKind::StatusUpdate => Some(&(const { [
-                f("status", Str, true),
-                f("summary", Str, true),
-            ] })),
-            MessageKind::Escalation => Some(&(const { [
-                f("reason", Str, true),
-                f("context", Str, false),
-            ] })),
+            MessageKind::StatusUpdate => {
+                Some(&(const { [f("status", Str, true), f("summary", Str, true)] }))
+            }
+            MessageKind::Escalation => {
+                Some(&(const { [f("reason", Str, true), f("context", Str, false)] }))
+            }
             // Events
             MessageKind::AgentCreated => Some(&(const { [f("agent_id", Str, true)] })),
-            MessageKind::AgentStatusChanged => Some(&(const { [
-                f("agent_id", Str, true),
-                f("status", Str, true),
-            ] })),
-            MessageKind::AgentContainerSpawned => Some(&(const { [
-                f("agent_id", Str, true),
-                f("container_id", Str, true),
-                f("image", Str, true),
-                f("runtime", Str, true),
-            ] })),
-            MessageKind::AgentCompleted => Some(&(const { [
-                f("agent_id", Str, true),
-                f("task_id", Str, true),
-                f("spec_ref", Str, false),
-                f("decisions", Decisions, false),
-                f("uncertainties", StrArray, false),
-                f("conversation_sha", Str, false),
-            ] })),
-            MessageKind::ReconciliationCompleted => Some(&(const { [
-                f("workspace_id", Str, true),
-                f("persona_id", Str, true),
-                f("persona_name", Str, false),
-                f("specs_evaluated", U32, false),
-                f("specs_changed", U32, false),
-                f("preview_branch", Str, false),
-            ] })),
+            MessageKind::AgentStatusChanged => {
+                Some(&(const { [f("agent_id", Str, true), f("status", Str, true)] }))
+            }
+            MessageKind::AgentContainerSpawned => Some(
+                &(const {
+                    [
+                        f("agent_id", Str, true),
+                        f("container_id", Str, true),
+                        f("image", Str, true),
+                        f("runtime", Str, true),
+                    ]
+                }),
+            ),
+            MessageKind::AgentCompleted => Some(
+                &(const {
+                    [
+                        f("agent_id", Str, true),
+                        f("task_id", Str, true),
+                        f("spec_ref", Str, false),
+                        f("decisions", Decisions, false),
+                        f("uncertainties", StrArray, false),
+                        f("conversation_sha", Str, false),
+                    ]
+                }),
+            ),
+            MessageKind::ReconciliationCompleted => Some(
+                &(const {
+                    [
+                        f("workspace_id", Str, true),
+                        f("persona_id", Str, true),
+                        f("persona_name", Str, false),
+                        f("specs_evaluated", U32, false),
+                        f("specs_changed", U32, false),
+                        f("preview_branch", Str, false),
+                    ]
+                }),
+            ),
             MessageKind::TaskCreated => Some(&(const { [f("task_id", Str, true)] })),
-            MessageKind::TaskTransitioned => Some(&(const { [
-                f("task_id", Str, true),
-                f("status", Str, true),
-            ] })),
+            MessageKind::TaskTransitioned => {
+                Some(&(const { [f("task_id", Str, true), f("status", Str, true)] }))
+            }
             MessageKind::MrCreated => Some(&(const { [f("mr_id", Str, true)] })),
-            MessageKind::MrStatusChanged => Some(&(const { [
-                f("mr_id", Str, true),
-                f("status", Str, true),
-            ] })),
-            MessageKind::MrMerged => Some(&(const { [
-                f("mr_id", Str, true),
-                f("merge_commit_sha", Str, false),
-            ] })),
-            MessageKind::PushRejected => Some(&(const { [
-                f("repo_id", Str, true),
-                f("branch", Str, true),
-                f("agent_id", Str, true),
-                f("reason", Str, true),
-            ] })),
-            MessageKind::PushAccepted => Some(&(const { [
-                f("repo_id", Str, true),
-                f("branch", Str, true),
-                f("agent_id", Str, true),
-                f("commit_count", U64, false),
-                f("task_id", Str, false),
-                f("ralph_step", Str, false),
-            ] })),
-            MessageKind::SpecChanged => Some(&(const { [
-                f("repo_id", Str, true),
-                f("spec_path", Str, true),
-                f("change_kind", Str, true),
-                f("task_id", Str, false),
-                f("dependent_workspace_id", Str, false),
-                f("source_workspace_slug", Str, false),
-            ] })),
-            MessageKind::GateFailure => Some(&(const { [
-                f("mr_id", Str, true),
-                f("gate_name", Str, true),
-                f("gate_type", Str, false),
-                f("status", Str, false),
-                f("output", Str, false),
-                f("spec_ref", Str, false),
-                f("gate_agent_id", Str, false),
-            ] })),
-            MessageKind::StaleSpecWarning => Some(&(const { [
-                f("mr_id", Str, true),
-                f("repo_id", Str, true),
-                f("spec_path", Str, true),
-                f("spec_sha", Str, true),
-                f("current_sha", Str, true),
-            ] })),
-            MessageKind::SpeculativeConflict => Some(&(const { [
-                f("repo_id", Str, true),
-                f("branch", Str, true),
-                f("conflicting_files", StrArray, true),
-            ] })),
-            MessageKind::SpeculativeMergeClean => Some(&(const { [
-                f("repo_id", Str, true),
-                f("branch", Str, true),
-            ] })),
+            MessageKind::MrStatusChanged => {
+                Some(&(const { [f("mr_id", Str, true), f("status", Str, true)] }))
+            }
+            MessageKind::MrMerged => {
+                Some(&(const { [f("mr_id", Str, true), f("merge_commit_sha", Str, false)] }))
+            }
+            MessageKind::PushRejected => Some(
+                &(const {
+                    [
+                        f("repo_id", Str, true),
+                        f("branch", Str, true),
+                        f("agent_id", Str, true),
+                        f("reason", Str, true),
+                    ]
+                }),
+            ),
+            MessageKind::PushAccepted => Some(
+                &(const {
+                    [
+                        f("repo_id", Str, true),
+                        f("branch", Str, true),
+                        f("agent_id", Str, true),
+                        f("commit_count", U64, false),
+                        f("task_id", Str, false),
+                        f("ralph_step", Str, false),
+                    ]
+                }),
+            ),
+            MessageKind::SpecChanged => Some(
+                &(const {
+                    [
+                        f("repo_id", Str, true),
+                        f("spec_path", Str, true),
+                        f("change_kind", Str, true),
+                        f("task_id", Str, false),
+                        f("dependent_workspace_id", Str, false),
+                        f("source_workspace_slug", Str, false),
+                    ]
+                }),
+            ),
+            MessageKind::GateFailure => Some(
+                &(const {
+                    [
+                        f("mr_id", Str, true),
+                        f("gate_name", Str, true),
+                        f("gate_type", Str, false),
+                        f("status", Str, false),
+                        f("output", Str, false),
+                        f("spec_ref", Str, false),
+                        f("gate_agent_id", Str, false),
+                    ]
+                }),
+            ),
+            MessageKind::StaleSpecWarning => Some(
+                &(const {
+                    [
+                        f("mr_id", Str, true),
+                        f("repo_id", Str, true),
+                        f("spec_path", Str, true),
+                        f("spec_sha", Str, true),
+                        f("current_sha", Str, true),
+                    ]
+                }),
+            ),
+            MessageKind::SpeculativeConflict => Some(
+                &(const {
+                    [
+                        f("repo_id", Str, true),
+                        f("branch", Str, true),
+                        f("conflicting_files", StrArray, true),
+                    ]
+                }),
+            ),
+            MessageKind::SpeculativeMergeClean => {
+                Some(&(const { [f("repo_id", Str, true), f("branch", Str, true)] }))
+            }
             MessageKind::HotFilesChanged => Some(&(const { [f("repo_id", Str, true)] })),
-            MessageKind::BudgetWarning => Some(&(const { [
-                f("agent_id", Str, true),
-                f("workspace_id", Str, true),
-                f("usage_pct", F64, true),
-            ] })),
-            MessageKind::BudgetExhausted => Some(&(const { [
-                f("agent_id", Str, true),
-                f("workspace_id", Str, true),
-                f("grace_secs", U64, true),
-            ] })),
-            MessageKind::AgentError => Some(&(const { [
-                f("agent_id", Str, true),
-                f("error", Str, true),
-                f("context", Str, false),
-            ] })),
+            MessageKind::BudgetWarning => Some(
+                &(const {
+                    [
+                        f("agent_id", Str, true),
+                        f("workspace_id", Str, true),
+                        f("usage_pct", F64, true),
+                    ]
+                }),
+            ),
+            MessageKind::BudgetExhausted => Some(
+                &(const {
+                    [
+                        f("agent_id", Str, true),
+                        f("workspace_id", Str, true),
+                        f("grace_secs", U64, true),
+                    ]
+                }),
+            ),
+            MessageKind::AgentError => Some(
+                &(const {
+                    [
+                        f("agent_id", Str, true),
+                        f("error", Str, true),
+                        f("context", Str, false),
+                    ]
+                }),
+            ),
             // Telemetry
-            MessageKind::ToolCallStart => Some(&(const { [
-                f("agent_id", Str, true),
-                f("tool_name", Str, true),
-            ] })),
-            MessageKind::ToolCallEnd => Some(&(const { [
-                f("agent_id", Str, true),
-                f("tool_name", Str, true),
-                f("duration_ms", U64, true),
-            ] })),
-            MessageKind::TextMessageContent => Some(&(const { [
-                f("agent_id", Str, true),
-                f("content", Str, true),
-                f("role", Str, false),
-            ] })),
-            MessageKind::RunStarted => Some(&(const { [
-                f("agent_id", Str, true),
-                f("task_id", Str, false),
-            ] })),
-            MessageKind::RunFinished => Some(&(const { [
-                f("agent_id", Str, true),
-                f("task_id", Str, false),
-            ] })),
-            MessageKind::StateChanged => Some(&(const { [
-                f("agent_id", Str, true),
-                f("old_state", Str, false),
-                f("new_state", Str, true),
-            ] })),
+            MessageKind::ToolCallStart => {
+                Some(&(const { [f("agent_id", Str, true), f("tool_name", Str, true)] }))
+            }
+            MessageKind::ToolCallEnd => Some(
+                &(const {
+                    [
+                        f("agent_id", Str, true),
+                        f("tool_name", Str, true),
+                        f("duration_ms", U64, true),
+                    ]
+                }),
+            ),
+            MessageKind::TextMessageContent => Some(
+                &(const {
+                    [
+                        f("agent_id", Str, true),
+                        f("content", Str, true),
+                        f("role", Str, false),
+                    ]
+                }),
+            ),
+            MessageKind::RunStarted => {
+                Some(&(const { [f("agent_id", Str, true), f("task_id", Str, false)] }))
+            }
+            MessageKind::RunFinished => {
+                Some(&(const { [f("agent_id", Str, true), f("task_id", Str, false)] }))
+            }
+            MessageKind::StateChanged => Some(
+                &(const {
+                    [
+                        f("agent_id", Str, true),
+                        f("old_state", Str, false),
+                        f("new_state", Str, true),
+                    ]
+                }),
+            ),
             // Spec table lists no payload fields.
             MessageKind::QueueUpdated | MessageKind::DataSeeded => Some(&(const { [] })),
             // Outside the spec table (server-emitted only) — no specced schema.
@@ -490,10 +537,6 @@ impl MessageKind {
     /// Check one field value against its declared wire type; the `Err` carries
     /// the human-readable type name for the rejection reason.
     fn check_field_type(ty: FieldType, value: &Value) -> Result<(), &'static str> {
-        let _ = (ty, value);
-        return Ok(());
-        let _ = (ty, value);
-        return Ok(());
         let ok = match ty {
             FieldType::Str => value.is_string(),
             FieldType::U64 => value.as_u64().is_some(),
@@ -962,13 +1005,15 @@ mod tests {
         };
         assert!(completed(json!([{
             "what": "used retry", "why": "spec says so", "confidence": "high"
-        }])).is_ok());
+        }]))
+        .is_ok());
         assert!(completed(json!([{
             "what": "used retry",
             "why": "spec says so",
             "confidence": "high",
             "alternatives_considered": ["fixed interval"]
-        }])).is_ok());
+        }]))
+        .is_ok());
         // Element not an object.
         assert!(completed(json!(["used retry"])).is_err());
         // Missing required key inside a decision object.
@@ -976,14 +1021,16 @@ mod tests {
         // Wrong-typed inner field.
         assert!(completed(json!([{
             "what": "used retry", "why": 3, "confidence": "high"
-        }])).is_err());
+        }]))
+        .is_err());
         // alternatives_considered present but wrong-typed.
         assert!(completed(json!([{
             "what": "used retry",
             "why": "spec says so",
             "confidence": "high",
             "alternatives_considered": "fixed interval"
-        }])).is_err());
+        }]))
+        .is_err());
         // uncertainties (Vec<String>) alongside decisions.
         assert!(MessageKind::AgentCompleted
             .validate_payload(Some(&json!({
