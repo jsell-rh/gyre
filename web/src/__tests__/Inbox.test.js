@@ -359,4 +359,38 @@ describe('Inbox', () => {
     const addCell = container.querySelector('.diff-cell.diff-add.diff-right');
     expect(addCell.textContent).toContain('my local line');
   });
+
+  // HSI §1.5 scope rows: workspace filter is server-side (?workspace_id=);
+  // repo filter is client-side on n.repo_id — notifications with repo_id NULL
+  // (trust suggestions, meta-spec drift) must stay invisible at repo scope.
+  describe('scope filtering (HSI §1.5)', () => {
+    it('passes workspace_id to the server at workspace scope', async () => {
+      api.myNotifications.mockResolvedValue({ notifications: [] });
+      render(Inbox, { props: { workspaceId: 'ws-1', scope: 'workspace' } });
+      await waitFor(() => expect(api.myNotifications).toHaveBeenCalledWith({ workspace_id: 'ws-1' }));
+    });
+
+    it('fetches unfiltered at tenant scope', async () => {
+      api.myNotifications.mockResolvedValue({ notifications: [] });
+      render(Inbox, { props: { scope: 'tenant' } });
+      await waitFor(() => expect(api.myNotifications).toHaveBeenCalled());
+      expect(api.myNotifications).toHaveBeenCalledWith({});
+    });
+
+    it('repo scope shows only notifications with matching repo_id', async () => {
+      api.myNotifications.mockResolvedValue([
+        makeNotification({ id: 'n-repo', repo_id: 'repo-1' }),
+        makeNotification({ id: 'n-other', repo_id: 'repo-2' }),
+        makeNotification({ id: 'n-ws', repo_id: null, notification_type: 'trust_suggestion', title: 'Consider increasing trust' }),
+      ]);
+      const { container } = render(Inbox, { props: { workspaceId: 'ws-1', repoId: 'repo-1', scope: 'repo' } });
+      // The repo-scoped card renders; the other-repo and workspace-only cards do not.
+      await waitFor(() => expect(container.querySelectorAll('.inbox-card').length).toBe(1));
+      expect(container.textContent).toContain('Agent needs clarification');
+      expect(container.textContent).not.toContain('Consider increasing trust');
+      // Exactly one card body (one visible notification).
+      const cards = container.querySelectorAll('.inbox-card');
+      expect(cards.length).toBe(1);
+    });
+  });
 });
