@@ -514,6 +514,9 @@
   setContext('navigate', (view) => {
     // Legacy compat shim: map old nav items to new navigation
     if (view === 'profile') { goToProfile(); return; }
+    // Meta-specs at repo scope redirects to the workspace-scoped editor
+    // (HSI §1.5 Meta-specs row — meta-specs are workspace-scoped).
+    if (view === 'meta-specs') { goToAgentRules(); return; }
     // In repo mode, tab names switch the active tab instead of navigating away
     if (mode === 'repo' && REPO_TABS.includes(view)) { goToRepoTab(view); return; }
     // Everything else lands on workspace home
