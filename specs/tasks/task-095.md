@@ -9,7 +9,7 @@ coverage_sections:
   - "platform-model.md §6 Post-Merge Validation"
   - "platform-model.md §6 Recovery Protocol"
   - "platform-model.md §6 Agent Behavior During Recovery"
-commits: ["1108963087198eb69aeec789725bcdfbbd4aea7f", "6b2a1640099e8c9b202bd69e55ce419a627d4e41", "7a43b48f857a38887bd0d8afcc266972dd4b241a", "2bd373389c71d470e5997eb4fb5fdddc2f1769d5"]
+commits: ["9487edf2e5e6c09d6222e18327741846cdc5e9a0", "1108963087198eb69aeec789725bcdfbbd4aea7f", "6b2a1640099e8c9b202bd69e55ce419a627d4e41", "7a43b48f857a38887bd0d8afcc266972dd4b241a", "2bd373389c71d470e5997eb4fb5fdddc2f1769d5"]
 ---
 
 ## Spec Excerpt
