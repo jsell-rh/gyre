@@ -694,6 +694,51 @@ async fn merge_atomic_group(
             }
         };
 
+        // R4: re-validate member MR status at fetch time. The selection
+        // loop's 4b'' check (task-095 R3-F2) validates only the first
+        // candidate it dispatches on; a later-enqueued group member that
+        // was closed or reverted while its entry sat Queued must not be
+        // silently merged by the group path — same rule as the single
+        // path. Closed/Reverted are terminal MR states, so unlike the
+        // conflict path (which requeues and retries), the stale member's
+        // entry is failed permanently and the partial group merge is
+        // rolled back; the healthy members proceed as a reduced group on
+        // the next cycle. `rollback_atomic_group` requeues every entry,
+        // so the Failed status must be set AFTER it to stay terminal.
+        if !matches!(mr.status, MrStatus::Open | MrStatus::Approved) {
+            warn!(
+                group = %group_name,
+                entry_id = %ge.id,
+                mr_id = %mr.id,
+                status = ?mr.status,
+                "atomic group member MR is not mergeable, failing entry and rolling back group"
+            );
+            rollback_atomic_group(
+                state,
+                group_name,
+                &repo,
+                target_branch,
+                pre_group_sha.as_deref(),
+                &merged_entries,
+                &group_entries,
+                &format!("member MR {} is not mergeable (status {:?})", mr.id, mr.status),
+                &mr.id,
+            )
+            .await?;
+            state
+                .merge_queue
+                .update_status(
+                    &ge.id,
+                    MergeQueueEntryStatus::Failed,
+                    Some(format!(
+                        "merge request status {:?} cannot be merged",
+                        mr.status
+                    )),
+                )
+                .await?;
+            return Ok(());
+        }
+
         // P5: Check dependency health for this member.
         if handle_dep_health_issues(state, ge, &mr).await? {
             // Dep health issue found — rollback the group.
@@ -5855,6 +5900,124 @@ mod tests {
             "no notifications expected while paused, got {:?}",
             notifs.iter().map(|n| &n.notification_type).collect::<Vec<_>>()
         );
+    }
+
+    /// TASK-095 R4: a group member whose MR became non-mergeable while its
+    /// entry sat Queued (closed, reverted, or merged elsewhere — the
+    /// selection loop's 4b'' status check validates only the first
+    /// candidate it dispatches on) must not be silently merged by the
+    /// group path. Its entry is failed permanently, the partial group
+    /// merge is rolled back (branch reset, merged members re-Open,
+    /// remaining entries requeued), and the healthy member proceeds as a
+    /// reduced group on the next cycle.
+    #[tokio::test]
+    async fn atomic_group_skips_non_mergeable_member_and_rolls_back() {
+        let state = test_state();
+        let repo = create_repo_in_workspace(&state, "recovery-repo", "ws-1").await;
+
+        let mut agent = gyre_domain::Agent::new(Id::new("agent-r4"), "agent-r4", 1000);
+        agent.spawned_by = Some("user-r4".to_string());
+        agent.workspace_id = Id::new("ws-1");
+        state.agents.create(&agent).await.unwrap();
+
+        create_mr_in_group(
+            &state,
+            "mr-r4-a",
+            &repo.id,
+            "ws-1",
+            "bundle",
+            "feat/r4-a",
+            Some("agent-r4"),
+        )
+        .await;
+        create_mr_in_group(
+            &state,
+            "mr-r4-b",
+            &repo.id,
+            "ws-1",
+            "bundle",
+            "feat/r4-b",
+            Some("agent-r4"),
+        )
+        .await;
+        enqueue_mr(&state, "mr-r4-a", 100, 1000).await;
+        enqueue_mr(&state, "mr-r4-b", 100, 1001).await;
+
+        // Member B is closed after enqueueing — exactly the state
+        // `transition_mr_status` (Open→Closed), `repos.rs` close-without-
+        // merge, or `specs.rs` auto-close produce without touching the
+        // queue.
+        let mut mr_b = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-r4-b"))
+            .await
+            .unwrap()
+            .unwrap();
+        mr_b.transition_status(MrStatus::Closed).unwrap();
+        state.merge_requests.update(&mr_b).await.unwrap();
+
+        let mut rx = state.message_broadcast_tx.subscribe();
+        process_next(&state).await.unwrap();
+
+        // Stale member's entry is terminally Failed, not requeued.
+        let entry_b = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-r4-b"))
+            .await
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(
+            entry_b.status,
+            MergeQueueEntryStatus::Failed,
+            "stale member entry must be terminally Failed, got {:?} ({:?})",
+            entry_b.status, entry_b.error_message
+        );
+
+        // Neither member merged: A rolled back to Open, B stays Closed.
+        for (mr_id, expected) in [("mr-r4-a", MrStatus::Open), ("mr-r4-b", MrStatus::Closed)] {
+            let updated = state
+                .merge_requests
+                .find_by_id(&Id::new(mr_id))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(updated.status, expected, "{mr_id} must not be merged");
+        }
+
+        // Healthy member's entry was requeued for a reduced-group retry.
+        let entry_a = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-r4-a"))
+            .await
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(
+            entry_a.status,
+            MergeQueueEntryStatus::Queued,
+            "healthy member must be requeued after group rollback"
+        );
+
+        // The rollback path notified the author (AtomicGroupFailure) and
+        // emitted the group-failure event.
+        let notifs = state
+            .notifications
+            .list_for_user(&Id::new("user-r4"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .await
+            .unwrap();
+        assert!(
+            notifs
+                .iter()
+                .any(|n| n.notification_type == NotificationType::AtomicGroupFailure),
+            "author should be notified of the group rollback, got {:?}",
+            notifs.iter().map(|n| &n.notification_type).collect::<Vec<_>>()
+        );
+        let mut saw_group_fail = false;
+        while let Ok(msg) = rx.try_recv() {
+            if matches!(msg.kind, MessageKind::AtomicGroupFailed) {
+                saw_group_fail = true;
+            }
+        }
+        assert!(saw_group_fail, "AtomicGroupFailed event should be emitted");
     }
 
     /// Test: post-merge gate failure on an atomic-group merge runs the full
