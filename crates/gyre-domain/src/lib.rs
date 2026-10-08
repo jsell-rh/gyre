@@ -117,7 +117,7 @@ pub use typescript_extractor::TypeScriptExtractor;
 pub use user::{GlobalRole, Theme, User, UserPreferences, UserRole};
 pub use user_profile::{JudgmentEntry, JudgmentType, UserNotificationPreference, UserToken};
 pub use workspace::{
-    builtin_personas, BuiltinPersonaDef, BUILTIN_PERSONA_DEFS, Persona, PersonaApprovalStatus,
-    PersonaScope, TrustLevel, Workspace,
+    builtin_personas, BuiltinPersonaDef, Persona, PersonaApprovalStatus, PersonaScope, TrustLevel,
+    Workspace, BUILTIN_PERSONA_DEFS,
 };
 pub use workspace_membership::{WorkspaceMembership, WorkspaceRole};
