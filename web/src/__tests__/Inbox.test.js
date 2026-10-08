@@ -72,6 +72,11 @@ vi.mock('../lib/api.js', () => ({
     agent: vi.fn().mockResolvedValue({ name: 'test-agent' }),
     task: vi.fn().mockResolvedValue({ title: 'test-task' }),
     mergeRequest: vi.fn().mockResolvedValue({ title: 'test-mr' }),
+    mrStatus: vi.fn().mockResolvedValue({ status: 'closed' }),
+    submitReview: vi.fn().mockResolvedValue({}),
+    pauseMergeQueue: vi.fn().mockResolvedValue({ queue_paused: true }),
+    agents: vi.fn().mockResolvedValue([]),
+    sendAgentMessage: vi.fn().mockResolvedValue({}),
   },
 }));
 
@@ -229,15 +234,17 @@ describe('Inbox', () => {
     });
   });
 
-  it('gate_failure: shows View MR, Retry Gate, Dismiss when expanded', async () => {
+  it('gate_failure: shows View Diff, View Output, Retry Gate, Override, Close MR when expanded (HSI §8 P3)', async () => {
     api.myNotifications.mockResolvedValue([gateFailureNotif]);
     const { findByRole } = render(Inbox);
     const header = await findByRole('button', { name: /Expand: Gate failure/ });
     await fireEvent.click(header);
     await waitFor(() => {
+      expect(document.body.textContent).toContain('View Diff');
+      expect(document.body.textContent).toContain('View Output');
       expect(document.body.textContent).toContain('Retry Gate');
-      expect(document.body.textContent).toContain('View MR');
-      expect(document.body.textContent).toContain('Dismiss');
+      expect(document.body.textContent).toContain('Override');
+      expect(document.body.textContent).toContain('Close MR');
     });
   });
 
@@ -275,6 +282,128 @@ describe('Inbox', () => {
     const retryBtn = await findByText('Retry Gate');
     await fireEvent.click(retryBtn);
     expect(api.enqueue).toHaveBeenCalledWith('mr-uuid-42');
+  });
+
+  it('calls submitReview with approved decision when Override is clicked for gate_failure', async () => {
+    api.myNotifications.mockResolvedValue([gateFailureNotif]);
+    const { findByRole, findByText } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Gate failure/ });
+    await fireEvent.click(header);
+    const overrideBtn = await findByText('Override');
+    await fireEvent.click(overrideBtn);
+    expect(api.submitReview).toHaveBeenCalledWith(
+      'mr-uuid-42',
+      expect.objectContaining({ decision: 'approved' }),
+    );
+    await waitFor(() => {
+      expect(document.body.textContent).toContain('Override submitted');
+    });
+  });
+
+  it('calls mrStatus with closed when Close MR is clicked for gate_failure', async () => {
+    api.myNotifications.mockResolvedValue([gateFailureNotif]);
+    const { findByRole, findByText } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Gate failure/ });
+    await fireEvent.click(header);
+    const closeBtn = await findByText('Close MR');
+    await fireEvent.click(closeBtn);
+    expect(api.mrStatus).toHaveBeenCalledWith('mr-uuid-42', 'closed');
+    await waitFor(() => {
+      expect(document.body.textContent).toContain('MR closed');
+    });
+  });
+
+  it('View Diff and View Output open the MR detail panel with the right tab', async () => {
+    const openDetailPanel = vi.fn();
+    api.myNotifications.mockResolvedValue([gateFailureNotif]);
+    const { findByRole, findByText } = render(Inbox, {
+      context: new Map([['openDetailPanel', openDetailPanel]]),
+    });
+    const header = await findByRole('button', { name: /Expand: Gate failure/ });
+    await fireEvent.click(header);
+    await fireEvent.click(await findByText('View Diff'));
+    expect(openDetailPanel).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'mr', id: 'mr-uuid-42' }),
+    );
+    expect(openDetailPanel.mock.calls[0][0].data._openTab).toBe('diff');
+    await fireEvent.click(await findByText('View Output'));
+    const lastCall = openDetailPanel.mock.calls[openDetailPanel.mock.calls.length - 1];
+    expect(lastCall[0].data._openTab).toBe('gates');
+  });
+
+  it('budget_warning: shows Increase Limit and Pause Work when expanded (HSI §8 P7)', async () => {
+    api.myNotifications.mockResolvedValue([
+      makeNotification({
+        id: 'notif-budget',
+        notification_type: 'budget_warning',
+        priority: 7,
+        title: 'Budget warning',
+        body: JSON.stringify({ message: 'Workspace at 90% of budget.' }),
+        repo_id: 'repo-1',
+      }),
+    ]);
+    const { findByRole } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Budget warning/ });
+    await fireEvent.click(header);
+    await waitFor(() => {
+      expect(document.body.textContent).toContain('Increase Limit');
+      expect(document.body.textContent).toContain('Pause Work');
+    });
+  });
+
+  it('calls pauseMergeQueue when Pause Work is clicked for repo-scoped budget_warning', async () => {
+    api.myNotifications.mockResolvedValue([
+      makeNotification({
+        id: 'notif-budget',
+        notification_type: 'budget_warning',
+        priority: 7,
+        title: 'Budget warning',
+        body: JSON.stringify({ message: 'Workspace at 90% of budget.' }),
+        repo_id: 'repo-1',
+      }),
+    ]);
+    const { findByRole, findByText } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Budget warning/ });
+    await fireEvent.click(header);
+    const pauseBtn = await findByText('Pause Work');
+    await fireEvent.click(pauseBtn);
+    expect(api.pauseMergeQueue).toHaveBeenCalledWith('repo-1', expect.any(String));
+  });
+
+  it('sends pause_requested to active agents when Pause Work is clicked for workspace-scoped budget_warning', async () => {
+    api.agents.mockResolvedValue([
+      { id: 'agent-a', status: 'active' },
+      { id: 'agent-b', status: 'stopped' },
+    ]);
+    api.myNotifications.mockResolvedValue([
+      makeNotification({
+        id: 'notif-budget-ws',
+        notification_type: 'budget_warning',
+        priority: 7,
+        title: 'Budget warning',
+        body: JSON.stringify({ message: 'Workspace at 90% of budget.' }),
+        repo_id: null,
+      }),
+    ]);
+    const { findByRole, findByText } = render(Inbox, {
+      props: { workspaceId: 'ws-1', scope: 'workspace' },
+    });
+    const header = await findByRole('button', { name: /Expand: Budget warning/ });
+    await fireEvent.click(header);
+    const pauseBtn = await findByText('Pause Work');
+    await fireEvent.click(pauseBtn);
+    await waitFor(() => {
+      expect(api.sendAgentMessage).toHaveBeenCalledTimes(1);
+    });
+    expect(api.sendAgentMessage).toHaveBeenCalledWith(
+      'ws-1',
+      'agent-a',
+      expect.objectContaining({
+        kind: 'status_update',
+        tier: 'directed',
+        payload: expect.objectContaining({ status: 'pause_requested' }),
+      }),
+    );
   });
 
   it('shows Approved feedback after successful approve', async () => {

@@ -510,6 +510,8 @@
     "accepted": "Accepted",
     "approval_failed": "Approval failed",
     "rejection_failed": "Rejection failed",
+    "re_queued": "Re-queued",
+    "retry_failed": "Retry failed",
     "override_submitted": "Override submitted \u2014 approval recorded",
     "mr_closed": "MR closed",
     "work_paused": "Pause requested for {count, plural, one {# active agent} other {# active agents}}",
