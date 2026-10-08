@@ -255,6 +255,16 @@ pub async fn scim_list_users(
 }
 
 /// POST /scim/v2/Users — create user.
+///
+/// The username handle is derived from the SCIM `userName` exactly as the
+/// SSO first-login path derives it from `preferred_username`
+/// (auth.rs `find_or_create_user`): sanitized to the URL-safe handle
+/// contract (user-management.md §Username vs Display Name), falling back
+/// to the external id when sanitization yields nothing. A changed
+/// `userName` on a later PUT is ignored — the handle is immutable after
+/// creation, and since create-time sanitization may legitimately differ
+/// from what the IdP echoes back, ignoring (not 409) keeps IdP sync loops
+/// working.
 pub async fn scim_create_user(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
@@ -272,10 +282,33 @@ pub async fn scim_create_user(
         }
     }
 
-    let mut user = User::new(new_id(), ext_id, req.user_name.clone(), now);
-    if let Some(dn) = req.display_name {
-        user.display_name = dn;
+    // URL-safe handle derivation, mirroring the SSO path: sanitize the
+    // IdP-provided name, fall back to the external id (unique per caller),
+    // and reject when neither yields a usable handle — never persist a
+    // non-URL-safe or empty username through the provisioning path.
+    let username = match User::sanitize_username(&req.user_name) {
+        Some(handle) => handle,
+        None if !ext_id.is_empty() => ext_id.clone(),
+        None => {
+            return Err(ApiError::InvalidInput(format!(
+                "userName {:?} has no URL-safe characters and no externalId to fall back to",
+                req.user_name
+            )))
+        }
+    };
+    // Username is unique (spec §Username vs Display Name). The adapter
+    // also enforces this, but checking here yields a precise 409 instead
+    // of a raw storage error surfacing as 500 (same pattern as
+    // api::users::create_user).
+    if let Some(existing) = state.users.find_by_username(&username).await? {
+        return Err(ApiError::Conflict(format!(
+            "username {username} already taken (user {})",
+            existing.id
+        )));
     }
+
+    let display_name = req.display_name.unwrap_or_else(|| req.user_name.clone());
+    let mut user = User::new_sso(new_id(), ext_id, username, display_name, now);
     if let Some(email) = req.emails.into_iter().find(|e| e.primary).map(|e| e.value) {
         user.email = Some(email);
     }
@@ -300,8 +333,15 @@ pub async fn scim_get_user(
 
     Ok(Json(user_to_scim(&user)))
 }
-
 /// PUT /scim/v2/Users/{id} — replace user.
+///
+/// `userName` and `externalId` are the immutable identity handle and the
+/// immutable IdP join key (user-management.md §Username vs Display Name,
+/// §User Entity): a changed value in the request is ignored rather than
+/// rejected, because IdPs routinely re-send their original (pre-sanitized)
+/// `userName` on every sync PUT and a 409 would break the sync loop. All
+/// mutable profile fields (displayName, emails) are replaced per SCIM's
+/// PUT semantics.
 pub async fn scim_update_user(
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -316,15 +356,12 @@ pub async fn scim_update_user(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("user {id} not found")))?;
 
-    user.username = req.user_name.clone();
+    // username and external_id stay untouched: immutable after creation.
     if let Some(dn) = req.display_name {
         user.display_name = dn;
     }
     if let Some(email) = req.emails.into_iter().find(|e| e.primary).map(|e| e.value) {
         user.email = Some(email);
-    }
-    if let Some(ext_id) = req.external_id {
-        user.external_id = ext_id;
     }
     user.updated_at = now_secs();
 
@@ -473,6 +510,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scim_update_user() {
+        // PUT replaces mutable profile fields (displayName) but ignores
+        // userName/externalId: the username handle is immutable after
+        // creation (user-management.md §Username vs Display Name), and
+        // IdPs re-send their original userName on every sync PUT.
+        let app = api_router().with_state(make_state());
+        let payload = serde_json::json!({ "userName": "Bob", "displayName": "Bob" });
+        let create_resp = app
+            .clone()
+            .oneshot(scim_request("POST", "/scim/v2/Users", Some(payload)))
+            .await
+            .unwrap();
+        let created = body_json(create_resp).await;
+        let id = created["id"].as_str().unwrap().to_string();
+        assert_eq!(created["userName"], "bob", "userName is sanitized on create");
+
+        let update = serde_json::json!({
+            "userName": "bob-renamed",
+            "displayName": "Bob Updated",
+            "externalId": "evil-swapped-identity"
+        });
+        let upd_resp = app
+            .clone()
+            .oneshot(scim_request(
+                "PUT",
+                &format!("/scim/v2/Users/{id}"),
+                Some(update),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(upd_resp.status(), StatusCode::OK);
+        let updated = body_json(upd_resp).await;
+        assert_eq!(updated["userName"], "bob", "username is immutable after creation");
+        assert_eq!(updated["displayName"], "Bob Updated");
+
+        // externalId swap attempt did not take either (immutable join key).
+        let get_resp = app
+            .clone()
+            .oneshot(scim_request("GET", &format!("/scim/v2/Users/{id}"), None))
+            .await
+            .unwrap();
+        let got = body_json(get_resp).await;
+        assert_eq!(got["externalId"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn scim_create_sanitizes_user_name() {
+        // The provisioning path must derive the same URL-safe handle the
+        // SSO path derives; "Bad Handle!" has URL-safe characters so it
+        // sanitizes to "bad-handle" (display name keeps the raw value).
+        let app = api_router().with_state(make_state());
+        let payload = serde_json::json!({
+            "userName": "Bad Handle!",
+            "displayName": "Bad Handle!"
+        });
+        let create_resp = app
+            .clone()
+            .oneshot(scim_request("POST", "/scim/v2/Users", Some(payload)))
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let created = body_json(create_resp).await;
+        assert_eq!(created["userName"], "bad-handle");
+        assert_eq!(created["displayName"], "Bad Handle!");
+    }
+
+    #[tokio::test]
+    async fn scim_create_sanitizes_falls_back_to_external_id() {
+        // A userName with nothing URL-safe falls back to the externalId;
+        // with no externalId either, the request is rejected with 400 —
+        // never an empty or non-URL-safe persisted username.
+        let app = api_router().with_state(make_state());
+        let payload = serde_json::json!({
+            "userName": "!!!",
+            "externalId": "ext-fall-back"
+        });
+        let create_resp = app
+            .clone()
+            .oneshot(scim_request("POST", "/scim/v2/Users", Some(payload)))
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let created = body_json(create_resp).await;
+        assert_eq!(created["userName"], "ext-fall-back");
+
+        let no_fallback = serde_json::json!({ "userName": "!!!" });
+        let resp = app
+            .oneshot(scim_request("POST", "/scim/v2/Users", Some(no_fallback)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn scim_create_conflict_on_duplicate_username() {
+        // Two distinct external ids colliding on the sanitized handle:
+        // the second create must be a 409, not a 500 from the storage
+        // layer's unique-index violation.
+        let app = api_router().with_state(make_state());
+        let first = serde_json::json!({ "userName": "carol", "externalId": "ext-c1" });
+        let resp = app
+            .clone()
+            .oneshot(scim_request("POST", "/scim/v2/Users", Some(first)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let second = serde_json::json!({ "userName": "Carol!", "externalId": "ext-c2" });
+        let resp = app
+            .oneshot(scim_request("POST", "/scim/v2/Users", Some(second)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
     async fn scim_create_and_get_user() {
         let app = api_router().with_state(make_state());
         let payload = serde_json::json!({
@@ -499,33 +652,6 @@ mod tests {
         let got = body_json(get_resp).await;
         assert_eq!(got["id"], id);
         assert_eq!(got["userName"], "alice");
-    }
-
-    #[tokio::test]
-    async fn scim_update_user() {
-        let app = api_router().with_state(make_state());
-        let payload = serde_json::json!({ "userName": "bob", "displayName": "Bob" });
-        let create_resp = app
-            .clone()
-            .oneshot(scim_request("POST", "/scim/v2/Users", Some(payload)))
-            .await
-            .unwrap();
-        let created = body_json(create_resp).await;
-        let id = created["id"].as_str().unwrap().to_string();
-
-        let update = serde_json::json!({ "userName": "bob-updated", "displayName": "Bob Updated" });
-        let upd_resp = app
-            .clone()
-            .oneshot(scim_request(
-                "PUT",
-                &format!("/scim/v2/Users/{id}"),
-                Some(update),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(upd_resp.status(), StatusCode::OK);
-        let updated = body_json(upd_resp).await;
-        assert_eq!(updated["userName"], "bob-updated");
     }
 
     #[tokio::test]
