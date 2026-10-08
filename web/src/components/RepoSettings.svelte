@@ -23,11 +23,12 @@
     repo = null,
   } = $props();
 
-  const TAB_IDS = ['general', 'gates', 'policies', 'budget', 'dependencies', 'release', 'audit', 'danger-zone'];
+  const TAB_IDS = ['general', 'gates', 'policies', 'spec-lifecycle', 'budget', 'dependencies', 'release', 'audit', 'danger-zone'];
   const TAB_KEYS = {
     'general': 'repo_settings.tabs.general',
     'gates': 'repo_settings.tabs.gates',
     'policies': 'repo_settings.tabs.policies',
+    'spec-lifecycle': 'repo_settings.tabs.spec_lifecycle',
     'budget': 'repo_settings.tabs.budget',
     'dependencies': 'Dependencies',
     'release': 'Release',
@@ -73,9 +74,8 @@
   // ── Push Gates ────────────────────────────────────────────────────────
   let pushGates = $state([]);
   let pushGatesLoading = $state(false);
-  let newPushGate = $state('');
   let pushGatesSaving = $state(false);
-
+  let newPushGate = $state('');
   // ── Policies ──────────────────────────────────────────────────────────
   let specPolicy = $state(null);
   let specPolicyLoading = $state(false);
@@ -87,6 +87,15 @@
   let repoBudget = $state(null);
   let repoBudgetLoading = $state(false);
   let repoBudgetError = $state(null);
+
+  // ── Spec Lifecycle ───────────────────────────────────────────────────
+  let specLifecycle = $state(null);
+  let specLifecycleLoading = $state(false);
+  let specLifecycleError = $state(null);
+  let specLifecycleSaving = $state(false);
+  let specLifecycleSaved = $state(false);
+  let newWatchedPath = $state('');
+  let newIgnoredPath = $state('');
 
   // ── Dependencies ───────────────────────────────────────────────────────
   let repoDeps = $state([]);
@@ -154,6 +163,9 @@
     }
     if (activeTab === 'policies') {
       if (untrack(() => !specPolicy && !specPolicyLoading)) loadSpecPolicy(repoId);
+    }
+    if (activeTab === 'spec-lifecycle') {
+      if (untrack(() => !specLifecycle && !specLifecycleLoading)) loadSpecLifecycle(repoId);
     }
     if (activeTab === 'budget') {
       if (untrack(() => !repoBudget && !repoBudgetLoading)) loadRepoBudget(repoId);
@@ -282,11 +294,61 @@
     specPolicyError = null;
     try {
       specPolicy = await api.repoSpecPolicy(repoId);
-    } catch (e) {
+    }
+    catch (e) {
       specPolicyError = e.message;
       specPolicy = null;
     }
     finally { specPolicyLoading = false; }
+  }
+
+  async function loadSpecLifecycle(repoId) {
+    specLifecycleLoading = true;
+    specLifecycleError = null;
+    try {
+      specLifecycle = await api.repoSpecLifecycle(repoId);
+    } catch (e) {
+      specLifecycleError = e.message;
+      specLifecycle = null;
+    }
+    finally { specLifecycleLoading = false; }
+  }
+
+  async function saveSpecLifecycle() {
+    if (!repo?.id || !specLifecycle) return;
+    specLifecycleSaving = true;
+    try {
+      specLifecycle = await api.setRepoSpecLifecycle(repo.id, specLifecycle);
+      specLifecycleSaved = true;
+      setTimeout(() => { specLifecycleSaved = false; }, 2000);
+    } catch (e) {
+      toastError($t('repo_settings.spec_lifecycle.save_failed', { values: { error: e?.message ?? 'unknown error' } }));
+    }
+    finally { specLifecycleSaving = false; }
+  }
+
+  function addWatchedPath() {
+    const p = newWatchedPath.trim();
+    if (!p || !specLifecycle) return;
+    if (!specLifecycle.watched_paths.includes(p)) specLifecycle.watched_paths.push(p);
+    newWatchedPath = '';
+  }
+
+  function removeWatchedPath(path) {
+    if (!specLifecycle) return;
+    specLifecycle.watched_paths = specLifecycle.watched_paths.filter(p => p !== path);
+  }
+
+  function addIgnoredPath() {
+    const p = newIgnoredPath.trim();
+    if (!p || !specLifecycle) return;
+    if (!specLifecycle.ignored_paths.includes(p)) specLifecycle.ignored_paths.push(p);
+    newIgnoredPath = '';
+  }
+
+  function removeIgnoredPath(path) {
+    if (!specLifecycle) return;
+    specLifecycle.ignored_paths = specLifecycle.ignored_paths.filter(p => p !== path);
   }
 
   async function loadRepoBudget(_repoId) {
@@ -838,6 +900,172 @@
         {/if}
       </div>
 
+
+    <!-- Spec Lifecycle tab -->
+    {:else if activeTab === 'spec-lifecycle'}
+      <div class="tab-body" data-testid="repo-spec-lifecycle-tab">
+        <h2 class="tab-title">{$t('repo_settings.spec_lifecycle.title')}</h2>
+        <p class="tab-desc">{$t('repo_settings.spec_lifecycle.description')}</p>
+
+        {#if specLifecycleLoading}
+          <p class="loading-text">{$t('repo_settings.spec_lifecycle.loading')}</p>
+        {:else if specLifecycleError}
+          <p class="error-text" role="alert">{specLifecycleError}</p>
+        {:else if !specLifecycle}
+          <p class="empty-text">{$t('repo_settings.spec_lifecycle.empty')}</p>
+        {:else}
+          <div class="field-card" data-testid="spec-lifecycle-form">
+            <div class="field">
+              <label class="toggle-row">
+                <input
+                  type="checkbox"
+                  bind:checked={specLifecycle.enabled}
+                  data-testid="toggle-spec-lifecycle-enabled"
+                />
+                <span class="toggle-label">
+                  <span class="toggle-name">{$t('repo_settings.spec_lifecycle.enabled')}</span>
+                  <span class="toggle-hint">{$t('repo_settings.spec_lifecycle.enabled_hint')}</span>
+                </span>
+              </label>
+            </div>
+
+            <div class="field">
+              <span class="field-label">{$t('repo_settings.spec_lifecycle.watched_paths')}</span>
+              <p class="field-hint">{$t('repo_settings.spec_lifecycle.watched_paths_hint')}</p>
+              <div class="path-tag-list" data-testid="watched-paths-list">
+                {#each specLifecycle.watched_paths as path (path)}
+                  <span class="path-tag">
+                    <code>{path}</code>
+                    <button
+                      class="path-tag-remove"
+                      onclick={() => removeWatchedPath(path)}
+                      aria-label={$t('repo_settings.spec_lifecycle.remove_path', { values: { path } })}
+                      data-testid="remove-watched-path-btn"
+                    >✕</button>
+                  </span>
+                {/each}
+              </div>
+              <div class="action-row action-row-left path-add-row">
+                <input
+                  class="field-input"
+                  type="text"
+                  placeholder={$t('repo_settings.spec_lifecycle.path_placeholder')}
+                  bind:value={newWatchedPath}
+                  onkeydown={(e) => e.key === 'Enter' && addWatchedPath()}
+                  data-testid="new-watched-path-input"
+                />
+                <button class="btn-secondary" onclick={addWatchedPath} disabled={!newWatchedPath.trim()} data-testid="add-watched-path-btn">
+                  {$t('repo_settings.spec_lifecycle.add_path')}
+                </button>
+              </div>
+            </div>
+
+            <div class="field">
+              <span class="field-label">{$t('repo_settings.spec_lifecycle.ignored_paths')}</span>
+              <p class="field-hint">{$t('repo_settings.spec_lifecycle.ignored_paths_hint')}</p>
+              <div class="path-tag-list" data-testid="ignored-paths-list">
+                {#each specLifecycle.ignored_paths as path (path)}
+                  <span class="path-tag">
+                    <code>{path}</code>
+                    <button
+                      class="path-tag-remove"
+                      onclick={() => removeIgnoredPath(path)}
+                      aria-label={$t('repo_settings.spec_lifecycle.remove_path', { values: { path } })}
+                      data-testid="remove-ignored-path-btn"
+                    >✕</button>
+                  </span>
+                {/each}
+              </div>
+              <div class="action-row action-row-left path-add-row">
+                <input
+                  class="field-input"
+                  type="text"
+                  placeholder={$t('repo_settings.spec_lifecycle.path_placeholder')}
+                  bind:value={newIgnoredPath}
+                  onkeydown={(e) => e.key === 'Enter' && addIgnoredPath()}
+                  data-testid="new-ignored-path-input"
+                />
+                <button class="btn-secondary" onclick={addIgnoredPath} disabled={!newIgnoredPath.trim()} data-testid="add-ignored-path-btn">
+                  {$t('repo_settings.spec_lifecycle.add_path')}
+                </button>
+              </div>
+            </div>
+
+            <div class="field">
+              <label class="toggle-row">
+                <input
+                  type="checkbox"
+                  bind:checked={specLifecycle.auto_invalidate_approvals}
+                  data-testid="toggle-auto-invalidate"
+                />
+                <span class="toggle-label">
+                  <span class="toggle-name">{$t('repo_settings.spec_lifecycle.auto_invalidate')}</span>
+                  <span class="toggle-hint">{$t('repo_settings.spec_lifecycle.auto_invalidate_hint')}</span>
+                </span>
+              </label>
+            </div>
+
+            <div class="field">
+              <label class="toggle-row">
+                <input
+                  type="checkbox"
+                  bind:checked={specLifecycle.dedup_open_tasks}
+                  data-testid="toggle-dedup-tasks"
+                />
+                <span class="toggle-label">
+                  <span class="toggle-name">{$t('repo_settings.spec_lifecycle.dedup_tasks')}</span>
+                  <span class="toggle-hint">{$t('repo_settings.spec_lifecycle.dedup_tasks_hint')}</span>
+                </span>
+              </label>
+            </div>
+
+            <div class="field">
+              <span class="field-label">{$t('repo_settings.spec_lifecycle.priorities')}</span>
+              <p class="field-hint">{$t('repo_settings.spec_lifecycle.priorities_hint')}</p>
+              <div class="priority-grid">
+                <div class="field">
+                  <label class="field-label" for="prio-new">{$t('repo_settings.spec_lifecycle.priority_new')}</label>
+                  <select id="prio-new" class="filter-select" bind:value={specLifecycle.default_priority_new} data-testid="select-priority-new">
+                    <option value="Low">Low</option>
+                    <option value="Medium">Medium</option>
+                    <option value="High">High</option>
+                    <option value="Critical">Critical</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label class="field-label" for="prio-modified">{$t('repo_settings.spec_lifecycle.priority_modified')}</label>
+                  <select id="prio-modified" class="filter-select" bind:value={specLifecycle.default_priority_modified} data-testid="select-priority-modified">
+                    <option value="Low">Low</option>
+                    <option value="Medium">Medium</option>
+                    <option value="High">High</option>
+                    <option value="Critical">Critical</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label class="field-label" for="prio-deleted">{$t('repo_settings.spec_lifecycle.priority_deleted')}</label>
+                  <select id="prio-deleted" class="filter-select" bind:value={specLifecycle.default_priority_deleted} data-testid="select-priority-deleted">
+                    <option value="Low">Low</option>
+                    <option value="Medium">Medium</option>
+                    <option value="High">High</option>
+                    <option value="Critical">Critical</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="action-row">
+            <button
+              class="btn-primary"
+              onclick={saveSpecLifecycle}
+              disabled={specLifecycleSaving}
+              data-testid="save-spec-lifecycle-btn"
+            >
+              {#if specLifecycleSaving}{$t('repo_settings.spec_lifecycle.saving')}{:else if specLifecycleSaved}{$t('repo_settings.spec_lifecycle.saved')}{:else}{$t('repo_settings.spec_lifecycle.save')}{/if}
+            </button>
+          </div>
+        {/if}
+      </div>
     <!-- Budget tab -->
     {:else if activeTab === 'budget'}
       <div class="tab-body" data-testid="repo-budget-tab">
@@ -2187,5 +2415,63 @@
 
   .blast-item {
     border-left: 3px solid var(--color-warning);
+  }
+
+  /* ── Spec Lifecycle ───────────────────────────────────────────────── */
+  .path-tag-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .path-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    padding: 2px 6px 2px 8px;
+    border-radius: var(--radius-sm);
+    background: var(--color-border);
+    font-size: var(--text-xs);
+  }
+
+  .path-tag code {
+    font-family: var(--font-mono, monospace);
+    color: var(--color-text);
+  }
+
+  .path-tag-remove {
+    border: none;
+    background: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    padding: 0 2px;
+    font-size: var(--text-xs);
+    line-height: 1;
+  }
+
+  .path-tag-remove:hover {
+    color: var(--color-danger, #c0392b);
+  }
+
+  .path-add-row {
+    display: flex;
+    gap: var(--space-2);
+    align-items: center;
+  }
+
+  .path-add-row .field-input {
+    max-width: 320px;
+  }
+
+  .priority-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-4);
+  }
+
+  .priority-grid .field {
+    flex: 1 1 140px;
+    min-width: 140px;
+    max-width: 200px;
   }
 </style>
