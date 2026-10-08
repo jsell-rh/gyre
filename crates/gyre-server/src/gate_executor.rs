@@ -1792,4 +1792,91 @@ mod tests {
             "{{repo_name}} must be templated to the repository name"
         );
     }
+
+    // ─── Auto-emitted analytics events (analytics.md §Auto-Emitted Events) ────
+
+    async fn analytics_events(
+        state: &Arc<crate::AppState>,
+        name: &str,
+    ) -> Vec<gyre_domain::AnalyticsEvent> {
+        // state.analytics is an Arc<dyn AnalyticsRepository>; method calls
+        // resolve through the trait object without importing the trait here.
+        state.analytics.query(Some(name), None, 10).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn passing_gate_emits_gate_passed_analytics_event() {
+        // gate.passed must carry gate_id, gate_type, mr_id, duration_secs.
+        let state = crate::mem::test_state();
+        let gate = make_gate(GateType::TestCommand, Some("true".to_string()));
+        let mr_id = make_mr_id();
+        let result_id = Id::new(Uuid::new_v4().to_string());
+
+        // Store a pending result first (run_gate updates it).
+        state
+            .gate_results
+            .save(&GateResult {
+                id: result_id.clone(),
+                gate_id: gate.id.clone(),
+                mr_id: mr_id.clone(),
+                status: GateStatus::Pending,
+                output: None,
+                started_at: None,
+                finished_at: None,
+            })
+            .await
+            .unwrap();
+
+        run_gate(state.clone(), result_id, gate.clone(), mr_id.clone()).await;
+
+        let events = analytics_events(&state, "gate.passed").await;
+        assert_eq!(events.len(), 1, "one gate.passed event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["gate_id"], gate.id.to_string());
+        assert_eq!(ev.properties["gate_type"], "TestCommand");
+        assert_eq!(ev.properties["mr_id"], mr_id.to_string());
+        assert!(
+            ev.properties["duration_secs"].as_u64().is_some(),
+            "duration_secs must be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn failing_gate_emits_gate_failed_analytics_event() {
+        // gate.failed must carry gate_id, gate_type, mr_id, output_snippet.
+        let state = crate::mem::test_state();
+        let gate = make_gate(GateType::TestCommand, Some("false".to_string()));
+        let mr_id = make_mr_id();
+        let result_id = Id::new(Uuid::new_v4().to_string());
+
+        state
+            .gate_results
+            .save(&GateResult {
+                id: result_id.clone(),
+                gate_id: gate.id.clone(),
+                mr_id: mr_id.clone(),
+                status: GateStatus::Pending,
+                output: None,
+                started_at: None,
+                finished_at: None,
+            })
+            .await
+            .unwrap();
+
+        run_gate(state.clone(), result_id, gate.clone(), mr_id.clone()).await;
+
+        let events = analytics_events(&state, "gate.failed").await;
+        assert_eq!(events.len(), 1, "one gate.failed event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["gate_id"], gate.id.to_string());
+        assert_eq!(ev.properties["gate_type"], "TestCommand");
+        assert_eq!(ev.properties["mr_id"], mr_id.to_string());
+        assert!(
+            ev.properties["output_snippet"].as_str().is_some(),
+            "output_snippet must be present (failure output)"
+        );
+        // No gate.passed event for a failing gate.
+        let passed = analytics_events(&state, "gate.passed").await;
+        assert!(passed.is_empty(), "failed gate must not emit gate.passed");
+    }
 }

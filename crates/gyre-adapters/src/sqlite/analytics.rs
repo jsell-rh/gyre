@@ -505,6 +505,72 @@ mod tests {
         assert_eq!(d2.1, 1);
     }
 
+    #[tokio::test]
+    async fn analytics_query_filtered_all_params() {
+        let (_tmp, s) = setup();
+        let mk = |id: &str, name: &str, agent: Option<&str>, ws: Option<&str>, repo: Option<&str>, ts: u64| {
+            AnalyticsEvent {
+                id: Id::new(id),
+                event_name: name.to_string(),
+                agent_id: agent.map(str::to_string),
+                user_id: None,
+                session_id: None,
+                workspace_id: ws.map(str::to_string),
+                repo_id: repo.map(str::to_string),
+                properties: serde_json::json!({}),
+                timestamp: ts,
+            }
+        };
+        AnalyticsRepository::record(&s, &mk("f1", "mr.merged", Some("a1"), Some("ws-1"), Some("r1"), 100))
+            .await
+            .unwrap();
+        AnalyticsRepository::record(&s, &mk("f2", "mr.merged", Some("a2"), Some("ws-2"), Some("r1"), 200))
+            .await
+            .unwrap();
+        AnalyticsRepository::record(&s, &mk("f3", "task.status_changed", Some("a1"), Some("ws-1"), None, 300))
+            .await
+            .unwrap();
+
+        // Prefix wildcard.
+        let f = AnalyticsQueryFilter {
+            event_name: Some("mr.*".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(out.len(), 2, "mr.* prefix match");
+
+        // Conjunctive scope filters.
+        let f = AnalyticsQueryFilter {
+            event_name: Some("mr.merged".into()),
+            agent_id: Some("a2".into()),
+            workspace_id: Some("ws-2".into()),
+            repo_id: Some("r1".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, Id::new("f2"));
+
+        // Inclusive since/until bounds.
+        let f = AnalyticsQueryFilter {
+            since: Some(200),
+            until: Some(200),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, Id::new("f2"));
+
+        // Limit truncates, newest first.
+        let f = AnalyticsQueryFilter {
+            limit: 2,
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = AnalyticsRepository::query_filtered(&s, &f).await.unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].id, Id::new("f3"), "newest event first");
+    }
+
     // --- CostRepository tests ---
 
     #[tokio::test]

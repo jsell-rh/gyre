@@ -833,4 +833,197 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json.as_array().unwrap().len(), 2);
     }
+
+    // ─── Query Parameters (analytics.md §Query Parameters) ─────────────────────
+
+    /// Helper: POST an event with full scope fields, return the state for
+    /// direct repository assertions.
+    async fn record_scoped(
+        app: &Router,
+        event_name: &str,
+        agent_id: Option<&str>,
+        user_id: Option<&str>,
+        workspace_id: Option<&str>,
+        repo_id: Option<&str>,
+    ) {
+        let body = serde_json::json!({
+            "event_name": event_name,
+            "agent_id": agent_id,
+            "user_id": user_id,
+            "workspace_id": workspace_id,
+            "repo_id": repo_id,
+            "properties": { "k": "v" },
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/analytics/events")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    async fn get_events(app: &Router, query: &str) -> serde_json::Value {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/analytics/events?{query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "query was: {query}");
+        body_json(resp).await
+    }
+
+    #[tokio::test]
+    async fn query_events_filters_by_scope_ids() {
+        // Spec: agent_id, workspace_id, repo_id, user_id must each filter.
+        let app = app();
+        record_scoped(&app, "mr.merged", Some("agent-1"), None, Some("ws-1"), Some("repo-1"))
+            .await;
+        record_scoped(&app, "mr.merged", Some("agent-2"), None, Some("ws-2"), Some("repo-1"))
+            .await;
+        record_scoped(&app, "mr.closed", Some("agent-1"), Some("user-9"), Some("ws-1"), None)
+            .await;
+
+        let json = get_events(&app, "agent_id=agent-1").await;
+        assert_eq!(
+            json.as_array().unwrap().len(),
+            2,
+            "agent_id filter must match both agent-1 events"
+        );
+
+        let json = get_events(&app, "workspace_id=ws-2").await;
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json[0]["agent_id"], "agent-2");
+
+        let json = get_events(&app, "repo_id=repo-1&event_name=mr.merged").await;
+        assert_eq!(json.as_array().unwrap().len(), 2);
+
+        let json = get_events(&app, "user_id=user-9").await;
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json[0]["event_name"], "mr.closed");
+
+        // Combined scope filters are conjunctive.
+        let json = get_events(&app, "agent_id=agent-1&workspace_id=ws-1&event_name=mr.merged").await;
+        assert_eq!(json.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn query_events_event_name_prefix_wildcard() {
+        // Spec: `event_name` supports prefix match with trailing `*`.
+        let app = app();
+        record_scoped(&app, "mr.merged", None, None, None, None).await;
+        record_scoped(&app, "mr.closed", None, None, None, None).await;
+        record_scoped(&app, "task.status_changed", None, None, None, None).await;
+
+        let json = get_events(&app, "event_name=mr.*").await;
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 2, "mr.* must match mr.merged and mr.closed");
+        assert!(arr.iter().all(|e| e["event_name"].as_str().unwrap().starts_with("mr.")));
+
+        // Exact match still works and excludes the other mr.* events.
+        let json = get_events(&app, "event_name=mr.merged").await;
+        assert_eq!(json.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn query_events_since_until_bounds() {
+        // Spec: since/until bound the time range (inclusive).
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Record events directly against the repository so timestamps are
+        // deterministic (the POST handler stamps `now`).
+        for (id, ts) in [("e-old", 100u64), ("e-mid", 200), ("e-new", 300)] {
+            let ev = gyre_domain::AnalyticsEvent::new(
+                gyre_common::Id::new(id),
+                "ev.ts",
+                None,
+                serde_json::json!({}),
+                ts,
+            );
+            state.analytics.record(&ev).await.unwrap();
+        }
+
+        let json = get_events(&app, "event_name=ev.ts&since=200").await;
+        assert_eq!(json.as_array().unwrap().len(), 2, "since=200 is inclusive");
+
+        let json = get_events(&app, "event_name=ev.ts&until=200").await;
+        assert_eq!(json.as_array().unwrap().len(), 2, "until=200 is inclusive");
+
+        let json = get_events(&app, "event_name=ev.ts&since=150&until=250").await;
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json[0]["id"], "e-mid");
+    }
+
+    #[tokio::test]
+    async fn query_events_limit_truncates() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        for i in 0..5u64 {
+            let ev = gyre_domain::AnalyticsEvent::new(
+                gyre_common::Id::new(format!("e-lim-{i}")),
+                "ev.limit",
+                None,
+                serde_json::json!({}),
+                100 + i,
+            );
+            state.analytics.record(&ev).await.unwrap();
+        }
+
+        let json = get_events(&app, "event_name=ev.limit&limit=2").await;
+        assert_eq!(json.as_array().unwrap().len(), 2, "limit must truncate");
+    }
+
+    #[tokio::test]
+    async fn query_events_group_by_aggregates() {
+        // Spec: group_by ∈ {event_name, agent_id, workspace_id, day}.
+        let app = app();
+        record_scoped(&app, "mr.merged", Some("a1"), None, Some("ws-1"), None).await;
+        record_scoped(&app, "mr.merged", Some("a1"), None, Some("ws-1"), None).await;
+        record_scoped(&app, "mr.closed", Some("a2"), None, Some("ws-2"), None).await;
+
+        let json = get_events(&app, "group_by=event_name").await;
+        let obj = json.as_object().expect("group_by returns an object");
+        assert_eq!(obj.get("mr.merged").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(obj.get("mr.closed").and_then(|v| v.as_u64()), Some(1));
+
+        let json = get_events(&app, "group_by=agent_id").await;
+        let obj = json.as_object().unwrap();
+        assert_eq!(obj.get("a1").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(obj.get("a2").and_then(|v| v.as_u64()), Some(1));
+
+        let json = get_events(&app, "group_by=workspace_id").await;
+        let obj = json.as_object().unwrap();
+        assert_eq!(obj.get("ws-1").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(obj.get("ws-2").and_then(|v| v.as_u64()), Some(1));
+
+        // day grouping: all events recorded "now" land on today's UTC date.
+        let json = get_events(&app, "group_by=day").await;
+        let obj = json.as_object().unwrap();
+        let total: u64 = obj.values().filter_map(|v| v.as_u64()).sum();
+        assert_eq!(total, 3, "day grouping must account for every event");
+
+        // Unsupported group_by field is rejected.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/analytics/events?group_by=bogus")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
 }

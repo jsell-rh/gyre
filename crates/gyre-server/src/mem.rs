@@ -1136,6 +1136,95 @@ fn epoch_days_to_date(days: i64) -> String {
     format!("{:04}-{:02}-{:02}", y, m, d)
 }
 
+#[cfg(test)]
+mod analytics_query_tests {
+    use super::*;
+    use gyre_ports::AnalyticsRepository;
+
+    fn scoped_event(
+        id: &str,
+        name: &str,
+        agent_id: Option<&str>,
+        user_id: Option<&str>,
+        workspace_id: Option<&str>,
+        repo_id: Option<&str>,
+        ts: u64,
+    ) -> AnalyticsEvent {
+        AnalyticsEvent {
+            id: Id::new(id),
+            event_name: name.to_string(),
+            agent_id: agent_id.map(str::to_string),
+            user_id: user_id.map(str::to_string),
+            session_id: None,
+            workspace_id: workspace_id.map(str::to_string),
+            repo_id: repo_id.map(str::to_string),
+            properties: serde_json::json!({}),
+            timestamp: ts,
+        }
+    }
+
+    #[tokio::test]
+    async fn query_filtered_matches_sqlite_filter_semantics() {
+        let repo = MemAnalyticsRepository::default();
+        repo.record(&scoped_event("e1", "mr.merged", Some("a1"), None, Some("ws-1"), Some("r1"), 100))
+            .await
+            .unwrap();
+        repo.record(&scoped_event("e2", "mr.merged", Some("a2"), Some("u9"), Some("ws-2"), Some("r1"), 200))
+            .await
+            .unwrap();
+        repo.record(&scoped_event("e3", "task.status_changed", Some("a1"), None, Some("ws-1"), None, 300))
+            .await
+            .unwrap();
+
+        // Prefix wildcard.
+        let f = AnalyticsQueryFilter {
+            event_name: Some("mr.*".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo.query_filtered(&f).await.unwrap();
+        assert_eq!(out.len(), 2, "mr.* prefix match");
+
+        // Scope filters are conjunctive.
+        let f = AnalyticsQueryFilter {
+            event_name: Some("mr.merged".into()),
+            repo_id: Some("r1".into()),
+            workspace_id: Some("ws-2".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo.query_filtered(&f).await.unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, Id::new("e2"));
+
+        // user_id filter.
+        let f = AnalyticsQueryFilter {
+            user_id: Some("u9".into()),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo.query_filtered(&f).await.unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, Id::new("e2"));
+
+        // since/until inclusive bounds.
+        let f = AnalyticsQueryFilter {
+            since: Some(200),
+            until: Some(200),
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo.query_filtered(&f).await.unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, Id::new("e2"));
+
+        // limit truncates (newest first ordering).
+        let f = AnalyticsQueryFilter {
+            limit: 2,
+            ..AnalyticsQueryFilter::new()
+        };
+        let out = repo.query_filtered(&f).await.unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].id, Id::new("e3"), "newest event first");
+    }
+}
+
 #[derive(Default)]
 pub struct MemCostRepository {
     store: Arc<Mutex<Vec<CostEntry>>>,
