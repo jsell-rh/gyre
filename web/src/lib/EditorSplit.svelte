@@ -187,7 +187,7 @@
           for (const line of lines) {
             if (!line.startsWith('data: ')) continue;
             const raw = line.slice(6);
-            if (raw === { done = true; break; }
+            if (raw === ' done = true; break; }
             try {
               const parsed = JSON.parse(raw);
               if (parsed.event === 'partial' || parsed.type === 'partial') {
@@ -213,37 +213,9 @@
       llmStreaming = false;
     }
   }
-  }
-
   // Edit: copy the suggested text into the editor for manual refinement
   // (ui-layout.md §3 LLM-Assisted Spec Editing step 5).
   function editSuggestion() {
-            if (raw === '[DONE]') { done = true; break; }
-            try {
-              const parsed = JSON.parse(raw);
-              if (parsed.event === 'partial' || parsed.type === 'partial') {
-                llmExplanation += parsed.text ?? parsed.explanation ?? '';
-              } else if (parsed.event === 'complete' || parsed.type === 'complete') {
-                llmSuggestion = {
-                  diff: parsed.diff ?? [],
-                  explanation: parsed.explanation ?? llmExplanation,
-                };
-                done = true; break;
-              } else if (parsed.event === 'error' || parsed.type === 'error') {
-                throw new Error(parsed.message ?? 'LLM error');
-              }
-            } catch (pe) {
-              if (pe.message && !pe.message.startsWith('Unexpected token')) throw pe;
-            }
-          }
-        }
-      }
-    } catch (e) {
-      toastError($t('editor_split.llm_assist_failed', { values: { error: e.message } }));
-    } finally {
-      llmStreaming = false;
-    }
-  }
 
   function acceptSuggestion() {
     if (!llmSuggestion) return;
