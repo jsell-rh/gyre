@@ -62,6 +62,7 @@ describe('createPresenceHeartbeat', () => {
 
   function heartbeatStore() {
     const statusCbs = [];
+    const messageCbs = [];
     return {
       send: vi.fn(),
       sessionId: 'sess-1',
@@ -69,7 +70,12 @@ describe('createPresenceHeartbeat', () => {
         statusCbs.push(cb);
         return () => {};
       },
+      onMessage: (cb) => {
+        messageCbs.push(cb);
+        return () => {};
+      },
       _setStatus: (s) => statusCbs.forEach((cb) => cb(s)),
+      _emitMessage: (m) => messageCbs.forEach((cb) => cb(m)),
     };
   }
 
@@ -207,6 +213,34 @@ describe('createPresenceHeartbeat', () => {
     window.dispatchEvent(new Event('beforeunload'));
     expect(store.send).toHaveBeenCalledTimes(1);
     expect(store.send.mock.calls[0][0].view).toBe('disconnected');
+    hb.destroy();
+  });
+
+  // Eviction leg (HSI §1): a targeted PresenceEvicted naming THIS tab's
+  // session stops heartbeating for that tab — the server dropped the entry
+  // (5-session cap / idle sweep) and the client must not re-insert it.
+  it('stops heartbeating after PresenceEvicted names its own session', () => {
+    const store = heartbeatStore();
+    const hb = makeHb(store);
+    store._setStatus('connected'); // send #1
+    store._emitMessage({ type: 'PresenceEvicted', session_id: 'sess-1' });
+    vi.advanceTimersByTime(120_000); // two 30s beats would have fired
+    hb.notifyViewChange();
+    hb.sendNow();
+    window.dispatchEvent(new Event('beforeunload'));
+    expect(store.send).toHaveBeenCalledTimes(1); // only the pre-eviction send
+    hb.destroy();
+  });
+
+  // Eviction must be session-scoped: another tab's PresenceEvicted must not
+  // silence this tab's heartbeat (spec: "stops heartbeating only for that tab").
+  it('keeps heartbeating when PresenceEvicted names a different session', () => {
+    const store = heartbeatStore();
+    const hb = makeHb(store);
+    store._setStatus('connected'); // send #1
+    store._emitMessage({ type: 'PresenceEvicted', session_id: 'sess-other' });
+    vi.advanceTimersByTime(30_000);
+    expect(store.send).toHaveBeenCalledTimes(2); // beat still fires
     hb.destroy();
   });
 

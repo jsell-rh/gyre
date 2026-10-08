@@ -44,9 +44,11 @@ export function sendEditingPresence(wsStore, { workspaceId, editingEntity = null
  *
  * All legs are a conjunctive contract — see specs/prompts/implementation.md
  * item 161: send-on-connect, periodic timer, view-change re-send, and
- * disconnect-on-unload must each be implemented and tested.
+ * disconnect-on-unload must each be implemented and tested. Eviction leg: a
+ * targeted PresenceEvicted naming this tab's session_id stops heartbeating
+ * for that tab (HSI §1 5-session cap / idle sweep).
  *
- * @param {{ send: Function, sessionId: string, onStatus: Function } | null} wsStore
+ * @param {{ send: Function, sessionId: string, onStatus: Function, onMessage?: Function } | null} wsStore
  * @param {object} opts
  * @param {() => string | null} opts.getWorkspaceId — current workspace scope;
  *        when null the heartbeat pauses (no workspace = no presence)
@@ -69,8 +71,15 @@ export function createPresenceHeartbeat(wsStore, opts) {
   let lastSentAt = 0;
   let timer = null;
   let alive = true;
+  // Set when the server evicts THIS tab's session (PresenceEvicted with our
+  // session_id, HSI §1). The spec: "the client checks if the session_id
+  // matches its own tab and stops heartbeating only for that tab." Without
+  // this the evicted tab keeps re-inserting its presence entry every 30s,
+  // fighting the server's 5-session cap.
+  let evicted = false;
 
   function sendHeartbeat(view) {
+    if (evicted) return; // server dropped this session — stay dark
     const workspaceId = getWorkspaceId();
     if (!workspaceId) return; // no workspace scope — nothing to announce
     sendEditingPresence(wsStore, {
@@ -97,6 +106,21 @@ export function createPresenceHeartbeat(wsStore, opts) {
     if (status === 'connected') sendDebounced(currentView());
   });
 
+  // HSI §1 (5-session cap / idle eviction): a targeted PresenceEvicted naming
+  // OUR session means the server has dropped this tab from the presence map.
+  // Stop heartbeating for this tab so it does not re-insert itself. A fresh
+  // Subscribe (new tab) or heartbeat state is not revived here — eviction is
+  // terminal for this session, matching the spec's "stops heartbeating only
+  // for that tab".
+  const unsubMessage = wsStore.onMessage?.((msg) => {
+    if (msg?.type === 'PresenceEvicted' && msg.session_id === wsStore.sessionId) {
+      evicted = true;
+      alive = false;
+      clearInterval(timer);
+      timer = null;
+    }
+  });
+
   // Leg 2: 30-second periodic heartbeat.
   timer = setInterval(() => {
     if (!alive) return;
@@ -120,9 +144,10 @@ export function createPresenceHeartbeat(wsStore, opts) {
     },
     destroy() {
       alive = false;
-      if (timer) clearInterval(timer);
+      clearInterval(timer);
       window.removeEventListener('beforeunload', onBeforeUnload);
       unsubStatus?.();
+      unsubMessage?.();
     },
   };
 }
