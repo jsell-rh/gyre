@@ -40,7 +40,7 @@ const mockWorkspace = {
   name: 'Payments',
   description: 'Payment processing workspace',
   trust_level: 'Guided',
-  default_compute_target: null,
+  compute_target_id: null,
 };
 
 describe('WorkspaceSettings', () => {

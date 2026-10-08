@@ -181,6 +181,14 @@ impl SshTunnel {
 
 #[async_trait]
 impl ComputeTarget for SshTarget {
+    fn name(&self) -> &str {
+        "ssh"
+    }
+
+    fn target_type(&self) -> &'static str {
+        "ssh"
+    }
+
     async fn spawn_process(&self, config: &SpawnConfig) -> Result<ProcessHandle> {
         // Build the remote command: env K=V ... cmd args... &; echo $!
         let mut remote_parts: Vec<String> = vec![];
