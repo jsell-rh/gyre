@@ -46,3 +46,38 @@ History note (not a finding against the final state): the controller's sandbox-p
 - Hard tests anchor the enforcement on both paths (HTTP status + reason content + MCP persistence counts), each verified to fail when its validation call is removed; MCP tool description and `docs/api-reference.md` document the contract.
 
 — Verifier, 2026-10-08
+
+## Round 2 (independent spec review of the type-enforcement revision, attempt 10)
+
+Context: the rejected integration carried two failures — a trailing-whitespace gate error in this file (repaired in `5f12260`) and an independent spec review holding that message-bus.md §Payload Schemas declares per-field wire types, so presence-only validation accepts `{"task_id": false}` for `task_assignment`. The re-land added full type enforcement (`e44f113`, `MessageKind::payload_schema` + `FieldType` + `check_field_type`).
+
+Verdict: **complete** — after one real production defect found in the re-land and repaired this round.
+
+### F1 (found and fixed this round): dead guard short-circuited every type check
+
+`check_field_type` (`crates/gyre-common/src/message.rs`) opened with two scratch lines pasted below its signature:
+
+```rust
+let _ = (ty, value);
+return Ok(());
+let _ = (ty, value);
+return Ok(());
+```
+
+A leftover from the dev-loop's edit sequencing — a duplicate of the new schema block also sat at the repo root as `new_block.rs` (326 lines, committed by a "preserve sandbox attempt" commit). The dead lines made every type check a no-op returning `Ok(())`, while the type tests and the schema table looked complete: classic hollow implementation, invisible to the rustfmt/clippy gates because both lines are already-formatted, non-warning code.
+
+Reproduction on committed HEAD before the fix: `cargo test -p gyre-server api::messages` → **FAILED (13 passed, 1 failed)**; `cargo test -p gyre-server mcp_message_send` → **FAILED (7 passed, 1 failed)** — `send_message_rejects_payload_missing_required_field` and `mcp_message_send_rejects_payload_missing_required_field` both fail on their wrong-type assertions. Independent mutation probe: replacing the type match with `true ||` fails `validate_payload_enforces_field_types` in gyre-common. The tests were genuinely anchored; the code was not.
+
+Fix: `6e8a33f` removes the four dead lines and `new_block.rs`; `9897458d` satisfies the clippy diff gate on the validator lines (`map_or(false, …)` → `is_some_and`, unused import dropped). No gate weakened, no exemption entry added (exemption file untouched at 3), no test deleted or weakened.
+
+### Round-2 verification
+
+- Schema table checked field-by-field against message-bus.md lines 196–229: all 34 spec kinds match on names, wire types, and requiredness (incl. `PushAccepted.commit_count: u64` optional; `ReconciliationCompleted.specs_evaluated/specs_changed: u32` optional; `BudgetWarning.usage_pct: f64`; `SpeculativeConflict.conflicting_files: Vec<String>`; `AgentCompleted.decisions` nested `[{what, why, confidence, alternatives_considered?}]`; `MrMerged.merge_commit_sha` optional). Six non-spec variants in explicit `None` arms; `Custom` object-only.
+- Type semantics: `Str` = JSON string (Id and String share it — `Id` is a newtype over `String`, and the spec's own note "migration maps from `usize`" confirms ids are opaque strings on the wire); `U64` = non-negative integer; `U32` = non-negative integer < 2³²; `F64` = any JSON number; `StrArray` = array of strings; `Decisions` = array of objects with string `what`/`why`/`confidence` and optional string-array `alternatives_considered`. No coercion anywhere — wrong types are rejected.
+- Optional fields are type-checked when present (`spec_ref: 7` → 400 "must be a string"); unknown extension fields pass through; absent optional fields stay valid.
+- Both receipt paths wire the same `validate_payload` before sign/store (`api/messages.rs:259`, `mcp.rs:1948`); the wrong-type tests assert 400 + field-naming reason on REST and `isError` + zero persistence on MCP.
+- Test runs (this checkout, attempt-10 branch after `9897458d`): `gyre-common message` **30 passed** (incl. `validate_payload_enforces_field_types`); `gyre-server api::messages` **14 passed**; `gyre-server mcp_message_send` **8 passed**.
+- Gates against task base `f315b6f`: `git diff --check` clean; `check-rustfmt-diff.py` clean (3 files); `check-clippy-diff.py` clean; `check-task-commit-attribution.sh` OK (the six dangling candidate SHAs from the rejected integration remain intentionally unlisted — unreachable objects; the resolving branch lineage is recorded instead).
+- Static gate battery: 36 scripts fail identically on the task base `f315b6f` in this environment (missing JS toolchain, awk incompatibilities, arg-requiring hooks) — pre-existing, not caused by this task; the task-scoped gates above all pass.
+
+— Verifier round 2, 2026-10-08
