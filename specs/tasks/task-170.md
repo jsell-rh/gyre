@@ -2,7 +2,7 @@
 title: "View Specification Grammar — TypeScript types and server-side validation"
 spec_ref: "ui-layout.md §4"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "ui-layout.md §4. View Specification Grammar"
   - "ui-layout.md §Structure"
@@ -12,7 +12,7 @@ coverage_sections:
   - "ui-layout.md §Encoding Layer"
   - "ui-layout.md §Extensibility"
   - "ui-layout.md §LLM Constraints"
-commits: ["005f8adc54e2b2da53085643842ab97bffdedebe"]
+commits: ["005f8adc54e2b2da53085643842ab97bffdedebe", "5f6fb5e0583d73f9ae0317495a80862685ba9696"]
 ---
 
 ## Spec Excerpt
