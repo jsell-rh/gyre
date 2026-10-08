@@ -1314,6 +1314,7 @@
 
     <!-- Main content -->
     <div class="explorer-body">
+      <div class="explorer-body-main">
         {#if scopeType === 'repo' && archSubTab === 'briefing' && scope.repoId}
           <!-- Briefing sub-tab (ui-navigation.md §2): repo-scoped narrative —
                HSI §1.5 repo-scope Briefing row (?repo_id= filter). -->
@@ -1945,9 +1946,8 @@
             {/if}
           </div>
         {/if}
-
-        <!-- Architecture Insights moved inside explorer-canvas-area (see above) -->
       </div>
+        <!-- Architecture Insights moved inside explorer-canvas-area (see above) -->
     </div>
   </div>
 {/if}
