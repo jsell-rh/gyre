@@ -101,7 +101,7 @@ export const api = {
     const qs = new URLSearchParams(params).toString();
     return request(`/merge-requests${qs ? '?' + qs : ''}`);
   },
-  mergeRequest: (id) => request(`/merge-requests/${id}`),
+  mrStatus: (id, status) => request(`/merge-requests/${id}/status`, { method: 'PUT', body: JSON.stringify({ status }) }),
   mrReviews: (id) => request(`/merge-requests/${id}/reviews`),
   mrComments: (id) => request(`/merge-requests/${id}/comments`),
   submitComment: (mrId, data) =>
