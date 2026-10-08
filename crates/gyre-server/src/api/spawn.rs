@@ -546,6 +546,31 @@ pub(crate) async fn spawn_agent_core(
         None
     };
 
+    // Agent-runtime §2: assemble the meta-spec prompt set for this agent —
+    // required tenant → required workspace → spec-level bindings at pinned
+    // versions. The set is injected into the agent environment and recorded
+    // (kv: agent_meta_spec_sets) so the merge attestation can cite exactly
+    // which meta-specs the agent ran under.
+    let prompt_set = crate::prompt_assembly::assemble_prompt_set(state, &task).await;
+    if !prompt_set.sections.is_empty() {
+        crate::prompt_assembly::store_prompt_set_record(
+            state,
+            &crate::prompt_assembly::AgentPromptSetRecord {
+                agent_id: agent.id.clone(),
+                task_id: task.id.clone(),
+                spec_path: task.spec_path.clone(),
+                set_sha: prompt_set.set_sha.clone(),
+                assembled_at: now,
+                meta_specs_used: prompt_set
+                    .sections
+                    .iter()
+                    .map(|s| s.used.clone())
+                    .collect(),
+            },
+        )
+        .await;
+    }
+
     // Assign task to agent and advance to InProgress
     task.assigned_to = Some(agent.id.clone());
     if task.status == TaskStatus::Backlog {
@@ -623,8 +648,20 @@ pub(crate) async fn spawn_agent_core(
             })
             .unwrap_or_default();
 
+
         // Inject agent context env vars so the container can bootstrap itself.
         let mut container_env = std::collections::HashMap::new();
+        // Agent-runtime §2: meta-spec system prompt. The assembled set
+        // (required tenant → required workspace → spec bindings) is the
+        // agent's behavioral instruction context.
+        let meta_prompt = crate::prompt_assembly::render_system_prompt(&prompt_set.sections);
+        if !meta_prompt.is_empty() {
+            container_env.insert("GYRE_META_SPEC_PROMPT".to_string(), meta_prompt);
+            container_env.insert(
+                "GYRE_META_SPEC_SET_SHA".to_string(),
+                prompt_set.set_sha.clone(),
+            );
+        }
         container_env.insert("GYRE_SERVER_URL".to_string(), state.base_url.clone());
         container_env.insert("GYRE_AUTH_TOKEN".to_string(), token.clone());
         container_env.insert("GYRE_CLONE_URL".to_string(), clone_url.clone());
@@ -1091,10 +1128,14 @@ pub(crate) async fn spawn_agent_core(
     // M22.2: Increment budget active-agent counter for the workspace.
     super::budget::increment_active_agents(&state, &repo.workspace_id.to_string()).await;
 
-    // M32: Capture meta-spec set SHA for provenance — workspace lookup via kv_store
-    // requires a reverse scan (repo_id → workspace_id) which is not directly indexed.
-    // Best-effort: omit when workspace cannot be efficiently determined.
-    let meta_spec_set_sha: Option<String> = None;
+    // Agent-runtime §2: meta-spec set SHA from the assembled prompt set
+    // (required tenant → required workspace → spec bindings at pinned
+    // versions). Empty set → None (no meta-specs apply to this spawn).
+    let meta_spec_set_sha: Option<String> = if prompt_set.sections.is_empty() {
+        None
+    } else {
+        Some(prompt_set.set_sha.clone())
+    };
 
     Ok(SpawnAgentResponse {
         agent: {
