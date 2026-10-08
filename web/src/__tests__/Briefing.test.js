@@ -287,6 +287,26 @@ describe('Briefing S4.3', () => {
         expect(screen.getByText('final answer text')).toBeTruthy();
       });
       expect(screen.queryByText('partial stream buffer')).toBeNull();
+
+      // Follow-up: the client owns the conversation state, so the second
+      // request's history must include BOTH the first user turn and the
+      // committed assistant answer.
+      await fireEvent.input(screen.getByRole('textbox'), {
+        target: { value: 'And what about the MRs?' },
+      });
+      await fireEvent.click(screen.getByRole('button', { name: /send/i }));
+      await waitFor(() => {
+        expect(api.briefingAsk).toHaveBeenCalledWith(
+          'ws-1',
+          expect.objectContaining({
+            question: 'And what about the MRs?',
+            history: [
+              { role: 'user', content: 'What happened today?' },
+              { role: 'assistant', content: 'final answer text' },
+            ],
+          })
+        );
+      });
     });
   });
 
