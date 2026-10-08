@@ -104,11 +104,14 @@ fn require_tenant_admin(auth: &AuthenticatedAgent) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Resolve the caller's user Id (the inviting admin).
-fn caller_user_id(auth: &AuthenticatedAgent) -> Result<Id, ApiError> {
+/// Resolve the caller's identity (the inviting admin). API keys and JWTs
+/// linked to a user resolve to that user; the global dev token and agent
+/// tokens carry no user link, so the token's agent id (e.g. "system") is
+/// the audit identity — same convention as `users.rs::resolve_user_id`.
+fn caller_user_id(auth: &AuthenticatedAgent) -> Id {
     auth.user_id
         .clone()
-        .ok_or_else(|| ApiError::Forbidden("no user identity on this credential".into()))
+        .unwrap_or_else(|| Id::new(auth.agent_id.clone()))
 }
 
 // ─── Request/response types ──────────────────────────────────────────────────
@@ -258,7 +261,7 @@ async fn create_tenant_invitation(
         id: new_id(),
         tenant_id: Id::new(auth.tenant_id.clone()),
         email: email.clone(),
-        invited_by: caller_user_id(auth)?,
+        invited_by: caller_user_id(auth),
         role,
         workspace_ids,
         workspace_roles,
@@ -268,6 +271,22 @@ async fn create_tenant_invitation(
         created_at: now,
         accepted_at: None,
     };
+    // Duplicate guard before insert: a pending invitation for the same
+    // (tenant, email) is a 409 the caller can act on (revoke or wait for
+    // expiry). The repository contract enforces the same invariant as a
+    // race backstop, but its anyhow error would surface as a 500 here.
+    let existing_pending = state
+        .tenant_invitations
+        .list_by_tenant(&Id::new(auth.tenant_id.clone()))
+        .await?
+        .into_iter()
+        .any(|i| i.email == email && i.status == InvitationStatus::Pending);
+    if existing_pending {
+        return Err(ApiError::Conflict(format!(
+            "a pending invitation for {email} in tenant {} already exists",
+            auth.tenant_id
+        )));
+    }
     state.tenant_invitations.create(&invitation).await?;
 
     let invitee_note = serde_json::json!({
@@ -667,7 +686,7 @@ pub async fn invite_to_workspace(
             "workspace belongs to a different tenant".to_string(),
         ));
     }
-    let caller_id = caller_user_id(&auth)?;
+    let caller_id = caller_user_id(&auth);
     let caller_membership = state
         .workspace_memberships
         .find_by_user_and_workspace(&caller_id, &ws_id)
@@ -721,11 +740,24 @@ pub async fn invite_to_workspace(
     }
 
     // max_pending_invitations cap per workspace.
-    let policy = load_policy(state, &auth.tenant_id).await;
-    let pending = state
+    let policy = load_policy(&state, &auth.tenant_id).await;
+    let ws_pending = state
         .workspace_invitations
         .list_by_workspace(&ws_id)
-        .await?
+        .await?;
+    // Duplicate guard before insert: a pending invitation for the same
+    // (workspace, user) is a 409 (the repository contract remains the race
+    // backstop, but its anyhow error would surface as a 500 here).
+    if ws_pending
+        .iter()
+        .any(|i| i.user_id == user_id && i.status == InvitationStatus::Pending)
+    {
+        return Err(ApiError::Conflict(format!(
+            "a pending invitation for user {user_id} in workspace {workspace_id} already exists"
+        )));
+    }
+    // max_pending_invitations cap per workspace.
+    let pending = ws_pending
         .into_iter()
         .filter(|i| i.status == InvitationStatus::Pending)
         .count() as u32;
@@ -806,7 +838,7 @@ pub async fn list_workspace_invitations(
             "workspace belongs to a different tenant".to_string(),
         ));
     }
-    let caller_id = caller_user_id(&auth)?;
+    let caller_id = caller_user_id(&auth);
     let member = state
         .workspace_memberships
         .find_by_user_and_workspace(&caller_id, &ws_id)
@@ -846,7 +878,7 @@ pub async fn revoke_workspace_invitation(
             "workspace belongs to a different tenant".to_string(),
         ));
     }
-    let caller_id = caller_user_id(&auth)?;
+    let caller_id = caller_user_id(&auth);
     let caller_membership = state
         .workspace_memberships
         .find_by_user_and_workspace(&caller_id, &ws_id)
@@ -910,7 +942,7 @@ pub async fn accept_workspace_invitation(
         )));
     }
     if let Some(auth) = &auth {
-        let caller = caller_user_id(auth)?;
+        let caller = caller_user_id(auth);
         if caller != invitation.user_id {
             return Err(ApiError::Forbidden(
                 "this invitation was issued to a different user".to_string(),
@@ -989,7 +1021,7 @@ pub async fn decline_workspace_invitation(
         )));
     }
     if let Some(auth) = &auth {
-        let caller = caller_user_id(auth)?;
+        let caller = caller_user_id(auth);
         if caller != invitation.user_id {
             return Err(ApiError::Forbidden(
                 "this invitation was issued to a different user".to_string(),
@@ -1342,6 +1374,23 @@ mod tests {
             accepted_at: None,
         };
         state.tenant_invitations.create(&invitation).await.unwrap();
+        // Second still-pending expired invitation the accept path never
+        // touches — the expiry job must be the one to mark it.
+        let untouched = TenantInvitation {
+            id: Id::new("expired-inv-2"),
+            tenant_id: Id::new("default"),
+            email: "expired2@example.com".to_string(),
+            invited_by: Id::new("someadmin"),
+            role: GlobalRole::Member,
+            workspace_ids: vec![],
+            workspace_roles: vec![],
+            status: InvitationStatus::Pending,
+            token_hash: hash_token("expired-token-2"),
+            expires_at: now_secs() - 5,
+            created_at: now_secs() - 100,
+            accepted_at: None,
+        };
+        state.tenant_invitations.create(&untouched).await.unwrap();
 
         // Accept → 409 expired, and status transitions to Expired.
         let app = Router::new()
@@ -1366,9 +1415,17 @@ mod tests {
             .unwrap();
         assert_eq!(stored.status, InvitationStatus::Expired);
 
-        // The expiry job marks the remaining pending+past invitations.
+        // The expiry job marks the remaining pending+past invitations —
+        // the second seed is still Pending, so the job must mark it.
         let marked = run_expiry_once(&state).await.unwrap();
-        assert!(marked >= 1);
+        assert_eq!(marked, 1, "job marks exactly the untouched seed");
+        let marked_inv = state
+            .tenant_invitations
+            .find_by_id(&Id::new("expired-inv-2"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(marked_inv.status, InvitationStatus::Expired);
     }
 
     #[tokio::test]
