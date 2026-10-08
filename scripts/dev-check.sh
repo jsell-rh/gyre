@@ -2,17 +2,26 @@
 # Deterministic integration gates. Keep mechanics out of agent prompts.
 set -euo pipefail
 cd /tmp/gyre
+FAILED=0
 # Git uses exit 2 for whitespace errors. Report a candidate defect using the
 # controller's repair status rather than leaving the task in manual attention.
-git diff --check HEAD^1 HEAD || exit 1
+git diff --check HEAD^1 HEAD || FAILED=1
 BASE=$(git rev-parse HEAD^1)
-gate() { python3 /tmp/stage/dev-static-gate.py "$BASE" "$@"; }
+gate() {
+  local rc=0
+  python3 /tmp/stage/dev-static-gate.py "$BASE" "$@" || rc=$?
+  case "$rc" in
+    0) ;;
+    77|79|81) return "$rc";; # Infrastructure, configuration, or main baseline.
+    *) FAILED=1;; # Collect regressions so one repair receives all findings.
+  esac
+}
 gate python3 /tmp/stage/check-rustfmt-diff.py "$BASE"
 gate timeout --signal=INT --kill-after=30s "${GYRE_DEV_GATE_TIMEOUT:-1800}" \
   python3 /tmp/stage/check-clippy-diff.py "$BASE"
 # The candidate must not grant itself new exemptions, including replacement
 # entries that leave the count unchanged.
-python3 - <<'PY'
+python3 - <<'PY' || FAILED=1
 import subprocess
 def git(*args):
     return subprocess.check_output(['git', *args], text=True)
@@ -71,7 +80,8 @@ static_gates
 # OpenShell cannot accept loopback sockets, including those used by library
 # tests. Clippy above compiles every Rust target; the controller executes the
 # full test suite on the exact merge SHA on the host before promotion.
-(cd web && timeout --signal=INT --kill-after=30s "${GYRE_DEV_GATE_TIMEOUT:-1800}" \
-  bash -c 'npm ci && npm run build')
+gate timeout --signal=INT --kill-after=30s "${GYRE_DEV_GATE_TIMEOUT:-1800}" \
+  bash -c 'cd web && npm ci && npm run build'
 git restore --worktree -- web/dist
 git clean -fd -- web/dist
+exit "$FAILED"
