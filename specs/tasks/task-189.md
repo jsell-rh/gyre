@@ -2,7 +2,7 @@
 title: "Fix persona scope resolution to walk the real parent chain"
 spec_ref: "platform-model.md §2 Scope Resolution"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "platform-model.md §Scope Resolution"
 commits: ["a977a9175d0f3e6c96172156c7983a2d25cb0803", "8cd3f081bd1a53eab155700f7522799943322237", "2d1e74d949a55a5b166a317d19f5faf2478490e3"]
@@ -102,3 +102,10 @@ Do not write self-confirming tests: seed personas with distinct `system_prompt`/
 - Confirm the route `GET /api/v1/personas/resolve` registration in `crates/gyre-server/src/api/mod.rs` before relying on the path in tests.
 - Do NOT change the query contract (`scope_kind`, `scope_id`, `slug`); only fix the resolution logic behind it.
 - Skip project-wide lint/format/test suites; run `cargo test -p gyre-server personas` (or the crate's persona tests) to validate.
+
+## Shipped
+
+- `GET /api/v1/personas/resolve` now walks the real parent chain — repo → its workspace → that workspace's tenant — using `Repository.workspace_id` and `Workspace.tenant_id` from storage instead of cloning the queried `scope_id` into every scope variant, so workspace- and tenant-scoped personas actually resolve from repo/workspace queries (nearest-scope-wins per platform-model.md §2).
+- Missing scope entities are rejected with a descriptive `NotFound` naming the repo/workspace, not a spurious persona miss; unknown `scope_kind` still returns `InvalidInput`.
+- Five regression tests seed a real tenant→workspace→repo chain with distinct ids and distinct persona bodies: both parent-scope fallbacks, workspace→tenant fallback, nearest-wins shadowing at all three levels, and the bad-scope-id discrimination. Mutation probe: reverting the handler to the pre-fix cloned-id logic fails 4 of the 5.
+
