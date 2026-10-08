@@ -352,7 +352,42 @@ impl MessageKind {
     /// required fields. The `Err` string is a human-readable reason meant to be
     /// surfaced verbatim to the caller (REST 400 body / MCP `tool_error`).
     pub fn validate_payload(&self, payload: Option<&Value>) -> Result<(), String> {
-        let _ = payload;
+        let required = self.required_payload_fields();
+        // An explicit JSON `null` payload means the same thing as an absent one.
+        // The REST body types it `Option<Value>` (serde maps `null` -> `None`) while
+        // the MCP argument map hands us `Some(Value::Null)`; without this
+        // normalization the two receipt paths disagree on the same wire payload.
+        let payload = payload.filter(|v| !v.is_null());
+
+        let obj = match payload {
+            None if !required.is_empty() => {
+                return Err(format!(
+                    "payload for kind '{}' missing required field '{}'",
+                    self.as_str(),
+                    required[0]
+                ));
+            }
+            // Nothing required — an absent payload satisfies the schema.
+            None => return Ok(()),
+            Some(Value::Object(obj)) => obj,
+            Some(_) => {
+                return Err(format!(
+                    "payload for kind '{}' must be a JSON object",
+                    self.as_str()
+                ))
+            }
+        };
+
+        for field in required {
+            // JSON null is treated as missing: no required field is satisfiable by null.
+            if !matches!(obj.get(*field), Some(v) if !v.is_null()) {
+                return Err(format!(
+                    "payload for kind '{}' missing required field '{}'",
+                    self.as_str(),
+                    field
+                ));
+            }
+        }
         Ok(())
     }
 
