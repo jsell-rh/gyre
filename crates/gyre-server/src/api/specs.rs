@@ -485,10 +485,59 @@ pub async fn approve_spec(
 
     // Determine approver type from auth token kind (not request body).
     // JWT bearer tokens → agent; global token / API key → human.
-    let (approver_type, approver_id) = if auth.jwt_claims.is_some() {
-        ("agent".to_string(), format!("agent:{}", auth.agent_id))
+    let (approver_type, approver_id, attestation_level, stack_hash) = if let Some(claims) =
+        auth.jwt_claims.as_ref()
+    {
+        // Gyre agent JWT (scope="agent"): capture the verified workload claims
+        // so §9 agent-approval validity (attestation_level >= manifest minimum,
+        // stack_hash exact match) can be evaluated from the recorded event.
+        // Keycloak user JWTs do not carry agent workload claims; their scope
+        // is not "agent", so they are treated as human approvals.
+        let is_agent = claims.get("scope").and_then(|s| s.as_str()) == Some("agent");
+        if is_agent {
+            // Stack hash: from the verified JWT `wl_stack_hash` claim
+            // (spec §5: "the forge verifies the agent's OIDC token contains
+            // a matching stack_hash claim").
+            let wl_stack_hash = claims
+                .get("wl_stack_hash")
+                .and_then(|h| h.as_str())
+                .map(|s| s.to_string());
+            // Attestation level: derived from the agent's workload attestation
+            // record — the same derivation `build_agent_context` uses
+            // (supply-chain.md §2 levels 0-3). Never invented.
+            let workload = state
+                .kv_store
+                .kv_get("workload_attestations", &auth.agent_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|json| {
+                    serde_json::from_str::<crate::workload_attestation::WorkloadAttestation>(&json)
+                        .ok()
+                });
+            let level =
+                crate::constraint_check::derive_attestation_level(workload.as_ref()) as u32;
+            (
+                "agent".to_string(),
+                format!("agent:{}", auth.agent_id),
+                Some(level),
+                wl_stack_hash,
+            )
+        } else {
+            (
+                "human".to_string(),
+                format!("user:{}", auth.agent_id),
+                None,
+                None,
+            )
+        }
     } else {
-        ("human".to_string(), format!("user:{}", auth.agent_id))
+        (
+            "human".to_string(),
+            format!("user:{}", auth.agent_id),
+            None,
+            None,
+        )
     };
 
     let event = SpecApprovalEvent {
@@ -498,6 +547,8 @@ pub async fn approve_spec(
         approver_type,
         approver_id,
         persona: req.persona,
+        attestation_level,
+        stack_hash,
         approved_at: now,
         revoked_at: None,
         revoked_by: None,
@@ -669,41 +720,55 @@ pub async fn approve_spec(
         }
     }
 
-    // Update ledger approval_status based on new approval.
-    // For simplicity: any valid approval for the current SHA sets status to Approved.
+    // Update ledger approval_status via mode-based resolution (spec-registry.md §9).
+    // The status is computed from the approval_mode and ALL active approvals for
+    // current_sha — human_and_agent requires both, agent_only requires the
+    // manifest's attestation/stack_hash constraints to hold, human_only ignores
+    // agent approvals entirely.
     if let Some(mut entry) = state.spec_ledger.find_by_path(&spec_path).await? {
         if entry.current_sha == req.sha {
-            entry.approval_status = ApprovalStatus::Approved;
-            entry.updated_at = now;
-            let _ = state.spec_ledger.save(&entry).await;
+            let prior_status = entry.approval_status.clone();
+            let new_status = resolve_new_approval_status(state, &spec_path, &entry).await;
+            if entry.approval_status != new_status {
+                entry.approval_status = new_status;
+                entry.updated_at = now;
+                let _ = state.spec_ledger.save(&entry).await;
+            }
 
-            // Emit SpecApproved event on the message bus (agent-runtime.md §1).
+            // Emit SpecApproved event on the message bus (agent-runtime.md §1)
+            // only when the entry transitions INTO Approved — i.e. all required
+            // approvals are now present. Partial approvals (e.g. the human half
+            // of a human_and_agent pair) must not trigger the signal chain.
             // This is the single trigger for all agent work via the signal chain:
             // SpecApproved → workspace orchestrator → delegation task → repo orchestrator → sub-tasks → agents.
             // Destination: Workspace(workspace_id) — consumed by workspace orchestrator.
-            let dest = match entry.workspace_id.as_deref() {
-                Some(ws_id) => {
-                    gyre_common::message::Destination::Workspace(gyre_common::Id::new(ws_id))
-                }
-                None => gyre_common::message::Destination::Broadcast,
-            };
-            state
-                .emit_event(
-                    entry
-                        .workspace_id
-                        .as_ref()
-                        .map(|ws| gyre_common::Id::new(ws.as_str())),
-                    dest,
-                    gyre_common::message::MessageKind::SpecApproved,
-                    Some(serde_json::json!({
-                        "repo_id": entry.repo_id,
-                        "spec_path": spec_path,
-                        "spec_sha": req.sha,
-                        "approved_by": event.approver_id,
-                        "approval_id": event.id,
-                    })),
-                )
-                .await;
+            if prior_status != ApprovalStatus::Approved
+                && entry.approval_status == ApprovalStatus::Approved
+            {
+                let dest = match entry.workspace_id.as_deref() {
+                    Some(ws_id) => {
+                        gyre_common::message::Destination::Workspace(gyre_common::Id::new(ws_id))
+                    }
+                    None => gyre_common::message::Destination::Broadcast,
+                };
+                state
+                    .emit_event(
+                        entry
+                            .workspace_id
+                            .as_ref()
+                            .map(|ws| gyre_common::Id::new(ws.as_str())),
+                        dest,
+                        gyre_common::message::MessageKind::SpecApproved,
+                        Some(serde_json::json!({
+                            "repo_id": entry.repo_id,
+                            "spec_path": spec_path,
+                            "spec_sha": req.sha,
+                            "approved_by": event.approver_id,
+                            "approval_id": event.id,
+                        })),
+                    )
+                    .await;
+            }
         }
     }
 
@@ -763,6 +828,60 @@ pub async fn approve_spec(
     }
 
     Ok((StatusCode::CREATED, Json(event.into())))
+}
+
+/// Resolve the new `approval_status` for a ledger entry after a recorded
+/// approval event (spec-registry.md §9).
+///
+/// Reads the manifest entry for the spec (via the ledger entry's repo) and
+/// applies the pure `resolve_approval_status` resolver over the full approval
+/// history for the spec path. When the manifest cannot be read — the ledger
+/// entry has no repo, the repo is gone, or the repo has no manifest — falls
+/// back to the legacy single-approval behavior so approvals in manifest-less
+/// repos keep working.
+async fn resolve_new_approval_status(
+    state: &crate::AppState,
+    spec_path: &str,
+    entry: &SpecLedgerEntry,
+) -> ApprovalStatus {
+    let resolved = async {
+        let repo_id = entry.repo_id.as_deref()?;
+        let repo = state
+            .repos
+            .find_by_id(&gyre_common::Id::new(repo_id))
+            .await
+            .ok()
+            .flatten()?;
+        let manifest = crate::spec_registry::read_manifest(&repo.path, "HEAD").await?;
+        // Manifest paths are relative to `specs/`; the ledger/API path is the
+        // same relative form (e.g. "system/design-principles.md") — the same
+        // normalization `sync_spec_ledger` uses when keying the ledger.
+        let spec_entry = manifest.specs.iter().find(|e| e.path == spec_path)?;
+        Some((spec_entry.clone(), manifest.defaults.clone()))
+    }
+    .await;
+
+    let Some((manifest_entry, defaults)) = resolved else {
+        tracing::debug!(
+            spec_path,
+            "spec-approval: no manifest entry for spec — falling back to single-approval status"
+        );
+        // Manifest-less fallback: one valid approval for the current SHA
+        // approves the spec (matches the pre-§9 behavior).
+        return ApprovalStatus::Approved;
+    };
+
+    let events = state
+        .spec_approval_history
+        .list_by_path(spec_path)
+        .await
+        .unwrap_or_default();
+    crate::spec_registry::resolve_approval_status(
+        &manifest_entry,
+        &defaults,
+        &entry.current_sha,
+        &events,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -979,6 +1098,8 @@ pub async fn reject_spec(
         approver_type: "human".to_string(),
         approver_id: format!("user:{}", auth.agent_id),
         persona: None,
+        attestation_level: None,
+        stack_hash: None,
         approved_at: now,
         revoked_at: Some(now),
         revoked_by: Some(auth.agent_id.clone()),
