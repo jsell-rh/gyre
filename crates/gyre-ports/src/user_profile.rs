@@ -35,6 +35,22 @@ pub trait SessionRepository: Send + Sync {
     async fn find_by_id(&self, id: &Id) -> Result<Option<UserSession>>;
     /// Find a session by token hash (used for per-request session resolution).
     async fn find_by_token_hash(&self, token_hash: &str) -> Result<Option<UserSession>>;
+    /// Find the session a credential presents from a given device: same
+    /// user, same credential hash, same client IP and User-Agent.
+    ///
+    /// API keys are long-lived, so one key presented from many devices must
+    /// not collapse into one session row (revoking one device would sign out
+    /// every device). Conversely, the same key re-presented from the same
+    /// device IS the same session — the auth path uses this to avoid
+    /// creating a row per request. Adapters match ALL of (user_id,
+    /// credential_hash, ip_address, user_agent).
+    async fn find_by_credential_and_device(
+        &self,
+        user_id: &Id,
+        credential_hash: &str,
+        ip_address: &str,
+        user_agent: &str,
+    ) -> Result<Option<UserSession>>;
     /// Update `last_active_at` (throttled by the caller to ≤ once per minute).
     async fn touch(&self, id: &Id, last_active_at: u64) -> Result<()>;
     /// Revoke a single session. No-op if already revoked or not found.
