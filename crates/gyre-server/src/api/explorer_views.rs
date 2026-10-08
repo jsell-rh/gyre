@@ -495,7 +495,7 @@ pub async fn generate_explorer_view(
     // Resolve model and call LLM for structured JSON output.
     let (model, _) =
         crate::llm_helpers::resolve_llm_model(&state, &ws_id, "explorer-generate").await;
-    let view_spec = factory
+    let llm_output = factory
         .for_model(&model)
         .predict_json(&system_prompt, &user_prompt)
         .await
@@ -523,13 +523,33 @@ pub async fn generate_explorer_view(
     );
     let _ = state.costs.record(&cost_entry).await;
 
+    // Spec §2: the server validates the LLM's output against the view spec
+    // grammar before sending `event: complete`. An invalid spec is reported
+    // as `{view_spec: null, explanation, fallback}` (the same null-view-spec
+    // pattern as unanswerable questions) — NOT a 500, and NOT forwarded raw
+    // to the client.
+    let grammar_ok = parse_and_validate(&llm_output).is_ok();
+    let mut complete = if grammar_ok {
+        json!({
+            "view_spec": llm_output.clone(),
+            "explanation": format!("Generated view for: {}", req.question),
+        })
+    } else {
+        tracing::warn!(workspace_id = %workspace_id, "LLM produced invalid view spec");
+        invalid_llm_view_response()
+    };
+    // Validate repo_id ownership in the generated spec too — a hallucinated
+    // repo_id must not leak cross-workspace data when the view renders.
+    if grammar_ok {
+        if let Err(e) = validate_repo_ownership(&state, &workspace_id, &llm_output).await {
+            tracing::warn!(workspace_id = %workspace_id, error = %e, "LLM view spec referenced foreign repo_id");
+            complete = invalid_llm_view_response();
+        }
+    }
+
     let partial_data =
         serde_json::to_string(&json!({"explanation": "Generating view..."})).unwrap_or_default();
-    let complete_data = serde_json::to_string(&json!({
-        "view_spec": view_spec,
-        "explanation": format!("Generated view for: {}", req.question)
-    }))
-    .unwrap_or_default();
+    let complete_data = serde_json::to_string(&complete).unwrap_or_default();
 
     let events: Vec<Result<Event, std::convert::Infallible>> = vec![
         Ok(Event::default().event("partial").data(partial_data)),
@@ -562,30 +582,52 @@ fn check_ownership(view: &SavedView, caller: &AuthenticatedAgent) -> Result<(), 
     Ok(())
 }
 
-/// Validate that `repo_id` in the spec belongs to `workspace_id`.
-/// Prevents cross-workspace data leakage (spec requirement).
+/// The `event: complete` payload for an LLM output that failed grammar or
+/// ownership validation (ui-layout.md §2): null `view_spec` + explanation +
+/// a fallback list view the client renders instead of crashing.
+fn invalid_llm_view_response() -> serde_json::Value {
+    json!({
+        "view_spec": null,
+        "explanation": "Generated view was invalid — try rephrasing",
+        "fallback": {
+            "name": "Fallback list view",
+            "data": {"node_types": [], "edge_types": [], "depth": 1},
+            "layout": "list"
+        },
+    })
+}
+
+/// Validate that every `repo_id` referenced by the spec — the top-level data
+/// layer AND each `side-by-side` sub-view's own data layer — belongs to
+/// `workspace_id`. Prevents cross-workspace data leakage (spec requirement:
+/// sub-views do not inherit the parent's scope, so each must be checked).
 async fn validate_repo_ownership(
     state: &AppState,
     workspace_id: &str,
     spec_json: &serde_json::Value,
 ) -> Result<(), ApiError> {
-    if let Some(repo_id) = spec_json
-        .get("data")
-        .and_then(|d| d.get("repo_id"))
-        .and_then(|r| r.as_str())
-    {
-        // Verify ownership via the database.
-        let repo = state
-            .repos
-            .find_by_id(&gyre_common::Id::new(repo_id))
-            .await
-            .map_err(ApiError::Internal)?;
-        match repo {
-            Some(r) if r.workspace_id.to_string() == workspace_id => {}
-            _ => {
-                return Err(ApiError::BadRequest(format!(
-                    "repo {repo_id} does not belong to workspace {workspace_id}"
-                )));
+    // The top-level data layer plus left/right sub-view data layers.
+    let mut data_layers = vec![spec_json.get("data")];
+    for side in ["left", "right"] {
+        if let Some(sub) = spec_json.get(side) {
+            data_layers.push(sub.get("data"));
+        }
+    }
+    for data in data_layers.into_iter().flatten() {
+        if let Some(repo_id) = data.get("repo_id").and_then(|r| r.as_str()) {
+            // Verify ownership via the database.
+            let repo = state
+                .repos
+                .find_by_id(&gyre_common::Id::new(repo_id))
+                .await
+                .map_err(ApiError::Internal)?;
+            match repo {
+                Some(r) if r.workspace_id.to_string() == workspace_id => {}
+                _ => {
+                    return Err(ApiError::BadRequest(format!(
+                        "repo {repo_id} does not belong to workspace {workspace_id}"
+                    )));
+                }
             }
         }
     }
@@ -891,5 +933,268 @@ mod tests {
             .expect("Retry-After header");
         let secs: u64 = retry_after.to_str().unwrap().parse().unwrap();
         assert!(secs >= 1, "Retry-After must be at least 1 second");
+    }
+
+    fn app_with_llm_response(response: serde_json::Value) -> axum::Router {
+        let mut s = (*crate::mem::test_state()).clone();
+        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
+            inner: Arc::new(gyre_adapters::MockLlmAdapter::json_response(response)),
+        }));
+        crate::build_router(Arc::new(s))
+    }
+
+    async fn sse_body(resp: axum::response::Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    fn complete_event_payload(sse: &str) -> serde_json::Value {
+        // SSE frames look like "event: complete\ndata: {...}\n\n".
+        let frame = sse
+            .split("event: complete")
+            .nth(1)
+            .expect("complete event present");
+        let data_line = frame
+            .lines()
+            .find(|l| l.starts_with("data: "))
+            .expect("data line in complete event");
+        serde_json::from_str(data_line.trim_start_matches("data: ")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn create_view_rejects_side_by_side_sub_view_nesting() {
+        let app = app();
+        let body = Body::from(
+            r#"{
+                "name": "Nested",
+                "spec": {
+                    "name": "Nested",
+                    "data": {"node_types": [], "edge_types": [], "depth": 1},
+                    "layout": "side-by-side",
+                    "left": {"data": {}, "layout": "side-by-side"},
+                    "right": {"data": {}, "layout": "list"}
+                }
+            }"#,
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-nest/explorer-views")
+                    .header("Authorization", auth())
+                    .header("Content-Type", "application/json")
+                    .body(body)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_view_rejects_spec_path_filter_without_repo_id() {
+        let app = app();
+        let body = Body::from(
+            r#"{
+                "name": "Spec filter",
+                "spec": {
+                    "name": "Spec filter",
+                    "data": {
+                        "node_types": [], "edge_types": [], "depth": 1,
+                        "filter": {"spec_path": "system/payment-retry.md"}
+                    },
+                    "layout": "graph"
+                }
+            }"#,
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-sp/explorer-views")
+                    .header("Authorization", auth())
+                    .header("Content-Type", "application/json")
+                    .body(body)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_view_rejects_unknown_repo_id() {
+        let app = app();
+        let body = Body::from(
+            r#"{
+                "name": "Foreign repo",
+                "spec": {
+                    "name": "Foreign repo",
+                    "data": {"node_types": [], "edge_types": [], "depth": 1, "repo_id": "repo-other"},
+                    "layout": "graph"
+                }
+            }"#,
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-own/explorer-views")
+                    .header("Authorization", auth())
+                    .header("Content-Type", "application/json")
+                    .body(body)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_view_rejects_foreign_repo_id_in_sub_view() {
+        // Sub-views don't inherit the parent's repo scope — each must be
+        // validated. A foreign repo_id smuggled into `left.data` must 400.
+        let state = crate::mem::test_state();
+        // Seed a repo that belongs to a *different* workspace.
+        let foreign = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-foreign"),
+            gyre_common::Id::new("ws-other"),
+            "foreign",
+            "repos/foreign.git",
+            0,
+        );
+        state.repos.create(&foreign).await.unwrap();
+        let app = crate::build_router(state);
+
+        let body = Body::from(
+            r#"{
+                "name": "Smuggled",
+                "spec": {
+                    "name": "Smuggled",
+                    "data": {"node_types": [], "edge_types": [], "depth": 1},
+                    "layout": "side-by-side",
+                    "left": {"data": {"repo_id": "repo-foreign"}, "layout": "list"},
+                    "right": {"data": {}, "layout": "list"}
+                }
+            }"#,
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-sub/explorer-views")
+                    .header("Authorization", auth())
+                    .header("Content-Type", "application/json")
+                    .body(body)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn generate_rejects_invalid_llm_view_spec_with_fallback() {
+        // The mock LLM returns a structurally-plausible but grammatically
+        // invalid spec (flow layout, no trace_source). The server must NOT
+        // 500 or forward it — the complete event carries view_spec: null
+        // plus a fallback list view (ui-layout.md §2).
+        let app = app_with_llm_response(serde_json::json!({
+            "name": "LLM output",
+            "data": {"node_types": [], "edge_types": [], "depth": 1},
+            "layout": "flow"
+        }));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-inv/explorer-views/generate")
+                    .header("Authorization", auth())
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"question":"How does auth work?"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sse = sse_body(resp).await;
+        let payload = complete_event_payload(&sse);
+        assert!(payload["view_spec"].is_null(), "payload: {payload}");
+        assert_eq!(
+            payload["explanation"], "Generated view was invalid — try rephrasing"
+        );
+        assert_eq!(payload["fallback"]["layout"], "list");
+    }
+
+    #[tokio::test]
+    async fn generate_forwards_valid_llm_view_spec() {
+        let app = app_with_llm_response(serde_json::json!({
+            "name": "LLM output",
+            "data": {"node_types": ["Module"], "edge_types": [], "depth": 2},
+            "layout": "hierarchical"
+        }));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-ok/explorer-views/generate")
+                    .header("Authorization", auth())
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"question":"Module structure?"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sse = sse_body(resp).await;
+        let payload = complete_event_payload(&sse);
+        assert_eq!(payload["view_spec"]["layout"], "hierarchical");
+        assert_eq!(payload["view_spec"]["name"], "LLM output");
+    }
+
+    #[tokio::test]
+    async fn generate_rejects_llm_spec_with_foreign_repo_id() {
+        // A hallucinated repo_id pointing at another workspace's repo must
+        // not be forwarded — the client would render cross-workspace data.
+        let state = crate::mem::test_state();
+        let foreign = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-hallucinated"),
+            gyre_common::Id::new("ws-other"),
+            "other-ws-repo",
+            "repos/other-ws-repo.git",
+            0,
+        );
+        state.repos.create(&foreign).await.unwrap();
+        let mut s = (*state).clone();
+        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
+            inner: Arc::new(gyre_adapters::MockLlmAdapter::json_response(
+                serde_json::json!({
+                    "name": "Leaky",
+                    "data": {"node_types": [], "edge_types": [], "depth": 1, "repo_id": "repo-hallucinated"},
+                    "layout": "graph"
+                }),
+            )),
+        }));
+        let app = crate::build_router(Arc::new(s));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-leak/explorer-views/generate")
+                    .header("Authorization", auth())
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"question":"Show me everything"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sse = sse_body(resp).await;
+        let payload = complete_event_payload(&sse);
+        assert!(payload["view_spec"].is_null(), "payload: {payload}");
+        assert_eq!(payload["fallback"]["layout"], "list");
     }
 }
