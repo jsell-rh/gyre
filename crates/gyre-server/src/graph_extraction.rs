@@ -1357,6 +1357,118 @@ mod tests {
         assert_eq!(calls[0].target_id, callee.id);
         assert_eq!(calls[0].edge_type, EdgeType::Calls);
     }
+    #[tokio::test]
+    async fn push_check_persists_assertion_results_via_repo() {
+        use crate::mem::MemSpecAssertionResultRepository;
+        use gyre_common::graph::{SpecConfidence, Visibility};
+
+        // A repo snapshot with a spec carrying two assertions: one that passes
+        // against the graph below, one that fails.
+        let dir = tempfile::TempDir::new().unwrap();
+        let specs_dir = dir.path().join("specs").join("system");
+        std::fs::create_dir_all(&specs_dir).unwrap();
+        std::fs::write(
+            specs_dir.join("architecture.md"),
+            "# Architecture\n\n<!-- gyre:assert type=\"no_dependency\" from=\"gyre-domain\" to=\"gyre-adapters\" -->\n\n<!-- gyre:assert type=\"implements\" subject=\"SearchService\" trait=\"FullTextPort\" -->\n",
+        )
+        .unwrap();
+
+        let repo_id = Id::new("repo-assert");
+        let mk_node = |id: &str, name: &str| GraphNode {
+            id: Id::new(id),
+            repo_id: repo_id.clone(),
+            node_type: NodeType::Module,
+            name: name.to_string(),
+            qualified_name: name.to_string(),
+            file_path: format!("crates/{name}/src/lib.rs"),
+            line_start: 1,
+            line_end: 10,
+            visibility: Visibility::Public,
+            doc_comment: None,
+            spec_path: None,
+            spec_paths: vec![],
+            spec_confidence: SpecConfidence::None,
+            last_modified_sha: "abc".to_string(),
+            last_modified_by: None,
+            last_modified_at: 0,
+            created_sha: "abc".to_string(),
+            created_at: 0,
+            complexity: None,
+            churn_count_30d: 0,
+            test_coverage: None,
+            first_seen_at: 0,
+            last_seen_at: 0,
+            deleted_at: None,
+            test_node: false,
+            spec_approved_at: None,
+            milestone_completed_at: None,
+        };
+        let nodes = vec![
+            mk_node("nd", "gyre-domain"),
+            mk_node("na", "gyre-adapters"),
+        ];
+
+        let results_repo = MemSpecAssertionResultRepository::default();
+        check_spec_assertions_on_push(
+            dir.path(),
+            &nodes,
+            &[],
+            &repo_id,
+            "deadbeef",
+            &None,
+            None,
+            &results_repo,
+        )
+        .await
+        .unwrap();
+
+        // Both assertions (pass and fail) are persisted under the canonical
+        // spec path (no `specs/` prefix), ordered by line.
+        let stored = results_repo
+            .list_by_spec(repo_id.as_str(), "system/architecture.md")
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), 2, "both assertions must be persisted");
+        assert_eq!(stored[0].line, 3);
+        assert_eq!(stored[0].assertion_type, "no_dependency");
+        assert!(stored[0].passed, "no edge from gyre-domain to gyre-adapters exists");
+        assert_eq!(stored[0].commit_sha, "deadbeef");
+        assert_eq!(stored[1].line, 5);
+        assert_eq!(stored[1].assertion_type, "implements");
+        assert!(!stored[1].passed, "SearchService node is absent from the graph");
+
+        // A second push replaces the stored set for the same spec (no stale
+        // rows from the first check linger).
+        std::fs::write(
+            specs_dir.join("architecture.md"),
+            "# Architecture\n\n<!-- gyre:assert type=\"all_have\" node_type=\"Endpoint\" property=\"auth_middleware\" -->\n",
+        )
+        .unwrap();
+        check_spec_assertions_on_push(
+            dir.path(),
+            &nodes,
+            &[],
+            &repo_id,
+            "deadbeef2",
+            &None,
+            None,
+            &results_repo,
+        )
+        .await
+        .unwrap();
+
+        let replaced = results_repo
+            .list_by_spec(repo_id.as_str(), "system/architecture.md")
+            .await
+            .unwrap();
+        assert_eq!(
+            replaced.len(),
+            1,
+            "re-push must replace prior rows for the spec"
+        );
+        assert_eq!(replaced[0].assertion_type, "all_have");
+        assert_eq!(replaced[0].commit_sha, "deadbeef2");
+    }
 
     #[tokio::test]
     async fn pass2_dedups_calls_edge_already_present_from_pass1() {

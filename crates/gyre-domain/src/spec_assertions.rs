@@ -221,9 +221,10 @@ fn node_type_str(node_type: &NodeType) -> &'static str {
 pub struct SpecAssertionResult {
     pub id: String,
     pub repo_id: String,
-    /// Repo-relative spec path, e.g. `specs/system/architecture.md`.
+    /// Canonical spec path — relative to `specs/`, without the `specs/`
+    /// prefix (e.g. `system/architecture.md`), matching the spec ledger
+    /// identity used by `GET /api/v1/specs/:path`.
     pub spec_path: String,
-    /// 1-based line of the `<!-- gyre:assert ... -->` comment in the spec.
     pub line: usize,
     /// Canonical assertion type (`no_dependency`, `implements`, `all_have`, ...).
     pub assertion_type: String,
