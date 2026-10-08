@@ -2,10 +2,10 @@
 title: "Implement graph narrative generation (template-based + LLM-synthesized)"
 spec_ref: "realized-model.md §6"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "realized-model.md §6 Narrative Generation"
-commits: ["95f1a147e04b1e0ff8b380aa37a9c5556c39af01", "f88e55b70b980e2f9823a51315097d3e8a8b6334"]
+commits: ["95f1a147e04b1e0ff8b380aa37a9c5556c39af01", "f88e55b70b980e2f9823a51315097d3e8a8b6334", "e69fa0fe1def50f3dbb3dada4fc7685d345ae837"]
 ---
 
 ## Spec Excerpt
@@ -82,6 +82,7 @@ From `realized-model.md` §6 — Narrative Generation:
 - `narrative` field on every timeline and diff delta response, grounded per request against the repo's live graph and attributed via real agent + persona lookups (crates/gyre-server/src/api/graph.rs).
 - LLM-synthesized briefing architecture narrative over grounded delta facts (prompt-template and model-config aware, 10s-bounded, grounds the model in structured facts) with concatenated template narratives as the fallback on unconfigured/error/timeout/empty completion.
 - 11 domain unit tests + 3 server tests (through-router timeline, briefing LLM path, briefing template fallback); api-reference timeline/briefing rows corrected to the shipped response shapes.
+- Gate repair (follow-up commit e69fa0f): the pre-existing template-substitution gate's const-span heuristic attributed the *next* const's `/// Variables:` doc block to this const, producing 7 false positives on pristine main (CI never ran it; pre-commit-only) — fixed by stripping comment lines from the span, with planted-bug probes proving the fixed gate still catches both true-positive classes (new `{{var}}` in a template value; dropped `.replace` in a consumer).
 
 ## Agent Instructions
 

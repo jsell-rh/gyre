@@ -2,7 +2,7 @@
 
 Spec: `specs/system/realized-model.md` §6 "Narrative Generation": briefing/delta view requires human-readable summaries generated from architectural deltas — template-based (fast, deterministic, grounded in module/trait/fields/spec/agent facts) and LLM-synthesized (richer prose for the briefing view), both grounded in the knowledge graph so the LLM summarizes structured data rather than hallucinating.
 
-Commits under review: `f88e55b7` (implementation: narrative.rs + graph.rs + llm_defaults.rs + domain lib.rs), `95f1a14` (byte-slice gate annotation follow-up). Docs-only commits `c120478` (coverage row) and `32456cc` (api-reference) are task-labeled but not product-surface; correctly outside `commits:` per the attribution script's scope. Verdict: **complete**.
+Commits under review: `f88e55b7` (implementation: narrative.rs + graph.rs + llm_defaults.rs + domain lib.rs), `95f1a14` (byte-slice gate annotation follow-up), `e69fa0f` (template-substitution gate false-positive fix, round 2). Docs-only commits `c120478` (coverage row) and `32456cc` (api-reference) are task-labeled but not product-surface; correctly outside `commits:` per the attribution script's scope. Verdict: **complete**.
 
 ## Round 1 (this review)
 
@@ -29,9 +29,31 @@ Minor (non-blocking, recorded for completeness):
 - `NARRATIVE_LLM_TIMEOUT_SECS=10` bounds a synchronous GET; acceptable, though a workspace with a slow LLM still pays up to 10s on briefing. If that ever matters, an async/precomputed narrative is the follow-up — not a §6 requirement.
 - `delta_attribution`'s persona lookup is a `.filter(|p| !p.is_empty())` on the kv value — an empty-string persona binding is treated as no persona, which is the honest reading.
 
+## Round 2 — gate-repair verification (this review)
+
+Scope: follow-up commit `e69fa0f` ("wip(task-152): preserve sandbox attempt") — the only tree change since round 1 (`git diff 0f0a092..HEAD --stat`: gate script +12/−2, task file). It fixes a false-positive failure of the template-substitution gate that round 1 surfaced when the fixed gate passed at HEAD: the question this round had to settle was whether that pass masked tree state, and whether the comment-strip blinded the gate.
+
+Full probe matrix, re-run live this round (base = `/tmp/t152-base`, verified byte-identical to `git archive main` for all files except the probe-replaced gate script itself):
+
+| Gate | Tree | Result |
+|---|---|---|
+| old (main's version) | pristine main | **exit 1, 7 false positives** — `predict_graph` ×3 + `briefing_ask` ×4, all from doc-block bleed |
+| old | HEAD | exit 1, 8: same 7 + 4 new against `llm_architecture_narrative` (GRAPH_NARRATIVE's span swallows SPECS_ASSIST's doc block — same mechanism) |
+| fixed | pristine main | **exit 0** |
+| fixed | HEAD | **exit 0** |
+| fixed | Probe A/B: `{{rogue_var}}` planted in `PROMPT_BRIEFING_ASK` string value | **exit 1**, correctly attributed to `briefing_ask` |
+| fixed | Probe C: `{{graph_context}}` `.replace` dropped in `specs_assist.rs:403` | **exit 1**, correctly attributed (`fn assist_spec`) — the exact task-012 origin class |
+
+Mechanism, confirmed by reading the span code (`scripts/check-template-substitution.sh:47-58`): each const's window runs to just before the next `pub const`, which always includes the NEXT const's `/// Variables:` doc block. `PROMPT_BRIEFING_ASK` (line 24) is followed by `PROMPT_SPECS_ASSIST`'s doc block (`{{spec_path}}, {{spec_content}}, {{graph_context}}, {{instruction}}`), so `briefing_ask` was flagged for 4 doc vars it never templates; likewise `PROMPT_GRAPH_PREDICT` (line 12) swallows `PROMPT_BRIEFING_ASK`'s doc vars (3). The fix strips `//`-leading lines from the span before extracting `{{vars}}` — a doc block can never be part of a string value. Verified the strip cannot blind: no line inside any template string value begins with `//` (awk scan of string-continuation lines: empty), and the consumer-side logic (lines 80-130) is byte-unchanged from main. The `|| true` addition to `grep -oP` is required, not weakening: with comments stripped, some spans now legitimately have zero vars, and `grep` exits 1 on no-match, which would kill the script under `set -euo pipefail`.
+
+Notable context: the old gate's 7 false positives exist on **pristine main** — this bug predates task-152. It was pre-commit-only (`.pre-commit-config.yaml:233`), never wired into `.github/workflows/ci.yml` (grep: no match among its 31 run steps), which is why main's PRs passed. The fix is therefore a true false-positive repair with no coverage regression.
+
+Round-2 verdict: the fix is strictly better than the old gate — removes all false positives (base and HEAD), retains both true-positive classes (probes A/B and C). No exemptions added (zero `template-sub:ok` in tree), no meaningful tests deleted, no gate weakening. `e69fa0f` is scripts-only, outside the attribution gate's product-surface regex (`^(crates/|web/src|web/tests)`), but is recorded in `commits:` so this review round's scope is explicit. Task-152 stands **complete**: round 1 verified the §6 narrative implementation end-to-end; round 2 resolves the only open doubt (gate repair) with a decisive probe matrix.
+
 ## Shipped (mirrors task file)
 
 - Template narrative generator grounded in the live knowledge graph (module, traits, fields, spec governance, agent/persona attribution), with grouping, count-only, and empty-delta handling.
 - `narrative` field on every timeline and diff delta response, grounded per repo and attributed via real agent/persona lookups.
 - LLM-synthesized briefing architecture narrative over grounded delta facts (prompt-template + model-config aware, 10s-bounded) with template narratives as the quality floor on every failure mode.
 - Docs: api-reference timeline/briefing rows corrected to the shipped response shapes.
+- Gate repair: template-substitution gate's const-span swallowed the next const's `/// Variables:` doc block (7 false positives on pristine main, pre-commit-only so CI never saw it); fixed by comment-stripping the span, proven non-blinding by planted-bug probes for both true-positive classes.
