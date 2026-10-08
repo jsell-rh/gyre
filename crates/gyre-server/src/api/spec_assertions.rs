@@ -1,9 +1,12 @@
-//! Executable spec assertion endpoint (system-explorer spec S9).
+//! Executable spec assertion endpoints (system-explorer spec S9).
 //!
 //! POST /api/v1/repos/:id/spec-assertions/check
+//!   Parses `<!-- gyre:assert ... -->` comments from spec markdown content,
+//!   evaluates them against the repo's knowledge graph, and returns results.
 //!
-//! Parses `<!-- gyre:assert ... -->` comments from spec markdown content,
-//! evaluates them against the repo's knowledge graph, and returns results.
+//! GET /api/v1/repos/:id/specs/*spec_path/assertions
+//!   Returns the results persisted by the last push's knowledge-graph check
+//!   for a spec, so the inline spec view can show the last checked state.
 
 use axum::{
     extract::{Path, State},
@@ -92,7 +95,74 @@ pub async fn check_spec_assertions(
         })
         .collect();
 
+
     Ok((StatusCode::OK, Json(CheckAssertionsResponse { assertions })))
+}
+/// A stored assertion result in the GET response.
+#[derive(Serialize)]
+pub struct StoredAssertionResultResponse {
+    /// 1-based line of the `<!-- gyre:assert ... -->` comment in the spec.
+    pub line: usize,
+    /// Canonical assertion type (`no_dependency`, `implements`, `all_have`, ...).
+    #[serde(rename = "type")]
+    pub assertion_type: String,
+    /// Assertion parameters as a JSON object.
+    pub params: serde_json::Value,
+    /// Whether the assertion passed at the last check.
+    pub passed: bool,
+    /// Human-readable explanation of the result.
+    pub details: String,
+    /// Commit SHA the knowledge graph was extracted from when checked.
+    pub commit_sha: String,
+    /// Unix epoch seconds when the check ran.
+    pub checked_at: u64,
+}
+
+/// Response for GET /api/v1/repos/:id/specs/*spec_path/assertions.
+#[derive(Serialize)]
+pub struct StoredAssertionsResponse {
+    pub assertions: Vec<StoredAssertionResultResponse>,
+}
+
+/// GET /api/v1/repos/:id/specs/*spec_path/assertions
+///
+/// Returns the assertion results persisted by the last push's post-extraction
+/// check for the given spec. The spec path is the wildcard tail after
+/// `/specs/` (URL-decoded by axum), e.g. for
+/// `/api/v1/repos/r1/specs/system/architecture.md/assertions` the spec path
+/// is `system/architecture.md`.
+pub async fn get_spec_assertion_results(
+    State(state): State<Arc<AppState>>,
+    Path((id, spec_path)): Path<(String, String)>,
+) -> Result<Json<StoredAssertionsResponse>, ApiError> {
+    // Verify repo exists (same containment as the check endpoint).
+    state
+        .repos
+        .find_by_id(&Id::new(&id))
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+
+    let results = state
+        .spec_assertion_results
+        .list_by_spec(&id, &spec_path)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    let assertions = results
+        .into_iter()
+        .map(|r| StoredAssertionResultResponse {
+            line: r.line,
+            assertion_type: r.assertion_type,
+            params: serde_json::from_str(&r.params_json).unwrap_or(serde_json::Value::Null),
+            passed: r.passed,
+            details: r.explanation,
+            commit_sha: r.commit_sha,
+            checked_at: r.checked_at,
+        })
+        .collect();
+
+    Ok(Json(StoredAssertionsResponse { assertions }))
 }
 
 #[cfg(test)]
