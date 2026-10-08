@@ -373,11 +373,11 @@
     membersLoading = true;
     membersError = null;
     try {
+      members = await api.workspaceMembers(wsId) ?? [];
     } catch (e) {
       membersError = e.message;
       members = [];
-    }
-    finally { membersLoading = false; }
+    } finally { membersLoading = false; }
   }
 
   async function loadBudget(wsId) {

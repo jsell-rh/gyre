@@ -509,10 +509,12 @@ describe('TenantSettings', () => {
       await waitFor(() => {
         expect(container.querySelector('[data-testid="tenant-new-workspace-btn"]')).toBeTruthy();
       }, { timeout: 3000 });
-      container.querySelector('[data-testid="tenant-new-workspace-btn"]').click();
-      const nameInput = container.querySelector('[data-testid="tenant-new-ws-name"]');
-      expect(nameInput).toBeTruthy();
-      await fireEvent.input(nameInput, { target: { value: 'Risk Engine' } });
+      await fireEvent.click(container.querySelector('[data-testid="tenant-new-workspace-btn"]'));
+      await waitFor(() => {
+        const nameInput = container.querySelector('[data-testid="tenant-new-ws-name"]');
+        expect(nameInput).toBeTruthy();
+      }, { timeout: 3000 });
+      await fireEvent.input(container.querySelector('[data-testid="tenant-new-ws-name"]'), { target: { value: 'Risk Engine' } });
       await fireEvent.submit(container.querySelector('[data-testid="tenant-new-workspace-form"]'));
       await waitFor(() => {
         expect(api.createWorkspace).toHaveBeenCalledWith(

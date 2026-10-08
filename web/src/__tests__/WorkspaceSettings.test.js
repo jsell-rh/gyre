@@ -29,6 +29,7 @@ vi.mock('../lib/api.js', () => ({
     workspaceRepos: vi.fn().mockResolvedValue([]),
     createRepo: vi.fn().mockResolvedValue({ id: 'repo-new', name: 'new-repo' }),
     createMirrorRepo: vi.fn().mockResolvedValue({ id: 'repo-mirror', name: 'mirrored', is_mirror: true }),
+    updateWorkspace: vi.fn().mockResolvedValue({}),
   },
   setAuthToken: vi.fn(),
 }));

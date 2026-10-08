@@ -32,6 +32,7 @@
     { id: 'users',      labelKey: 'tenant_settings.tabs.users' },
     { id: 'compute',    labelKey: 'tenant_settings.tabs.compute' },
     { id: 'workspaces', labelKey: 'tenant_settings.tabs.workspaces' },
+    { id: 'budget',     labelKey: 'tenant_settings.tabs.budget' },
     { id: 'policies',   label: 'Policies' },
     { id: 'llm',        label: 'LLM Defaults' },
     { id: 'analytics',  label: 'Analytics' },
