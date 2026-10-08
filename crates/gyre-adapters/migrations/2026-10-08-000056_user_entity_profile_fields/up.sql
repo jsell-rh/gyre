@@ -22,6 +22,7 @@ ALTER TABLE users ADD COLUMN avatar_url TEXT;
 ALTER TABLE users ADD COLUMN preferences TEXT;
 ALTER TABLE users ADD COLUMN last_login_at INTEGER;
 ALTER TABLE users ADD COLUMN tenant_id TEXT;
+ALTER TABLE users ADD COLUMN global_role TEXT NOT NULL DEFAULT 'Member';
 
 -- Backfill username from the existing display name (`name` / `display_name`,
 -- which the pre-migration domain type aliased to the same value): lowercase,
@@ -101,9 +102,12 @@ WHERE users.id = ranked.id;
 -- cannot be confused with Tenant B's user of the same handle).
 CREATE UNIQUE INDEX idx_users_username ON users(username);
 
--- Defaults per spec: timezone UTC, locale en-US (task plan step 3).
+-- Defaults per spec: timezone UTC, locale en-US (task plan step 3), and
+-- global_role Member for rows predating the column (admins are granted via
+-- the bootstrap path, which re-stamps the role on update).
 UPDATE users SET timezone = 'UTC' WHERE timezone IS NULL OR timezone = '';
 UPDATE users SET locale = 'en-US' WHERE locale IS NULL OR locale = '';
+UPDATE users SET global_role = 'Member' WHERE global_role IS NULL OR global_role = '';
 
 -- Default preferences JSON for rows created before the column existed.
 -- Matches gyre-domain UserPreferences::default() exactly.

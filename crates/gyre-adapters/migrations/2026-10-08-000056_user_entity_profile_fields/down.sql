@@ -6,3 +6,4 @@ ALTER TABLE users DROP COLUMN avatar_url;
 ALTER TABLE users DROP COLUMN preferences;
 ALTER TABLE users DROP COLUMN last_login_at;
 ALTER TABLE users DROP COLUMN tenant_id;
+ALTER TABLE users DROP COLUMN global_role;

@@ -168,6 +168,10 @@ diesel::table! {
     }
 }
 
+// users: full User entity per user-management.md §User Entity (task-120).
+// username is UNIQUE (migration 000056 idx_users_username); preferences is a
+// JSON blob (UserPreferences domain type); last_login_at is stamped on each
+// authentication; tenant_id is the nullable tenant scope column.
 diesel::table! {
     users (id) {
         id -> Text,
@@ -180,6 +184,12 @@ diesel::table! {
         display_name -> Nullable<Text>,
         timezone -> Nullable<Text>,
         locale -> Nullable<Text>,
+        username -> Text,
+        avatar_url -> Nullable<Text>,
+        preferences -> Nullable<Text>,
+        last_login_at -> Nullable<BigInt>,
+        tenant_id -> Nullable<Text>,
+        global_role -> Text,
     }
 }
 
