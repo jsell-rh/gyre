@@ -268,33 +268,114 @@
     }
   }
 
-  function handleRespondToAgent(n) {
-    const body = getBody(n);
-    openDetail({ type: 'agent', id: body.agent_id || n.entity_ref, data: n, defaultTab: 'chat' });
-  }
-
-  function handleViewSpec(n) {
-    const body = getBody(n);
-    const specPath = body.spec_path || n.entity_ref;
-    if (specPath) {
-      openDetail({ type: 'spec', id: specPath, data: n });
-    }
-  }
-
-  function handleViewMr(n) {
+  function handleViewMr(n, tab = undefined) {
     const body = getBody(n);
     if (body.mr_id) {
-      openDetail({ type: 'mr', id: body.mr_id, data: n });
+      openDetail({
+        type: 'mr',
+        id: body.mr_id,
+        data: { ...n, ...(tab ? { _openTab: tab } : {}) },
+      });
     }
   }
 
-  async function handleIncreaseTrust(n) {
-    goToWorkspaceSettings?.();
-    await handleDismiss(n);
+  // HSI §8 P3 "Override": record a human approval review on the failed-gate MR —
+  // the persisted judgment that the failure is acceptable. POST /merge-requests/:id/reviews
+  async function handleOverrideGate(n) {
+    const body = getBody(n);
+    if (!body.mr_id) return;
+    actionStates = { ...actionStates, [n.id]: { loading: true, action: 'override' } };
+    try {
+      await api.submitReview(body.mr_id, {
+        decision: 'approved',
+        reviewer_agent_id: 'human',
+        body: `Gate override from Inbox: ${body.gate_name ?? 'gate'} failure accepted by human`,
+      });
+      api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+      );
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: true, message: $t('decisions.override_submitted') },
+      };
+    } catch (e) {
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: false, message: e.message || $t('decisions.override_failed') },
+      };
+    }
   }
 
-  function handleAdjustMetaSpec(n) {
-    goToAgentRules?.();
+  // HSI §8 P3 "Close MR": transition the failed-gate MR to closed.
+  async function handleCloseMr(n) {
+    const body = getBody(n);
+    if (!body.mr_id) return;
+    actionStates = { ...actionStates, [n.id]: { loading: true, action: 'close' } };
+    try {
+      await api.mrStatus(body.mr_id, 'closed');
+      api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+      );
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: true, message: $t('decisions.mr_closed') },
+      };
+    } catch (e) {
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: false, message: e.message || $t('decisions.mr_close_failed') },
+      };
+    }
+  }
+
+  // HSI §8 P7 "Pause Work": pause work in the affected scope —
+  // repo-scoped notifications pause that repo's merge queue; workspace-scoped
+  // notifications send a pause_requested StatusUpdate to every active agent
+  // (HSI §4 Hard Interrupt, via the existing message bus).
+  async function handlePauseWork(n) {
+    actionStates = { ...actionStates, [n.id]: { loading: true, action: 'pause' } };
+    try {
+      if (n.repo_id) {
+        await api.pauseMergeQueue(n.repo_id, 'Paused from Inbox budget warning');
+        actionStates = {
+          ...actionStates,
+          [n.id]: { loading: false, success: true, message: $t('decisions.work_paused', { values: { count: 0 } }) },
+        };
+      } else if (workspaceId) {
+        const active = (await api.agents({ workspaceId })) ?? [];
+        const activeAgents = active.filter(a => a.status === 'active' || a.status === 'running');
+        await Promise.allSettled(
+          activeAgents.map(a =>
+            api.sendAgentMessage(workspaceId, a.id, {
+              kind: 'status_update',
+              tier: 'directed',
+              payload: { status: 'pause_requested', summary: 'Human requested pause from Inbox budget warning' },
+            })
+          )
+        );
+        actionStates = {
+          ...actionStates,
+          [n.id]: { loading: false, success: true, message: $t('decisions.work_paused', { values: { count: activeAgents.length } }) },
+        };
+      } else {
+        actionStates = {
+          ...actionStates,
+          [n.id]: { loading: false, success: false, message: $t('decisions.pause_failed') },
+        };
+        return;
+      }
+      api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+      );
+    } catch (e) {
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: false, message: e.message || $t('decisions.pause_failed') },
+      };
+    }
   }
 
   // Reload when scope/workspaceId/repoId changes, and set up auto-refresh
@@ -554,8 +635,12 @@
                         {$t('decisions.open_spec')}
                       </Button>
                     {:else if n.notification_type === 'gate_failure'}
-                      <Button variant="ghost" size="sm" onclick={() => handleViewMr(n)}>
-                        {$t('decisions.view_mr')}
+                      <!-- HSI §8 P3: View Diff, View Output, Retry, Override, Close MR -->
+                      <Button variant="ghost" size="sm" onclick={() => handleViewMr(n, 'diff')}>
+                        {$t('decisions.view_diff')}
+                      </Button>
+                      <Button variant="ghost" size="sm" onclick={() => handleViewMr(n, 'gates')}>
+                        {$t('decisions.view_output')}
                       </Button>
                       <Button
                         variant="primary"
@@ -563,15 +648,23 @@
                         disabled={state?.loading}
                         onclick={() => handleRetry(n)}
                       >
-                        {state?.loading ? $t('decisions.retrying') : $t('decisions.retry_gate')}
+                        {state?.loading && state?.action !== 'override' && state?.action !== 'close' ? $t('decisions.retrying') : $t('decisions.retry_gate')}
                       </Button>
                       <Button
                         variant="ghost"
                         size="sm"
                         disabled={state?.loading}
-                        onclick={() => handleDismiss(n)}
+                        onclick={() => handleOverrideGate(n)}
                       >
-                        {$t('common.dismiss')}
+                        {state?.loading && state?.action === 'override' ? $t('decisions.overriding') : $t('decisions.override')}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={state?.loading}
+                        onclick={() => handleCloseMr(n)}
+                      >
+                        {state?.loading && state?.action === 'close' ? $t('decisions.closing_mr') : $t('decisions.close_mr')}
                       </Button>
                     {:else if n.notification_type === 'cross_workspace_change'}
                       <Button variant="primary" size="sm" onclick={() => handleViewSpec(n)}>
@@ -611,7 +704,16 @@
                       </Button>
                       <Button variant="ghost" size="sm" onclick={() => handleDismiss(n)} disabled={state?.loading}>{$t('common.dismiss')}</Button>
                     {:else if n.notification_type === 'budget_warning'}
+                      <!-- HSI §8 P7: Increase Limit, Pause Work -->
                       <Button variant="primary" size="sm" onclick={() => goToWorkspaceSettings?.()}>{$t('decisions.increase_limit')}</Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={state?.loading}
+                        onclick={() => handlePauseWork(n)}
+                      >
+                        {state?.loading && state?.action === 'pause' ? $t('decisions.pausing_work') : $t('decisions.pause_work')}
+                      </Button>
                       <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>{$t('common.dismiss')}</Button>
                     {:else if n.notification_type === 'trust_suggestion'}
                       <Button

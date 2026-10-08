@@ -74,6 +74,7 @@ export const api = {
     return request(`/agents${qs ? '?' + qs : ''}`);
   },
   agent: (id) => request(`/agents/${id}`),
+  stopAgent: (id) => request(`/agents/${id}/stop`, { method: 'POST' }),
   repo: (id) => request(`/repos/${id}`),
   spawnAgent: (data) =>
     request('/agents/spawn', { method: 'POST', body: JSON.stringify(data) }),
@@ -101,6 +102,7 @@ export const api = {
     const qs = new URLSearchParams(params).toString();
     return request(`/merge-requests${qs ? '?' + qs : ''}`);
   },
+  mergeRequest: (id) => request(`/merge-requests/${id}`),
   mrStatus: (id, status) => request(`/merge-requests/${id}/status`, { method: 'PUT', body: JSON.stringify({ status }) }),
   mrReviews: (id) => request(`/merge-requests/${id}/reviews`),
   mrComments: (id) => request(`/merge-requests/${id}/comments`),
@@ -126,6 +128,11 @@ export const api = {
     }),
   cancelQueueEntry: (id) =>
     request(`/merge-queue/${id}`, { method: 'DELETE' }),
+  pauseMergeQueue: (repoId, reason) =>
+    request(`/repos/${repoId}/queue/pause`, {
+      method: 'PUT',
+      body: JSON.stringify(reason ? { reason } : {}),
+    }),
   // jj VCS operations
   jjInit: (repoId) =>
     request(`/repos/${repoId}/jj/init`, { method: 'POST' }),
