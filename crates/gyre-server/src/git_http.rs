@@ -263,6 +263,21 @@ pub async fn git_receive_pack(
         )
             .into_response();
     }
+    // repo-lifecycle.md §4 Archive step 5: archived repos are read-only —
+    // reject the push before the packfile is processed.
+    if resolved.is_archived() {
+        warn!(
+            agent_id = %auth.agent_id,
+            workspace_slug = %workspace_slug,
+            repo_name = %repo_name,
+            "git-receive-pack 403: repository is archived"
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            "push rejected: repository is archived".to_string(),
+        )
+            .into_response();
+    }
     let repo_id = resolved.id.to_string();
     let repo_workspace_id = resolved.workspace_id.clone();
     let repo_path = resolved.path;
