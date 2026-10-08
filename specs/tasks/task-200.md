@@ -2,7 +2,7 @@
 title: "Message bus — per-kind payload schema validation (reject invalid payloads with 400)"
 spec_ref: "message-bus.md §Payload Schemas"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "message-bus.md §Payload Schemas"
 commits: ["54083114e2db94a2b0d2ee72422a804e2743c0f6", "eecd06dc7285c14d87c70a6baf3bea15ee14a1ea", "e71d72fd103f5c0bfa657f5a4133a85e0ff89bd0", "c0cbeac214b48bb791bc3a64b0ede2d81a044083", "41846588861b3ba22bc04077ce768bd98cf8cf8c", "9764477d2fcb5226bc866f6ff8c143c39bd715ca"]
@@ -112,3 +112,10 @@ There is no `validate_payload` / schema module. Missing-required-field enforceme
 - **Server-internal emit paths untouched** per plan (`emit_event`, `build_agent_completed_payload`, `gyre_record_activity`): the spec scopes validation to receipt. `gyre_record_activity`'s payload-shape mismatch against §Payload Schemas is tracked separately in `specs/reviews/task-001.md` F6 — it is a distinct defect, not papered over here.
 - **Tests** — `message::tests::validate_payload_enforces_required_fields` and `validate_payload_treats_explicit_null_as_absent` (gyre-common); `api::messages::tests::send_message_rejects_payload_missing_required_field` asserts 400 + reason naming `summary`, 400 for absent payload, 201 when complete; `mcp::tests::mcp_message_send_rejects_payload_missing_required_field` asserts `isError` + reason naming `task_id` **and** that nothing was persisted (`list_unacked` == 0), then that the valid payload persists (== 1). All fail if the validation call is removed.
 - **Contract surfaced where hit** — MCP `gyre_message_send` payload description and `docs/api-reference.md` now name the per-kind required fields and the 400 behavior.
+
+## Shipped
+
+- `MessageKind::validate_payload` + `required_payload_fields` in `gyre-common` encode message-bus.md §Payload Schemas once — all 34 spec kinds with exact required-field sets, non-spec variants in explicit empty match arms, `Custom` object-only — returning a reason string surfaced verbatim to the caller.
+- Both receipt paths enforce it before sign/store: REST `POST /api/v1/workspaces/:id/messages` rejects missing/null required fields, absent payloads for required kinds, and non-object payloads with **400** naming the field (`api/messages.rs:259`); MCP `gyre_message_send` returns a tool error for the same with nothing persisted (`mcp.rs:1948`).
+- Explicit JSON `null` payload is normalized to "absent" inside the validator, so the REST (`None`) and MCP (`Some(Null)`) paths give identical verdicts for the same wire payload; a null value for a required key still fails.
+- Tests anchor the enforcement on both paths (HTTP status + reason content + MCP persistence counts) and were mutation-probed: each fails when its validation call is removed. Verified in review `specs/reviews/task-200.md`.
