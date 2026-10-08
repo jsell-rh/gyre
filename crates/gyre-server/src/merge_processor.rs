@@ -5399,6 +5399,7 @@ mod tests {
             gate_phase: GatePhase::PostMerge,
             timeout_secs: Some(30),
             created_at: 1000,
+            position: 0,
         };
         state.quality_gates.save(&gate).await.unwrap();
     }
