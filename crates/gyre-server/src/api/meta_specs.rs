@@ -1537,207 +1537,636 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Preview endpoint tests
+    // Preview mode (§5) — real-agent tests
+    //
+    // These exercise the production path end to end: real git repository on
+    // disk (Git2OpsAdapter), real branch + worktree creation, real agent
+    // rows, and a real spawned process whose environment is captured to a
+    // file so the draft-injection contract is verified against what the
+    // agent actually received — not against a field that was set.
+    //
+    // `GYRE_AGENT_COMMAND` is process-global, so every test that spawns a
+    // process holds `ENV_LOCK` for its whole body.
     // -----------------------------------------------------------------------
 
-    /// Helper: create a workspace and return its id string.
-    async fn create_workspace(app: &Router, name: &str) -> String {
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/workspaces")
-                    .header("authorization", "Bearer test-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(format!(
-                        r#"{{"name":"{name}","slug":"{name}"}}"#
-                    )))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::CREATED,
-            "workspace creation failed"
-        );
-        body_json(resp).await["id"].as_str().unwrap().to_string()
-    }
+    /// Serializes tests that touch `GYRE_AGENT_COMMAND` (read at launch time
+    /// by `launch_agent_process` from the process environment).
+    static ENV_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn preview_returns_202_with_preview_id() {
-        let app = app();
-        let ws_id = create_workspace(&app, "preview-ws-1").await;
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/api/v1/workspaces/{ws_id}/meta-specs/preview"))
-                    .header("authorization", "Bearer test-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"spec_paths":["specs/system/search.md","specs/system/identity.md"]}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::ACCEPTED);
-        let json = body_json(resp).await;
+    fn git(repo: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .expect("git must run");
         assert!(
-            json["preview_id"].as_str().is_some(),
-            "preview_id must be present"
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
         );
-        assert_eq!(json["state"].as_str().unwrap(), "complete");
-        let specs = json["specs"].as_array().unwrap();
-        assert_eq!(specs.len(), 2);
-        assert_eq!(specs[0]["status"].as_str().unwrap(), "complete");
-        assert_eq!(specs[1]["status"].as_str().unwrap(), "complete");
-        assert!(json["blast_radius"].is_object());
-        assert!(json["structural_impact"].is_object());
-        assert_eq!(
-            json["structural_impact"]["affected_spec_count"]
-                .as_u64()
-                .unwrap(),
-            2
-        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn preview_status_endpoint_returns_stored_preview() {
-        let app = app();
-        let ws_id = create_workspace(&app, "preview-ws-2").await;
+    /// A real git repository with one spec file committed on `main`, plus the
+    /// workspace and repo rows pointing at it. Returns the state-backed app
+    /// and the repo id.
+    ///
+    /// `ttl_secs` / `max_concurrent` pin the preview knobs (the env-var
+    /// variants are process-global and unsafe to mutate from a test).
+    async fn preview_app(
+        repos_root: &std::path::Path,
+        ttl_secs: u64,
+        max_concurrent: Option<u64>,
+    ) -> (Router, std::sync::Arc<crate::AppState>, String) {
+        use gyre_domain::{Repository, Workspace};
+        use std::sync::Arc;
 
-        // Create preview.
-        let create_resp = app
-            .clone()
+        let repo_dir = repos_root.join("src-repo.git");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        git(&repo_dir, &["init", "--bare", "--initial-branch=main"]);
+
+        // Build the initial commit in a temp clone, then push it up. This
+        // exercises the same shape production repos have (bare, with a spec
+        // tree on the default branch).
+        let workdir = repos_root.join("seed-workdir");
+        std::fs::create_dir_all(workdir.join("specs/system")).unwrap();
+        git(&workdir, &["init", "--initial-branch=main"]);
+        git(&workdir, &["config", "user.email", "test@gyre.local"]);
+        git(&workdir, &["config", "user.name", "Gyre Test"]);
+        std::fs::write(
+            workdir.join("specs/system/search.md"),
+            "# Search\n\nThe search spec under test.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workdir.join("specs/system/identity.md"),
+            "# Identity\n\nThe identity spec under test.\n",
+        )
+        .unwrap();
+        git(&workdir, &["add", "."]);
+        git(&workdir, &["commit", "-m", "seed specs"]);
+        git(
+            &workdir,
+            &[
+                "push",
+                repo_dir.to_str().unwrap(),
+                "HEAD:refs/heads/main",
+            ],
+        );
+
+        let state = crate::mem::test_state_with_preview_config(
+            Arc::new(gyre_adapters::Git2OpsAdapter::new()),
+            ttl_secs,
+            max_concurrent,
+        );
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let ws = Workspace::new(
+            gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+            gyre_common::Id::new("default"),
+            "preview-ws",
+            format!("preview-ws-{}", uuid::Uuid::new_v4()),
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        let repo = Repository::new(
+            gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+            ws.id.clone(),
+            "src-repo",
+            repo_dir.to_str().unwrap().to_string(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        (app, state, repo.id.to_string())
+    }
+
+    fn preview_body(repo_id: &str, spec_paths: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "draft": {
+                "kind": "meta:persona",
+                "content": "DRAFT-PERSONA-BODY: write exhaustive tests for every change"
+            },
+            "targets": spec_paths
+                .iter()
+                .map(|p| serde_json::json!({ "repo_id": repo_id, "spec_path": p }))
+                .collect::<Vec<_>>()
+        })
+    }
+
+    async fn post_preview(app: &Router, body: serde_json::Value) -> axum::response::Response {
+        app.clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/v1/workspaces/{ws_id}/meta-specs/preview"))
+                    .uri("/api/v1/meta-specs/preview")
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"spec_paths":["specs/system/auth.md"]}"#))
+                    .body(Body::from(body.to_string()))
                     .unwrap(),
             )
             .await
-            .unwrap();
-        assert_eq!(create_resp.status(), StatusCode::ACCEPTED);
-        let create_json = body_json(create_resp).await;
-        let preview_id = create_json["preview_id"].as_str().unwrap().to_string();
+            .unwrap()
+    }
 
-        // Poll status.
-        let status_resp = app
+    async fn get_preview_status(app: &Router, preview_id: &str) -> axum::response::Response {
+        app.clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!(
-                        "/api/v1/workspaces/{ws_id}/meta-specs/preview/{preview_id}"
-                    ))
+                    .uri(format!("/api/v1/meta-specs/preview/{preview_id}"))
                     .header("authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
-            .unwrap();
-        assert_eq!(status_resp.status(), StatusCode::OK);
-        let status_json = body_json(status_resp).await;
-        assert_eq!(status_json["preview_id"].as_str().unwrap(), preview_id);
-        assert_eq!(status_json["state"].as_str().unwrap(), "complete");
-        let specs = status_json["specs"].as_array().unwrap();
-        assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0]["path"].as_str().unwrap(), "specs/system/auth.md");
+            .unwrap()
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn preview_requires_at_least_one_spec() {
-        let app = app();
-        let ws_id = create_workspace(&app, "preview-ws-3").await;
-
-        let resp = app
+    async fn delete_preview(app: &Router, preview_id: &str) -> axum::response::Response {
+        app.clone()
             .oneshot(
                 Request::builder()
-                    .method("POST")
-                    .uri(format!("/api/v1/workspaces/{ws_id}/meta-specs/preview"))
+                    .method("DELETE")
+                    .uri(format!("/api/v1/meta-specs/preview/{preview_id}"))
                     .header("authorization", "Bearer test-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"spec_paths":[]}"#))
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
-            .unwrap();
+            .unwrap()
+    }
+
+    /// Run `f` with `GYRE_AGENT_COMMAND` pointed at `command`. The env var is
+    /// process-global and read at launch time, so the lock serializes every
+    async fn with_agent_command<F, Fut>(command: &str, f: F)
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let _env = ENV_LOCK.lock();
+        std::env::set_var("GYRE_AGENT_COMMAND", command);
+        let result = std::panic::AssertUnwindSafe(f()).catch_unwind().await;
+        std::env::remove_var("GYRE_AGENT_COMMAND");
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    /// Write a fake agent-entrypoint script that dumps the environment it was
+    /// handed (the injection contract) to `env_out` and then sleeps, so the
+    /// process stays alive until the test kills it. Returns the script path.
+    fn env_dump_script(dir: &std::path::Path, env_out: &std::path::Path) -> std::path::PathBuf {
+        let script = dir.join("agent-entrypoint.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nenv > {out}\nexec sleep 300\n",
+                out = env_out.display()
+            ),
+        )
+        .unwrap();
+        make_executable(&script);
+        script
+    }
+
+    fn make_executable(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+
+    /// Wait until `f` returns Some, polling briefly (git + process spawn are
+    /// async relative to the handler's launch path).
+    async fn soon<T>(mut f: impl FnMut() -> Option<T>) -> T {
+        for _ in 0..100 {
+            if let Some(v) = f() {
+                return v;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("condition not met within 5s");
+    }
+
+    use futures_util::FutureExt as _;
+
+    /// The full happy path: POST spawns one real agent per target on
+    /// `preview/{preview_id}/{slug}` branches with real worktrees on disk,
+    /// the 202 shape matches the spec, the draft reaches the agent process
+    /// environment, and no task/MR/provenance is created.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_spawns_real_agents_with_branches_worktrees_and_draft() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, state, repo_id) = preview_app(dir.path(), 86_400, None).await;
+
+        let env_out = dir.path().join("agent-env.txt");
+        let script = env_dump_script(dir.path(), &env_out);
+
+        with_agent_command(script.to_str().unwrap(), || async {
+            let resp = post_preview(
+                &app,
+                preview_body(&repo_id, &["specs/system/search.md", "specs/system/identity.md"]),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::ACCEPTED, "preview must be accepted");
+            let json = body_json(resp).await;
+
+            let preview_id = json["preview_id"].as_str().unwrap().to_string();
+            assert!(!preview_id.is_empty());
+            let agents = json["agents"].as_array().unwrap();
+            assert_eq!(agents.len(), 2, "one agent per target: {json}");
+
+            let mut branches: Vec<&str> = agents.iter().map(|a| a["branch"].as_str().unwrap()).collect();
+            branches.sort();
+            assert_eq!(
+                branches,
+                vec![
+                    format!("preview/{preview_id}/identity").as_str(),
+                    format!("preview/{preview_id}/search").as_str(),
+                ],
+                "branches follow preview/<id>/<spec-stem>"
+            );
+            for a in agents {
+                assert_eq!(a["repo_id"].as_str().unwrap(), repo_id);
+                assert!(a["spec_path"].as_str().unwrap().starts_with("specs/system/"));
+                assert!(!a["agent_id"].as_str().unwrap().is_empty());
+            }
+
+            // Real agent rows: Active, scoped to the repo's workspace.
+            for a in agents {
+                let agent = state
+                    .agents
+                    .find_by_id(&gyre_common::Id::new(a["agent_id"].as_str().unwrap()))
+                    .await
+                    .unwrap()
+                    .expect("agent row must exist");
+                assert_eq!(agent.status, gyre_domain::AgentStatus::Active);
+                assert_eq!(
+                    agent.workspace_id.as_str(),
+                    state
+                        .repos
+                        .find_by_id(&gyre_common::Id::new(&repo_id))
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .workspace_id
+                        .as_str()
+                );
+                assert!(
+                    agent.current_task_id.is_none(),
+                    "preview agents have no task"
+                );
+            }
+
+            // Real branches + worktrees on disk.
+            let repo = state
+                .repos
+                .find_by_id(&gyre_common::Id::new(&repo_id))
+                .await
+                .unwrap()
+                .unwrap();
+            for b in &branches {
+                assert!(
+                    state.git_ops.branch_exists(&repo.path, b).await.unwrap(),
+                    "branch {b} must exist in the repo"
+                );
+                let wt_path = format!("{}/worktrees/{}", repo.path, b.replace('/', "-"));
+                assert!(
+                    std::path::Path::new(&wt_path).is_dir(),
+                    "worktree {wt_path} must exist on disk"
+                );
+            }
+
+            // The draft actually reached the agent process environment.
+            let env = soon(|| std::fs::read_to_string(&env_out).ok()).await;
+            assert!(
+                env.contains("GYRE_META_SPEC_DRAFT_KIND=meta:persona"),
+                "draft kind must be injected; env was:\n{env}"
+            );
+            assert!(
+                env.contains("DRAFT-PERSONA-BODY: write exhaustive tests"),
+                "draft content must be injected; env was:\n{env}"
+            );
+            assert!(
+                env.contains(&format!("GYRE_PREVIEW_ID={preview_id}")),
+                "preview id must be injected; env was:\n{env}"
+            );
+            assert!(
+                env.contains("GYRE_TARGET_SPEC_PATH=specs/system/search.md")
+                    || env.contains("GYRE_TARGET_SPEC_PATH=specs/system/identity.md"),
+                "target spec path must be injected; env was:\n{env}"
+            );
+            assert!(
+                !env.contains("GYRE_TASK_ID="),
+                "preview agents must NOT receive GYRE_TASK_ID; env was:\n{env}"
+            );
+
+            // Skip-ceremony: no MRs, no tasks, no provenance keys, no
+            // refs/agents/* or refs/tasks/* writes.
+            assert!(
+                state.merge_requests.list().await.unwrap().is_empty(),
+                "preview must not create MRs"
+            );
+            assert!(
+                state.tasks.list().await.unwrap().is_empty(),
+                "preview must not create tasks"
+            );
+            let provenance = state.kv_store.kv_list("agent_provenance").await.unwrap();
+            assert!(provenance.is_empty(), "no provenance recording: {provenance:?}");
+            let agent_refs = crate::git_refs::count_refs_under(&repo.path, "refs/agents/").await;
+            assert_eq!(agent_refs, 0, "no refs/agents/* writes in preview mode");
+            let task_refs = crate::git_refs::count_refs_under(&repo.path, "refs/tasks/").await;
+            assert_eq!(task_refs, 0, "no refs/tasks/* writes in preview mode");
+
+            // Token minted and short-lived (preview JWT TTL, not the default).
+            for a in agents {
+                let tok = state
+                    .kv_store
+                    .kv_get("agent_tokens", a["agent_id"].as_str().unwrap())
+                    .await
+                    .unwrap();
+                assert!(tok.is_some(), "preview agent token must be minted");
+                let claims = state
+                    .agent_signing_key
+                    .validate(tok.unwrap().as_str(), &state.base_url)
+                    .expect("preview agent token must be a valid JWT");
+                let expected_exp = chrono_now_secs() + state.preview_jwt_ttl_secs;
+                assert!(
+                    claims.exp <= expected_exp,
+                    "preview JWT must use the preview TTL ({:?} vs {claims:?})",
+                    state.preview_jwt_ttl_secs
+                );
+            }
+
+            // Budget slot taken (workspace accounting governs by default).
+            let ws_key = crate::api::budget::workspace_key(repo.workspace_id.as_str());
+            let usage = state
+                .budget_usages
+                .get_usage(&ws_key)
+                .await
+                .unwrap()
+                .expect("usage row must exist after preview spawn");
+            assert!(usage.active_agents >= 2, "two preview agents must be counted");
+
+            // Status reflects the real Active state while the process runs.
+            let status_resp = get_preview_status(&app, &preview_id).await;
+            assert_eq!(status_resp.status(), StatusCode::OK);
+            let status = body_json(status_resp).await;
+            assert_eq!(status["state"].as_str().unwrap(), "running");
+            assert_eq!(status["agents"].as_array().unwrap().len(), 2);
+            for a in status["agents"].as_array().unwrap() {
+                assert_eq!(a["status"].as_str().unwrap(), "running");
+            }
+
+            // Cleanup so the sleep processes do not outlive the test.
+            let del = delete_preview(&app, &preview_id).await;
+            assert_eq!(del.status(), StatusCode::NO_CONTENT);
+        })
+        .await;
+    }
+
+    fn chrono_now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    /// DELETE tears the run down completely: processes killed, worktrees
+    /// force-removed, branches deleted, kv record gone, budget released —
+    /// and a subsequent GET status 404s.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_delete_tears_down_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, state, repo_id) = preview_app(dir.path(), 86_400, None).await;
+
+        let env_out = dir.path().join("agent-env.txt");
+        let script = env_dump_script(dir.path(), &env_out);
+
+        with_agent_command(script.to_str().unwrap(), || async {
+            let resp = post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let json = body_json(resp).await;
+            let preview_id = json["preview_id"].as_str().unwrap().to_string();
+            let agent_id = json["agents"][0]["agent_id"].as_str().unwrap().to_string();
+            let branch = json["agents"][0]["branch"].as_str().unwrap().to_string();
+
+            // Wait for the process to actually be running (registered).
+            soon(|| {
+                state
+                    .process_registry
+                    .try_lock()
+                    .map(|r| r.contains_key(&agent_id))
+                    .unwrap_or(false)
+            })
+            .await;
+
+            let repo = state
+                .repos
+                .find_by_id(&gyre_common::Id::new(&repo_id))
+                .await
+                .unwrap()
+                .unwrap();
+            let wt_path = format!("{}/worktrees/{}", repo.path, branch.replace('/', "-"));
+            assert!(std::path::Path::new(&wt_path).is_dir());
+
+            let del = delete_preview(&app, &preview_id).await;
+            assert_eq!(del.status(), StatusCode::NO_CONTENT);
+
+            // Branch gone, worktree gone, kv records gone.
+            assert!(!state.git_ops.branch_exists(&repo.path, &branch).await.unwrap());
+            assert!(!std::path::Path::new(&wt_path).exists());
+            assert!(
+                state
+                    .kv_store
+                    .kv_get("meta_spec_previews", &preview_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                state
+                    .kv_store
+                    .kv_get("preview_agents", &agent_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                state
+                    .kv_store
+                    .kv_get("agent_tokens", &agent_id)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "preview agent token must be revoked on DELETE"
+            );
+
+            // Agent row terminal, not Active/Idle.
+            let agent = state
+                .agents
+                .find_by_id(&gyre_common::Id::new(&agent_id))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_ne!(agent.status, gyre_domain::AgentStatus::Active);
+            assert_ne!(agent.status, gyre_domain::AgentStatus::Idle);
+
+            // Status 404 afterwards.
+            let status = get_preview_status(&app, &preview_id).await;
+            assert_eq!(status.status(), StatusCode::NOT_FOUND);
+
+            // Second DELETE is 404 (record is gone).
+            let del2 = delete_preview(&app, &preview_id).await;
+            assert_eq!(del2.status(), StatusCode::NOT_FOUND);
+        })
+        .await;
+    }
+
+    /// A preview agent that finishes lands in Stopped (never Idle), its
+    /// worktree is removed, its token revoked, its budget slot released —
+    /// and the produced diff shows up in the status endpoint.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_agent_finish_teardown_and_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, state, repo_id) = preview_app(dir.path(), 86_400, None).await;
+
+        // The "agent": commit a change on the preview branch, then exit. The
+        // commit is what the diff endpoint must surface.
+        let script_path = dir.path().join("agent-commit.sh");
+        std::fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\n\
+                 cd \"${{GYRE_WORK_DIR:-$PWD}}\" || cd /workspace || exit 0\n\
+                 echo 'search v2 under draft persona' >> specs/system/search.md\n\
+                 git add -A\n\
+                 git -c user.email=agent@gyre -c user.name=agent commit -m 'preview: apply draft' >/dev/null 2>&1\n\
+                 git push origin HEAD:refs/heads/\"$GYRE_BRANCH\" >/dev/null 2>&1\n\
+                 exit 0\n"
+            ),
+        )
+        .unwrap();
+        make_executable(&script_path);
+
+        with_agent_command(script_path.to_str().unwrap(), || async {
+            let resp = post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let json = body_json(resp).await;
+            let preview_id = json["preview_id"].as_str().unwrap().to_string();
+            let agent_id = json["agents"][0]["agent_id"].as_str().unwrap().to_string();
+            let branch = json["agents"][0]["branch"].as_str().unwrap().to_string();
+
+            let repo = state
+                .repos
+                .find_by_id(&gyre_common::Id::new(&repo_id))
+                .await
+                .unwrap()
+                .unwrap();
+
+            // Wait for the monitor to observe the exit and run the finish
+            // path (poll interval is 2s for local targets).
+            let mut terminal = None;
+            for _ in 0..150 {
+                if let Ok(Some(a)) = state
+                    .agents
+                    .find_by_id(&gyre_common::Id::new(&agent_id))
+                    .await
+                {
+                    if a.status != gyre_domain::AgentStatus::Active {
+                        terminal = Some(a);
+                        break;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            let agent = terminal.expect("preview agent must leave Active after process exit");
+
+            // Terminal state is Stopped — never Idle (§5: no idle state).
+            assert_eq!(
+                agent.status,
+                gyre_domain::AgentStatus::Stopped,
+                "finished preview agent must be Stopped, not {:?}",
+                agent.status
+            );
+
+            // Worktree removed on completion; branch survives for diffing.
+            let wt_path = format!("{}/worktrees/{}", repo.path, branch.replace('/', "-"));
+            assert!(!std::path::Path::new(&wt_path).exists(), "worktree removed on finish");
+            assert!(
+                state.git_ops.branch_exists(&repo.path, &branch).await.unwrap(),
+                "branch survives for diffing"
+            );
+            assert!(
+                state
+                    .kv_store
+                    .kv_get("agent_tokens", &agent_id)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "token revoked on finish"
+            );
+
+            // Status reports complete + the produced diff.
+            let status = body_json(get_preview_status(&app, &preview_id).await).await;
+            assert_eq!(status["state"].as_str().unwrap(), "complete");
+            let agents = status["agents"].as_array().unwrap();
+            assert_eq!(agents[0]["status"].as_str().unwrap(), "complete");
+            let diff = agents[0]["diff"].as_object().expect("diff must be present");
+            assert!(
+                diff["files_changed"].as_u64().unwrap() >= 1,
+                "diff must show the agent's commit: {diff:?}"
+            );
+            let patches = diff["patches"].as_array().unwrap();
+            assert!(
+                patches
+                    .iter()
+                    .any(|p| p["path"].as_str().unwrap() == "specs/system/search.md"),
+                "diff must include the changed spec: {patches:?}"
+            );
+        })
+        .await;
+    }
+
+    /// Role and target validation: read-only caller 403, unknown repo 404,
+    /// unknown spec path 400, empty targets 400, empty draft 400.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_validation_and_role_gates() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _state, repo_id) = preview_app(dir.path(), 86_400, None).await;
+
+        // Empty targets.
+        let resp = post_preview(&app, preview_body(&repo_id, &[])).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn preview_returns_404_for_unknown_workspace() {
-        let resp = app()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/workspaces/00000000-0000-0000-0000-000000000000/meta-specs/preview")
-                    .header("authorization", "Bearer test-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"spec_paths":["specs/system/auth.md"]}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        // Empty draft content.
+        let mut bad_draft = preview_body(&repo_id, &["specs/system/search.md"]);
+        bad_draft["draft"]["content"] = serde_json::json!("  ");
+        let resp = post_preview(&app, bad_draft).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Unknown repo.
+        let resp = post_preview(
+            &app,
+            preview_body("00000000-0000-0000-0000-000000000000", &["specs/system/search.md"]),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn preview_status_returns_404_for_unknown_preview_id() {
-        let app = app();
-        let ws_id = create_workspace(&app, "preview-ws-4").await;
+        // Spec path that does not exist in the repo.
+        let resp = post_preview(&app, preview_body(&repo_id, &["specs/system/does-not-exist.md"])).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!(
-                        "/api/v1/workspaces/{ws_id}/meta-specs/preview/00000000-0000-0000-0000-000000000000"
-                    ))
-                    .header("authorization", "Bearer test-token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn preview_readonly_role_is_forbidden() {
+        // Read-only caller → 403 (no agents spawned, so no env lock needed).
         use crate::abac_middleware::seed_builtin_policies;
         use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
-        let state = make_test_state_with_jwt();
+        let jwt_state = make_test_state_with_jwt();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&jwt_state))
         });
-
-        // Create workspace as admin.
-        let ws_resp = crate::api::api_router()
-            .with_state(state.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/workspaces")
-                    .header("authorization", "Bearer test-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"name":"preview-ws-ro","slug":"preview-ws-ro"}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(ws_resp.status(), StatusCode::CREATED);
-        let ws_json = body_json(ws_resp).await;
-        let ws_id = ws_json["id"].as_str().unwrap().to_string();
-
-        // ReadOnly OIDC JWT.
         let ro_token = sign_test_jwt(
             &serde_json::json!({
                 "sub": "ro-sub",
@@ -1746,21 +2175,154 @@ mod tests {
             }),
             3600,
         );
-
-        let resp = crate::api::api_router()
-            .with_state(state)
+        let ro_app = crate::api::api_router().with_state(jwt_state);
+        let resp = ro_app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/v1/workspaces/{ws_id}/meta-specs/preview"))
+                    .uri("/api/v1/meta-specs/preview")
                     .header("authorization", format!("Bearer {ro_token}"))
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"spec_paths":["specs/system/auth.md"]}"#))
+                    .body(Body::from(
+                        preview_body(&repo_id, &["specs/system/search.md"]).to_string(),
+                    ))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Unknown preview id on GET/DELETE → 404.
+        let resp = get_preview_status(&app, "00000000-0000-0000-0000-000000000000").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = delete_preview(&app, "00000000-0000-0000-0000-000000000000").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// The separate preview budget cap: with `max_concurrent=1` pinned, a
+    /// second concurrent spawn is rejected with 429.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_budget_cap_rejects_overflow() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _state, repo_id) = preview_app(dir.path(), 86_400, Some(1)).await;
+
+        let env_out = dir.path().join("agent-env.txt");
+        let script = env_dump_script(dir.path(), &env_out);
+
+        with_agent_command(script.to_str().unwrap(), || async {
+            let resp = post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let first = body_json(resp).await;
+            let preview_id = first["preview_id"].as_str().unwrap().to_string();
+
+            // One preview agent already running; the cap is 1.
+            let resp = post_preview(&app, preview_body(&repo_id, &["specs/system/identity.md"])).await;
+            assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+
+            delete_preview(&app, &preview_id).await;
+        })
+        .await;
+    }
+
+    /// GC TTL boundary: a run at/past the TTL is deleted, one just under it
+    /// survives. Also covers the orphan pass (agent record whose run record
+    /// is gone).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_gc_ttl_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        // TTL = 1000s.
+        let (app, state, repo_id) = preview_app(dir.path(), 1000, None).await;
+
+        let env_out = dir.path().join("agent-env.txt");
+        let script = env_dump_script(dir.path(), &env_out);
+
+        with_agent_command(script.to_str().unwrap(), || async {
+            let resp = post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let old = body_json(resp).await;
+            let old_id = old["preview_id"].as_str().unwrap().to_string();
+
+            // Age the run past the TTL by rewriting its created_at.
+            let raw = state
+                .kv_store
+                .kv_get("meta_spec_previews", &old_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut record: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            record["created_at"] = serde_json::json!(chrono_now_secs() - 1000);
+            state
+                .kv_store
+                .kv_set("meta_spec_previews", &old_id, record.to_string())
+                .await
+                .unwrap();
+
+            // A second run, left fresh (created_at = now ⇒ just under TTL).
+            let resp = post_preview(&app, preview_body(&repo_id, &["specs/system/identity.md"])).await;
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let fresh = body_json(resp).await;
+            let fresh_id = fresh["preview_id"].as_str().unwrap().to_string();
+
+            super::run_once(&state).await.unwrap();
+
+            // Old run is gone entirely.
+            assert!(
+                state
+                    .kv_store
+                    .kv_get("meta_spec_previews", &old_id)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "run at/past TTL must be deleted"
+            );
+            let old_agent_id = old["agents"][0]["agent_id"].as_str().unwrap().to_string();
+            assert!(
+                state
+                    .kv_store
+                    .kv_get("preview_agents", &old_agent_id)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "aged run's agent index entry must be removed"
+            );
+
+            // Fresh run survives.
+            assert!(
+                state
+                    .kv_store
+                    .kv_get("meta_spec_previews", &fresh_id)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "run just under TTL must be retained"
+            );
+
+            // Orphan pass: an agent index entry whose run record is gone is
+            // reclaimed (slot, token, branch).
+            let repo = state
+                .repos
+                .find_by_id(&gyre_common::Id::new(&repo_id))
+                .await
+                .unwrap()
+                .unwrap();
+            let fresh_agent = fresh["agents"][0]["agent_id"].as_str().unwrap().to_string();
+            state
+                .kv_store
+                .kv_remove("meta_spec_previews", &fresh_id)
+                .await
+                .unwrap();
+            super::run_once(&state).await.unwrap();
+            assert!(
+                state
+                    .kv_store
+                    .kv_get("preview_agents", &fresh_agent)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "orphaned preview agent record must be reclaimed"
+            );
+        })
+        .await;
     }
 }
 
