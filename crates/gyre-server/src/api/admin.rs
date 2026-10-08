@@ -446,7 +446,6 @@ pub async fn admin_seed(
     // personas (idempotent — skipped if already present).
     crate::seed_builtin_personas_for_tenant(&state, &tenant.id).await;
 
-
     // ── Repos ─────────────────────────────────────────────────────────────────
     let repo1 = Repository::new(
         Id::new("seed-repo-1"),

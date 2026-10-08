@@ -213,7 +213,12 @@ pub const BUILTIN_PERSONA_DEFS: &[BuiltinPersonaDef] = &[
         name: "Repo Orchestrator",
         slug: "repo-orchestrator",
         system_prompt: include_str!("../../../specs/personas/repo-orchestrator.md"),
-        capabilities: &["task.create", "task.decompose", "agent.dispatch", "merge.queue"],
+        capabilities: &[
+            "task.create",
+            "task.decompose",
+            "agent.dispatch",
+            "merge.queue",
+        ],
         protocols: &["mcp", "ralph-loop", "escalation", "handoff"],
     },
     BuiltinPersonaDef {

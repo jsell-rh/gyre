@@ -336,6 +336,55 @@ mod tests {
         let update_resp = app
             .clone()
             .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/tenants/{id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&update_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update_resp.status(), StatusCode::OK);
+        let updated = body_json(update_resp).await;
+        assert_eq!(updated["name"], "New Name");
+    }
+
+    #[tokio::test]
+    async fn delete_tenant() {
+        let app = app();
+        let body = serde_json::json!({ "name": "Del", "slug": "del" });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tenants")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let created = body_json(create_resp).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let del_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/tenants/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_resp.status(), StatusCode::NO_CONTENT);
+    }
 
     /// platform-model.md §2: creating a tenant seeds the four built-in
     /// personas at that tenant's scope, pre-approved.
@@ -346,6 +395,7 @@ mod tests {
 
         let body = serde_json::json!({ "name": "Acme Corp", "slug": "acme-corp" });
         let create_resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -395,54 +445,5 @@ mod tests {
         for p in list.as_array().unwrap() {
             assert_eq!(p["approval_status"], "Approved");
         }
-    }
-                Request::builder()
-                    .method("PUT")
-                    .uri(format!("/api/v1/tenants/{id}"))
-                    .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
-                    .body(Body::from(serde_json::to_vec(&update_body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(update_resp.status(), StatusCode::OK);
-        let updated = body_json(update_resp).await;
-        assert_eq!(updated["name"], "New Name");
-    }
-
-    #[tokio::test]
-    async fn delete_tenant() {
-        let app = app();
-        let body = serde_json::json!({ "name": "Del", "slug": "del" });
-        let create_resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v1/tenants")
-                    .header("content-type", "application/json")
-                    .header("authorization", "Bearer test-token")
-                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let created = body_json(create_resp).await;
-        let id = created["id"].as_str().unwrap().to_string();
-
-        let del_resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("DELETE")
-                    .uri(format!("/api/v1/tenants/{id}"))
-                    .header("authorization", "Bearer test-token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(del_resp.status(), StatusCode::NO_CONTENT);
     }
 }
