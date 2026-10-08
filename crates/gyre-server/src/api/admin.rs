@@ -288,6 +288,15 @@ pub async fn admin_kill_agent(
     if let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await {
         for wt in worktrees {
             if let Ok(Some(repo)) = state.repos.find_by_id(&wt.repository_id).await {
+                // jj workspace teardown (source-control.md §4).
+                crate::api::spawn::cleanup_jj_workspace(
+                    state,
+                    &agent.id.to_string(),
+                    &repo.path,
+                    &wt.path,
+                    &format!("agent-{}", agent.id),
+                )
+                .await;
                 let _ = state.git_ops.remove_worktree(&repo.path, &wt.path).await;
             }
             let _ = state.worktrees.delete(&wt.id).await;

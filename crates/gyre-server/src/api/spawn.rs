@@ -279,6 +279,52 @@ pub async fn cleanup_interrogation_policies(state: &AppState, agent_id: &str) {
     );
 }
 
+/// Clean up an agent's jj workspace: forget it from the repo's shared jj
+/// checkout and remove the on-disk working copy. Called on every agent
+/// teardown path (stale/abort, admin kill, worktree delete).
+///
+/// `main_checkout_path` is the repo's shared jj checkout
+/// (`{repo.path}/jj-main`); `workspace_path`/`workspace_name` identify the
+/// agent's working copy. Best-effort: teardown must not fail because jj
+/// state is already gone, but failures are logged at warn (a leaked
+/// workspace stays registered in `jj workspace list` otherwise).
+pub async fn cleanup_jj_workspace(
+    state: &AppState,
+    agent_id: &str,
+    repo_path: &str,
+    workspace_path: &str,
+    workspace_name: &str,
+) {
+    let main_checkout = format!("{repo_path}/jj-main");
+    if let Err(e) = state
+        .jj_ops
+        .jj_workspace_forget(&main_checkout, workspace_name)
+        .await
+    {
+        tracing::warn!(
+            agent_id = %agent_id,
+            workspace = %workspace_name,
+            error = %e,
+            "jj workspace forget failed on cleanup"
+        );
+    }
+    if std::path::Path::new(workspace_path).exists() {
+        if let Err(e) = std::fs::remove_dir_all(workspace_path) {
+            tracing::warn!(
+                agent_id = %agent_id,
+                path = %workspace_path,
+                error = %e,
+                "failed to remove jj workspace directory"
+            );
+        }
+    }
+    // Remove the now-empty parent dir (workspaces/) when this was the last
+    // workspace — keep the tree tidy; ignore failures.
+    if let Some(parent) = std::path::Path::new(workspace_path).parent() {
+        let _ = std::fs::remove_dir(parent);
+    }
+}
+
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 /// POST /api/v1/agents/spawn
@@ -466,60 +512,123 @@ pub(crate) async fn spawn_agent_core(
         }
     }
 
-    // Compute worktree path: {repo_path}/worktrees/{branch_slug}
+    // Compute provisioning paths (source-control.md §4 layout):
+    //   {repo.path}/jj-main      — the repo's shared jj main checkout
+    //                              (standalone, backed by the bare git repo)
+    //   {repo.path}/workspaces/{agent_id} — this agent's jj workspace
+    //                              (working copy on the spawn branch)
+    //   {repo.path}/worktrees/{branch_slug} — plain-git worktree fallback
+    // jj 0.39.0 refuses colocated repos inside git worktrees, so agent jj
+    // working copies are separate workspaces of the shared checkout.
+    // `repo.path` is absolute at rest (repos_root is canonicalized at
+    // server start) — jj resolves child-process paths against the command
+    // cwd, not the server cwd (review F6).
     let branch_slug = req.branch.replace('/', "-");
     let worktree_path = format!("{}/worktrees/{}", repo.path, branch_slug);
+    let jj_main_checkout_path = format!("{}/jj-main", repo.path);
+    let jj_workspace_path = format!("{}/workspaces/{}", repo.path, agent.id);
+    let jj_workspace_name = format!("agent-{}", agent.id);
 
     // HSI §4: Interrogation agents are read-only — they have no worktree.
     // Skip worktree creation, jj init, and git ref writes.
     let jj_change_id = if !is_interrogation {
-        // Create git worktree. The adapter tries existing branch first, then
-        // creates a new branch from HEAD if the branch doesn't exist yet.
-        if let Err(e) = state
-            .git_ops
-            .create_worktree(&repo.path, &worktree_path, &req.branch)
+        // Provision the agent's jj working copy FIRST: a per-agent
+        // workspace of the repo's shared jj checkout, created on the
+        // spawn branch. This is the layout the automatic rebase
+        // (source-control.md §4) operates on.
+        //
+        // Failure degrades to the plain-git worktree path below — the
+        // agent still gets a working directory (best-effort, but the
+        // failure is logged at warn, never silently swallowed: a spawn
+        let mut change_id: Option<String> = None;
+        let jj_provisioned = match state
+            .jj_ops
+            .jj_main_checkout_init(&jj_main_checkout_path, &repo.path)
             .await
         {
-            let msg = e.to_string();
-            let msg_lc = msg.to_lowercase();
-            if msg_lc.contains("not a valid object") || msg_lc.contains("bad default revision") {
-                return Err(ApiError::InvalidInput(format!(
-                    "cannot create worktree: repo has no commits yet — push an initial commit before spawning (branch: {})",
-                    req.branch
-                )));
-            }
-            tracing::warn!("create_worktree failed (non-fatal): {e}");
-        }
-
-        // Initialize jj in the worktree and create an initial change (best-effort).
-        // Only attempted if the worktree directory exists on disk.
-        let change_id = if std::path::Path::new(&worktree_path).exists() {
-            match state.jj_ops.jj_init(&worktree_path).await {
-                Ok(()) => {
-                    let description = format!("Agent {}: task {}", agent.name, req.task_id);
-                    match state.jj_ops.jj_new(&worktree_path, &description).await {
-                        Ok(change_id) => {
-                            tracing::debug!(
-                                agent_id = %agent.id,
-                                change_id = %change_id,
-                                "jj initialized in worktree"
-                            );
-                            Some(change_id)
+            Ok(()) => {
+                let description = format!("Agent {}: task {}", agent.name, req.task_id);
+                match state
+                    .jj_ops
+                    .jj_workspace_add(
+                        &jj_main_checkout_path,
+                        &jj_workspace_path,
+                        &jj_workspace_name,
+                        &req.branch,
+                        &description,
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        // The workspace's working copy IS the agent's new
+                        // change — describe it so the change is named.
+                        match state
+                            .jj_ops
+                            .jj_new(&jj_workspace_path, &description)
+                            .await
+                        {
+                            Ok(cid) => {
+                                tracing::info!(
+                                    agent_id = %agent.id,
+                                    workspace = %jj_workspace_path,
+                                    change_id = %cid,
+                                    "jj workspace provisioned for agent"
+                                );
+                                change_id = Some(cid);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    agent_id = %agent.id,
+                                    error = %e,
+                                    "jj new in workspace failed — workspace stays on branch tip"
+                                );
+                            }
                         }
-                        Err(e) => {
-                            tracing::debug!(agent_id = %agent.id, "jj new skipped: {e}");
-                            None
-                        }
+                        true
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            agent_id = %agent.id,
+                            error = %e,
+                            "jj workspace add failed — falling back to plain git worktree"
+                        );
+                        false
                     }
                 }
-                Err(e) => {
-                    tracing::debug!(agent_id = %agent.id, "jj init skipped: {e}");
-                    None
-                }
             }
-        } else {
-            None
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent.id,
+                    checkout = %jj_main_checkout_path,
+                    error = %e,
+                    "jj main checkout init failed — falling back to plain git worktree"
+                );
+                false
+            }
         };
+
+        // Plain-git worktree: created for every agent (the plain-git
+        // surface — CLI clones, git push, can_merge — keys off git refs),
+        // and the FALLBACK working directory when jj provisioning failed.
+        // Skipped when the jj workspace provisioned (its working copy
+        // serves as the agent's directory).
+        if !jj_provisioned {
+            if let Err(e) = state
+                .git_ops
+                .create_worktree(&repo.path, &worktree_path, &req.branch)
+                .await
+            {
+                let msg = e.to_string();
+                let msg_lc = msg.to_lowercase();
+                if msg_lc.contains("not a valid object") || msg_lc.contains("bad default revision") {
+                    return Err(ApiError::InvalidInput(format!(
+                        "cannot create worktree: repo has no commits yet — push an initial commit before spawning (branch: {})",
+                        req.branch
+                    )));
+                }
+                tracing::warn!("create_worktree failed (non-fatal): {e}");
+            }
+        }
 
         // Write custom ref namespaces (best-effort)
         if let Some(sha) = git_refs::resolve_ref(&repo.path, "HEAD").await {
@@ -529,14 +638,22 @@ pub(crate) async fn spawn_agent_core(
             git_refs::write_ref(&repo.path, &task_ref, &sha).await;
         }
 
-        // Record worktree in DB linked to agent and task
+        // Record worktree in DB linked to agent and task. The recorded
+        // path is the jj workspace when provisioned (that's where the
+        // agent's in-progress change lives — and what the automatic
+        // rebase operates on), else the plain-git worktree.
+        let effective_path = if jj_provisioned {
+            jj_workspace_path.clone()
+        } else {
+            worktree_path.clone()
+        };
         let wt = AgentWorktree::new(
             new_id(),
             agent.id.clone(),
             Id::new(&req.repo_id),
             Some(Id::new(&req.task_id)),
             req.branch.clone(),
-            worktree_path.clone(),
+            effective_path,
             now,
         );
         state.worktrees.create(&wt).await?;
@@ -595,12 +712,16 @@ pub(crate) async fn spawn_agent_core(
         // Docker requires an absolute working directory path. Canonicalize the
         // worktree path to ensure it's absolute even when GYRE_REPOS_PATH is
         // relative (e.g. the default "./repos/").
-        let effective_work_dir = if std::path::Path::new(&worktree_path).exists() {
+        let effective_work_dir = if std::path::Path::new(&jj_workspace_path).exists() {
+            std::fs::canonicalize(&jj_workspace_path)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| jj_workspace_path.clone())
+        } else if std::path::Path::new(&worktree_path).exists() {
             std::fs::canonicalize(&worktree_path)
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| worktree_path.clone())
         } else {
-            // Worktree not yet on disk — fall back to /workspace (absolute).
+            // No working directory on disk — fall back to /workspace (absolute).
             "/workspace".to_string()
         };
         // Command is server-controlled only — never from user input (C-1 RCE fix).
@@ -1258,23 +1379,44 @@ pub async fn complete_agent(
     // Also remove any stored conversation context for this agent.
     let _ = state.kv_store.kv_remove("interrogation_context", &id).await;
 
-    // Create a jj bookmark for the agent's branch in their worktree (best-effort).
-    // This persists the branch tip in jj's bookmark namespace for traceability.
+    // jj completion path (source-control.md §4): the agent's in-progress
+    // change must become visible to git-backed consumers (diff,
+    // can_merge, merge_branches) when the agent completes. In the
+    // workspace layout, agent work lives in jj's object database —
+    // `jj git export` pushes it into the bare git repo's refs. A bookmark
+    // on the source branch makes the branch tip resolvable by name.
     if let Some(wt) = worktrees.first() {
-        if std::path::Path::new(&wt.path).exists() {
+        if std::path::Path::new(&wt.path).join(".jj").exists() {
+            // Workspace working copy: create the branch bookmark and
+            // export to git so the MR's diff/conflict checks see the work.
+            if let Err(e) = state
+                .jj_ops
+                .jj_bookmark_create(&wt.path, &mr.source_branch, "@")
+                .await
+            {
+                tracing::warn!(agent_id = %agent.id, "jj bookmark create failed: {e}");
+            }
+            if let Err(e) = state.jj_ops.jj_git_export(&wt.path).await {
+                tracing::warn!(
+                    agent_id = %agent.id,
+                    error = %e,
+                    "jj git export failed — agent work may be invisible to merge checks"
+                );
+            } else {
+                tracing::info!(
+                    agent_id = %agent.id,
+                    branch = %mr.source_branch,
+                    "jj work exported to git on complete"
+                );
+            }
+        } else if std::path::Path::new(&wt.path).exists() {
+            // Legacy colocated layout (pre-workspace): bookmark best-effort.
             if let Err(e) = state
                 .jj_ops
                 .jj_bookmark_create(&wt.path, &mr.source_branch, "@")
                 .await
             {
                 tracing::debug!(agent_id = %agent.id, "jj bookmark skipped: {e}");
-            } else {
-                // domain-event:ok — jj bookmark is an internal VCS operation, not a spec-required activity event
-                tracing::debug!(
-                    agent_id = %agent.id,
-                    branch = %mr.source_branch,
-                    "jj bookmark created on complete"
-                );
             }
         }
     }
