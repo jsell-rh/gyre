@@ -2,10 +2,10 @@
 title: "Record real per-call LLM usage into budget counters and audit log"
 spec_ref: "platform-model.md §Budget Tracking"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Budget Tracking"
-commits: ["b82196260bc3c52ed363f4bd6d3e5d797fb6ec8a", "9b046efe4eb7038b7fb5e7b9e064c78e2453a73d", "d38e94d46481bd57ebe7787d0ee56097544e2cde", "21986645c231814dffef3c9e5c6670e47bf8a690"]
+commits: ["b82196260bc3c52ed363f4bd6d3e5d797fb6ec8a", "9b046efe4eb7038b7fb5e7b9e064c78e2453a73d", "d38e94d46481bd57ebe7787d0ee56097544e2cde", "21986645c231814dffef3c9e5c6670e47bf8a690", "a0ddfba49b89b32919d1489d1d23d34b1a58f7ed"]
 ---
 
 ## Spec Excerpt
