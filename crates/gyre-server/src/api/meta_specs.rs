@@ -2404,12 +2404,76 @@ fn parse_approval_status(s: &str) -> Result<MetaSpecApprovalStatus, ApiError> {
 }
 
 // ---------------------------------------------------------------------------
+// Registry authorization (registry routes run without middleware ABAC —
+// frozen exemption list — so every handler enforces per-handler authz)
+// ---------------------------------------------------------------------------
+
+/// Role gate for registry mutations: creating, editing, approving, or deleting
+/// a meta-spec rewrites the rules agents operate under — same authority class
+/// as the workspace meta-spec-set binding (Admin-only, NEW-26).
+fn require_registry_admin(auth: &AuthenticatedAgent) -> Result<(), ApiError> {
+    if auth.roles.contains(&UserRole::Admin) {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden(
+            "only Admin role may modify the meta-spec registry".to_string(),
+        ))
+    }
+}
+
+/// Tenant containment for a Workspace-scoped meta-spec: the named workspace
+/// must exist and belong to the caller's tenant (Admin bypasses). Global
+/// scope crosses tenants by definition, so only the role gate applies to it.
+/// A `scope_id` that does not resolve to a workspace is denied rather than
+/// ridden on an assumed identity (AGENTS.md — never fabricate a scope).
+async fn require_registry_scope(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    scope: &MetaSpecScope,
+    scope_id: &Option<String>,
+) -> Result<(), ApiError> {
+    if matches!(scope, MetaSpecScope::Global) {
+        return Ok(());
+    }
+    let Some(ws_id) = scope_id else {
+        return Err(ApiError::BadRequest(
+            "workspace-scoped meta-spec requires scope_id".to_string(),
+        ));
+    };
+    match state.workspaces.find_by_id(&Id::new(ws_id)).await? {
+        Some(ws) if ws.tenant_id.as_str() == auth.tenant_id || auth.roles.contains(&UserRole::Admin) => Ok(()),
+        Some(_) => Err(ApiError::Forbidden(format!(
+            "workspace-scoped meta-spec '{ws_id}' is outside the caller's tenant"
+        ))),
+        None => Err(ApiError::NotFound(format!("workspace '{ws_id}' not found"))),
+    }
+}
+
+/// Per-handler authorization for a registry entry point operating on an
+/// existing meta-spec (get/update/delete/versions): load the entity, derive
+/// its scope from the record — never from the request — and compare tenant.
+async fn require_meta_spec_access(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    id: &str,
+) -> Result<MetaSpec, ApiError> {
+    let ms = state
+        .meta_specs
+        .get_by_id(&Id::new(id))
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("meta-spec '{id}' not found")))?;
+    require_registry_scope(state, auth, &ms.scope, &ms.scope_id).await?;
+    Ok(ms)
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/v1/meta-specs-registry
 // ---------------------------------------------------------------------------
 
 pub async fn list_meta_specs_registry(
     State(state): State<Arc<AppState>>,
-    _auth: AuthenticatedAgent,
+    auth: AuthenticatedAgent,
     Query(q): Query<ListMetaSpecsQuery>,
 ) -> Result<Json<Vec<MetaSpec>>, ApiError> {
     let scope = match q.scope.as_deref() {
@@ -2426,11 +2490,33 @@ pub async fn list_meta_specs_registry(
         kind,
         required: q.required,
     };
-    let results = state
+    let mut results = state
         .meta_specs
         .list(&filter)
         .await
         .map_err(ApiError::Internal)?;
+    if !auth.roles.contains(&UserRole::Admin) {
+        // A Workspace-scoped meta-spec is visible only when its scope names
+        // one of the caller's own workspaces (tenant containment). Global
+        // scope is visible to every authenticated caller. An unresolvable
+        // scope_id is skipped, never guessed (never fabricate a scope).
+        let mine: std::collections::HashSet<String> = state
+            .workspaces
+            .list_by_tenant(&Id::new(&auth.tenant_id))
+            .await
+            .map_err(ApiError::Internal)?
+            .into_iter()
+            .map(|ws| ws.id.to_string())
+            .collect();
+        results.retain(|ms| match ms.scope {
+            MetaSpecScope::Global => true,
+            MetaSpecScope::Workspace => ms
+                .scope_id
+                .as_deref()
+                .map(|ws_id| mine.contains(ws_id))
+                .unwrap_or(false),
+        });
+    }
     Ok(Json(results))
 }
 
@@ -2443,8 +2529,12 @@ pub async fn create_meta_spec_registry(
     auth: AuthenticatedAgent,
     Json(req): Json<CreateMetaSpecRequest>,
 ) -> Result<(StatusCode, Json<MetaSpec>), ApiError> {
+    require_registry_admin(&auth)?;
     let kind = parse_kind(&req.kind)?;
     let scope = parse_scope(&req.scope)?;
+    // Scope containment: `scope_id` is caller-supplied, so it is validated
+    // against the caller's tenant, never trusted.
+    require_registry_scope(&state, &auth, &scope, &req.scope_id).await?;
     let prompt = req.prompt.unwrap_or_default();
     let content_hash = sha256_hex(&prompt);
     let now = now_secs();
@@ -2481,15 +2571,10 @@ pub async fn create_meta_spec_registry(
 
 pub async fn get_meta_spec_registry(
     State(state): State<Arc<AppState>>,
-    _auth: AuthenticatedAgent,
+    auth: AuthenticatedAgent,
     Path(id): Path<String>,
 ) -> Result<Json<MetaSpec>, ApiError> {
-    let ms = state
-        .meta_specs
-        .get_by_id(&Id::new(&id))
-        .await
-        .map_err(ApiError::Internal)?
-        .ok_or_else(|| ApiError::NotFound(format!("meta-spec '{id}' not found")))?;
+    let ms = require_meta_spec_access(&state, &auth, &id).await?;
     Ok(Json(ms))
 }
 
@@ -2503,12 +2588,8 @@ pub async fn update_meta_spec_registry(
     Path(id): Path<String>,
     Json(req): Json<UpdateMetaSpecRequest>,
 ) -> Result<Json<MetaSpec>, ApiError> {
-    let mut ms = state
-        .meta_specs
-        .get_by_id(&Id::new(&id))
-        .await
-        .map_err(ApiError::Internal)?
-        .ok_or_else(|| ApiError::NotFound(format!("meta-spec '{id}' not found")))?;
+    require_registry_admin(&auth)?;
+    let mut ms = require_meta_spec_access(&state, &auth, &id).await?;
 
     let now = now_secs();
 
@@ -2552,9 +2633,13 @@ pub async fn update_meta_spec_registry(
 
 pub async fn delete_meta_spec_registry(
     State(state): State<Arc<AppState>>,
-    _auth: AuthenticatedAgent,
+    auth: AuthenticatedAgent,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    require_registry_admin(&auth)?;
+    // Load the entity, derive scope from the record (never the request), and
+    // check tenant containment before deleting.
+    require_meta_spec_access(&state, &auth, &id).await?;
     let rid = Id::new(&id);
     let has_bindings = state
         .meta_spec_bindings
@@ -2580,16 +2665,11 @@ pub async fn delete_meta_spec_registry(
 
 pub async fn list_meta_spec_versions(
     State(state): State<Arc<AppState>>,
-    _auth: AuthenticatedAgent,
+    auth: AuthenticatedAgent,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<gyre_domain::MetaSpecVersion>>, ApiError> {
-    // Ensure meta-spec exists.
-    state
-        .meta_specs
-        .get_by_id(&Id::new(&id))
-        .await
-        .map_err(ApiError::Internal)?
-        .ok_or_else(|| ApiError::NotFound(format!("meta-spec '{id}' not found")))?;
+    // Load the entity, derive its scope from the record, tenant-check it.
+    require_meta_spec_access(&state, &auth, &id).await?;
 
     let versions = state
         .meta_specs
@@ -2605,24 +2685,23 @@ pub async fn list_meta_spec_versions(
 
 pub async fn get_meta_spec_version(
     State(state): State<Arc<AppState>>,
-    _auth: AuthenticatedAgent,
+    auth: AuthenticatedAgent,
     Path((id, version)): Path<(String, u32)>,
 ) -> Result<Json<gyre_domain::MetaSpecVersion>, ApiError> {
+    // Load the entity, derive its scope from the record, tenant-check it.
+    require_meta_spec_access(&state, &auth, &id).await?;
     let ver = state
         .meta_specs
         .get_version(&Id::new(&id), version)
         .await
         .map_err(ApiError::Internal)?
         .ok_or_else(|| {
-            ApiError::NotFound(format!("version {version} of meta-spec '{id}' not found"))
+            ApiError::NotFound(format!(
+                "version {version} of meta-spec '{id}' not found"
+            ))
         })?;
     Ok(Json(ver))
 }
-
-// ---------------------------------------------------------------------------
-// Registry-level tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod registry_tests {
     use crate::mem::test_state;
@@ -2640,6 +2719,94 @@ mod registry_tests {
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    }
+
+    /// A non-admin caller must not create, update, or delete registry entries
+    /// — the registry rewrites the rules agents operate under, and these
+    /// routes run without middleware ABAC (frozen exemption list), so the
+    /// handler is the only gate. Regression test for the gap flagged by
+    /// check-abac-exempt-handlers.sh.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn registry_mutations_require_admin() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Agent-role identity: a real agent JWT (not the global token), so
+        // roles = [Agent], tenant = "default".
+        let agent_id = "reg-authz-agent".to_string();
+        state
+            .agents
+            .create(&gyre_domain::Agent::new(
+                gyre_common::Id::new(&agent_id),
+                "reg-authz",
+                0,
+            ))
+            .await
+            .unwrap();
+        let token = state
+            .agent_signing_key
+            .mint(&agent_id, "task-x", "system", &state.base_url, 300)
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", &agent_id, token.clone())
+            .await
+            .unwrap();
+
+        let req = |method: &str, uri: &str, body: &str| {
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/v1/meta-specs-registry",
+                r#"{"kind":"meta:persona","name":"sneak","scope":"Global","prompt":"x"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "create must be admin-only"
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "PUT",
+                "/api/v1/meta-specs-registry/00000000-0000-0000-0000-000000000000",
+                r#"{"prompt":"x"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "update must be admin-only"
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "DELETE",
+                "/api/v1/meta-specs-registry/00000000-0000-0000-0000-000000000000",
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "delete must be admin-only"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
