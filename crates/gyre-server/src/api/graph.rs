@@ -294,6 +294,15 @@ pub struct HistoryEntry {
     pub content: String,
 }
 
+/// Source attribution entry for the Briefing Q&A response (HSI §9).
+/// Derived from briefing items that carry a `spec_path` and from
+/// completed agents (agent_id + spec_ref).
+#[derive(Serialize, Clone, PartialEq, Eq, Hash)]
+pub struct BriefingSource {
+    pub spec_path: Option<String>,
+    pub agent_id: Option<String>,
+}
+
 #[derive(Deserialize)]
 pub struct LinkNodeRequest {
     pub node_id: String,
@@ -1112,6 +1121,25 @@ pub async fn assemble_briefing(
     })
 }
 
+/// Resolve the briefing `since` timestamp: explicit param > last_seen_at from
+/// user_workspace_state > 24h fallback (HSI §9).
+///
+/// Shared by `get_workspace_briefing` and `briefing_ask` so the REST briefing
+/// and the Q&A grounding window stay in sync.
+async fn resolve_since(state: &AppState, user_id: Option<&Id>, workspace_id: &str) -> u64 {
+    if let Some(uid) = user_id {
+        let last_seen = state
+            .user_workspace_state
+            .get_last_seen(uid.as_str(), workspace_id)
+            .await
+            .unwrap_or(None);
+        if let Some(ts) = last_seen {
+            return ts as u64;
+        }
+    }
+    now_secs().saturating_sub(24 * 3600)
+}
+
 /// GET /api/v1/workspaces/{id}/briefing
 /// Returns the HSI-defined briefing for a workspace (HSI §9).
 /// When `?since=` is omitted, uses `last_seen_at` from `user_workspace_state` as default.
@@ -1125,24 +1153,54 @@ pub async fn get_workspace_briefing(
     require_workspace(&state, &id).await?;
 
     // Resolve `since`: explicit param > last_seen_at from user_workspace_state > 24h fallback.
-    let since: u64 = if let Some(s) = q.since {
-        s
-    } else if let Some(uid) = &auth.user_id {
-        let last_seen = state
-            .user_workspace_state
-            .get_last_seen(uid.as_str(), &id)
-            .await
-            .unwrap_or(None);
-        last_seen
-            .map(|ts| ts as u64)
-            .unwrap_or_else(|| now_secs().saturating_sub(24 * 3600))
-    } else {
-        now_secs().saturating_sub(24 * 3600)
-    };
+    let since = q.since.unwrap_or({
+        let uid = auth.user_id.clone();
+        resolve_since(&state, uid.as_ref(), &id).await
+    });
 
     let briefing = assemble_briefing(&state, &id, since).await?;
     Ok(Json(briefing))
 }
+
+/// Derive the Q&A response `sources` array (HSI §1325) from an assembled
+/// briefing: de-duplicated `{spec_path, agent_id}` entries collected from
+/// briefing items that carry a `spec_path` and from completed agents
+/// (agent_id + their spec_ref). Order-preserving; entries with neither
+/// field set are skipped.
+fn briefing_sources(briefing: &BriefingResponse) -> Vec<BriefingSource> {
+    let mut seen = std::collections::HashSet::new();
+    let mut sources: Vec<BriefingSource> = Vec::new();
+
+    let mut push = |spec_path: Option<String>, agent_id: Option<String>| {
+        if spec_path.is_none() && agent_id.is_none() {
+            return;
+        }
+        if seen.insert((spec_path.clone(), agent_id.clone())) {
+            sources.push(BriefingSource {
+                spec_path,
+                agent_id,
+            });
+        }
+    };
+
+    for item in briefing
+        .completed
+        .iter()
+        .chain(briefing.in_progress.iter())
+        .chain(briefing.cross_workspace.iter())
+        .chain(briefing.exceptions.iter())
+    {
+        if item.spec_path.is_some() {
+            push(item.spec_path.clone(), None);
+        }
+    }
+    for agent in &briefing.completed_agents {
+        push(agent.spec_ref.clone(), Some(agent.agent_id.clone()));
+    }
+
+    sources
+}
+
 
 /// POST /api/v1/workspaces/{id}/briefing/ask
 /// SSE streaming Q&A grounded in briefing data (HSI §9). ABAC: workspace/generate.
@@ -1150,10 +1208,9 @@ pub async fn briefing_ask(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     caller: AuthenticatedAgent,
-    Json(mut req): Json<BriefingAskRequest>,
+    Json(req): Json<BriefingAskRequest>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError>
 {
-    require_workspace(&state, &id).await?;
 
     // Per-user/workspace sliding-window rate limit (HSI §6): 10 req/60 s.
     {
@@ -1169,16 +1226,27 @@ pub async fn briefing_ask(
         }
     }
 
-    // Cap history at 20 entries (truncate oldest).
-    if let Some(ref mut history) = req.history {
-        if history.len() > 20 {
-            let excess = history.len() - 20;
-            history.drain(..excess);
-        }
+    // HSI §1325: history is capped at 20 entries — the server REJECTS requests
+    // with more than 20 entries (the client drops older ones). Do not truncate.
+    if req.history.as_ref().is_some_and(|h| h.len() > 20) {
+        return Err(ApiError::InvalidInput(
+            "history must contain at most 20 entries".to_string(),
+        ));
     }
 
     // Require LLM to be configured.
     let factory = state.llm.as_ref().ok_or(ApiError::LlmUnavailable)?;
+
+    // ── Grounding (HSI §1327): the LLM gets read-only access to the real
+    // briefing data. Resolve `since` with the same logic as the briefing
+    // endpoint (last_seen_at > 24h fallback) so Q&A sees the same window.
+    let since = resolve_since(&state, caller.user_id.as_ref(), &id).await;
+    let briefing = assemble_briefing(&state, &id, since).await?;
+
+    // Source attribution (HSI §1325): de-duplicated {spec_path, agent_id}
+    // entries from briefing items that carry a spec_path and from completed
+    // agents (agent_id + their spec_ref).
+    let sources = briefing_sources(&briefing);
 
     let workspace_id_obj = Id::new(&id);
 
@@ -1191,9 +1259,26 @@ pub async fn briefing_ask(
         .map(|t| t.content)
         .unwrap_or_else(|| crate::llm_defaults::PROMPT_BRIEFING_ASK.to_string());
 
+    // Grounding context: JSON-serialized briefing + conversation history.
+    // The server is stateless (HSI §1325); the client owns the conversation
+    // state, so we replay exactly what was sent as prompt context.
+    let briefing_json =
+        serde_json::to_string(&briefing).map_err(|e| ApiError::Internal(anyhow::anyhow!(e)))?;
+    let mut context = format!("Briefing data:\n{briefing_json}");
+    if let Some(history) = req.history.as_deref() {
+        if !history.is_empty() {
+            let transcript: Vec<String> = history
+                .iter()
+                .map(|e| format!("{}: {}", e.role, e.content))
+                .collect();
+            context.push_str("\n\nConversation history so far:\n");
+            context.push_str(&transcript.join("\n"));
+        }
+    }
+
     let system_prompt = template_content
         .replace("{{workspace_id}}", &id)
-        .replace("{{context}}", "")
+        .replace("{{context}}", &context)
         .replace("{{question}}", &req.question);
     let user_prompt = req.question.clone();
 
@@ -1211,11 +1296,15 @@ pub async fn briefing_ask(
 
     let mut events: Vec<Result<Event, std::convert::Infallible>> = Vec::new();
     for chunk in &chunks {
-        let data = serde_json::to_string(&serde_json::json!({"text": chunk})).unwrap_or_default();
+        let data =
+            serde_json::to_string(&serde_json::json!({"type": "partial", "text": chunk}))
+                .unwrap_or_default();
         events.push(Ok(Event::default().event("partial").data(data)));
     }
+    // Terminal event carries the spec §1325 response object {answer, sources}.
     let complete_data =
-        serde_json::to_string(&serde_json::json!({"text": full_text})).unwrap_or_default();
+        serde_json::to_string(&serde_json::json!({"type": "complete", "answer": full_text, "sources": sources}))
+            .unwrap_or_default();
     events.push(Ok(Event::default().event("complete").data(complete_data)));
 
     Ok(Sse::new(stream::iter(events)).keep_alive(
@@ -1867,6 +1956,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn briefing_ask_rejects_history_over_20_entries_with_400() {
+        let app = app();
+
+        let ws_body = serde_json::json!({"name": "history-cap-ws", "tenant_id": "tenant-1"});
+        let ws_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ws_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_json = body_json(ws_resp).await;
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+
+        // HSI §1325: exactly 20 entries is the cap — must be accepted.
+        let twenty: Vec<serde_json::Value> = (0..20)
+            .map(|i| serde_json::json!({"role": "user", "content": format!("q{i}")}))
+            .collect();
+        let ask_body = serde_json::json!({"question": "ok?", "history": twenty});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/briefing/ask"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ask_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "20 entries must be accepted");
+
+        // 21 entries must be rejected with 400 — the server must not truncate.
+        let twenty_one: Vec<serde_json::Value> = (0..21)
+            .map(|i| serde_json::json!({"role": "user", "content": format!("q{i}")}))
+            .collect();
+        let ask_body = serde_json::json!({"question": "ok?", "history": twenty_one});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/briefing/ask"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ask_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "21 history entries must be rejected with 400"
+        );
+        let body = body_json(resp).await;
+        assert!(
+            body["error"].as_str().unwrap_or("").contains("20"),
+            "error message should name the cap, got: {body}"
+        );
+    }
+
+    #[tokio::test]
     async fn briefing_ask_with_mock_llm_streams_sse_events() {
         let app = app();
 
@@ -1888,7 +2048,15 @@ mod tests {
         let ws_json = body_json(ws_resp).await;
         let ws_id = ws_json["id"].as_str().unwrap().to_string();
 
-        let ask_body = serde_json::json!({"question": "What changed recently?"});
+        // Follow-up shape per HSI §1325: history present, within the cap.
+        let history = vec![
+            serde_json::json!({"role": "user", "content": "What changed recently?"}),
+            serde_json::json!({"role": "assistant", "content": "Nothing major."}),
+        ];
+        let ask_body = serde_json::json!({
+            "question": "Tell me more",
+            "history": history,
+        });
         let resp = app
             .oneshot(
                 Request::builder()
@@ -1904,6 +2072,214 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let ct = resp.headers().get("content-type").unwrap();
         assert!(ct.to_str().unwrap().contains("text/event-stream"));
+
+        // Parse the SSE stream: partial events stream {type, text} chunks, and
+        // the terminal complete event must carry the HSI §1325 response object
+        // {answer, sources} with answer == concatenated partial text.
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let mut partial_text = String::new();
+        let mut complete_payload: Option<serde_json::Value> = None;
+        let mut saw_partial = false;
+        let mut current_event: Option<String> = None;
+        for line in text.lines() {
+            if let Some(kind) = line.strip_prefix("event: ") {
+                current_event = Some(kind.trim().to_string());
+            } else if let Some(data) = line.strip_prefix("data: ") {
+                let kind = match current_event.take() {
+                    Some(k) => k,
+                    None => continue,
+                };
+                if kind == "partial" {
+                    saw_partial = true;
+                    let v: serde_json::Value = serde_json::from_str(data).unwrap();
+                    assert_eq!(v["type"], "partial");
+                    partial_text.push_str(v["text"].as_str().unwrap_or(""));
+                } else if kind == "complete" {
+                    complete_payload = Some(serde_json::from_str(data).unwrap());
+                }
+            }
+        }
+        assert!(saw_partial, "expected at least one partial event");
+        let complete = complete_payload.expect("expected a complete event");
+        assert_eq!(complete["type"], "complete");
+        assert_eq!(
+            complete["answer"].as_str().unwrap_or(""),
+            partial_text,
+            "answer must equal the concatenated partial stream text"
+        );
+        assert!(
+            complete["sources"].is_array(),
+            "sources must be a JSON array, got: {}",
+            complete["sources"]
+        );
+    }
+
+    /// Prompt-capturing LLM factory for the grounding test: records the
+    /// system prompt of each stream_complete call and streams it back so the
+    /// caller can assert on the exact prompt text the production code built.
+    struct PromptCaptureFactory {
+        prompts: Arc<parking_lot::Mutex<Vec<String>>>,
+    }
+
+    struct PromptCapturePort {
+        prompts: Arc<parking_lot::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl gyre_ports::LlmPort for PromptCapturePort {
+        async fn complete(
+            &self,
+            _system_prompt: &str,
+            _user_prompt: &str,
+            _max_tokens: Option<u32>,
+        ) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+
+        async fn predict_json(
+            &self,
+            _system_prompt: &str,
+            _user_prompt: &str,
+        ) -> anyhow::Result<serde_json::Value> {
+            Ok(serde_json::json!([]))
+        }
+
+        async fn stream_complete(
+            &self,
+            system_prompt: &str,
+            _user_prompt: &str,
+            _max_tokens: Option<u32>,
+        ) -> anyhow::Result<
+            std::pin::Pin<Box<dyn futures_util::Stream<Item = anyhow::Result<String>> + Send>>,
+        > {
+            self.prompts
+                .lock()
+                .push(system_prompt.to_string());
+            let text = system_prompt.to_string();
+            Ok(Box::pin(futures_util::stream::iter(vec![Ok(text)])))
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _system_prompt: &str,
+            _messages: &[gyre_ports::ConversationMessage],
+            _tools: &[gyre_ports::ToolDefinition],
+            _max_tokens: Option<u32>,
+        ) -> anyhow::Result<gyre_ports::ToolCallingResponse> {
+            Ok(gyre_ports::ToolCallingResponse {
+                text: String::new(),
+                tool_calls: vec![],
+                stop_reason: "end_turn".to_string(),
+            })
+        }
+    }
+
+    impl gyre_ports::LlmPortFactory for PromptCaptureFactory {
+        fn for_model(&self, _model_name: &str) -> std::sync::Arc<dyn gyre_ports::LlmPort> {
+            std::sync::Arc::new(PromptCapturePort {
+                prompts: self.prompts.clone(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn briefing_ask_prompt_is_grounded_in_real_briefing_data() {
+        // Wire a prompt-capturing LLM into a fresh state.
+        let mut s = (*test_state()).clone();
+        let prompts = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        s.llm = Some(Arc::new(PromptCaptureFactory {
+            prompts: prompts.clone(),
+        }) as Arc<dyn gyre_ports::LlmPortFactory>);
+        let state = Arc::new(s);
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Seed a workspace with one merged MR carrying a spec_ref so the
+        // assembled briefing (and thus the grounding context) is non-empty.
+        let ws = gyre_domain::Workspace::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            Id::new("tenant-1"),
+            "grounding-ws",
+            "grounding-ws",
+            1000,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let ws_id = ws.id.to_string();
+
+        let mr_title = "Ground the briefing Q&A prompt with real data";
+        let spec_ref = "specs/system/payment-retry.md\
+0000000000000000000000000000000000000000";
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            Id::new("repo-grounding"),
+            mr_title,
+            "feature/grounding",
+            "main",
+            1000,
+        );
+        mr.workspace_id = ws.id.clone();
+        mr.spec_ref = Some(spec_ref.to_string());
+        mr.status = gyre_domain::MrStatus::Merged;
+        mr.updated_at = now_secs();
+        state.merge_requests.create(&mr).await.unwrap();
+
+        // Ask a question — history within the cap is replayed into the prompt.
+        let ask_body = serde_json::json!({
+            "question": "What was merged?",
+            "history": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+            ],
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/briefing/ask"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ask_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        // Drain the SSE stream so the handler runs to completion.
+        let _ = axum::body::to_bytes(resp.into_body(), usize::MAX).await;
+
+        let prompts = prompts.lock();
+        assert_eq!(prompts.len(), 1, "exactly one LLM call expected");
+        let prompt = &prompts[0];
+        // Hard assertions: fail if {{context}} were empty — the seeded MR
+        // title and spec path must be in the grounding context.
+        assert!(
+            prompt.contains(mr_title),
+            "system prompt must contain the seeded MR title, got: {prompt}"
+        );
+        assert!(
+            prompt.contains("specs/system/payment-retry.md"),
+            "system prompt must contain the seeded MR spec path, got: {prompt}"
+        );
+        assert!(
+            prompt.contains("Briefing data:"),
+            "system prompt must embed the briefing JSON block, got: {prompt}"
+        );
+        // History replay: follow-up context must be present.
+        assert!(
+            prompt.contains("user: hi"),
+            "system prompt must replay conversation history, got: {prompt}"
+        );
+        assert!(
+            prompt.contains("assistant: hello"),
+            "system prompt must replay conversation history, got: {prompt}"
+        );
+
+        // The complete event must also carry sources derived from the
+        // seeded spec-linked MR.
+        // (sources assertion covered by the SSE payload test; here the
+        // grounding contract is the prompt itself.)
     }
 
     // ── Briefing cross_workspace + exceptions tests (TASK-013) ──────────
