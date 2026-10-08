@@ -1,8 +1,8 @@
 use anyhow::Result;
 use gyre_server::{
-    abac_middleware, audit_simulator, build_router, build_state, jobs, merge_processor,
-    procfs_monitor, register_default_compute_target, seed_builtin_meta_specs, siem,
-    spawn_budget_daily_reset, spawn_llm_rate_limiter_cleanup, spawn_presence_eviction,
+    abac_middleware, audit_simulator, bootstrap_default_tenant, build_router, build_state, jobs,
+    merge_processor, procfs_monitor, register_default_compute_target, seed_builtin_meta_specs,
+    siem, spawn_budget_daily_reset, spawn_llm_rate_limiter_cleanup, spawn_presence_eviction,
     spawn_stale_agent_detector, spawn_stale_peer_detector, telemetry, JwtConfig,
 };
 use std::sync::Arc;
@@ -41,6 +41,10 @@ async fn main() -> Result<()> {
     }
 
     let state = build_state(&auth_token, &base_url, jwt_config);
+
+    // Materialize the default Tenant entity before any tenant-scoped seeding
+    // (hierarchy-enforcement.md §1 Bootstrap Behavior).
+    bootstrap_default_tenant(&state).await;
 
     // Initialise ABAC resource resolver and seed built-in policies (M34 Slice 4).
     abac_middleware::init_resolver();
