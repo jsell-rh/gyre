@@ -9,8 +9,8 @@
   import Skeleton from '../lib/Skeleton.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import { toast as showToast } from '../lib/toast.svelte.js';
+  import Briefing from './Briefing.svelte';
   import WorkspaceCards from './WorkspaceCards.svelte';
-  import NodeDetailPanel from '../lib/NodeDetailPanel.svelte';
 
   const navigate = getContext('navigate');
   const goToWorkspaceSettings = getContext('goToWorkspaceSettings');
@@ -20,6 +20,11 @@
   let { scope = { type: 'tenant' }, onSelectWorkspace = null, workspaceName = null } = $props();
 
   let scopeType = $derived(scope?.type ?? 'tenant');
+
+  // ── Architecture sub-tabs (ui-navigation.md §2, repo scope) ─────────────
+  // Control-bar sub-tabs at repo scope: Graph (default) | Briefing (the
+  // repo-scoped narrative via ?repo_id= — HSI §1.5 repo-scope Briefing row).
+  let archSubTab = $state('graph'); // 'graph' | 'briefing'
 
   // ── Workspace-scope repo list ──────────────────────────────────────────
   let wsRepos = $state([]);
@@ -724,6 +729,21 @@
     }
   });
 
+  // Read initial Architecture sub-tab from URL params (set by goToRepoTab
+  // context — same convention as the Code tab's subTab param).
+  $effect(() => {
+    if (scopeType !== 'repo') return;
+    const params = new URLSearchParams(window.location.search);
+    const initialSubTab = params.get('subTab');
+    if (initialSubTab === 'briefing' || initialSubTab === 'graph') {
+      archSubTab = initialSubTab;
+      // Clean up the URL params after reading
+      const url = new URL(window.location.href);
+      url.searchParams.delete('subTab');
+      window.history.replaceState(window.history.state, '', url.toString());
+    }
+  });
+
   async function loadWsRepos() {
     wsReposLoading = true;
     wsReposError = null;
@@ -1137,6 +1157,29 @@
         {#if scopeType !== 'repo' && !showingRepoGraph}
           <p class="subtitle">{$t('explorer_view.system_subtitle')}</p>
         {/if}
+
+        {#if scopeType === 'repo'}
+          <!-- Control-bar sub-tabs (ui-navigation.md §2): Graph (default) |
+               Briefing (repo-scoped narrative, HSI §1.5). -->
+          <div class="arch-subtabs" role="tablist" aria-label={$t('explorer_view.arch_subtabs_label')}>
+            <button
+              class="arch-subtab-btn"
+              class:active={archSubTab === 'graph'}
+              role="tab"
+              aria-selected={archSubTab === 'graph'}
+              onclick={() => { archSubTab = 'graph'; }}
+              data-testid="arch-subtab-graph"
+            >{$t('explorer_view.sub_tabs.graph')}</button>
+            <button
+              class="arch-subtab-btn"
+              class:active={archSubTab === 'briefing'}
+              role="tab"
+              aria-selected={archSubTab === 'briefing'}
+              onclick={() => { archSubTab = 'briefing'; }}
+              data-testid="arch-subtab-briefing"
+            >{$t('explorer_view.sub_tabs.briefing')}</button>
+          </div>
+        {/if}
       </div>
       <div class="header-right">
         <!-- Repo selector — hidden in repo scope (auto-selected from parent) -->
@@ -1271,8 +1314,13 @@
 
     <!-- Main content -->
     <div class="explorer-body">
-      <div class="explorer-body-main">
-        {#if !selectedRepoId}
+        {#if scopeType === 'repo' && archSubTab === 'briefing' && scope.repoId}
+          <!-- Briefing sub-tab (ui-navigation.md §2): repo-scoped narrative —
+               HSI §1.5 repo-scope Briefing row (?repo_id= filter). -->
+          <div class="arch-briefing-wrap" data-testid="arch-briefing">
+            <Briefing workspaceId={scope.workspaceId} repoId={scope.repoId} scope="repo" />
+          </div>
+        {:else if !selectedRepoId}
           <div class="empty-state-wrap">
             {#if scopeType === 'repo'}
               <!-- Repo scope: repo ID will be set by the auto-select effect -->
@@ -2031,6 +2079,46 @@
     margin: 0;
     font-size: var(--text-sm);
     color: var(--color-text-secondary);
+  }
+
+  /* Control-bar sub-tabs at repo scope (ui-navigation.md §2): Graph | Briefing */
+  .arch-subtabs {
+    display: flex;
+    gap: 0;
+    border-bottom: none;
+    margin-top: var(--space-2);
+  }
+
+  .arch-subtab-btn {
+    padding: var(--space-2) var(--space-4);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--color-text-muted, var(--color-text));
+    font-size: var(--text-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease;
+  }
+
+  .arch-subtab-btn.active {
+    color: var(--color-primary);
+    border-bottom-color: var(--color-primary);
+  }
+
+  .arch-subtab-btn:not(.active):hover {
+    color: var(--color-text);
+  }
+
+  .arch-subtab-btn:focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  .arch-briefing-wrap {
+    flex: 1;
+    min-width: 0;
+    overflow-y: auto;
   }
 
   .header-right {

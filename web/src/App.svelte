@@ -29,6 +29,10 @@
   let currentWorkspace = $state(null);
   let currentRepo = $state(null); // { id, name } | null
   let repoTab = $state('specs'); // 'specs' | 'architecture' | 'decisions' | 'code' | 'settings'
+  // Architecture tab sub-tab at repo scope: 'graph' | 'briefing'. Tracked in
+  // App state so the sidebar highlights Briefing while its sub-tab is active
+  // (ui-navigation.md §2; HSI §1.5 Briefing row — narrative for this repo).
+  let repoArchSubTab = $state('graph');
   // Cross-workspace sub-page: null = dashboard, 'settings' = /all/settings tenant admin
   let crossWorkspaceTab = $state(null);
   // Which sidebar section is active while at workspace_home scope. workspace_home
@@ -341,11 +345,23 @@
     if (repo.id) loadRepoDetail(repo.id);
   }
 
-  function goToRepoTab(tab) {
+  function goToRepoTab(tab, params) {
     repoTab = tab;
     entityDetail = null; // Clear entity detail when switching tabs
+    // Architecture sub-tab sync: params.subTab wins when targeting the
+    // architecture tab; leaving the tab resets to the Graph default.
+    if (tab === 'architecture' && params?.subTab) repoArchSubTab = params.subTab;
+    else if (tab !== 'architecture') repoArchSubTab = 'graph';
     fadeContent();
     pushState({ mode: 'repo', slug: wsSlug(currentWorkspace), repoName: currentRepo?.name, tab });
+    // Sub-tab deep-link params (e.g. Architecture → Briefing): same URL
+    // search-param convention as the Code tab. Applied after pushState so
+    // the param survives the canonical-URL replace.
+    if (params) {
+      const url = new URL(window.location.href);
+      for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+      window.history.replaceState(window.history.state, '', url.toString());
+    }
   }
 
   /** Navigate to a full-page entity detail view within repo mode.
@@ -535,12 +551,7 @@
   setContext('goToWorkspaceHome', (ws) => goToWorkspaceHome(ws ?? currentWorkspace));
   setContext('goToRepoTab', (tab, params) => {
     if (mode !== 'repo') return;
-    if (params) {
-      const url = new URL(window.location.href);
-      for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-      window.history.replaceState(window.history.state, '', url.toString());
-    }
-    goToRepoTab(tab);
+    goToRepoTab(tab, params);
   });
 
   // ── Detail panel (with navigation history stack) ──────────────────────
@@ -819,6 +830,8 @@
       // dependencies, decisions, code, settings) to a sidebar item (HSI §1.3).
       if (repoTab === 'specs' || repoTab === 'tasks') return 'specs'; // Specs column covers specs + implementation progress
       // Code tab (branches, commits, MRs, merge queue) and the C4 graph are part of the Explorer per HSI §1.3
+      // Briefing sub-tab of the Architecture tab maps to Briefing (ui-navigation.md §2)
+      if (repoTab === 'architecture' && repoArchSubTab === 'briefing') return 'briefing';
       if (repoTab === 'architecture' || repoTab === 'dependencies' || repoTab === 'code' || repoTab === 'mrs' || repoTab === 'agents') return 'explorer';
       if (repoTab === 'decisions') return 'inbox';
       if (repoTab === 'settings') return 'admin';
@@ -838,10 +851,11 @@
         case 'explorer':   goToRepoTab('architecture'); return;
         case 'admin':      goToRepoTab('settings'); return;
         case 'briefing':
-          // No repo-scoped briefing tab — go to workspace home and highlight Briefing.
-          goToWorkspaceHome(currentWorkspace);
-          workspaceActiveSection = 'briefing';
-          tick().then(() => document.querySelector('[data-testid="section-briefing"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+          // Repo-scope Briefing: the Architecture tab's Briefing sub-tab
+          // (ui-navigation.md §2 supersedes HSI §1.5 here — "a sub-tab in
+          // the Architecture tab at repo scope"). Stays at repo scope;
+          // no escape to workspace home.
+          goToRepoTab('architecture', { subTab: 'briefing' });
           return;
         case 'meta-specs': goToAgentRules(); return;
       }

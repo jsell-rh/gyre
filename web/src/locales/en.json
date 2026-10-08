@@ -983,6 +983,8 @@
     "system_subtitle": "Realized architecture — navigate the living knowledge graph",
     "sub_tabs": {
       "architecture": "Architecture",
+      "graph": "Graph",
+      "arch_subtabs_label": "Architecture sub-tabs",
       "briefing": "Briefing",
       "code": "Code"
     },
