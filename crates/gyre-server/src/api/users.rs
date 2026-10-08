@@ -931,7 +931,7 @@ pub async fn update_channel_preferences(
     Json(req): Json<UpdateChannelPrefsRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let user_id = resolve_user_id(&auth);
-    let mut channels = req.channels;
+    let channels = req.channels;
     if !channels.in_app {
         return Err(ApiError::InvalidInput(
             "in_app cannot be disabled (user-management.md §Delivery Channels)".to_string(),

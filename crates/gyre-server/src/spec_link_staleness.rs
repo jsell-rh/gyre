@@ -77,9 +77,8 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                 current = %current_sha,
                 "spec_link_staleness: SHA mismatch — marking stale"
             );
-
             // Create notifications for workspace members.
-            if let Some(ref source_repo_id) = link.source_repo_id {
+            if let Some(source_repo_id) = &link.source_repo_id {
                 notify_workspace_members(
                     state,
                     source_repo_id,
@@ -89,6 +88,11 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                 )
                 .await;
             }
+
+            // user-management.md §Who Gets Notified — "Spec drift detected"
+            // also notifies the spec owner.
+            notify_spec_owner_of_drift(state, &link.source_path, &link.target_path, now_secs)
+                .await;
         }
     }
 
@@ -260,6 +264,77 @@ async fn notify_workspace_members(
                 "spec_link_staleness: failed to create notification"
             );
         }
+    }
+}
+
+/// Notify the drifted spec's owner (user-management.md §Who Gets Notified:
+/// "Spec drift detected" → Spec owner). The owner comes from the source
+/// spec's ledger entry (`owner`, `user:<name>` form); the workspace scope
+/// also comes from the entry. No-op when the spec has no ledger entry or
+/// no owner.
+async fn notify_spec_owner_of_drift(
+    state: &AppState,
+    source_path: &str,
+    target_path: &str,
+    now_secs: u64,
+) {
+    let Some(entry) = state.spec_ledger.find_by_path(source_path).await.ok().flatten() else {
+        return;
+    };
+    let owner = entry.owner.strip_prefix("user:").unwrap_or(&entry.owner);
+    if owner.is_empty() {
+        return;
+    }
+    let Some(ws_id) = entry.workspace_id.clone() else {
+        return;
+    };
+    let workspace_id = Id::new(ws_id);
+    // Resolve tenant_id from the workspace (skip + log when unresolvable —
+    // never fabricate a scope identity, see check-fabricated-scope-defaults).
+    let tenant_id = match state.workspaces.find_by_id(&workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        _ => {
+            warn!(
+                spec_path = %source_path,
+                workspace_id = %workspace_id,
+                "spec_link_staleness: cannot resolve workspace for spec-owner drift notification — skipping"
+            );
+            return;
+        }
+    };
+    let owner_id = Id::new(owner.to_string());
+
+    let id = Id::new(uuid::Uuid::new_v4().to_string());
+    let mut notif = Notification::new(
+        id,
+        workspace_id.clone(),
+        owner_id,
+        NotificationType::CrossWorkspaceSpecChange,
+        format!(
+            "Spec drift detected: '{}' → '{}' — target spec has changed",
+            source_path, target_path
+        ),
+        tenant_id,
+        now_secs as i64,
+    );
+    notif.body = Some(
+        serde_json::json!({
+            "source_path": source_path,
+            "target_path": target_path,
+            "link_status": "stale",
+            "reason": "spec_drift",
+        })
+        .to_string(),
+    );
+    notif.entity_ref = Some(source_path.to_string());
+
+    if let Err(e) = state.notifications.create(&notif).await {
+        warn!(
+            spec_path = %source_path,
+            owner,
+            error = %e,
+            "spec_link_staleness: failed to notify spec owner"
+        );
     }
 }
 
@@ -543,6 +618,62 @@ mod tests {
                 .iter()
                 .any(|n| n.notification_type == NotificationType::CrossWorkspaceSpecChange),
             "Viewer should NOT receive stale link notification"
+        );
+    }
+
+    #[tokio::test]
+    async fn staleness_job_notifies_spec_owner_of_drift() {
+        let state = test_state();
+
+        let ws = make_workspace("ws1");
+        state.workspaces.create(&ws).await.unwrap();
+
+        // The SOURCE spec's ledger entry names the owner; its SHA-mismatched
+        // target triggers drift.
+        let mut source = make_ledger_entry("system/source.md", "src_sha", ApprovalStatus::Approved);
+        source.owner = "user:spec-owner".to_string();
+        state.spec_ledger.save(&source).await.unwrap();
+
+        let target = make_ledger_entry("system/target.md", "new_sha", ApprovalStatus::Approved);
+        state.spec_ledger.save(&target).await.unwrap();
+
+        let link = make_link(
+            "link7",
+            "system/source.md",
+            "system/target.md",
+            SpecLinkType::DependsOn,
+            Some("old_sha"),
+        );
+        {
+            let mut store = state.spec_links_store.lock().await;
+            store.push(link);
+        }
+
+        run_once(&state).await.unwrap();
+
+        // The spec owner receives a drift notification even though they hold
+        // no workspace membership (user-management.md §Who Gets Notified:
+        // "Spec drift detected" → Spec owner).
+        let owner_notifs = state
+            .notifications
+            .list_for_user(
+                &Id::new("spec-owner"),
+                Some(&Id::new("ws1")),
+                None,
+                None,
+                None,
+                10,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            owner_notifs.iter().any(|n| {
+                n.notification_type == NotificationType::CrossWorkspaceSpecChange
+                    && n.title.starts_with("Spec drift detected")
+            }),
+            "spec owner should receive a drift notification, got {:?}",
+            owner_notifs.iter().map(|n| &n.title).collect::<Vec<_>>()
         );
     }
 
