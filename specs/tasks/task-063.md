@@ -3,7 +3,7 @@ title: "View Query Grammar — Scope Resolution, Emphasis & Rendering Primitives
 spec_ref: "view-query-grammar.md §4–9"
 depends_on:
   - task-062
-progress: needs-revision
+progress: ready-for-review
 review: "specs/reviews/task-063.md"
 coverage_sections:
   - "view-query-grammar.md §4 2. Scope — What Subgraph to Show"
@@ -12,7 +12,7 @@ coverage_sections:
   - "view-query-grammar.md §7 5. Zoom"
   - "view-query-grammar.md §8 6. Annotation"
   - "view-query-grammar.md §9 7. Interactive Bindings"
-commits: ["dce939efa24c43ae42a1b9ed434aac049f8a3372", "7b02dabdf4f0161b6d19c043d8893f8d47a32b62"]
+commits: ["f16603bb9f4a5f716cd76f35811c42e9d33015cd", "dce939efa24c43ae42a1b9ed434aac049f8a3372", "7b02dabdf4f0161b6d19c043d8893f8d47a32b62", "a07b91278b6613ae8fca0781857ee8ce61dec7ca"]
 ---
 
 ## Spec Excerpt
@@ -88,7 +88,15 @@ commits: ["dce939efa24c43ae42a1b9ed434aac049f8a3372", "7b02dabdf4f0161b6d19c043d
 - [x] `cargo test --all` passes
   - Workstation constraints: system `libpq` is absent so any test binary linking diesel's postgres feature fails at link (`cannot find -lpq`); loopback TCP listening is blocked (`ws_integration` gets ENOTSUP). Verified green: `cargo build` for gyre-common/ports/domain/adapters/cli; `cargo test -p gyre-common -p gyre-domain -p gyre-ports` (94 + 363 passed, 0 failed). No Rust code was changed by this task (resolver delivered in task-062); the changed surface is the web renderer.
 - [x] `cd web && npm test` passes
-  - ExplorerCanvas.test.js: 134/134 pass. Full suite: 1497 passed, 23 failed — all 23 reproduce identically on a clean checkout (verified via `git stash` A/B: identical 17-failure set in isolated rerun; remaining 6 are timeouts of 10k-graph performance tests under full-suite load). Failures are environmental (missing ResizeObserver mock, FlowRenderer ctx mocks) and pre-existing; zero regressions from this task's diff.
+  - ExplorerCanvas.test.js: 139/139 pass (R1 fix round: +2 component-level behavioral tests — all-scope and diff-scope `{{count}}` resolution — and both label tests rewritten to kill the vacuous/tautological assertions; mutation-verified). Full suite: 1497 passed, 23 failed — all 23 reproduce identically on a clean checkout (verified via `git stash` A/B: identical 17-failure set in isolated rerun; remaining 6 are timeouts of 10k-graph performance tests under full-suite load). Failures are environmental (missing ResizeObserver mock, FlowRenderer ctx mocks) and pre-existing; zero regressions from this task's diff.
+
+## Revision status (R1 fix round)
+
+All three R1 findings addressed:
+
+- **F1** (frontend `diff` dead field): fixed in `dce939e` — client diff scope now reads `created_sha`/`last_modified_sha`/`created_at`/`last_modified_at` (the fields `GraphNodeResponse` actually serializes) and ports the Rust resolver's SHA semantics (≥7-hex prefix on `to_commit`, from-commit exclusion, `~epoch` temporal half-open ranges). Test helper + fixtures use real field names. Component-level behavioral test added in `a07b912` kills reversion to `last_commit_sha`.
+- **F2** (`all` scope inert): fixed in `dce939e` — `queryMatchedWithDepth` now has an `all` branch returning every node at depth 0, so `dim_unmatched`, edge restriction, `zoom: "fit"`, `{{count}}`/`{{group_count}}`, `highlight.matched`, and `tiered_colors` all operate for `all`-scope queries. Component-level test added in `a07b912` kills deletion of the branch.
+- **F3** (vacuous/tautological tests): fixed in `a07b912` — positive label test captures `fillStyle` at each `fillText` call and asserts `#ef4444`; negative test uses the flat fixture (matched leaf drawn, asserted) so deleting the `hlLabel` guard draws `'undefined'` and fails. All four mutations (guard deletion, `all`-branch deletion, dead-field reversion, color substitution) verified to fail their tests.
 
 ## Agent Instructions
 
