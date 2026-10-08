@@ -2702,6 +2702,50 @@ impl gyre_ports::SpecLedgerRepository for MemSpecLedgerRepository {
 }
 
 #[derive(Default)]
+pub struct MemSpecLinkRepository {
+    store: Arc<Mutex<Vec<gyre_domain::spec_links::SpecLinkEntry>>>,
+}
+
+#[async_trait]
+impl gyre_ports::SpecLinkRepository for MemSpecLinkRepository {
+    async fn list_all(&self) -> Result<Vec<gyre_domain::spec_links::SpecLinkEntry>> {
+        Ok(self.store.lock().await.clone())
+    }
+    async fn replace_for_source(
+        &self,
+        source_repo_id: &str,
+        source_path: &str,
+        links: &[gyre_domain::spec_links::SpecLinkEntry],
+    ) -> Result<()> {
+        let mut store = self.store.lock().await;
+        // Match the SQL adapters' (source_repo_id, source_path) scoping:
+        // `source_repo_id` None in the entry means the unscoped/legacy bucket.
+        let source_repo_key = |e: &gyre_domain::spec_links::SpecLinkEntry| {
+            e.source_repo_id.clone().unwrap_or_default()
+        };
+        store.retain(|l| {
+            !(source_repo_key(l) == source_repo_id && l.source_path == source_path)
+        });
+        store.extend(links.iter().cloned());
+        Ok(())
+    }
+    async fn save(&self, entry: &gyre_domain::spec_links::SpecLinkEntry) -> Result<()> {
+        let mut store = self.store.lock().await;
+        match store.iter().position(|l| l.id == entry.id) {
+            Some(i) => store[i] = entry.clone(),
+            None => store.push(entry.clone()),
+        }
+        Ok(())
+    }
+    async fn delete_by_source_repo(&self, source_repo_id: &str) -> Result<()> {
+        self.store.lock().await.retain(|l| {
+            l.source_repo_id.as_deref().unwrap_or_default() != source_repo_id
+        });
+        Ok(())
+    }
+}
+
+#[derive(Default)]
 pub struct MemSpecApprovalEventRepository {
     store: Arc<Mutex<Vec<gyre_domain::SpecApprovalEvent>>>,
 }
@@ -3248,8 +3292,10 @@ fn test_state_inner(
     policies: Arc<dyn gyre_ports::PolicyRepository>,
     storage: Option<Arc<dyn gyre_ports::storage::StoragePort>>,
 ) -> Arc<crate::AppState> {
+    let spec_link_repo = Arc::new(MemSpecLinkRepository::default());
+    let spec_links_store = crate::spec_registry::SpecLinksStore::default();
+    crate::load_spec_links_into_store(&spec_link_repo, &spec_links_store);
     use std::collections::HashMap;
-    use tokio::sync::{broadcast, Mutex};
     Arc::new(crate::AppState {
         auth_token: "test-token".to_string(),
         base_url: "http://localhost:3000".to_string(),
@@ -3315,7 +3361,8 @@ fn test_state_inner(
         container_audits: Arc::new(MemContainerAuditRepository::default()),
         spec_ledger: Arc::new(MemSpecLedgerRepository::default()),
         spec_approval_history: Arc::new(MemSpecApprovalEventRepository::default()),
-        spec_links_store: Arc::new(Mutex::new(Vec::new())),
+        spec_link_repo: spec_link_repo.clone(),
+        spec_links_store,
         budget_configs: Arc::new(MemBudgetConfigRepository::default()),
         budget_usages: Arc::new(MemBudgetUsageRepository::default()),
         search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
@@ -3369,6 +3416,7 @@ fn test_state_inner(
         secrets: Arc::new(MemSecretRepository::default()),
         ws_tickets: crate::auth::WsTicketStore::new(),
     })
+
 }
 
 // ── In-memory SecretRepository ──────────────────────────────────────────────

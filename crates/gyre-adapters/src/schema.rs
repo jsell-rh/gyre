@@ -551,6 +551,24 @@ diesel::table! {
 }
 
 diesel::table! {
+    spec_links (id) {
+        id -> Text,
+        source_repo_id -> Text,
+        source_path -> Text,
+        source_sha -> Text,
+        link_type -> Text,
+        target_repo_id -> Nullable<Text>,
+        target_path -> Text,
+        target_sha -> Text,
+        target_display -> Nullable<Text>,
+        reason -> Nullable<Text>,
+        status -> Text,
+        created_at -> BigInt,
+        stale_since -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
     budget_usages (entity_key) {
         entity_key -> Text,
         entity_type -> Text,
@@ -707,6 +725,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     attestation_bundles,
     container_audit_records,
     spec_ledger_entries,
+    spec_links,
     spec_approval_events,
     tenants,
     messages,

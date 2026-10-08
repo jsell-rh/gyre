@@ -509,6 +509,7 @@ mod tests {
             id: id.to_string(),
             source_path: source.to_string(),
             source_repo_id: Some("repo1".to_string()),
+            source_sha: "src-sha".to_string(),
             link_type,
             target_path: target.to_string(),
             target_repo_id: None,
