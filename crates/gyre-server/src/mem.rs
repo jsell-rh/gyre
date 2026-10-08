@@ -13,7 +13,8 @@ use gyre_domain::{
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
 use gyre_ports::{
-    AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
+    AgentCommitRepository, AgentRepository, AnalyticsQueryFilter, AnalyticsRepository,
+    ApiKeyRepository,
     AuditQueryFilter, AuditRepository, BudgetRepository, BudgetUsageRepository, CostRepository,
     DependencyRepository, KvJsonStore, LlmConfigRepository, MergeQueueRepository,
     MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository, PersonaRepository,
@@ -1048,6 +1049,36 @@ impl AnalyticsRepository for MemAnalyticsRepository {
             .collect();
         events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         events.truncate(limit);
+        Ok(events)
+    }
+
+    async fn query_filtered(&self, filter: &AnalyticsQueryFilter) -> Result<Vec<AnalyticsEvent>> {
+        let store = self.store.lock().await;
+        let mut events: Vec<AnalyticsEvent> = store
+            .iter()
+            .filter(|e| {
+                let name_ok = match &filter.event_name {
+                    None => true,
+                    Some(pat) => match pat.strip_suffix('*') {
+                        Some(prefix) => e.event_name.starts_with(prefix),
+                        None => e.event_name == *pat,
+                    },
+                };
+                name_ok
+                    && filter.agent_id.as_ref().is_none_or(|id| e.agent_id.as_ref() == Some(id))
+                    && filter.user_id.as_ref().is_none_or(|id| e.user_id.as_ref() == Some(id))
+                    && filter
+                        .workspace_id
+                        .as_ref()
+                        .is_none_or(|id| e.workspace_id.as_ref() == Some(id))
+                    && filter.repo_id.as_ref().is_none_or(|id| e.repo_id.as_ref() == Some(id))
+                    && filter.since.is_none_or(|s| e.timestamp >= s)
+                    && filter.until.is_none_or(|u| e.timestamp <= u)
+            })
+            .cloned()
+            .collect();
+        events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        events.truncate(filter.limit);
         Ok(events)
     }
 

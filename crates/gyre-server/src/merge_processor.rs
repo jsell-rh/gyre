@@ -761,11 +761,13 @@ async fn merge_atomic_group(
             serde_json::json!({
                 "entry_id": ge.id.to_string(),
                 "mr_id": updated_mr.id.to_string(),
-                "result": "merged",
+                "outcome": "merged",
+                "wait_secs": now.saturating_sub(ge.enqueued_at),
                 "atomic_group": group_name,
             }),
             now,
-        );
+        )
+        .with_scope(None, None, Some(&updated_mr.workspace_id), Some(&updated_mr.repository_id));
         let _ = state.analytics.record(&ev).await;
 
         if let Some(ref author_id) = updated_mr.author_agent_id {
@@ -1532,10 +1534,12 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 serde_json::json!({
                     "entry_id": entry.id.to_string(),
                     "mr_id": updated_mr.id.to_string(),
-                    "result": "merged",
+                    "outcome": "merged",
+                    "wait_secs": now.saturating_sub(entry.enqueued_at),
                 }),
                 now,
-            );
+            )
+            .with_scope(None, None, Some(&updated_mr.workspace_id), Some(&updated_mr.repository_id));
             let _ = state.analytics.record(&ev).await;
 
             // Build and store a signed merge attestation bundle (G5).
@@ -1773,6 +1777,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                     Some(format!("conflict: {}", message)),
                 )
                 .await?;
+            emit_queue_processed_failed(state, &entry, &mr, "conflict", &message).await;
         }
         Err(e) => {
             error!(entry_id = %entry.id, error = %e, "git merge error");
@@ -1784,10 +1789,42 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                     Some(format!("git error: {e}")),
                 )
                 .await?;
+            emit_queue_processed_failed(state, &entry, &mr, "git_error", &e.to_string()).await;
         }
     }
 
     Ok(())
+}
+
+/// Emit a `merge_queue.processed` analytics event with `outcome: "failed"`
+/// (analytics.md §Auto-Emitted Events) when a queue entry fails without merging.
+async fn emit_queue_processed_failed(
+    state: &AppState,
+    entry: &MergeQueueEntry,
+    mr: &MergeRequest,
+    failure_kind: &str,
+    detail: &str,
+) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let ev = AnalyticsEvent::new(
+        Id::new(Uuid::new_v4().to_string()),
+        "merge_queue.processed",
+        mr.author_agent_id.as_ref().map(|id| id.to_string()),
+        serde_json::json!({
+            "entry_id": entry.id.to_string(),
+            "mr_id": mr.id.to_string(),
+            "outcome": "failed",
+            "wait_secs": now.saturating_sub(entry.enqueued_at),
+            "failure_kind": failure_kind,
+            "detail": detail,
+        }),
+        now,
+    )
+    .with_scope(None, None, Some(&mr.workspace_id), Some(&mr.repository_id));
+    let _ = state.analytics.record(&ev).await;
 }
 
 /// KV namespace for merge queue pause state. Key = repo id, value = JSON

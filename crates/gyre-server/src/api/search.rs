@@ -5,6 +5,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use gyre_common::Id;
 use gyre_ports::search::SearchQuery;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
@@ -56,16 +57,51 @@ pub async fn search_handler(
         }));
     }
     let limit = params.limit.min(100);
+    let started = std::time::Instant::now();
     let results = state
         .search
         .search(SearchQuery {
             query: q.clone(),
-            entity_type: params.entity_type,
-            workspace_id: params.workspace_id,
+            entity_type: params.entity_type.clone(),
+            workspace_id: params.workspace_id.clone(),
             limit,
         })
         .await
         .map_err(ApiError::Internal)?;
+    let duration_ms = started.elapsed().as_millis() as u64;
+
+    // Auto-track search execution (analytics.md §Auto-Emitted Events).
+    {
+        let entity_types: Vec<String> = {
+            let mut types: Vec<String> =
+                results.iter().map(|r| r.entity_type.clone()).collect();
+            types.sort();
+            types.dedup();
+            types
+        };
+        let ev = gyre_domain::AnalyticsEvent::new(
+            gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+            "search.query",
+            None,
+            serde_json::json!({
+                "query_length": q.chars().count(),
+                "entity_types": entity_types,
+                "result_count": results.len(),
+                "duration_ms": duration_ms,
+            }),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        )
+        .with_scope(
+            None,
+            None,
+            params.workspace_id.as_deref().map(Id::new).as_ref(),
+            None,
+        );
+        let _ = state.analytics.record(&ev).await;
+    }
 
     let total = results.len();
     let items = results
