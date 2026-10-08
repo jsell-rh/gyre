@@ -510,6 +510,13 @@ diesel::table! {
 }
 
 diesel::table! {
+    spec_lifecycle_configs (repo_id) {
+        repo_id -> Text,
+        config -> Text,
+    }
+}
+
+diesel::table! {
     attestation_bundles (mr_id) {
         mr_id -> Text,
         attestation -> Text,
@@ -704,6 +711,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     gate_results,
     repo_push_gates,
     spec_policies,
+    spec_lifecycle_configs,
     attestation_bundles,
     container_audit_records,
     spec_ledger_entries,

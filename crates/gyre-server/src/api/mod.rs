@@ -47,6 +47,7 @@ pub mod search;
 pub mod spawn;
 pub mod spec_assertions;
 pub mod spec_policy;
+pub mod spec_lifecycle;
 pub mod specs;
 pub mod specs_assist;
 pub mod speculative;
@@ -183,6 +184,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/repos/:id/spec-policy",
             get(spec_policy::get_spec_policy).put(spec_policy::set_spec_policy),
+        )
+        // Spec lifecycle configuration (spec-lifecycle.md §Configuration)
+        .route(
+            "/api/v1/repos/:id/spec-lifecycle",
+            get(spec_lifecycle::get_spec_lifecycle).put(spec_lifecycle::set_spec_lifecycle),
         )
         // ABAC policies (G6)
         .route(
