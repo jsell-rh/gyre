@@ -13,7 +13,7 @@
 # --- task-106 revision round owns these (repos_root / repo.path) ---
 # --- unowned; fix opportunistically when touching these files ---
 crates/gyre-adapters/src/sqlite/conversation.rs:191   # GYRE_CONVERSATIONS_PATH default "./conversations" — relative at rest
-crates/gyre-server/src/api/spawn.rs:645   # comment quoting the "./repos/" default in prose — not a path value; canonicalize call lives at :646-648
+crates/gyre-server/src/api/spawn.rs:651   # comment quoting the "./repos/" default in prose — not a path value; canonicalize call lives at :652-654 (re-anchored after task-077 F6 delete-sweep shifted lines, same as 3782ccb post-task-095)
 crates/gyre-server/src/snapshot.rs:9                  # DEFAULT_SNAPSHOT_PATH "./snapshots" — relative at rest
 crates/gyre-server/src/api/admin.rs:451               # seed repo path "./repos/default/gyre-core.git" — relative seed data
 crates/gyre-server/src/api/admin.rs:458               # seed repo path "./repos/default/gyre-web.git" — relative seed data
@@ -22,4 +22,4 @@ crates/gyre-server/src/api/admin.rs:465               # seed repo path "./repos/
 # --- task-099 revision round owns this (F6: starter kit written to a
 # relative "./<repo-name>" when --repo-path is omitted — dynamic
 # PathBuf::from default, flagged by Check 2) ---
-crates/gyre-cli/src/main.rs:1737          # .unwrap_or_else(|| PathBuf::from(&repo_name)) — relative default when --repo-path omitted (task-099 F6 exact site)
+crates/gyre-cli/src/main.rs:1765          # .unwrap_or_else(|| PathBuf::from(&repo_name)) — relative default when --repo-path omitted (task-099 F6 exact site; line re-anchored 1737→1765 after branch fmt run shifted main.rs)

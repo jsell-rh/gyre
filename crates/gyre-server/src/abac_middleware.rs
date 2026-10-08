@@ -517,7 +517,6 @@ fn method_to_action(method: &Method) -> &'static str {
 /// gate, HSI §2) exclude this policy by id — see merge_processor.rs.
 pub const DEFAULT_DENY_POLICY_ID: &str = "builtin-default-deny";
 
-
 /// Built-in M34 ABAC policies that ship with the server.
 ///
 /// These replicate the old RBAC extractor behaviour through attribute conditions
