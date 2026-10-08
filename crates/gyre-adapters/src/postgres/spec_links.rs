@@ -66,10 +66,6 @@ fn opt_from_empty(s: String) -> Option<String> {
     }
 }
 
-fn empty_from_opt(s: &Option<String>) -> &str {
-    s.as_deref().unwrap_or("")
-}
-
 #[derive(Insertable)]
 #[diesel(table_name = spec_links)]
 struct NewSpecLinkRow {
