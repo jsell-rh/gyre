@@ -547,6 +547,13 @@ pub(crate) async fn spawn_agent_core(
     };
 
     // Assign task to agent and advance to InProgress
+    //
+    // §2.4 replay prevention: spawning onto a task that was assigned to a
+    // different agent is a reassignment — bump the deployment generation so
+    // SignedInputs pinned to the previous generation cannot be replayed.
+    if task.assigned_to.as_ref() != Some(&agent.id) {
+        task.generation = task.generation.saturating_add(1);
+    }
     task.assigned_to = Some(agent.id.clone());
     if task.status == TaskStatus::Backlog {
         let _ = task.transition_status(TaskStatus::InProgress);
