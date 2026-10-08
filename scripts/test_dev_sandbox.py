@@ -27,7 +27,7 @@ if 'create' in args:
     record.open('a').write('create\\n')
 elif 'get' in args:
     print('Phase: Ready')
-elif 'exec' in args and '/tmp/stage/dev-remote.sh' in args:
+elif 'exec' in args and '/tmp/stage/dev-attach.py' in args:
     print('GYRE_BOOTSTRAP_COMPLETE task=task-001')
     record.open('a').write('remote\\n')
     sys.exit(76)
@@ -105,7 +105,7 @@ if 'create' in args:
     record.open('a').write('create\\n')
 elif 'get' in args:
     print('Phase: Ready')
-elif 'exec' in args and '/tmp/stage/dev-remote.sh' in args:
+elif 'exec' in args and '/tmp/stage/dev-attach.py' in args:
     if 'CARGO_TARGET_DIR=/tmp/gyre-target' not in args or 'RUSTFLAGS=-C link-arg=-fuse-ld=lld' not in args:
         sys.exit(42)
     count = sum(line == 'remote' for line in record.read_text().splitlines())
@@ -167,7 +167,7 @@ if 'get' in args:
     record.open('a').write('get\\n')
     print('Phase: Pending' if count < 2 else 'Phase: Ready'); sys.exit(0)
 if 'exec' in args:
-    if '/tmp/stage/dev-remote.sh' in args:
+    if '/tmp/stage/dev-attach.py' in args:
         record.open('a').write('remote\\n')
     else:
         sys.stdin.buffer.read(); record.open('a').write('stage\\n')

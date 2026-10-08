@@ -46,6 +46,11 @@ reauth() {
 }
 osrun() {
   reauth
+  local cursor="${GYRE_DEV_STATE:-$ROOT/.gyre-dev-controller}/attempts/$ARG3/remote-log.offset"
+  local offset=0
+  local -a retry=()
+  [ "${1:-}" != registry ] || retry=(--retry-failed)
+  [ ! -f "$cursor" ] || offset=$(cat "$cursor")
   timeout "${GYRE_DEV_EXEC_TIMEOUT:-14400}" "$OS" -g gyre-gyre sandbox exec \
     -n "$SANDBOX" --no-login-shell --workdir /tmp \
     --env HOME=/tmp --env RUSTUP_HOME=/usr/local/rustup --env CARGO_HOME=/tmp/cargo \
@@ -59,12 +64,14 @@ osrun() {
     --env GYRE_DEV_MODEL="${GYRE_DEV_MODEL:-enmaas-glm-5-3/rits/zai-org/glm-5-3}" \
     --env GYRE_DEV_IMPLEMENTATION_MODEL="${GYRE_DEV_IMPLEMENTATION_MODEL:-${GYRE_DEV_MODEL:-enmaas-glm-5-3/rits/zai-org/glm-5-3}}" \
     --env GYRE_DEV_REPO_URL="${GYRE_DEV_REPO_URL:-https://github.com/jsell-rh/gyre.git}" \
-    -- bash /tmp/stage/dev-remote.sh "$MODE" "$TASK" "$ARG1" "$ARG2" "$ARG3"
+    -- python3 /tmp/stage/dev-attach.py "$MODE" "$TASK" "$ARG1" "$ARG2" "$ARG3" "$offset" "${retry[@]}" \
+    | python3 "$ROOT/scripts/dev-log-cursor.py" "$cursor"
 }
 stage_bundle() {
   local bundle stage_rc retry role stage_log
   bundle=$(mktemp -d "${TMPDIR:-/tmp}/gyre-stage.XXXXXX")
   cp "$ROOT/scripts/dev-remote.sh" "$ROOT/scripts/dev-round.sh" \
+    "$ROOT/scripts/dev-attach.py" "$ROOT/scripts/dev-process.sh" \
     "$ROOT/scripts/dev-stream.mjs" "$ROOT/scripts/dev-check.sh" \
     "$ROOT/scripts/dev-merge-message.py" \
     "$ROOT/scripts/dev-static-gate.py" \
@@ -194,13 +201,15 @@ report_phase Staging
 stage_bundle
 transport_log="${GYRE_DEV_STATE:-$ROOT/.gyre-dev-controller}/attempts/$ARG3/transport.log"
 remote_rc=74
+restart_reason=''
 for reconnect in 1 2 3 4; do
   report_phase "${MODE^}" "exec reconnect=$reconnect"
   run_log=$(mktemp "${TMPDIR:-/tmp}/gyre-run.XXXXXX")
   set +e
-  osrun 2>&1 | tee -a "$transport_log" "$run_log"
+  osrun "$restart_reason" 2>&1 | tee -a "$transport_log" "$run_log"
   remote_rc=${PIPESTATUS[0]}
   set -e
+  restart_reason=''
   retry_reason=""
   if [ "$remote_rc" -eq 74 ]; then
     retry_reason="transport interrupted"
@@ -210,6 +219,7 @@ for reconnect in 1 2 3 4; do
   elif [ "$remote_rc" -ne 0 ] &&
        grep -Eq 'Failed to connect to (static|index)\.crates\.io|failed to download from .*static\.crates\.io' "$run_log"; then
     retry_reason="Cargo registry unavailable"
+    restart_reason=registry
   fi
   rm "$run_log"
   [ -n "$retry_reason" ] && [ "$reconnect" -lt 4 ] || break
