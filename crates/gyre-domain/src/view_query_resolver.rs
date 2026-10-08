@@ -2550,6 +2550,7 @@ mod tests {
     use super::*;
     use gyre_common::graph::*;
     use gyre_common::Id;
+    use gyre_common::view_query::{NarrativeStep, ViewCallout, ViewGroup};
 
     fn make_node(id: &str, name: &str, node_type: NodeType) -> GraphNode {
         GraphNode {
@@ -5572,7 +5573,7 @@ mod tests {
 
     #[test]
     fn test_search_graph_nodes_matches_all_fields_excludes_deleted() {
-        let mut by_name = make_node("s1", "AuthService", NodeType::Type);
+        let by_name = make_node("s1", "AuthService", NodeType::Type);
         let mut by_doc = make_node("s2", "CacheLayer", NodeType::Type);
         by_doc.doc_comment = Some("Handles token auth refresh".to_string());
         let mut by_spec = make_node("s3", "LogWriter", NodeType::Function);
@@ -5617,5 +5618,175 @@ mod tests {
         assert_eq!(search_graph_nodes("auth", &nodes, 5).len(), 5);
         assert!(search_graph_nodes("   ", &nodes, 10).is_empty());
         assert!(search_graph_nodes("nothing-matches-this", &nodes, 10).is_empty());
+    }
+
+    // ── §23 dry-run warnings (spec: empty scope, cluttered scope, broad groups,
+    // unresolved callouts/narrative) ──────────────────────────────────────────
+
+    fn base_query() -> ViewQuery {
+        ViewQuery {
+            scope: Scope::All,
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        }
+    }
+
+    #[test]
+    fn test_dry_run_warns_on_empty_scope() {
+        // Filter scope that matches nothing (name pattern not present).
+        let nodes = vec![make_node("n1", "Foo", NodeType::Type)];
+        let mut query = base_query();
+        query.scope = Scope::Filter {
+            node_types: vec![],
+            computed: None,
+            name_pattern: Some("does-not-exist".to_string()),
+        };
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.matched_nodes, 0);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Scope matched 0 nodes")),
+            "expected empty-scope warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_dry_run_warns_on_broad_group() {
+        // Group pattern "n" matches 25 node names via substring fallback —
+        // over the 20-node breadth threshold.
+        let nodes: Vec<GraphNode> = (0..25)
+            .map(|i| make_node(&format!("n{i}"), &format!("node_{i}"), NodeType::Function))
+            .collect();
+        let mut query = base_query();
+        query.groups = vec![ViewGroup {
+            name: "Persistence".to_string(),
+            nodes: vec!["node".to_string()],
+            color: None,
+            label: None,
+        }];
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.matched_nodes, 25);
+        assert_eq!(result.groups_resolved.len(), 1);
+        assert_eq!(result.groups_resolved[0].matched, 25);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Group 'Persistence' matched 25 nodes - too broad")),
+            "expected too-broad-group warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_dry_run_no_warning_for_small_group() {
+        let nodes: Vec<GraphNode> = (0..5)
+            .map(|i| make_node(&format!("n{i}"), &format!("node_{i}"), NodeType::Function))
+            .collect();
+        let mut query = base_query();
+        query.groups = vec![ViewGroup {
+            name: "Core".to_string(),
+            nodes: vec!["node".to_string()],
+            color: None,
+            label: None,
+        }];
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.groups_resolved[0].matched, 5);
+        assert!(
+            !result.warnings.iter().any(|w| w.contains("too broad")),
+            "small group must not warn, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_dry_run_reports_unresolved_callouts() {
+        let nodes = vec![
+            make_node("n1", "RealService", NodeType::Type),
+            make_node("n2", "OtherType", NodeType::Type),
+        ];
+        let mut query = base_query();
+        query.callouts = vec![
+            ViewCallout {
+                node: "RealService".to_string(),
+                text: "annotated".to_string(),
+                color: None,
+            },
+            ViewCallout {
+                node: "GhostNode".to_string(),
+                text: "missing".to_string(),
+                color: None,
+            },
+        ];
+        query.narrative = vec![
+            NarrativeStep {
+                node: "RealService".to_string(),
+                text: "starts here".to_string(),
+                order: None,
+            },
+            NarrativeStep {
+                node: "AlsoGhost".to_string(),
+                text: "never found".to_string(),
+                order: Some(1),
+            },
+        ];
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.callouts_resolved, 1);
+        assert_eq!(result.callouts_unresolved, vec!["GhostNode"]);
+        assert_eq!(result.narrative_resolved, 1);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Unresolved callouts: GhostNode")),
+            "expected unresolved-callout warning, got: {:?}",
+            result.warnings
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Unresolved narrative steps: AlsoGhost")),
+            "expected unresolved-narrative warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_graph_summary_top_functions_by_calls() {
+        let nodes = vec![
+            make_node("n1", "caller_a", NodeType::Function),
+            make_node("n2", "caller_b", NodeType::Function),
+            make_node("n3", "hot_fn", NodeType::Function),
+            make_node("n4", "cold_fn", NodeType::Function),
+        ];
+        let edges = vec![
+            make_edge("e1", "n1", "n3", EdgeType::Calls),
+            make_edge("e2", "n2", "n3", EdgeType::Calls),
+            make_edge("e3", "n1", "n4", EdgeType::Calls),
+        ];
+        let summary = compute_graph_summary("repo1", &nodes, &edges);
+        assert!(!summary.top_functions_by_calls.is_empty());
+        assert!(
+            summary.top_functions_by_calls[0].contains("hot_fn (2)"),
+            "hot_fn with 2 incoming calls should rank first, got: {:?}",
+            summary.top_functions_by_calls
+        );
+        assert!(
+            summary
+                .top_functions_by_calls
+                .iter()
+                .any(|f| f.contains("cold_fn (1)")),
+            "cold_fn should appear in top functions, got: {:?}",
+            summary.top_functions_by_calls
+        );
     }
 }
