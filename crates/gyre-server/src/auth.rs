@@ -764,7 +764,7 @@ async fn validate_jwt(
 
     let claims = token_data.claims;
     let roles = roles_from_claims(&claims);
-    let username = claims
+    let preferred_username = claims
         .preferred_username
         .clone()
         .unwrap_or_else(|| claims.sub.clone());
@@ -777,7 +777,7 @@ async fn validate_jwt(
     let user = find_or_create_user(
         state,
         &claims.sub,
-        &username,
+        &preferred_username,
         claims.email.as_deref(),
         &roles,
     )
@@ -794,28 +794,54 @@ async fn validate_jwt(
     })
 }
 
+/// Find or auto-provision a user from a verified SSO identity.
+///
+/// - First login: the username is derived from the SSO `preferred_username`
+///   claim (sanitized to the URL-safe handle contract; falls back to the
+///   subject when sanitization yields nothing), display name starts as the
+///   raw preferred_username (user-management.md §Username vs Display Name).
+/// - Every authentication: `last_login_at` is stamped and persisted.
+/// - The username is immutable after creation: later logins never rewrite
+///   it, even if the IdP later changes `preferred_username`.
 async fn find_or_create_user(
     state: &Arc<AppState>,
     external_id: &str,
-    name: &str,
+    preferred_username: &str,
     email: Option<&str>,
     roles: &[UserRole],
 ) -> anyhow::Result<User> {
-    if let Some(existing) = state.users.find_by_external_id(external_id).await? {
-        return Ok(existing);
-    }
-
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
+    if let Some(mut existing) = state.users.find_by_external_id(external_id).await? {
+        // Spec §User Entity: last_login_at is set on each authentication.
+        // username/external_id stay untouched (immutable after creation).
+        existing.record_login(now);
+        state.users.update(&existing).await?;
+        return Ok(existing);
+    }
+
+    // Derive the URL-safe username from the SSO preferred_username. When
+    // sanitization leaves nothing usable, fall back to the subject (the
+    // migration's backfill does the same for legacy rows).
+    let username = User::sanitize_username(preferred_username)
+        .unwrap_or_else(|| external_id.to_string());
+
     let id = Id::new(uuid::Uuid::new_v4().to_string());
-    let mut user = User::new(id, external_id, name, now);
+    let mut user = User::new_sso(
+        id,
+        external_id,
+        username,
+        preferred_username, // display_name: human-readable, editable
+        now,
+    );
     user.email = email.map(|e| e.to_string());
     if !roles.is_empty() {
         user.roles = roles.to_vec();
     }
+    user.last_login_at = Some(now);
 
     state.users.create(&user).await?;
     Ok(user)
@@ -1411,6 +1437,155 @@ mod tests {
         let user = after.unwrap();
         assert_eq!(user.display_name, "dave");
         assert_eq!(user.email.as_deref(), Some("dave@example.com"));
+    }
+
+    #[tokio::test]
+    async fn first_login_derives_url_safe_username_from_preferred() {
+        // user-management.md §Username vs Display Name: username is derived
+        // from SSO preferred_username (sanitized to URL-safe), display_name
+        // stays human-readable, last_login_at is stamped on the first auth.
+        let state = make_test_state_with_jwt();
+        let claims = serde_json::json!({
+            "sub": "derive-sub-1",
+            "preferred_username": "Jordan.Sell@example.com",
+            "email": "jordan@example.com"
+        });
+        let token = sign_test_jwt(&claims, 3600);
+        let app: Router = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let user = state
+            .users
+            .find_by_external_id("derive-sub-1")
+            .await
+            .unwrap()
+            .expect("user provisioned on first login");
+        assert_eq!(
+            user.username, "jordan-sell-example-com",
+            "username must be the sanitized handle"
+        );
+        assert_eq!(
+            user.display_name, "Jordan.Sell@example.com",
+            "display name starts as the raw preferred_username"
+        );
+        assert!(user.last_login_at.is_some(), "first login stamps last_login_at");
+        assert_eq!(user.last_login_at, Some(user.updated_at));
+    }
+
+    #[tokio::test]
+    async fn second_login_stamps_last_login_and_keeps_username() {
+        // Spec: last_login_at is set on EACH authentication, and the
+        // username is immutable after creation even if the IdP later
+        // changes preferred_username.
+        let state = make_test_state_with_jwt();
+        let claims1 = serde_json::json!({
+            "sub": "relogin-sub",
+            "preferred_username": "alice"
+        });
+        let token1 = sign_test_jwt(&claims1, 3600);
+        let app: Router = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token1}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let first = state
+            .users
+            .find_by_external_id("relogin-sub")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.username, "alice");
+        let first_login = first.last_login_at.unwrap();
+
+        // IdP now reports a different preferred_username for the same sub.
+        let claims2 = serde_json::json!({
+            "sub": "relogin-sub",
+            "preferred_username": "alice-renamed"
+        });
+        let token2 = sign_test_jwt(&claims2, 3600);
+        let app2: Router = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state.clone());
+        let resp = app2
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token2}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let second = state
+            .users
+            .find_by_external_id("relogin-sub")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.username, "alice", "username is immutable after creation");
+        assert_eq!(second.display_name, "alice", "display name also stable across logins");
+        let second_login = second.last_login_at.expect("re-login must re-stamp");
+        assert!(
+            second_login >= first_login,
+            "last_login_at must advance (first={first_login}, second={second_login})"
+        );
+        assert_eq!(second_login, second.updated_at);
+    }
+
+    #[tokio::test]
+    async fn preferred_username_unsanitizable_falls_back_to_subject() {
+        // When sanitization yields nothing URL-safe ("!!!"), the username
+        // falls back to the SSO subject instead of failing the login.
+        let state = make_test_state_with_jwt();
+        let claims = serde_json::json!({
+            "sub": "opaque-sub-42",
+            "preferred_username": "!!!"
+        });
+        let token = sign_test_jwt(&claims, 3600);
+        let app: Router = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let user = state
+            .users
+            .find_by_external_id("opaque-sub-42")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(user.username, "opaque-sub-42");
     }
 
     #[tokio::test]
