@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render } from '@testing-library/svelte';
+import { render, fireEvent } from '@testing-library/svelte';
 import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
 
 // Mock canvas context
@@ -95,16 +95,22 @@ describe('ExplorerCanvas', () => {
     expect(stats?.textContent).toContain('7 nodes');
   });
 
-  it('renders toolbar with lens toggle (filter presets removed per spec)', () => {
+  it('renders toolbar with lens toggle and all five filter presets', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
-    const buttons = container.querySelectorAll('.tb-btn');
-    // 3 lens buttons (Structural, Evaluative, Observable)
-    expect(buttons.length).toBeGreaterThanOrEqual(3);
-    const labels = Array.from(buttons).map(b => b.textContent.trim());
-    expect(labels.some(l => l.includes('Structural'))).toBe(true);
-    expect(labels.some(l => l.includes('Evaluative'))).toBe(true);
+    const lensButtons = container.querySelectorAll('.lens-group .tb-btn');
+    expect(lensButtons.length).toBe(3);
+    const lensLabels = Array.from(lensButtons).map(b => b.textContent.trim());
+    expect(lensLabels[0]).toContain('Structural');
+    expect(lensLabels[1]).toContain('Evaluative');
+    expect(lensLabels[2]).toContain('Observable');
+    // Filter presets (explorer-implementation.md §25 Phase 1)
+    const filterButtons = container.querySelectorAll('.filter-preset-group .tb-btn-filter');
+    const filterLabels = Array.from(filterButtons).map(b => b.textContent.trim());
+    expect(filterLabels).toEqual(['All', 'Endpoints', 'Types', 'Calls', 'Dependencies']);
+    // All is active by default
+    expect(filterButtons[0].classList.contains('active')).toBe(true);
   });
 
   it('renders lens toggle with structural active', () => {
@@ -798,6 +804,33 @@ describe('ExplorerCanvas — lens switching', () => {
     expect(legendLabels).toContain('OK span');
     expect(legendLabels).toContain('Error span');
   });
+
+  it('clicking a filter preset switches active preset and updates aria-pressed', async () => {
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: NODES, edges: EDGES },
+    });
+    const filterButtons = container.querySelectorAll('.filter-preset-group .tb-btn-filter');
+    const [all, endpoints, types, calls, dependencies] = filterButtons;
+    expect(all.getAttribute('aria-pressed')).toBe('true');
+
+    // Endpoints preset: no endpoint nodes in fixture, but toggle still switches
+    await fireEvent.click(endpoints);
+    expect(endpoints.getAttribute('aria-pressed')).toBe('true');
+    expect(all.getAttribute('aria-pressed')).toBe('false');
+
+    await fireEvent.click(calls);
+    expect(calls.getAttribute('aria-pressed')).toBe('true');
+    expect(endpoints.getAttribute('aria-pressed')).toBe('false');
+
+    await fireEvent.click(types);
+    expect(types.getAttribute('aria-pressed')).toBe('true');
+
+    await fireEvent.click(dependencies);
+    expect(dependencies.getAttribute('aria-pressed')).toBe('true');
+
+    await fireEvent.click(all);
+    expect(all.getAttribute('aria-pressed')).toBe('true');
+  });
 });
 
 describe('ExplorerCanvas — heat map coloring', () => {
@@ -1361,15 +1394,20 @@ describe('ExplorerCanvas — semantic zoom levels', () => {
     expect(metricGroup).toBeTruthy();
   });
 
-  it('observable button is visually disabled with tooltip', () => {
+  it('observable button is aria-disabled with spec label, click shows banner', async () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
     const obsBtn = container.querySelector('.tb-btn-observable');
     expect(obsBtn).toBeTruthy();
-    expect(obsBtn.disabled).toBe(true);
+    // Lens stays disabled (spec: grayed out until production telemetry integration)
     expect(obsBtn.getAttribute('aria-disabled')).toBe('true');
-    expect(obsBtn.title).toMatch(/disabled.*pending production/i);
+    expect(obsBtn.textContent).toContain('requires production telemetry integration');
+    // Click is reachable (not a native disabled button) and shows the notice banner
+    await fireEvent.click(obsBtn);
+    const banner = container.querySelector('.observable-banner');
+    expect(banner).toBeTruthy();
+    expect(banner.textContent).toContain('OpenTelemetry collector');
   });
 });
 
