@@ -43,6 +43,7 @@ pub mod spec_approval;
 pub mod spec_assertions;
 pub mod spec_ledger;
 pub mod spec_policy;
+pub mod spec_lifecycle_config;
 pub mod task;
 pub mod team;
 pub mod tenant;
@@ -110,6 +111,7 @@ pub use spec_assertions::{
 };
 pub use spec_ledger::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry};
 pub use spec_policy::SpecPolicy;
+pub use spec_lifecycle_config::SpecLifecycleConfig;
 pub use task::{Task, TaskError, TaskPriority, TaskStatus, TaskType};
 pub use team::Team;
 pub use tenant::Tenant;
