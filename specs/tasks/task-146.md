@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: []
+commits: ["777d5a5f4cb4deb98fa043af94df18f70c8e1837", "d56b3ba8b66dbaadb5ce840d29cfcbfb8876fa41"]
 ---
 
 ## Spec Excerpt
