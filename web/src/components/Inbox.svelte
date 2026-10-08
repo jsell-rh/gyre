@@ -93,7 +93,6 @@
         SpecApproved: 'spec_approved',
         SpecRejected: 'spec_rejected',
         MrMerged: 'mr_merged',
-        MrCreated: 'mr_created',
         MrNeedsReview: 'mr_needs_review',
         GateFailure: 'gate_failure',
         SuggestedSpecLink: 'suggested_link',
@@ -266,6 +265,28 @@
         [n.id]: { loading: false, success: false, message: e.message || $t('decisions.retry_failed') },
       };
     }
+  }
+
+  function handleRespondToAgent(n) {
+    const body = getBody(n);
+    openDetail({ type: 'agent', id: body.agent_id || n.entity_ref, data: n, defaultTab: 'chat' });
+  }
+
+  function handleViewSpec(n) {
+    const body = getBody(n);
+    const specPath = body.spec_path || n.entity_ref;
+    if (specPath) {
+      openDetail({ type: 'spec', id: specPath, data: n });
+    }
+  }
+
+  async function handleIncreaseTrust(n) {
+    goToWorkspaceSettings?.();
+    await handleDismiss(n);
+  }
+
+  function handleAdjustMetaSpec(n) {
+    goToAgentRules?.();
   }
 
   function handleViewMr(n, tab = undefined) {
