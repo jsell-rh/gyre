@@ -5,7 +5,7 @@ depends_on: []
 progress: not-started
 coverage_sections:
   - "authorization-provenance.md §2.4 Context Binding (Replay Prevention)"
-commits: []
+commits: ["70b05f05f70dede7be04b960e1bebdc09ad7be40"]
 ---
 
 ## Spec Excerpt
