@@ -253,6 +253,13 @@ pub async fn send_message(
         }
     }
 
+    // Payload schema validation (message-bus.md §Payload Schemas): a payload that
+    // does not carry its kind's required fields is rejected on receipt with 400,
+    // before anything is signed or persisted.
+    if let Err(reason) = kind.validate_payload(req.payload.as_ref()) {
+        return Err(ApiError::BadRequest(reason));
+    }
+
     let workspace_id_opt = if matches!(to, Destination::Broadcast) {
         None
     } else {
@@ -544,6 +551,115 @@ mod tests {
             json.get("acknowledged").is_none(),
             "acknowledged should be excluded from send response"
         );
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_payload_missing_required_field() {
+        // message-bus.md §Payload Schemas: `status_update` requires both `status`
+        // and `summary`. An incomplete payload must be rejected with 400 whose body
+        // names the missing field, and must not be persisted.
+        let state = test_state();
+        create_agent_in_workspace(state.clone(), "agent-schema", "ws-schema").await;
+
+        let body = serde_json::json!({
+            "to": {"agent": "agent-schema"},
+            "kind": "status_update",
+            "payload": {"status": "in_progress"}
+        });
+        let resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-schema/messages")
+                    .header("content-type", "application/json")
+                    .header(auth_header().0, auth_header().1)
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("summary"),
+            "400 body must name the missing field, got: {json}"
+        );
+
+        // An absent payload for a kind with required fields is likewise a 400.
+        let body = serde_json::json!({
+            "to": {"agent": "agent-schema"},
+            "kind": "status_update",
+        });
+        let resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-schema/messages")
+                    .header("content-type", "application/json")
+                    .header(auth_header().0, auth_header().1)
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // A required field present but wrongly typed is the same 400 class:
+        // message-bus.md §Payload Schemas declares wire types per field, so
+        // `task_id: false` is an invalid payload, not a valid one.
+        let body = serde_json::json!({
+            "to": {"agent": "agent-schema"},
+            "kind": "task_assignment",
+            "payload": {"task_id": false}
+        });
+        let resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-schema/messages")
+                    .header("content-type", "application/json")
+                    .header(auth_header().0, auth_header().1)
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("task_id"),
+            "400 body must name the wrongly-typed field, got: {json}"
+        );
+
+        // The same request with every required field present is accepted (201).
+        let body = serde_json::json!({
+            "to": {"agent": "agent-schema"},
+            "kind": "status_update",
+            "payload": {"status": "in_progress", "summary": "halfway there"}
+        });
+        let resp = crate::api::api_router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-schema/messages")
+                    .header("content-type", "application/json")
+                    .header(auth_header().0, auth_header().1)
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED, "body: {json}");
     }
 
     #[tokio::test]

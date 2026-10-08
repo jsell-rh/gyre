@@ -2,10 +2,10 @@
 title: "Message bus — per-kind payload schema validation (reject invalid payloads with 400)"
 spec_ref: "message-bus.md §Payload Schemas"
 depends_on: []
-progress: not-started
+progress: complete
 coverage_sections:
   - "message-bus.md §Payload Schemas"
-commits: []
+commits: ["9897458d6df63c56a0af0dcaf61b0d3066e62c0c", "6e8a33fabd7fc23f217560c1a130b935217382de", "2d4f9cb0b8b72a0c463820e8969f3c77e7adb956", "e44f11354629cf2dab7fd7846c8a0a0a1d2d9591", "fe1b8dbaad10f2fa26761883e79b95db04df0e60", "a680a06250f47493d44500f78cce171a02f64ba8", "66aefab8ce0356aeba7c3cb7b77d1d0823db1022", "61ab18265e4cd05620a360682c2661d0e91be6aa", "a5bb0560b504aca00ca3d11c55bf1c271d7f9b5c", "7fb1fa128afdf42083fd5169885f14e909aef57a", "af448f7bfc49945d0c2a8efbf286da76b8b39a1b"]
 ---
 
 ## Spec Excerpt
@@ -72,7 +72,7 @@ There is no `validate_payload` / schema module. Missing-required-field enforceme
      - `Custom(_)`: if a payload is present it MUST be a JSON object (reject non-object with `Err`); no required fields. `None` payload is allowed for `Custom`.
      - For kinds with ≥1 required field: `None` payload → `Err`. Payload present but not a JSON object → `Err`. For each required field name: the key MUST be present and non-null in the object (`Value::Null` counts as missing) → else `Err` naming the missing field and kind.
    - The returned `String` is a human-readable reason (e.g. `"payload for kind 'task_assignment' missing required field 'task_id'"`), surfaced verbatim in the 400 body.
-   - Do NOT validate field *types* beyond object-ness and presence — the spec table specifies presence/required-ness; type coercion is out of scope. Keep it minimal and exact.
+   - The spec table (message-bus.md lines 194–229) declares a wire type per field (`Id`/`String`, `u64`, `u32`, `f64`, `Vec<String>`, nested `decisions` objects), not just requiredness. Encode the full field schema — name, wire type, requiredness — and validate every schema-known field that is present against its declared type (required or optional). Unknown extension fields pass through; absent optional fields stay valid; no type coercion. (The earlier "presence-only" reading here was wrong — see the independent spec review that rejected attempt 10; the spec is the contract.)
 
 2. **Wire into the REST send path** (`gyre-server/src/api/messages.rs::send_message`).
    - After parsing `kind` (line ~92) and before building the `Message` (line ~265) — a natural spot is right after the tier/destination/scoping checks — call `kind.validate_payload(req.payload.as_ref())` and map `Err(reason)` → `return Err(ApiError::BadRequest(reason))`.
@@ -102,3 +102,30 @@ There is no `validate_payload` / schema module. Missing-required-field enforceme
 - Follow hexagonal boundaries: `gyre-common` has no infra deps; `validate_payload` returns a plain `Result<(), String>` (no `ApiError` in common). The server layer maps the string to `ApiError::BadRequest` / `tool_error`.
 - Confirm `ApiError::BadRequest` → 400 in `crates/gyre-server/src/api/error.rs` before relying on it.
 - Skip formatters/linters and project-wide suites; run only the targeted tests above. Conventional commit, author `Project Manager` is NOT you — commit under your worker identity per repo convention.
+
+## Implementation Notes
+
+- **Shared table** — `MessageKind::payload_schema` + `validate_payload` in `crates/gyre-common/src/message.rs` encode message-bus.md §Payload Schemas once — per-kind field name, wire type (Id/String, u64, u32, f64, Vec<String>, nested `decisions` objects), and requiredness — so both receipt paths call the same table and cannot drift.
+- **Receipt paths wired** — `api/messages.rs::send_message` maps `Err` → `ApiError::BadRequest` (→ 400, `api/error.rs:56`), `mcp.rs::handle_message_send` maps `Err` → `tool_error`. Both run after the tier/destination/scoping guards and before signing/persistence, so a rejected payload is never stored.
+- **Explicit `null` payload ≡ absent payload** — normalized inside `validate_payload`. The REST body types the field `Option<Value>` (serde maps `"payload": null` → `None`) while the MCP argument map hands over `Some(Value::Null)`; without the normalization the identical wire payload was 400 on one path and accepted on the other. A required field is still unsatisfied by null, whether the payload itself is null or the required key holds null.
+- **Non-spec variants** (`SpecApproved`, `ConstraintViolation`, `AtomicGroupFailed`, `MrReverted`, `MergeQueuePaused`, `MergeQueueResumed`) are outside the spec table and server-emitted only, so they impose no required fields — they are listed explicitly in the `match` so adding a spec row for one is a visible edit, not a silent default arm.
+- **Server-internal emit paths untouched** per plan (`emit_event`, `build_agent_completed_payload`, `gyre_record_activity`): the spec scopes validation to receipt. `gyre_record_activity`'s payload-shape mismatch against §Payload Schemas is tracked separately in `specs/reviews/task-001.md` F6 — it is a distinct defect, not papered over here.
+- **Tests** — `message::tests::validate_payload_enforces_required_fields`, `validate_payload_enforces_field_types` (u64/u32/f64/Vec<String>/nested decisions, required and optional fields), and `validate_payload_treats_explicit_null_as_absent` (gyre-common); `api::messages::tests::send_message_rejects_payload_missing_required_field` asserts 400 + reason naming `summary`, 400 for absent payload, 400 + reason naming `task_id` for `{"task_id": false}`, 201 when complete; `mcp::tests::mcp_message_send_rejects_payload_missing_required_field` asserts `isError` + reason naming `task_id` for missing **and** wrongly-typed fields, that nothing was persisted (`list_unacked` == 0), then that the valid payload persists (== 1). All fail if the validation call is removed; the type tests fail if the type match is disabled (mutation-probed).
+- **Contract surfaced where hit** — MCP `gyre_message_send` payload description and `docs/api-reference.md` now name the per-kind required fields and the 400 behavior.
+
+## Shipped
+
+- `MessageKind::payload_schema` + `validate_payload` in `gyre-common` encode message-bus.md §Payload Schemas once — all 34 spec kinds with exact field names, wire types (Id/String, u64, u32, f64, Vec<String>, nested `decisions`), and requiredness; non-spec variants in explicit empty match arms; `Custom` object-only — returning a reason string surfaced verbatim to the caller.
+- Both receipt paths enforce the full schema before sign/store: REST `POST /api/v1/workspaces/:id/messages` rejects missing/null required fields, absent payloads for required kinds, non-object payloads, and wrongly-typed schema-known fields (required or optional) with **400** naming the field (`api/messages.rs:259`); MCP `gyre_message_send` returns a tool error for the same with nothing persisted (`mcp.rs:1948`). Unknown extension fields pass through; absent optional fields stay valid; no coercion.
+- Explicit JSON `null` payload is normalized to "absent" inside the validator, so the REST (`None`) and MCP (`Some(Null)`) paths give identical verdicts for the same wire payload; a null value for a required key still fails.
+- Tests anchor the enforcement on both paths (HTTP status + reason content + MCP persistence counts) and were mutation-probed: each fails when its validation call is removed, and the type tests fail when the type match is disabled. Verified in review `specs/reviews/task-200.md`.
+
+## Repair (rejected integration 848395b, re-land attempt 10)
+
+Two defects, both in the re-land's bookkeeping — `git diff 848395b..HEAD -- crates/` is empty, so the product surface is byte-identical to the reviewed candidate:
+
+Those six candidate-lineage SHAs (`9764477`…`5408311`) are kept out of the `commits:` frontmatter on purpose: they are dangling objects reachable in no ref, so a fresh clone cannot resolve them and any automated scoping over the list would break. The re-land lineage (`62c0730`…`b414c50`, six commits, same subjects, `crates/`-identical trees modulo dev-loop machinery) is what the frontmatter records.
+
+Verification: `git diff --check f315b6f..HEAD` clean; `check-rustfmt-diff.py f315b6f` and `check-clippy-diff.py f315b6f` clean; `bash scripts/check-task-commit-attribution.sh` exits 0 on the repaired tree; all 20 static gate scripts OK on HEAD; targeted suites green (`gyre-common message` 29 passed, `gyre-server api::messages` 14 passed, `gyre-server mcp_message_send` 8 passed). No gate weakened, no exemption entry added (exemption file untouched at 3), no test deleted.
+
+- **Latent rustfmt violations** (masked by the whitespace failure — the gate stops at `git diff --check`): against the task base `f315b6f`, `check-rustfmt-diff.py` flagged changed lines this task added in `message.rs`, `api/messages.rs`, and `mcp.rs`. Formatted exactly those lines (commit `4c175765`); no logic changed — assertions preserved, targeted suites re-run green after the edit.
