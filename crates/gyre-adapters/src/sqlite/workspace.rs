@@ -123,19 +123,6 @@ impl WorkspaceRepository for SqliteStorage {
         .await?
     }
 
-    async fn find_by_id_unfiltered_probe(&self, id: &Id) -> Result<Option<Workspace>> {
-        let pool = Arc::clone(&self.pool);
-        let id = id.clone();
-        tokio::task::spawn_blocking(move || -> Result<Option<Workspace>> {
-            let mut conn = pool.get().context("get db connection")?;
-            let row = workspaces::table
-                .filter(workspaces::id.eq(&id))
-                .first::<WorkspaceRow>(&mut conn)
-                .optional()?;
-            row.map(WorkspaceRow::into_workspace).transpose()
-        })
-        .await?
-    }
 
     async fn find_by_slug(&self, tenant_id: &Id, slug: &str) -> Result<Option<Workspace>> {
         let pool = Arc::clone(&self.pool);
