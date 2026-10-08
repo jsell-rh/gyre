@@ -4044,6 +4044,10 @@ impl gyre_ports::MetaSpecBindingRepository for MemMetaSpecBindingRepository {
             .collect())
     }
 
+    async fn list_all(&self) -> Result<Vec<gyre_domain::MetaSpecBinding>> {
+        Ok(self.store.read().await.clone())
+    }
+
     async fn delete(&self, id: &Id) -> Result<()> {
         self.store.write().await.retain(|b| &b.id != id);
         Ok(())
