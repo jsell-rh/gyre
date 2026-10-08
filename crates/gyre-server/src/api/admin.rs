@@ -1192,8 +1192,15 @@ mod tests {
         let state = test_state();
         let app = api_router().with_state(state.clone());
 
+        // A complete, valid replacement list: all 7 types, values changed.
         let new_policies = serde_json::json!([
-            { "data_type": "activity_events", "max_age_days": 30 }
+            { "data_type": "activity_events", "max_age_days": 30 },
+            { "data_type": "agent_logs", "max_age_days": 14 },
+            { "data_type": "audit_events", "max_age_days": 180 },
+            { "data_type": "snapshots", "max_age_days": u64::MAX, "snapshot_tiers": { "keep_24h": 12, "keep_7d": 3, "keep_4w": 2 } },
+            { "data_type": "attestations", "max_age_days": u64::MAX },
+            { "data_type": "notifications", "max_age_days": 200, "max_age_days_read": 60 },
+            { "data_type": "analytics_events", "max_age_days": 90 }
         ]);
 
         let resp = app
@@ -1211,8 +1218,46 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
         let policies = state.retention_store.list();
-        assert_eq!(policies.len(), 1);
-        assert_eq!(policies[0].max_age_days, 30);
+        assert_eq!(policies.len(), 7);
+        assert_eq!(
+            policies.iter().find(|p| p.data_type == "activity_events").unwrap().max_age_days,
+            30
+        );
+        assert_eq!(
+            policies.iter().find(|p| p.data_type == "agent_logs").unwrap().max_age_days,
+            14
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_update_retention_rejects_incomplete_list() {
+        // A partial list would silently disable enforcement for the omitted
+        // types — the PUT must reject it and leave the current policies
+        // untouched (retention.rs F4).
+        let state = test_state();
+        let app = api_router().with_state(state.clone());
+        let before = state.retention_store.list();
+
+        let partial = serde_json::json!([
+            { "data_type": "activity_events", "max_age_days": 30 }
+        ]);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/admin/retention")
+                    .header("Authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&partial).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Policies unchanged — the rejected list was not applied.
+        assert_eq!(state.retention_store.list(), before);
     }
 
     #[tokio::test]
