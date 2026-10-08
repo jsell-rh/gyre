@@ -482,6 +482,12 @@ impl WorkspaceInvitationRepository for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Both repository traits define create/find_by_id/find_by_token_hash/
+    // update_status/delete; `use super::*` brings both into scope, so the
+    // shared method names are ambiguous at call syntax. Disambiguate with
+    // trait-qualified calls.
+    use gyre_ports::TenantInvitationRepository as TiRepo;
+    use gyre_ports::WorkspaceInvitationRepository as WiRepo;
 
     /// Round-trip a tenant invitation through SQLite and verify every field
     /// survives persistence, lookup by token hash, and status transitions.
@@ -503,13 +509,13 @@ mod tests {
             created_at: 1000,
             accepted_at: None,
         };
-        db.create(&inv).await.unwrap();
+        TiRepo::create(&db, &inv).await.unwrap();
 
         // Duplicate pending invitation for the same (tenant, email) is rejected.
         let dup = TenantInvitation { ..inv.clone() };
-        assert!(db.create(&dup).await.is_err());
+        assert!(TiRepo::create(&db, &dup).await.is_err());
 
-        let found = db.find_by_token_hash("abc123").await.unwrap().unwrap();
+        let found = TiRepo::find_by_token_hash(&db, "abc123").await.unwrap().unwrap();
         assert_eq!(found.id.as_str(), "ti1");
         assert_eq!(found.email, "alice@example.com");
         assert_eq!(found.workspace_ids.len(), 2);
@@ -517,7 +523,7 @@ mod tests {
         assert_eq!(found.workspace_roles[1], WorkspaceRole::Admin);
         assert_eq!(found.status, InvitationStatus::Pending);
 
-        let listed = db.list_by_tenant(&Id::new("t1")).await.unwrap();
+        let listed = TiRepo::list_by_tenant(&db, &Id::new("t1")).await.unwrap();
         assert_eq!(listed.len(), 1);
         assert!(db
             .list_by_tenant(&Id::new("other"))
@@ -525,10 +531,10 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        db.update_status(&Id::new("ti1"), InvitationStatus::Accepted, Some(1500))
+        TiRepo::update_status(&db, &Id::new("ti1"), InvitationStatus::Accepted, Some(1500))
             .await
             .unwrap();
-        let accepted = db.find_by_id(&Id::new("ti1")).await.unwrap().unwrap();
+        let accepted = TiRepo::find_by_id(&db, &Id::new("ti1")).await.unwrap().unwrap();
         assert_eq!(accepted.status, InvitationStatus::Accepted);
         assert_eq!(accepted.accepted_at, Some(1500));
 
@@ -538,8 +544,8 @@ mod tests {
             token_hash: "def456".to_string(),
             ..inv
         };
-        db.create(&reinvite).await.unwrap();
-        let pending = db.list_by_status(InvitationStatus::Pending).await.unwrap();
+        TiRepo::create(&db, &reinvite).await.unwrap();
+        let pending = TiRepo::list_by_status(&db, InvitationStatus::Pending).await.unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id.as_str(), "ti2");
     }
@@ -563,10 +569,10 @@ mod tests {
             created_at: 1000,
             accepted_at: None,
         };
-        db.create(&inv).await.unwrap();
+        WiRepo::create(&db, &inv).await.unwrap();
 
         // Same (workspace, user) pending → rejected.
-        assert!(db.create(&inv).await.is_err());
+        assert!(WiRepo::create(&db, &inv).await.is_err());
 
         // Same user, different workspace → allowed.
         let other_ws = WorkspaceInvitation {
@@ -575,18 +581,18 @@ mod tests {
             token_hash: "tok2".to_string(),
             ..inv.clone()
         };
-        db.create(&other_ws).await.unwrap();
+        WiRepo::create(&db, &other_ws).await.unwrap();
 
-        let by_user = db.list_by_user(&Id::new("u2")).await.unwrap();
+        let by_user = WiRepo::list_by_user(&db, &Id::new("u2")).await.unwrap();
         assert_eq!(by_user.len(), 2);
-        let by_ws = db.list_by_workspace(&Id::new("ws1")).await.unwrap();
+        let by_ws = WiRepo::list_by_workspace(&db, &Id::new("ws1")).await.unwrap();
         assert_eq!(by_ws.len(), 1);
 
-        db.update_status(&Id::new("wi1"), InvitationStatus::Declined, None)
+        WiRepo::update_status(&db, &Id::new("wi1"), InvitationStatus::Declined, None)
             .await
             .unwrap();
         assert_eq!(
-            db.find_by_id(&Id::new("wi1"))
+            WiRepo::find_by_id(&db, &Id::new("wi1"))
                 .await
                 .unwrap()
                 .unwrap()
