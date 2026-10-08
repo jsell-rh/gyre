@@ -728,7 +728,7 @@ pub async fn approve_spec(
     if let Some(mut entry) = state.spec_ledger.find_by_path(&spec_path).await? {
         if entry.current_sha == req.sha {
             let prior_status = entry.approval_status.clone();
-            let new_status = resolve_new_approval_status(state, &spec_path, &entry).await;
+            let new_status = resolve_new_approval_status(&state, &spec_path, &entry).await;
             if entry.approval_status != new_status {
                 entry.approval_status = new_status;
                 entry.updated_at = now;
