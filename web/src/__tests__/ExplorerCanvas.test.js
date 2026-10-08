@@ -162,6 +162,26 @@ describe('ExplorerCanvas', () => {
     expect(annotation?.textContent).toContain('Test View');
   });
 
+  it('all scope: {{count}} resolves to total node count, not "?"', () => {
+    // spec view-query-grammar.md §2 "all" = show everything — the result set
+    // is every node, so the annotation templates resolve against the full
+    // graph. Regresses if the all branch falls through to null (count '?',
+    // group_count '0').
+    const query = {
+      scope: { type: 'all' },
+      annotation: { title: 'Graph: {{count}} nodes', description: 'across {{group_count}} groups' },
+    };
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: NODES, edges: EDGES, activeQuery: query },
+    });
+    // 7 nodes across api / api.handlers / domain / tests (qualified names:
+    // api, api.handlers.create_user, api.handlers.get_user, domain,
+    // domain.User, tests.test_create_user → 4 distinct parents + 'api' itself
+    // as a root added to the parents set)
+    expect(container.querySelector('.annotation-title')?.textContent).toContain('Graph: 7 nodes');
+    expect(container.querySelector('.annotation-desc')?.textContent).toContain('4 groups');
+  });
+
   it('calls canvas getContext on render', () => {
     render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
@@ -256,25 +276,56 @@ describe('ExplorerCanvas — view queries', () => {
       scope: { type: 'test_gaps' },
       emphasis: { highlight: { matched: { color: '#ef4444', label: 'Untested' } }, dim_unmatched: 0.3 },
     };
+    // Capture fillStyle at each fillText call — asserting mockCtx.fillStyle
+    // after render would only see the LAST assignment (tautological).
+    const drawn = [];
+    mockCtx.fillText.mockImplementation((text) => {
+      drawn.push({ text, fillStyle: mockCtx.fillStyle });
+    });
     render(ExplorerCanvas, {
       props: { nodes: flatNodes, edges: flatEdges, activeQuery: query },
     });
-    const labelCalls = mockCtx.fillText.mock.calls.filter(c => c[0] === 'Untested');
+    // The matched leaf itself is drawn (same LOD guards as the label branch):
+    // proves this fixture exercises the draw path, unlike a deep tree whose
+    // matched leaf stays collapsed inside a tree-group summary.
+    expect(drawn.some(d => d.text === 'get_user')).toBe(true);
+    // The label is drawn with fillStyle set to the configured matched color
+    const labelCalls = drawn.filter(d => d.text === 'Untested');
     expect(labelCalls.length).toBeGreaterThan(0);
-    // The label is drawn while fillStyle is the matched color
-    expect(mockCtx.fillStyle).toBeDefined();
+    expect(labelCalls.every(d => d.fillStyle === '#ef4444')).toBe(true);
   });
 
   it('does not draw highlight label when emphasis has no label', () => {
+    // Same flat fixture as the positive test: the matched leaf IS drawn
+    // (asserted below), so the label branch's guards are exercised — the
+    // absence of the label is meaningful, not a fixture artifact.
+    const flatNodes = [
+      { id: 'pkg1', node_type: 'package', name: 'api', qualified_name: 'api', file_path: '', line_start: 0, line_end: 0, visibility: 'public', spec_confidence: 'none', test_node: false },
+      { id: 'fn2', node_type: 'function', name: 'get_user', qualified_name: 'api.get_user', file_path: 'api/handlers.py', line_start: 32, line_end: 45, visibility: 'public', spec_confidence: 'medium', test_node: false },
+    ];
+    const flatEdges = [
+      { id: 'e1', source_id: 'pkg1', target_id: 'fn2', edge_type: 'contains' },
+    ];
     const query = {
       scope: { type: 'test_gaps' },
       emphasis: { highlight: { matched: { color: '#ef4444' } }, dim_unmatched: 0.3 },
     };
-    render(ExplorerCanvas, {
-      props: { nodes: NODES, edges: EDGES, activeQuery: query },
+    const texts = [];
+    mockCtx.fillText.mockImplementation((text) => {
+      texts.push(text);
     });
-    expect(mockCtx.fillText.mock.calls.some(c => c[0] === 'Untested')).toBe(false);
+    render(ExplorerCanvas, {
+      props: { nodes: flatNodes, edges: flatEdges, activeQuery: query },
+    });
+    // The matched leaf is drawn: the draw path (and its LOD guards) executed.
+    expect(texts.includes('get_user')).toBe(true);
+    // No label is drawn without emphasis.highlight.matched.label — and no
+    // fallback label sneaks in: every drawn text is a real string (deleting
+    // the hlLabel guard would draw `undefined` here and fail this).
+    expect(texts.includes('Untested')).toBe(false);
+    expect(texts.every(t => typeof t === 'string')).toBe(true);
   });
+
 
   it('renders filter scope with node_types', () => {
     const query = {
@@ -309,6 +360,30 @@ describe('ExplorerCanvas — view queries', () => {
       props: { nodes: NODES, edges: EDGES, activeQuery: query },
     });
     expect(container.querySelector('.annotation-title')?.textContent).toContain('Hot paths');
+  });
+
+  it('diff scope: {{count}} resolves against real commit fields in the component', () => {
+    // Behavioral test of the component's own diff resolution (not the mirror
+    // helper): reads created_sha/last_modified_sha — the fields
+    // GraphNodeResponse actually serializes. If the component reverts to the
+    // old dead field (last_commit_sha), the result set is null and the count
+    // renders as '?'.
+    const nodesWithSha = NODES.map(n => {
+      if (n.id === 'fn1') return { ...n, created_sha: '1111111111111111', last_modified_sha: 'abcdef1234567890' };
+      if (n.id === 'fn2') return { ...n, created_sha: 'abcdef1234567890', last_modified_sha: 'abcdef1999999999' };
+      return { ...n, created_sha: '0000000aaaaaaaa', last_modified_sha: '0000000bbbbbbbb' };
+    });
+    const query = {
+      scope: { type: 'diff', from_commit: 'abcdef1', to_commit: 'abcdef12' },
+      annotation: { title: '{{count}} changed' },
+    };
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: nodesWithSha, edges: EDGES, activeQuery: query },
+    });
+    // fn1 matches to_commit via last_modified_sha and is not unchanged at
+    // from_commit; fn2 is unchanged at from_commit (both shas prefix-match);
+    // every other node never matches to_commit.
+    expect(container.querySelector('.annotation-title')?.textContent).toContain('1 changed');
   });
 
   it('renders diff scope query', () => {
