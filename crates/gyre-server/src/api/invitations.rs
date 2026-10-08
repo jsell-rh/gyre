@@ -157,15 +157,23 @@ pub struct InvitationResponse {
 
 impl From<TenantInvitation> for InvitationResponse {
     fn from(i: TenantInvitation) -> Self {
+        let role = i.role_as_str().to_string();
+        let status = i.status.as_str().to_string();
+        let workspace_ids = i.workspace_ids.iter().map(|w| w.to_string()).collect();
+        let workspace_roles = i
+            .workspace_roles
+            .iter()
+            .map(|r| r.as_str().to_string())
+            .collect();
         Self {
             id: i.id.to_string(),
             tenant_id: i.tenant_id.to_string(),
             email: i.email,
             invited_by: i.invited_by.to_string(),
-            role: i.role_as_str().to_string(),
-            workspace_ids: i.workspace_ids.iter().map(|w| w.to_string()).collect(),
-            workspace_roles: i.workspace_roles.iter().map(|r| r.as_str().to_string()).collect(),
-            status: i.status.as_str().to_string(),
+            role,
+            workspace_ids,
+            workspace_roles,
+            status,
             expires_at: i.expires_at,
             created_at: i.created_at,
             accepted_at: i.accepted_at,
@@ -269,15 +277,18 @@ async fn create_tenant_invitation(
         accepted_at: None,
     };
     state.tenant_invitations.create(&invitation).await?;
-
     let invitee_note = serde_json::json!({
         "email": email,
         "role": invitation.role_as_str(),
-        "workspace_ids": invitation.workspace_ids.iter().map(|w| w.to_string()).collect::<Vec<_>>(),
+        "workspace_ids": invitation
+            .workspace_ids
+            .iter()
+            .map(|w| w.to_string())
+            .collect::<Vec<_>>(),
     });
     tracing::info!(
         tenant_id = %auth.tenant_id,
-        invited_by = %auth.user_id.map(|i| i.to_string()).unwrap_or_default(),
+        invited_by = %auth.user_id.as_ref().map(|i| i.to_string()).unwrap_or_default(),
         invitation_id = %invitation.id,
         "tenant invitation created: {}",
         serde_json::to_string(&invitee_note).unwrap_or_default()
@@ -716,7 +727,7 @@ pub async fn invite_to_workspace(
     }
 
     // max_pending_invitations cap per workspace.
-    let policy = load_policy(state, &auth.tenant_id).await;
+    let policy = load_policy(&state, &auth.tenant_id).await;
     let pending = state
         .workspace_invitations
         .list_by_workspace(&ws_id)
@@ -768,7 +779,7 @@ pub async fn invite_to_workspace(
             workspace_id,
             invitation.role.as_str()
         ),
-        workspace.tenant_id.clone(),
+        workspace.tenant_id.as_str().to_string(),
         now as i64,
     );
     let _ = state.notifications.create(&notif).await;
@@ -1047,15 +1058,28 @@ pub async fn run_expiry_once(state: &AppState) -> anyhow::Result<u64> {
     Ok(expired_count)
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-impl TenantInvitation {
-    fn role_as_str(&self) -> &'static str {
-        match self.role {
-            GlobalRole::TenantAdmin => "TenantAdmin",
-            GlobalRole::Member => "Member",
+/// Spawn the invitation-expiry background job (user-management.md
+/// §Invitation Expiry): every [`EXPIRY_JOB_INTERVAL_SECS`] (default 1h,
+/// override via `GYRE_INVITE_EXPIRY_INTERVAL_SECS`), mark all Pending
+/// invitations past `expires_at` as Expired. Rows are never deleted —
+/// expired invitations are kept for audit.
+pub fn spawn_invitation_expiry(state: Arc<AppState>) {
+    let state = state.clone();
+    let interval = std::env::var("GYRE_INVITE_EXPIRY_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(EXPIRY_JOB_INTERVAL_SECS);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval));
+        // First tick completes immediately — expire backlog at startup.
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            if let Err(e) = run_expiry_once(&state).await {
+                tracing::warn!("invitation expiry cycle failed: {e:#}");
+            }
         }
-    }
+    });
 }
 
 /// Minimal RFC-ish email sanity check (exactly one @, non-empty local part
@@ -1403,7 +1427,6 @@ mod tests {
 
     #[tokio::test]
     async fn non_admin_cannot_invite() {
-        let state = test_state();
         // A Developer-role user's API key... simplest: craft an
         // AuthenticatedAgent-equivalent by using a non-admin token. The
         // test_state dev token is Admin; use an agent token (Agent role).

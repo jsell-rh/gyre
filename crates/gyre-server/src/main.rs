@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
     procfs_monitor::spawn_procfs_monitor(state.clone());
     audit_simulator::spawn_audit_simulator(state.clone());
     spawn_budget_daily_reset(state.clone());
-    spawn_llm_rate_limiter_cleanup(state.clone());
+    gyre_server::api::invitations::spawn_invitation_expiry(state.clone());
 
     let app = build_router(state);
 
