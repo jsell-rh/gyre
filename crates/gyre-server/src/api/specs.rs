@@ -527,19 +527,19 @@ pub async fn approve_spec(
     };
     let ledger_id = ledger_entry.id.clone();
     if let Err(e) = state.spec_approvals.create(&ledger_entry).await {
-        return Err(ApiError::Internal(format!(
+        return Err(ApiError::Internal(anyhow::anyhow!(
             "failed to record spec approval in ledger: {e}"
         )));
     }
     match state.spec_approvals.approve(&ledger_id, now).await {
         Ok(Some(())) => {}
         Ok(None) => {
-            return Err(ApiError::Internal(
-                "spec approval ledger entry vanished after create".to_string(),
-            ))
+            return Err(ApiError::Internal(anyhow::anyhow!(
+                "spec approval ledger entry vanished after create"
+            )))
         }
         Err(e) => {
-            return Err(ApiError::Internal(format!(
+            return Err(ApiError::Internal(anyhow::anyhow!(
                 "invalid spec approval transition: {e}"
             )))
         }

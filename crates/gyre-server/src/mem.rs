@@ -12,6 +12,8 @@ use gyre_domain::{
 };
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
+#[cfg(test)]
+use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
     AuditQueryFilter, AuditRepository, BudgetRepository, BudgetUsageRepository, CostRepository,
@@ -21,6 +23,7 @@ use gyre_ports::{
     TenantRepository, UserRepository, UserWorkspaceStateRepository, WorkspaceRepository,
     WorktreeRepository,
 };
+use sha2::{Digest, Sha256};
 use gyre_domain::spec_approval::ApprovalTransitionError;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -2478,6 +2481,24 @@ impl gyre_ports::PushGateRepository for MemPushGateRepository {
 pub struct MemSpecApprovalRepository {
     store: Arc<Mutex<HashMap<String, gyre_domain::SpecApproval>>>,
 }
+impl MemSpecApprovalRepository {
+    /// Apply a domain transition (approve/revoke/reject) to a stored entry:
+    /// load, validate via the domain's transition rules, persist the full
+    /// record so mutual exclusivity is guaranteed. Returns Ok(None) when the
+    /// entry does not exist.
+    async fn transition(
+        &self,
+        id: &Id,
+        apply: impl FnOnce(&mut gyre_domain::SpecApproval) -> Result<(), ApprovalTransitionError>,
+    ) -> Result<Option<()>, ApprovalTransitionError> {
+        let mut store = self.store.lock().await;
+        let Some(approval) = store.get_mut(&id.to_string()) else {
+            return Ok(None);
+        };
+        apply(approval)?;
+        Ok(Some(()))
+    }
+}
 #[async_trait]
 impl gyre_ports::SpecApprovalRepository for MemSpecApprovalRepository {
     async fn create(&self, approval: &gyre_domain::SpecApproval) -> Result<()> {
@@ -2539,7 +2560,7 @@ impl gyre_ports::SpecApprovalRepository for MemSpecApprovalRepository {
         reason: &str,
         now: u64,
     ) -> Result<Option<()>, ApprovalTransitionError> {
-        self.transition(id, move |a| a.reject(rejected_by, reason.clone(), now))
+        self.transition(id, |a| a.reject(rejected_by, reason, now))
             .await
     }
 
