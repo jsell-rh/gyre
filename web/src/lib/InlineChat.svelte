@@ -129,7 +129,10 @@
               if (parsed.type === 'partial') {
                 streamBuffer += parsed.text ?? '';
               } else if (parsed.type === 'complete') {
-                const final = parsed.text ?? streamBuffer;
+                // HSI §1325: briefing Q&A complete events carry {answer, sources};
+                // other producers may still send {text}. Fall back to the partial
+                // buffer when neither is present.
+                const final = parsed.answer ?? parsed.text ?? streamBuffer;
                 messages = [...messages, { role: 'assistant', content: final }];
                 streamBuffer = '';
                 done = true;
