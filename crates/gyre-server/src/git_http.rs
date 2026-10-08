@@ -1357,12 +1357,6 @@ pub fn parse_spec_changes_with_config(
     changes
 }
 
-/// Parse with default config (spec-lifecycle.md §Configuration defaults).
-/// Kept for tests of the default behavior.
-pub fn parse_spec_changes(diff_output: &str) -> Vec<(char, String, Option<String>)> {
-    parse_spec_changes_with_config(diff_output, &gyre_domain::SpecLifecycleConfig::default())
-}
-
 /// After a successful push to the default branch, detect spec changes and create tasks.
 async fn process_spec_lifecycle(
     state: &Arc<AppState>,
@@ -3787,14 +3781,16 @@ mod tests {
 
     #[test]
     fn parse_spec_changes_empty_input() {
-        let changes = super::parse_spec_changes("");
+        let changes =
+            super::parse_spec_changes_with_config("", &Default::default());
         assert!(changes.is_empty());
     }
 
     #[test]
     fn parse_spec_changes_added_spec() {
         let input = "A\tspecs/system/new-spec.md\n";
-        let changes = super::parse_spec_changes(input);
+        let changes =
+            super::parse_spec_changes_with_config(input, &Default::default());
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].0, 'A');
         assert_eq!(changes[0].1, "specs/system/new-spec.md");
@@ -3804,7 +3800,8 @@ mod tests {
     #[test]
     fn parse_spec_changes_modified_spec() {
         let input = "M\tspecs/development/architecture.md\n";
-        let changes = super::parse_spec_changes(input);
+        let changes =
+            super::parse_spec_changes_with_config(input, &Default::default());
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].0, 'M');
         assert_eq!(changes[0].1, "specs/development/architecture.md");
@@ -3813,7 +3810,8 @@ mod tests {
     #[test]
     fn parse_spec_changes_deleted_spec() {
         let input = "D\tspecs/system/old-spec.md\n";
-        let changes = super::parse_spec_changes(input);
+        let changes =
+            super::parse_spec_changes_with_config(input, &Default::default());
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].0, 'D');
         assert_eq!(changes[0].1, "specs/system/old-spec.md");
@@ -3822,7 +3820,8 @@ mod tests {
     #[test]
     fn parse_spec_changes_renamed_spec() {
         let input = "R090\tspecs/system/old.md\tspecs/system/new.md\n";
-        let changes = super::parse_spec_changes(input);
+        let changes =
+            super::parse_spec_changes_with_config(input, &Default::default());
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].0, 'R');
         assert_eq!(changes[0].1, "specs/system/new.md");
@@ -3833,7 +3832,8 @@ mod tests {
     fn parse_spec_changes_ignores_non_watched_paths() {
         // milestones and src changes should be ignored
         let input = "M\tspecs/milestones/m1.md\nM\tsrc/main.rs\nA\tspecs/system/real.md\n";
-        let changes = super::parse_spec_changes(input);
+        let changes =
+            super::parse_spec_changes_with_config(input, &Default::default());
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].1, "specs/system/real.md");
     }
@@ -3841,7 +3841,8 @@ mod tests {
     #[test]
     fn parse_spec_changes_development_path_watched() {
         let input = "A\tspecs/development/database-migrations.md\n";
-        let changes = super::parse_spec_changes(input);
+        let changes =
+            super::parse_spec_changes_with_config(input, &Default::default());
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].1, "specs/development/database-migrations.md");
     }

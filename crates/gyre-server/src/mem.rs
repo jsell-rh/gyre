@@ -3325,6 +3325,7 @@ fn test_state_inner(
         quality_gates: Arc::new(MemQualityGateRepository::default()),
         gate_results: Arc::new(MemGateResultRepository::default()),
         spec_lifecycle_configs: Arc::new(MemSpecLifecycleRepository::default()),
+        push_gate_registry: Arc::new(crate::pre_accept::builtin_gates()),
         repo_push_gates: Arc::new(MemPushGateRepository::default()),
         speculative_results: Arc::new(Mutex::new(HashMap::new())),
         spawn_log: Arc::new(MemSpawnLogRepository::default()),
