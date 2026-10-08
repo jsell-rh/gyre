@@ -5,7 +5,7 @@ depends_on: []
 progress: not-started
 coverage_sections:
   - "platform-model.md §Built-In Personas"
-commits: []
+commits: ["5a04a54e9fd2b6478e709957b891e0faec3cd4cb"]
 ---
 
 ## Spec Excerpt
