@@ -154,3 +154,75 @@ impl SpecApprovalEventRepository for SqliteStorage {
         .await?
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    fn tmp_storage() -> (NamedTempFile, SqliteStorage) {
+        let tmp = NamedTempFile::new().unwrap();
+        let storage = SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap();
+        (tmp, storage)
+    }
+
+    fn make_event(id: &str, approver_type: &str) -> SpecApprovalEvent {
+        SpecApprovalEvent {
+            id: id.to_string(),
+            spec_path: "system/design-principles.md".to_string(),
+            spec_sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            approver_type: approver_type.to_string(),
+            approver_id: format!("{approver_type}:someone"),
+            persona: None,
+            attestation_level: None,
+            stack_hash: None,
+            approved_at: 1_700_000_000,
+            revoked_at: None,
+            revoked_by: None,
+            revocation_reason: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn record_and_list_by_path_round_trip() {
+        let (_tmp, s) = tmp_storage();
+        s.record(&make_event("e1", "human")).await.unwrap();
+        let listed = s.list_by_path("system/design-principles.md").await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "e1");
+        assert_eq!(listed[0].approver_type, "human");
+        assert_eq!(listed[0].spec_sha, "0123456789abcdef0123456789abcdef01234567");
+        // Other paths see nothing.
+        assert!(s
+            .list_by_path("system/other.md")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn agent_attestation_fields_round_trip() {
+        // §9 agent-approval validity is evaluated from recorded events —
+        // attestation_level and stack_hash MUST survive persistence.
+        let (_tmp, s) = tmp_storage();
+        let mut ev = make_event("e1", "agent");
+        ev.persona = Some("accountability".to_string());
+        ev.attestation_level = Some(3);
+        ev.stack_hash = Some("sha256:abc".to_string());
+        s.record(&ev).await.unwrap();
+
+        let listed = s.list_by_path("system/design-principles.md").await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].persona.as_deref(), Some("accountability"));
+        assert_eq!(listed[0].attestation_level, Some(3));
+        assert_eq!(listed[0].stack_hash.as_deref(), Some("sha256:abc"));
+    }
+
+    #[tokio::test]
+    async fn human_approval_keeps_attestation_fields_null() {
+        let (_tmp, s) = tmp_storage();
+        s.record(&make_event("e1", "human")).await.unwrap();
+        let listed = s.list_by_path("system/design-principles.md").await.unwrap();
+        assert_eq!(listed[0].attestation_level, None);
+        assert_eq!(listed[0].stack_hash, None);
+    }
+}
