@@ -29,6 +29,7 @@ pub mod llm_config;
 pub mod merge_queue;
 pub mod merge_request;
 pub mod message_type;
+pub mod invitation;
 pub mod meta_spec;
 pub mod network_peer;
 pub mod notification;
@@ -67,6 +68,9 @@ pub use attestation::{
 };
 pub use audit::{AuditEvent, AuditEventType, AuditOutcome};
 pub use budget::{BudgetCallRecord, BudgetConfig, BudgetUsage};
+pub use invitation::{
+    InvitationPolicy, InvitationStatus, TenantInvitation, WorkspaceInvitation,
+};
 pub use compose::{AgentCompose, AgentSpec, TaskSpec};
 pub use compute_target::{ComputeTargetEntity, ComputeTargetType};
 pub use constraint_evaluator::{
