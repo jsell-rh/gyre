@@ -2590,7 +2590,6 @@ async fn handle_spec_assist(state: &AppState, args: &Value, auth: &Authenticated
         );
     }
 
-
     // Validate LLM response: parse JSON, check diff+explanation fields, validate diff ops.
     // Must match REST handler validation (specs_assist.rs) per HSI §11 MCP parity.
     match serde_json::from_str::<serde_json::Value>(&full_text) {
