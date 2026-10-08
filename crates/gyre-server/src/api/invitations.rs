@@ -697,7 +697,8 @@ pub async fn invite_to_workspace(
         .ok_or_else(|| ApiError::InvalidInput(format!("unknown role: {}", req.role)))?;
     let user_id = Id::new(req.user_id.clone());
 
-    // The invitee must exist and belong to the same tenant.
+    // The invitee must exist and belong to the same tenant. A user with no
+    // tenant has no verifiable scope — reject rather than fabricate one.
     let invitee = state
         .users
         .find_by_id(&user_id)
@@ -705,9 +706,13 @@ pub async fn invite_to_workspace(
         .ok_or_else(|| ApiError::NotFound(format!("user {user_id} not found")))?;
     let invitee_tenant = invitee
         .tenant_id
-        .clone()
-        .map(|t| t.as_str().to_string())
-        .unwrap_or_else(|| "default".to_string());
+        .as_ref()
+        .map(|t| t.as_str())
+        .ok_or_else(|| {
+            ApiError::Forbidden(format!(
+                "user {user_id} has no tenant scope; cannot verify tenant containment"
+            ))
+        })?;
     if invitee_tenant != workspace.tenant_id.as_str() {
         return Err(ApiError::Forbidden(
             "cross-tenant workspace invitations are not supported".to_string(),
