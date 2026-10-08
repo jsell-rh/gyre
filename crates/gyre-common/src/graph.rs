@@ -31,6 +31,36 @@ pub enum NodeType {
     Spec,
 }
 
+impl NodeType {
+    /// Parse a node type from its string name.
+    ///
+    /// Accepts both the PascalCase variant name (`"Endpoint"`, used by
+    /// `gyre:assert type="all_have" node_type="Endpoint"` in spec markdown)
+    /// and the snake_case wire name (`"endpoint"`, used by the serde
+    /// representation and the storage adapters).
+    pub fn from_str_name(s: &str) -> Option<Self> {
+        match s {
+            "Package" | "package" => Some(Self::Package),
+            "Module" | "module" => Some(Self::Module),
+            "Type" | "type" => Some(Self::Type),
+            "Trait" | "trait" => Some(Self::Trait),
+            "Interface" | "interface" => Some(Self::Interface),
+            "Function" | "function" => Some(Self::Function),
+            "Method" | "method" => Some(Self::Method),
+            "Class" | "class" => Some(Self::Class),
+            "Enum" | "enum" => Some(Self::Enum),
+            "EnumVariant" | "enum_variant" => Some(Self::EnumVariant),
+            "Endpoint" | "endpoint" => Some(Self::Endpoint),
+            "Component" | "component" => Some(Self::Component),
+            "Table" | "table" => Some(Self::Table),
+            "Constant" | "constant" => Some(Self::Constant),
+            "Field" | "field" => Some(Self::Field),
+            "Spec" | "spec" => Some(Self::Spec),
+            _ => None,
+        }
+    }
+}
+
 /// Typed relationship between two graph nodes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
