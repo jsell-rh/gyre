@@ -1320,7 +1320,6 @@
                 activeQuery={activeViewQuery}
                 bind:filter={explorerFilter}
                 bind:lens={explorerLens}
-                filters={null}
                 bind:canvasState={explorerCanvasState}
                 onNodeDetail={(n) => {
                   detailNode = n;
