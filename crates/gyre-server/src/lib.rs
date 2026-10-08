@@ -906,10 +906,7 @@ pub fn build_state(
             dyn NetworkPeerRepository,
             mem::MemNetworkPeerRepository::default()
         ),
-        dependencies: store!(
-            dyn DependencyRepository,
-            mem::MemDependencyRepository::default()
-        ),
+        dependencies: Arc::new(mem::MemDependencyRepository::default()),
         breaking_changes: Arc::new(mem::MemBreakingChangeRepository::default()),
         dependency_policies: Arc::new(mem::MemDependencyPolicyRepository::default()),
         rate_limiter: rate_limit::RateLimiter::new(rate_per_sec),
