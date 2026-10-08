@@ -9,24 +9,32 @@
 //! This file is a separate integration-test binary (own process), so setting
 //! `GYRE_DATABASE_URL` here cannot race the env of other test binaries.
 //!
+//! The HTTP leg drives the full router middleware stack (require_auth →
+//! last_seen → ABAC → rate limit → CatchPanic → handler) via
+//! `tower::ServiceExt::oneshot` rather than a bound TCP listener: same
+//! request path, and it stays valid in sandboxed environments where loopback
+//! serving is unavailable.
+//!
 //! Regression kill conditions (each fails if the wiring reverts to mem):
 //! - port-level: porter stemming ("running" matches "runs") — substring
 //!   matching cannot do this;
-//! - server-level: real HTTP `GET /api/v1/search` through the task-create
-//!   callsite returns FTS5 snippet markers and bm25 scores;
+//! - router-level: the real POST /api/v1/tasks → GET /api/v1/search flow
+//!   returns FTS5 snippet markers and a bm25-derived score;
 //! - durability: a second `build_state` on the same file still finds the doc
 //!   (an in-memory index loses it).
 
+use axum::body::Body;
 use gyre_ports::search::{SearchDocument, SearchQuery};
-use gyre_server::{abac_middleware, build_router, build_state, AppState};
+use gyre_server::{abac_middleware, build_router, build_state};
+use http::{Request, StatusCode};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tower::ServiceExt;
 
 const TOKEN: &str = "search-wiring-token";
 
-/// Read `GYRE_DATABASE_URL`, pointing it at a temp SQLite file.
-/// Pokes the env var once at startup — safe because this integration test
-/// binary runs in its own process.
+/// Point `GYRE_DATABASE_URL` at a temp SQLite file. Pokes the env var once at
+/// startup — safe because this integration test binary runs in its own process.
 fn sqlite_url() -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("gyre-search-test.db");
@@ -47,12 +55,19 @@ fn doc(entity_type: &str, entity_id: &str, title: &str, body: &str) -> SearchDoc
     }
 }
 
-async fn spawn_server(state: Arc<AppState>) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let app = build_router(Arc::clone(&state));
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    format!("http://127.0.0.1:{port}")
+async fn call(app: &axum::Router, method: &str, uri: &str, body: Option<String>) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("Authorization", format!("Bearer {TOKEN}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(body.unwrap_or_default()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
@@ -100,32 +115,30 @@ async fn sqlite_url_wires_fts5_search_port() {
         stemmed[0].snippet
     );
 
-    // ── Server-level: the /api/v1/search route over the same wired port ────
+    // ── Router-level: real API surface over the same wired port ───────────
     abac_middleware::seed_builtin_policies(&state).await;
-    let base = spawn_server(Arc::clone(&state)).await;
-    let client = reqwest::Client::new();
+    let app = build_router(Arc::clone(&state));
 
     // Real task-create callsite indexes into the same backend.
-    let resp = client
-        .post(format!("{base}/api/v1/tasks"))
-        .bearer_auth(TOKEN)
-        .json(&serde_json::json!({
-            "title": "Quokka census",
-            "description": "Count quokkas on the island every quarter."
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 201, "task create through real API failed");
+    let resp = call(
+        &app,
+        "POST",
+        "/api/v1/tasks",
+        Some(
+            serde_json::json!({
+                "title": "Quokka census",
+                "description": "Count quokkas on the island every quarter."
+            })
+            .to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "task create through real API failed");
 
-    let resp = client
-        .get(format!("{base}/api/v1/search?q=quokkas"))
-        .bearer_auth(TOKEN)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let resp = call(&app, "GET", "/api/v1/search?q=quokkas", None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let results = body["results"].as_array().unwrap();
     // "quokkas" porter-stems to "quokka" and matches the indexed doc.
     assert_eq!(
@@ -136,12 +149,12 @@ async fn sqlite_url_wires_fts5_search_port() {
     let hit = &results[0];
     assert_eq!(hit["entity_type"], "task");
     assert_eq!(hit["title"], "Quokka census");
+    let snippet = hit["snippet"].as_str().unwrap();
+    // FTS5 snippet() marks the raw query token with ** ** — assert the marker
+    // pair around the echoed token (either casing) to prove FTS5 highlighting.
     assert!(
-        hit["snippet"]
-            .as_str()
-            .unwrap()
-            .contains("**Quokka**") || hit["snippet"].as_str().unwrap().contains("**quokka**"),
-        "HTTP search snippet lacks FTS5 markers: {hit}"
+        snippet.contains("**quokkas**") || snippet.contains("**Quokkas**"),
+        "HTTP search snippet lacks FTS5 match markers: {snippet}"
     );
     assert!(
         hit["score"].as_f64().unwrap() > 0.0,
