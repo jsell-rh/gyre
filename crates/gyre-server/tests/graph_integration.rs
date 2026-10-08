@@ -1891,7 +1891,7 @@ async fn test_mcp_graph_search() {
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     assert!(
-        body["result"]["isError"].is_null(),
+        !body["result"]["isError"].as_bool().unwrap_or(true),
         "search must succeed, got: {body}"
     );
     let content = body["result"]["content"][0]["text"].as_str().unwrap_or("");
