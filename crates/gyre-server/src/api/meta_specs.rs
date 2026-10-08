@@ -1058,6 +1058,7 @@ async fn provision_preview_agent(
     // Throwaway branch checked out into its own worktree — the branch already
     // exists, so `create_worktree` checks it out instead of branching from HEAD.
     let worktree_path = format!("{}/worktrees/{}", repo.path, branch.replace('/', "-"));
+    let worktree_path_for_log = worktree_path.clone();
     if let Err(e) = state
         .git_ops
         .create_worktree(&repo.path, &worktree_path, branch)
@@ -1083,7 +1084,7 @@ async fn provision_preview_agent(
             )));
         }
         return Err(ApiError::Internal(anyhow::anyhow!(
-            "create preview worktree '{worktree_path}': {e:#}"
+            "create preview worktree '{worktree_path_for_log}': {e:#}"
         )));
     }
 
@@ -1102,7 +1103,7 @@ async fn provision_preview_agent(
         let mut partial = preview_agent_ref(preview_id, &agent, repo, &target.spec_path, branch, base_sha, worktree_path);
         partial.released = true; // no slot was taken
         rollback_preview_agent(state, &partial).await;
-        return Err(e);
+        return Err(ApiError::Internal(e));
     }
 
     // Short-lived token: a preview agent must not outlive its run. The preview
