@@ -39,12 +39,14 @@ fn now_secs() -> i64 {
 #[diesel(table_name = dependency_policies)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 struct DependencyPolicyRow {
+    #[allow(dead_code)]
     workspace_id: String,
     breaking_change_behavior: String,
     max_version_drift: i32,
     stale_dependency_alert_days: i32,
     require_cascade_tests: i32,
     auto_create_update_tasks: i32,
+    #[allow(dead_code)]
     updated_at: i64,
 }
 
@@ -112,6 +114,7 @@ impl DependencyPolicyRepository for SqliteStorage {
                 .on_conflict(dependency_policies::workspace_id)
                 .do_update()
                 .set((
+                    dependency_policies::breaking_change_behavior.eq(row.breaking_change_behavior),
                     dependency_policies::max_version_drift.eq(row.max_version_drift),
                     dependency_policies::stale_dependency_alert_days
                         .eq(row.stale_dependency_alert_days),
@@ -145,7 +148,10 @@ mod tests {
         let policy = DependencyPolicyRepository::get_for_workspace(&s, &Id::new("ws-none"))
             .await
             .unwrap();
-        assert_eq!(policy.breaking_change_behavior, BreakingChangeBehavior::Warn);
+        assert_eq!(
+            policy.breaking_change_behavior,
+            BreakingChangeBehavior::Warn
+        );
         assert_eq!(policy.max_version_drift, 3);
         assert_eq!(policy.stale_dependency_alert_days, 30);
         assert!(policy.require_cascade_tests);
@@ -169,7 +175,10 @@ mod tests {
         let found = DependencyPolicyRepository::get_for_workspace(&s, &Id::new("ws-1"))
             .await
             .unwrap();
-        assert_eq!(found.breaking_change_behavior, BreakingChangeBehavior::Block);
+        assert_eq!(
+            found.breaking_change_behavior,
+            BreakingChangeBehavior::Block
+        );
         assert_eq!(found.max_version_drift, 7);
         assert_eq!(found.stale_dependency_alert_days, 90);
         assert!(!found.require_cascade_tests);
@@ -217,7 +226,10 @@ mod tests {
         let found = DependencyPolicyRepository::get_for_workspace(&s, &ws)
             .await
             .unwrap();
-        assert_eq!(found.breaking_change_behavior, BreakingChangeBehavior::Block);
+        assert_eq!(
+            found.breaking_change_behavior,
+            BreakingChangeBehavior::Block
+        );
         assert_eq!(found.max_version_drift, 5);
         assert_eq!(found.stale_dependency_alert_days, 60);
         assert!(found.require_cascade_tests);
@@ -252,7 +264,10 @@ mod tests {
         let found = DependencyPolicyRepository::get_for_workspace(&s2, &Id::new("ws-persist"))
             .await
             .unwrap();
-        assert_eq!(found.breaking_change_behavior, BreakingChangeBehavior::Block);
+        assert_eq!(
+            found.breaking_change_behavior,
+            BreakingChangeBehavior::Block
+        );
         assert_eq!(found.max_version_drift, 9);
         assert_eq!(found.stale_dependency_alert_days, 15);
         assert!(found.require_cascade_tests);

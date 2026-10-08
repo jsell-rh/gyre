@@ -71,9 +71,9 @@ impl BreakingChangeRepository for SqliteStorage {
                 commit_sha: &bc.commit_sha,
                 description: &bc.description,
                 detected_at: bc.detected_at as i64,
-                acknowledged: 0,
-                acknowledged_by: None,
-                acknowledged_at: None,
+                acknowledged: if bc.acknowledged { 1 } else { 0 },
+                acknowledged_by: bc.acknowledged_by.as_deref(),
+                acknowledged_at: bc.acknowledged_at.map(|v| v as i64),
             };
             diesel::insert_into(breaking_changes::table)
                 .values(&row)
@@ -249,6 +249,34 @@ mod tests {
             .await
             .unwrap();
         assert!(!acked);
+    }
+
+    /// A pre-acknowledged record (e.g. seeded for a merge-blocked test)
+    /// must persist its acknowledgment fields — `create` must not reset
+    /// them to unacknowledged, or Block-policy merges stay blocked on
+    /// records the domain model says are already acknowledged.
+    #[tokio::test]
+    async fn create_preserves_preacknowledged_fields() {
+        let (_tmp, s) = setup();
+        let mut bc = make_bc("bc-pre", "edge-1", "repo-b");
+        bc.acknowledged = true;
+        bc.acknowledged_by = Some("user-1".to_string());
+        bc.acknowledged_at = Some(2500);
+        BreakingChangeRepository::create(&s, &bc).await.unwrap();
+
+        let found = BreakingChangeRepository::find_by_id(&s, &Id::new("bc-pre"))
+            .await
+            .unwrap()
+            .expect("record should exist");
+        assert!(found.acknowledged);
+        assert_eq!(found.acknowledged_by.as_deref(), Some("user-1"));
+        assert_eq!(found.acknowledged_at, Some(2500));
+        assert!(
+            BreakingChangeRepository::list_unacknowledged(&s)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
