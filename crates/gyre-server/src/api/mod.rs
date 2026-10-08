@@ -155,7 +155,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         .route(
             "/api/v1/repos/:id/gates/:gate_id",
-            delete(gates::delete_gate),
+            put(gates::update_gate).delete(gates::delete_gate),
         )
         // Pre-accept push gates
         .route(

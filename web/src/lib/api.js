@@ -289,6 +289,8 @@ export const api = {
   repoGates: (id) => request(`/repos/${id}/gates`),
   createRepoGate: (id, data) =>
     request(`/repos/${id}/gates`, { method: 'POST', body: JSON.stringify(data) }),
+  updateRepoGate: (id, gateId, data) =>
+    request(`/repos/${id}/gates/${gateId}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteRepoGate: (id, gateId) =>
     request(`/repos/${id}/gates/${gateId}`, { method: 'DELETE' }),
   repoPushGates: (id) => request(`/repos/${id}/push-gates`),
