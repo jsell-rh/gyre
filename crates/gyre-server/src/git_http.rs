@@ -1266,14 +1266,17 @@ async fn undo_ref_updates(repo_path: &str, ref_updates: &[RefUpdate]) {
 // Spec lifecycle: auto-create tasks on spec changes in the default branch
 // ---------------------------------------------------------------------------
 
-/// Spec path prefixes that trigger lifecycle task creation (per spec-lifecycle.md).
-const SPEC_WATCHED_PATHS: &[&str] = &["specs/system/", "specs/development/"];
-
 /// Classify a spec file change and return (title, labels, priority).
+///
+/// Priorities come from the repo's `SpecLifecycleConfig`
+/// (spec-lifecycle.md §Configuration): new/rename -> `default_priority_new`,
+/// modified -> `default_priority_modified`, deleted ->
+/// `default_priority_deleted`.
 fn classify_spec_change(
     status_char: char,
     path: &str,
     old_path: Option<&str>,
+    config: &gyre_domain::SpecLifecycleConfig,
 ) -> Option<(String, Vec<String>, gyre_domain::TaskPriority)> {
     match status_char {
         'A' => Some((
@@ -1282,33 +1285,36 @@ fn classify_spec_change(
                 "spec-implementation".to_string(),
                 "auto-created".to_string(),
             ],
-            gyre_domain::TaskPriority::Medium,
+            config.default_priority_new.clone(),
         )),
         'M' => Some((
             format!("Review spec change: {path}"),
             vec!["spec-drift-review".to_string(), "auto-created".to_string()],
-            gyre_domain::TaskPriority::High,
+            config.default_priority_modified.clone(),
         )),
         'D' => Some((
             format!("Handle spec removal: {path}"),
             vec!["spec-deprecated".to_string(), "auto-created".to_string()],
-            gyre_domain::TaskPriority::High,
+            config.default_priority_deleted.clone(),
         )),
         'R' => {
             let old = old_path.unwrap_or(path);
             Some((
                 format!("Update spec references: {old} -> {path}"),
                 vec!["spec-housekeeping".to_string(), "auto-created".to_string()],
-                gyre_domain::TaskPriority::Medium,
+                config.default_priority_new.clone(),
             ))
         }
         _ => None,
     }
 }
 
-/// Parse `git diff --name-status` output into (status_char, new_path, old_path) tuples.
-/// Only returns entries in watched spec paths.
-pub fn parse_spec_changes(diff_output: &str) -> Vec<(char, String, Option<String>)> {
+/// Parse `git diff --name-status` output into (status_char, new_path, old_path)
+/// tuples, filtered by the repo's watched/ignored spec path prefixes.
+pub fn parse_spec_changes_with_config(
+    diff_output: &str,
+    config: &gyre_domain::SpecLifecycleConfig,
+) -> Vec<(char, String, Option<String>)> {
     let mut changes = Vec::new();
 
     for line in diff_output.lines() {
@@ -1334,14 +1340,8 @@ pub fn parse_spec_changes(diff_output: &str) -> Vec<(char, String, Option<String
             (None, parts[1])
         };
 
-        let is_watched = SPEC_WATCHED_PATHS
-            .iter()
-            .any(|prefix| new_path.starts_with(prefix));
-        let old_is_watched = old_path.is_some_and(|p| {
-            SPEC_WATCHED_PATHS
-                .iter()
-                .any(|prefix| p.starts_with(prefix))
-        });
+        let is_watched = config.is_watched(new_path);
+        let old_is_watched = old_path.is_some_and(|p| config.is_watched(p));
 
         if !is_watched && !old_is_watched {
             continue;
@@ -1357,6 +1357,12 @@ pub fn parse_spec_changes(diff_output: &str) -> Vec<(char, String, Option<String
     changes
 }
 
+/// Parse with default config (spec-lifecycle.md §Configuration defaults).
+/// Kept for tests of the default behavior.
+pub fn parse_spec_changes(diff_output: &str) -> Vec<(char, String, Option<String>)> {
+    parse_spec_changes_with_config(diff_output, &gyre_domain::SpecLifecycleConfig::default())
+}
+
 /// After a successful push to the default branch, detect spec changes and create tasks.
 async fn process_spec_lifecycle(
     state: &Arc<AppState>,
@@ -1365,6 +1371,17 @@ async fn process_spec_lifecycle(
     default_branch: &str,
     ref_updates: &[RefUpdate],
 ) {
+    // Per-repo config (spec-lifecycle.md §Configuration); defaults when unset.
+    let config = state
+        .spec_lifecycle_configs
+        .get_for_repo(repo_id)
+        .await
+        .unwrap_or_default();
+    if !config.enabled {
+        info!(repo_id, "spec-lifecycle: disabled for repo, skipping");
+        return;
+    }
+
     let default_ref = format!("refs/heads/{default_branch}");
     let relevant_updates: Vec<&RefUpdate> = ref_updates
         .iter()
@@ -1407,9 +1424,8 @@ async fn process_spec_lifecycle(
                 continue;
             }
         };
-
         let diff_text = String::from_utf8_lossy(&out.stdout);
-        let changes = parse_spec_changes(&diff_text);
+        let changes = parse_spec_changes_with_config(&diff_text, &config);
         if changes.is_empty() {
             continue;
         }
@@ -1419,8 +1435,8 @@ async fn process_spec_lifecycle(
 
         for (status_char, path, old_path) in changes {
             // Auto-invalidate active spec approvals when the spec file is modified,
-            // deleted, or renamed. An approval is stale once the spec content changes.
-            {
+            // deleted, or renamed (configurable, spec-lifecycle.md §Configuration).
+            if config.auto_invalidate_approvals {
                 // For renames, the old path is stale; for M/D, the current path is stale.
                 let stale_paths: Vec<&str> = match status_char {
                     'M' | 'D' => vec![path.as_str()],
@@ -1461,18 +1477,21 @@ async fn process_spec_lifecycle(
             }
 
             let Some((title, labels, priority)) =
-                classify_spec_change(status_char, &path, old_path.as_deref())
+                classify_spec_change(status_char, &path, old_path.as_deref(), &config)
             else {
                 continue;
             };
 
-            // Dedup: skip if a non-Done task with the same title already exists.
-            let exists = existing_tasks
-                .iter()
-                .any(|t| t.title == title && !matches!(t.status, gyre_domain::TaskStatus::Done));
-            if exists {
-                info!(title, "spec-lifecycle: task already exists, skipping");
-                continue;
+            // Dedup: skip if a non-Done task with the same title already exists
+            // (configurable, spec-lifecycle.md §Configuration).
+            if config.dedup_open_tasks {
+                let exists = existing_tasks.iter().any(|t| {
+                    t.title == title && !matches!(t.status, gyre_domain::TaskStatus::Done)
+                });
+                if exists {
+                    info!(title, "spec-lifecycle: task already exists, skipping");
+                    continue;
+                }
             }
 
             let task_id = gyre_common::Id::new(uuid::Uuid::new_v4().to_string());
@@ -3829,8 +3848,13 @@ mod tests {
 
     #[test]
     fn classify_spec_change_added() {
-        let (title, labels, priority) =
-            super::classify_spec_change('A', "specs/system/foo.md", None).unwrap();
+        let (title, labels, priority) = super::classify_spec_change(
+            'A',
+            "specs/system/foo.md",
+            None,
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(title, "Implement spec: specs/system/foo.md");
         assert!(labels.contains(&"spec-implementation".to_string()));
         assert!(labels.contains(&"auto-created".to_string()));
@@ -3839,8 +3863,13 @@ mod tests {
 
     #[test]
     fn classify_spec_change_modified() {
-        let (title, labels, priority) =
-            super::classify_spec_change('M', "specs/system/foo.md", None).unwrap();
+        let (title, labels, priority) = super::classify_spec_change(
+            'M',
+            "specs/system/foo.md",
+            None,
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(title, "Review spec change: specs/system/foo.md");
         assert!(labels.contains(&"spec-drift-review".to_string()));
         assert_eq!(priority, gyre_domain::TaskPriority::High);
@@ -3848,8 +3877,13 @@ mod tests {
 
     #[test]
     fn classify_spec_change_deleted() {
-        let (title, labels, priority) =
-            super::classify_spec_change('D', "specs/system/old.md", None).unwrap();
+        let (title, labels, priority) = super::classify_spec_change(
+            'D',
+            "specs/system/old.md",
+            None,
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(title, "Handle spec removal: specs/system/old.md");
         assert!(labels.contains(&"spec-deprecated".to_string()));
         assert_eq!(priority, gyre_domain::TaskPriority::High);
@@ -3857,9 +3891,13 @@ mod tests {
 
     #[test]
     fn classify_spec_change_renamed() {
-        let (title, labels, priority) =
-            super::classify_spec_change('R', "specs/system/new.md", Some("specs/system/old.md"))
-                .unwrap();
+        let (title, labels, priority) = super::classify_spec_change(
+            'R',
+            "specs/system/new.md",
+            Some("specs/system/old.md"),
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(
             title,
             "Update spec references: specs/system/old.md -> specs/system/new.md"
@@ -3870,7 +3908,65 @@ mod tests {
 
     #[test]
     fn classify_spec_change_unknown_returns_none() {
-        assert!(super::classify_spec_change('X', "specs/system/foo.md", None).is_none());
+        assert!(
+            super::classify_spec_change('X', "specs/system/foo.md", None, &Default::default())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn classify_spec_change_respects_configured_priorities() {
+        // spec-lifecycle.md §Configuration: default_priority_* must override
+        // the built-in Medium/High/High for task creation.
+        let config = gyre_domain::SpecLifecycleConfig {
+            default_priority_new: gyre_domain::TaskPriority::Critical,
+            default_priority_modified: gyre_domain::TaskPriority::Low,
+            default_priority_deleted: gyre_domain::TaskPriority::Medium,
+            ..Default::default()
+        };
+        let (_, _, p_new) =
+            super::classify_spec_change('A', "specs/system/foo.md", None, &config).unwrap();
+        let (_, _, p_mod) =
+            super::classify_spec_change('M', "specs/system/foo.md", None, &config).unwrap();
+        let (_, _, p_del) =
+            super::classify_spec_change('D', "specs/system/foo.md", None, &config).unwrap();
+        let (_, _, p_ren) = super::classify_spec_change(
+            'R',
+            "specs/system/new.md",
+            Some("specs/system/old.md"),
+            &config,
+        )
+        .unwrap();
+        assert_eq!(p_new, gyre_domain::TaskPriority::Critical);
+        assert_eq!(p_mod, gyre_domain::TaskPriority::Low);
+        assert_eq!(p_del, gyre_domain::TaskPriority::Medium);
+        assert_eq!(p_ren, gyre_domain::TaskPriority::Critical);
+    }
+
+    #[test]
+    fn parse_spec_changes_custom_watched_paths() {
+        // Custom watched paths replace the hardcoded prefixes entirely.
+        let config = gyre_domain::SpecLifecycleConfig {
+            watched_paths: vec!["docs/specs/".to_string()],
+            ..Default::default()
+        };
+        let input = "A\tdocs/specs/new.md\nM\tspecs/system/foo.md\n";
+        let changes = super::parse_spec_changes_with_config(input, &config);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].1, "docs/specs/new.md");
+    }
+
+    #[test]
+    fn parse_spec_changes_ignored_overrides_watched() {
+        let config = gyre_domain::SpecLifecycleConfig {
+            watched_paths: vec!["specs/".to_string()],
+            ignored_paths: vec!["specs/milestones/".to_string()],
+            ..Default::default()
+        };
+        let input = "M\tspecs/system/a.md\nM\tspecs/milestones/b.md\n";
+        let changes = super::parse_spec_changes_with_config(input, &config);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].1, "specs/system/a.md");
     }
 
     // ── Audit-only verification tests (TASK-006) ─────────────────────────
