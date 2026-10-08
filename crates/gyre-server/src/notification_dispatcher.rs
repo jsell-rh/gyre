@@ -8,6 +8,7 @@
 //! agent-escalation online-status fan-out.
 
 use crate::AppState;
+use async_trait::async_trait;
 use gyre_common::{Id, Notification, NotificationType};
 use gyre_domain::{NotificationChannels, NotificationPriority, WorkspaceRole};
 use std::collections::HashSet;
@@ -61,7 +62,7 @@ impl HttpSender for ReqwestSender {
 /// HMAC-SHA256 signature over the payload body, hex-encoded.
 fn sign_payload(secret: &str, body: &str) -> String {
     use ring::hmac::{Key, HMAC_SHA256};
-    let tag = HMAC_SHA256.sign(Key::new(HMAC_SHA256, secret.as_bytes()), body.as_bytes());
+    let tag = ring::hmac::sign(&Key::new(HMAC_SHA256, secret.as_bytes()), body.as_bytes());
     hex::encode(tag.as_ref())
 }
 
@@ -80,17 +81,17 @@ pub async fn dispatch_to_channels(state: &AppState, notif: &Notification) {
             );
             return;
         }
-    };
-    dispatch_with(state, notif, &channels, &Arc::new(ReqwestSender::default())).await;
+    dispatch_with(state, notif, &channels, &ReqwestSender::default()).await;
 }
 
 /// Testable core of `dispatch_to_channels`.
-pub async fn dispatch_with(
+pub async fn dispatch_with<S: HttpSender>(
     state: &AppState,
     notif: &Notification,
     channels: &NotificationChannels,
-    sender: &Arc<dyn HttpSender>,
+    sender: &S,
 ) {
+
     // In-app is always delivered (in_app can't be disabled) — the caller has
     // already persisted the notification, which IS in-app delivery.
 
@@ -230,7 +231,7 @@ pub async fn escalation_recipients(
     let mut recipients: Vec<Id> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
-    let mut push = |id: Id, recipients: &mut Vec<Id>, seen: &mut HashSet<String>| {
+    let push = |id: Id, recipients: &mut Vec<Id>, seen: &mut HashSet<String>| {
         if seen.insert(id.as_str().to_string()) {
             recipients.push(id);
         }
@@ -405,9 +406,9 @@ mod tests {
         let sender = Arc::new(CapturingSender {
             calls: Mutex::new(Vec::new()),
         });
-        dispatch_with(&state, &notif, &channels, &sender).await;
+        dispatch_with(&state, &notif, &channels, sender.as_ref()).await;
 
-        let calls = sender.calls.lock().unwrap();
+        let calls = sender.calls.lock();
         assert_eq!(calls.len(), 1, "urgent >= high threshold must deliver");
         let (url, body, headers) = &calls[0];
         assert_eq!(url, "https://hooks.example.test/gyre");
@@ -445,9 +446,9 @@ mod tests {
         let sender = Arc::new(CapturingSender {
             calls: Mutex::new(Vec::new()),
         });
-        dispatch_with(&state, &notif, &channels, &sender).await;
+        dispatch_with(&state, &notif, &channels, sender.as_ref()).await;
         assert!(
-            sender.calls.lock().unwrap().is_empty(),
+            sender.calls.lock().is_empty(),
             "low-priority notification must not reach a High-threshold webhook"
         );
     }
@@ -469,8 +470,8 @@ mod tests {
         let sender = Arc::new(CapturingSender {
             calls: Mutex::new(Vec::new()),
         });
-        dispatch_with(&state, &notif, &channels, &sender).await;
-        let calls = sender.calls.lock().unwrap();
+        dispatch_with(&state, &notif, &channels, sender.as_ref()).await;
+        let calls = sender.calls.lock();
         assert_eq!(calls.len(), 1);
         let (url, body, _) = &calls[0];
         assert_eq!(url, "https://hooks.slack.test/T/B/X");
@@ -498,7 +499,7 @@ mod tests {
         let sender = Arc::new(CapturingSender {
             calls: Mutex::new(Vec::new()),
         });
-        dispatch_with(&state, &notif, &channels, &sender).await;
+        dispatch_with(&state, &notif, &channels, sender.as_ref()).await;
 
         let outbox = state.kv_store.kv_list(EMAIL_OUTBOX_NS).await.unwrap();
         assert_eq!(outbox.len(), 1, "urgent notification must be queued");
@@ -510,7 +511,7 @@ mod tests {
 
         // Low priority (9) below Medium threshold → no queue entry.
         let notif_low = sample_notif(&state, "user-1", 9);
-        dispatch_with(&state, &notif_low, &channels, &sender).await;
+        dispatch_with(&state, &notif_low, &channels, sender.as_ref()).await;
         let outbox = state.kv_store.kv_list(EMAIL_OUTBOX_NS).await.unwrap();
         assert_eq!(outbox.len(), 1, "below-threshold email must not queue");
 
@@ -524,7 +525,7 @@ mod tests {
             ..channels
         };
         let notif2 = sample_notif(&state, "user-2", 1);
-        dispatch_with(&state, &notif2, &channels_off, &sender).await;
+        dispatch_with(&state, &notif2, &channels_off, sender.as_ref()).await;
         let outbox = state.kv_store.kv_list(EMAIL_OUTBOX_NS).await.unwrap();
         assert_eq!(
             outbox.len(),

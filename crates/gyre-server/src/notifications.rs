@@ -66,6 +66,7 @@ pub async fn notify_rich(
     );
     notif.body = body;
     notif.entity_ref = entity_ref;
+    notif.repo_id = repo_id;
     if let Err(e) = state.notifications.create(&notif).await {
         tracing::warn!("Failed to create notification: {e}");
         return;
@@ -227,7 +228,7 @@ pub async fn notify_mr_reverted(
     notify_rich(
         state,
         workspace_id.clone(),
-        user_id,
+        user_id.clone(),
         NotificationType::MrReverted,
         format!("MR {mr_label} was reverted: {reason}"),
         "default",
