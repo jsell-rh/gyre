@@ -1143,6 +1143,7 @@ mod tests {
             gate_phase: Default::default(),
             timeout_secs: None,
             created_at: now_secs(),
+            position: 0,
         }
     }
 
@@ -1435,6 +1436,7 @@ mod tests {
                 gate_phase: Default::default(),
                 timeout_secs: None,
                 created_at: now_secs(),
+                position: 0,
             })
             .await
             .unwrap();

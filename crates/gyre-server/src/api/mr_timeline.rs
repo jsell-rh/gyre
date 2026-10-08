@@ -598,6 +598,7 @@ mod tests {
             "source_branch": "feat/test",
             "target_branch": "main",
             "author_agent_id": "agent-42",
+            position: 0,
         });
         let resp = app
             .clone()
@@ -739,6 +740,7 @@ mod tests {
             "source_branch": "feat/delta",
             "target_branch": "main",
             "author_agent_id": "agent-delta",
+            position: 0,
         });
         let resp = app
             .clone()

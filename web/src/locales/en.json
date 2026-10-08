@@ -1482,7 +1482,8 @@
       "teams": "Teams",
       "budget": "Budget",
       "compute": "Compute",
-      "audit": "Audit"
+      "audit": "Audit",
+      "repos": "Repos"
     },
     "tab_bar_label": "Workspace settings sections",
     "general": {
@@ -1573,6 +1574,24 @@
       "col_actor": "Actor",
       "col_detail": "Detail",
       "col_time": "Time"
+    },
+    "repos": {
+      "title": "Repositories",
+      "new_repo": "+ New Repo",
+      "import_repo": "Import Repo",
+      "refresh": "Refresh",
+      "loading": "Loading repos...",
+      "empty": "No repositories in this workspace yet.",
+      "name_label": "Name",
+      "description_label": "Description",
+      "clone_url_label": "Clone URL",
+      "creating": "Creating...",
+      "create": "Create Repo",
+      "importing": "Importing...",
+      "col_name": "Repo",
+      "col_status": "Status",
+      "col_agents": "Agents",
+      "col_last_activity": "Last Activity"
     },
     "save_failed_settings": "Failed to save settings",
     "save_failed_trust": "Failed to save trust level",
