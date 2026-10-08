@@ -264,8 +264,11 @@ impl JudgmentLedgerRepository for SqliteStorage {
                 .unwrap_or(true);
 
             if include_approvals {
+                // Pending approvals (approved_at NULL) carry no judgment
+                // timestamp yet; they are not part of the judgment ledger.
                 let mut q = spec_approvals::table
                     .filter(spec_approvals::approver_id.eq(&approver))
+                    .filter(spec_approvals::approved_at.is_not_null())
                     .into_boxed();
 
                 if let Some(since_ts) = since_ts {
@@ -281,10 +284,13 @@ impl JudgmentLedgerRepository for SqliteStorage {
                         spec_approvals::revoked_at,
                         spec_approvals::revocation_reason,
                     ))
-                    .load::<(String, String, i64, Option<i64>, Option<String>)>(&mut *conn)
+                    .load::<(String, String, Option<i64>, Option<i64>, Option<String>)>(
+                        &mut *conn,
+                    )
                     .context("load spec_approvals for judgment ledger")?;
 
                 for (_, spec_path, approved_at, revoked_at, revocation_reason) in rows {
+                    let approved_at = approved_at.unwrap_or(0) as u64;
                     // If revoked, it's a rejection entry; otherwise an approval.
                     let jt = if revoked_at.is_some() {
                         // Only include if filter allows rejections.
@@ -310,7 +316,7 @@ impl JudgmentLedgerRepository for SqliteStorage {
                         jt,
                         spec_path,
                         ws_id.as_deref().map(Id::new),
-                        approved_at as u64,
+                        approved_at,
                         revocation_reason,
                     ));
                 }

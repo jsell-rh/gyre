@@ -496,8 +496,8 @@ pub async fn approve_spec(
         spec_path: spec_path.clone(),
         spec_sha: req.sha.clone(),
         approver_type,
-        approver_id,
-        persona: req.persona,
+        approver_id: approver_id.clone(),
+        persona: req.persona.clone(),
         approved_at: now,
         revoked_at: None,
         revoked_by: None,
@@ -506,6 +506,44 @@ pub async fn approve_spec(
 
     // Record in approval history.
     let _ = state.spec_approval_history.record(&event).await;
+
+    // Record in the durable spec-approvals ledger (agent-gates.md §Spec
+    // Approval Ledger): create the entry for this spec version (Pending),
+    // then transition it to Approved. A fresh entry per (path, sha, approver)
+    // approval; re-approving the same SHA records another ledger row.
+    let ledger_entry = gyre_domain::SpecApproval {
+        id: new_id(),
+        spec_path: spec_path.clone(),
+        spec_sha: req.sha.clone(),
+        approver_id,
+        signature: req.signature.clone(),
+        approved_at: None,
+        revoked_at: None,
+        revoked_by: None,
+        revocation_reason: None,
+        rejected_at: None,
+        rejected_reason: None,
+        rejected_by: None,
+    };
+    let ledger_id = ledger_entry.id.clone();
+    if let Err(e) = state.spec_approvals.create(&ledger_entry).await {
+        return Err(ApiError::Internal(format!(
+            "failed to record spec approval in ledger: {e}"
+        )));
+    }
+    match state.spec_approvals.approve(&ledger_id, now).await {
+        Ok(Some(())) => {}
+        Ok(None) => {
+            return Err(ApiError::Internal(
+                "spec approval ledger entry vanished after create".to_string(),
+            ))
+        }
+        Err(e) => {
+            return Err(ApiError::Internal(format!(
+                "invalid spec approval transition: {e}"
+            )))
+        }
+    }
 
     // TASK-006: Produce SignedInput when a KeyBinding is available AND the client
     // provides a user_content_signature (Phase 1, non-enforcing).
@@ -778,6 +816,14 @@ pub async fn revoke_spec_approval(
     let spec_path = encoded_path;
     let now = now_secs();
 
+    // Revocation requires a reason (agent-gates.md §Spec Approval Ledger).
+    let reason = req.reason.trim().to_string();
+    if reason.is_empty() {
+        return Err(ApiError::InvalidInput(
+            "revocation requires a reason".to_string(),
+        ));
+    }
+
     // Find the most recent active approval for this spec path.
     let events = state
         .spec_approval_history
@@ -786,50 +832,114 @@ pub async fn revoke_spec_approval(
         .unwrap_or_default();
     let active_event = events.into_iter().rev().find(|e| e.is_active());
 
-    match active_event {
-        None => Err(ApiError::NotFound(format!(
+    let Some(ev) = active_event else {
+        return Err(ApiError::NotFound(format!(
             "no active approval for spec '{spec_path}'"
-        ))),
-        Some(ev) => {
-            // Only the original approver or an Admin can revoke.
-            let is_admin =
-                auth.agent_id == "system" || auth.roles.contains(&gyre_domain::UserRole::Admin);
-            let caller_id = format!(
-                "{}:{}",
-                if auth.jwt_claims.is_some() {
-                    "agent"
-                } else {
-                    "user"
-                },
-                auth.agent_id
-            );
-            if ev.approver_id != caller_id && !is_admin {
-                return Err(ApiError::Forbidden(
-                    "only the original approver or an Admin can revoke".to_string(),
-                ));
+        )));
+    };
+
+    // Only the original approver or an Admin can revoke.
+    let is_admin =
+        auth.agent_id == "system" || auth.roles.contains(&gyre_domain::UserRole::Admin);
+    let caller_id = format!(
+        "{}:{}",
+        if auth.jwt_claims.is_some() {
+            "agent"
+        } else {
+            "user"
+        },
+        auth.agent_id
+    );
+    if ev.approver_id != caller_id && !is_admin {
+        return Err(ApiError::Forbidden(
+            "only the original approver or an Admin can revoke".to_string(),
+        ));
+    }
+
+    // Revoke in the durable spec-approvals ledger: the most recent active
+    // approval row for this path transitions Approved → Revoked. The domain
+    // enforces the transition and mutual exclusivity (clears approved_at).
+    let caller_label = if auth.jwt_claims.is_some() {
+        format!("agent:{}", auth.agent_id)
+    } else {
+        format!("user:{}", auth.agent_id)
+    };
+    let mut ledger_revoked_id = None;
+    {
+        let active_ledger = state
+            .spec_approvals
+            .list_active_by_path(&spec_path)
+            .await
+            .unwrap_or_default();
+        if let Some(latest) = active_ledger.first() {
+            match state
+                .spec_approvals
+                .revoke(&latest.id, &caller_label, &reason, now)
+                .await
+            {
+                Ok(Some(())) => ledger_revoked_id = Some(latest.id.clone()),
+                Ok(None) => {
+                    return Err(ApiError::NotFound(format!(
+                        "approval {} vanished from ledger", latest.id
+                    )))
+                }
+                Err(e) => {
+                    return Err(ApiError::Conflict(format!(
+                        "cannot revoke spec approval: {e}"
+                    )))
+                }
             }
-
-            let _ = state
-                .spec_approval_history
-                .revoke_event(&ev.id, now, &auth.agent_id, &req.reason)
-                .await;
-
-            // Reset ledger approval_status to Pending.
-            if let Some(mut entry) = state.spec_ledger.find_by_path(&spec_path).await? {
-                entry.approval_status = ApprovalStatus::Pending;
-                entry.updated_at = now;
-                let _ = state.spec_ledger.save(&entry).await;
-            }
-
-            Ok(Json(serde_json::json!({
-                "spec_path": spec_path,
-                "revoked_by": auth.agent_id,
-                "revoked_at": now,
-            })))
         }
     }
-}
 
+    let _ = state
+        .spec_approval_history
+        .revoke_event(&ev.id, now, &auth.agent_id, &reason)
+        .await;
+
+    // Audit the revocation (spec: "Revocation requires a reason and is
+    // audited") in the audit_events table.
+    {
+        let audit = gyre_domain::AuditEvent::new(
+            new_id(),
+            gyre_domain::AuditEventType::Custom("spec_approval_revoked".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            "spec".to_string(),
+            ledger_revoked_id.as_ref().map(|id| id.to_string()),
+            gyre_domain::AuditOutcome::Success,
+            serde_json::json!({
+                "spec_path": spec_path,
+                "spec_sha": ev.spec_sha,
+                "revoked_by": caller_label,
+                "reason": reason,
+            }),
+            None,
+            None,
+            now,
+        );
+        if let Err(e) = state.audit.record(&audit).await {
+            tracing::warn!("failed to audit spec approval revocation: {e}");
+        }
+    }
+
+    // Reset ledger approval_status to Pending.
+    if let Some(mut entry) = state.spec_ledger.find_by_path(&spec_path).await? {
+        entry.approval_status = ApprovalStatus::Pending;
+        entry.updated_at = now;
+        let _ = state.spec_ledger.save(&entry).await;
+    }
+
+    Ok(Json(serde_json::json!({
+        "spec_path": spec_path,
+        "revoked_by": caller_label,
+        "revoked_at": now,
+        "ledger_approval_id": ledger_revoked_id,
+    })))
+}
 // ---------------------------------------------------------------------------
 // POST /api/v1/specs/:path/reject — reject a spec (human decision)
 // ---------------------------------------------------------------------------
@@ -858,6 +968,7 @@ pub async fn reject_spec(
         ));
     }
 
+
     // Fetch the spec from the ledger.
     let mut entry = state
         .spec_ledger
@@ -869,6 +980,35 @@ pub async fn reject_spec(
     entry.approval_status = ApprovalStatus::Rejected;
     entry.updated_at = now;
     let _ = state.spec_ledger.save(&entry).await;
+
+    // Wire the rejection into the durable spec-approvals ledger
+    // (agent-gates.md §Spec Approval Ledger: Pending → Rejected, and
+    // "Rejection closes associated MR" — handled above). Active approvals
+    // for the current SHA are transitioned; already-approved rows whose
+    // spec version was later superseded keep their own lifecycle.
+    {
+        let caller_label = format!("user:{}", auth.agent_id);
+        let pending = state
+            .spec_approvals
+            .list_by_path(&spec_path)
+            .await
+            .unwrap_or_default();
+        for approval in pending {
+            if approval.status() == gyre_domain::spec_approval::ApprovalStatus::Pending {
+                if let Err(e) = state
+                    .spec_approvals
+                    .reject(&approval.id, &caller_label, &req.reason, now)
+                    .await
+                {
+                    tracing::warn!(
+                        approval_id = %approval.id,
+                        error = %e,
+                        "failed to reject pending ledger approval for spec"
+                    );
+                }
+            }
+        }
+    }
 
     // Close any associated MRs from spec-edit/* branches that reference this spec.
     // A spec-edit MR has spec_ref set to "spec_path@sha" and source_branch "spec-edit/...".
