@@ -4,7 +4,7 @@
 //!   Parses `<!-- gyre:assert ... -->` comments from spec markdown content,
 //!   evaluates them against the repo's knowledge graph, and returns results.
 //!
-//! GET /api/v1/repos/:id/specs/*spec_path/assertions
+//! GET /api/v1/repos/:id/specs/:path/assertions
 //!   Returns the results persisted by the last push's knowledge-graph check
 //!   for a spec, so the inline spec view can show the last checked state.
 
@@ -118,18 +118,18 @@ pub struct StoredAssertionResultResponse {
     pub checked_at: u64,
 }
 
-/// Response for GET /api/v1/repos/:id/specs/*spec_path/assertions.
+/// Response for GET /api/v1/repos/:id/specs/:path/assertions.
 #[derive(Serialize)]
 pub struct StoredAssertionsResponse {
     pub assertions: Vec<StoredAssertionResultResponse>,
 }
 
-/// GET /api/v1/repos/:id/specs/*spec_path/assertions
+/// GET /api/v1/repos/:id/specs/:path/assertions
 ///
 /// Returns the assertion results persisted by the last push's post-extraction
-/// check for the given spec. The spec path is the wildcard tail after
-/// `/specs/` (URL-decoded by axum), e.g. for
-/// `/api/v1/repos/r1/specs/system/architecture.md/assertions` the spec path
+/// check for the given spec. The spec path is URL-encoded into the `:path`
+/// segment (same convention as `GET /api/v1/specs/:path`), e.g. for
+/// `/api/v1/repos/r1/specs/system%2Farchitecture.md/assertions` the spec path
 /// is `system/architecture.md`.
 pub async fn get_spec_assertion_results(
     State(state): State<Arc<AppState>>,
@@ -142,6 +142,13 @@ pub async fn get_spec_assertion_results(
         .await
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+
+    // Stored spec paths are canonical (no `specs/` prefix — same identity as
+    // the spec ledger); tolerate a caller that sends the prefixed form.
+    let spec_path = spec_path
+        .strip_prefix("specs/")
+        .unwrap_or(&spec_path)
+        .to_string();
 
     let results = state
         .spec_assertion_results
