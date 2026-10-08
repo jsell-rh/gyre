@@ -460,6 +460,18 @@ impl MetaSpecBindingRepository for SqliteStorage {
         .await?
     }
 
+    async fn list_all(&self) -> Result<Vec<MetaSpecBinding>> {
+        let pool = Arc::clone(&self.pool);
+        tokio::task::spawn_blocking(move || -> Result<Vec<MetaSpecBinding>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = meta_spec_bindings::table
+                .load::<MetaSpecBindingRow>(&mut *conn)
+                .context("list all meta_spec_bindings")?;
+            Ok(rows.into_iter().map(|r| r.into_domain()).collect())
+        })
+        .await?
+    }
+
     async fn delete(&self, id: &Id) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let id_str = id.as_str().to_string();

@@ -306,6 +306,164 @@ pub async fn load_prompt_set_record(
     serde_json::from_str(&json).ok()
 }
 
+// ---------------------------------------------------------------------------
+// Stale pin detection (agent-runtime.md §2 Stale Pin Detection)
+// ---------------------------------------------------------------------------
+
+/// Run one pass of stale-pin detection: for every spec-level binding, compare
+/// its `pinned_version` against the meta-spec's current `version`. On mismatch,
+/// create a priority-6 `MetaSpecDrift` notification for the workspace's
+/// Admin/Owner members ("Meta-spec drift alert": review and update the pin).
+///
+/// Idempotent per (spec, meta-spec): a dedup key in the kv store gates repeat
+/// notifications, cleared when the pin is updated to the current version.
+pub async fn detect_stale_pins(state: &Arc<AppState>) -> anyhow::Result<()> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let bindings = state.meta_spec_bindings.list_all().await?;
+    if bindings.is_empty() {
+        return Ok(());
+    }
+
+    let mut stale_count = 0u32;
+    for binding in bindings {
+        let Some(ms) = state
+            .meta_specs
+            .get_by_id(&binding.meta_spec_id)
+            .await?
+        else {
+            // Referenced meta-spec deleted — the delete guard blocks this for
+            // new deletes, but historical rows may exist. Nothing to compare.
+            continue;
+        };
+        if binding.pinned_version >= ms.version {
+            continue; // current (or ahead — future-proof against version resets)
+        }
+
+        let dedup_key = format!("stale_pin:{}:{}", binding.spec_id, ms.id.as_str());
+        let already_notified = state
+            .kv_store
+            .kv_get("meta_spec_stale_pins", &dedup_key)
+            .await?
+            .is_some();
+        if already_notified {
+            continue;
+        }
+
+        notify_stale_pin(state, &binding, &ms, now).await;
+        state
+            .kv_store
+            .kv_set("meta_spec_stale_pins", &dedup_key, now.to_string())
+            .await?;
+        stale_count += 1;
+    }
+
+    if stale_count > 0 {
+        tracing::info!(
+            stale_pins = stale_count,
+            "stale pin detection: created drift notifications"
+        );
+    }
+    Ok(())
+}
+
+/// Create the "Meta-spec drift alert" notification for the workspace that owns
+/// the bound spec (resolved via the spec ledger), addressed to Admin/Owner
+/// members. Falls back to the meta-spec's own workspace when the spec ledger
+/// has no workspace recorded.
+async fn notify_stale_pin(
+    state: &Arc<AppState>,
+    binding: &gyre_domain::MetaSpecBinding,
+    ms: &MetaSpec,
+    now: u64,
+) {
+    // Resolve the workspace that owns the bound spec.
+    let ledger_ws = state
+        .spec_ledger
+        .find_by_path(&binding.spec_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|e| e.workspace_id);
+    let workspace_id = match ledger_ws {
+        Some(ws) => Id::new(ws),
+        None => match &ms.scope_id {
+            // Workspace-scoped meta-spec: notify its own workspace.
+            Some(ws) => Id::new(ws.clone()),
+            // Global meta-spec bound by a spec with no ledger workspace —
+            // no addressable workspace, skip (logged).
+            None => {
+                tracing::warn!(
+                    spec = %binding.spec_id,
+                    meta_spec = %ms.name,
+                    "stale pin: cannot resolve workspace for notification"
+                );
+                return;
+            }
+        },
+    };
+
+    // Tenant for the notification record.
+    let tenant_id = match state.workspaces.find_by_id(&workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        _ => return,
+    };
+
+    let members = match state
+        .workspace_memberships
+        .list_by_workspace(&workspace_id)
+        .await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("stale pin detection: failed to list members: {e}");
+            return;
+        }
+    };
+
+    for member in members {
+        if !matches!(
+            member.role,
+            gyre_domain::WorkspaceRole::Admin | gyre_domain::WorkspaceRole::Owner
+        ) {
+            continue;
+        }
+        let mut notif = gyre_common::Notification::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            workspace_id.clone(),
+            member.user_id.clone(),
+            gyre_common::NotificationType::MetaSpecDrift,
+            format!(
+                "Meta-spec drift alert: '{}' uses {} v{}, but v{} is available. Review and update pin.",
+                binding.spec_id, ms.name, binding.pinned_version, ms.version
+            ),
+            &tenant_id,
+            now as i64,
+        );
+        notif.body = Some(
+            serde_json::json!({
+                "spec_id": binding.spec_id,
+                "meta_spec_id": ms.id.as_str(),
+                "meta_spec_name": ms.name,
+                "kind": ms.kind.as_str(),
+                "pinned_version": binding.pinned_version,
+                "current_version": ms.version,
+            })
+            .to_string(),
+        );
+        notif.entity_ref = Some(binding.spec_id.clone());
+        if let Err(e) = state.notifications.create(&notif).await {
+            tracing::warn!(
+                user = %member.user_id,
+                "stale pin detection: failed to create notification: {e}"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

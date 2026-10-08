@@ -67,6 +67,14 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
+    // Hourly stale-pin detection: specs pinning old meta-spec versions get
+    // priority-6 MetaSpecDrift notifications (agent-runtime.md §2).
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "meta_spec_stale_pin_check".to_string(),
+        Arc::clone(&state),
+    );
+
     // Background tasks.
     spawn_stale_agent_detector(state.clone());
     spawn_stale_peer_detector(state.clone());
