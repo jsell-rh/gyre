@@ -16,5 +16,4 @@
 # --- unowned; fix opportunistically when touching these files ---
 crates/gyre-server/src/api/specs.rs:282       # &e.current_sha[..8] — hex sha
 crates/gyre-server/src/explorer_ws.rs:2882    # &raw_preview[..500] — JSON preview
-crates/gyre-server/src/explorer_ws.rs:3437    # &d[..100] — doc_comment preview
 crates/gyre-server/src/pre_accept.rs:81       # &sample[..72] — commit message sample
