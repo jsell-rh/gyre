@@ -335,6 +335,10 @@ pub struct AppState {
     pub teams: Arc<dyn TeamRepository>,
     /// Notification repository (M22.8).
     pub notifications: Arc<dyn NotificationRepository>,
+    /// Tenant invitation repository (task-110, user-management.md).
+    pub tenant_invitations: Arc<dyn gyre_ports::TenantInvitationRepository>,
+    /// Workspace invitation repository (task-110, user-management.md).
+    pub workspace_invitations: Arc<dyn gyre_ports::WorkspaceInvitationRepository>,
     /// WireGuard coordination plane configuration (M26.1).
     pub wg_config: WireGuardConfig,
     /// Knowledge graph store — nodes, edges, and architectural deltas (realized-model).
@@ -665,6 +669,27 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // WebSocket ticket endpoint: issues short-lived, single-use tokens.
         // Prevents leaking real auth tokens in WebSocket URL query parameters.
         .route("/api/v1/ws-ticket", post(explorer_ws::issue_ws_ticket))
+        // Invitation magic-link acceptance (task-110, user-management.md
+        // §Tenant-Level User Onboarding): the 256-bit CSPRNG token in the
+        // URL is the auth factor — the invitee has no credentials yet, so
+        // these cannot run behind require_auth_middleware. The handler
+        // validates the token hash, single-use status, and expiry.
+        .route(
+            "/api/v1/invite/:token/accept",
+            post(api::invitations::accept_tenant_invitation),
+        )
+        .route(
+            "/api/v1/invite/:token/decline",
+            post(api::invitations::decline_tenant_invitation),
+        )
+        .route(
+            "/api/v1/workspaces/invitations/:token/accept",
+            post(api::invitations::accept_workspace_invitation),
+        )
+        .route(
+            "/api/v1/workspaces/invitations/:token/decline",
+            post(api::invitations::decline_workspace_invitation),
+        )
         // Explorer WebSocket (explorer-implementation.md).
         // WebSocket upgrades cannot go through body-reading ABAC middleware,
         // so auth + repo-scoped tenant checks are enforced inside the handler.
@@ -986,6 +1011,14 @@ pub fn build_state(
         budget_configs: store!(
             dyn BudgetRepository,
             mem::MemBudgetConfigRepository::default()
+        ),
+        tenant_invitations: store!(
+            dyn gyre_ports::TenantInvitationRepository,
+            mem::MemTenantInvitationRepository::default()
+        ),
+        workspace_invitations: store!(
+            dyn gyre_ports::WorkspaceInvitationRepository,
+            mem::MemWorkspaceInvitationRepository::default()
         ),
         budget_usages: store!(
             dyn BudgetUsageRepository,

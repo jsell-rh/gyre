@@ -20,6 +20,7 @@ pub mod container_audit;
 pub mod conversation;
 pub mod dependency;
 pub mod graph;
+pub mod invitation;
 pub mod key_binding;
 pub mod kv_store;
 pub mod llm_config;
