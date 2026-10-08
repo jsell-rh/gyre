@@ -47,11 +47,22 @@
   // 409 conflict body from the last save attempt, or null (HSI §7).
   let specConflict = $state(null);
 
-  // ── Graph data (lazy-loaded from graphPredict) ─────────────────────────────
+  // ── Graph data (lazy-loaded) ───────────────────────────────────────────────
+  // The fast preview combines the repo's current graph (real nodes/edges from
+  // the knowledge graph) with graphPredict ghost overlays (ui-layout.md §2
+  // Editor Split — Phase 1 fast preview; Phase 2 thorough preview computes a
+  // real ArchitecturalDelta server-side).
   let graphNodes = $state([]);
   let graphEdges = $state([]);
   let graphLoading = $state(false);
   let graphLoaded = $state(false);
+  // Ghost overlays derived from graphPredict predictions — same normalization
+  // DetailPanel uses (predictions → { nodeId, type }).
+  let derivedOverlays = $state([]);
+
+  // Effective overlays: caller-supplied ghosts (e.g. DetailPanel arch tab)
+  // take precedence; otherwise the locally predicted ones.
+  let overlays = $derived(ghostOverlays.length ? ghostOverlays : derivedOverlays);
 
   $effect(() => {
     // Load graph once when repoId is available
@@ -64,15 +75,72 @@
     if (!repoId) return;
     graphLoading = true;
     try {
-      const result = await api.graphPredict(repoId, {
-        spec_path: specPath,
-        overlays: ghostOverlays,
-      });
-      graphNodes = result?.nodes ?? [];
-      graphEdges = result?.edges ?? [];
-      graphLoaded = true;
-    } catch {
-      // graceful: show empty canvas; user can still edit
+      // Base graph: real nodes/edges from the knowledge graph. The spec-path
+      // filter mirrors the DetailPanel architecture tab: nodes governed by
+      // this spec plus edges between them. Falls back to the full graph when
+      // no node carries this spec_path (e.g. new/unlinked specs).
+      let nodes = [];
+      let edges = [];
+      try {
+        const graph = await api.repoGraph(repoId);
+        const allNodes = graph?.nodes ?? [];
+        const allEdges = graph?.edges ?? [];
+        const specNodes = specPath ? allNodes.filter((n) => n.spec_path === specPath) : allNodes;
+        if (specNodes.length) {
+          const specNodeIds = new Set(specNodes.map((n) => n.id));
+          edges = allEdges.filter(
+            (e) => specNodeIds.has(e.source_id ?? e.source) && specNodeIds.has(e.target_id ?? e.target),
+          );
+        } else {
+          specNodes.push(...allNodes);
+          edges = allEdges;
+        }
+        nodes = specNodes;
+      } catch {
+        // graceful: fall through to predictions only
+      }
+
+      // Fast preview: ask the LLM what the draft would change structurally,
+      // and render those predictions as ghost overlays on the real graph.
+      // Prediction-only nodes (LLM-invented names) are appended so the
+      // canvas isn't empty for specs with no graph linkage yet.
+      try {
+        const result = await api.graphPredict(repoId, {
+          spec_path: specPath,
+          draft_content: content || undefined,
+        });
+        const predictions = result?.predictions ?? result?.overlays ?? [];
+        const predOverlays = predictions
+          .map((p) => ({
+            nodeId: p.node_id ?? p.nodeId ?? p.name ?? p.qualified_name,
+            type: p.change_type ?? p.type ?? 'modified',
+          }))
+          .filter((p) => p.nodeId);
+        derivedOverlays = predOverlays;
+        if (nodes.length) {
+          // Match predictions to existing graph nodes by name; append
+          // synthetic ghost nodes for unmatched predictions.
+          const byName = new Map(nodes.map((n) => [n.name ?? n.label ?? n.id, n]));
+          const synthetic = [];
+          for (const p of predOverlays) {
+            const existing = byName.get(p.nodeId);
+            if (!existing && p.type !== 'removed') {
+              synthetic.push({ id: p.nodeId, name: p.nodeId, node_type: p.node_type ?? 'type' });
+            }
+          }
+          nodes = [...nodes, ...synthetic];
+        } else {
+          nodes = predOverlays
+            .filter((p) => p.type !== 'removed')
+            .map((p) => ({ id: p.nodeId, name: p.nodeId, node_type: 'type' }));
+          edges = [];
+        }
+      } catch {
+        // graceful: show base graph without ghost overlays; user can still edit
+      }
+
+      graphNodes = nodes;
+      graphEdges = edges;
       graphLoaded = true;
     } finally {
       graphLoading = false;
@@ -119,6 +187,37 @@
           for (const line of lines) {
             if (!line.startsWith('data: ')) continue;
             const raw = line.slice(6);
+            if (raw === { done = true; break; }
+            try {
+              const parsed = JSON.parse(raw);
+              if (parsed.event === 'partial' || parsed.type === 'partial') {
+                llmExplanation += parsed.text ?? parsed.explanation ?? '';
+              } else if (parsed.event === 'complete' || parsed.type === 'complete') {
+                llmSuggestion = {
+                  diff: parsed.diff ?? [],
+                  explanation: parsed.explanation ?? llmExplanation,
+                };
+                done = true; break;
+              } else if (parsed.event === 'error' || parsed.type === 'error') {
+                throw new Error(parsed.message ?? 'LLM error');
+              }
+            } catch (pe) {
+              if (pe.message && !pe.message.startsWith('Unexpected token')) throw pe;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      toastError($t('editor_split.llm_assist_failed', { values: { error: e.message } }));
+    } finally {
+      llmStreaming = false;
+    }
+  }
+  }
+
+  // Edit: copy the suggested text into the editor for manual refinement
+  // (ui-layout.md §3 LLM-Assisted Spec Editing step 5).
+  function editSuggestion() {
             if (raw === '[DONE]') { done = true; break; }
             try {
               const parsed = JSON.parse(raw);
