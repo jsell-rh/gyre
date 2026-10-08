@@ -1209,6 +1209,53 @@ pub async fn briefing_ask(
     let chunks: Vec<String> = stream.filter_map(|r| async { r.ok() }).collect().await;
     let full_text = chunks.join("");
 
+    // Budget tracking (ui-layout.md §3, platform-model.md §Budget Tracking):
+    // the LlmPort does not return actual usage, so estimate — ~4 chars per
+    // token for prompts (input) and the produced text (output).
+    let estimated_input = (user_prompt.len() + system_prompt.len()) / 4;
+    let estimated_output = full_text.len() / 4;
+    let estimated_tokens = (estimated_input + estimated_output) as f64;
+    let cost_entry = gyre_domain::CostEntry::new(
+        new_id(),
+        Id::new(caller.agent_id.clone()),
+        None,
+        "llm_query",
+        estimated_tokens,
+        "tokens",
+        now_secs(),
+    );
+    if let Err(e) = state.costs.record(&cost_entry).await {
+        tracing::warn!("Failed to record briefing/ask cost entry: {e}");
+    }
+
+    // Per-call budget record + workspace/tenant counter increment
+    // (platform-model.md §Budget Tracking). User-initiated query:
+    // agent_id/task_id/repo_id are None.
+    let ws_for_budget = state.workspaces.find_by_id(&workspace_id_obj).await.ok().flatten();
+    if let Some(ws) = ws_for_budget {
+        super::budget::record_llm_call_usage(
+            &state,
+            &super::budget::LlmCallUsage {
+                tenant_id: ws.tenant_id.clone(),
+                workspace_id: ws.id.clone(),
+                repo_id: None,
+                agent_id: None,
+                task_id: None,
+                usage_type: "llm_query".to_string(),
+                input_tokens: estimated_input as u64,
+                output_tokens: estimated_output as u64,
+                cost_usd: 0.0,
+                model: model.clone(),
+            },
+        )
+        .await;
+    } else {
+        tracing::warn!(
+            workspace_id = %id,
+            "briefing/ask budget recording skipped: workspace not found"
+        );
+    }
+
     let mut events: Vec<Result<Event, std::convert::Infallible>> = Vec::new();
     for chunk in &chunks {
         let data = serde_json::to_string(&serde_json::json!({"text": chunk})).unwrap_or_default();
