@@ -1861,3 +1861,139 @@ async fn test_mcp_graph_nodes() {
     let content = body["result"]["content"][0]["text"].as_str().unwrap_or("");
     assert!(content.contains("AuthService"));
 }
+
+/// MCP search tool does full-text search across the graph (§9 fifth tool).
+#[tokio::test]
+async fn test_mcp_graph_search() {
+    let ctx = Ctx::new().await;
+    let repo_id = create_repo(&ctx, "proj-mcp-search").await;
+
+    let mut n1 = make_node(&repo_id, "AuthService", NodeType::Type);
+    n1.doc_comment = Some("Handles bearer token validation".to_string());
+    let n2 = make_node(&repo_id, "UnrelatedThing", NodeType::Type);
+    ctx.state.graph_store.create_node(n1).await.unwrap();
+    ctx.state.graph_store.create_node(n2).await.unwrap();
+
+    let resp = ctx
+        .post_json(
+            "/mcp",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "search",
+                    "arguments": { "repo_id": repo_id, "query": "auth" }
+                }
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert!(
+        body["result"]["isError"].is_null(),
+        "search must succeed, got: {body}"
+    );
+    let content = body["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        content.contains("AuthService"),
+        "name match should be returned, got: {content}"
+    );
+    assert!(
+        !content.contains("UnrelatedThing"),
+        "non-matching node must not be returned, got: {content}"
+    );
+
+    // Doc-comment text is also searchable.
+    let resp = ctx
+        .post_json(
+            "/mcp",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "search",
+                    "arguments": { "repo_id": repo_id, "query": "bearer token" }
+                }
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let content = body["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        content.contains("AuthService"),
+        "doc-comment match should be returned, got: {content}"
+    );
+
+    // Missing required field is a tool error, not a panic.
+    let resp = ctx
+        .post_json(
+            "/mcp",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "search",
+                    "arguments": { "repo_id": repo_id }
+                }
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let content = body["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        content.contains("missing required field: query"),
+        "missing query must error, got: {content}"
+    );
+}
+
+/// MCP graph_edges tool returns edges filtered by node.
+#[tokio::test]
+async fn test_mcp_graph_edges() {
+    let ctx = Ctx::new().await;
+    let repo_id = create_repo(&ctx, "proj-mcp-edges").await;
+
+    let n1 = make_node(&repo_id, "caller_fn", NodeType::Function);
+    let n2 = make_node(&repo_id, "callee_fn", NodeType::Function);
+    let n3 = make_node(&repo_id, "orphan_fn", NodeType::Function);
+    ctx.state.graph_store.create_node(n1.clone()).await.unwrap();
+    ctx.state.graph_store.create_node(n2.clone()).await.unwrap();
+    ctx.state.graph_store.create_node(n3).await.unwrap();
+
+    let e1 = make_edge(&repo_id, &n1.id, &n2.id, EdgeType::Calls);
+    ctx.state.graph_store.create_edge(e1).await.unwrap();
+
+    let resp = ctx
+        .post_json(
+            "/mcp",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_edges",
+                    "arguments": { "repo_id": repo_id, "node_id": n1.id.to_string() }
+                }
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    let content = body["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        content.contains("1 edges"),
+        "one edge should be returned, got: {content}"
+    );
+    assert!(
+        content.contains(n2.id.to_string()),
+        "edge target should be included, got: {content}"
+    );
+    assert!(
+        content.contains("\"calls\""),
+        "edge type should be reported, got: {content}"
+    );
+}

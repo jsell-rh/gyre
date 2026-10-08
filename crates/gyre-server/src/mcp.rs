@@ -463,6 +463,19 @@ fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "search",
+                "description": "Full-text search across a repo's knowledge graph. Searches node names, qualified names, doc comments, file paths, and spec paths. Results are ranked (exact name > prefix > substring).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_id": { "type": "string", "description": "Repository ID" },
+                        "query": { "type": "string", "description": "Search query (case-insensitive substring)" },
+                        "limit": { "type": "number", "description": "Max results to return (default 30, max 50)" }
+                    },
+                    "required": ["repo_id", "query"]
+                }
+            },
+            {
                 "name": "node_provenance",
                 "description": "Get provenance (creation/modification history) for specific nodes. Shows who created or modified the node, when, and in which commit.",
                 "inputSchema": {
@@ -2309,6 +2322,41 @@ async fn handle_graph_edges(state: &AppState, args: &Value) -> Value {
     ))
 }
 
+/// MCP tool handler for `search` — graph full-text search (explorer-implementation.md §9).
+/// Case-insensitive substring search over node name, qualified_name, file_path,
+/// doc_comment and spec_path, ranked by relevance. Soft-deleted nodes are excluded.
+async fn handle_graph_search(state: &AppState, args: &Value) -> Value {
+    let repo_id = match require_str(args, "repo_id") {
+        Ok(r) => r.to_string(),
+        Err(_) => return tool_error("missing required field: repo_id"),
+    };
+    let query = match require_str(args, "query") {
+        Ok(q) => q.to_string(),
+        Err(_) => return tool_error("missing required field: query"),
+    };
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(30)
+        .min(50) as usize; // Cap at 50 to limit conversation history bloat
+
+    let rid = Id::new(&repo_id);
+    let nodes = match state.graph_store.list_nodes(&rid, None).await {
+        Ok(n) => n,
+        Err(e) => return tool_error(format!("Failed to load graph nodes: {e}")),
+    };
+
+    let hits = gyre_domain::view_query_resolver::search_graph_nodes(&query, &nodes, limit);
+    if hits.is_empty() {
+        return tool_result(format!("No results for '{query}'"));
+    }
+    tool_result(format!(
+        "{} result(s):\n{}",
+        hits.len(),
+        serde_json::to_string_pretty(&hits).unwrap_or_default()
+    ))
+}
+
 async fn handle_node_provenance(state: &AppState, args: &Value) -> Value {
     let repo_id = match require_str(args, "repo_id") {
         Ok(r) => r.to_string(),
@@ -3033,6 +3081,7 @@ pub async fn mcp_handler(
                 "graph_query_dryrun" => handle_graph_query_dryrun(&state, &args).await,
                 "graph_nodes" => handle_graph_nodes(&state, &args).await,
                 "graph_edges" => handle_graph_edges(&state, &args).await,
+                "search" => handle_graph_search(&state, &args).await,
                 "node_provenance" => handle_node_provenance(&state, &args).await,
                 "graph_concept" => handle_graph_concept(&state, &args).await,
                 "spec_assist" => handle_spec_assist(&state, &args, &auth).await,
@@ -3151,7 +3200,12 @@ mod tests {
         assert!(names.contains(&"gyre_record_activity"));
         assert!(names.contains(&"gyre_agent_heartbeat"));
         assert!(names.contains(&"gyre_agent_complete"));
-        assert!(names.contains(&"gyre_search"));
+        // §9 explorer agent tools — all five must be exposed over MCP.
+        assert!(names.contains(&"graph_summary"));
+        assert!(names.contains(&"graph_query_dryrun"));
+        assert!(names.contains(&"graph_nodes"));
+        assert!(names.contains(&"graph_edges"));
+        assert!(names.contains(&"search"));
         assert!(names.contains(&"node_provenance"));
     }
 
