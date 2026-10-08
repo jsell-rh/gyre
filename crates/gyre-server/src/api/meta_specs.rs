@@ -230,6 +230,19 @@ pub async fn put_meta_spec_set(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("workspace '{workspace_id}' not found")))?;
 
+    // Load the OLD set before upsert — the diff between old and new pinned
+    // SHAs is the reconciliation trigger (meta-spec-reconciliation.md §6:
+    // "Reconciliation is triggered when a workspace's meta-spec set is
+    // updated to reference a new version of a meta-spec").
+    let old_set = match state.meta_spec_sets.get(&Id::new(&workspace_id)).await? {
+        Some(json) => serde_json::from_str::<MetaSpecSet>(&json)
+            .map_err(|e| ApiError::Internal(anyhow::anyhow!("corrupt meta_spec_set: {e}")))?,
+        None => MetaSpecSet {
+            workspace_id: workspace_id.clone(),
+            ..Default::default()
+        },
+    };
+
     let set = MetaSpecSet {
         workspace_id: workspace_id.clone(),
         personas: req.personas,
@@ -244,6 +257,25 @@ pub async fn put_meta_spec_set(
         .meta_spec_sets
         .upsert(&Id::new(&workspace_id), &json)
         .await?;
+
+    // §6: only version changes (new or re-pinned entries) trigger
+    // reconciliation — an identical re-PUT is a no-op.
+    let changed_paths = crate::reconciliation::diff_meta_spec_set(&old_set, &set);
+    if !changed_paths.is_empty() {
+        let summary = crate::reconciliation::run_reconciliation(
+            &state,
+            &Id::new(&workspace_id),
+            &changed_paths,
+        )
+        .await;
+        tracing::info!(
+            workspace_id = %workspace_id,
+            changed = changed_paths.len(),
+            created = summary.tasks_created,
+            skipped = summary.tasks_skipped,
+            "meta-spec-set update triggered reconciliation"
+        );
+    }
 
     Ok((StatusCode::OK, Json(set)))
 }
@@ -1069,7 +1101,8 @@ pub async fn update_meta_spec_registry(
     if let Some(name) = req.name {
         ms.name = name;
     }
-    if let Some(prompt) = req.prompt {
+    if let Some(prompt) = &req.prompt {
+        let prompt = prompt.clone();
         ms.content_hash = sha256_hex(&prompt);
         ms.prompt = prompt;
         // Spec §2: editing content resets approval to Pending until re-reviewed.
@@ -1097,6 +1130,43 @@ pub async fn update_meta_spec_registry(
         .update(&ms)
         .await
         .map_err(ApiError::Internal)?;
+
+    // Meta-spec change approved and rolled out (§6 trigger): content changed
+    // (new version) AND this update approves it. Every workspace whose
+    // meta-spec set binds this meta-spec reconciles.
+    if ms.approval_status == MetaSpecApprovalStatus::Approved && req.prompt.is_some() {
+        let spec_path = ms.name.clone();
+        let workspaces = state.workspaces.list().await.unwrap_or_default();
+        for ws in &workspaces {
+            let set_json = state.meta_spec_sets.get(&ws.id).await.ok().flatten();
+            let binds = set_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str::<MetaSpecSet>(j).ok())
+                .map(|s| {
+                    s.personas.values().any(|e| e.path == spec_path)
+                        || s.principles.iter().any(|e| e.path == spec_path)
+                        || s.standards.iter().any(|e| e.path == spec_path)
+                        || s.process.iter().any(|e| e.path == spec_path)
+                })
+                .unwrap_or(false);
+            if binds {
+                let summary = crate::reconciliation::run_reconciliation(
+                    &state,
+                    &ws.id,
+                    &[spec_path.clone()],
+                )
+                .await;
+                tracing::info!(
+                    workspace_id = %ws.id,
+                    meta_spec = %spec_path,
+                    created = summary.tasks_created,
+                    skipped = summary.tasks_skipped,
+                    "meta-spec approval triggered reconciliation"
+                );
+            }
+        }
+    }
+
     Ok(Json(ms))
 }
 
