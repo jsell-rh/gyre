@@ -2247,6 +2247,23 @@ async fn handle_graph_edges(state: &AppState, args: &Value) -> Value {
     };
     let rid = Id::new(&repo_id);
 
+    // Node ID → name map so edge payloads carry human-readable endpoints
+    // (§9: the agent reasons about edges by node name, not raw UUIDs).
+    let node_names: std::collections::HashMap<String, String> =
+        match state.graph_store.list_nodes(&rid, None).await {
+            Ok(ns) => ns
+                .into_iter()
+                .map(|n| (n.id.to_string(), n.name))
+                .collect(),
+            Err(e) => return tool_error(format!("Failed: {e}")),
+        };
+    let name_of = |id: &Id| -> String {
+        node_names
+            .get(&id.to_string())
+            .cloned()
+            .unwrap_or_else(|| id.to_string())
+    };
+
     // If node_id is specified, get edges for that node
     if let Some(node_id) = get_str(args, "node_id") {
         let nid = Id::new(node_id);
@@ -2261,6 +2278,8 @@ async fn handle_graph_edges(state: &AppState, args: &Value) -> Value {
                             "id": e.id.to_string(),
                             "source_id": e.source_id.to_string(),
                             "target_id": e.target_id.to_string(),
+                            "source_name": name_of(&e.source_id),
+                            "target_name": name_of(&e.target_id),
                             "edge_type": format!("{:?}", e.edge_type).to_lowercase(),
                         })
                     })
@@ -2310,6 +2329,8 @@ async fn handle_graph_edges(state: &AppState, args: &Value) -> Value {
                 "id": e.id.to_string(),
                 "source_id": e.source_id.to_string(),
                 "target_id": e.target_id.to_string(),
+                "source_name": name_of(&e.source_id),
+                "target_name": name_of(&e.target_id),
                 "edge_type": format!("{:?}", e.edge_type).to_lowercase(),
             })
         })
