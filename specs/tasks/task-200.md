@@ -2,10 +2,10 @@
 title: "Message bus — per-kind payload schema validation (reject invalid payloads with 400)"
 spec_ref: "message-bus.md §Payload Schemas"
 depends_on: []
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "message-bus.md §Payload Schemas"
-commits: ["54083114e2db94a2b0d2ee72422a804e2743c0f6", "eecd06dc7285c14d87c70a6baf3bea15ee14a1ea", "e71d72fd103f5c0bfa657f5a4133a85e0ff89bd0", "c0cbeac214b48bb791bc3a64b0ede2d81a044083", "41846588861b3ba22bc04077ce768bd98cf8cf8c", "9764477d2fcb5226bc866f6ff8c143c39bd715ca"]
+commits: ["62c07303a581c5916933061bbf21423941f73d78", "28457e9f7e8f546642e68663f17586c8835723d8", "0f826ab7da2069ac9abd2e46c6b30f7ce3160583", "3595e6533e94a7e7ae61861a591b381a7c9dbf59", "98b5f543f1577839967b8175ff8609b8c62527e0", "b414c50218e10a26b26defc6bdb40bed5c6c80f4"]
 ---
 
 ## Spec Excerpt
@@ -119,3 +119,11 @@ There is no `validate_payload` / schema module. Missing-required-field enforceme
 - Both receipt paths enforce it before sign/store: REST `POST /api/v1/workspaces/:id/messages` rejects missing/null required fields, absent payloads for required kinds, and non-object payloads with **400** naming the field (`api/messages.rs:259`); MCP `gyre_message_send` returns a tool error for the same with nothing persisted (`mcp.rs:1948`).
 - Explicit JSON `null` payload is normalized to "absent" inside the validator, so the REST (`None`) and MCP (`Some(Null)`) paths give identical verdicts for the same wire payload; a null value for a required key still fails.
 - Tests anchor the enforcement on both paths (HTTP status + reason content + MCP persistence counts) and were mutation-probed: each fails when its validation call is removed. Verified in review `specs/reviews/task-200.md`.
+
+## Repair (rejected integration 848395b, re-land attempt 10)
+
+Two defects, both in the re-land's bookkeeping — `git diff 848395b..HEAD -- crates/` is empty, so the product surface is byte-identical to the reviewed candidate:
+
+Those six candidate-lineage SHAs (`9764477`…`5408311`) are kept out of the `commits:` frontmatter on purpose: they are dangling objects reachable in no ref, so a fresh clone cannot resolve them and any automated scoping over the list would break. The re-land lineage (`62c0730`…`b414c50`, six commits, same subjects, `crates/`-identical trees modulo dev-loop machinery) is what the frontmatter records.
+
+Verification: `git diff --check f315b6f..HEAD` clean (after committing this repair); `bash scripts/check-task-commit-attribution.sh` exits 0 on the repaired tree; targeted suites green (`gyre-common message` 29 passed; `gyre-server api::messages` and `mcp_message_send` — see review doc). No gate weakened, no exemption entry added (exemption file untouched at 3), no test deleted.

@@ -14,7 +14,7 @@ Test runs (this checkout, branch `devloop/task-200/attempt-9` at `4d8d4a9`):
 - `cargo test -p gyre-server --lib "message"` → **36 passed, 0 failed** (broad sweep: signing, ack, telemetry, ws, mcp).
 - `cargo test -p gyre-server --test api_integration agent_messages_send_and_receive` → **FAILED — pre-existing environment flake, not this task**: same failure reproduces at the pre-task-200 baseline `9764477~1` and with task-200 changes stashed (reqwest `Canceled`/`IncompleteMessage` on `POST /api/v1/agents` at api_integration.rs:82, i.e. during agent *creation*, before any message is sent; no causal path through payload validation). The test itself sends a *valid* payload (`task_assignment` with `task_id`), so it exercises acceptance, not rejection.
 - Mutation probes (restore verified by `git status --short` clean after each):
-  - REST: replace the `kind.validate_payload(req.payload.as_ref())` call in `api/messages.rs:259` with a constant `Ok` → `send_message_rejects_payload_missing_required_field` **FAILS**. 
+  - REST: replace the `kind.validate_payload(req.payload.as_ref())` call in `api/messages.rs:259` with a constant `Ok` → `send_message_rejects_payload_missing_required_field` **FAILS**.
   - MCP: replace the `kind.validate_payload(args.get("payload"))` call in `mcp.rs:1948` with a constant `Ok` → `mcp_message_send_rejects_payload_missing_required_field` **FAILS**.
   Both tests are genuinely anchored to the enforcement, not to incidental behavior.
 - `bash scripts/check-arch.sh` → OK. `bash scripts/check-mcp-write-tools.sh` → OK. `bash scripts/check-dead-message-kinds.sh` → OK. `bash scripts/check-inert-enforcement.sh` → OK. `bash scripts/check-task-commit-attribution.sh` → OK (all six product-surface commits listed in frontmatter).
