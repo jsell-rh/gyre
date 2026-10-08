@@ -557,6 +557,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn budget_warning_emitted_when_threshold_crossed() {
+        // analytics.md §Auto-Emitted Events: budget.warning carries
+        // workspace_id, metric, threshold_pct. Emitted when a workspace
+        // budget metric crosses 80% of its configured limit.
+        let state = crate::mem::test_state();
+        state
+            .budget_configs
+            .set_config(
+                &super::workspace_key("proj-warn"),
+                &gyre_domain::BudgetConfig {
+                    max_concurrent_agents: Some(10),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // 8 active agents = 80% of 10 → crosses the warning threshold.
+        for _ in 0..8 {
+            super::increment_active_agents(&state, "proj-warn").await;
+        }
+
+        // Any spawn-budget check now evaluates the threshold.
+        let result = super::check_spawn_budget(&state, "proj-warn").await;
+        assert!(result.is_ok(), "8/10 agents is under the hard limit");
+
+        let events = state
+            .analytics
+            .query(Some("budget.warning"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one budget.warning event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["workspace_id"], "proj-warn");
+        assert_eq!(ev.properties["metric"], "agents");
+        assert_eq!(ev.properties["threshold_pct"], 80.0);
+        // Scope field: the event is filterable by workspace.
+        assert_eq!(ev.workspace_id.as_deref(), Some("proj-warn"));
+    }
+
+    #[tokio::test]
+    async fn budget_warning_not_emitted_below_threshold() {
+        let state = crate::mem::test_state();
+        state
+            .budget_configs
+            .set_config(
+                &super::workspace_key("proj-quiet"),
+                &gyre_domain::BudgetConfig {
+                    max_concurrent_agents: Some(10),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // 7 active agents = 70% of 10 → below the 80% threshold.
+        for _ in 0..7 {
+            super::increment_active_agents(&state, "proj-quiet").await;
+        }
+        let result = super::check_spawn_budget(&state, "proj-quiet").await;
+        assert!(result.is_ok());
+
+        let events = state
+            .analytics
+            .query(Some("budget.warning"), None, 10)
+            .await
+            .unwrap();
+        assert!(
+            events.is_empty(),
+            "no budget.warning below the 80% threshold"
+        );
+    }
+
+    #[tokio::test]
     async fn cascade_validation_rejects_workspace_exceeding_tenant() {
         let state = crate::mem::test_state();
         // Set tenant limit.

@@ -2315,6 +2315,117 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
+    // ─── Auto-emitted analytics events (analytics.md §Auto-Emitted Events) ────
+
+    #[tokio::test]
+    async fn spawn_emits_agent_spawned_analytics_event() {
+        // agent.spawned must carry agent_id, task_id, compute_target, persona.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Spawn analytics").await;
+        let (_, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/analytics-spawn").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let events = state
+            .analytics
+            .query(Some("agent.spawned"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one agent.spawned event expected");
+        let ev = &events[0];
+        assert_eq!(ev.agent_id.as_deref(), Some(agent_id.as_str()));
+        assert_eq!(ev.properties["task_id"], task_id);
+        assert!(
+            ev.properties["compute_target"].as_str().is_some_and(|t| !t.is_empty()),
+            "compute_target must be a non-empty string"
+        );
+        assert!(
+            ev.properties["persona"].as_str().is_some_and(|p| !p.is_empty()),
+            "persona must be a non-empty string"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_agent_emits_analytics_event() {
+        // agent.completed must carry agent_id, task_id, duration_secs.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Complete analytics").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/analytics-complete").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let body = serde_json::json!({
+            "branch": "feat/analytics-complete",
+            "title": "Done",
+            "target_branch": "main",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/complete"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let events = state
+            .analytics
+            .query(Some("agent.completed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one agent.completed event expected");
+        let ev = &events[0];
+        assert_eq!(ev.agent_id.as_deref(), Some(agent_id.as_str()));
+        assert_eq!(ev.properties["task_id"], task_id);
+        assert!(
+            ev.properties["duration_secs"].as_u64().is_some(),
+            "duration_secs must be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn fail_agent_emits_analytics_event() {
+        // agent.failed must carry agent_id, task_id, reason.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Fail analytics").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/analytics-fail").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/fail"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let events = state
+            .analytics
+            .query(Some("agent.failed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one agent.failed event expected");
+        let ev = &events[0];
+        assert_eq!(ev.agent_id.as_deref(), Some(agent_id.as_str()));
+        assert_eq!(ev.properties["task_id"], task_id);
+        assert!(
+            ev.properties["reason"].as_str().is_some_and(|r| !r.is_empty()),
+            "reason must be a non-empty string"
+        );
+    }
+
     #[tokio::test]
     async fn complete_no_worktree_returns_bad_request() {
         let app = app();

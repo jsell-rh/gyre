@@ -2134,6 +2134,40 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn approve_spec_emits_analytics_event() {
+        // analytics.md §Auto-Emitted Events: spec.approved carries spec_path,
+        // approver_type, approval_mode.
+        let (app, state) = app_with_spec();
+        let sha = "a".repeat(40);
+        let body = serde_json::json!({ "sha": sha });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fdesign-principles.md/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let events = state
+            .analytics
+            .query(Some("spec.approved"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one spec.approved event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["spec_path"], "system/design-principles.md");
+        // test-token is the global token → human approver.
+        assert_eq!(ev.properties["approver_type"], "human");
+        assert_eq!(ev.properties["approval_mode"], "human_only");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn approve_then_revoke() {
         let (app, state) = app_with_spec();
         let sha = "a".repeat(40);
