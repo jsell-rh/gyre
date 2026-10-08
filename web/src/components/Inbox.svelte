@@ -83,7 +83,12 @@
     try {
       if (!isBackground) loading = true;
       error = null;
-      let raw = await api.myNotifications();
+      // Scope narrowing (HSI §1.5 Inbox row): the workspace filter is
+      // server-side (?workspace_id=); tenant scope passes no filter and the
+      // server returns the queue across all workspaces the user belongs to.
+      const params = {};
+      if (scope !== 'tenant' && workspaceId) params.workspace_id = workspaceId;
+      let raw = await api.myNotifications(params);
       let data = Array.isArray(raw) ? raw : (raw?.notifications ?? []);
       // Normalize PascalCase notification types from the server to snake_case
       const typeNormMap = {
@@ -107,11 +112,11 @@
         notification_type: typeNormMap[n.notification_type] ?? n.notification_type,
       }));
 
-      // Client-side scope filtering
-      if (repoId) {
+      // Repo scope narrows client-side on repo_id: workspace-scoped
+      // notifications with repo_id NULL (trust suggestions, meta-spec drift)
+      // stay invisible at repo scope (HSI §1.5 Inbox row).
+      if (scope === 'repo' && repoId) {
         data = data.filter(n => n.repo_id === repoId);
-      } else if (workspaceId) {
-        data = data.filter(n => n.workspace_id === workspaceId);
       }
 
       // Sort by priority ascending (1 = highest)

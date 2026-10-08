@@ -1482,7 +1482,8 @@
       "teams": "Teams",
       "budget": "Budget",
       "compute": "Compute",
-      "audit": "Audit"
+      "audit": "Audit",
+      "repos": "Repos"
     },
     "tab_bar_label": "Workspace settings sections",
     "general": {
@@ -1554,6 +1555,24 @@
       "invalid_number": "Enter a valid non-negative number.",
       "save_failed": "Failed to save budget."
     },
+    "repos": {
+      "desc": "Repositories in this workspace — list, create, and import.",
+      "new_btn": "+ New",
+      "import_btn": "Import",
+      "name_placeholder": "Repository name",
+      "desc_placeholder": "Description (optional)",
+      "url_placeholder": "https://example.com/repo.git",
+      "create_btn": "Create",
+      "creating": "Creating\u2026",
+      "import_go_btn": "Import",
+      "importing": "Importing\u2026",
+      "loading": "Loading repositories\u2026",
+      "empty": "No repositories yet. Create one or import an existing mirror.",
+      "col_name": "Name",
+      "col_status": "Status",
+      "col_default_branch": "Default Branch",
+      "col_mirror": "Mirror URL"
+    },
     "compute": {
       "title": "Compute Targets",
       "desc": "Compute targets available for agents in this workspace, configured by your tenant.",
@@ -1586,6 +1605,7 @@
       "users": "Users",
       "compute": "Compute Targets",
       "budget": "Budget",
+      "workspaces": "Workspaces",
       "audit": "Audit",
       "health": "Health",
       "jobs": "Jobs"
@@ -1625,6 +1645,24 @@
       "col_allocated": "Allocated",
       "col_used": "Used",
       "col_usage_pct": "Usage %"
+    },
+    "workspaces": {
+      "title": "Workspaces",
+      "desc": "All workspaces in this tenant — create, manage, and open them.",
+      "new_btn": "+ New Workspace",
+      "name_label": "Name",
+      "name_placeholder": "e.g. Payments",
+      "desc_label": "Description",
+      "desc_placeholder": "Optional description",
+      "create_btn": "Create",
+      "creating": "Creating\u2026",
+      "loading": "Loading workspaces\u2026",
+      "empty": "No workspaces yet.",
+      "col_name": "Name",
+      "col_slug": "Slug",
+      "col_trust": "Trust Level",
+      "col_created": "Created",
+      "open_btn": "Open"
     },
     "audit": {
       "title": "Audit",
@@ -1678,7 +1716,9 @@
     "error_load_budget": "Failed to load budget summary",
     "error_load_audit": "Failed to load audit log",
     "error_load_health": "Failed to load health status",
-    "error_load_jobs": "Failed to load jobs"
+    "error_load_jobs": "Failed to load jobs",
+    "error_load_workspaces": "Failed to load workspaces",
+    "error_create_workspace": "Failed to create workspace"
   },
   "common": {
     "cancel": "Cancel",

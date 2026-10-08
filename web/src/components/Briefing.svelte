@@ -98,6 +98,16 @@
       if (scope === 'workspace' && workspaceId) {
         const raw = await api.getWorkspaceBriefing(workspaceId, since);
         briefing = isEmpty(raw) ? { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null } : raw;
+      } else if (scope === 'repo') {
+        // HSI §1.5 repo-scope Briefing row: same endpoint narrowed by
+        // ?repo_id= — every section only covers this repo. No workspace or
+        // repo id means the repo is unresolved: no fetch, empty state.
+        if (workspaceId && repoId) {
+          const raw = await api.getWorkspaceBriefing(workspaceId, since, repoId);
+          briefing = isEmpty(raw) ? { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null } : raw;
+        } else {
+          briefing = { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null };
+        }
       } else if (scope === 'tenant') {
         const workspaces = await api.workspaces();
         const wsList = workspaces || [];
@@ -139,7 +149,7 @@
         };
         briefing = isEmpty(merged) ? { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null } : merged;
       } else {
-        // Repo scope — no briefing endpoint yet; show empty state
+        // No workspace context and no repo scope — nothing to fetch.
         briefing = { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null };
       }
     } catch (e) {

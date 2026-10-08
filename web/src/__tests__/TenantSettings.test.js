@@ -29,6 +29,8 @@ vi.mock('../lib/api.js', () => ({
     adminAudit: vi.fn().mockResolvedValue([]),
     adminHealth: vi.fn().mockResolvedValue(null),
     adminJobs: vi.fn().mockResolvedValue([]),
+    workspaces: vi.fn().mockResolvedValue([]),
+    createWorkspace: vi.fn().mockResolvedValue({ id: 'ws-new', name: 'New WS', slug: 'new-ws' }),
     adminRunJob: vi.fn().mockResolvedValue({}),
     version: vi.fn().mockResolvedValue({ version: '0.1.0', commit: 'abc1234' }),
     auditStreamUrl: vi.fn().mockReturnValue('http://localhost/api/v1/audit/stream'),
@@ -94,10 +96,10 @@ describe('TenantSettings', () => {
   it('renders all 6 tab buttons', async () => {
     const { container } = render(TenantSettings);
     await waitFor(() => {
-      const tabs = container.querySelector('[data-testid="tenant-settings-tabs"]');
-      expect(tabs).toBeTruthy();
       expect(container.querySelector('[data-testid="tenant-settings-tab-users"]')).toBeTruthy();
       expect(container.querySelector('[data-testid="tenant-settings-tab-compute"]')).toBeTruthy();
+      // HSI §1.5 Admin tenant scope: workspace creation + Manage Workspaces
+      expect(container.querySelector('[data-testid="tenant-settings-tab-workspaces"]')).toBeTruthy();
       expect(container.querySelector('[data-testid="tenant-settings-tab-budget"]')).toBeTruthy();
       expect(container.querySelector('[data-testid="tenant-settings-tab-audit"]')).toBeTruthy();
       expect(container.querySelector('[data-testid="tenant-settings-tab-health"]')).toBeTruthy();
@@ -474,5 +476,49 @@ describe('TenantSettings', () => {
     await waitFor(() => {
       expect(document.activeElement?.getAttribute('data-testid')).toBe('tenant-settings-tab-bcp');
     }, { timeout: 3000 });
+  });
+
+  // HSI §1.5 Admin tenant scope: workspace creation (+ New Workspace button)
+  // and Manage Workspaces list.
+  describe('Workspaces tab', () => {
+    it('lists all tenant workspaces', async () => {
+      api.workspaces.mockResolvedValueOnce([
+        { id: 'ws-1', name: 'Payments', slug: 'payments', trust_level: 'Guided', created_at: 1700000000 },
+        { id: 'ws-2', name: 'Platform', slug: 'platform', trust_level: 'Autonomous', created_at: 1700000001 },
+      ]);
+      const { container } = render(TenantSettings);
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="tenant-settings-tab-workspaces"]')).toBeTruthy();
+      }, { timeout: 3000 });
+      container.querySelector('[data-testid="tenant-settings-tab-workspaces"]').click();
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="tenant-workspaces-table"]')).toBeTruthy();
+      }, { timeout: 3000 });
+      const rows = container.querySelectorAll('[data-testid="tenant-workspace-row"]');
+      expect(rows.length).toBe(2);
+      expect(rows[0].textContent).toContain('Payments');
+      expect(rows[1].textContent).toContain('Platform');
+    });
+
+    it('New Workspace button opens the form; submit calls api.createWorkspace', async () => {
+      const { container } = render(TenantSettings);
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="tenant-settings-tab-workspaces"]')).toBeTruthy();
+      }, { timeout: 3000 });
+      container.querySelector('[data-testid="tenant-settings-tab-workspaces"]').click();
+      await waitFor(() => {
+        expect(container.querySelector('[data-testid="tenant-new-workspace-btn"]')).toBeTruthy();
+      }, { timeout: 3000 });
+      container.querySelector('[data-testid="tenant-new-workspace-btn"]').click();
+      const nameInput = container.querySelector('[data-testid="tenant-new-ws-name"]');
+      expect(nameInput).toBeTruthy();
+      await fireEvent.input(nameInput, { target: { value: 'Risk Engine' } });
+      await fireEvent.submit(container.querySelector('[data-testid="tenant-new-workspace-form"]'));
+      await waitFor(() => {
+        expect(api.createWorkspace).toHaveBeenCalledWith(
+          expect.objectContaining({ name: 'Risk Engine', slug: 'risk-engine' })
+        );
+      }, { timeout: 3000 });
+    });
   });
 });
