@@ -97,6 +97,7 @@ if ! git rebase --autostash origin/main; then
   git merge-base --is-ancestor origin/main HEAD || { echo "resolver did not finish rebase onto main" >&2; exit 1; }
 fi
 
+python3 /tmp/stage/dev-attribution.py "$task"
 progress=$(bash scripts/task-field.sh "$file" progress)
 if [ -f /tmp/stage/audit-contract.json ]; then
   python3 /tmp/stage/dev-audit-check.py /tmp/stage/audit-contract.json --generation-only || exit 80

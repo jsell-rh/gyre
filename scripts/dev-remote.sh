@@ -97,30 +97,7 @@ PY
     fi
     # Rebasing rewrites task commit IDs. Rebuild attribution from the exact
     # branch range after each round, including commits the agent made itself.
-    TASK="$TASK" node - "specs/tasks/$TASK.md" <<'JS'
-const fs = require('fs');
-const { execFileSync } = require('child_process');
-const [file] = process.argv.slice(2);
-const text = fs.readFileSync(file, 'utf8');
-const parts = text.split('---');
-if (parts.length < 3) throw new Error('missing task frontmatter');
-const lines = parts[1].split('\n');
-let start = lines.findIndex(line => /^commits:/.test(line));
-if (start < 0) { start = lines.length; lines.push('commits: []'); }
-let end = start + 1;
-while (end < lines.length && !/^[a-z_][\w-]*:/.test(lines[end])) end++;
-const branch = execFileSync('git', ['log', '--no-merges', '--format=%H', 'origin/main..HEAD'], {encoding:'utf8'}).trim().split('\n').filter(Boolean);
-const hashes = branch.filter(sha => {
-  const subject = execFileSync('git', ['show', '-s', '--format=%s', sha], {encoding:'utf8'}).trim();
-  if (!subject.includes(process.env.TASK)) return false;
-  const paths = execFileSync('git', ['diff-tree', '--no-commit-id', '--name-only', '-r', sha], {encoding:'utf8'}).trim().split('\n');
-  return paths.some(path => path.startsWith('crates/') || path.startsWith('web/src/') || path.startsWith('web/tests/'));
-});
-lines.splice(start, end - start, `commits: [${hashes.map(h => JSON.stringify(h)).join(', ')}]`);
-parts[1] = lines.join('\n');
-if (!parts[1].endsWith('\n')) parts[1] += '\n';
-fs.writeFileSync(file, parts.join('---'));
-JS
+    python3 /tmp/stage/dev-attribution.py "$TASK"
     if ! git diff --quiet -- "specs/tasks/$TASK.md"; then
       git add "specs/tasks/$TASK.md"
       git commit -q -m "process: record $TASK branch commits" --no-verify
