@@ -1840,8 +1840,13 @@ mod tests {
                 );
             }
 
-            // The draft actually reached the agent process environment.
-            let env = soon(|| std::fs::read_to_string(&env_out).ok()).await;
+            // The draft actually reached the agent process environment. The
+            // shell creates the redirect target before `env` writes it, so
+            // poll until the dump has content, not merely exists.
+            let env = soon(|| {
+                std::fs::read_to_string(&env_out).ok().filter(|s| !s.is_empty())
+            })
+            .await;
             assert!(
                 env.contains("GYRE_META_SPEC_DRAFT_KIND=meta:persona"),
                 "draft kind must be injected; env was:\n{env}"
@@ -1956,11 +1961,8 @@ mod tests {
 
             // Wait for the process to actually be running (registered).
             soon(|| {
-                state
-                    .process_registry
-                    .try_lock()
-                    .map(|r| r.contains_key(&agent_id))
-                    .unwrap_or(false)
+                let reg = state.process_registry.try_lock().ok()?;
+                reg.contains_key(&agent_id).then_some(())
             })
             .await;
 
@@ -2299,12 +2301,6 @@ mod tests {
 
             // Orphan pass: an agent index entry whose run record is gone is
             // reclaimed (slot, token, branch).
-            let repo = state
-                .repos
-                .find_by_id(&gyre_common::Id::new(&repo_id))
-                .await
-                .unwrap()
-                .unwrap();
             let fresh_agent = fresh["agents"][0]["agent_id"].as_str().unwrap().to_string();
             state
                 .kv_store
