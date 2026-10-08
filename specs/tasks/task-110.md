@@ -8,7 +8,7 @@ coverage_sections:
   - "user-management.md §Workspace Invitation Flow"
   - "user-management.md §Invitation Expiry"
   - "user-management.md §Tenant Invitations"
-commits: ["75c0dedcd676350a81749e890b771f5ffe7ed314", "d7f3d4769f5b33ed688f10cb569d0dd62c422ee0", "97f895fa5bf1c363495732dd76d3e32926ff7460"]
+commits: ["48969e5c2ef1720ca2a4da5f4b76438492eed8a5", "75c0dedcd676350a81749e890b771f5ffe7ed314", "d7f3d4769f5b33ed688f10cb569d0dd62c422ee0", "97f895fa5bf1c363495732dd76d3e32926ff7460"]
 ---
 
 ## Spec Excerpt
