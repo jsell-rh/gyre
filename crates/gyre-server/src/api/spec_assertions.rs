@@ -364,4 +364,165 @@ mod tests {
         let assertions = json["assertions"].as_array().unwrap();
         assert!(assertions.is_empty());
     }
+
+    #[tokio::test]
+    async fn get_spec_assertion_results_returns_stored_rows() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Create a repo via HTTP (shares the same state).
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "name": "assert-get-repo",
+                            "workspace_id": "ws-1",
+                            "tenant_id": "tenant-1",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_json = body_json(repo_resp).await;
+        let repo_id = repo_json["id"].as_str().unwrap().to_string();
+
+        // Seed stored results the way the post-push check does: canonical spec
+        // path (no `specs/` prefix), one passing and one failing assertion.
+        state
+            .spec_assertion_results
+            .save_results(&[
+                gyre_domain::SpecAssertionResult {
+                    id: "r1".to_string(),
+                    repo_id: repo_id.clone(),
+                    spec_path: "system/architecture.md".to_string(),
+                    line: 3,
+                    assertion_type: "no_dependency".to_string(),
+                    assertion_text: "<!-- gyre:assert type=\"no_dependency\" from=\"gyre-domain\" to=\"gyre-adapters\" -->".to_string(),
+                    params_json: r#"{"type":"no_dependency","from":"gyre-domain","to":"gyre-adapters"}"#.to_string(),
+                    passed: true,
+                    explanation: "no dependency edge from gyre-domain to gyre-adapters".to_string(),
+                    commit_sha: "deadbeef".to_string(),
+                    checked_at: 1700000000,
+                },
+                gyre_domain::SpecAssertionResult {
+                    id: "r2".to_string(),
+                    repo_id: repo_id.clone(),
+                    spec_path: "system/architecture.md".to_string(),
+                    line: 5,
+                    assertion_type: "implements".to_string(),
+                    assertion_text: "<!-- gyre:assert type=\"implements\" subject=\"SearchService\" trait=\"FullTextPort\" -->".to_string(),
+                    params_json: r#"{"type":"implements","subject":"SearchService","trait":"FullTextPort"}"#.to_string(),
+                    passed: false,
+                    explanation: "SearchService not found in graph".to_string(),
+                    commit_sha: "deadbeef".to_string(),
+                    checked_at: 1700000000,
+                },
+            ])
+            .await
+            .unwrap();
+
+        // URL-encoded path segment (same convention as GET /api/v1/specs/:path).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/v1/repos/{repo_id}/specs/system%2Farchitecture.md/assertions"
+                    ))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let assertions = json["assertions"].as_array().unwrap();
+        assert_eq!(assertions.len(), 2);
+        assert_eq!(assertions[0]["line"].as_u64().unwrap(), 3);
+        assert_eq!(assertions[0]["type"].as_str().unwrap(), "no_dependency");
+        assert!(assertions[0]["passed"].as_bool().unwrap());
+        assert_eq!(assertions[0]["commit_sha"].as_str().unwrap(), "deadbeef");
+        assert_eq!(assertions[0]["checked_at"].as_u64().unwrap(), 1700000000);
+        assert_eq!(
+            assertions[0]["params"]["from"].as_str().unwrap(),
+            "gyre-domain"
+        );
+        assert!(!assertions[1]["passed"].as_bool().unwrap());
+        assert_eq!(assertions[1]["type"].as_str().unwrap(), "implements");
+    }
+
+    #[tokio::test]
+    async fn get_spec_assertion_results_unknown_repo_404s() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/repos/nonexistent/specs/test%2Fspec.md/assertions")
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_spec_assertion_results_no_stored_rows_returns_empty() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "name": "assert-empty-get-repo",
+                            "workspace_id": "ws-1",
+                            "tenant_id": "tenant-1",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_json = body_json(repo_resp).await;
+        let repo_id = repo_json["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/repos/{repo_id}/specs/never%2Fchecked.md/assertions"))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["assertions"].as_array().unwrap().is_empty());
+    }
 }
