@@ -300,6 +300,7 @@ mod tests {
             compute_targets: base.compute_targets.clone(),
             llm: base.llm.clone(),
             user_notification_prefs: base.user_notification_prefs.clone(),
+            user_channel_prefs: base.user_channel_prefs.clone(),
             user_tokens: base.user_tokens.clone(),
             secrets: base.secrets.clone(),
             judgment_ledger: base.judgment_ledger.clone(),

@@ -78,10 +78,10 @@ use gyre_common::Id;
 use std::sync::Arc;
 use users::{
     create_team, create_token, create_user, delete_team, delete_token, dismiss_notification,
-    get_judgments, get_me, get_my_agents, get_my_mrs, get_my_notifications, get_my_tasks,
-    get_notification_count, get_notification_preferences, invite_member, list_members, list_teams,
-    list_tokens, remove_member, resolve_notification, update_me, update_member_role,
-    update_notification_preferences, update_team,
+    get_channel_preferences, get_judgments, get_me, get_my_agents, get_my_mrs, get_my_notifications,
+    get_my_tasks, get_notification_count, get_notification_preferences, invite_member, list_members,
+    list_teams, list_tokens, remove_member, resolve_notification, update_channel_preferences,
+    update_me, update_member_role, update_notification_preferences, update_team,
 };
 
 use crate::AppState;
@@ -824,6 +824,11 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/notifications/:id/resolve",
             post(resolve_notification),
+        )
+        // Delivery channel preferences (task-112) — per-handler auth, ABAC-exempt
+        .route(
+            "/api/v1/notifications/preferences",
+            get(get_channel_preferences).put(update_channel_preferences),
         )
         // Workspace members (M22.8)
         .route(

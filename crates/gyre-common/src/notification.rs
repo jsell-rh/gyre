@@ -206,6 +206,12 @@ impl Notification {
         }
     }
 
+    /// Builder: override the type-derived priority (HSI §8).
+    pub fn with_priority(mut self, priority: u8) -> Self {
+        self.priority = priority;
+        self
+    }
+
     /// Returns true if this notification is active (not resolved or dismissed).
     pub fn is_active(&self) -> bool {
         self.resolved_at.is_none() && self.dismissed_at.is_none()

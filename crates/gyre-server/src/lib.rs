@@ -46,6 +46,7 @@ pub mod speculative_merge;
 // sqlite.rs (rusqlite) removed — use gyre_adapters::SqliteStorage (Diesel) instead.
 pub(crate) mod explorer_ws;
 pub mod notifications;
+pub mod notification_dispatcher;
 pub mod otlp_receiver;
 pub mod policy_engine;
 pub mod stale_agents;
@@ -394,6 +395,8 @@ pub struct AppState {
     pub llm: Option<Arc<dyn gyre_ports::LlmPortFactory>>,
     /// Per-user notification preferences (HSI §12).
     pub user_notification_prefs: Arc<dyn gyre_ports::UserNotificationPreferenceRepository>,
+    /// Per-user delivery-channel preferences (user-management.md §Delivery Channels).
+    pub user_channel_prefs: Arc<dyn gyre_ports::UserChannelPreferenceRepository>,
     /// Per-user API tokens (HSI §12). Hashed at rest; plaintext never stored.
     pub user_tokens: Arc<dyn gyre_ports::UserTokenRepository>,
     /// Secret repository (platform-model.md §7): scoped credential storage,
@@ -1085,6 +1088,10 @@ pub fn build_state(
         user_notification_prefs: store!(
             dyn gyre_ports::UserNotificationPreferenceRepository,
             mem::MemUserNotificationPreferenceRepository::default()
+        ),
+        user_channel_prefs: store!(
+            dyn gyre_ports::UserChannelPreferenceRepository,
+            mem::MemUserChannelPreferenceRepository::default()
         ),
         user_tokens: store!(
             dyn gyre_ports::UserTokenRepository,

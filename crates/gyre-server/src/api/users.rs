@@ -899,6 +899,65 @@ pub async fn update_notification_preferences(
     Ok(Json(serde_json::json!({ "preferences": items })))
 }
 
+// ─── task-112: Delivery Channel Preferences (user-management.md §Delivery Channels) ──
+
+/// GET /api/v1/notifications/preferences — the caller's channel configuration.
+/// Per-handler auth (self-scope only): the handler reads/writes exclusively
+/// the authenticated user's own row, so no cross-scope decision is possible.
+pub async fn get_channel_preferences(
+    auth: AuthenticatedAgent,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    let channels = state
+        .user_channel_prefs
+        .find(&user_id)
+        .await?
+        .unwrap_or_default();
+    Ok(Json(serde_json::json!({ "channels": channels })))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateChannelPrefsRequest {
+    pub channels: gyre_domain::NotificationChannels,
+}
+
+/// PUT /api/v1/notifications/preferences — update channel configuration.
+/// Per-handler auth (self-scope only). `in_app` is forced true: the spec
+/// marks it "Always true (can't disable)".
+pub async fn update_channel_preferences(
+    auth: AuthenticatedAgent,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateChannelPrefsRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    let mut channels = req.channels;
+    if !channels.in_app {
+        return Err(ApiError::InvalidInput(
+            "in_app cannot be disabled (user-management.md §Delivery Channels)".to_string(),
+        ));
+    }
+    // Validate configured channel endpoints are absolute URLs.
+    if let Some(hook) = &channels.webhook {
+        if reqwest::Url::parse(&hook.url).is_err() {
+            return Err(ApiError::InvalidInput(format!(
+                "webhook.url is not a valid absolute URL: {}",
+                hook.url
+            )));
+        }
+    }
+    if let Some(slack) = &channels.slack {
+        if reqwest::Url::parse(&slack.webhook_url).is_err() {
+            return Err(ApiError::InvalidInput(format!(
+                "slack.webhook_url is not a valid absolute URL: {}",
+                slack.webhook_url
+            )));
+        }
+    }
+    state.user_channel_prefs.upsert(&user_id, &channels).await?;
+    Ok(Json(serde_json::json!({ "channels": channels })))
+}
+
 // ─── HSI §12: Judgment Ledger ─────────────────────────────────────────────────
 
 #[derive(Deserialize)]

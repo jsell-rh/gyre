@@ -2,14 +2,17 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
 use gyre_common::Id;
-use gyre_domain::{JudgmentEntry, JudgmentType, UserNotificationPreference, UserToken};
+use gyre_domain::{
+    JudgmentEntry, JudgmentType, NotificationChannels, UserNotificationPreference, UserToken,
+};
 use gyre_ports::{
-    JudgmentLedgerRepository, UserNotificationPreferenceRepository, UserTokenRepository,
+    JudgmentLedgerRepository, UserChannelPreferenceRepository,
+    UserNotificationPreferenceRepository, UserTokenRepository,
 };
 use std::sync::Arc;
 
 use super::SqliteStorage;
-use crate::schema::{user_notification_preferences, user_tokens};
+use crate::schema::{user_channel_preferences, user_notification_preferences, user_tokens};
 
 // ─── User Notification Preferences ──────────────────────────────────────────
 
@@ -79,7 +82,7 @@ impl UserNotificationPreferenceRepository for SqliteStorage {
 
     async fn upsert_batch(&self, prefs: &[UserNotificationPreference]) -> Result<()> {
         for pref in prefs {
-            self.upsert(pref).await?;
+            UserNotificationPreferenceRepository::upsert(self, pref).await?;
         }
         Ok(())
     }
@@ -324,6 +327,78 @@ impl JudgmentLedgerRepository for SqliteStorage {
                 .take(lim as usize)
                 .collect();
             Ok(entries)
+        })
+        .await?
+    }
+}
+
+// ─── User Channel Preferences (task-112) ────────────────────────────────────
+
+#[derive(Queryable, Selectable)]
+#[diesel(table_name = user_channel_preferences)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+struct ChannelPrefRow {
+    user_id: String,
+    channels: String,
+    updated_at: i64,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = user_channel_preferences)]
+struct ChannelPrefRecord<'a> {
+    user_id: &'a str,
+    channels: &'a str,
+    updated_at: i64,
+}
+
+#[async_trait]
+impl UserChannelPreferenceRepository for SqliteStorage {
+    async fn find(&self, user_id: &Id) -> Result<Option<NotificationChannels>> {
+        let pool = Arc::clone(&self.pool);
+        let uid = user_id.as_str().to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<NotificationChannels>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let row = user_channel_preferences::table
+                .find(&uid)
+                .first::<ChannelPrefRow>(&mut *conn)
+                .optional()
+                .context("find user channel preferences")?;
+            match row {
+                Some(r) => serde_json::from_str(&r.channels)
+                    .map(Some)
+                    .map_err(|e| anyhow::anyhow!("corrupt channel preferences for {uid}: {e}")),
+                None => Ok(None),
+            }
+        })
+        .await?
+    }
+
+    async fn upsert(&self, user_id: &Id, channels: &NotificationChannels) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let uid = user_id.as_str().to_string();
+        let json = serde_json::to_string(channels).context("serialize channel preferences")?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            let record = ChannelPrefRecord {
+                user_id: &uid,
+                channels: &json,
+                updated_at: now,
+            };
+            diesel::insert_into(user_channel_preferences::table)
+                .values(&record)
+                .on_conflict(user_channel_preferences::user_id)
+                .do_update()
+                .set((
+                    user_channel_preferences::channels.eq(&json),
+                    user_channel_preferences::updated_at.eq(now),
+                ))
+                .execute(&mut *conn)
+                .context("upsert user channel preferences")?;
+            Ok(())
         })
         .await?
     }
