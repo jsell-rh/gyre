@@ -760,6 +760,7 @@ pub async fn git_receive_pack(
                 &git_bin,
                 agent_push_ctx,
                 divergence_ports,
+                Arc::clone(&state_clone.spec_assertion_results),
             )
             .await;
         }

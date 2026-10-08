@@ -2702,6 +2702,50 @@ impl gyre_ports::SpecLedgerRepository for MemSpecLedgerRepository {
 }
 
 #[derive(Default)]
+pub struct MemSpecAssertionResultRepository {
+    store: Arc<Mutex<Vec<gyre_domain::SpecAssertionResult>>>,
+}
+
+#[async_trait]
+impl gyre_ports::SpecAssertionResultRepository for MemSpecAssertionResultRepository {
+    async fn save_results(&self, results: &[gyre_domain::SpecAssertionResult]) -> Result<()> {
+        if results.is_empty() {
+            return Ok(());
+        }
+        let mut store = self.store.lock().await;
+        // Replace semantics: drop prior rows for the same (repo_id, spec_path)
+        // so the stored set reflects the latest check only.
+        let repo_id = results[0].repo_id.clone();
+        let spec_path = results[0].spec_path.clone();
+        store.retain(|r| !(r.repo_id == repo_id && r.spec_path == spec_path));
+        store.extend(results.iter().cloned());
+        Ok(())
+    }
+
+    async fn list_by_spec(
+        &self,
+        repo_id: &str,
+        spec_path: &str,
+    ) -> Result<Vec<gyre_domain::SpecAssertionResult>> {
+        let mut rows: Vec<gyre_domain::SpecAssertionResult> = self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|r| r.repo_id == repo_id && r.spec_path == spec_path)
+            .cloned()
+            .collect();
+        rows.sort_by_key(|r| r.line);
+        Ok(rows)
+    }
+
+    async fn delete_by_repo(&self, repo_id: &str) -> Result<()> {
+        self.store.lock().await.retain(|r| r.repo_id != repo_id);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
 pub struct MemSpecApprovalEventRepository {
     store: Arc<Mutex<Vec<gyre_domain::SpecApprovalEvent>>>,
 }
@@ -3306,7 +3350,6 @@ fn test_state_inner(
         attestation_store: Arc::new(MemAttestationRepository::default()),
         chain_attestations: Arc::new(MemChainAttestationRepository::default()),
         key_bindings: Arc::new(MemKeyBindingRepository::default()),
-        trust_anchors: Arc::new(MemTrustAnchorRepository::default()),
         trusted_issuers: vec![],
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         commit_signatures: Arc::new(Mutex::new(HashMap::new())),
@@ -3315,6 +3358,7 @@ fn test_state_inner(
         container_audits: Arc::new(MemContainerAuditRepository::default()),
         spec_ledger: Arc::new(MemSpecLedgerRepository::default()),
         spec_approval_history: Arc::new(MemSpecApprovalEventRepository::default()),
+        spec_assertion_results: Arc::new(MemSpecAssertionResultRepository::default()),
         spec_links_store: Arc::new(Mutex::new(Vec::new())),
         budget_configs: Arc::new(MemBudgetConfigRepository::default()),
         budget_usages: Arc::new(MemBudgetUsageRepository::default()),

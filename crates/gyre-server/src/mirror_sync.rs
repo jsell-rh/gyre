@@ -78,6 +78,7 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                             &git_bin,
                             None, // no agent context for mirror syncs
                             None, // no divergence check
+                            Arc::clone(&state.spec_assertion_results),
                         )
                         .await;
 

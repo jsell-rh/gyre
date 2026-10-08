@@ -477,6 +477,7 @@ pub async fn create_mirror_repo(
         let extract_repo_id = repo.id.to_string();
         let extract_path = repo_path.clone();
         let graph_store = Arc::clone(&state.graph_store);
+        let extract_results_repo = Arc::clone(&state.spec_assertion_results);
         let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
         let default_ref = format!("refs/heads/{}", repo.default_branch);
         tokio::spawn(async move {
@@ -495,6 +496,7 @@ pub async fn create_mirror_repo(
                         &git_bin,
                         None,
                         None,
+                        extract_results_repo,
                     )
                     .await;
                 }
@@ -572,6 +574,7 @@ pub async fn sync_mirror(
                 &git_bin,
                 None,
                 None,
+                Arc::clone(&state.spec_assertion_results),
             )
             .await;
         }

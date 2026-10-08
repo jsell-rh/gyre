@@ -313,6 +313,8 @@ pub struct AppState {
     pub spec_ledger: Arc<dyn gyre_ports::SpecLedgerRepository>,
     /// Spec approval event history (persisted).
     pub spec_approval_history: Arc<dyn gyre_ports::SpecApprovalEventRepository>,
+    /// Persisted spec assertion check results (system-explorer.md §9).
+    pub spec_assertion_results: Arc<dyn gyre_ports::SpecAssertionResultRepository>,
     /// Spec links graph: all inter-spec links from manifests (M22.3).
     pub spec_links_store: spec_registry::SpecLinksStore,
     /// Budget limits per entity: entity_key -> BudgetConfig (M22.2).
@@ -981,6 +983,10 @@ pub fn build_state(
         spec_approval_history: store!(
             dyn SpecApprovalEventRepository,
             mem::MemSpecApprovalEventRepository::default()
+        ),
+        spec_assertion_results: store!(
+            dyn gyre_ports::SpecAssertionResultRepository,
+            mem::MemSpecAssertionResultRepository::default()
         ),
         spec_links_store: Arc::new(Mutex::new(Vec::new())),
         budget_configs: store!(

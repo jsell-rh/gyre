@@ -78,6 +78,7 @@ pub async fn extract_and_store_graph(
     git_bin: &str,
     agent_ctx: Option<AgentPushContext>,
     divergence_ports: Option<DivergencePorts<'_>>,
+    results_repo: Arc<dyn gyre_ports::SpecAssertionResultRepository>,
 ) {
     if let Err(e) = do_extract(
         repo_path,
@@ -87,6 +88,7 @@ pub async fn extract_and_store_graph(
         git_bin,
         agent_ctx,
         divergence_ports,
+        results_repo,
     )
     .await
     {
@@ -102,6 +104,7 @@ async fn do_extract(
     git_bin: &str,
     agent_ctx: Option<AgentPushContext>,
     divergence_ports: Option<DivergencePorts<'_>>,
+    results_repo: Arc<dyn gyre_ports::SpecAssertionResultRepository>,
 ) -> anyhow::Result<()> {
     // --- Step 1: snapshot the commit tree into a temp directory ---------------
 
@@ -363,8 +366,10 @@ async fn do_extract(
             &final_nodes,
             &spec_edges,
             &repo_id_parsed,
+            new_sha,
             &agent_ctx,
             divergence_ports.as_ref(),
+            results_repo.as_ref(),
         )
         .await
         {
@@ -847,8 +852,10 @@ async fn check_spec_assertions_on_push(
     nodes: &[GraphNode],
     edges: &[GraphEdge],
     repo_id: &Id,
+    commit_sha: &str,
     agent_ctx: &Option<AgentPushContext>,
     divergence_ports: Option<&DivergencePorts<'_>>,
+    results_repo: &dyn gyre_ports::SpecAssertionResultRepository,
 ) -> anyhow::Result<()> {
     use gyre_domain::spec_assertions;
 
@@ -902,11 +909,51 @@ async fn check_spec_assertions_on_push(
             continue;
         }
 
-        let results = spec_assertions::evaluate_assertions(&parsed, nodes, edges);
-        for result in results {
-            if !result.passed {
-                failed_assertions.push((relative_path.clone(), result));
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let records: Vec<gyre_domain::SpecAssertionResult> = parsed
+            .iter()
+            .zip(spec_assertions::evaluate_assertions(&parsed, nodes, edges))
+            .map(|(assertion, result)| gyre_domain::SpecAssertionResult {
+                id: Uuid::new_v4().to_string(),
+                repo_id: repo_id.as_str().to_string(),
+                spec_path: relative_path.clone(),
+                line: result.line,
+                assertion_type: assertion.type_name().to_string(),
+                assertion_text: result.assertion_text,
+                params_json: assertion.params_json().to_string(),
+                passed: result.passed,
+                explanation: result.explanation.clone(),
+                commit_sha: commit_sha.to_string(),
+                checked_at: now,
+            })
+            .collect();
+
+        for record in &records {
+            if !record.passed {
+                failed_assertions.push((
+                    relative_path.clone(),
+                    spec_assertions::AssertionResult {
+                        line: record.line,
+                        assertion_text: record.assertion_text.clone(),
+                        passed: record.passed,
+                        explanation: record.explanation.clone(),
+                    },
+                ));
             }
+        }
+
+        // Persist the full result set (pass and fail) so the spec's inline
+        // view can show the last push's check state (system-explorer.md §9).
+        if let Err(e) = results_repo.save_results(&records).await {
+            warn!(
+                %repo_id,
+                spec_path = %relative_path,
+                "failed to persist spec assertion results: {e}"
+            );
         }
     }
 

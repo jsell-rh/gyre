@@ -113,6 +113,132 @@ pub struct AssertionResult {
     pub explanation: String,
 }
 
+impl ParsedAssertion {
+    /// The assertion type name as used by the attribute form
+    /// (`no_dependency` / `implements` / `all_have`) or the predicate-form
+    /// predicate keyword (`not_depends_on`, `has_implementors`, ...).
+    pub fn type_name(&self) -> &'static str {
+        self.predicate.type_name()
+    }
+
+    /// The assertion parameters as a JSON object (`from`/`to`,
+    /// `subject`/`trait`, `node_type`/`property`, or the predicate-form
+    /// equivalents), for persistence and API responses.
+    pub fn params_json(&self) -> serde_json::Value {
+        let mut params = match &self.subject {
+            Subject::Module(name) => serde_json::json!({ "module": name }),
+            Subject::Type(name) => serde_json::json!({ "type": name }),
+            Subject::Endpoint(path) => serde_json::json!({ "endpoint": path }),
+            Subject::Function(name) => serde_json::json!({ "function": name }),
+            Subject::NodesOfType(node_type) => {
+                serde_json::json!({ "node_type": node_type_str(node_type) })
+            }
+        };
+        if let (Some(k), Some(v)) = self.predicate.params() {
+            params[k] = v;
+        }
+        params
+    }
+}
+
+impl Predicate {
+    /// The canonical assertion type name for this predicate.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Predicate::DependsOn(_) => "depends_on",
+            Predicate::NotDependsOn(_) => "no_dependency",
+            Predicate::HasImplementors(_, _) => "has_implementors",
+            Predicate::GovernedBy(_) => "governed_by",
+            Predicate::Calls(_) => "calls",
+            Predicate::NotCalls(_) => "not_calls",
+            Predicate::TestCoverage(_, _) => "test_coverage",
+            Predicate::Complexity(_, _) => "complexity",
+            Predicate::Churn(_, _) => "churn",
+            Predicate::FieldCount(_, _) => "field_count",
+            Predicate::Implements(_) => "implements",
+            Predicate::HasProperty(_) => "all_have",
+        }
+    }
+
+    /// The predicate-specific parameter, as a (key, value) pair merged over
+    /// the subject parameters by [`ParsedAssertion::params_json`].
+    fn params(&self) -> (Option<&'static str>, Option<serde_json::Value>) {
+        match self {
+            Predicate::DependsOn(t) | Predicate::NotDependsOn(t) => {
+                (Some("to"), Some(serde_json::json!(t)))
+            }
+            Predicate::HasImplementors(cmp, n) => (
+                Some("count"),
+                Some(serde_json::json!(format!("{} {}", comparison_str(cmp), n))),
+            ),
+            Predicate::GovernedBy(p) => (Some("path"), Some(serde_json::json!(p))),
+            Predicate::Calls(t) | Predicate::NotCalls(t) => {
+                (Some("target"), Some(serde_json::json!(t)))
+            }
+            Predicate::TestCoverage(cmp, t)
+            | Predicate::Complexity(cmp, t)
+            | Predicate::Churn(cmp, t) => (
+                Some("threshold"),
+                Some(serde_json::json!(format!("{} {}", comparison_str(cmp), t))),
+            ),
+            Predicate::FieldCount(cmp, n) => (
+                Some("count"),
+                Some(serde_json::json!(format!("{} {}", comparison_str(cmp), n))),
+            ),
+            Predicate::Implements(t) => (Some("trait"), Some(serde_json::json!(t))),
+            Predicate::HasProperty(p) => (Some("property"), Some(serde_json::json!(p))),
+        }
+    }
+}
+
+fn node_type_str(node_type: &NodeType) -> &'static str {
+    match node_type {
+        NodeType::Package => "Package",
+        NodeType::Module => "Module",
+        NodeType::Type => "Type",
+        NodeType::Trait => "Trait",
+        NodeType::Interface => "Interface",
+        NodeType::Function => "Function",
+        NodeType::Method => "Method",
+        NodeType::Class => "Class",
+        NodeType::Enum => "Enum",
+        NodeType::EnumVariant => "EnumVariant",
+        NodeType::Endpoint => "Endpoint",
+        NodeType::Component => "Component",
+        NodeType::Table => "Table",
+        NodeType::Constant => "Constant",
+        NodeType::Field => "Field",
+        NodeType::Spec => "Spec",
+    }
+}
+
+/// A persisted assertion-check result for one spec, produced by the post-push
+/// knowledge-graph check (system-explorer.md §9).
+///
+/// One record per assertion, keyed by (repo_id, spec_path, line) — the latest
+/// push's result replaces any earlier one for that assertion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpecAssertionResult {
+    pub id: String,
+    pub repo_id: String,
+    /// Repo-relative spec path, e.g. `specs/system/architecture.md`.
+    pub spec_path: String,
+    /// 1-based line of the `<!-- gyre:assert ... -->` comment in the spec.
+    pub line: usize,
+    /// Canonical assertion type (`no_dependency`, `implements`, `all_have`, ...).
+    pub assertion_type: String,
+    /// Raw assertion text (between `gyre:assert` and `-->`).
+    pub assertion_text: String,
+    /// Assertion parameters as a JSON object string.
+    pub params_json: String,
+    pub passed: bool,
+    pub explanation: String,
+    /// Commit SHA the knowledge graph was extracted from when checked.
+    pub commit_sha: String,
+    /// Unix epoch seconds when the check ran.
+    pub checked_at: u64,
+}
+
 // ── Parsing ─────────────────────────────────────────────────────────────────
 
 /// Parse all `<!-- gyre:assert ... -->` comments from markdown content.
@@ -1468,5 +1594,225 @@ Some explanation.
 
         assert_eq!(results.len(), 1);
         assert!(!results[0].passed);
+    }
+
+    // ── Attribute form (system-explorer.md §9) ──────────────────────────
+
+    #[test]
+    fn parse_attribute_no_dependency() {
+        let content =
+            r#"<!-- gyre:assert type="no_dependency" from="gyre-domain" to="gyre-adapters" -->"#;
+        let assertions = parse_assertions(content);
+        assert_eq!(assertions.len(), 1);
+        let a = &assertions[0];
+        assert_eq!(a.line, 1);
+        assert_eq!(a.subject, Subject::Module("gyre-domain".to_string()));
+        assert_eq!(
+            a.predicate,
+            Predicate::NotDependsOn("gyre-adapters".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_attribute_implements() {
+        let content =
+            r#"<!-- gyre:assert type="implements" subject="SearchService" trait="FullTextPort" -->"#;
+        let assertions = parse_assertions(content);
+        assert_eq!(assertions.len(), 1);
+        let a = &assertions[0];
+        assert_eq!(a.subject, Subject::Type("SearchService".to_string()));
+        assert_eq!(a.predicate, Predicate::Implements("FullTextPort".to_string()));
+    }
+
+    #[test]
+    fn parse_attribute_all_have() {
+        let content =
+            r#"<!-- gyre:assert type="all_have" node_type="Endpoint" property="spec_path" -->"#;
+        let assertions = parse_assertions(content);
+        assert_eq!(assertions.len(), 1);
+        let a = &assertions[0];
+        assert_eq!(a.subject, Subject::NodesOfType(NodeType::Endpoint));
+        assert_eq!(a.predicate, Predicate::HasProperty("spec_path".to_string()));
+    }
+
+    #[test]
+    fn parse_attribute_all_have_snake_case_node_type() {
+        // The snake_case wire name is accepted too (NodeType::from_str_name).
+        let content =
+            r#"<!-- gyre:assert type="all_have" node_type="endpoint" property="spec_path" -->"#;
+        let assertions = parse_assertions(content);
+        assert_eq!(assertions.len(), 1);
+        assert_eq!(assertions[0].subject, Subject::NodesOfType(NodeType::Endpoint));
+    }
+
+    #[test]
+    fn parse_attribute_unknown_type_is_skipped() {
+        let content = r#"<!-- gyre:assert type="bogus" from="a" to="b" -->"#;
+        assert!(parse_assertions(content).is_empty());
+    }
+
+    #[test]
+    fn parse_attribute_all_have_unknown_node_type_is_skipped() {
+        let content =
+            r#"<!-- gyre:assert type="all_have" node_type="NotAType" property="p" -->"#;
+        assert!(parse_assertions(content).is_empty());
+    }
+
+    #[test]
+    fn parse_attribute_missing_required_params_is_skipped() {
+        // no_dependency requires both from and to.
+        assert!(parse_assertions(r#"<!-- gyre:assert type="no_dependency" from="a" -->"#)
+            .is_empty());
+        // implements requires both subject and trait.
+        assert!(parse_assertions(r#"<!-- gyre:assert type="implements" subject="S" -->"#)
+            .is_empty());
+        // all_have requires both node_type and property.
+        assert!(parse_assertions(r#"<!-- gyre:assert type="all_have" node_type="Endpoint" -->"#)
+            .is_empty());
+    }
+
+    #[test]
+    fn parse_attribute_spec_example_block() {
+        // The exact §9 example block, embedded in a spec.
+        let content = r#"## Invariants
+
+<!-- gyre:assert type="no_dependency" from="gyre-domain" to="gyre-adapters" -->
+- `gyre-domain` MUST NOT depend on `gyre-adapters`
+
+<!-- gyre:assert type="implements" subject="SearchService" trait="FullTextPort" -->
+- `SearchService` MUST implement `FullTextPort`
+
+<!-- gyre:assert type="all_have" node_type="Endpoint" property="auth_middleware" -->
+- All API endpoints MUST have auth middleware
+"#;
+        let assertions = parse_assertions(content);
+        assert_eq!(assertions.len(), 3);
+        assert_eq!(assertions[0].line, 3);
+        assert_eq!(
+            assertions[0].subject,
+            Subject::Module("gyre-domain".to_string())
+        );
+        assert_eq!(
+            assertions[1].subject,
+            Subject::Type("SearchService".to_string())
+        );
+        assert_eq!(assertions[2].subject, Subject::NodesOfType(NodeType::Endpoint));
+    }
+
+    #[test]
+    fn eval_attribute_no_dependency_passes_and_fails() {
+        let nodes = vec![
+            make_node("n1", "gyre-domain", NodeType::Module),
+            make_node("n2", "gyre-adapters", NodeType::Module),
+        ];
+        let content =
+            r#"<!-- gyre:assert type="no_dependency" from="gyre-domain" to="gyre-adapters" -->"#;
+        let assertions = parse_assertions(content);
+        assert_eq!(assertions.len(), 1);
+
+        // No edge: passes.
+        let results = evaluate_assertions(&assertions, &nodes, &[]);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].passed);
+
+        // Edge exists: fails.
+        let edges = vec![make_edge("n1", "n2", EdgeType::DependsOn)];
+        let results = evaluate_assertions(&assertions, &nodes, &edges);
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].passed);
+    }
+
+    #[test]
+    fn eval_attribute_implements_passes_and_fails() {
+        let nodes = vec![
+            make_node("s1", "SearchService", NodeType::Type),
+            make_node("t1", "FullTextPort", NodeType::Interface),
+        ];
+        let content =
+            r#"<!-- gyre:assert type="implements" subject="SearchService" trait="FullTextPort" -->"#;
+        let assertions = parse_assertions(content);
+        assert_eq!(assertions.len(), 1);
+
+        // Implements edge present: passes.
+        let edges = vec![make_edge("s1", "t1", EdgeType::Implements)];
+        let results = evaluate_assertions(&assertions, &nodes, &edges);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].passed, "should pass: {}", results[0].explanation);
+
+        // No Implements edge: fails.
+        let results = evaluate_assertions(&assertions, &nodes, &[]);
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].passed);
+    }
+
+    #[test]
+    fn eval_attribute_all_have_passes_and_fails() {
+        let mut good = make_node("e1", "/api/v1/specs", NodeType::Endpoint);
+        good.spec_path = Some("specs/system/spec-lifecycle.md".to_string());
+        let mut bad = make_node("e2", "/api/v1/repos", NodeType::Endpoint);
+        bad.spec_path = None;
+        let unrelated = make_node("f1", "handler", NodeType::Function);
+
+        let content =
+            r#"<!-- gyre:assert type="all_have" node_type="Endpoint" property="spec_path" -->"#;
+        let assertions = parse_assertions(content);
+        assert_eq!(assertions.len(), 1);
+
+        // All endpoints carry the property: passes (unrelated Function node ignored).
+        let nodes = vec![good.clone(), unrelated.clone()];
+        let results = evaluate_assertions(&assertions, &nodes, &[]);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].passed, "should pass: {}", results[0].explanation);
+
+        // One endpoint lacks it: fails, naming the offender.
+        let nodes = vec![good, bad, unrelated];
+        let results = evaluate_assertions(&assertions, &nodes, &[]);
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].passed);
+        assert!(results[0].explanation.contains("/api/v1/repos"));
+    }
+
+    #[test]
+    fn eval_attribute_all_have_no_subject_nodes_fails() {
+        // Zero nodes of the requested type — the assertion cannot hold
+        // vacuously; the subject is not found.
+        let nodes = vec![make_node("f1", "handler", NodeType::Function)];
+        let content =
+            r#"<!-- gyre:assert type="all_have" node_type="Endpoint" property="spec_path" -->"#;
+        let assertions = parse_assertions(content);
+        let results = evaluate_assertions(&assertions, &nodes, &[]);
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].passed);
+        assert!(results[0].explanation.contains("not found"));
+    }
+
+    #[test]
+    fn eval_attribute_all_have_unknown_property_fails() {
+        let nodes = vec![make_node("e1", "/api/v1/specs", NodeType::Endpoint)];
+        let content =
+            r#"<!-- gyre:assert type="all_have" node_type="Endpoint" property="auth_middleware" -->"#;
+        let assertions = parse_assertions(content);
+        let results = evaluate_assertions(&assertions, &nodes, &[]);
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].passed);
+        assert!(results[0].explanation.contains("Unknown property"));
+    }
+
+    #[test]
+    fn parse_attribute_mixed_with_predicate_form() {
+        let content = r#"# Spec
+<!-- gyre:assert type="no_dependency" from="a" to="b" -->
+<!-- gyre:assert module("a") NOT depends_on("b") -->
+"#;
+        let assertions = parse_assertions(content);
+        assert_eq!(assertions.len(), 2);
+        assert_eq!(
+            assertions[0].subject,
+            Subject::Module("a".to_string())
+        );
+        assert_eq!(
+            assertions[1].predicate,
+            Predicate::NotDependsOn("b".to_string())
+        );
     }
 }
