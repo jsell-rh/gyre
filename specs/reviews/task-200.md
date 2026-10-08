@@ -81,3 +81,18 @@ Fix: `6e8a33f` removes the four dead lines and `new_block.rs`; `9897458d` satisf
 - Static gate battery: 36 scripts fail identically on the task base `f315b6f` in this environment (missing JS toolchain, awk incompatibilities, arg-requiring hooks) — pre-existing, not caused by this task; the task-scoped gates above all pass.
 
 — Verifier round 2, 2026-10-08
+
+## Round 3 (final verification of the round-2 repairs, attempt-10 tree at `d8e2c2a`)
+
+Independently re-checked every repair Round 2 claimed, on the committed tree (working tree clean; the round-2 review/task/coverage prose commits `aced5fc`/`d8e2c2a` included):
+
+- **Dead guard stays dead-dead.** `check_field_type` (`crates/gyre-common/src/message.rs:539`) opens directly with `let ok = match ty { … }` — no `return Ok(())` scratch lines; `new_block.rs` absent from the tree. Mutation probe re-run properly this round: replacing the match with `true || match` (which actually disables it) makes `validate_payload_enforces_field_types` **FAIL**; restored, all green. Round 2's probe description (`true ||`) was the correct form; an earlier `true &&` probe in this round was logically inert and discarded.
+- **Schema table re-checked field-by-field against message-bus.md lines 196–229**: all 34 kinds match on names, wire types, and requiredness, including `GateFailure`'s optional `gate_type`/`status`/`output`/`spec_ref`/`gate_agent_id`, `AgentCompleted`'s nested `decisions` objects, `PushAccepted.commit_count: u64` optional, and `RunStarted`/`RunFinished` optional `task_id`. Non-spec variants and `Custom` in explicit `None` arms; `QueueUpdated`/`DataSeeded` as empty schemas.
+- **Wiring intact on both receipt paths, pre-sign/persist**: REST `api/messages.rs:259` (→ `ApiError::BadRequest`, 400) and MCP `mcp.rs:1948` (→ `tool_error`), each placed after tier/destination/scoping guards and before `Message` construction. `grep` over `crates/gyre-server/src` confirms exactly two production call sites, both calling the shared `gyre-common` function.
+- **Test runs on HEAD**: `cargo test -p gyre-common --lib message` → **30 passed**; `cargo test -p gyre-server --lib api::messages` → **14 passed**; `cargo test -p gyre-server --lib mcp_message_send` → **8 passed**. The wrong-type assertions inside `send_message_rejects_payload_missing_required_field` and `mcp_message_send_rejects_payload_missing_required_field` pass on HEAD and failed at the F1 dead-guard state (13/14, 7/8) — the defect class is test-anchored.
+- **Gates on HEAD against base `f315b6f`**: `git diff --check` clean; `check-rustfmt-diff.py` clean (3 files); `check-clippy-diff.py` clean; `check-task-commit-attribution.sh` OK; `check-arch.sh`, `check-dead-message-kinds.sh`, `check-mcp-write-tools.sh` OK. `git diff f315b6f..HEAD -- scripts/check-*.sh 'scripts/*-exemptions.txt'` is empty — no gate weakened, no exemption file touched (still frozen at 3).
+- **Crates/docs diff surface**: exactly `message.rs`, `api/messages.rs`, `mcp.rs`, `docs/api-reference.md` — the docs rows now state the per-kind required fields and the 400 on both send paths. Server-internal emit paths untouched, per plan item 4.
+
+Findings: none. The re-land meets the spec contract as amended by the independent spec review (presence **and** wire-type enforcement, no coercion, extension fields pass through).
+
+— Verifier round 3, 2026-10-08
