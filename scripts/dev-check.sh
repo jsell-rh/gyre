@@ -2,7 +2,9 @@
 # Deterministic integration gates. Keep mechanics out of agent prompts.
 set -euo pipefail
 cd /tmp/gyre
-git diff --check HEAD^1 HEAD
+# Git uses exit 2 for whitespace errors. Report a candidate defect using the
+# controller's repair status rather than leaving the task in manual attention.
+git diff --check HEAD^1 HEAD || exit 1
 BASE=$(git rev-parse HEAD^1)
 gate() { python3 /tmp/stage/dev-static-gate.py "$BASE" "$@"; }
 gate python3 /tmp/stage/check-rustfmt-diff.py "$BASE"

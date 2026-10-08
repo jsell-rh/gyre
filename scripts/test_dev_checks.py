@@ -60,6 +60,13 @@ class CheckIntegrityTest(unittest.TestCase):
         self.assertEqual(check.read_text(), "exit 0\n", "candidate tree was not restored after failure")
         self.assertEqual(self.git("status", "--porcelain"), "")
 
+    def test_whitespace_failure_requests_implementation_repair(self):
+        (self.work / "review.md").write_text("review with trailing whitespace  \n")
+        self.commit("candidate with malformed review")
+        result = subprocess.run(["bash", str(self.runner)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("trailing whitespace", result.stdout)
+
     def test_replacing_an_exemption_at_the_same_count_is_rejected(self):
         (self.work / "scripts/example-exemptions.txt").write_text("new-violation\n")
         self.commit("replace exemption")
