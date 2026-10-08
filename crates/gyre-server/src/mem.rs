@@ -3359,6 +3359,7 @@ fn test_state_inner(
         spec_ledger: Arc::new(MemSpecLedgerRepository::default()),
         spec_approval_history: Arc::new(MemSpecApprovalEventRepository::default()),
         spec_assertion_results: Arc::new(MemSpecAssertionResultRepository::default()),
+        trust_anchors: Arc::new(MemTrustAnchorRepository::default()),
         spec_links_store: Arc::new(Mutex::new(Vec::new())),
         budget_configs: Arc::new(MemBudgetConfigRepository::default()),
         budget_usages: Arc::new(MemBudgetUsageRepository::default()),
