@@ -77,6 +77,9 @@ vi.mock('../lib/api.js', () => ({
     pauseMergeQueue: vi.fn().mockResolvedValue({ queue_paused: true }),
     agents: vi.fn().mockResolvedValue([]),
     sendAgentMessage: vi.fn().mockResolvedValue({}),
+    mergeRequests: vi.fn().mockResolvedValue([]),
+    revertMr: vi.fn().mockResolvedValue({ repo_id: 'repo-1', mr_id: 'mr-lose', revert_commit_sha: 'rev123' }),
+    createTask: vi.fn().mockResolvedValue({ id: 'task-42', title: 'Reconcile' }),
   },
 }));
 
@@ -455,7 +458,7 @@ describe('Inbox', () => {
   });
 
   it('renders the conflict diff view when a SpecConflict card is expanded (HSI §7 item 3)', async () => {
-    const conflictNotif = makeNotification({
+    const specConflictNotif = makeNotification({
       id: 'notif-conflict',
       notification_type: 'SpecConflict',
       priority: 2,
@@ -473,7 +476,7 @@ describe('Inbox', () => {
       }),
       entity_ref: 'specs/system/payments.md',
     });
-    api.myNotifications.mockResolvedValue([conflictNotif]);
+    api.myNotifications.mockResolvedValue([specConflictNotif]);
     const { findByRole, container } = render(Inbox);
     const header = await findByRole('button', { name: /Expand: Spec edit conflict/ });
     await fireEvent.click(header);
@@ -487,5 +490,124 @@ describe('Inbox', () => {
     expect(removeCell.textContent).toContain('old server line');
     const addCell = container.querySelector('.diff-cell.diff-add.diff-right');
     expect(addCell.textContent).toContain('my local line');
+  });
+
+  // HSI §8 P5: conflicting interpretations — View Both, Pick A / Pick B, Reconcile
+  const conflictNotif = makeNotification({
+    id: 'notif-conflict-p5',
+    notification_type: 'conflicting_interpretations',
+    priority: 5,
+    title: 'Conflicting spec interpretations: system/payments.md',
+    repo_id: 'repo-1',
+    entity_ref: 'system/payments.md',
+    body: JSON.stringify({
+      spec_ref: 'system/payments.md',
+      agent_a: 'agent-1',
+      commit_sha_a: 'aaaa000000000000000000000000000000000000',
+      agent_b: 'agent-2',
+      commit_sha_b: 'bbbb000000000000000000000000000000000000',
+      conflicting_nodes: ['PaymentService', 'RetryPolicy'],
+      conflict_count: 2,
+      resolution_options: [
+        { label: 'Pick A', action: 'revert_b' },
+        { label: 'Pick B', action: 'revert_a' },
+        { label: 'Reconcile', action: 'create_reconciliation_task' },
+      ],
+    }),
+  });
+
+  it('conflicting_interpretations: shows View Both Specs, Pick A, Pick B, Reconcile when expanded (HSI §8 P5)', async () => {
+    api.myNotifications.mockResolvedValue([conflictNotif]);
+    const { findByRole } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Conflicting spec interpretations/ });
+    await fireEvent.click(header);
+    await waitFor(() => {
+      expect(document.body.textContent).toContain('View Both Specs');
+      expect(document.body.textContent).toContain('Pick A');
+      expect(document.body.textContent).toContain('Pick B');
+      expect(document.body.textContent).toContain('Reconcile');
+    });
+    // No more "coming soon" placeholder — the actions must be real.
+    expect(document.body.textContent).not.toContain('coming soon');
+  });
+
+  it('conflicting_interpretations: expanded card lists the conflicting nodes and both agents', async () => {
+    api.myNotifications.mockResolvedValue([conflictNotif]);
+    const { findByRole, container } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Conflicting spec interpretations/ });
+    await fireEvent.click(header);
+    await waitFor(() => {
+      expect(document.body.textContent).toContain('PaymentService');
+      expect(document.body.textContent).toContain('RetryPolicy');
+    });
+    const nodes = container.querySelectorAll('.conflict-node');
+    expect(nodes.length).toBe(2);
+  });
+
+  it('Pick B reverts agent A\'s merged MR via the recovery endpoint', async () => {
+    api.mergeRequests.mockResolvedValue([
+      { id: 'mr-a', repository_id: 'repo-1', status: 'merged', merge_commit_sha: 'aaaa000000000000000000000000000000000000' },
+      { id: 'mr-b', repository_id: 'repo-1', status: 'merged', merge_commit_sha: 'bbbb000000000000000000000000000000000000' },
+    ]);
+    api.myNotifications.mockResolvedValue([conflictNotif]);
+    const { findByRole, findByText } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Conflicting spec interpretations/ });
+    await fireEvent.click(header);
+    await fireEvent.click(await findByText('Pick B'));
+    await waitFor(() => {
+      expect(api.revertMr).toHaveBeenCalledWith('repo-1', 'mr-a');
+    });
+    await waitFor(() => {
+      expect(document.body.textContent).toContain("Picked — reverted agent-1's conflicting MR");
+    });
+  });
+
+  it('Pick A reverts agent B\'s merged MR via the recovery endpoint', async () => {
+    api.mergeRequests.mockResolvedValue([
+      { id: 'mr-a', repository_id: 'repo-1', status: 'merged', merge_commit_sha: 'aaaa000000000000000000000000000000000000' },
+      { id: 'mr-b', repository_id: 'repo-1', status: 'merged', merge_commit_sha: 'bbbb000000000000000000000000000000000000' },
+    ]);
+    api.myNotifications.mockResolvedValue([conflictNotif]);
+    const { findByRole, findByText } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Conflicting spec interpretations/ });
+    await fireEvent.click(header);
+    await fireEvent.click(await findByText('Pick A'));
+    await waitFor(() => {
+      expect(api.revertMr).toHaveBeenCalledWith('repo-1', 'mr-b');
+    });
+  });
+
+  it('Pick shows a targeted error when the losing commit has no merged MR', async () => {
+    api.mergeRequests.mockResolvedValue([]);
+    api.myNotifications.mockResolvedValue([conflictNotif]);
+    const { findByRole, findByText } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Conflicting spec interpretations/ });
+    await fireEvent.click(header);
+    await fireEvent.click(await findByText('Pick A'));
+    await waitFor(() => {
+      expect(document.body.textContent).toContain('Could not find the merged MR for commit');
+    });
+    expect(api.revertMr).not.toHaveBeenCalled();
+  });
+
+  it('Reconcile creates a reconciliation task scoped to the contested spec', async () => {
+    api.myNotifications.mockResolvedValue([conflictNotif]);
+    const { findByRole, findByText } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Conflicting spec interpretations/ });
+    await fireEvent.click(header);
+    await fireEvent.click(await findByText('Reconcile'));
+    await waitFor(() => {
+      expect(api.createTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          task_type: 'implementation',
+          spec_path: 'system/payments.md',
+          workspace_id: 'ws-1',
+          labels: ['reconciliation'],
+        }),
+      );
+    });
+    await waitFor(() => {
+      expect(document.body.textContent).toContain('Reconciliation task created (task-42)');
+    });
   });
 });

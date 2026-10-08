@@ -399,6 +399,93 @@
     }
   }
 
+  // HSI §8 P5 "Pick A / Pick B / Reconcile": conflicting-interpretation
+  // arbitration. The divergence body carries both agents' commit SHAs and
+  // the repo; each side's MR is resolved from the repo's merged MR list by
+  // merge-commit SHA (the divergence is post-merge). Picking a side reverts
+  // the other side's MR via the recovery protocol; Reconcile creates a
+  // reconciliation task scoped to the contested spec.
+  async function resolveConflictMrId(n, commitSha) {
+    if (!commitSha || !n.repo_id) return null;
+    const mrs = (await api.mergeRequests({ repository_id: n.repo_id })) ?? [];
+    const merged = mrs.filter(m => m.status === 'merged');
+    const bySha = merged.find(m => m.merge_commit_sha === commitSha);
+    if (bySha) return bySha.id;
+    // Fallback: SHA may be the branch head commit rather than the merge commit;
+    // match MRs whose title/branch references the authoring agent is not
+    // reliable, so return null and surface a targeted error instead of
+    // reverting the wrong MR.
+    return null;
+  }
+
+  async function handlePickSide(n, keepSide) {
+    const body = getBody(n);
+    const repoId = n.repo_id ?? body.repo_id;
+    const keepSha = keepSide === 'a' ? body.commit_sha_a : body.commit_sha_b;
+    const loseSha = keepSide === 'a' ? body.commit_sha_b : body.commit_sha_a;
+    const loseAgent = keepSide === 'a' ? body.agent_b : body.agent_a;
+    if (!repoId || !loseSha) return;
+    actionStates = { ...actionStates, [n.id]: { loading: true, action: `pick_${keepSide}` } };
+    try {
+      const mrId = await resolveConflictMrId(n, loseSha);
+      if (!mrId) {
+        throw new Error($t('decisions.no_conflict_mr', { values: { sha: loseSha.slice(0, 12) } }));
+      }
+      await api.revertMr(repoId, mrId);
+      api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+      );
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: true, message: $t('decisions.side_picked', { values: { agent: loseAgent ?? '' } }) },
+      };
+    } catch (e) {
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: false, message: e.message || $t('decisions.pick_failed') },
+      };
+    }
+  }
+
+  async function handleReconcile(n) {
+    const body = getBody(n);
+    const specRef = body.spec_ref || n.entity_ref;
+    if (!specRef || !n.workspace_id) return;
+    actionStates = { ...actionStates, [n.id]: { loading: true, action: 'reconcile' } };
+    try {
+      const task = await api.createTask({
+        title: $t('decisions.reconcile_task_title', { values: { spec: specRef.split('/').pop() ?? specRef } }),
+        description: $t('decisions.reconcile_task_desc', {
+          values: {
+            spec: specRef,
+            agent_a: body.agent_a ?? '',
+            agent_b: body.agent_b ?? '',
+            count: body.conflict_count ?? (Array.isArray(body.conflicting_nodes) ? body.conflicting_nodes.length : 0),
+          },
+        }),
+        task_type: 'implementation',
+        spec_path: specRef,
+        workspace_id: n.workspace_id,
+        repo_id: n.repo_id ?? undefined,
+        labels: ['reconciliation'],
+      });
+      api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+      );
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: true, message: $t('decisions.reconcile_task_created', { values: { id: task?.id ?? '' } }) },
+      };
+    } catch (e) {
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: false, message: e.message || $t('decisions.reconcile_failed') },
+      };
+    }
+  }
+
   // Reload when scope/workspaceId/repoId changes, and set up auto-refresh
   $effect(() => {
     void scope;
@@ -569,6 +656,24 @@
                   <pre class="card-output">{body.output}</pre>
                 {/if}
 
+                {#if Array.isArray(body.conflicting_nodes) && body.conflicting_nodes.length > 0}
+                  <!-- HSI §8 P5: which agents conflicted and on which nodes -->
+                  <p class="card-detail">
+                    {$t('decisions.conflict_between', {
+                      values: {
+                        a: body.agent_name_a ?? resolveEntityName('agent', body.agent_a ?? ''),
+                        b: body.agent_name_b ?? resolveEntityName('agent', body.agent_b ?? ''),
+                        count: body.conflicting_nodes.length,
+                      },
+                    })}
+                  </p>
+                  <ul class="conflict-nodes">
+                    {#each body.conflicting_nodes as nodeName}
+                      <li class="conflict-node mono">{nodeName}</li>
+                    {/each}
+                  </ul>
+                {/if}
+
                 <!-- Entity reference links -->
                 <div class="card-refs">
                   {#if body.spec_path}
@@ -700,8 +805,32 @@
                         {$t('common.dismiss')}
                       </Button>
                     {:else if n.notification_type === 'conflicting_interpretations'}
+                      <!-- HSI §8 P5: View Both, Pick A / Pick B, Reconcile -->
                       <Button variant="ghost" size="sm" onclick={() => handleViewSpec(n)}>{$t('decisions.view_both_specs')}</Button>
-                      <span class="coming-soon-note">{$t('decisions.reconciliation_note')}</span>
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        disabled={state?.loading}
+                        onclick={() => handlePickSide(n, 'a')}
+                      >
+                        {state?.loading && state?.action === 'pick_a' ? $t('decisions.picking_a') : $t('decisions.pick_a')}
+                      </Button>
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        disabled={state?.loading}
+                        onclick={() => handlePickSide(n, 'b')}
+                      >
+                        {state?.loading && state?.action === 'pick_b' ? $t('decisions.picking_b') : $t('decisions.pick_b')}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={state?.loading}
+                        onclick={() => handleReconcile(n)}
+                      >
+                        {state?.loading && state?.action === 'reconcile' ? $t('decisions.reconciling') : $t('decisions.reconcile')}
+                      </Button>
                       <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>{$t('common.dismiss')}</Button>
                     {:else if n.notification_type === 'meta_spec_drift'}
                       <Button
@@ -1152,6 +1281,25 @@
     color: var(--color-text-muted);
   }
 
+  .conflict-nodes {
+    margin: 0;
+    padding: var(--space-2) var(--space-3);
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .conflict-node {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+  }
+
+  .conflict-node::before {
+    content: '· ';
+  }
+
   .card-output {
     margin: 0;
     padding: var(--space-3);
@@ -1258,11 +1406,6 @@
     color: var(--color-danger);
   }
 
-  .coming-soon-note {
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-    font-style: italic;
-  }
 
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
