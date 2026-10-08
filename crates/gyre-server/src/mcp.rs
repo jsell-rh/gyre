@@ -4919,6 +4919,327 @@ mod tests {
         assert!(result["repo_id"].as_str().is_some());
     }
 
+    // ── TASK-068: §9 graph tools callable over MCP protocol ─────────────────
+    use gyre_common::graph::{
+        EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence, Visibility,
+    };
+    //
+    // These exercise the real JSON-RPC tools/call dispatch path (router +
+    // AuthenticatedAgent + handler) against a real graph store, in-process.
+    // The TCP-level integration twins live in tests/graph_integration.rs
+    // (test_mcp_graph_summary/_dryrun/_nodes/_edges/_search); in this
+    // sandbox loopback accept() is seccomp-blocked, so the in-process tests
+    // are the runnable proof of §9's "callable via MCP protocol".
+
+    fn graph_node(repo_id: &str, name: &str, node_type: NodeType) -> GraphNode {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        GraphNode {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            repo_id: Id::new(repo_id),
+            node_type,
+            name: name.to_string(),
+            qualified_name: format!("pkg::{name}"),
+            file_path: format!("src/{name}.rs"),
+            line_start: 1,
+            line_end: 10,
+            visibility: Visibility::Public,
+            doc_comment: None,
+            spec_path: None,
+            spec_paths: vec![],
+            spec_confidence: SpecConfidence::None,
+            last_modified_sha: "abc123".to_string(),
+            last_modified_by: None,
+            last_modified_at: now,
+            created_sha: "abc123".to_string(),
+            created_at: now,
+            complexity: None,
+            churn_count_30d: 0,
+            test_coverage: None,
+            first_seen_at: now,
+            last_seen_at: now,
+            deleted_at: None,
+            test_node: false,
+            spec_approved_at: None,
+            milestone_completed_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_graph_summary_tool_call() {
+        let state = test_state();
+        let mut t = graph_node("repo-t68", "test_foo", NodeType::Function);
+        t.test_node = true;
+        let a = graph_node("repo-t68", "fn_a", NodeType::Function);
+        let b = graph_node("repo-t68", "fn_b", NodeType::Function);
+        state.graph_store.create_node(t.clone()).await.unwrap();
+        state.graph_store.create_node(a.clone()).await.unwrap();
+        state.graph_store.create_node(b.clone()).await.unwrap();
+        state
+            .graph_store
+            .create_edge(GraphEdge {
+                id: Id::new(uuid::Uuid::new_v4().to_string()),
+                repo_id: Id::new("repo-t68"),
+                source_id: t.id.clone(),
+                target_id: a.id.clone(),
+                edge_type: EdgeType::Calls,
+                metadata: None,
+                first_seen_at: 0,
+                last_seen_at: 0,
+                deleted_at: None,
+            })
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 150,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_summary",
+                    "arguments": { "repo_id": "repo-t68" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!json["result"]["isError"].as_bool().unwrap_or(true), "tool must succeed");
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        let summary: Value = serde_json::from_str(text).unwrap();
+        // §22 fields all present.
+        for field in [
+            "node_counts",
+            "edge_counts",
+            "top_types_by_fields",
+            "top_functions_by_calls",
+            "modules",
+            "test_coverage",
+        ] {
+            assert!(
+                summary[field].is_object() || summary[field].is_array(),
+                "graph_summary must include {field}, got: {text}"
+            );
+        }
+        assert_eq!(summary["test_coverage"]["test_functions"], 1);
+        // BFS seeds include the test node itself: reachable = {test_foo, fn_a}.
+        assert_eq!(summary["test_coverage"]["reachable_from_tests"], 2);
+        assert_eq!(summary["test_coverage"]["unreachable"], 1);
+    }
+
+    #[tokio::test]
+    async fn mcp_graph_query_dryrun_tool_call() {
+        let state = test_state();
+        let n1 = graph_node("repo-t68", "AuthService", NodeType::Type);
+        state.graph_store.create_node(n1).await.unwrap();
+        let app = crate::build_router(state);
+
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 151,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_query_dryrun",
+                    "arguments": {
+                        "repo_id": "repo-t68",
+                        "query": {
+                            "scope": {
+                                "type": "filter",
+                                "node_types": ["type"],
+                                "name_pattern": "Auth"
+                            }
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!json["result"]["isError"].as_bool().unwrap_or(true), "tool must succeed");
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(result["matched_nodes"], 1);
+        assert!(
+            result["matched_node_names"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|n| n == "AuthService"),
+            "dryrun must report matched node names, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_graph_query_dryrun_empty_scope_warning_over_mcp() {
+        let state = test_state();
+        state
+            .graph_store
+            .create_node(graph_node("repo-t68", "Foo", NodeType::Type))
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 152,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_query_dryrun",
+                    "arguments": {
+                        "repo_id": "repo-t68",
+                        "query": {
+                            "scope": {
+                                "type": "filter",
+                                "node_types": [],
+                                "name_pattern": "does-not-exist"
+                            }
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(result["matched_nodes"], 0);
+        assert!(
+            result["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w.as_str().unwrap().contains("Scope matched 0 nodes")),
+            "empty scope must warn over MCP, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_graph_nodes_tool_call() {
+        let state = test_state();
+        state
+            .graph_store
+            .create_node(graph_node("repo-t68", "TargetNode", NodeType::Type))
+            .await
+            .unwrap();
+        state
+            .graph_store
+            .create_node(graph_node("repo-t68", "OtherNode", NodeType::Type))
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 153,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_nodes",
+                    "arguments": { "repo_id": "repo-t68", "name_pattern": "Target" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("TargetNode") && !text.contains("OtherNode"),
+            "graph_nodes must filter by name pattern, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_graph_edges_tool_call() {
+        let state = test_state();
+        let src = graph_node("repo-t68", "caller_fn", NodeType::Function);
+        let dst = graph_node("repo-t68", "callee_fn", NodeType::Function);
+        let (sid, did) = (src.id.clone(), dst.id.clone());
+        state.graph_store.create_node(src).await.unwrap();
+        state.graph_store.create_node(dst).await.unwrap();
+        state
+            .graph_store
+            .create_edge(GraphEdge {
+                id: Id::new(uuid::Uuid::new_v4().to_string()),
+                repo_id: Id::new("repo-t68"),
+                source_id: sid,
+                target_id: did,
+                edge_type: EdgeType::Calls,
+                metadata: None,
+                first_seen_at: 0,
+                last_seen_at: 0,
+                deleted_at: None,
+            })
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 154,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_edges",
+                    "arguments": { "repo_id": "repo-t68", "edge_type": "calls" }
+                }
+            }),
+        )
+ .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("caller_fn") && text.contains("calls"),
+            "graph_edges must return the seeded call edge, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_graph_search_tool_call() {
+        let state = test_state();
+        state
+            .graph_store
+            .create_node(graph_node("repo-t68", "AuthService", NodeType::Type))
+            .await
+            .unwrap();
+        state
+            .graph_store
+            .create_node(graph_node("repo-t68", "UnrelatedNode", NodeType::Type))
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 155,
+                "method": "tools/call",
+                "params": {
+                    "name": "search",
+                    "arguments": { "repo_id": "repo-t68", "query": "auth" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!json["result"]["isError"].as_bool().unwrap_or(true), "tool must succeed");
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("AuthService") && !text.contains("UnrelatedNode"),
+            "search must return matching node only, got: {text}"
+        );
+    }
+
     // ── TASK-010: spec_assist tool ───────────────────────────────────────────
 
     #[tokio::test]
