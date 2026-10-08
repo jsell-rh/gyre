@@ -7,7 +7,6 @@ use gyre_ports::storage::StoragePort;
 use std::sync::Arc;
 use tracing::instrument;
 
-pub mod activity;
 pub mod agent;
 pub mod agent_commit;
 pub mod analytics;

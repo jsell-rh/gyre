@@ -12,7 +12,10 @@ use gyre_domain::{AgentStatus, TaskStatus};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::{retention::RetentionPolicy, AppState};
+use crate::{
+    retention::{validate_policies, RetentionPolicy},
+    AppState,
+};
 
 use super::error::ApiError;
 use super::now_secs;
@@ -203,12 +206,17 @@ pub async fn admin_list_retention(
 }
 
 /// PUT /api/v1/admin/retention — update retention policies (Admin only).
+///
+/// The body must be a complete, valid policy list: all 7 spec data types
+/// (`validate_policies`); an omitted type would silently disable
+/// enforcement for it.
 pub async fn admin_update_retention(
     State(state): State<Arc<AppState>>,
     Json(policies): Json<Vec<RetentionPolicy>>,
-) -> StatusCode {
+) -> Result<StatusCode, ApiError> {
+    validate_policies(&policies).map_err(ApiError::BadRequest)?;
     state.retention_store.update(policies);
-    StatusCode::NO_CONTENT
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ── Audit Log ─────────────────────────────────────────────────────────────────
