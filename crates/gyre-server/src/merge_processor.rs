@@ -4282,8 +4282,8 @@ mod tests {
             assert_eq!(ev.event_name, "merge_queue.processed");
             let payload = &ev.properties;
             assert_eq!(
-                payload["result"], "merged",
-                "analytics event result should be 'merged'"
+                payload["outcome"], "merged",
+                "analytics event outcome should be 'merged' (analytics.md §Auto-Emitted Events)"
             );
             assert_eq!(
                 payload["atomic_group"], "bundle",
