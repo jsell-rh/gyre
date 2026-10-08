@@ -150,6 +150,38 @@ pub enum MessageKind {
     Custom(String),
 }
 
+/// Wire type of a payload field, per message-bus.md §Payload Schemas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FieldType {
+    /// `Id` or `String` — any JSON string.
+    Str,
+    /// `u64` — a JSON number that is a non-negative integer.
+    U64,
+    /// `u32` — a JSON number that is a non-negative integer < 2^32.
+    U32,
+    /// `f64` — any JSON number (integer literals like `usage_pct: 80` are valid).
+    F64,
+    /// `Vec<String>` — a JSON array whose elements are all strings.
+    StrArray,
+    /// `decisions: [{what, why, confidence, alternatives_considered?}]` —
+    /// a JSON array of objects each carrying string `what`/`why`/`confidence`
+    /// and an optional string-array `alternatives_considered`.
+    Decisions,
+}
+
+/// One payload field's schema: name, wire type, requiredness.
+struct FieldSpec {
+    name: &'static str,
+    ty: FieldType,
+    required: bool,
+}
+
+const fn f(name: &'static str, ty: FieldType, required: bool) -> FieldSpec {
+    FieldSpec { name, ty, required }
+}
+
+
+
 impl MessageKind {
     /// Returns the snake_case wire name for this kind.
     pub fn as_str(&self) -> &str {
@@ -283,91 +315,267 @@ impl MessageKind {
         }
     }
 
-    /// Required payload fields for this kind — message-bus.md §Payload Schemas.
+    /// Payload schema for this kind — message-bus.md §Payload Schemas
+    /// (lines 194–229), transcribed field-by-field including wire types.
     ///
-    /// An empty slice means "no required fields". Kinds the spec table does not
-    /// list (`SpecApproved`, `ConstraintViolation`, `AtomicGroupFailed`,
-    /// `MrReverted`, `MergeQueuePaused`, `MergeQueueResumed`) are server-emitted
-    /// only and carry no specced schema, so they impose no requirements.
-    fn required_payload_fields(&self) -> &'static [&'static str] {
+    /// Returns `None` for kinds the spec table does not list (server-emitted
+    /// only: `SpecApproved`, `ConstraintViolation`, `AtomicGroupFailed`,
+    /// `MrReverted`, `MergeQueuePaused`, `MergeQueueResumed`) and for `Custom`,
+    /// which accepts any JSON object — both keep explicit match arms below so
+    /// adding a spec row for one is a visible edit, not a silent default.
+    fn payload_schema(&self) -> Option<&'static [FieldSpec]> {
+        use FieldType::*;
         match self {
             // Directed
-            MessageKind::TaskAssignment => &["task_id"],
-            MessageKind::ReviewRequest => &["mr_id"],
-            MessageKind::StatusUpdate => &["status", "summary"],
-            MessageKind::Escalation => &["reason"],
+            MessageKind::TaskAssignment => Some(&(const { [
+                f("task_id", Str, true),
+                f("spec_ref", Str, false),
+            ] })),
+            MessageKind::ReviewRequest => Some(&(const { [f("mr_id", Str, true)] })),
+            MessageKind::StatusUpdate => Some(&(const { [
+                f("status", Str, true),
+                f("summary", Str, true),
+            ] })),
+            MessageKind::Escalation => Some(&(const { [
+                f("reason", Str, true),
+                f("context", Str, false),
+            ] })),
             // Events
-            MessageKind::AgentCreated => &["agent_id"],
-            MessageKind::AgentStatusChanged => &["agent_id", "status"],
-            MessageKind::AgentContainerSpawned => &["agent_id", "container_id", "image", "runtime"],
-            MessageKind::AgentCompleted => &["agent_id", "task_id"],
-            MessageKind::ReconciliationCompleted => &["workspace_id", "persona_id"],
-            MessageKind::TaskCreated => &["task_id"],
-            MessageKind::TaskTransitioned => &["task_id", "status"],
-            MessageKind::MrCreated => &["mr_id"],
-            MessageKind::MrStatusChanged => &["mr_id", "status"],
-            MessageKind::MrMerged => &["mr_id"],
-            MessageKind::PushRejected => &["repo_id", "branch", "agent_id", "reason"],
-            MessageKind::PushAccepted => &["repo_id", "branch", "agent_id"],
-            MessageKind::SpecChanged => &["repo_id", "spec_path", "change_kind"],
-            MessageKind::GateFailure => &["mr_id", "gate_name"],
-            MessageKind::StaleSpecWarning => {
-                &["mr_id", "repo_id", "spec_path", "spec_sha", "current_sha"]
-            }
-            MessageKind::SpeculativeConflict => &["repo_id", "branch", "conflicting_files"],
-            MessageKind::SpeculativeMergeClean => &["repo_id", "branch"],
-            MessageKind::HotFilesChanged => &["repo_id"],
-            MessageKind::BudgetWarning => &["agent_id", "workspace_id", "usage_pct"],
-            MessageKind::BudgetExhausted => &["agent_id", "workspace_id", "grace_secs"],
-            MessageKind::AgentError => &["agent_id", "error"],
+            MessageKind::AgentCreated => Some(&(const { [f("agent_id", Str, true)] })),
+            MessageKind::AgentStatusChanged => Some(&(const { [
+                f("agent_id", Str, true),
+                f("status", Str, true),
+            ] })),
+            MessageKind::AgentContainerSpawned => Some(&(const { [
+                f("agent_id", Str, true),
+                f("container_id", Str, true),
+                f("image", Str, true),
+                f("runtime", Str, true),
+            ] })),
+            MessageKind::AgentCompleted => Some(&(const { [
+                f("agent_id", Str, true),
+                f("task_id", Str, true),
+                f("spec_ref", Str, false),
+                f("decisions", Decisions, false),
+                f("uncertainties", StrArray, false),
+                f("conversation_sha", Str, false),
+            ] })),
+            MessageKind::ReconciliationCompleted => Some(&(const { [
+                f("workspace_id", Str, true),
+                f("persona_id", Str, true),
+                f("persona_name", Str, false),
+                f("specs_evaluated", U32, false),
+                f("specs_changed", U32, false),
+                f("preview_branch", Str, false),
+            ] })),
+            MessageKind::TaskCreated => Some(&(const { [f("task_id", Str, true)] })),
+            MessageKind::TaskTransitioned => Some(&(const { [
+                f("task_id", Str, true),
+                f("status", Str, true),
+            ] })),
+            MessageKind::MrCreated => Some(&(const { [f("mr_id", Str, true)] })),
+            MessageKind::MrStatusChanged => Some(&(const { [
+                f("mr_id", Str, true),
+                f("status", Str, true),
+            ] })),
+            MessageKind::MrMerged => Some(&(const { [
+                f("mr_id", Str, true),
+                f("merge_commit_sha", Str, false),
+            ] })),
+            MessageKind::PushRejected => Some(&(const { [
+                f("repo_id", Str, true),
+                f("branch", Str, true),
+                f("agent_id", Str, true),
+                f("reason", Str, true),
+            ] })),
+            MessageKind::PushAccepted => Some(&(const { [
+                f("repo_id", Str, true),
+                f("branch", Str, true),
+                f("agent_id", Str, true),
+                f("commit_count", U64, false),
+                f("task_id", Str, false),
+                f("ralph_step", Str, false),
+            ] })),
+            MessageKind::SpecChanged => Some(&(const { [
+                f("repo_id", Str, true),
+                f("spec_path", Str, true),
+                f("change_kind", Str, true),
+                f("task_id", Str, false),
+                f("dependent_workspace_id", Str, false),
+                f("source_workspace_slug", Str, false),
+            ] })),
+            MessageKind::GateFailure => Some(&(const { [
+                f("mr_id", Str, true),
+                f("gate_name", Str, true),
+                f("gate_type", Str, false),
+                f("status", Str, false),
+                f("output", Str, false),
+                f("spec_ref", Str, false),
+                f("gate_agent_id", Str, false),
+            ] })),
+            MessageKind::StaleSpecWarning => Some(&(const { [
+                f("mr_id", Str, true),
+                f("repo_id", Str, true),
+                f("spec_path", Str, true),
+                f("spec_sha", Str, true),
+                f("current_sha", Str, true),
+            ] })),
+            MessageKind::SpeculativeConflict => Some(&(const { [
+                f("repo_id", Str, true),
+                f("branch", Str, true),
+                f("conflicting_files", StrArray, true),
+            ] })),
+            MessageKind::SpeculativeMergeClean => Some(&(const { [
+                f("repo_id", Str, true),
+                f("branch", Str, true),
+            ] })),
+            MessageKind::HotFilesChanged => Some(&(const { [f("repo_id", Str, true)] })),
+            MessageKind::BudgetWarning => Some(&(const { [
+                f("agent_id", Str, true),
+                f("workspace_id", Str, true),
+                f("usage_pct", F64, true),
+            ] })),
+            MessageKind::BudgetExhausted => Some(&(const { [
+                f("agent_id", Str, true),
+                f("workspace_id", Str, true),
+                f("grace_secs", U64, true),
+            ] })),
+            MessageKind::AgentError => Some(&(const { [
+                f("agent_id", Str, true),
+                f("error", Str, true),
+                f("context", Str, false),
+            ] })),
             // Telemetry
-            MessageKind::ToolCallStart => &["agent_id", "tool_name"],
-            MessageKind::ToolCallEnd => &["agent_id", "tool_name", "duration_ms"],
-            MessageKind::TextMessageContent => &["agent_id", "content"],
-            MessageKind::RunStarted => &["agent_id"],
-            MessageKind::RunFinished => &["agent_id"],
-            MessageKind::StateChanged => &["agent_id", "new_state"],
-            // Spec table lists no required fields.
-            MessageKind::QueueUpdated | MessageKind::DataSeeded => &[],
+            MessageKind::ToolCallStart => Some(&(const { [
+                f("agent_id", Str, true),
+                f("tool_name", Str, true),
+            ] })),
+            MessageKind::ToolCallEnd => Some(&(const { [
+                f("agent_id", Str, true),
+                f("tool_name", Str, true),
+                f("duration_ms", U64, true),
+            ] })),
+            MessageKind::TextMessageContent => Some(&(const { [
+                f("agent_id", Str, true),
+                f("content", Str, true),
+                f("role", Str, false),
+            ] })),
+            MessageKind::RunStarted => Some(&(const { [
+                f("agent_id", Str, true),
+                f("task_id", Str, false),
+            ] })),
+            MessageKind::RunFinished => Some(&(const { [
+                f("agent_id", Str, true),
+                f("task_id", Str, false),
+            ] })),
+            MessageKind::StateChanged => Some(&(const { [
+                f("agent_id", Str, true),
+                f("old_state", Str, false),
+                f("new_state", Str, true),
+            ] })),
+            // Spec table lists no payload fields.
+            MessageKind::QueueUpdated | MessageKind::DataSeeded => Some(&(const { [] })),
             // Outside the spec table (server-emitted only) — no specced schema.
             MessageKind::SpecApproved
             | MessageKind::ConstraintViolation
             | MessageKind::AtomicGroupFailed
             | MessageKind::MrReverted
             | MessageKind::MergeQueuePaused
-            | MessageKind::MergeQueueResumed => &[],
-            // Any JSON object; requiredness is permissive.
-            MessageKind::Custom(_) => &[],
+            | MessageKind::MergeQueueResumed => None,
+            // Any JSON object; the payload shape is the sender's contract.
+            MessageKind::Custom(_) => None,
+        }
+    }
+
+    /// Check one field value against its declared wire type; the `Err` carries
+    /// the human-readable type name for the rejection reason.
+    fn check_field_type(ty: FieldType, value: &Value) -> Result<(), &'static str> {
+        let ok = match ty {
+            FieldType::Str => value.is_string(),
+            FieldType::U64 => value.as_u64().is_some(),
+            FieldType::U32 => matches!(value.as_u64(), Some(n) if n <= u32::MAX as u64),
+            FieldType::F64 => value.as_f64().is_some(),
+            FieldType::StrArray => value
+                .as_array()
+                .map_or(false, |arr| arr.iter().all(|v| v.is_string())),
+            FieldType::Decisions => value.as_array().map_or(false, |arr| {
+                arr.iter().all(|v| {
+                    v.as_object().map_or(false, |o| {
+                        o.get("what").map_or(false, |x| x.is_string())
+                            && o.get("why").map_or(false, |x| x.is_string())
+                            && o.get("confidence").map_or(false, |x| x.is_string())
+                            && match o.get("alternatives_considered") {
+                                None | Some(Value::Null) => true,
+                                Some(a) => a
+                                    .as_array()
+                                    .map_or(false, |arr| arr.iter().all(|x| x.is_string())),
+                            }
+                    })
+                })
+            }),
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(match ty {
+                FieldType::Str => "a string",
+                FieldType::U64 => "an unsigned integer",
+                FieldType::U32 => "an unsigned 32-bit integer",
+                FieldType::F64 => "a number",
+                FieldType::StrArray => "an array of strings",
+                FieldType::Decisions => "an array of decision objects",
+            })
         }
     }
 
     /// Validate a payload received from a caller against this kind's schema
-    /// (message-bus.md §Payload Schemas): payload must be a JSON object and must
-    /// carry every required field with a non-null value.
+    /// (message-bus.md §Payload Schemas): the payload must be a JSON object,
+    /// every required field must be present and non-null, and every
+    /// schema-known field that is present (required or optional) must match
+    /// its declared wire type.
     ///
-    /// Field *types* are deliberately not checked — the spec table defines
-    /// requiredness only. An absent payload is valid only for kinds with no
-    /// required fields. The `Err` string is a human-readable reason meant to be
-    /// surfaced verbatim to the caller (REST 400 body / MCP `tool_error`).
+    /// Unknown extension fields pass through untouched, and an optional field
+    /// may be absent (or explicitly null — null is treated as absent, the same
+    /// normalization the payload itself gets). An absent payload is valid only
+    /// for kinds with no required fields. The `Err` string is a human-readable
+    /// reason meant to be surfaced verbatim to the caller (REST 400 body /
+    /// MCP `tool_error`).
     pub fn validate_payload(&self, payload: Option<&Value>) -> Result<(), String> {
-        let required = self.required_payload_fields();
+        let schema = match self.payload_schema() {
+            None => {
+                // No specced schema (`Custom`, non-spec server-emitted kinds):
+                // any JSON object is accepted; so is an absent payload.
+                return match payload.filter(|v| !v.is_null()) {
+                    None | Some(Value::Object(_)) => Ok(()),
+                    Some(_) => Err(format!(
+                        "payload for kind '{}' must be a JSON object",
+                        self.as_str()
+                    )),
+                };
+            }
+            Some(schema) => schema,
+        };
+
         // An explicit JSON `null` payload means the same thing as an absent one.
-        // The REST body types it `Option<Value>` (serde maps `null` -> `None`) while
-        // the MCP argument map hands us `Some(Value::Null)`; without this
+        // The REST body types it `Option<Value>` (serde maps `null` -> `None`)
+        // while the MCP argument map hands us `Some(Value::Null)`; without this
         // normalization the two receipt paths disagree on the same wire payload.
         let payload = payload.filter(|v| !v.is_null());
 
         let obj = match payload {
-            None if !required.is_empty() => {
-                return Err(format!(
-                    "payload for kind '{}' missing required field '{}'",
-                    self.as_str(),
-                    required[0]
-                ));
-            }
-            // Nothing required — an absent payload satisfies the schema.
-            None => return Ok(()),
             Some(Value::Object(obj)) => obj,
+            None => {
+                // An absent payload still satisfies a kind with no required
+                // fields; otherwise name the first missing required field.
+                return match schema.iter().find(|spec| spec.required) {
+                    Some(spec) => Err(format!(
+                        "payload for kind '{}' missing required field '{}'",
+                        self.as_str(),
+                        spec.name
+                    )),
+                    None => Ok(()),
+                };
+            }
             Some(_) => {
                 return Err(format!(
                     "payload for kind '{}' must be a JSON object",
@@ -376,13 +584,28 @@ impl MessageKind {
             }
         };
 
-        for field in required {
-            // JSON null is treated as missing: no required field is satisfiable by null.
-            if !matches!(obj.get(*field), Some(v) if !v.is_null()) {
+        for spec in schema {
+            let value = match obj.get(spec.name) {
+                Some(Value::Null) | None => {
+                    // JSON null is treated as missing: a required field is
+                    // never satisfiable by null; an optional one may be.
+                    if spec.required {
+                        return Err(format!(
+                            "payload for kind '{}' missing required field '{}'",
+                            self.as_str(),
+                            spec.name
+                        ));
+                    }
+                    continue;
+                }
+                Some(v) => v,
+            };
+            if let Err(expected) = Self::check_field_type(spec.ty, value) {
                 return Err(format!(
-                    "payload for kind '{}' missing required field '{}'",
+                    "payload for kind '{}' field '{}' must be {}",
                     self.as_str(),
-                    field
+                    spec.name,
+                    expected
                 ));
             }
         }
@@ -588,7 +811,8 @@ mod tests {
         assert!(MessageKind::TaskAssignment
             .validate_payload(Some(&json!({"task_id": serde_json::Value::Null})))
             .is_err());
-        // Present satisfies the schema (value type is not validated).
+        // Present and correctly typed satisfies the schema; an optional
+        // string field and unknown extension fields pass through.
         assert!(MessageKind::TaskAssignment
             .validate_payload(Some(
                 &json!({"task_id": "TASK-1", "spec_ref": "specs/x.md"})
@@ -631,6 +855,148 @@ mod tests {
         assert!(MessageKind::DataSeeded
             .validate_payload(Some(&json!({"anything": true})))
             .is_ok());
+    }
+
+    #[test]
+    fn validate_payload_enforces_field_types() {
+        // message-bus.md §Payload Schemas declares wire types per field
+        // (`Id`/`String`, `u64`, `u32`, `f64`, `Vec<String>`, nested
+        // `decisions` objects). A wrong-typed required field is an invalid
+        // payload, not a valid one — presence alone is not enough.
+
+        // Required field present but wrong-typed → reject, naming field + type.
+        let err = MessageKind::TaskAssignment
+            .validate_payload(Some(&json!({"task_id": false})))
+            .expect_err("task_id must be a string");
+        assert!(
+            err.contains("task_id") && err.contains("string"),
+            "reason must name field and expected type: {err}"
+        );
+        assert!(
+            MessageKind::TaskAssignment
+                .validate_payload(Some(&json!({"task_id": 42})))
+                .is_err(),
+            "a number is not a valid Id/String"
+        );
+
+        // Wrong-typed OPTIONAL field is still rejected when present — the
+        // schema applies to every schema-known field, not just required ones.
+        let err = MessageKind::TaskAssignment
+            .validate_payload(Some(&json!({"task_id": "T1", "spec_ref": 7})))
+            .expect_err("spec_ref must be a string when present");
+        assert!(
+            err.contains("spec_ref") && err.contains("string"),
+            "reason: {err}"
+        );
+        // Absent optional field is fine.
+        assert!(MessageKind::TaskAssignment
+            .validate_payload(Some(&json!({"task_id": "T1"})))
+            .is_ok());
+        // Unknown extension fields pass through untouched.
+        assert!(MessageKind::TaskAssignment
+            .validate_payload(Some(&json!({"task_id": "T1", "extra": [1, 2]})))
+            .is_ok());
+
+        // u64: negative, fractional, and boolean are invalid.
+        for bad in [json!(-1), json!(1.5), json!(true), json!("10")] {
+            assert!(
+                MessageKind::ToolCallEnd
+                    .validate_payload(Some(&json!({
+                        "agent_id": "a1", "tool_name": "Read", "duration_ms": bad
+                    })))
+                    .is_err(),
+                "duration_ms must be an unsigned integer, got {bad}"
+            );
+        }
+        assert!(MessageKind::ToolCallEnd
+            .validate_payload(Some(&json!({
+                "agent_id": "a1", "tool_name": "Read", "duration_ms": 250
+            })))
+            .is_ok());
+
+        // u32 (ReconciliationCompleted.specs_evaluated): in-range ok, 2^32 rejected.
+        let reconciliation = |specs_evaluated: Value| {
+            MessageKind::ReconciliationCompleted.validate_payload(Some(&json!({
+                "workspace_id": "ws-1", "persona_id": "p-1", "specs_evaluated": specs_evaluated
+            })))
+        };
+        assert!(reconciliation(json!(4294967295u64)).is_ok());
+        assert!(reconciliation(json!(4294967296u64)).is_err());
+        assert!(reconciliation(json!(-1)).is_err());
+
+        // f64 (BudgetWarning.usage_pct): any JSON number, integer literal included.
+        let budget = |usage_pct: Value| {
+            MessageKind::BudgetWarning.validate_payload(Some(&json!({
+                "agent_id": "a1", "workspace_id": "ws-1", "usage_pct": usage_pct
+            })))
+        };
+        assert!(budget(json!(80)).is_ok());
+        assert!(budget(json!(85.5)).is_ok());
+        assert!(budget(json!("85")).is_err());
+        assert!(budget(json!(true)).is_err());
+
+        // Vec<String> (SpeculativeConflict.conflicting_files).
+        let conflict = |files: Value| {
+            MessageKind::SpeculativeConflict.validate_payload(Some(&json!({
+                "repo_id": "r1", "branch": "main", "conflicting_files": files
+            })))
+        };
+        assert!(conflict(json!(["src/a.rs", "src/b.rs"])).is_ok());
+        assert!(conflict(json!([])).is_ok());
+        assert!(conflict(json!(["ok", 2])).is_err());
+        assert!(conflict(json!("src/a.rs")).is_err());
+        assert!(conflict(json!({"a": "b"})).is_err());
+
+        // Nested decisions (AgentCompleted): [{what, why, confidence,
+        // alternatives_considered?}] — every element must be an object with
+        // string what/why/confidence; alternatives_considered, when present,
+        // must be a string array.
+        let completed = |decisions: Value| {
+            MessageKind::AgentCompleted.validate_payload(Some(&json!({
+                "agent_id": "a1", "task_id": "t1", "decisions": decisions
+            })))
+        };
+        assert!(completed(json!([{
+            "what": "used retry", "why": "spec says so", "confidence": "high"
+        }])).is_ok());
+        assert!(completed(json!([{
+            "what": "used retry",
+            "why": "spec says so",
+            "confidence": "high",
+            "alternatives_considered": ["fixed interval"]
+        }])).is_ok());
+        // Element not an object.
+        assert!(completed(json!(["used retry"])).is_err());
+        // Missing required key inside a decision object.
+        assert!(completed(json!([{"what": "used retry", "why": "spec"}])).is_err());
+        // Wrong-typed inner field.
+        assert!(completed(json!([{
+            "what": "used retry", "why": 3, "confidence": "high"
+        }])).is_err());
+        // alternatives_considered present but wrong-typed.
+        assert!(completed(json!([{
+            "what": "used retry",
+            "why": "spec says so",
+            "confidence": "high",
+            "alternatives_considered": "fixed interval"
+        }])).is_err());
+        // uncertainties (Vec<String>) alongside decisions.
+        assert!(MessageKind::AgentCompleted
+            .validate_payload(Some(&json!({
+                "agent_id": "a1",
+                "task_id": "t1",
+                "decisions": [{"what": "w", "why": "y", "confidence": "high"}],
+                "uncertainties": ["timeout behavior undefined"],
+                "conversation_sha": "abc123"
+            })))
+            .is_ok());
+        assert!(MessageKind::AgentCompleted
+            .validate_payload(Some(&json!({
+                "agent_id": "a1",
+                "task_id": "t1",
+                "uncertainties": "none"
+            })))
+            .is_err());
     }
 
     #[test]
