@@ -290,12 +290,12 @@ pub struct BriefingMetrics {
 pub struct BriefingAskRequest {
     pub question: String,
     pub history: Option<Vec<HistoryEntry>>,
-}
-
-#[derive(Deserialize, Serialize)]
-pub struct HistoryEntry {
-    pub role: String,
-    pub content: String,
+    /// Optional repo scope — narrows the Q&A to one repo in the workspace
+    /// (HSI §1.5 repo-scope Briefing row; ui-navigation.md §2 Architecture
+    /// sub-tab Briefing: "add optional `repo_id` field to
+    /// `POST /workspaces/:id/briefing/ask` request body"). Must belong to the
+    /// path workspace; otherwise 404 (no repo-existence leak).
+    pub repo_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1257,12 +1257,33 @@ pub async fn briefing_ask(
     }
 
     // Cap history at 20 entries (truncate oldest).
-    if let Some(ref mut history) = req.history {
+    if let Some(history) = &mut req.history {
         if history.len() > 20 {
             let excess = history.len() - 20;
             history.drain(..excess);
         }
     }
+
+    // Optional repo scope (HSI §1.5 repo-scope Briefing / ui-navigation.md §2
+    // Architecture Briefing sub-tab): same validation as the GET briefing
+    // repo filter — repo must exist AND belong to the path workspace.
+    let repo_scope = match &req.repo_id {
+        Some(rid) => {
+            let repo = state
+                .repos
+                .find_by_id(&Id::new(rid))
+                .await
+                .map_err(ApiError::Internal)?
+                .ok_or_else(|| ApiError::NotFound(format!("repo {rid} not found")))?;
+            if repo.workspace_id != Id::new(&id) {
+                return Err(ApiError::Forbidden(format!(
+                    "repo {rid} does not belong to workspace {id}"
+                )));
+            }
+            Some(repo.name)
+        }
+        None => None,
+    };
 
     // Require LLM to be configured.
     let factory = state.llm.as_ref().ok_or(ApiError::LlmUnavailable)?;
@@ -1278,11 +1299,17 @@ pub async fn briefing_ask(
         .map(|t| t.content)
         .unwrap_or_else(|| crate::llm_defaults::PROMPT_BRIEFING_ASK.to_string());
 
+    // Ground the LLM in the repo scope when the request is repo-scoped — the
+    // answer must be about this repo's work, not the whole workspace.
+    let context = match &repo_scope {
+        Some(name) => format!("The user is asking about the repository \"{name}\" only."),
+        None => String::new(),
+    };
+
     let system_prompt = template_content
         .replace("{{workspace_id}}", &id)
-        .replace("{{context}}", "")
+        .replace("{{context}}", &context)
         .replace("{{question}}", &req.question);
-    let user_prompt = req.question.clone();
 
     // Resolve model and call streaming LLM.
     let (model, _) =

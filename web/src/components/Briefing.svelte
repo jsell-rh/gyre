@@ -215,7 +215,11 @@
     }
     const trimmedHistory = chatHistory.slice(-20);
     chatHistory = [...chatHistory, { role: 'user', content: question }];
-    return api.briefingAsk(workspaceId, { question, history: trimmedHistory });
+    // Repo scope narrows the Q&A to this repo (ui-navigation.md §2 Briefing
+    // sub-tab amends HSI §9: optional repo_id in the ask request body).
+    const body = { question, history: trimmedHistory };
+    if (scope === 'repo' && repoId) body.repo_id = repoId;
+    return api.briefingAsk(workspaceId, body);
   }
 
   // Reload when scope or workspaceId changes (not just on mount)
@@ -568,8 +572,9 @@
         />
       {/if}
 
-      <!-- Q&A Chat (bottom) — only available with a workspace context -->
-      {#if scope === 'workspace' && workspaceId}
+      <!-- Q&A Chat (bottom) — workspace and repo scopes (ui-navigation.md §2:
+           repo Briefing sub-tab has the same "Ask a question" Q&A). -->
+      {#if (scope === 'workspace' || scope === 'repo') && workspaceId}
         <div class="chat-section" data-testid="briefing-chat">
           <InlineChat
             recipient="this briefing"
