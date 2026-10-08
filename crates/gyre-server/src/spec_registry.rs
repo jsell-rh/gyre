@@ -190,22 +190,130 @@ pub fn parse_manifest(yaml: &str) -> Result<SpecManifest, serde_yaml::Error> {
     serde_yaml::from_str(yaml)
 }
 
+/// Read and parse `specs/manifest.yaml` from a git commit.
+///
+/// Returns `None` when the manifest is absent or unparseable. Callers use
+/// this to resolve per-spec approval policy (agent approvers, attestation
+/// constraints) at approval time (spec-registry.md §9).
+pub async fn read_manifest(repo_path: &str, sha: &str) -> Option<SpecManifest> {
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let yaml = read_git_file(&git_bin, repo_path, sha, "specs/manifest.yaml").await?;
+    match parse_manifest(&yaml) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            warn!(repo_path, "spec-registry: failed to parse manifest: {e}");
+            None
+        }
+    }
+}
+
 /// Read the manifest from a commit and return the set of registered spec paths.
 ///
 /// Returns an empty set if the manifest is absent or unparseable.
 pub async fn read_manifest_paths(repo_path: &str, sha: &str) -> std::collections::HashSet<String> {
-    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
-    let yaml = match read_git_file(&git_bin, repo_path, sha, "specs/manifest.yaml").await {
-        Some(content) => content,
-        None => return std::collections::HashSet::new(),
-    };
-    match parse_manifest(&yaml) {
-        Ok(m) => m.specs.iter().map(|e| e.path.clone()).collect(),
-        Err(e) => {
-            warn!(repo_path, "spec-registry: failed to parse manifest: {e}");
-            std::collections::HashSet::new()
-        }
+    read_manifest(repo_path, sha)
+        .await
+        .map(|m| m.specs.iter().map(|e| e.path.clone()).collect())
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Approval status resolution (spec-registry.md §9)
+// ---------------------------------------------------------------------------
+
+/// Resolve the ledger `approval_status` for a spec from its approval mode and
+/// the recorded approval events (spec-registry.md §9 Approval Status
+/// Resolution).
+///
+/// An event is valid when:
+/// - `spec_sha` matches `current_sha` (not stale), and
+/// - `revoked_at` is null (not revoked).
+///
+/// Agent-approval validity additionally requires the event to satisfy a
+/// configured `agent_approvers[]` entry for the spec:
+/// - `persona` matches the approver's persona,
+/// - `attestation_level >= min_attestation_level` (default 1), and
+/// - when the approver pins a `stack_hash`, the event's recorded stack hash
+///   matches exactly.
+///
+/// Human-approval validity requires `approver_type == "human"` and, when the
+/// manifest lists `human_approvers`, the `approver_id` must be in that list.
+///
+/// Status by mode:
+/// - `human_only`        → Approved with ≥1 valid human approval
+/// - `agent_only`        → Approved with ≥1 valid agent approval
+/// - `human_and_agent`   → Approved with ≥1 valid human AND ≥1 valid agent
+///
+/// Specs with `requires_approval: false` are Approved regardless of events
+/// (§17: any SHA is accepted).
+pub fn resolve_approval_status(
+    entry: &SpecEntry,
+    defaults: &ManifestDefaults,
+    current_sha: &str,
+    events: &[SpecApprovalEvent],
+) -> ApprovalStatus {
+    if !entry.effective_requires_approval(defaults) {
+        return ApprovalStatus::Approved;
     }
+
+    let approval = entry.approval.as_ref();
+    let has_valid_human = events.iter().any(|e| is_valid_human_approval(e, approval, current_sha));
+    let has_valid_agent = events.iter().any(|e| is_valid_agent_approval(e, approval, current_sha));
+
+    match entry.effective_approval_mode() {
+        ApprovalMode::HumanOnly => has_valid_human,
+        ApprovalMode::AgentOnly => has_valid_agent,
+        ApprovalMode::HumanAndAgent => has_valid_human && has_valid_agent,
+    }
+    .then_some(ApprovalStatus::Approved)
+    .unwrap_or(ApprovalStatus::Pending)
+}
+
+/// A human approval is valid when it is active, matches `current_sha`, and the
+/// approver is in `human_approvers` (when that list is non-empty).
+fn is_valid_human_approval(
+    event: &SpecApprovalEvent,
+    approval: Option<&ApprovalConfig>,
+    current_sha: &str,
+) -> bool {
+    event.approver_type == "human"
+        && event.spec_sha == current_sha
+        && event.is_active()
+        && approval
+            .map(|a| a.human_approvers.is_empty() || a.human_approvers.contains(&event.approver_id))
+            .unwrap_or(true)
+}
+
+/// An agent approval is valid when it is active, matches `current_sha`, and
+/// satisfies one of the configured `agent_approvers[]` constraints
+/// (persona + min attestation level + optional pinned stack hash).
+fn is_valid_agent_approval(
+    event: &SpecApprovalEvent,
+    approval: Option<&ApprovalConfig>,
+    current_sha: &str,
+) -> bool {
+    if event.approver_type != "agent" || event.spec_sha != current_sha || !event.is_active() {
+        return false;
+    }
+    let approvers: &[AgentApproverConfig] = approval
+        .map(|a| a.agent_approvers.as_slice())
+        .unwrap_or(&[]);
+    approvers.iter().any(|cfg| {
+        // Persona must match the configured approver persona.
+        if event.persona.as_deref() != Some(cfg.persona.as_str()) {
+            return false;
+        }
+        // Attestation level must meet the configured minimum (default 1).
+        let min_level = cfg.min_attestation_level.unwrap_or(1);
+        if event.attestation_level.unwrap_or(0) < min_level {
+            return false;
+        }
+        // When a stack hash is pinned, the event's recorded hash must match exactly.
+        match &cfg.stack_hash {
+            Some(required) => event.stack_hash.as_deref() == Some(required.as_str()),
+            None => true,
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
