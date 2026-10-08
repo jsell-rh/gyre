@@ -1474,6 +1474,67 @@ pub async fn seed_builtin_meta_specs(state: &Arc<AppState>) {
     tracing::info!("seeded {} built-in meta-specs", seeds.len());
 }
 
+/// Seed the four built-in personas (platform-model.md §2) into every
+/// existing tenant. Idempotent: an existing persona with the same slug at
+/// Tenant scope is never overwritten — the user may have customized it, and
+/// the spec allows workspace/repo-scope overrides to shadow it.
+///
+/// Called at server startup, after migrations and tenant bootstrap.
+pub async fn seed_builtin_personas(state: &Arc<AppState>) {
+    let tenants = match state.tenants.list().await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("seed_builtin_personas: failed to list tenants: {e}");
+            return;
+        }
+    };
+    for tenant in &tenants {
+        seed_builtin_personas_for_tenant(state, &tenant.id).await;
+    }
+}
+
+/// Seed the built-in personas for one tenant — the shared tail of startup
+/// seeding and tenant creation (`POST /api/v1/tenants`), so every tenant
+/// gets the spec §2 table the moment it exists. Idempotent per slug+scope.
+pub async fn seed_builtin_personas_for_tenant(state: &Arc<AppState>, tenant_id: &Id) {
+    use gyre_domain::{builtin_personas, PersonaScope};
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    for persona in builtin_personas(tenant_id, now) {
+        let scope = PersonaScope::Tenant(tenant_id.clone());
+        match state
+            .personas
+            .find_by_slug_and_scope(&persona.slug, &scope)
+            .await
+        {
+            Ok(Some(_)) => {} // already exists → idempotent
+            Ok(None) => match state.personas.create(&persona).await {
+                Ok(()) => tracing::debug!(
+                    slug = %persona.slug,
+                    tenant_id = %tenant_id,
+                    "Seeded built-in persona"
+                ),
+                Err(e) => tracing::warn!(
+                    slug = %persona.slug,
+                    tenant_id = %tenant_id,
+                    err = %e,
+                    "Failed to seed built-in persona"
+                ),
+            },
+            Err(e) => tracing::warn!(
+                slug = %persona.slug,
+                tenant_id = %tenant_id,
+                err = %e,
+                "Error checking built-in persona existence"
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1588,5 +1649,111 @@ mod tests {
         assert_eq!(json["checks"]["merge_processor"], "ok");
         assert_eq!(json["checks"]["database"], "not_configured");
         assert_eq!(json["checks"]["migrations"], "not_configured");
+    }
+
+    /// platform-model.md §2: startup seeding creates the four built-in
+    /// personas at tenant level, pre-approved, and is idempotent.
+    #[tokio::test]
+    async fn seed_builtin_personas_creates_four_and_is_idempotent() {
+        use gyre_domain::{PersonaApprovalStatus, PersonaScope, Tenant};
+
+        let state = mem::test_state();
+        // Startup seeding enumerates tenants — create one first (the way
+        // migrations/bootstrap would have).
+        let tenant = Tenant::new(Id::new("t-seed"), "Seed Tenant", "seed-tenant", 1);
+        state.tenants.create(&tenant).await.unwrap();
+
+        seed_builtin_personas(&state).await;
+
+        let scope = PersonaScope::Tenant(Id::new("t-seed"));
+        let seeded = state.personas.list_by_scope(&scope).await.unwrap();
+        let mut slugs: Vec<String> = seeded.iter().map(|p| p.slug.clone()).collect();
+        slugs.sort();
+        assert_eq!(
+            slugs,
+            vec![
+                "accountability",
+                "repo-orchestrator",
+                "security",
+                "workspace-orchestrator"
+            ],
+            "all four built-in personas must be seeded at tenant scope"
+        );
+        for p in &seeded {
+            assert_eq!(
+                p.approval_status,
+                PersonaApprovalStatus::Approved,
+                "built-in {} must be pre-approved",
+                p.slug
+            );
+            assert_eq!(p.approved_by.as_deref(), Some("system"));
+            assert_eq!(p.version, 1);
+        }
+
+        // Second run (server restart): no duplicates.
+        seed_builtin_personas(&state).await;
+        let after = state.personas.list_by_scope(&scope).await.unwrap();
+        assert_eq!(after.len(), 4, "re-seeding must not duplicate personas");
+    }
+
+    /// Task plan: "If the persona already exists, do not overwrite" — a
+    /// customized persona survives re-seeding untouched.
+    #[tokio::test]
+    async fn seed_builtin_personas_preserves_existing() {
+        use gyre_domain::{Persona, PersonaApprovalStatus, PersonaScope};
+
+        let state = mem::test_state();
+        let tenant_id = Id::new("t-custom");
+        // A user-customized security persona already exists at tenant scope.
+        let mut custom = Persona::new(
+            Id::new("custom-sec"),
+            "Custom Security",
+            "security",
+            PersonaScope::Tenant(tenant_id.clone()),
+            "hand-edited prompt",
+            42,
+        );
+        custom.system_prompt = "hand-edited prompt".to_string();
+        state.personas.create(&custom).await.unwrap();
+
+        seed_builtin_personas_for_tenant(&state, &tenant_id).await;
+
+        let scope = PersonaScope::Tenant(tenant_id.clone());
+        let personas = state.personas.list_by_scope(&scope).await.unwrap();
+        let sec: Vec<_> = personas.iter().filter(|p| p.slug == "security").collect();
+        assert_eq!(sec.len(), 1, "no duplicate security persona");
+        assert_eq!(sec[0].id, Id::new("custom-sec"));
+        assert_eq!(sec[0].system_prompt, "hand-edited prompt");
+        assert_eq!(sec[0].approval_status, PersonaApprovalStatus::Pending);
+        // The other three were seeded around it.
+        assert_eq!(personas.len(), 4);
+    }
+
+    /// Seeding for one tenant never leaks personas into another tenant.
+    #[tokio::test]
+    async fn seed_builtin_personas_scoped_to_own_tenant() {
+        use gyre_domain::PersonaScope;
+
+        let state = mem::test_state();
+        let a = Id::new("t-a");
+        let b = Id::new("t-b");
+        seed_builtin_personas_for_tenant(&state, &a).await;
+        seed_builtin_personas_for_tenant(&state, &b).await;
+
+        let in_a = state
+            .personas
+            .list_by_scope(&PersonaScope::Tenant(a.clone()))
+            .await
+            .unwrap();
+        let in_b = state
+            .personas
+            .list_by_scope(&PersonaScope::Tenant(b.clone()))
+            .await
+            .unwrap();
+        assert_eq!(in_a.len(), 4);
+        assert_eq!(in_b.len(), 4);
+        for p in &in_a {
+            assert_eq!(p.scope, PersonaScope::Tenant(a.clone()));
+        }
     }
 }
