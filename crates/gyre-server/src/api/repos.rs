@@ -562,6 +562,7 @@ pub async fn sync_mirror(
                 .map(|ws| ws.tenant_id);
             crate::spec_registry::sync_spec_ledger(
                 &state.spec_ledger,
+                &state.spec_links_store,
                 &state.spec_link_repo,
                 &repo.path,
                 &new_sha,
