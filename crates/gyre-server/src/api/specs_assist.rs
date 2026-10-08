@@ -474,7 +474,6 @@ pub async fn assist_spec(
         );
     }
 
-
     // Build SSE events: partial events stream the explanation progressively,
     // complete event carries the full {diff, explanation} response.
     let mut events: Vec<Result<Event, std::convert::Infallible>> = Vec::new();
