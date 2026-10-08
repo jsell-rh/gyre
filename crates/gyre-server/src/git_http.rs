@@ -669,6 +669,7 @@ pub async fn git_receive_pack(
             &repo_id_clone,
             &repo_path_clone,
             &default_branch_clone,
+            &push_workspace_id,
             &ref_updates,
         )
         .await;
@@ -1363,6 +1364,7 @@ async fn process_spec_lifecycle(
     repo_id: &str,
     repo_path: &str,
     default_branch: &str,
+    workspace_id: &gyre_common::Id,
     ref_updates: &[RefUpdate],
 ) {
     // Per-repo config (spec-lifecycle.md §Configuration); defaults when unset.
@@ -1504,15 +1506,10 @@ async fn process_spec_lifecycle(
                 Err(e) => warn!(title, "spec-lifecycle: failed to create task: {e}"),
                 Ok(()) => {
                     info!(title, "spec-lifecycle: created task for spec change");
-                    // Look up workspace_id from repo for proper scoping.
-                    let ws_id = state
-                        .repos
-                        .find_by_id(&gyre_common::Id::new(repo_id))
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|r| r.workspace_id)
-                        .unwrap_or_else(|| gyre_common::Id::new("default"));
+                    // Workspace scope comes from the resolved repo at push
+                    // time — a failed re-lookup must not fabricate a
+                    // "default" workspace (task-097 F3 class).
+                    let ws_id = workspace_id.clone();
                     let change_kind = match status_char {
                         'A' => "added",
                         'M' => "modified",
@@ -3968,6 +3965,218 @@ mod tests {
         let changes = super::parse_spec_changes_with_config(input, &config);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].1, "specs/system/a.md");
+    }
+
+    // ── process_spec_lifecycle: per-repo config end-to-end ────────────────
+
+    /// Set up a real bare repo with two pushed commits to main:
+    /// one adding `specs/system/a.md`, one adding `docs/guides/b.md`.
+    /// Returns (state, repo_id, tmp_dir, first_commit_sha, second_commit_sha).
+    async fn spec_lifecycle_fixture() -> (
+        Arc<crate::AppState>,
+        String,
+        TempDir,
+        String,
+        String,
+    ) {
+        let tmp = TempDir::new().unwrap();
+        let bare = tmp.path().join("repo.git");
+        let status = std::process::Command::new("git")
+            .args(["init", "--bare", "--initial-branch=main", "-q"])
+            .arg(&bare)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git init --bare failed");
+
+        // Clone to a work dir, commit the spec files, push to main.
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let bare_str = bare.to_str().unwrap().to_string();
+        let work_str = work.to_str().unwrap().to_string();
+        tokio::task::spawn_blocking(move || {
+            fn git(dir: &str, args: &[&str]) {
+                let out = std::process::Command::new("git")
+                    .args(["-C", dir])
+                    .args(args)
+                    .env("GIT_CONFIG_COUNT", "2")
+                    .env("GIT_CONFIG_KEY_0", "user.email")
+                    .env("GIT_CONFIG_VALUE_0", "t@t")
+                    .env("GIT_CONFIG_KEY_1", "user.name")
+                    .env("GIT_CONFIG_VALUE_1", "T")
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success(),
+                    "git {} failed: {}",
+                    args.join(" "),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            // Local clone of the (empty) bare repo, then two commits.
+            let clone = std::process::Command::new("git")
+                .args(["clone", &bare_str, &work_str])
+                .output()
+                .unwrap();
+            assert!(
+                clone.status.success()
+                    || String::from_utf8_lossy(&clone.stderr).contains("empty repository"),
+                "clone of empty bare repo failed: {}",
+                String::from_utf8_lossy(&clone.stderr)
+            );
+            git(&work_str, &["checkout", "-q", "-b", "main"]);
+            std::fs::create_dir_all(std::path::Path::new(&work_str).join("specs/system")).unwrap();
+            std::fs::write(
+                std::path::Path::new(&work_str).join("specs/system/a.md"),
+                "# A\n",
+            )
+            .unwrap();
+            git(&work_str, &["add", "."]);
+            git(&work_str, &["commit", "-q", "-m", "feat(x): add spec a"]);
+            git(&work_str, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+
+            git(&work_str, &["pull", "-q", "origin", "main"]);
+            std::fs::create_dir_all(std::path::Path::new(&work_str).join("docs/guides")).unwrap();
+            std::fs::write(
+                std::path::Path::new(&work_str).join("docs/guides/b.md"),
+                "# B\n",
+            )
+            .unwrap();
+            git(&work_str, &["add", "."]);
+            git(&work_str, &["commit", "-q", "-m", "feat(x): add guide b"]);
+            git(&work_str, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+        })
+        .await
+        .unwrap();
+
+        // Read the pushed SHAs from the bare repo.
+        let first = {
+            let out = std::process::Command::new("git")
+                .args(["-C", bare.to_str().unwrap(), "rev-parse", "main~1"])
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let second = {
+            let out = std::process::Command::new("git")
+                .args(["-C", bare.to_str().unwrap(), "rev-parse", "main"])
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        let state = test_state();
+        let repo = Repository::new(
+            Id::new("repo-slc"),
+            Id::new("ws-test"),
+            "slc-repo",
+            bare.to_str().unwrap(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        (state, "repo-slc".to_string(), tmp, first, second)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_lifecycle_disabled_skips_task_creation() {
+        // spec-lifecycle.md §Configuration: `enabled = false` must skip
+        // processing entirely — no task, no approval invalidation.
+        // Zero old_sha models the initial push (hook substitutes the
+        // empty-tree SHA itself).
+        let (state, repo_id, _tmp, _first, second) = spec_lifecycle_fixture().await;
+        let zeros = "0000000000000000000000000000000000000000".to_string();
+
+        // Disable via the same port the PUT handler writes through.
+        state
+            .spec_lifecycle_configs
+            .set_for_repo(
+                &repo_id,
+                gyre_domain::SpecLifecycleConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let updates = vec![super::RefUpdate {
+            old_sha: zeros,
+            new_sha: second,
+            refname: "refs/heads/main".to_string(),
+        }];
+        let repo_path = state
+            .repos
+            .find_by_id(&Id::new(&repo_id))
+            .await
+            .unwrap()
+            .unwrap()
+            .path
+            .clone();
+        super::process_spec_lifecycle(&state, &repo_id, &repo_path, "main", &updates).await;
+
+        let tasks = state.tasks.list().await.unwrap();
+        assert!(
+            tasks.iter().all(|t| t.repo_id.to_string() != repo_id),
+            "no tasks must be created when spec lifecycle is disabled"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_lifecycle_per_repo_config_drives_filtering_and_priority() {
+        // Custom config: watch docs/guides instead, with a custom priority.
+        // This must replace the default watched prefixes entirely — the
+        // specs/system file in the same diff must NOT produce a task.
+        let (state, repo_id, _tmp, _first, second) = spec_lifecycle_fixture().await;
+        let zeros = "0000000000000000000000000000000000000000".to_string();
+
+        state
+            .spec_lifecycle_configs
+            .set_for_repo(
+                &repo_id,
+                gyre_domain::SpecLifecycleConfig {
+                    watched_paths: vec!["docs/guides/".to_string()],
+                    default_priority_new: gyre_domain::TaskPriority::Critical,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let updates = vec![super::RefUpdate {
+            old_sha: zeros,
+            new_sha: second,
+            refname: "refs/heads/main".to_string(),
+        }];
+        let repo_path = state
+            .repos
+            .find_by_id(&Id::new(&repo_id))
+            .await
+            .unwrap()
+            .unwrap()
+            .path
+            .clone();
+        super::process_spec_lifecycle(&state, &repo_id, &repo_path, "main", &updates).await;
+
+        let tasks = state.tasks.list().await.unwrap();
+        let created: Vec<&gyre_domain::Task> = tasks
+            .iter()
+            .filter(|t| t.repo_id.to_string() == repo_id)
+            .collect();
+        assert_eq!(
+            created.len(),
+            1,
+            "exactly one task for the watched docs/guides path, got: {created:?}"
+        );
+        let task = created[0];
+        assert_eq!(task.spec_path.as_deref(), Some("docs/guides/b.md"));
+        assert_eq!(task.priority, gyre_domain::TaskPriority::Critical);
+        assert!(
+            task.labels.contains(&"spec-implementation".to_string()),
+            "labels: {:?}",
+            task.labels
+        );
     }
 
     // ── Audit-only verification tests (TASK-006) ─────────────────────────
