@@ -111,6 +111,20 @@ pub trait GitOpsPort: Send + Sync {
         file_path: &str,
     ) -> Result<Option<Vec<u8>>>;
 
+    /// Read a file's content at a specific commit SHA (not a branch tip).
+    ///
+    /// Returns `Ok(None)` if the file does not exist at the given path in
+    /// that commit's tree. Used by the gate executor to hand a review agent
+    /// the spec content at the exact SHA pinned in the MR's `spec_ref`
+    /// (`path@sha`), so the reviewer judges the change against the spec the
+    /// MR was authored under, not whatever the branch tip holds now.
+    async fn read_file_at_commit(
+        &self,
+        repo_path: &str,
+        sha: &str,
+        file_path: &str,
+    ) -> Result<Option<Vec<u8>>>;
+
     /// Create a revert commit on `branch` that undoes `sha_to_revert`.
     ///
     /// The revert commit's tree is the first parent's tree of `sha_to_revert`,
