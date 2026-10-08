@@ -1873,7 +1873,7 @@ pub fn dry_run(
     let total_matched = result_set.len();
     let matched_node_names: Vec<String> = result_set
         .iter()
-        .filter_map(|id| node_map.get(id).map(|n| n.qualified_name.clone()))
+        .filter_map(|id| node_map.get(id).map(|n| n.name.clone()))
         .take(50)
         .collect();
     if total_matched > 50 {
