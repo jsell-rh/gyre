@@ -298,6 +298,12 @@ pub struct BriefingAskRequest {
     pub repo_id: Option<String>,
 }
 
+#[derive(Deserialize, Serialize)]
+pub struct HistoryEntry {
+    pub role: String,
+    pub content: String,
+}
+
 #[derive(Deserialize)]
 pub struct LinkNodeRequest {
     pub node_id: String,
@@ -1310,6 +1316,7 @@ pub async fn briefing_ask(
         .replace("{{workspace_id}}", &id)
         .replace("{{context}}", &context)
         .replace("{{question}}", &req.question);
+    let user_prompt = req.question.clone();
 
     // Resolve model and call streaming LLM.
     let (model, _) =
