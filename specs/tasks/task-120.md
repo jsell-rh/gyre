@@ -2,12 +2,13 @@
 title: "Enhance User entity with profile fields and preferences"
 spec_ref: "user-management.md §User Entity"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "user-management.md §User Entity"
   - "user-management.md §Username vs Display Name"
   - "user-management.md §User Preferences"
 commits: ["2db5888935ecc06cb7b38cd1f1b59614b369990a", "ce3768e47b64214dd898a53d94d0981d3a517f0b", "43fb72a0f00eb1a86e684540453466c3cc998a8a"]
+review: specs/reviews/task-120.md
 ---
 
 ## Spec Excerpt
