@@ -177,11 +177,12 @@ pub async fn update_me(
         user.avatar_url = Some(avatar);
     }
     if let Some(prefs_json) = req.preferences {
-        // Reject malformed preference payloads instead of silently keeping
-        // the old value (an unbound parse result gates nothing).
-        let prefs: gyre_domain::UserPreferences = serde_json::from_value(prefs_json)
+        // Partial-update semantics: omitted preference fields keep their
+        // current value (matching the Option-based top-level fields). An
+        // invalid value for a present field still fails the whole request.
+        let patch: gyre_domain::UserPreferencesPatch = serde_json::from_value(prefs_json)
             .map_err(|e| ApiError::InvalidInput(format!("invalid preferences: {e}")))?;
-        user.preferences = prefs;
+        user.preferences.apply_patch(patch);
     }
     user.updated_at = now_secs();
     state.users.update(&user).await?;
@@ -1275,8 +1276,8 @@ mod tests {
             } else {
                 assert_eq!(
                     resp.status(),
-                    StatusCode::BAD_REQUEST,
-                    "duplicate external_id must be rejected"
+                    StatusCode::CONFLICT,
+                    "duplicate external_id must be rejected with 409 Conflict"
                 );
             }
         }
@@ -1406,6 +1407,19 @@ mod tests {
         assert_eq!(json2["preferences"]["theme"], "Dark");
         assert_eq!(json2["preferences"]["code_font_size"], 16);
         assert_eq!(json2["username"], "put-me", "username immutable via PUT");
+
+        // Partial preferences payload: omitted fields keep their current
+        // value (merge, not replace-with-defaults). The PUT above omitted
+        // notification_channels and default_workspace_id entirely.
+        assert_eq!(
+            json2["preferences"]["notification_channels"],
+            serde_json::json!({"in_app": true, "email_enabled": false, "email_digest": "Off"}),
+            "omitted notification_channels must keep the stored value, not reset to default"
+        );
+        assert_eq!(
+            json2["preferences"]["default_workspace_id"], serde_json::Value::Null,
+            "omitted default_workspace_id must keep the stored value"
+        );
     }
 
     #[tokio::test]

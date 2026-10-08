@@ -116,7 +116,7 @@ pub use tenant::Tenant;
 pub use typescript_extractor::TypeScriptExtractor;
 pub use user::{
     DiffView, FeedScope, GlobalRole, NotificationChannels, Theme, UiDensity, User,
-    UserPreferences, UserRole,
+    UserPreferences, UserPreferencesPatch, UserRole,
 };
 pub use user_profile::{JudgmentEntry, JudgmentType, UserNotificationPreference, UserToken};
 pub use workspace::{Persona, PersonaApprovalStatus, PersonaScope, TrustLevel, Workspace};

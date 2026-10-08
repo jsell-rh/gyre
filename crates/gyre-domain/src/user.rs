@@ -97,6 +97,52 @@ impl Default for UserPreferences {
     }
 }
 
+/// Partial view of [`UserPreferences`] used by `PUT /api/v1/users/me`:
+/// every field is optional; omitted fields keep their current value.
+///
+/// This mirrors the handler's partial-update contract for the top-level
+/// profile fields (display_name/timezone/locale are each `Option`), so a
+/// preferences payload can update just `theme` without re-sending
+/// `notification_channels` and friends.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UserPreferencesPatch {
+    pub default_workspace_id: Option<Id>,
+    pub theme: Option<Theme>,
+    pub notification_channels: Option<NotificationChannels>,
+    pub ui_density: Option<UiDensity>,
+    pub code_font_size: Option<u32>,
+    pub diff_view: Option<DiffView>,
+    pub activity_feed_scope: Option<FeedScope>,
+}
+
+impl UserPreferences {
+    /// Merge a patch over `self`: `Some` fields replace, `None` fields keep
+    /// the current value (PUT /api/v1/users/me partial-update semantics).
+    pub fn apply_patch(&mut self, patch: UserPreferencesPatch) {
+        if let Some(v) = patch.default_workspace_id {
+            self.default_workspace_id = Some(v);
+        }
+        if let Some(v) = patch.theme {
+            self.theme = v;
+        }
+        if let Some(v) = patch.notification_channels {
+            self.notification_channels = v;
+        }
+        if let Some(v) = patch.ui_density {
+            self.ui_density = v;
+        }
+        if let Some(v) = patch.code_font_size {
+            self.code_font_size = v;
+        }
+        if let Some(v) = patch.diff_view {
+            self.diff_view = v;
+        }
+        if let Some(v) = patch.activity_feed_scope {
+            self.activity_feed_scope = v;
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NotificationChannels {
     pub in_app: bool,
