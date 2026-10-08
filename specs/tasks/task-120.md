@@ -7,7 +7,7 @@ coverage_sections:
   - "user-management.md §User Entity"
   - "user-management.md §Username vs Display Name"
   - "user-management.md §User Preferences"
-commits: []
+commits: ["ce3768e47b64214dd898a53d94d0981d3a517f0b", "43fb72a0f00eb1a86e684540453466c3cc998a8a"]
 ---
 
 ## Spec Excerpt
