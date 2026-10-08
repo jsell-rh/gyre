@@ -898,10 +898,18 @@ async fn check_spec_assertions_on_push(
             continue;
         }
 
+        // Canonical spec identity: path relative to `specs/` (no `specs/`
+        // prefix) — the same form the spec ledger, `GET /api/v1/specs/:path`,
+        // and the assertion-results endpoint use. `md_path` always starts at
+        // `repo_root/specs/`, so strip both.
         let relative_path = md_path
             .strip_prefix(repo_root)
             .unwrap_or(md_path)
             .to_string_lossy()
+            .to_string();
+        let spec_path = relative_path
+            .strip_prefix("specs/")
+            .unwrap_or(&relative_path)
             .to_string();
 
         let parsed = spec_assertions::parse_assertions(&content);
@@ -920,7 +928,7 @@ async fn check_spec_assertions_on_push(
             .map(|(assertion, result)| gyre_domain::SpecAssertionResult {
                 id: Uuid::new_v4().to_string(),
                 repo_id: repo_id.as_str().to_string(),
-                spec_path: relative_path.clone(),
+                spec_path: spec_path.clone(),
                 line: result.line,
                 assertion_type: assertion.type_name().to_string(),
                 assertion_text: result.assertion_text,
@@ -935,7 +943,7 @@ async fn check_spec_assertions_on_push(
         for record in &records {
             if !record.passed {
                 failed_assertions.push((
-                    relative_path.clone(),
+                    spec_path.clone(),
                     spec_assertions::AssertionResult {
                         line: record.line,
                         assertion_text: record.assertion_text.clone(),
@@ -951,7 +959,7 @@ async fn check_spec_assertions_on_push(
         if let Err(e) = results_repo.save_results(&records).await {
             warn!(
                 %repo_id,
-                spec_path = %relative_path,
+                spec_path = %spec_path,
                 "failed to persist spec assertion results: {e}"
             );
         }
