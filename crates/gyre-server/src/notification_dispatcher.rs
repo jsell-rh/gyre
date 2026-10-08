@@ -12,7 +12,6 @@ use async_trait::async_trait;
 use gyre_common::{Id, Notification, NotificationType};
 use gyre_domain::{NotificationChannels, NotificationPriority, WorkspaceRole};
 use std::collections::HashSet;
-use std::sync::Arc;
 
 /// KV namespace holding the email outbox (queued, digest-scheduled sends).
 pub const EMAIL_OUTBOX_NS: &str = "email_outbox";
@@ -81,6 +80,7 @@ pub async fn dispatch_to_channels(state: &AppState, notif: &Notification) {
             );
             return;
         }
+    };
     dispatch_with(state, notif, &channels, &ReqwestSender::default()).await;
 }
 
@@ -314,6 +314,7 @@ mod tests {
         Agent, EmailConfig, NotificationChannels, NotificationPriority, SlackConfig, WebhookConfig,
     };
     use parking_lot::Mutex;
+    use std::sync::Arc;
 
     fn band(p: u8) -> NotificationPriority {
         NotificationPriority::from_band(p)
@@ -375,7 +376,7 @@ mod tests {
         m
     }
 
-    fn sample_notif(state: &AppState, user: &str, priority: u8) -> Notification {
+    fn sample_notif(user: &str, priority: u8) -> Notification {
         Notification::new(
             Id::new("notif-1"),
             Id::new("ws-1"),
@@ -402,7 +403,7 @@ mod tests {
             }),
             slack: None,
         };
-        let notif = sample_notif(&state, "user-1", 3);
+        let notif = sample_notif("user-1", 3);
         let sender = Arc::new(CapturingSender {
             calls: Mutex::new(Vec::new()),
         });
@@ -442,7 +443,7 @@ mod tests {
             }),
             slack: None,
         };
-        let notif = sample_notif(&state, "user-1", 9);
+        let notif = sample_notif("user-1", 9);
         let sender = Arc::new(CapturingSender {
             calls: Mutex::new(Vec::new()),
         });
@@ -466,7 +467,7 @@ mod tests {
                 min_priority: NotificationPriority::Low,
             }),
         };
-        let notif = sample_notif(&state, "user-1", 9);
+        let notif = sample_notif("user-1", 9);
         let sender = Arc::new(CapturingSender {
             calls: Mutex::new(Vec::new()),
         });
@@ -495,7 +496,7 @@ mod tests {
             webhook: None,
             slack: None,
         };
-        let notif = sample_notif(&state, "user-1", 3);
+        let notif = sample_notif("user-1", 3);
         let sender = Arc::new(CapturingSender {
             calls: Mutex::new(Vec::new()),
         });
@@ -510,7 +511,7 @@ mod tests {
         assert_eq!(parsed["user_id"], "user-1");
 
         // Low priority (9) below Medium threshold → no queue entry.
-        let notif_low = sample_notif(&state, "user-1", 9);
+        let notif_low = sample_notif("user-1", 9);
         dispatch_with(&state, &notif_low, &channels, sender.as_ref()).await;
         let outbox = state.kv_store.kv_list(EMAIL_OUTBOX_NS).await.unwrap();
         assert_eq!(outbox.len(), 1, "below-threshold email must not queue");
@@ -524,7 +525,7 @@ mod tests {
             },
             ..channels
         };
-        let notif2 = sample_notif(&state, "user-2", 1);
+        let notif2 = sample_notif("user-2", 1);
         dispatch_with(&state, &notif2, &channels_off, sender.as_ref()).await;
         let outbox = state.kv_store.kv_list(EMAIL_OUTBOX_NS).await.unwrap();
         assert_eq!(

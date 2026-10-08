@@ -338,8 +338,10 @@ impl JudgmentLedgerRepository for SqliteStorage {
 #[diesel(table_name = user_channel_preferences)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 struct ChannelPrefRow {
+    #[allow(dead_code)]
     user_id: String,
     channels: String,
+    #[allow(dead_code)]
     updated_at: i64,
 }
 
