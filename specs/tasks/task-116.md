@@ -2,7 +2,7 @@
 title: "Implement meta-spec prompt assembly"
 spec_ref: "agent-runtime.md §2 Meta-Spec Prompt Assembly"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "agent-runtime.md §2. Meta-Spec Prompt Assembly"
   - "agent-runtime.md §Meta-Specs Are Prompts"
@@ -14,7 +14,7 @@ coverage_sections:
   - "agent-runtime.md §Stale Pin Detection"
   - "agent-runtime.md §Bootstrap"
   - "agent-runtime.md §API"
-commits: ["9b15d3e652f756da6f738c9949806382f6df8ac0", "9a7079b6d9150dd2b97440e88d871bbbdaf1e77a"]
+commits: ["9b15d3e652f756da6f738c9949806382f6df8ac0", "9a7079b6d9150dd2b97440e88d871bbbdaf1e77a", "5fbe344"]
 ---
 
 ## Spec Excerpt
@@ -98,3 +98,26 @@ From `agent-runtime.md` §2:
 ## Agent Instructions
 
 Read `specs/system/agent-runtime.md` §2 (Meta-Spec Prompt Assembly) in its entirety. The existing Persona model is in `gyre-domain/src/` — grep for `Persona`. Meta-spec API stubs may exist in `gyre-server/src/api/meta_specs.rs`. The persona scope enum is in `gyre-domain`. Agent spawn is in `gyre-server/src/api/spawn.rs`. MCP prompt delivery is in `gyre-server/src/mcp.rs` — look for `system://persona`. Bootstrap seeding patterns: grep for `seed` or `bootstrap` in the server startup code.
+
+## Shipped
+
+- **Prompt assembly pipeline** (`crates/gyre-server/src/prompt_assembly.rs`):
+  required tenant (Global) → required workspace → spec-level bindings at
+  pinned versions, kind-ordered (persona → principle → standard → process)
+  and deduped by meta_spec_id; pinned versions resolved from the immutable
+  `meta_spec_versions` history, unresolvable pins skipped with a warning.
+- **Agent-side delivery** (`docker/gyre-agent/agent-runner.mjs`): the
+  assembled set injected as `GYRE_META_SPEC_PROMPT` at spawn is prepended to
+  the prompt handed to the Claude Agent SDK, guarded by child-process tests
+  against a stubbed SDK (mutation-verified to fail when delivery breaks) and
+  a new `gyre-agent-tests` CI job.
+- **Registry + bindings API**: flat `/api/v1/meta-specs` CRUD with version
+  history and per-version lookup, `PUT/GET /api/v1/specs/:path/meta-spec-bindings`
+  with pin validation (409-guarded deletes, version-bumping updates with
+  archival), scope-admin gate on the `required` flag, ABAC route mappings
+  registered and legacy exemptions removed.
+- **Provenance + maintenance**: merge attestation records `meta_specs_used`
+  from the spawn-time prompt-set record; `meta_spec_set_sha` returned from
+  spawn; hourly stale-pin detection creates priority-6 `MetaSpecDrift`
+  notifications (deduped per spec+meta-spec); 9 default meta-specs seeded at
+  first startup per the spec table.
