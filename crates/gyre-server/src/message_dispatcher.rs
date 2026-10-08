@@ -69,18 +69,102 @@ impl MessageDispatcher {
 /// The channel is created alongside `AppState`; this function takes ownership
 /// of the receiver half (via [`AppState::take_message_dispatch_rx`]) and hands
 /// it to the dispatch task. Call once at startup (main.rs), after `build_state`.
-pub fn spawn_message_consumer(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
+/// If the receiver was already consumed, the call is a logged no-op — the bus
+/// has at most one dispatcher.
+pub async fn spawn_message_consumer(state: Arc<AppState>) {
     let dispatcher = MessageDispatcher::new(vec![Arc::new(NotificationBridge::new(
         Arc::clone(&state),
     ))]);
 
-    let rx = state
-        .take_message_dispatch_rx()
-        .expect("message dispatch receiver already consumed");
+    match state.take_message_dispatch_rx().await {
+        Some(rx) => {
+            tokio::spawn(async move {
+                dispatcher.run(rx).await;
+            });
+        }
+        None => {
+            tracing::warn!("spawn_message_consumer: dispatcher already running; not spawning");
+        }
+    }
+}
 
+// ── Event TTL expiry job (message-bus.md §Implementation Notes) ─────────────
+
+/// Event-tier message TTL in seconds. Default 7 days. `GYRE_EVENT_TTL_SECS`.
+pub const DEFAULT_EVENT_TTL_SECS: u64 = 604_800;
+/// Completed/orphaned agent inbox retention in seconds. Default 7 days.
+/// `GYRE_DEAD_INBOX_TTL_SECS`.
+pub const DEFAULT_DEAD_INBOX_TTL_SECS: u64 = 604_800;
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    match std::env::var(name) {
+        Ok(v) => v
+            .parse()
+            .unwrap_or_else(|e| {
+                tracing::warn!("invalid {name}={v} ({e}); using default {default}");
+                default
+            }),
+        Err(_) => default,
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// One message-expiry cycle: delete Event-tier messages older than
+/// `GYRE_EVENT_TTL_SECS` (default 7 days) and acked dead-agent inboxes older
+/// than `GYRE_DEAD_INBOX_TTL_SECS` (default 7 days). Returns deleted counts.
+pub async fn run_message_expiry(state: &AppState) -> anyhow::Result<(u64, u64)> {
+    let event_ttl_ms = env_u64("GYRE_EVENT_TTL_SECS", DEFAULT_EVENT_TTL_SECS) * 1000;
+    let dead_inbox_ttl_ms = env_u64("GYRE_DEAD_INBOX_TTL_SECS", DEFAULT_DEAD_INBOX_TTL_SECS) * 1000;
+    let now = now_ms();
+
+    let events_deleted = state
+        .messages
+        .expire_events(now.saturating_sub(event_ttl_ms))
+        .await?;
+    let inboxes_deleted = state
+        .messages
+        .expire_acked_inboxes(now.saturating_sub(dead_inbox_ttl_ms))
+        .await?;
+
+    if events_deleted > 0 || inboxes_deleted > 0 {
+        tracing::info!(
+            events_deleted,
+            inboxes_deleted,
+            "message expiry: deleted expired Event-tier messages and dead-agent inboxes"
+        );
+    }
+    Ok((events_deleted, inboxes_deleted))
+}
+
+/// Spawn the hourly message-expiry background job (message-bus.md
+/// §Implementation Notes). Registered as `message_expiry` in the admin job
+/// registry; `POST /admin/jobs/message_expiry/run` triggers it on demand.
+pub fn spawn_message_expiry(state: Arc<AppState>) {
+    const INTERVAL_SECS: u64 = 3600;
     tokio::spawn(async move {
-        dispatcher.run(rx).await;
-    })
+        state.job_registry.mark_scheduled("message_expiry").await;
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(INTERVAL_SECS));
+        interval
+            .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let started_at = crate::jobs::now_secs();
+            let result = run_message_expiry(&state)
+                .await
+                .map(|_| ())
+                .map_err(anyhow::Error::from);
+            state
+                .job_registry
+                .record_cycle("message_expiry", started_at, &result)
+                .await;
+        }
+    });
 }
 
 /// The notification system's [`MessageConsumer`] implementation: derives
