@@ -9,7 +9,7 @@ coverage_sections:
   - "agent-runtime.md §Supported Backends"
   - "agent-runtime.md §Nix-Based Image Build"
   - "agent-runtime.md §Tenant and Workspace Configuration"
-commits: []
+commits: ["1626c5bb641e1ecbbe81c811612b269b150218bb"]
 ---
 
 ## Spec Excerpt
