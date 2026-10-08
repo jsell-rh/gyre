@@ -317,6 +317,10 @@ pub struct AppState {
     /// Durable source of truth; `spec_links_store` is the hot in-memory cache
     /// loaded from this at boot and written through on every mutation.
     pub spec_link_repo: Arc<dyn gyre_ports::SpecLinkRepository>,
+    /// In-memory hot cache of the spec-link graph, rebuilt from the repository
+    /// at boot (see `load_spec_links_into_store`) and written through on every
+    /// mutation. The SQL table is authoritative; this is the reader-facing view.
+    pub spec_links_store: spec_registry::SpecLinksStore,
     /// Budget limits per entity: entity_key -> BudgetConfig (M22.2).
     pub budget_configs: Arc<dyn BudgetRepository>,
     /// Real-time budget usage per entity: entity_key -> BudgetUsage (M22.2).
