@@ -396,6 +396,10 @@ pub struct AppState {
     pub user_notification_prefs: Arc<dyn gyre_ports::UserNotificationPreferenceRepository>,
     /// Per-user API tokens (HSI §12). Hashed at rest; plaintext never stored.
     pub user_tokens: Arc<dyn gyre_ports::UserTokenRepository>,
+    /// Authenticated user sessions (user-management.md §Session Management).
+    /// Created on successful API-key auth, one per (credential, device);
+    /// revocable individually or in bulk ("sign out everywhere").
+    pub sessions: Arc<dyn gyre_ports::SessionRepository>,
     /// Secret repository (platform-model.md §7): scoped credential storage,
     /// encrypted at rest in the adapter. Agent spawn resolves secrets through
     /// this and injects them as GYRE_CRED_* env vars for the cred-proxy sidecar.
@@ -1082,13 +1086,13 @@ pub fn build_state(
             dyn ComputeTargetRepository,
             mem::MemComputeTargetRepository::default()
         ),
-        user_notification_prefs: store!(
-            dyn gyre_ports::UserNotificationPreferenceRepository,
-            mem::MemUserNotificationPreferenceRepository::default()
-        ),
         user_tokens: store!(
             dyn gyre_ports::UserTokenRepository,
             mem::MemUserTokenRepository::default()
+        ),
+        sessions: store!(
+            dyn gyre_ports::SessionRepository,
+            mem::MemSessionRepository::default()
         ),
         secrets: store!(
             dyn gyre_ports::SecretRepository,
