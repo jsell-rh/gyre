@@ -954,10 +954,21 @@ pub struct MemUserRepository {
 #[async_trait]
 impl UserRepository for MemUserRepository {
     async fn create(&self, user: &User) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(user.id.to_string(), user.clone());
+        // Port contract: fail if id, external_id, or username already exists.
+        let mut store = self.store.lock().await;
+        if store
+            .values()
+            .any(|u| u.id == user.id
+                || u.external_id == user.external_id
+                || u.username == user.username)
+        {
+            anyhow::bail!(
+                "user already exists for username {}, external_id {}",
+                user.username,
+                user.external_id
+            );
+        }
+        store.insert(user.id.to_string(), user.clone());
         Ok(())
     }
 
@@ -975,15 +986,42 @@ impl UserRepository for MemUserRepository {
             .cloned())
     }
 
+    async fn find_by_username(&self, username: &str) -> Result<Option<User>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .values()
+            .find(|u| u.username == username)
+            .cloned())
+    }
+
     async fn list(&self) -> Result<Vec<User>> {
         Ok(self.store.lock().await.values().cloned().collect())
     }
 
     async fn update(&self, user: &User) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(user.id.to_string(), user.clone());
+        let mut store = self.store.lock().await;
+        // Port contract: username and external_id are immutable after creation.
+        if let Some(existing) = store.get(user.id.as_str()) {
+            if existing.username != user.username {
+                anyhow::bail!(
+                    "username is immutable: cannot change {} to {}",
+                    existing.username,
+                    user.username
+                );
+            }
+            if existing.external_id != user.external_id {
+                anyhow::bail!(
+                    "external_id is immutable: cannot change {} to {}",
+                    existing.external_id,
+                    user.external_id
+                );
+            }
+        } else {
+            anyhow::bail!("cannot update user {}: not found", user.id);
+        }
+        store.insert(user.id.to_string(), user.clone());
         Ok(())
     }
 
