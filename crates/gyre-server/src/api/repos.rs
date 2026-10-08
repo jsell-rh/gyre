@@ -361,6 +361,12 @@ pub async fn delete_repo(
 
     state.repos.delete(&repo.id).await?;
 
+    // Remove persisted spec assertion results so a deleted repo leaves no
+    // orphaned rows behind.
+    if let Err(e) = state.spec_assertion_results.delete_by_repo(&repo.id.as_str()).await {
+        tracing::warn!(repo_id = %id, "failed to delete spec assertion results on repo delete: {e}");
+    }
+
     // Clean up the git directory on disk to prevent stale directories from
     // blocking future repo/mirror creation with the same workspace + name.
     let path = std::path::Path::new(&repo.path);
@@ -1205,6 +1211,68 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(del_resp2.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn delete_repo_removes_spec_assertion_results() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let id = create_repo_via_api(&app, "repo-assert-cleanup").await;
+
+        // Seed persisted assertion results for the repo (as the post-push
+        // check would).
+        let record = gyre_domain::SpecAssertionResult {
+            id: "assert-del-1".to_string(),
+            repo_id: id.clone(),
+            spec_path: "system/architecture.md".to_string(),
+            line: 3,
+            assertion_type: "no_dependency".to_string(),
+            assertion_text: "no_dependency gyre-domain -> gyre-adapters".to_string(),
+            params_json: r#"{"from":"gyre-domain","to":"gyre-adapters"}"#.to_string(),
+            passed: true,
+            explanation: "ok".to_string(),
+            commit_sha: "deadbeef".to_string(),
+            checked_at: 1_000,
+        };
+        state
+            .spec_assertion_results
+            .save_results(&[record])
+            .await
+            .unwrap();
+
+        // Archive, then delete.
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{id}/archive"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let del_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/repos/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_resp.status(), StatusCode::NO_CONTENT);
+
+        // The repo's assertion results are gone.
+        let stored = state
+            .spec_assertion_results
+            .list_by_spec(&id, "system/architecture.md")
+            .await
+            .unwrap();
+        assert!(
+            stored.is_empty(),
+            "assertion results must be removed on repo delete"
+        );
     }
 
     #[tokio::test]

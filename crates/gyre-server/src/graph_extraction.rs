@@ -1360,6 +1360,7 @@ mod tests {
     #[tokio::test]
     async fn push_check_persists_assertion_results_via_repo() {
         use crate::mem::MemSpecAssertionResultRepository;
+        use gyre_ports::SpecAssertionResultRepository as _;
         use gyre_common::graph::{SpecConfidence, Visibility};
 
         // A repo snapshot with a spec carrying two assertions: one that passes
@@ -1468,6 +1469,124 @@ mod tests {
         );
         assert_eq!(replaced[0].assertion_type, "all_have");
         assert_eq!(replaced[0].commit_sha, "deadbeef2");
+    }
+
+    #[tokio::test]
+    async fn push_check_creates_priority9_notifications_for_failed_assertions() {
+        use crate::mem::{MemNotificationRepository, MemSpecAssertionResultRepository, MemWorkspaceMembershipRepository};
+        use gyre_common::NotificationType;
+        use gyre_domain::{WorkspaceMembership, WorkspaceRole};
+
+        // Spec with one failing assertion (subject node absent from graph).
+        let dir = tempfile::TempDir::new().unwrap();
+        let specs_dir = dir.path().join("specs").join("system");
+        std::fs::create_dir_all(&specs_dir).unwrap();
+        std::fs::write(
+            specs_dir.join("architecture.md"),
+            "# Architecture\n\n<!-- gyre:assert type=\"implements\" subject=\"SearchService\" trait=\"FullTextPort\" -->\n",
+        )
+        .unwrap();
+
+        let repo_id = Id::new("repo-assert-notif");
+        let nodes: Vec<GraphNode> = vec![];
+        let results_repo = MemSpecAssertionResultRepository::default();
+        let notif_repo = MemNotificationRepository::default();
+        let membership_repo = MemWorkspaceMembershipRepository::default();
+
+        // One Developer and one Viewer in the workspace; only the Developer
+        // is within the notify set (Admin/Developer/Owner).
+        membership_repo
+            .create(&WorkspaceMembership::new(
+                Id::new("m-dev"),
+                Id::new("user-dev"),
+                Id::new("ws-1"),
+                WorkspaceRole::Developer,
+                Id::new("inviter"),
+                1_000,
+            ))
+            .await
+            .unwrap();
+        membership_repo
+            .create(&WorkspaceMembership::new(
+                Id::new("m-view"),
+                Id::new("user-view"),
+                Id::new("ws-1"),
+                WorkspaceRole::Viewer,
+                Id::new("inviter"),
+                1_000,
+            ))
+            .await
+            .unwrap();
+
+        let ctx = AgentPushContext {
+            agent_id: "agent-1".to_string(),
+            spec_ref: "system/architecture.md".to_string(),
+            workspace_id: "ws-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+        };
+        let ports = DivergencePorts {
+            notification_repo: &notif_repo,
+            membership_repo: &membership_repo,
+        };
+
+        check_spec_assertions_on_push(
+            dir.path(),
+            &nodes,
+            &[],
+            &repo_id,
+            "deadbeef",
+            &Some(ctx),
+            Some(&ports),
+            &results_repo,
+        )
+        .await
+        .unwrap();
+
+        // The Developer gets exactly one priority-9 SpecAssertionFailure
+        // notification carrying the failing spec and assertion.
+        let dev_notifs = notif_repo
+            .list_for_user(
+                &Id::new("user-dev"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(dev_notifs.len(), 1, "developer must be notified");
+        let n = &dev_notifs[0];
+        assert_eq!(n.notification_type, NotificationType::SpecAssertionFailure);
+        assert_eq!(n.priority, 9);
+        assert_eq!(n.repo_id.as_deref(), Some("repo-assert-notif"));
+        let body: serde_json::Value =
+            serde_json::from_str(n.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["failures"][0]["spec_path"], "system/architecture.md");
+        assert_eq!(body["repo_id"], "repo-assert-notif");
+
+        // The Viewer is outside the notify set.
+        let view_notifs = notif_repo
+            .list_for_user(
+                &Id::new("user-view"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            view_notifs.is_empty(),
+            "viewer must not receive spec assertion failure notifications"
+        );
+
+        // All-failing assertions must not spam one notification per failure:
+        // still a single notification per user for the push.
+        assert_eq!(body["failures"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
