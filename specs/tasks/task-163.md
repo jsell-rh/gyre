@@ -6,7 +6,7 @@ progress: not-started
 coverage_sections:
   - "dependency-graph.md §Enforcement Policies"
   - "dependency-graph.md §Cascade Testing"
-commits: ["f5fc588e50ed672c061871e1c8af2201201687b2", "d0e9599149bbfd11812a62fba58d48376f620d56"]
+commits: ["21bb132cb3589641e0565f756fc3a41bbac0c694", "f5fc588e50ed672c061871e1c8af2201201687b2", "d0e9599149bbfd11812a62fba58d48376f620d56"]
 ---
 
 ## Spec Excerpt
