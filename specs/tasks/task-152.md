@@ -2,7 +2,7 @@
 title: "Implement graph narrative generation (template-based + LLM-synthesized)"
 spec_ref: "realized-model.md §6"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "realized-model.md §6 Narrative Generation"
 commits: ["95f1a147e04b1e0ff8b380aa37a9c5556c39af01", "f88e55b70b980e2f9823a51315097d3e8a8b6334"]
@@ -75,6 +75,13 @@ From `realized-model.md` §6 — Narrative Generation:
 - [x] LLM narrative function exists and falls back to template on failure
 - [x] Briefing endpoint uses narratives for architectural change summaries
 - [x] Tests cover addition, removal, modification, and empty delta cases
+
+## Shipped
+
+- Template narrative generator grounded in the live knowledge graph (module, implemented traits, fields, spec governance, agent/persona attribution), with >3 grouping, legacy count-only delta_json support, and empty/malformed-delta handling (gyre-domain/src/narrative.rs).
+- `narrative` field on every timeline and diff delta response, grounded per request against the repo's live graph and attributed via real agent + persona lookups (crates/gyre-server/src/api/graph.rs).
+- LLM-synthesized briefing architecture narrative over grounded delta facts (prompt-template and model-config aware, 10s-bounded, grounds the model in structured facts) with concatenated template narratives as the fallback on unconfigured/error/timeout/empty completion.
+- 11 domain unit tests + 3 server tests (through-router timeline, briefing LLM path, briefing template fallback); api-reference timeline/briefing rows corrected to the shipped response shapes.
 
 ## Agent Instructions
 
