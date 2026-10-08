@@ -83,6 +83,37 @@ pub async fn evaluate_push_constraints(
     };
     let attestation_id = attestation_id.clone();
 
+    // §2.4 Context binding (replay prevention), audit-only mirror: record
+    // mismatches for Phase 2 observability without blocking the push.
+    // Enforcement lives in `enforce_push_constraints`.
+    {
+        let (task_spec_sha, task_generation) = resolve_task_binding_context(state, task_id).await;
+        let binding_result = crate::git_http::verify_context_binding(
+            signed_input,
+            repo_id,
+            workspace_id.as_str(),
+            task_spec_sha.as_deref(),
+            task_generation,
+        );
+        if !binding_result.valid {
+            for child in &binding_result.children {
+                if !child.valid {
+                    warn!(
+                        task_id = %task_id,
+                        repo_id = %repo_id,
+                        agent_id = %agent_id,
+                        category = "Provenance",
+                        event = "attestation.context_binding_mismatch",
+                        binding = %child.label,
+                        message = %child.message,
+                        "attestation.context_binding_mismatch (audit-only): {}",
+                        child.message
+                    );
+                }
+            }
+        }
+    }
+
     // Compute the diff for constraint evaluation.
     let diff_info = match compute_push_diff(repo_path, ref_updates).await {
         Some(d) => d,
@@ -319,6 +350,35 @@ pub async fn enforce_push_constraints(
         ));
     }
 
+    // §2.4 Context binding (replay prevention): compare the signed root
+    // InputContent against the actual target of this push. A SignedInput
+    // authorizing repo-A must not authorize a push to repo-B.
+    let (task_spec_sha, task_generation) = resolve_task_binding_context(state, task_id).await;
+    let binding_result = crate::git_http::verify_context_binding(
+        signed_input,
+        repo_id,
+        workspace_id.as_str(),
+        task_spec_sha.as_deref(),
+        task_generation,
+    );
+    if !binding_result.valid {
+        emit_context_binding_rejection(
+            state,
+            &binding_result,
+            &attestation_id,
+            task_id,
+            repo_id,
+            agent_id,
+            workspace_id,
+            "push",
+        )
+        .await;
+        return Err(format!(
+            "push rejected: attestation context binding failed — {}",
+            binding_result.message
+        ));
+    }
+
     // Compute the diff for constraint evaluation.
     let diff_info = match compute_push_diff(repo_path, ref_updates).await {
         Some(d) => d,
@@ -549,6 +609,35 @@ pub async fn enforce_merge_constraints(
         ));
     }
 
+    // §2.4 Context binding (replay prevention): compare the signed root
+    // InputContent against the actual target of this merge.
+    let (task_spec_sha, task_generation) =
+        resolve_task_binding_context(state, &task_id).await;
+    let binding_result = crate::git_http::verify_context_binding(
+        signed_input,
+        repo_id,
+        workspace_id.as_str(),
+        task_spec_sha.as_deref(),
+        task_generation,
+    );
+    if !binding_result.valid {
+        emit_context_binding_rejection(
+            state,
+            &binding_result,
+            &attestation_id,
+            &task_id,
+            repo_id,
+            &agent_id,
+            workspace_id,
+            "merge",
+        )
+        .await;
+        return Err(format!(
+            "merge blocked: attestation context binding failed — {}",
+            binding_result.message
+        ));
+    }
+
     // Compute diff for the merge commit.
     let diff_info = match compute_commit_diff(repo_path, merge_commit_sha).await {
         Some(d) => d,
@@ -762,6 +851,39 @@ pub async fn evaluate_merge_constraints(
     };
     let attestation_id = attestation_id.clone();
 
+    // §2.4 Context binding (replay prevention), audit-only mirror: record
+    // mismatches for Phase 2 observability without blocking the merge.
+    // Enforcement lives in `enforce_merge_constraints`.
+    {
+        let (task_spec_sha, task_generation) =
+            resolve_task_binding_context(state, &task_id).await;
+        let binding_result = crate::git_http::verify_context_binding(
+            signed_input,
+            repo_id,
+            workspace_id.as_str(),
+            task_spec_sha.as_deref(),
+            task_generation,
+        );
+        if !binding_result.valid {
+            for child in &binding_result.children {
+                if !child.valid {
+                    warn!(
+                        mr_id = %mr_id,
+                        task_id = %task_id,
+                        repo_id = %repo_id,
+                        agent_id = %agent_id,
+                        category = "Provenance",
+                        event = "attestation.context_binding_mismatch",
+                        binding = %child.label,
+                        message = %child.message,
+                        "attestation.context_binding_mismatch (audit-only): {}",
+                        child.message
+                    );
+                }
+            }
+        }
+    }
+
     // Compute diff for the merge commit.
     let diff_info = match compute_commit_diff(repo_path, merge_commit_sha).await {
         Some(d) => d,
@@ -888,6 +1010,116 @@ pub async fn evaluate_merge_constraints(
         )
         .await;
     }
+}
+
+
+/// Resolve the task context needed for §2.4 context binding: the task's
+/// current spec SHA (approved SHA from the spec approval history if the task
+/// has a spec_path, else the ledger's current SHA) and the task's current
+/// deployment generation.
+///
+/// Returns `(None, None)` when the task itself cannot be resolved — callers
+/// treating that as "no binding data" must still have the repo/workspace
+/// bindings enforced against the real push target.
+async fn resolve_task_binding_context(
+    state: &AppState,
+    task_id: &str,
+) -> (Option<String>, Option<u32>) {
+    let task = match state.tasks.find_by_id(&Id::new(task_id)).await {
+        Ok(Some(t)) => t,
+        _ => return (None, None),
+    };
+
+    let generation = Some(task.generation);
+
+    // Resolve the currently approved spec SHA for the task's spec_path.
+    // Preference order: newest active (non-revoked) approval event for the
+    // path — that is the SHA a human actually signed — falling back to the
+    // ledger's current SHA.
+    let spec_sha = match task.spec_path.as_deref() {
+        None => None,
+        Some(path) => {
+            let approved = state
+                .spec_approval_history
+                .list_by_path(path)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|e| e.revoked_at.is_none())
+                .max_by_key(|e| e.approved_at)
+                .map(|e| e.spec_sha);
+            match approved {
+                Some(sha) => Some(sha),
+                None => state
+                    .spec_ledger
+                    .find_by_path(path)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|e| e.current_sha),
+            }
+        }
+    };
+
+    (spec_sha, generation)
+}
+
+/// Emit the audit trail for a §2.4 context-binding rejection: the
+/// `attestation.chain_invalid` audit event (§7.7) plus one
+/// `ConstraintViolation` Event-tier message per failing binding (§7.5),
+/// reusing the existing violation emission path.
+async fn emit_context_binding_rejection(
+    state: &AppState,
+    binding_result: &VerificationResult,
+    attestation_id: &str,
+    task_id: &str,
+    repo_id: &str,
+    agent_id: &str,
+    workspace_id: &Id,
+    action: &str,
+) {
+    // §7.7: attestation.chain_invalid audit event — the chain is valid
+    // cryptographically but does not bind to this context.
+    warn!(
+        task_id = %task_id,
+        repo_id = %repo_id,
+        agent_id = %agent_id,
+        category = "Provenance",
+        event = "attestation.chain_invalid",
+        message = %binding_result.message,
+        "attestation.chain_invalid: {action}-time context binding failed"
+    );
+
+    let failed: Vec<&VerificationResult> =
+        binding_result.children.iter().filter(|c| !c.valid).collect();
+
+    let violations: Vec<ConstraintViolationInfo> = failed
+        .iter()
+        .map(|c| ConstraintViolationInfo {
+            constraint_name: c.label.clone(),
+            expression: "context_binding(signed_input, target)".to_string(),
+            message: c.message.clone(),
+        })
+        .collect();
+
+    let context_snapshot = serde_json::json!({
+        "binding_result": binding_result,
+        "action": action,
+    });
+
+    emit_constraint_violations(
+        state,
+        &violations,
+        attestation_id,
+        repo_id,
+        agent_id,
+        workspace_id,
+        action,
+        &context_snapshot,
+    )
+    .await;
+    create_violation_notifications(state, &violations, task_id, repo_id, workspace_id, action)
+        .await;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -2708,6 +2940,549 @@ mod tests {
         assert!(
             err.contains("constraint(s) failed"),
             "error should mention constraint failure: {err}"
+        );
+    }
+
+    // ── TASK-188: §2.4 Context binding (replay prevention) ──────────────
+
+    /// Build a REAL Ed25519-signed SignedInput for binding tests: the content
+    /// (including repo_id/workspace_id/spec_sha/expected_generation) is fully
+    /// signed, so only the binding comparison — not signature validity —
+    /// decides the outcome.
+    fn make_binding_signed_input(
+        repo_id: &str,
+        workspace_id: &str,
+        spec_sha: &str,
+        expected_generation: Option<u32>,
+        key_pair: &ring::signature::Ed25519KeyPair,
+        meta_spec_set_sha: &str,
+    ) -> SignedInput {
+        use ring::signature::KeyPair;
+        let content = InputContent {
+            spec_path: "specs/system/payments.md".to_string(),
+            spec_sha: spec_sha.to_string(),
+            workspace_id: workspace_id.to_string(),
+            repo_id: repo_id.to_string(),
+            persona_constraints: vec![],
+            meta_spec_set_sha: meta_spec_set_sha.to_string(),
+            scope: ScopeConstraint {
+                allowed_paths: vec![],
+                forbidden_paths: vec![],
+            },
+        };
+        let content_bytes = serde_json::to_vec(&content).unwrap();
+        let content_hash = ring::digest::digest(&ring::digest::SHA256, &content_bytes);
+        let signature = key_pair.sign(content_hash.as_ref()).as_ref().to_vec();
+
+        SignedInput {
+            content,
+            output_constraints: vec![],
+            valid_until: u64::MAX,
+            expected_generation,
+            signature,
+            key_binding: gyre_common::KeyBinding {
+                public_key: key_pair.public_key().as_ref().to_vec(),
+                user_identity: "user:jsell".to_string(),
+                issuer: "https://keycloak.example.com".to_string(),
+                trust_anchor_id: "tenant-keycloak".to_string(),
+                issued_at: 1_700_000_000,
+                expires_at: u64::MAX,
+                user_signature: vec![10],
+                platform_countersign: vec![20],
+            },
+        }
+    }
+
+    fn make_binding_keypair() -> ring::signature::Ed25519KeyPair {
+        use ring::signature::KeyPair;
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap()
+    }
+
+    /// Seed a task with repo/workspace/generation so the binding check has a
+    /// real persisted target to compare against.
+    async fn seed_binding_task(state: &crate::AppState, task_id: &str, generation: u32) {
+        let mut task = gyre_domain::Task::new(Id::new(task_id), "binding test task", 1000);
+        task.repo_id = Id::new("repo-1");
+        task.workspace_id = Id::new("ws-1");
+        task.generation = generation;
+        state.tasks.create(&task).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn enforce_push_rejects_repo_id_mismatch() {
+        // A SignedInput authorizing repo-OTHER cannot authorize a push to
+        // repo-1 — even though the signature is perfectly valid.
+        let (tmp, initial_sha, second_sha) = init_test_git_repo();
+        let repo_path = tmp.path().to_str().unwrap();
+
+        let state = crate::mem::test_state();
+        let meta_sha = seed_agent_context(&state, "ws-1", "agent-bind-1").await;
+        seed_binding_task(&state, "TASK-BIND-1", 1).await;
+
+        let key_pair = make_binding_keypair();
+        let si = make_binding_signed_input(
+            "repo-OTHER",
+            "ws-1",
+            "abc12345",
+            None,
+            &key_pair,
+            &meta_sha,
+        );
+        let att = make_attestation(si, "TASK-BIND-1");
+        state.chain_attestations.save(&att).await.unwrap();
+
+        let result = enforce_push_constraints(
+            &state,
+            "TASK-BIND-1",
+            "repo-1", // push target
+            repo_path,
+            "agent-bind-1",
+            &Id::new("ws-1"),
+            &[(initial_sha, second_sha, "refs/heads/main".to_string())],
+            "main",
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "push with SignedInput bound to another repo must be rejected"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("context binding") && err.contains("repo_id"),
+            "error should name the failing repo_id binding: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn enforce_merge_rejects_workspace_id_mismatch() {
+        // A SignedInput authorizing ws-OTHER cannot authorize a merge in ws-1.
+        let (tmp, _initial_sha, second_sha) = init_test_git_repo();
+        let repo_path = tmp.path().to_str().unwrap();
+
+        let state = crate::mem::test_state();
+        let meta_sha = seed_agent_context(&state, "ws-1", "agent-bind-2").await;
+        seed_binding_task(&state, "TASK-BIND-2", 1).await;
+
+        let mr = gyre_domain::MergeRequest {
+            id: Id::new("mr-bind-ws"),
+            repository_id: Id::new("repo-1"),
+            title: "Binding test MR".to_string(),
+            source_branch: "feat/test".to_string(),
+            target_branch: "main".to_string(),
+            status: gyre_domain::MrStatus::Approved,
+            author_agent_id: Some(Id::new("agent-bind-2")),
+            reviewers: vec![],
+            diff_stats: None,
+            has_conflicts: None,
+            spec_ref: None,
+            depends_on: vec![],
+            atomic_group: None,
+            created_at: 0,
+            updated_at: 0,
+            workspace_id: Id::new("ws-1"),
+            reverted_at: None,
+            revert_commit_sha: None,
+        };
+        state.merge_requests.create(&mr).await.unwrap();
+
+        let mut agent = gyre_domain::Agent::new(Id::new("agent-bind-2"), "bind-agent-2", 0);
+        agent.current_task_id = Some(Id::new("TASK-BIND-2"));
+        state.agents.create(&agent).await.unwrap();
+
+        let key_pair = make_binding_keypair();
+        let si = make_binding_signed_input(
+            "repo-1",
+            "ws-OTHER",
+            "abc12345",
+            None,
+            &key_pair,
+            &meta_sha,
+        );
+        let att = make_attestation(si, "TASK-BIND-2");
+        state.chain_attestations.save(&att).await.unwrap();
+
+        let result = enforce_merge_constraints(
+            &state,
+            "mr-bind-ws",
+            "repo-1",
+            repo_path,
+            &second_sha,
+            &Id::new("ws-1"), // merge target workspace
+            "feat/test",
+            "main",
+            "main",
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "merge with SignedInput bound to another workspace must be rejected"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("context binding") && err.contains("workspace_id"),
+            "error should name the failing workspace_id binding: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn enforce_push_rejects_stale_generation() {
+        // expected_generation = Some(2) but the task is at generation 1
+        // (never reassigned to that generation) — the old authorization
+        // cannot be replayed.
+        let (tmp, initial_sha, second_sha) = init_test_git_repo();
+        let repo_path = tmp.path().to_str().unwrap();
+
+        let state = crate::mem::test_state();
+        let meta_sha = seed_agent_context(&state, "ws-1", "agent-bind-3").await;
+        seed_binding_task(&state, "TASK-BIND-3", 1).await;
+
+        let key_pair = make_binding_keypair();
+        let si = make_binding_signed_input(
+            "repo-1",
+            "ws-1",
+            "abc12345",
+            Some(2), // pinned to generation 2; task is at generation 1
+            &key_pair,
+            &meta_sha,
+        );
+        let att = make_attestation(si, "TASK-BIND-3");
+        state.chain_attestations.save(&att).await.unwrap();
+
+        let result = enforce_push_constraints(
+            &state,
+            "TASK-BIND-3",
+            "repo-1",
+            repo_path,
+            "agent-bind-3",
+            &Id::new("ws-1"),
+            &[(initial_sha, second_sha, "refs/heads/main".to_string())],
+            "main",
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "push with expected_generation=2 against generation-1 task must be rejected"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("context binding") && err.contains("generation"),
+            "error should name the failing generation binding: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn enforce_push_matching_generation_passes() {
+        // expected_generation = Some(1) and the task is at generation 1 —
+        // the pin matches, the push passes.
+        let (tmp, initial_sha, second_sha) = init_test_git_repo();
+        let repo_path = tmp.path().to_str().unwrap();
+
+        let state = crate::mem::test_state();
+        let meta_sha = seed_agent_context(&state, "ws-1", "agent-bind-4").await;
+        seed_binding_task(&state, "TASK-BIND-4", 1).await;
+
+        let key_pair = make_binding_keypair();
+        let si = make_binding_signed_input(
+            "repo-1",
+            "ws-1",
+            "abc12345",
+            Some(1),
+            &key_pair,
+            &meta_sha,
+        );
+        let att = make_attestation(si, "TASK-BIND-4");
+        state.chain_attestations.save(&att).await.unwrap();
+
+        let result = enforce_push_constraints(
+            &state,
+            "TASK-BIND-4",
+            "repo-1",
+            repo_path,
+            "agent-bind-4",
+            &Id::new("ws-1"),
+            &[(initial_sha, second_sha, "refs/heads/main".to_string())],
+            "main",
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "push with all bindings matching must be allowed: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn enforce_push_matching_context_passes() {
+        // All bindings match (repo, workspace, no generation pin, no approved
+        // spec SHA recorded for the task's spec_path) — legitimate work is
+        // not over-rejected.
+        let (tmp, initial_sha, second_sha) = init_test_git_repo();
+        let repo_path = tmp.path().to_str().unwrap();
+
+        let state = crate::mem::test_state();
+        let meta_sha = seed_agent_context(&state, "ws-1", "agent-bind-5").await;
+        seed_binding_task(&state, "TASK-BIND-5", 1).await;
+
+        let key_pair = make_binding_keypair();
+        let si = make_binding_signed_input(
+            "repo-1",
+            "ws-1",
+            "abc12345",
+            None,
+            &key_pair,
+            &meta_sha,
+        );
+        let att = make_attestation(si, "TASK-BIND-5");
+        state.chain_attestations.save(&att).await.unwrap();
+
+        let result = enforce_push_constraints(
+            &state,
+            "TASK-BIND-5",
+            "repo-1",
+            repo_path,
+            "agent-bind-5",
+            &Id::new("ws-1"),
+            &[(initial_sha, second_sha, "refs/heads/main".to_string())],
+            "main",
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "push with fully matching context must be allowed: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn enforce_push_rejects_spec_sha_mismatch() {
+        // The task's spec was approved at a different SHA than the one the
+        // SignedInput pins — a modified spec requires a new approval.
+        let (tmp, initial_sha, second_sha) = init_test_git_repo();
+        let repo_path = tmp.path().to_str().unwrap();
+
+        let state = crate::mem::test_state();
+        let meta_sha = seed_agent_context(&state, "ws-1", "agent-bind-6").await;
+
+        // Task with a spec_path whose current approved SHA is "f".repeat(40).
+        let mut task = gyre_domain::Task::new(Id::new("TASK-BIND-6"), "spec sha test", 1000);
+        task.repo_id = Id::new("repo-1");
+        task.workspace_id = Id::new("ws-1");
+        task.spec_path = Some("specs/system/payments.md".to_string());
+        task.generation = 1;
+        state.tasks.create(&task).await.unwrap();
+
+        // Record an approval event at the CURRENT spec SHA.
+        let event = gyre_domain::SpecApprovalEvent {
+            id: "approval-bind-6".to_string(),
+            spec_path: "specs/system/payments.md".to_string(),
+            spec_sha: "f".repeat(40),
+            approver_type: "human".to_string(),
+            approver_id: "user:approver".to_string(),
+            persona: None,
+            approved_at: 1_700_000_100,
+            revoked_at: None,
+            revoked_by: None,
+            revocation_reason: None,
+        };
+        state.spec_approval_history.record(&event).await.unwrap();
+
+        let key_pair = make_binding_keypair();
+        // SignedInput pins an OLD SHA ("abc12345") — spec changed since.
+        let si = make_binding_signed_input(
+            "repo-1",
+            "ws-1",
+            "abc12345",
+            None,
+            &key_pair,
+            &meta_sha,
+        );
+        let att = make_attestation(si, "TASK-BIND-6");
+        state.chain_attestations.save(&att).await.unwrap();
+
+        let result = enforce_push_constraints(
+            &state,
+            "TASK-BIND-6",
+            "repo-1",
+            repo_path,
+            "agent-bind-6",
+            &Id::new("ws-1"),
+            &[(initial_sha, second_sha, "refs/heads/main".to_string())],
+            "main",
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "push with SignedInput pinned to a stale spec SHA must be rejected"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("context binding") && err.contains("spec_sha"),
+            "error should name the failing spec_sha binding: {err}"
+        );
+    }
+
+    #[test]
+    fn verify_context_binding_unit_matrix() {
+        // Direct unit coverage of the comparison logic (real values, no
+        // storage): each binding independently rejects, all-match passes.
+        let key_pair = make_binding_keypair();
+        let si = |repo: &str, ws: &str, gen: Option<u32>| {
+            make_binding_signed_input(repo, ws, "abc12345", gen, &key_pair, "meta-sha")
+        };
+
+        // All match (with generation pin satisfied).
+        let r = crate::git_http::verify_context_binding(&si("repo-1", "ws-1", Some(3)), "repo-1", "ws-1", None, Some(3));
+        assert!(r.valid, "all bindings match must pass");
+        assert_eq!(r.children.len(), 3);
+
+        // repo mismatch.
+        let r = crate::git_http::verify_context_binding(&si("repo-A", "ws-1", None), "repo-B", "ws-1", None, None);
+        assert!(!r.valid);
+        assert!(r.children.iter().any(|c| c.label == "context_binding.repo_id" && !c.valid));
+
+        // workspace mismatch.
+        let r = crate::git_http::verify_context_binding(&si("repo-1", "ws-A", None), "repo-1", "ws-B", None, None);
+        assert!(!r.valid);
+        assert!(r.children.iter().any(|c| c.label == "context_binding.workspace_id" && !c.valid));
+
+        // spec_sha mismatch.
+        let r = crate::git_http::verify_context_binding(&si("repo-1", "ws-1", None), "repo-1", "ws-1", Some("different-sha"), None);
+        assert!(!r.valid);
+        assert!(r.children.iter().any(|c| c.label == "context_binding.spec_sha" && !c.valid));
+
+        // generation pin vs missing task generation → fail closed.
+        let r = crate::git_http::verify_context_binding(&si("repo-1", "ws-1", Some(2)), "repo-1", "ws-1", None, None);
+        assert!(!r.valid);
+        assert!(r.children.iter().any(|c| c.label == "context_binding.expected_generation" && !c.valid));
+
+        // generation pin vs different generation.
+        let r = crate::git_http::verify_context_binding(&si("repo-1", "ws-1", Some(2)), "repo-1", "ws-1", None, Some(1));
+        assert!(!r.valid);
+        assert!(r.children.iter().any(|c| c.label == "context_binding.expected_generation" && !c.valid));
+
+        // No pin → no generation check performed.
+        let r = crate::git_http::verify_context_binding(&si("repo-1", "ws-1", None), "repo-1", "ws-1", None, Some(9));
+        assert!(r.valid);
+        assert!(!r.children.iter().any(|c| c.label == "context_binding.expected_generation"));
+
+        // spec_sha binding skipped when current SHA unresolvable (None).
+        let r = crate::git_http::verify_context_binding(&si("repo-1", "ws-1", None), "repo-1", "ws-1", None, None);
+        assert!(r.valid);
+        assert!(!r.children.iter().any(|c| c.label == "context_binding.spec_sha"));
+    }
+
+    #[tokio::test]
+    async fn task_generation_increments_on_reassignment() {
+        // The API reassignment path bumps Task.generation — the value the
+        // expected_generation binding compares against is real persisted
+        // state, not a constant.
+        let state = crate::mem::test_state();
+        let task_id = "task-gen-bump";
+        let mut task = gyre_domain::Task::new(Id::new(task_id), "gen bump", 1000);
+        task.assigned_to = Some(Id::new("agent-a"));
+        state.tasks.create(&task).await.unwrap();
+
+        // Round-trip through update (no reassignment) — generation unchanged.
+        task.title = "renamed".to_string();
+        state.tasks.update(&task).await.unwrap();
+        let t = state.tasks.find_by_id(&Id::new(task_id)).await.unwrap().unwrap();
+        assert_eq!(t.generation, 1, "non-reassigning update must not bump generation");
+
+        // Reassign via the domain value the API sets — generation bumps.
+        let mut t = t;
+        t.assigned_to = Some(Id::new("agent-b"));
+        t.generation = t.generation.saturating_add(1);
+        state.tasks.update(&t).await.unwrap();
+        let t2 = state.tasks.find_by_id(&Id::new(task_id)).await.unwrap().unwrap();
+        assert_eq!(t2.generation, 2, "reassignment must bump generation");
+        assert_eq!(t2.assigned_to.as_ref().map(|i| i.to_string()), Some("agent-b".to_string()));
+    }
+
+    #[tokio::test]
+    async fn update_task_api_reassignment_bumps_generation() {
+        // Full API-level proof: PATCH /tasks/:id with a different assignee
+        // increments generation; the SignedInput pinned to the old
+        // generation then fails the binding check.
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let state = crate::mem::test_state();
+        let mut task = gyre_domain::Task::new(Id::new("task-api-gen"), "api gen", 1000);
+        task.assigned_to = Some(Id::new("agent-old"));
+        state.tasks.create(&task).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let body = serde_json::json!({ "assigned_to": "agent-new" });
+        let resp = app
+            .oneshot(
+                http::Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/tasks/task-api-gen")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let mut updated = state
+            .tasks
+            .find_by_id(&Id::new("task-api-gen"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.generation, 2, "API reassignment must bump generation");
+
+        // An authorization pinned to generation 1 is now stale and must be
+        // rejected at the enforcement boundary.
+        let (tmp, initial_sha, second_sha) = init_test_git_repo();
+        let repo_path = tmp.path().to_str().unwrap();
+        let meta_sha = seed_agent_context(&state, "ws-1", "agent-bind-7").await;
+        updated.repo_id = Id::new("repo-1");
+        updated.workspace_id = Id::new("ws-1");
+        state.tasks.update(&updated).await.unwrap();
+
+        let key_pair = make_binding_keypair();
+        let si = make_binding_signed_input(
+            "repo-1",
+            "ws-1",
+            "abc12345",
+            Some(1), // pinned to the pre-reassignment generation
+            &key_pair,
+            &meta_sha,
+        );
+        let att = make_attestation(si, "task-api-gen");
+        state.chain_attestations.save(&att).await.unwrap();
+
+        let result = enforce_push_constraints(
+            &state,
+            "task-api-gen",
+            "repo-1",
+            repo_path,
+            "agent-bind-7",
+            &Id::new("ws-1"),
+            &[(initial_sha, second_sha, "refs/heads/main".to_string())],
+            "main",
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "authorization pinned to generation 1 must be rejected after reassignment to generation 2"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("generation"),
+            "error should name the generation binding: {err}"
         );
     }
 }
