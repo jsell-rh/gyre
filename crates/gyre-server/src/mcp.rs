@@ -3963,20 +3963,25 @@ mod tests {
             json["result"]["isError"].as_bool().unwrap_or(false),
             "invalid payload must be a tool error: {json}"
         );
-        let text = json["result"]["content"][0]["text"].as_str().unwrap_or_default();
+        let text = json["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
         assert!(
             text.contains("task_id"),
             "error must name the missing field, got: {text}"
         );
         assert_eq!(
-            gyre_ports::MessageRepository::list_unacked(&*state.messages, &Id::new("agent-schema-target"), 10)
-                .await
-                .unwrap()
-                .len(),
+            gyre_ports::MessageRepository::list_unacked(
+                &*state.messages,
+                &Id::new("agent-schema-target"),
+                10
+            )
+            .await
+            .unwrap()
+            .len(),
             0,
             "a rejected payload must not be persisted"
         );
-
         // Same kind with the required field present succeeds.
         let (status, json) = call(json!({"task_id": "TASK-1"})).await;
         assert_eq!(status, StatusCode::OK);
@@ -3985,10 +3990,14 @@ mod tests {
             "valid payload must succeed: {json}"
         );
         assert_eq!(
-            gyre_ports::MessageRepository::list_unacked(&*state.messages, &Id::new("agent-schema-target"), 10)
-                .await
-                .unwrap()
-                .len(),
+            gyre_ports::MessageRepository::list_unacked(
+                &*state.messages,
+                &Id::new("agent-schema-target"),
+                10
+            )
+            .await
+            .unwrap()
+            .len(),
             1,
             "the accepted payload must be persisted"
         );

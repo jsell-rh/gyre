@@ -299,9 +299,7 @@ impl MessageKind {
             // Events
             MessageKind::AgentCreated => &["agent_id"],
             MessageKind::AgentStatusChanged => &["agent_id", "status"],
-            MessageKind::AgentContainerSpawned => {
-                &["agent_id", "container_id", "image", "runtime"]
-            }
+            MessageKind::AgentContainerSpawned => &["agent_id", "container_id", "image", "runtime"],
             MessageKind::AgentCompleted => &["agent_id", "task_id"],
             MessageKind::ReconciliationCompleted => &["workspace_id", "persona_id"],
             MessageKind::TaskCreated => &["task_id"],
@@ -592,7 +590,9 @@ mod tests {
             .is_err());
         // Present satisfies the schema (value type is not validated).
         assert!(MessageKind::TaskAssignment
-            .validate_payload(Some(&json!({"task_id": "TASK-1", "spec_ref": "specs/x.md"})))
+            .validate_payload(Some(
+                &json!({"task_id": "TASK-1", "spec_ref": "specs/x.md"})
+            ))
             .is_ok());
 
         // Both required: `status` alone must fail, naming the missing field + kind.
@@ -642,7 +642,9 @@ mod tests {
         let null_value = Value::Null;
         let null = Some(&null_value);
         assert!(MessageKind::QueueUpdated.validate_payload(null).is_ok());
-        assert!(MessageKind::Custom("e".to_string()).validate_payload(null).is_ok());
+        assert!(MessageKind::Custom("e".to_string())
+            .validate_payload(null)
+            .is_ok());
         // A kind with required fields is still unsatisfied by a null payload,
         // whether the payload itself is null or the required key holds null.
         assert!(MessageKind::TaskAssignment.validate_payload(null).is_err());

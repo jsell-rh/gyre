@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "message-bus.md §Payload Schemas"
-commits: ["62c07303a581c5916933061bbf21423941f73d78", "28457e9f7e8f546642e68663f17586c8835723d8", "0f826ab7da2069ac9abd2e46c6b30f7ce3160583", "3595e6533e94a7e7ae61861a591b381a7c9dbf59", "98b5f543f1577839967b8175ff8609b8c62527e0", "b414c50218e10a26b26defc6bdb40bed5c6c80f4"]
+commits: ["62c07303a581c5916933061bbf21423941f73d78", "28457e9f7e8f546642e68663f17586c8835723d8", "0f826ab7da2069ac9abd2e46c6b30f7ce3160583", "3595e6533e94a7e7ae61861a591b381a7c9dbf59", "98b5f543f1577839967b8175ff8609b8c62527e0", "b414c50218e10a26b26defc6bdb40bed5c6c80f4", "6652c190d0d36c64f56808636a33ba6a41c1d5bb"]
 ---
 
 ## Spec Excerpt
@@ -126,4 +126,6 @@ Two defects, both in the re-land's bookkeeping — `git diff 848395b..HEAD -- cr
 
 Those six candidate-lineage SHAs (`9764477`…`5408311`) are kept out of the `commits:` frontmatter on purpose: they are dangling objects reachable in no ref, so a fresh clone cannot resolve them and any automated scoping over the list would break. The re-land lineage (`62c0730`…`b414c50`, six commits, same subjects, `crates/`-identical trees modulo dev-loop machinery) is what the frontmatter records.
 
-Verification: `git diff --check f315b6f..HEAD` clean (after committing this repair); `bash scripts/check-task-commit-attribution.sh` exits 0 on the repaired tree; targeted suites green (`gyre-common message` 29 passed; `gyre-server api::messages` and `mcp_message_send` — see review doc). No gate weakened, no exemption entry added (exemption file untouched at 3), no test deleted.
+Verification: `git diff --check f315b6f..HEAD` clean; `check-rustfmt-diff.py f315b6f` and `check-clippy-diff.py f315b6f` clean; `bash scripts/check-task-commit-attribution.sh` exits 0 on the repaired tree; all 20 static gate scripts OK on HEAD; targeted suites green (`gyre-common message` 29 passed, `gyre-server api::messages` 14 passed, `gyre-server mcp_message_send` 8 passed). No gate weakened, no exemption entry added (exemption file untouched at 3), no test deleted.
+
+- **Latent rustfmt violations** (masked by the whitespace failure — the gate stops at `git diff --check`): against the task base `f315b6f`, `check-rustfmt-diff.py` flagged changed lines this task added in `message.rs`, `api/messages.rs`, and `mcp.rs`. Formatted exactly those lines (commit `6652c190`); no logic changed — assertions preserved, targeted suites re-run green after the edit.
