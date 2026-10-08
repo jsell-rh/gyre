@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "message-bus.md §Payload Schemas"
-commits: ["e71d72fd103f5c0bfa657f5a4133a85e0ff89bd0", "c0cbeac214b48bb791bc3a64b0ede2d81a044083", "41846588861b3ba22bc04077ce768bd98cf8cf8c", "9764477d2fcb5226bc866f6ff8c143c39bd715ca"]
+commits: ["eecd06dc7285c14d87c70a6baf3bea15ee14a1ea", "e71d72fd103f5c0bfa657f5a4133a85e0ff89bd0", "c0cbeac214b48bb791bc3a64b0ede2d81a044083", "41846588861b3ba22bc04077ce768bd98cf8cf8c", "9764477d2fcb5226bc866f6ff8c143c39bd715ca"]
 ---
 
 ## Spec Excerpt
