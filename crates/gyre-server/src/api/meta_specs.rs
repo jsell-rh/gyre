@@ -1130,6 +1130,7 @@ async fn record_meta_spec_publish(
             "kind": ms.kind.as_str(),
             "name": ms.name,
             "version": ms.version,
+            "content_hash": ms.content_hash,
         }),
         None,
         None,
