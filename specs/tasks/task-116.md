@@ -14,7 +14,7 @@ coverage_sections:
   - "agent-runtime.md §Stale Pin Detection"
   - "agent-runtime.md §Bootstrap"
   - "agent-runtime.md §API"
-commits: ["9b15d3e652f756da6f738c9949806382f6df8ac0", "9a7079b6d9150dd2b97440e88d871bbbdaf1e77a", "5fbe344"]
+commits: ["9b15d3e652f756da6f738c9949806382f6df8ac0", "9a7079b6d9150dd2b97440e88d871bbbdaf1e77a"]
 ---
 
 ## Spec Excerpt
