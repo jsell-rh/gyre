@@ -43,7 +43,7 @@ pub const DEFAULT_SNAPSHOT_TIER_24H_KEEP: usize = 24;
 pub const DEFAULT_SNAPSHOT_TIER_7D_KEEP: usize = 7;
 pub const DEFAULT_SNAPSHOT_TIER_4W_KEEP: usize = 4;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct RetentionPolicy {
     pub data_type: String,
     pub max_age_days: u64,
@@ -63,7 +63,7 @@ pub struct RetentionPolicy {
 /// Tiered snapshot retention counts (business-continuity.md §5 "24h×24 +
 /// 7d×7 + 4w×4"), configurable via the `snapshots` row of
 /// `PUT /api/v1/admin/retention`.
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct SnapshotTiers {
     pub keep_24h: usize,
     pub keep_7d: usize,
