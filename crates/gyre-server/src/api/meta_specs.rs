@@ -1567,6 +1567,26 @@ mod registry_tests {
             )
             .await
             .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let id = body_json(create_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Delete
+        let del_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/meta-specs/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_resp.status(), StatusCode::NO_CONTENT);
+    }
 
     /// §2 + NEW-26: registry writes are scope-admin-gated, not just the
     /// `required` flag. An agent token (Agent role, no user identity) must
@@ -1711,15 +1731,15 @@ mod registry_tests {
         let victim_ws = gyre_domain::Workspace::new(
             gyre_common::Id::new("ws-victim"),
             gyre_common::Id::new("tenant-x"),
-            "ws-victim-slug".to_string(),
             "Victim WS".to_string(),
+            "ws-victim-slug".to_string(),
             1000,
         );
         state.workspaces.create(&victim_ws).await.unwrap();
 
         // Attacker: pre-create the user the JWT will resolve to (external_id
         // = JWT `sub`), Developer role, member of a different workspace.
-        let attacker = gyre_domain::User::new(
+        let mut attacker = gyre_domain::User::new(
             gyre_common::Id::new("user-attacker"),
             "attacker-sub",
             "attacker".to_string(),
@@ -1730,8 +1750,8 @@ mod registry_tests {
         let home_ws = gyre_domain::Workspace::new(
             gyre_common::Id::new("ws-home"),
             gyre_common::Id::new("tenant-x"),
-            "ws-home-slug".to_string(),
             "Home WS".to_string(),
+            "ws-home-slug".to_string(),
             1000,
         );
         state.workspaces.create(&home_ws).await.unwrap();
@@ -1757,7 +1777,7 @@ mod registry_tests {
         let attacker_token = sign_test_jwt(&claims, 3600);
 
         // Developer JWT, member of ws-home only, targets ws-victim → 403.
-        let app = crate::api::api_router().with_state(state);
+        let app = crate::api::api_router().with_state(state.clone());
         let resp = app
             .clone()
             .oneshot(
@@ -1783,7 +1803,7 @@ mod registry_tests {
         let resp = app
             .clone()
             .oneshot(
-                Request::Builder()
+                Request::builder()
                     .method("POST")
                     .uri("/api/v1/meta-specs")
                     .header("authorization", format!("Bearer {attacker_token}"))
@@ -1802,12 +1822,20 @@ mod registry_tests {
         );
 
         // Agent token (no user identity) targeting any workspace → 403.
+        // Registered in agent_tokens so the extractor resolves it to
+        // UserRole::Agent with user_id: None — an unregistered token would
+        // 401 at the extractor before the gate.
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agt-no-member", "agt-secret-nm".to_string())
+            .await
+            .unwrap();
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/meta-specs")
-                    .header("authorization", "Bearer agt-no-member")
+                    .header("authorization", "Bearer agt-secret-nm")
                     .header("content-type", "application/json")
                     .body(Body::from(
                         r#"{"kind":"meta:persona","name":"agent-injected","scope":"Workspace","scope_id":"ws-victim","prompt":"x","required":false}"#,
