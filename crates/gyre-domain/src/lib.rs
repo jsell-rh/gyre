@@ -114,7 +114,10 @@ pub use task::{Task, TaskError, TaskPriority, TaskStatus, TaskType};
 pub use team::Team;
 pub use tenant::Tenant;
 pub use typescript_extractor::TypeScriptExtractor;
-pub use user::{GlobalRole, Theme, User, UserPreferences, UserRole};
+pub use user::{
+    DiffView, FeedScope, GlobalRole, NotificationChannels, Theme, UiDensity, User,
+    UserPreferences, UserRole,
+};
 pub use user_profile::{JudgmentEntry, JudgmentType, UserNotificationPreference, UserToken};
 pub use workspace::{Persona, PersonaApprovalStatus, PersonaScope, TrustLevel, Workspace};
 pub use workspace_membership::{WorkspaceMembership, WorkspaceRole};
