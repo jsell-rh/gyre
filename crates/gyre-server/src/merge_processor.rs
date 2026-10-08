@@ -1583,6 +1583,23 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 None
             };
 
+            // Agent-runtime §2: record exactly which meta-specs the authoring
+            // agent ran under (loaded from the prompt-set record stored at
+            // spawn time). Empty for agents spawned before prompt assembly or
+            // with no applicable meta-specs.
+            let meta_specs_used = match updated_mr.author_agent_id.as_ref() {
+                Some(agent_id) => {
+                    crate::prompt_assembly::load_prompt_set_record(
+                        state,
+                        agent_id.as_str(),
+                    )
+                    .await
+                    .map(|rec| rec.meta_specs_used)
+                    .unwrap_or_default()
+                }
+                None => vec![],
+            };
+
             let attestation = crate::attestation::MergeAttestation {
                 attestation_version: 1,
                 mr_id: updated_mr.id.to_string(),
@@ -1597,7 +1614,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 // when the agent calls agent.complete with a summary. At merge time, the
                 // processor does not re-fetch the summary — it is stored at agent.complete time.
                 completion_summary: None,
-                meta_specs_used: vec![],
+                meta_specs_used,
             };
 
             let bundle =

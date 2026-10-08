@@ -28,10 +28,6 @@
 /api/v1/dependencies/breaking
 /api/v1/dependencies/breaking/:id/acknowledge
 /api/v1/dependencies/stale
-/api/v1/meta-specs-registry
-/api/v1/meta-specs-registry/:id
-/api/v1/meta-specs-registry/:id/versions
-/api/v1/meta-specs-registry/:id/versions/:version
 /api/v1/patrol/spec-links
 /api/v1/repos/:id/archive
 /api/v1/repos/:id/attestations/:commit_sha/bundle
