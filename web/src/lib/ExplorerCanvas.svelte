@@ -17,7 +17,7 @@
   } from './test-reachability.js';
   import { edgePassesFilter } from './canvas-filters.js';
 
-  /** @type {{ repoId: string, nodes: any[], edges: any[], activeQuery: import('./types/view-query.ts').ViewQuery | null }} */
+  /** @type {{ repoId: string, nodes: any[], edges: any[], activeQuery: import('./types/view-query.ts').ViewQuery | null, filter: 'all'|'endpoints'|'types'|'calls'|'dependencies', lens: 'structural'|'evaluative'|'observable' }} */
   let {
     repoId = '',
     nodes = [],
@@ -29,7 +29,6 @@
     onNodeDetail = () => {},
     onInteractiveQuery = () => {},
     ghostOverlays = [],
-    filters = null,
     traceData = null, // { spans: [], root_spans: [] } from GateTraceResponse
     queryResult = null, // { node_metrics: Record<string, number>, ... } from dry-run resolve
     assertionResults = [], // [{ line, assertion_text, passed, explanation }] from spec assertion check
@@ -1567,60 +1566,13 @@
     return s;
   }
 
-  // Map filter-panel categories to node_type sets
-  const CATEGORY_NODE_TYPES = {
-    boundaries: new Set(['module', 'crate', 'package', 'namespace']),
-    interfaces: new Set(['endpoint', 'function', 'method', 'trait', 'interface']),
-    data: new Set(['type', 'struct', 'enum', 'field', 'table', 'model']),
-    specs: new Set(['spec', 'spec_file']),
-  };
-
-  function matchesActiveFilters(node) {
-    if (!filters) return true;
-    // Spec focus: highlight nodes governed by a specific spec (Vision Principle 3: specs as primary artifact)
-    if (filters.focus_spec) {
-      const specPath = filters.focus_spec;
-      // Match nodes with this spec_path
-      if (node.spec_path === specPath) return true;
-      // Match nodes governed by this spec via GovernedBy edges
-      const governed = edges.some(e => {
-        const src = e.source_id ?? e.from_node_id ?? e.from;
-        const tgt = e.target_id ?? e.to_node_id ?? e.to;
-        const et = (e.edge_type ?? e.type ?? '').toLowerCase();
-        if (et !== 'governed_by' || src !== node.id) return false;
-        // Check if the target spec node matches
-        const specNode = nodes.find(n => n.id === tgt);
-        return specNode && (specNode.file_path === specPath || specNode.name === specPath || specNode.spec_path === specPath);
-      });
-      return governed;
-    }
-    // Focus on boundary/interface/data node
-    if (filters.focus_node) {
-      return node.id === filters.focus_node;
-    }
-    // Category check
-    if (filters.categories && filters.categories.length > 0) {
-      const nt = (node.node_type ?? '').toLowerCase();
-      let matched = false;
-      for (const cat of filters.categories) {
-        if (CATEGORY_NODE_TYPES[cat]?.has(nt)) { matched = true; break; }
-      }
-      // If the node type doesn't fit any known category, show it if all categories are active
-      if (!matched && filters.categories.length < 4) return false;
-    }
-    // Visibility check
-    if (filters.visibility === 'public' && node.visibility === 'private') return false;
-    if (filters.visibility === 'private' && node.visibility === 'public') return false;
-    // Churn check
-    if (filters.min_churn && (node.churn ?? 0) < filters.min_churn) return false;
-    return true;
-  }
+  // filter-panel category matching (CATEGORY_NODE_TYPES/matchesActiveFilters) removed with
+  // ExplorerFilterPanel — spec explorer-implementation.md "Replaces" lists the panel; filter
+  // presets + view queries are the filtering surfaces now.
 
   function filterOpacity(ln) {
     if (ln.kind === 'tree-group') return 1.0;
     if (!ln.node) return 0.1;
-    // Apply active filters from filter panel
-    if (filters && !matchesActiveFilters(ln.node)) return 0.1;
     if (filter === 'all') return 1.0;
     switch (filter) {
       case 'endpoints': return ln.node.node_type === 'endpoint' ? 1.0 : 0.1;
@@ -5030,7 +4982,7 @@
     <div class="lens-group" role="group" aria-label="Lens toggle">
       <button class="tb-btn" class:active={lens === 'structural'} onclick={() => { lens = 'structural'; onLensChange('structural'); }} aria-pressed={lens === 'structural'} type="button">Structural</button>
       <button class="tb-btn" class:active={lens === 'evaluative'} onclick={() => { lens = 'evaluative'; onLensChange('evaluative'); }} aria-pressed={lens === 'evaluative'} title="Overlay test/trace data on the structural topology" type="button">Evaluative</button>
-      <button class="tb-btn tb-btn-observable" type="button" disabled title="Observable lens is disabled — pending production OpenTelemetry collector integration" onclick={() => { observableBannerVisible = !observableBannerVisible; }} aria-disabled="true">Observable <span class="observable-coming-soon">(coming soon)</span></button>
+      <button class="tb-btn tb-btn-observable" type="button" aria-disabled="true" title="Observable lens is disabled — requires production telemetry integration" onclick={() => { observableBannerVisible = true; }}>Observable <span class="observable-coming-soon">(requires production telemetry integration)</span></button>
     </div>
 
     <div class="filter-preset-group" role="group" aria-label={$t('explorer_treemap.filter_presets')}>
