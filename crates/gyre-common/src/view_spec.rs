@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 // ── Layout ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum LayoutType {
     Graph,
     Hierarchical,
@@ -89,6 +89,7 @@ pub struct Annotation {
 /// Reduced view spec for use within a `side-by-side` layout.
 /// Only `data`, `layout`, and `encoding` are permitted — no nesting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubViewSpec {
     pub data: DataLayer,
     pub layout: LayoutType,
@@ -133,21 +134,21 @@ pub fn validate_view_spec(spec: &ViewSpec) -> Result<(), String> {
 
     // side-by-side: sub-views cannot themselves be side-by-side (depth=1 max).
     if spec.layout == LayoutType::SideBySide {
-        if let Some(left) = &spec.left {
-            if left.layout == LayoutType::SideBySide {
+        let (left, right) = match (&spec.left, &spec.right) {
+            (Some(l), Some(r)) => (l, r),
+            _ => {
+                return Err(
+                    "layout 'side-by-side' requires both 'left' and 'right' sub-views".to_string()
+                )
+            }
+        };
+        for sub in [left, right] {
+            if sub.layout == LayoutType::SideBySide {
                 return Err(
                     "side-by-side sub-views cannot contain side-by-side layouts".to_string()
                 );
             }
-            validate_sub_view(left)?;
-        }
-        if let Some(right) = &spec.right {
-            if right.layout == LayoutType::SideBySide {
-                return Err(
-                    "side-by-side sub-views cannot contain side-by-side layouts".to_string()
-                );
-            }
-            validate_sub_view(right)?;
+            validate_sub_view(sub)?;
         }
     }
 
@@ -166,4 +167,218 @@ fn validate_sub_view(sub: &SubViewSpec) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn valid_spec() -> serde_json::Value {
+        json!({
+            "name": "How authentication works",
+            "description": "Authentication flow from request to identity resolution",
+            "data": {
+                "concept": "auth",
+                "node_types": ["Module", "Function", "Type", "Endpoint"],
+                "edge_types": ["Contains", "Implements", "RoutesTo"],
+                "depth": 2,
+                "filter": {"min_churn": 0, "spec_path": null, "visibility": null},
+                "repo_id": null
+            },
+            "layout": "hierarchical",
+            "encoding": {
+                "color": {"field": "node_type", "scale": "categorical"},
+                "size": {"field": "churn_count_30d", "scale": "linear", "range": [24, 64]},
+                "label": "qualified_name",
+                "group_by": "file_path"
+            },
+            "annotations": [
+                {"node_name": "require_auth_middleware", "text": "Entry point"}
+            ],
+            "highlight": {"spec_path": "specs/system/identity-security.md"},
+            "explanation": "Authentication flows through require_auth_middleware"
+        })
+    }
+
+    fn parse(v: serde_json::Value) -> ViewSpec {
+        serde_json::from_value(v).expect("spec should parse")
+    }
+
+    #[test]
+    fn spec_example_from_ui_layout_parses_and_validates() {
+        let spec = parse(valid_spec());
+        assert_eq!(spec.layout, LayoutType::Hierarchical);
+        assert_eq!(spec.data.concept.as_deref(), Some("auth"));
+        assert_eq!(spec.data.depth, 2);
+        assert_eq!(
+            spec.encoding.as_ref().unwrap().label.as_deref(),
+            Some("qualified_name")
+        );
+        assert!(validate_view_spec(&spec).is_ok());
+    }
+
+    #[test]
+    fn layout_names_serialize_as_kebab_case_per_spec() {
+        // ui-layout.md §4 uses kebab-case layout names in JSON ("side-by-side").
+        assert_eq!(
+            serde_json::to_value(LayoutType::SideBySide).unwrap(),
+            json!("side-by-side")
+        );
+        for (variant, expected) in [
+            (LayoutType::Graph, "graph"),
+            (LayoutType::Hierarchical, "hierarchical"),
+            (LayoutType::Layered, "layered"),
+            (LayoutType::List, "list"),
+            (LayoutType::Timeline, "timeline"),
+            (LayoutType::Diff, "diff"),
+            (LayoutType::Flow, "flow"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(variant.clone()).unwrap(),
+                json!(expected)
+            );
+            let back: LayoutType =
+                serde_json::from_value(json!(expected)).expect("roundtrip layout");
+            assert_eq!(back, variant);
+        }
+    }
+
+    #[test]
+    fn unknown_layout_name_is_rejected() {
+        let mut v = valid_spec();
+        v["layout"] = json!("sankey");
+        let err = serde_json::from_value::<ViewSpec>(v).unwrap_err();
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn flow_layout_requires_trace_source() {
+        let mut v = valid_spec();
+        v["layout"] = json!("flow");
+        let spec = parse(v);
+        let err = validate_view_spec(&spec).unwrap_err();
+        assert!(err.contains("trace_source"), "got: {err}");
+    }
+
+    #[test]
+    fn flow_layout_with_trace_source_is_valid() {
+        let mut v = valid_spec();
+        v["layout"] = json!("flow");
+        v["data"]["trace_source"] = json!({"mr_id": "mr-47"});
+        let spec = parse(v);
+        assert!(validate_view_spec(&spec).is_ok());
+    }
+
+    #[test]
+    fn spec_path_filter_requires_repo_id() {
+        let mut v = valid_spec();
+        v["data"]["filter"]["spec_path"] = json!("system/payment-retry.md");
+        v["data"]["repo_id"] = json!(null);
+        let spec = parse(v);
+        let err = validate_view_spec(&spec).unwrap_err();
+        assert!(err.contains("repo_id"), "got: {err}");
+    }
+
+    #[test]
+    fn side_by_side_requires_both_sub_views() {
+        let mut v = valid_spec();
+        v["layout"] = json!("side-by-side");
+        v["left"] = json!({
+            "data": {"spec_path": null},
+            "layout": "list"
+        });
+        let spec = parse(v);
+        let err = validate_view_spec(&spec).unwrap_err();
+        assert!(err.contains("left"), "got: {err}");
+        assert!(err.contains("right"), "got: {err}");
+    }
+
+    #[test]
+    fn side_by_side_sub_view_cannot_contain_side_by_side() {
+        let mut v = valid_spec();
+        v["layout"] = json!("side-by-side");
+        v["left"] = json!({
+            "data": {},
+            "layout": "side-by-side"
+        });
+        v["right"] = json!({
+            "data": {},
+            "layout": "list"
+        });
+        let spec = parse(v);
+        let err = validate_view_spec(&spec).unwrap_err();
+        assert!(err.contains("cannot contain side-by-side"), "got: {err}");
+    }
+
+    #[test]
+    fn side_by_side_sub_view_rejects_top_level_only_fields() {
+        let mut v = valid_spec();
+        v["layout"] = json!("side-by-side");
+        v["left"] = json!({
+            "data": {},
+            "layout": "list",
+            "name": "sub-view name",
+            "annotations": [{"node_name": "a", "text": "b"}],
+            "explanation": "leaked field"
+        });
+        v["right"] = json!({
+            "data": {},
+            "layout": "list"
+        });
+        let err = serde_json::from_value::<ViewSpec>(v).unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "got: {err}");
+    }
+
+    #[test]
+    fn side_by_side_sub_views_do_not_inherit_parent_repo_id() {
+        // Spec: "No field inheritance: sub-views do not inherit data fields
+        // from the parent. Each sub-view must declare its own repo_id if needed."
+        // A sub-view filter.spec_path with no sub-view repo_id must fail even
+        // when the parent declares one.
+        let mut v = valid_spec();
+        v["layout"] = json!("side-by-side");
+        v["data"]["repo_id"] = json!("repo-1");
+        v["left"] = json!({
+            "data": {"filter": {"spec_path": "system/payment-retry.md"}},
+            "layout": "list"
+        });
+        v["right"] = json!({
+            "data": {},
+            "layout": "list"
+        });
+        let spec = parse(v);
+        let err = validate_view_spec(&spec).unwrap_err();
+        assert!(err.contains("repo_id"), "got: {err}");
+    }
+
+    #[test]
+    fn flow_sub_view_requires_trace_source() {
+        let mut v = valid_spec();
+        v["layout"] = json!("side-by-side");
+        v["left"] = json!({"data": {}, "layout": "flow"});
+        v["right"] = json!({"data": {}, "layout": "list"});
+        let spec = parse(v);
+        let err = validate_view_spec(&spec).unwrap_err();
+        assert!(err.contains("trace_source"), "got: {err}");
+    }
+
+    #[test]
+    fn valid_side_by_side_composition_from_spec_example() {
+        let spec = parse(json!({
+            "name": "Spec realization",
+            "data": {"node_types": [], "edge_types": [], "depth": 1},
+            "layout": "side-by-side",
+            "left": {
+                "data": {"repo_id": "repo-1", "filter": {"spec_path": "system/payment-retry.md"}},
+                "layout": "list",
+                "encoding": {"label": "name", "color": {"field": "node_type"}}
+            },
+            "right": {
+                "data": {"repo_id": "repo-1", "node_types": ["Type", "Function"]},
+                "layout": "hierarchical"
+            }
+        }));
+        assert!(validate_view_spec(&spec).is_ok());
+    }
 }
