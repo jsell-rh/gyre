@@ -37,6 +37,498 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
     process_next(state).await
 }
 
+// ── Automatic jj rebase on target branch movement (source-control.md §4) ──
+
+use gyre_domain::{AgentStatus, AuditEventType, AuditOutcome, JjRebaseOutcome};
+use gyre_ports::JjOpsPort;
+
+/// KV namespace for the per-agent rebase backoff window. Key = agent id,
+/// value = epoch seconds of the last *completed* rebase (Success or
+/// Conflict). A failure must NOT consume the window (R2 F4): a broken
+/// workspace would otherwise suppress every retry for 60s.
+const JJ_REBASE_BACKOFF_NS: &str = "jj_rebase_backoff";
+/// KV namespace for the per-agent pending-rebase marker. Key = agent id,
+/// value = JSON `{repo_id, target_branch, new_base_sha}` of the movement
+/// that was deferred by the backoff window and must be replayed once it
+/// expires (batch semantics: one deferred movement per agent — a later
+/// movement overwrites an earlier pending one, which is exactly the
+/// "batch into one rebase" behavior the plan requires).
+const JJ_REBASE_PENDING_NS: &str = "jj_rebase_pending";
+/// Rebase rate-limit window (plan item 5). Multiple baseline movements
+/// inside the window collapse into the pending marker above; the replay
+/// runs once the window expires.
+const JJ_REBASE_WINDOW_SECS: u64 = 60;
+
+/// An in-flight agent identified for rebasing after a merge landed.
+struct RebaseTarget {
+    agent_id: Id,
+    worktree_path: String,
+    branch: String,
+}
+
+/// One pending (deferred) rebase recorded in KV.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PendingRebase {
+    repo_id: String,
+    target_branch: String,
+    new_base_sha: String,
+}
+
+/// Identify the in-flight agents that must be rebased after a merge landed
+/// on `target_branch`: authors of other Open/Approved MRs targeting the
+/// same branch in the same repo, whose agent is still Active, and whose
+/// worktree directory exists on disk.
+///
+/// The merged MR's own author is excluded — their work just landed.
+async fn find_rebase_targets(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+    target_branch: &str,
+    merged_author_agent_ids: &[Id],
+) -> Vec<RebaseTarget> {
+    let mut targets = Vec::new();
+    let mrs = match state.merge_requests.list_by_repo(&repo.id).await {
+        Ok(m) => m,
+        Err(e) => {
+            warn!(repo_id = %repo.id, error = %e, "cannot list MRs for rebase targets");
+            return targets;
+        }
+    };
+    for mr in mrs {
+        if mr.target_branch != target_branch {
+            continue;
+        }
+        if !matches!(mr.status, MrStatus::Open | MrStatus::Approved) {
+            continue;
+        }
+        let Some(author_id) = &mr.author_agent_id else {
+            continue;
+        };
+        if merged_author_agent_ids.contains(author_id) {
+            continue;
+        }
+        // Safeguard (plan item 5): only Active agents — Dead/Completed/Idle
+        // agents have no in-progress work to rebase.
+        let Ok(Some(agent)) = state.agents.find_by_id(author_id).await else {
+            continue;
+        };
+        if agent.status != AgentStatus::Active {
+            continue;
+        }
+        // Safeguard (plan item 5): skip agents whose worktree is gone
+        // (already cleaned up, or never provisioned).
+        let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await else {
+            continue;
+        };
+        let Some(wt) = worktrees
+            .iter()
+            .find(|wt| wt.repository_id == repo.id && wt.branch == mr.source_branch)
+            .or_else(|| worktrees.first())
+        else {
+            continue;
+        };
+        if !std::path::Path::new(&wt.path).exists() {
+            continue;
+        }
+        targets.push(RebaseTarget {
+            agent_id: agent.id.clone(),
+            worktree_path: wt.path.clone(),
+            branch: mr.source_branch.clone(),
+        });
+    }
+    targets
+}
+
+/// Record a rebase audit event (plan item 5: log all rebase operations).
+/// The audit trail is the system of record for which agent was rebased
+/// onto which base, when, and with what outcome.
+async fn record_rebase_audit(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+    agent: &RebaseTarget,
+    outcome: &str,
+    rebased_count: usize,
+    files: &[String],
+    new_base_sha: &str,
+) {
+    let now = crate::jobs::now_secs();
+    let event = gyre_domain::AuditEvent::new(
+        Id::new(Uuid::new_v4().to_string()),
+        AuditEventType::Custom("jj_rebase".to_string()),
+        Some(agent.agent_id.clone()),
+        None,
+        None,
+        Some(repo.workspace_id.clone()),
+        Some(repo.id.clone()),
+        "merge_queue".to_string(),
+        Some(agent.branch.clone()),
+        AuditOutcome::Success,
+        serde_json::json!({
+            "outcome": outcome,
+            "rebased_count": rebased_count,
+            "conflicted_files": files,
+            "new_base_sha": new_base_sha,
+            "target_branch": repo.default_branch,
+            "worktree": agent.worktree_path,
+        }),
+        None,
+        None,
+        now,
+    );
+    if let Err(e) = state.audit.record(&event).await {
+        warn!(agent_id = %agent.agent_id, error = %e, "failed to record jj rebase audit event");
+    }
+}
+
+/// Attempt the rebase of one agent's in-flight work onto the new base.
+///
+/// Returns `true` when the deferral (pending marker) may be consumed —
+/// i.e. the rebase actually ran and reached a terminal outcome (Success or
+/// Conflict) — and `false` when it must stay deferred: backoff window hit,
+/// or infrastructure failure (an Err must not consume the deferral; the
+/// F4 guarantee holds on BOTH the trigger and replay paths, R2 F8).
+async fn rebase_one_agent(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+    agent: &RebaseTarget,
+    target_branch: &str,
+    new_base_sha: &str,
+) -> bool {
+    // Rate limit (plan item 5): inside the window, defer instead of skip.
+    // The pending marker records the newest movement; the replay once the
+    // window expires batches every intermediate movement into one rebase.
+    let in_window = match state
+        .kv_store
+        .kv_get(JJ_REBASE_BACKOFF_NS, agent.agent_id.as_str())
+        .await
+    {
+        Ok(Some(v)) => match v.parse::<u64>() {
+            Ok(last) => {
+                let now = crate::jobs::now_secs();
+                now.saturating_sub(last) < JJ_REBASE_WINDOW_SECS
+            }
+            Err(_) => false,
+        },
+        Ok(None) => false,
+        Err(e) => {
+            warn!(agent_id = %agent.agent_id, error = %e, "cannot read rebase backoff, proceeding");
+            false
+        }
+    };
+    if in_window {
+        let pending = PendingRebase {
+            repo_id: repo.id.to_string(),
+            target_branch: target_branch.to_string(),
+            new_base_sha: new_base_sha.to_string(),
+        };
+        match serde_json::to_string(&pending) {
+            Ok(v) => {
+                if let Err(e) = state
+                    .kv_store
+                    .kv_set(JJ_REBASE_PENDING_NS, agent.agent_id.as_str(), v)
+                    .await
+                {
+                    warn!(agent_id = %agent.agent_id, error = %e, "failed to record pending rebase");
+                }
+            }
+            Err(e) => warn!(agent_id = %agent.agent_id, error = %e, "cannot serialize pending rebase"),
+        }
+        info!(agent_id = %agent.agent_id, branch = %agent.branch, "rebase deferred: inside backoff window, pending marker set");
+        return false;
+    }
+
+    run_rebase(state, repo, agent, target_branch, new_base_sha).await
+}
+
+/// Execute the jj rebase and apply all side effects (audit, notifications,
+/// conflict state). Returns `true` on a terminal outcome (Success or
+/// Conflict — including no-op success), `false` on infrastructure error
+/// (caller keeps the deferral alive).
+async fn run_rebase(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+    agent: &RebaseTarget,
+    target_branch: &str,
+    new_base_sha: &str,
+) -> bool {
+    // -b @ rebases the branch containing the working copy — the whole
+    // in-flight stack ("the agent's in-progress work", source-control.md
+    // §4). Conflicts are state, not errors (jj's conflict-as-state model).
+    let outcome = state
+        .jj_ops
+        .jj_rebase(&agent.worktree_path, "@", &repo.default_branch)
+        .await;
+
+    match outcome {
+        Ok(JjRebaseOutcome::Success { rebased_count }) => {
+            // Persist the backoff only AFTER a completed rebase (R2 F4:
+            // guard state after the guarded action).
+            let now = crate::jobs::now_secs();
+            if let Err(e) = state
+                .kv_store
+                .kv_set(JJ_REBASE_BACKOFF_NS, agent.agent_id.as_str(), now.to_string())
+                .await
+            {
+                warn!(agent_id = %agent.agent_id, error = %e, "failed to persist rebase backoff");
+            }
+
+            record_rebase_audit(state, repo, agent, "success", rebased_count, &[], new_base_sha)
+                .await;
+
+            // Notify the agent: baseline moved, here is the new base.
+            state
+                .emit_event(
+                    Some(repo.workspace_id.clone()),
+                    gyre_common::message::Destination::Agent(agent.agent_id.clone()),
+                    gyre_common::message::MessageKind::Custom("baseline_moved".to_string()),
+                    Some(serde_json::json!({
+                        "repo_id": repo.id.to_string(),
+                        "branch": agent.branch,
+                        "target_branch": target_branch,
+                        "new_base_sha": new_base_sha,
+                        "rebased_count": rebased_count,
+                    })),
+                )
+                .await;
+            true
+        }
+        Ok(JjRebaseOutcome::Conflict { rebased_count, files }) => {
+            let now = crate::jobs::now_secs();
+            if let Err(e) = state
+                .kv_store
+                .kv_set(JJ_REBASE_BACKOFF_NS, agent.agent_id.as_str(), now.to_string())
+                .await
+            {
+                warn!(agent_id = %agent.agent_id, error = %e, "failed to persist rebase backoff");
+            }
+
+            record_rebase_audit(state, repo, agent, "conflict", rebased_count, &files, new_base_sha)
+                .await;
+
+            // Conflict-as-state (plan item 3): surface the conflict on the
+            // MR and via SpeculativeConflict + Escalation events. The agent
+            // keeps working on non-conflicting files.
+            if let Ok(Some(mut mr)) = find_mr_by_author_branch(
+                state,
+                &agent.agent_id,
+                &agent.branch,
+            )
+            .await
+            {
+                mr.has_conflicts = Some(true);
+                let _ = state.merge_requests.update(&mr).await;
+            }
+
+            state
+                .emit_event(
+                    Some(repo.workspace_id.clone()),
+                    gyre_common::message::Destination::Workspace(repo.workspace_id.clone()),
+                    gyre_common::message::MessageKind::SpeculativeConflict,
+                    Some(serde_json::json!({
+                        "repo_id": repo.id.to_string(),
+                        "branch": agent.branch,
+                        "target_branch": target_branch,
+                        "new_base_sha": new_base_sha,
+                        "conflicting_files": files,
+                    })),
+                )
+                .await;
+            state
+                .emit_event(
+                    Some(repo.workspace_id.clone()),
+                    gyre_common::message::Destination::Agent(agent.agent_id.clone()),
+                    gyre_common::message::MessageKind::Escalation,
+                    Some(serde_json::json!({
+                        "repo_id": repo.id.to_string(),
+                        "branch": agent.branch,
+                        "target_branch": target_branch,
+                        "new_base_sha": new_base_sha,
+                        "reason": "rebase conflict",
+                        "conflicting_files": files,
+                    })),
+                )
+                .await;
+            true
+        }
+        Err(e) => {
+            // Infrastructure failure: do NOT consume a pending deferral
+            // (R2 F8) and do NOT write the backoff (R2 F4 — a failed
+            // rebase must not consume the window).
+            record_rebase_failure(state, repo, agent, &e.to_string(), new_base_sha).await;
+            false
+        }
+    }
+}
+
+/// Find the (non-Closed) MR authored by `agent_id` on `branch`.
+async fn find_mr_by_author_branch(
+    state: &AppState,
+    agent_id: &Id,
+    branch: &str,
+) -> anyhow::Result<Option<MergeRequest>> {
+    // Reuse whatever repo scoping the caller has: MRs are listed per agent
+    // via list(); filter author + branch + status.
+    let all = state.merge_requests.list().await?;
+    Ok(all
+        .into_iter()
+        .find(|m| {
+            m.author_agent_id.as_ref() == Some(agent_id)
+                && m.source_branch == branch
+                && m.status != MrStatus::Closed
+        }))
+}
+
+/// Record an audit event for a failed rebase attempt.
+async fn record_rebase_failure(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+    agent: &RebaseTarget,
+    error: &str,
+    new_base_sha: &str,
+) {
+    let now = crate::jobs::now_secs();
+    let event = gyre_domain::AuditEvent::new(
+        Id::new(Uuid::new_v4().to_string()),
+        AuditEventType::Custom("jj_rebase".to_string()),
+        Some(agent.agent_id.clone()),
+        None,
+        None,
+        Some(repo.workspace_id.clone()),
+        Some(repo.id.clone()),
+        "merge_queue".to_string(),
+        Some(agent.branch.clone()),
+        AuditOutcome::Failure,
+        serde_json::json!({
+            "outcome": "error",
+            "error": error,
+            "new_base_sha": new_base_sha,
+            "target_branch": repo.default_branch,
+            "worktree": agent.worktree_path,
+        }),
+        None,
+        None,
+        now,
+    );
+    if let Err(e) = state.audit.record(&event).await {
+        warn!(agent_id = %agent.agent_id, error = %e, "failed to record jj rebase audit event");
+    }
+    warn!(
+        agent_id = %agent.agent_id,
+        branch = %agent.branch,
+        error = error,
+        "automatic jj rebase failed"
+    );
+}
+
+/// Rebase all in-flight agents after a merge landed on `target_branch`
+/// (plan item 1). Called as the LAST step of a successful merge, after
+/// post-merge gates pass (R2 F3: never rebase onto a base that recovery
+/// might revert).
+async fn rebase_inflight_agents(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+    target_branch: &str,
+    new_base_sha: &str,
+    merged_author_agent_ids: &[Id],
+) {
+    let targets = find_rebase_targets(state, repo, target_branch, merged_author_agent_ids).await;
+    for target in targets {
+        rebase_one_agent(state, repo, &target, target_branch, new_base_sha).await;
+    }
+}
+
+/// Replay deferred rebases whose backoff window has expired (plan item 5
+/// batch semantics). Runs on every processor cycle. A replay attempt that
+/// fails with an infrastructure error keeps the pending marker (R2 F8).
+async fn replay_pending_rebases(state: &AppState) {
+    let pendings = match state.kv_store.kv_list(JJ_REBASE_PENDING_NS).await {
+        Ok(list) => list,
+        Err(e) => {
+            warn!(error = %e, "cannot list pending rebases");
+            return;
+        }
+    };
+    for (agent_id, raw) in pendings {
+        let Ok(pending) = serde_json::from_str::<PendingRebase>(&raw) else {
+            // Corrupt marker — drop it; a future movement re-records it.
+            let _ = state
+                .kv_store
+                .kv_remove(JJ_REBASE_PENDING_NS, &agent_id)
+                .await;
+            continue;
+        };
+        let in_window = match state
+            .kv_store
+            .kv_get(JJ_REBASE_BACKOFF_NS, &agent_id)
+            .await
+        {
+            Ok(Some(v)) => match v.parse::<u64>() {
+                Ok(last) => crate::jobs::now_secs().saturating_sub(last) < JJ_REBASE_WINDOW_SECS,
+                Err(_) => false,
+            },
+            _ => false,
+        };
+        if in_window {
+            continue;
+        }
+
+        // Re-derive the current rebase target for this agent — the agent
+        // may have completed or the worktree removed since deferral. When
+        // the deferral is no longer actionable, drop the marker.
+        let actionable = async {
+            let repo = state
+                .repos
+                .find_by_id(&Id::new(&pending.repo_id))
+                .await
+                .ok()
+                .flatten()?;
+            let agent = state.agents.find_by_id(&Id::new(&agent_id)).await.ok().flatten()?;
+            if agent.status != AgentStatus::Active {
+                return None;
+            }
+            let worktrees = state.worktrees.find_by_agent(&agent.id).await.ok()?;
+            let wt = worktrees
+                .iter()
+                .find(|wt| wt.repository_id.as_str() == pending.repo_id)
+                .or_else(|| worktrees.first())?;
+            if !std::path::Path::new(&wt.path).exists() {
+                return None;
+            }
+            Some((repo, RebaseTarget {
+                agent_id: agent.id.clone(),
+                worktree_path: wt.path.clone(),
+                branch: wt.branch.clone(),
+            }))
+        }
+        .await;
+
+        let Some((repo, target)) = actionable else {
+            let _ = state
+                .kv_store
+                .kv_remove(JJ_REBASE_PENDING_NS, &agent_id)
+                .await;
+            continue;
+        };
+
+        let consumed = run_rebase(
+            state,
+            &repo,
+            &target,
+            &pending.target_branch,
+            &pending.new_base_sha,
+        )
+        .await;
+        if consumed {
+            let _ = state
+                .kv_store
+                .kv_remove(JJ_REBASE_PENDING_NS, &agent_id)
+                .await;
+        }
+        // else: keep the marker — an infra failure must not drop the
+        // deferral (R2 F8); the next cycle retries.
+    }
+}
+
 // ── Circuit Breaker (platform-model.md §6) ──
 
 const REVERT_COUNTS_NS: &str = "revert_counts";
@@ -805,6 +1297,23 @@ async fn merge_atomic_group(
                 &failure_reason,
             )
             .await;
+        } else {
+            // source-control.md §4: the group landing moved the baseline —
+            // rebase the other in-flight agents onto the new HEAD, after
+            // the group's post-merge gates pass (R2 F3: never rebase onto
+            // a base a group-recovery revert could strand).
+            let merged_authors: Vec<Id> = merged_entries
+                .iter()
+                .filter_map(|(_, m)| m.author_agent_id.clone())
+                .collect();
+            rebase_inflight_agents(
+                state,
+                &repo,
+                target_branch,
+                last_sha,
+                &merged_authors,
+            )
+            .await;
         }
     }
 
@@ -936,9 +1445,6 @@ async fn rollback_atomic_group(
                 "group": group_name,
                 "failing_mr_id": failing_mr_id.to_string(),
                 "failure_reason": failure_reason,
-                "member_count": all_group_entries.len(),
-                "rolled_back_count": merged_entries.len(),
-                "member_mr_ids": all_group_entries.iter().map(|e| e.merge_request_id.to_string()).collect::<Vec<_>>(),
             })),
         )
         .await;
@@ -963,6 +1469,11 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
         .collect();
 
     if queued_entries.is_empty() {
+        // Idle cycle: replay deferred rebases whose backoff window has
+        // expired (plan item 5 batch semantics). Running on idle cycles
+        // keeps the processor's merge path unchanged while guaranteeing
+        // timely replay without adding per-entry latency.
+        replay_pending_rebases(state).await;
         return Ok(());
     }
 
@@ -1759,6 +2270,25 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                     &updated_mr,
                     &merge_commit_sha,
                     &failure_reason,
+                )
+                .await;
+            } else {
+                // source-control.md §4: the baseline just moved — rebase
+                // every other in-flight agent on this target branch onto
+                // the new HEAD. Runs AFTER post-merge gates pass, so a
+                // gate failure + revert never strands agents on an
+                // orphaned base (R2 F3).
+                let merged_authors: Vec<Id> = updated_mr
+                    .author_agent_id
+                    .iter()
+                    .cloned()
+                    .collect();
+                rebase_inflight_agents(
+                    state,
+                    &repo,
+                    &updated_mr.target_branch,
+                    &merge_commit_sha,
+                    &merged_authors,
                 )
                 .await;
             }
