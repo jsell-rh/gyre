@@ -31,7 +31,9 @@ pub async fn notify(
 
     if let Err(e) = state.notifications.create(&notif).await {
         tracing::warn!("Failed to create notification: {e}");
+        return;
     }
+    crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
 }
 
 /// Create and persist a notification with structured body and entity references.
@@ -64,11 +66,13 @@ pub async fn notify_rich(
     );
     notif.body = body;
     notif.entity_ref = entity_ref;
-    notif.repo_id = repo_id;
-
     if let Err(e) = state.notifications.create(&notif).await {
         tracing::warn!("Failed to create notification: {e}");
+        return;
     }
+    // Fan out to the recipient's configured channels (email/webhook/slack)
+    // per user-management.md §Delivery Channels.
+    crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
 }
 
 /// Notify the spawning user that a gate failed on their MR.
@@ -227,9 +231,37 @@ pub async fn notify_mr_reverted(
         NotificationType::MrReverted,
         format!("MR {mr_label} was reverted: {reason}"),
         "default",
-        Some(body_json),
+        Some(body_json.clone()),
         Some(mr_id.to_string()),
         None,
     )
     .await;
+
+    // user-management.md §Who Gets Notified — "MR reverted" also notifies the
+    // workspace Admins.
+    let admin_members = state
+        .workspace_memberships
+        .list_by_workspace(workspace_id)
+        .await
+        .unwrap_or_default();
+    for member in admin_members {
+        if !matches!(member.role, gyre_domain::WorkspaceRole::Admin) {
+            continue;
+        }
+        if member.user_id == user_id {
+            continue; // already notified above
+        }
+        notify_rich(
+            state,
+            workspace_id.clone(),
+            member.user_id.clone(),
+            NotificationType::MrReverted,
+            format!("MR {mr_label} was reverted: {reason}"),
+            "default",
+            Some(body_json.clone()),
+            Some(mr_id.to_string()),
+            None,
+        )
+        .await;
+    }
 }

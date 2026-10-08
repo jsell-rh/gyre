@@ -3364,6 +3364,7 @@ fn test_state_inner(
         compute_targets: Arc::new(MemComputeTargetRepository::default()),
         llm: Some(Arc::new(gyre_adapters::MockLlmPortFactory::echo())),
         user_notification_prefs: Arc::new(MemUserNotificationPreferenceRepository::default()),
+        user_channel_prefs: Arc::new(MemUserChannelPreferenceRepository::default()),
         user_tokens: Arc::new(MemUserTokenRepository::default()),
         judgment_ledger: Arc::new(MemJudgmentLedgerRepository),
         secrets: Arc::new(MemSecretRepository::default()),
@@ -3807,6 +3808,34 @@ impl gyre_ports::UserNotificationPreferenceRepository for MemUserNotificationPre
     async fn upsert_batch(&self, prefs: &[gyre_domain::UserNotificationPreference]) -> Result<()> {
         for pref in prefs {
             self.upsert(pref).await?;
+        }
+        Ok(())
+    }
+}
+
+// ─── MemUserChannelPreferenceRepository ──────────────────────────────────────
+
+#[derive(Default)]
+pub struct MemUserChannelPreferenceRepository {
+    channels: Arc<tokio::sync::RwLock<Vec<(Id, gyre_domain::NotificationChannels)>>>,
+}
+
+#[async_trait]
+impl gyre_ports::UserChannelPreferenceRepository for MemUserChannelPreferenceRepository {
+    async fn find(&self, user_id: &Id) -> Result<Option<gyre_domain::NotificationChannels>> {
+        let guard = self.channels.read().await;
+        Ok(guard
+            .iter()
+            .find(|(uid, _)| uid == user_id)
+            .map(|(_, ch)| ch.clone()))
+    }
+
+    async fn upsert(&self, user_id: &Id, channels: &gyre_domain::NotificationChannels) -> Result<()> {
+        let mut guard = self.channels.write().await;
+        if let Some(existing) = guard.iter_mut().find(|(uid, _)| uid == user_id) {
+            existing.1 = channels.clone();
+        } else {
+            guard.push((user_id.clone(), channels.clone()));
         }
         Ok(())
     }
