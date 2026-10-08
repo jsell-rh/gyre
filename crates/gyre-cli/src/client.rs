@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub struct GyreClient {
     base_url: String,
@@ -1350,21 +1350,16 @@ impl GyreClient {
 
     /// GET /api/v1/workspaces/:id/budget — workspace limits + real-time usage.
     pub async fn get_workspace_budget(&self, workspace_id: &str) -> Result<BudgetResponse> {
-        let resp = self
-            .client
-            .get(format!(
-                "{}/api/v1/workspaces/{workspace_id}/budget",
-                self.base_url
-            ))
-            .header("Authorization", self.auth_header())
-            .send()
-            .await
-            .context("connecting to Gyre server")?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            anyhow::bail!("get workspace budget failed (HTTP {status}): {text}");
-        }
+        let resp = build_get_workspace_budget(
+            &self.client,
+            &self.base_url,
+            &self.auth_header(),
+            workspace_id,
+        )
+        .send()
+        .await
+        .context("connecting to Gyre server")?;
+        let text = parse_budget_response(resp, "get workspace budget").await?;
         serde_json::from_str(&text).context("parsing budget response")
     }
 
@@ -1384,47 +1379,105 @@ impl GyreClient {
         max_agent_lifetime_secs: Option<u64>,
     ) -> Result<BudgetResponse> {
         let current = self.get_workspace_budget(workspace_id).await?;
-        let merged = BudgetConfig {
-            max_tokens_per_day: max_tokens_per_day.or(current.config.max_tokens_per_day),
-            max_cost_per_day: max_cost_per_day.or(current.config.max_cost_per_day),
-            max_concurrent_agents: max_concurrent_agents.or(current.config.max_concurrent_agents),
-            max_agent_lifetime_secs: max_agent_lifetime_secs
-                .or(current.config.max_agent_lifetime_secs),
-        };
-        let resp = self
-            .client
-            .put(format!(
-                "{}/api/v1/workspaces/{workspace_id}/budget",
-                self.base_url
-            ))
-            .header("Authorization", self.auth_header())
-            .json(&merged)
-            .send()
-            .await
-            .context("connecting to Gyre server")?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            anyhow::bail!("set workspace budget failed (HTTP {status}): {text}");
-        }
+        let merged = merge_budget_config(
+            &current.config,
+            max_tokens_per_day,
+            max_cost_per_day,
+            max_concurrent_agents,
+            max_agent_lifetime_secs,
+        );
+        let resp = build_set_workspace_budget(
+            &self.client,
+            &self.base_url,
+            &self.auth_header(),
+            workspace_id,
+            &merged,
+        )
+        .send()
+        .await
+        .context("connecting to Gyre server")?;
+        let text = parse_budget_response(resp, "set workspace budget").await?;
         serde_json::from_str(&text).context("parsing budget response")
     }
 
     /// GET /api/v1/budget/summary — full tenant picture (Admin only).
     pub async fn budget_summary(&self) -> Result<TenantBudgetSummary> {
-        let resp = self
-            .client
-            .get(format!("{}/api/v1/budget/summary", self.base_url))
-            .header("Authorization", self.auth_header())
+        let resp = build_budget_summary(&self.client, &self.base_url, &self.auth_header())
             .send()
             .await
             .context("connecting to Gyre server")?;
-        let status = resp.status();
-        let text = resp.text().await?;
-        if !status.is_success() {
-            anyhow::bail!("get budget summary failed (HTTP {status}): {text}");
-        }
+        let text = parse_budget_response(resp, "get budget summary").await?;
         serde_json::from_str(&text).context("parsing budget summary response")
+    }
+}
+
+/// Consume a budget-endpoint response: on non-success status, surface the
+/// server's body verbatim (Admin 403s, tenant-ceiling cascade 400s); on
+/// success return the raw body text for JSON parsing.
+///
+/// The server wire shape is `{"error": "<message>"}` (`ApiError`).
+async fn parse_budget_response(resp: reqwest::Response, what: &str) -> Result<String> {
+    let status = resp.status();
+    let text = resp.text().await?;
+    if !status.is_success() {
+        anyhow::bail!("{what} failed (HTTP {status}): {text}");
+    }
+    Ok(text)
+}
+
+// ── Budget request builders (platform-model.md §5) ────────────────────────────
+//
+// Pure `RequestBuilder` constructors so tests can assert the exact method,
+// URL, auth header, and serialized body without a socket. `RequestBuilder::
+// build()` yields the same `Request` reqwest would send.
+fn build_get_workspace_budget(
+    client: &Client,
+    base_url: &str,
+    auth: &str,
+    workspace_id: &str,
+) -> reqwest::RequestBuilder {
+    client
+        .get(format!("{base_url}/api/v1/workspaces/{workspace_id}/budget"))
+        .header("Authorization", auth)
+}
+
+fn build_set_workspace_budget(
+    client: &Client,
+    base_url: &str,
+    auth: &str,
+    workspace_id: &str,
+    merged: &BudgetConfig,
+) -> reqwest::RequestBuilder {
+    client
+        .put(format!("{base_url}/api/v1/workspaces/{workspace_id}/budget"))
+        .header("Authorization", auth)
+        .json(merged)
+}
+
+fn build_budget_summary(
+    client: &Client,
+    base_url: &str,
+    auth: &str,
+) -> reqwest::RequestBuilder {
+    client
+        .get(format!("{base_url}/api/v1/budget/summary"))
+        .header("Authorization", auth)
+}
+
+/// Merge budget-limit overrides into a current config (the PUT is a full
+/// replace server-side): `None` keeps the current value.
+fn merge_budget_config(
+    current: &BudgetConfig,
+    max_tokens_per_day: Option<u64>,
+    max_cost_per_day: Option<f64>,
+    max_concurrent_agents: Option<u32>,
+    max_agent_lifetime_secs: Option<u64>,
+) -> BudgetConfig {
+    BudgetConfig {
+        max_tokens_per_day: max_tokens_per_day.or(current.max_tokens_per_day),
+        max_cost_per_day: max_cost_per_day.or(current.max_cost_per_day),
+        max_concurrent_agents: max_concurrent_agents.or(current.max_concurrent_agents),
+        max_agent_lifetime_secs: max_agent_lifetime_secs.or(current.max_agent_lifetime_secs),
     }
 }
 
@@ -1507,118 +1560,62 @@ mod tests {
 
     // ── Budget wiring tests ──────────────────────────────────────────────
     //
-    // Raw-HTTP mock asserts the exact method, path, auth header, and
-    // serialized body sent to the budget endpoints — fails if the URL or
-    // body changes.
+    // These assert the exact method, URL, auth header, and serialized body
+    // of the request `GyreClient` would send, via `RequestBuilder::build()`
+    // — the same `Request` reqwest hands to the connection layer. No socket
+    // is involved (the dev sandbox forbids peer-address accepts), and a
+    // wrong URL, method, header, or body fails the assertions.
 
     const WS_BUDGET_JSON: &str = r#"{"entity_type":"workspace","entity_id":"ws-1","config":{"max_tokens_per_day":500000,"max_cost_per_day":100.0,"max_concurrent_agents":8,"max_agent_lifetime_secs":3600},"usage":{"entity_type":"workspace","entity_id":"ws-1","tokens_used_today":12345,"cost_today":7.5,"active_agents":2,"period_start":1790000000}}"#;
     const WS_BUDGET_CURRENT_JSON: &str = r#"{"entity_type":"workspace","entity_id":"ws-1","config":{"max_tokens_per_day":null,"max_cost_per_day":20.0,"max_concurrent_agents":5,"max_agent_lifetime_secs":null},"usage":{"entity_type":"workspace","entity_id":"ws-1","tokens_used_today":12345,"cost_today":7.5,"active_agents":2,"period_start":1790000000}}"#;
 
-    /// Read one request off the socket: reqwest sends each request in a
-    /// burst, so a 100 ms idle boundary completes it without needing to
-    /// parse Content-Length at the byte level.
-    async fn read_request(sock: &mut tokio::net::TcpStream) -> String {
-        use tokio::io::AsyncReadExt;
-        let mut raw: Vec<u8> = Vec::new();
-        let mut chunk = [0u8; 1024];
-        loop {
-            match tokio::time::timeout(
-                std::time::Duration::from_millis(100),
-                sock.read(&mut chunk),
-            )
-            .await
-            {
-                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
-                Ok(Ok(n)) => raw.extend_from_slice(&chunk[..n]),
-            }
-        }
-        String::from_utf8(raw).expect("HTTP request must be ASCII/UTF-8")
+    /// Build the request and return (method, url, auth-header-value, body).
+    fn realize_request(rb: reqwest::RequestBuilder) -> (String, String, String, Option<Vec<u8>>) {
+        let req = rb.build().expect("request must build");
+        let method = req.method().to_string();
+        let url = req.url().to_string();
+        let auth = req
+            .headers()
+            .get("Authorization")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let body = req.body().and_then(|b| b.as_bytes().map(|b| b.to_vec()));
+        (method, url, auth, body)
     }
 
-    /// Serve one canned response per connection (Connection: close so
-    /// reqwest opens a fresh connection per request). Returns the collected
-    /// raw request texts.
-    async fn spawn_http_mocks(
-        responses: Vec<(u16, String)>,
-    ) -> (u16, tokio::task::JoinHandle<Vec<String>>) {
-        use tokio::io::AsyncWriteExt;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let handle = tokio::spawn(async move {
-            let mut requests = Vec::new();
-            for (status, body) in responses {
-                let (mut sock, _) = listener.accept().await.unwrap();
-                let req = read_request(&mut sock).await;
-                let reason = if status == 200 { "OK" } else { "Error" };
-                let resp = format!(
-                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                sock.write_all(resp.as_bytes()).await.unwrap();
-                sock.flush().await.unwrap();
-                requests.push(req);
-            }
-            requests
-        });
-        (port, handle)
+    #[test]
+    fn get_workspace_budget_builds_real_route() {
+        let c = Client::new();
+        let (method, url, auth, body) =
+            realize_request(build_get_workspace_budget(&c, "http://srv", "Bearer tok", "ws-1"));
+        assert_eq!(method, "GET");
+        assert_eq!(url, "http://srv/api/v1/workspaces/ws-1/budget");
+        assert_eq!(auth, "Bearer tok");
+        assert!(body.is_none(), "GET must not carry a body");
     }
 
-    fn request_head(req: &str) -> String {
-        req.split("\r\n\r\n").next().expect("request headers").to_string()
-    }
-
-    #[tokio::test]
-    async fn get_workspace_budget_hits_real_route() {
-        let (port, server) = spawn_http_mocks(vec![(200, WS_BUDGET_JSON.to_string())]).await;
-        let c = GyreClient::new(format!("http://127.0.0.1:{port}"), "tok".to_string());
-        let b = c.get_workspace_budget("ws-1").await.unwrap();
-        assert_eq!(b.entity_id, "ws-1");
-        assert_eq!(b.config.max_tokens_per_day, Some(500000));
-        assert_eq!(b.usage.tokens_used_today, 12345);
-        assert_eq!(b.usage.cost_today, 7.5);
-        let requests = server.await.unwrap();
-        assert_eq!(requests.len(), 1);
-        let head = request_head(&requests[0]);
-        assert_eq!(
-            head.split("\r\n").next().unwrap(),
-            "GET /api/v1/workspaces/ws-1/budget HTTP/1.1"
+    #[test]
+    fn set_workspace_budget_put_body_is_merged_config() {
+        // The PUT replaces the whole server-side config: the client must
+        // send the current config merged with the new override, so unset
+        // limits keep their values instead of being wiped to null.
+        let current: BudgetResponse = serde_json::from_str(WS_BUDGET_CURRENT_JSON).unwrap();
+        let merged = merge_budget_config(
+            &current.config,
+            Some(500000),
+            None,
+            None,
+            None,
         );
-        assert!(
-            head.to_ascii_lowercase().contains("authorization: bearer tok"),
-            "missing auth header: {head}"
-        );
-    }
-
-    #[tokio::test]
-    async fn set_workspace_budget_fetch_merge_put() {
-        // GET returns the current config (tokens unset, cost 20.0, agents 5),
-        // then PUT must carry the merged body: new tokens + kept current limits.
-        let (port, server) = spawn_http_mocks(vec![
-            (200, WS_BUDGET_CURRENT_JSON.to_string()),
-            (200, WS_BUDGET_JSON.to_string()),
-        ])
-        .await;
-        let c = GyreClient::new(format!("http://127.0.0.1:{port}"), "tok".to_string());
-        let b = c
-            .set_workspace_budget("ws-1", Some(500000), None, None, None)
-            .await
-            .unwrap();
-        assert_eq!(b.config.max_tokens_per_day, Some(500000));
-        let requests = server.await.unwrap();
-        assert_eq!(requests.len(), 2);
-        let get_head = request_head(&requests[0]);
-        assert_eq!(
-            get_head.split("\r\n").next().unwrap(),
-            "GET /api/v1/workspaces/ws-1/budget HTTP/1.1"
-        );
-        let (put_head, put_body) = requests[1]
-            .split_once("\r\n\r\n")
-            .expect("PUT request with body");
-        assert_eq!(
-            put_head.split("\r\n").next().unwrap(),
-            "PUT /api/v1/workspaces/ws-1/budget HTTP/1.1"
-        );
-        let sent: serde_json::Value = serde_json::from_str(put_body).expect("PUT body JSON");
+        let c = Client::new();
+        let (method, url, auth, body) =
+            realize_request(build_set_workspace_budget(&c, "http://srv", "Bearer tok", "ws-1", &merged));
+        assert_eq!(method, "PUT");
+        assert_eq!(url, "http://srv/api/v1/workspaces/ws-1/budget");
+        assert_eq!(auth, "Bearer tok");
+        let sent: serde_json::Value =
+            serde_json::from_slice(&body.expect("PUT must carry a JSON body")).unwrap();
         let expected: serde_json::Value = serde_json::from_str(
             r#"{"max_tokens_per_day":500000,"max_cost_per_day":20.0,"max_concurrent_agents":5,"max_agent_lifetime_secs":null}"#,
         )
@@ -1626,46 +1623,111 @@ mod tests {
         assert_eq!(sent, expected, "merged PUT body mismatch");
     }
 
-    #[tokio::test]
-    async fn set_workspace_budget_surfaces_server_error_body() {
-        // 403 (non-Admin) and the 400 cascade body must surface verbatim.
-        let (port, _server) = spawn_http_mocks(vec![
-            (200, WS_BUDGET_CURRENT_JSON.to_string()),
-            (
-                403,
-                r#"{"error":"only Admin role may update workspace budget limits"}"#.to_string(),
-            ),
-        ])
-        .await;
-        let c = GyreClient::new(format!("http://127.0.0.1:{port}"), "tok".to_string());
-        let err = c
-            .set_workspace_budget("ws-1", Some(1), None, None, None)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("403"), "{err}");
-        assert!(
-            err.contains("only Admin role may update workspace budget limits"),
-            "{err}"
-        );
+    #[test]
+    fn merge_budget_config_keeps_unset_limits() {
+        let current: BudgetResponse = serde_json::from_str(WS_BUDGET_CURRENT_JSON).unwrap();
+        let merged = merge_budget_config(&current.config, None, Some(100.0), None, None);
+        assert_eq!(merged.max_tokens_per_day, None, "unset stays unset");
+        assert_eq!(merged.max_cost_per_day, Some(100.0));
+        assert_eq!(merged.max_concurrent_agents, Some(5), "kept from current");
+        assert_eq!(merged.max_agent_lifetime_secs, None);
+    }
+
+    #[test]
+    fn budget_summary_builds_real_route() {
+        let c = Client::new();
+        let (method, url, auth, body) =
+            realize_request(build_budget_summary(&c, "http://srv", "Bearer tok"));
+        assert_eq!(method, "GET");
+        assert_eq!(url, "http://srv/api/v1/budget/summary");
+        assert_eq!(auth, "Bearer tok");
+        assert!(body.is_none());
+    }
+
+    #[test]
+    fn budget_response_parses_server_shape() {
+        // Field names must mirror the server's BudgetResponse exactly.
+        let b: BudgetResponse = serde_json::from_str(WS_BUDGET_JSON).unwrap();
+        assert_eq!(b.entity_type, "workspace");
+        assert_eq!(b.entity_id, "ws-1");
+        assert_eq!(b.config.max_tokens_per_day, Some(500000));
+        assert_eq!(b.config.max_cost_per_day, Some(100.0));
+        assert_eq!(b.config.max_concurrent_agents, Some(8));
+        assert_eq!(b.config.max_agent_lifetime_secs, Some(3600));
+        assert_eq!(b.usage.tokens_used_today, 12345);
+        assert_eq!(b.usage.cost_today, 7.5);
+        assert_eq!(b.usage.active_agents, 2);
+        assert_eq!(b.usage.period_start, 1790000000);
+
+        let summary: TenantBudgetSummary = serde_json::from_value(serde_json::json!({
+            "tenant_config": {
+                "max_tokens_per_day": 2000000,
+                "max_cost_per_day": 500.0,
+                "max_concurrent_agents": 20,
+                "max_agent_lifetime_secs": null
+            },
+            "tenant_usage": {
+                "entity_type": "tenant",
+                "entity_id": "global",
+                "tokens_used_today": 100,
+                "cost_today": 1.25,
+                "active_agents": 1,
+                "period_start": 1790000000
+            },
+            "workspaces": [serde_json::from_str::<serde_json::Value>(WS_BUDGET_JSON).unwrap()]
+        }))
+        .unwrap();
+        assert_eq!(summary.tenant_config.max_tokens_per_day, Some(2000000));
+        assert_eq!(summary.workspaces.len(), 1);
+        assert_eq!(summary.workspaces[0].entity_id, "ws-1");
+    }
+
+    /// Build a real `reqwest::Response` from an `http::Response` carrying
+    /// the server's exact wire shape — exercises the production error path
+    /// (status check + verbatim body surfacing) without a socket.
+    fn server_response(status: u16, body: &str) -> reqwest::Response {
+        let resp = http::Response::builder()
+            .status(status)
+            .header("Content-Type", "application/json")
+            .body(body.to_string())
+            .expect("test response must build");
+        reqwest::Response::from(resp)
     }
 
     #[tokio::test]
-    async fn budget_summary_hits_real_route() {
-        let summary = format!(
-            r#"{{"tenant_config":{{"max_tokens_per_day":2000000,"max_cost_per_day":500.0,"max_concurrent_agents":20,"max_agent_lifetime_secs":null}},"tenant_usage":{{"entity_type":"tenant","entity_id":"global","tokens_used_today":100,"cost_today":1.25,"active_agents":1,"period_start":1790000000}},"workspaces":[{WS_BUDGET_JSON}]}}"#
+    async fn budget_errors_surface_server_body_verbatim() {
+        // 403: non-Admin token — server body is {"error": "..."} (ApiError).
+        let err = parse_budget_response(
+            server_response(
+                403,
+                r#"{"error":"only Admin role may update workspace budget limits"}"#,
+            ),
+            "set workspace budget",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("HTTP 403"), "{err}");
+        assert!(
+            err.contains("only Admin role may update workspace budget limits"),
+            "403 body must surface verbatim: {err}"
         );
-        let (port, server) = spawn_http_mocks(vec![(200, summary)]).await;
-        let c = GyreClient::new(format!("http://127.0.0.1:{port}"), "tok".to_string());
-        let s = c.budget_summary().await.unwrap();
-        assert_eq!(s.tenant_config.max_tokens_per_day, Some(2000000));
-        assert_eq!(s.workspaces.len(), 1);
-        assert_eq!(s.workspaces[0].entity_id, "ws-1");
-        let requests = server.await.unwrap();
-        let head = request_head(&requests[0]);
-        assert_eq!(
-            head.split("\r\n").next().unwrap(),
-            "GET /api/v1/budget/summary HTTP/1.1"
+
+        // 400: tenant-ceiling cascade violation, verbatim server message.
+        let err = parse_budget_response(
+            server_response(
+                400,
+                r#"{"error":"workspace max_tokens_per_day (500000) exceeds tenant limit (200000)"}"#,
+            ),
+            "set workspace budget",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("HTTP 400"), "{err}");
+        assert!(
+            err.contains("exceeds tenant limit"),
+            "cascade body must surface verbatim: {err}"
         );
     }
 }
