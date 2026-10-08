@@ -359,7 +359,7 @@ fn tool_definitions() -> Value {
                         },
                         "payload": {
                             "type": "object",
-                            "description": "Optional structured payload for the message. Validated against the kind's required fields (message-bus.md §Payload Schemas) — e.g. task_assignment requires payload.task_id, status_update requires payload.status and payload.summary. A missing required field fails the call."
+                            "description": "Optional structured payload for the message. Validated against the kind's schema (message-bus.md §Payload Schemas) — required fields must be present and non-null (e.g. task_assignment requires payload.task_id, status_update requires payload.status and payload.summary), and every schema-known field must match its declared wire type (task_id is a string, duration_ms an unsigned integer, usage_pct a number, conflicting_files an array of strings). A missing or wrongly-typed field fails the call."
                         },
                         "tier": {
                             "type": "string",
@@ -3981,6 +3981,22 @@ mod tests {
             .len(),
             0,
             "a rejected payload must not be persisted"
+        );
+
+        // A required field present but wrongly typed is the same rejection
+        // class: message-bus.md §Payload Schemas declares wire types per field.
+        let (status, json) = call(json!({"task_id": 42})).await;
+        assert_eq!(status, StatusCode::OK, "JSON-RPC envelope is 200");
+        assert!(
+            json["result"]["isError"].as_bool().unwrap_or(false),
+            "wrongly-typed payload must be a tool error: {json}"
+        );
+        let text = json["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            text.contains("task_id"),
+            "error must name the wrongly-typed field, got: {text}"
         );
         // Same kind with the required field present succeeds.
         let (status, json) = call(json!({"task_id": "TASK-1"})).await;

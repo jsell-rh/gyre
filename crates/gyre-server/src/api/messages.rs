@@ -609,6 +609,37 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
+        // A required field present but wrongly typed is the same 400 class:
+        // message-bus.md §Payload Schemas declares wire types per field, so
+        // `task_id: false` is an invalid payload, not a valid one.
+        let body = serde_json::json!({
+            "to": {"agent": "agent-schema"},
+            "kind": "task_assignment",
+            "payload": {"task_id": false}
+        });
+        let resp = crate::api::api_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-schema/messages")
+                    .header("content-type", "application/json")
+                    .header(auth_header().0, auth_header().1)
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("task_id"),
+            "400 body must name the wrongly-typed field, got: {json}"
+        );
+
         // The same request with every required field present is accepted (201).
         let body = serde_json::json!({
             "to": {"agent": "agent-schema"},
