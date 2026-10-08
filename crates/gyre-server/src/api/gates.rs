@@ -146,16 +146,23 @@ pub struct SpecApprovalResponse {
     pub spec_sha: String,
     pub approver_id: String,
     pub signature: Option<String>,
-    pub approved_at: u64,
+    pub approved_at: Option<u64>,
     pub revoked_at: Option<u64>,
     pub revoked_by: Option<String>,
     pub revocation_reason: Option<String>,
+    pub rejected_at: Option<u64>,
+    pub rejected_reason: Option<String>,
+    pub rejected_by: Option<String>,
+    /// Derived from which timestamp column is non-null (never stored).
+    pub status: String,
+    /// True when this entry actively approves the spec SHA.
     pub active: bool,
 }
 
 impl From<SpecApproval> for SpecApprovalResponse {
     fn from(a: SpecApproval) -> Self {
         let active = a.is_active();
+        let status = a.status().to_string();
         Self {
             id: a.id.to_string(),
             spec_path: a.spec_path,
@@ -166,6 +173,10 @@ impl From<SpecApproval> for SpecApprovalResponse {
             revoked_at: a.revoked_at,
             revoked_by: a.revoked_by,
             revocation_reason: a.revocation_reason,
+            rejected_at: a.rejected_at,
+            rejected_reason: a.rejected_reason,
+            rejected_by: a.rejected_by,
+            status,
             active,
         }
     }
@@ -326,7 +337,7 @@ pub async fn list_spec_approvals(
     };
     let mut result: Vec<SpecApprovalResponse> =
         all.into_iter().map(SpecApprovalResponse::from).collect();
-    result.sort_by_key(|a| a.approved_at);
+    result.sort_by_key(|a| a.approved_at.unwrap_or(0));
     Ok(Json(result))
 }
 

@@ -21,9 +21,7 @@ use gyre_ports::{
     TenantRepository, UserRepository, UserWorkspaceStateRepository, WorkspaceRepository,
     WorktreeRepository,
 };
-#[cfg(test)]
-use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
-use sha2::{Digest, Sha256};
+use gyre_domain::spec_approval::ApprovalTransitionError;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -2480,80 +2478,89 @@ impl gyre_ports::PushGateRepository for MemPushGateRepository {
 pub struct MemSpecApprovalRepository {
     store: Arc<Mutex<HashMap<String, gyre_domain::SpecApproval>>>,
 }
-
 #[async_trait]
 impl gyre_ports::SpecApprovalRepository for MemSpecApprovalRepository {
     async fn create(&self, approval: &gyre_domain::SpecApproval) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(approval.id.to_string(), approval.clone());
+        let mut store = self.store.lock().await;
+        if store.contains_key(&approval.id.to_string()) {
+            anyhow::bail!("spec approval {} already exists", approval.id);
+        }
+        store.insert(approval.id.to_string(), approval.clone());
         Ok(())
     }
     async fn find_by_id(&self, id: &gyre_common::Id) -> Result<Option<gyre_domain::SpecApproval>> {
         Ok(self.store.lock().await.get(&id.to_string()).cloned())
     }
     async fn list_by_path(&self, spec_path: &str) -> Result<Vec<gyre_domain::SpecApproval>> {
-        Ok(self
+        let mut out: Vec<_> = self
             .store
             .lock()
             .await
             .values()
             .filter(|a| a.spec_path == spec_path)
             .cloned()
-            .collect())
+            .collect();
+        out.reverse(); // insertion order: newest first, mirroring SQL id-desc
+        Ok(out)
     }
     async fn list_active_by_path(&self, spec_path: &str) -> Result<Vec<gyre_domain::SpecApproval>> {
-        Ok(self
+        let mut out: Vec<_> = self
             .store
             .lock()
             .await
             .values()
             .filter(|a| a.spec_path == spec_path && a.is_active())
             .cloned()
-            .collect())
+            .collect();
+        out.reverse();
+        Ok(out)
     }
     async fn list_all(&self) -> Result<Vec<gyre_domain::SpecApproval>> {
         Ok(self.store.lock().await.values().cloned().collect())
     }
+
+    async fn approve(&self, id: &Id, now: u64) -> Result<Option<()>, ApprovalTransitionError> {
+        self.transition(id, |a| a.approve(now)).await
+    }
     async fn revoke(
         &self,
-        id: &gyre_common::Id,
+        id: &Id,
         revoked_by: &str,
         reason: &str,
         now: u64,
-    ) -> Result<()> {
-        if let Some(a) = self.store.lock().await.get_mut(&id.to_string()) {
-            a.revoked_at = Some(now);
-            a.revoked_by = Some(revoked_by.to_string());
-            a.revocation_reason = Some(reason.to_string());
-        }
-        Ok(())
+    ) -> Result<Option<()>, ApprovalTransitionError> {
+        self.transition(id, |a| a.revoke(revoked_by, reason, now))
+            .await
     }
+    async fn reject(
+        &self,
+        id: &Id,
+        rejected_by: &str,
+        reason: &str,
+        now: u64,
+    ) -> Result<Option<()>, ApprovalTransitionError> {
+        self.transition(id, move |a| a.reject(rejected_by, reason.clone(), now))
+            .await
+    }
+
     async fn revoke_all_for_path(
         &self,
         spec_path: &str,
         revoked_by: &str,
         reason: &str,
         now: u64,
-    ) -> Result<()> {
-        for a in self.store.lock().await.values_mut() {
-            if a.spec_path == spec_path && a.is_active() {
-                a.revoked_at = Some(now);
-                a.revoked_by = Some(revoked_by.to_string());
-                a.revocation_reason = Some(reason.to_string());
+    ) -> Result<u64> {
+        let mut store = self.store.lock().await;
+        let mut revoked = 0u64;
+        for a in store.values_mut() {
+            if a.spec_path == spec_path
+                && a.status() == gyre_domain::spec_approval::ApprovalStatus::Approved
+                && a.revoke(revoked_by, reason, now).is_ok()
+            {
+                revoked += 1;
             }
         }
-        Ok(())
-    }
-
-    async fn reject(&self, id: &Id, rejected_by: &str, reason: &str, now: u64) -> Result<()> {
-        if let Some(a) = self.store.lock().await.get_mut(id.as_str()) {
-            a.rejected_at = Some(now);
-            a.rejected_by = Some(Id::new(rejected_by));
-            a.rejected_reason = Some(reason.to_string());
-        }
-        Ok(())
+        Ok(revoked)
     }
 }
 
