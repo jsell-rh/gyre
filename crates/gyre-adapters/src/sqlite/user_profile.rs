@@ -280,8 +280,10 @@ impl JudgmentLedgerRepository for SqliteStorage {
             // (SQL `workspace_id = ?` drops NULLs on the left-joined side).
             if want_approvals {
                 let mut query = spec_approvals::table
-                    .left_join(spec_ledger_entries::table)
-                    .on(spec_ledger_entries::path.eq(spec_approvals::spec_path))
+                    .left_join(
+                        spec_ledger_entries::table
+                            .on(spec_ledger_entries::path.eq(spec_approvals::spec_path)),
+                    )
                     .filter(spec_approvals::approver_id.eq(&approver))
                     .filter(spec_approvals::approved_at.ge(since_i))
                     .select((
