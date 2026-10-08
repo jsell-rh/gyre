@@ -47,44 +47,81 @@ fi
 
 # ── Derive tenant-column tables from the migrations (ground truth) ──────
 # Outputs "<tenant tables>|<all tables>" (pipe-joined). Tracks:
-#   CREATE TABLE [IF NOT EXISTS] name            (block until `)`)
+#   CREATE TABLE [IF [NOT] EXISTS] name           (block until `)`)
 #   ALTER TABLE name ADD COLUMN [IF NOT EXISTS] tenant_id
-#   DROP TABLE name                              (removes a later-deleted table)
+#   DROP TABLE name                               (removes a later-deleted table)
+#   ALTER TABLE x RENAME TO y                     (re-creates y from x's columns)
 # SQLite table-recreation migrations use `<name>_new` temp tables that are
-# renamed to the real name — the _new suffix is normalized away.
+# renamed to the real name. The rename is load-bearing: without it, the
+# preceding `DROP TABLE name` deletes the table from the set and every read
+# method on it silently falls into the backlog bucket instead of being
+# checked — exactly the class of silent scan-shrink this lint exists to
+# prevent (found live: workspaces/tasks/agents/merge_requests/repositories/
+# saved_views were ALL unscanned). `_new` names are normalized via base().
 DERIVED=$(awk '
 function base(n) { sub(/_new$/, "", n); return n }
 function token_after_table(   i, nm) {
     nm = ""
     for (i = 1; i <= 10; i++) {
-        if (c[i] == "TABLE") { nm = (c[i + 1] == "IF") ? c[i + 4] : c[i + 1]; break }
+        if (c[i] == "TABLE") {
+            nm = (c[i + 1] == "IF") ? ((c[i + 2] == "NOT") ? c[i + 4] : c[i + 3]) : c[i + 1]
+            break
+        }
     }
     gsub(/[^A-Za-z0-9_]/, "", nm)
     return nm
 }
+# SQL comments (`-- ...`) are not statements: skip them so a prose mention of
+# CREATE TABLE inside a comment cannot register a phantom table (the word
+# after "EXISTS" in a comment line was being picked up as a table name).
+/^[ \t]*--/ { next }
 /CREATE TABLE/ {
     intbl = 1
     split($0, c, " ")
     cur = token_after_table()
-    if (cur != "") all[base(cur)] = 1
+    if (cur != "") all[cur] = 1
     next
 }
-intbl && /^[ \t]*["]?tenant_id["]?[ \t]/ && cur != "" { tt[base(cur)] = 1 }
+intbl && /^[ \t]*["]?tenant_id["]?[ \t]/ && cur != "" { tt[cur] = 1 }
 intbl && /^[ \t]*\)/ { intbl = 0; cur = "" }
 /^[ \t]*ALTER TABLE/ && /ADD COLUMN/ && /tenant_id/ {
     split($0, c, " ")
     nm = token_after_table()
-    if (nm != "") { tt[base(nm)] = 1; all[base(nm)] = 1 }
+    if (nm != "") { tt[nm] = 1; all[nm] = 1 }
+}
+# ALTER TABLE <src> RENAME TO <dst>: dst takes over the column set of src.
+# src is the token immediately before RENAME (robust to `ALTER TABLE [IF
+# EXISTS] x RENAME TO y`); both the raw key (workspaces_new) and its base
+# form are consumed from tt/all so a later real DROP of the recreated table
+# cannot be resurrected by a leftover _new key at END-normalization time.
+# Runs after the ADD COLUMN rule so a recreation RENAME is the final word
+# on table columns, matching the physical migration lifecycle.
+/^[ \t]*ALTER TABLE/ && /RENAME TO/ {
+    split($0, c, " ")
+    src = ""; dst = ""
+    for (i = 1; i <= 12; i++) {
+        if (c[i] == "RENAME") { src = c[i - 1]; if (c[i + 1] == "TO") dst = c[i + 2]; break }
+    }
+    gsub(/[^A-Za-z0-9_]/, "", src); gsub(/[^A-Za-z0-9_]/, "", dst)
+    if (src == "" || dst == "") next
+    had_t = (src in tt) || (base(src) in tt)
+    had_a = (src in all) || (base(src) in all)
+    delete tt[src]; delete tt[base(src)]; delete tt[dst]
+    delete all[src]; delete all[base(src)]; delete all[dst]
+    if (had_t) tt[dst] = 1
+    if (had_a) all[dst] = 1
 }
 /DROP TABLE/ {
     split($0, c, " ")
     nm = token_after_table()
-    if (nm != "") { delete tt[base(nm)]; delete all[base(nm)] }
+    if (nm != "") { delete tt[nm]; delete all[nm] }
 }
 END {
+    for (x in tt)  tf[base(x)] = 1
+    for (x in all) af[base(x)] = 1
     t = ""; a = ""
-    for (x in tt)  t = (t == "" ? x : t "|" x)
-    for (x in all) a = (a == "" ? x : a "|" x)
+    for (x in tf) t = (t == "" ? x : t "|" x)
+    for (x in af) a = (a == "" ? x : a "|" x)
     printf "%s\n%s\n", t, a
 }
 ' "$MIGRATIONS_DIR"/*/up.sql)
@@ -107,10 +144,16 @@ NTT=$(comm -23 "$ALL_TBL_F" "$TEN_TBL_F" | grep -v '^_new$' | tr '\n' ' ')
 rm -f "$ALL_TBL_F" "$TEN_TBL_F"
 
 # ── Skip list (spec §3 structural-isolation exemptions) ─────────────────
-# Each entry: "<basename>|<rationale>". Only files whose isolation is
-# structural qualify; a table that HAS a tenant_id column must not be skipped.
+# Each entry: "<basename>|<rationale>". Spec §3 names the exemption class:
+# adapters enforcing tenant isolation structurally (e.g. MessageRepository
+# querying by globally-unique workspace_id, which is tenant-bound). The
+# messages table itself has a tenant_id column; it is skipped because its
+# inbox/workspace queries are addressed by tenant-bound keys (workspace_id,
+# to_id) rather than a tenant_id predicate, per the spec's own example.
+# A skip entry is a per-file, spec-cited justification — not a way around
+# a missing filter on an arbitrarily-addressed read.
 SKIP_LIST=(
-    "message.rs|messages are queried by globally-unique workspace_id (tenant-bound); per-message expiry methods are intentionally cross-tenant housekeeping."
+    "message.rs|messages are queried by globally-unique workspace_id (tenant-bound) or per-agent inbox key (to_id, tenant-bound agent); per-message expiry methods are intentionally cross-tenant housekeeping. Spec §3 names MessageRepository as the structural-isolation example."
     "user_workspace_state.rs|table keyed by (workspace_id, user); workspace_id is globally unique so isolation is structural. No tenant_id column, no UUID-guessing surface (no REST endpoint)."
     "workspace_membership.rs|workspace_memberships has no tenant_id column; rows are addressed only via globally-unique workspace_id, which is tenant-bound."
     "tenant.rs|the tenants table IS the tenant registry: find_by_id/find_by_slug resolve tenant identity itself (used by the OIDC/SCIM resolvers before tenant context exists), so a self-tenant filter is impossible by construction."
