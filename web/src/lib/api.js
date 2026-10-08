@@ -429,10 +429,12 @@ export const api = {
   getWorkspaceMetaSpecSet: (id) => request(`/workspaces/${id}/meta-spec-set`),
   setWorkspaceMetaSpecSet: (id, data) =>
     request(`/workspaces/${id}/meta-spec-set`, { method: 'PUT', body: JSON.stringify(data) }),
-  // Workspace briefing (TASK-205)
-  getWorkspaceBriefing: (id, since) => {
+  // Workspace briefing (TASK-205). repoId narrows every section to one repo
+  // (HSI §1.5 repo-scope Briefing: ?repo_id= server-side filter).
+  getWorkspaceBriefing: (id, since, repoId) => {
     const params = new URLSearchParams();
     if (since) params.set('since', String(since));
+    if (repoId) params.set('repo_id', repoId);
     const qs = params.toString();
     return request(`/workspaces/${id}/briefing${qs ? `?${qs}` : ''}`);
   },
