@@ -5,7 +5,7 @@ depends_on: []
 progress: not-started
 coverage_sections:
   - "spec-lifecycle.md §Configuration"
-commits: []
+commits: ["e3639c6a4e8e26c93322ec48ab40cb0a1ed8a641"]
 ---
 
 ## Spec Excerpt
