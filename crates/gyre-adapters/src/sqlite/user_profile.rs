@@ -12,13 +12,6 @@ use std::sync::Arc;
 
 use super::SqliteStorage;
 use crate::schema::{user_notification_preferences, user_sessions, user_tokens};
-use gyre_ports::{
-    JudgmentLedgerRepository, UserNotificationPreferenceRepository, UserTokenRepository,
-};
-use std::sync::Arc;
-
-use super::SqliteStorage;
-use crate::schema::{user_notification_preferences, user_tokens};
 
 // ─── User Notification Preferences ──────────────────────────────────────────
 
@@ -452,6 +445,33 @@ impl SessionRepository for SqliteStorage {
                 .first::<UserSessionRow>(&mut *conn)
                 .optional()
                 .context("find user_session by token hash")?;
+            Ok(row.map(Into::into))
+        })
+        .await?
+    }
+
+    async fn find_by_credential_and_device(
+        &self,
+        user_id: &Id,
+        credential_hash: &str,
+        ip_address: &str,
+        user_agent: &str,
+    ) -> Result<Option<UserSession>> {
+        let pool = Arc::clone(&self.pool);
+        let uid = user_id.as_str().to_string();
+        let cred = credential_hash.to_string();
+        let ip = ip_address.to_string();
+        let ua = user_agent.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<UserSession>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let row = user_sessions::table
+                .filter(user_sessions::user_id.eq(&uid))
+                .filter(user_sessions::token_hash.eq(&cred))
+                .filter(user_sessions::ip_address.eq(&ip))
+                .filter(user_sessions::user_agent.eq(&ua))
+                .first::<UserSessionRow>(&mut *conn)
+                .optional()
+                .context("find user_session by credential+device")?;
             Ok(row.map(Into::into))
         })
         .await?
