@@ -80,7 +80,6 @@ mod tests {
     use gyre_domain::{Repository, TaskPriority};
     use http::{Method, Request, StatusCode};
     use tower::ServiceExt;
-    use std::future::Future;
 
     fn app_with_repo() -> (Router, std::sync::Arc<crate::AppState>) {
         let state = test_state();
@@ -107,11 +106,11 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
-    fn put(
+    async fn put(
         app: &Router,
         uri: &str,
         body: serde_json::Value,
-    ) -> impl Future<Output = axum::response::Response> {
+    ) -> axum::response::Response {
         let req = Request::builder()
             .method(Method::PUT)
             .uri(uri)
@@ -119,7 +118,7 @@ mod tests {
             .header("authorization", "Bearer test-token")
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
-        app.clone().oneshot(req)
+        app.clone().oneshot(req).await.unwrap()
     }
 
     async fn get(app: &Router, uri: &str) -> axum::response::Response {
