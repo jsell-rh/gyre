@@ -2603,12 +2603,13 @@ mod tests {
             payload: Some(serde_json::json!({ "agent_id": agent_id })),
             created_at,
             signature: None,
-            pub_key_id: None,
+            key_id: None,
+            acknowledged: false,
         };
         for (agent_id, at) in [("agent-r1", 2_000_000u64), ("agent-r2", 2_000_000), ("agent-ws", 2_000_000)] {
             state
                 .messages
-                .create(&mk_msg(agent_id, at))
+                .store(&mk_msg(agent_id, at))
                 .await
                 .unwrap();
         }
