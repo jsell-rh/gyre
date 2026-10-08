@@ -35,6 +35,22 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                 info!(agent_id = %agent.id, agent_name = %agent.name,
                     "aborting stale agent (disconnected_behavior=abort)");
                 let _ = agent.transition_status(AgentStatus::Dead);
+                // agent.failed analytics event (analytics.md §Auto-Emitted
+                // Events: "Agent fails or is killed"). Heartbeat timeout is
+                // a failure; the admin kill and fail_agent paths are others.
+                let ev = gyre_domain::AnalyticsEvent::new(
+                    Id::new(uuid::Uuid::new_v4().to_string()),
+                    "agent.failed",
+                    Some(agent.id.to_string()),
+                    serde_json::json!({
+                        "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+                        "reason": "heartbeat timeout (abort)",
+                        "duration_secs": now.saturating_sub(agent.spawned_at),
+                    }),
+                    now,
+                )
+                .with_scope(None, None, Some(&agent.workspace_id), agent.repo_id.as_ref());
+                let _ = state.analytics.record(&ev).await;
                 let _ = state.agents.update(&agent).await;
 
                 // Clean up worktrees
@@ -270,4 +286,63 @@ pub fn spawn_stale_agent_detector(state: Arc<AppState>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mem::test_state;
+
+    /// analytics.md §Auto-Emitted Events: an agent aborted by heartbeat
+    /// timeout ("fails or is killed") must record agent.failed with the
+    /// spec-required task_id/reason properties. Fails on the old behavior
+    /// where the abort path recorded no analytics event.
+    #[tokio::test]
+    async fn abort_records_agent_failed_analytics_event() {
+        let state = test_state();
+
+        let ws = gyre_domain::Workspace::new(Id::new("ws-1"), Id::new("t1"), "Ws", "ws", 0);
+        state.workspaces.create(&ws).await.unwrap();
+
+        let mut agent =
+            gyre_domain::Agent::new(Id::new("stale-agent-1"), "doomed", 1_000);
+        agent.disconnected_behavior = DisconnectedBehavior::Abort;
+        agent.transition_status(AgentStatus::Active).unwrap();
+        state.agents.create(&agent).await.unwrap();
+
+        // Age past the heartbeat timeout, no heartbeat ever recorded.
+        let mut aged = state
+            .agents
+            .find_by_id(&agent.id)
+            .await
+            .unwrap()
+            .unwrap();
+        aged.spawned_at = aged.spawned_at.saturating_sub(10_000);
+        aged.last_heartbeat = None;
+        state.agents.update(&aged).await.unwrap();
+
+        run_once(&state).await.unwrap();
+
+        let dead = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        assert_eq!(dead.status, AgentStatus::Dead);
+
+        let events = state
+            .analytics
+            .query(Some("agent.failed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "stale abort must record the agent.failed analytics event"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.event_name, "agent.failed");
+        assert_eq!(ev.agent_id.as_deref(), Some("stale-agent-1"));
+        assert_eq!(ev.properties["reason"], "heartbeat timeout (abort)");
+        assert!(
+            ev.properties["duration_secs"].as_u64().is_some(),
+            "duration_secs must be present"
+        );
+    }
 }
