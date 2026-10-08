@@ -1445,18 +1445,22 @@ pub async fn fail_agent(
     let workspace_id = agent.workspace_id.to_string();
     super::budget::decrement_active_agents(&state, &workspace_id).await;
 
-    // Notify the spawning user that the agent failed (HSI §2).
-    if let Some(ref spawned_by) = agent.spawned_by {
-        crate::notifications::notify(
-            state.as_ref(),
-            agent.workspace_id.clone(),
-            Id::new(spawned_by.clone()),
-            gyre_common::NotificationType::AgentEscalation,
-            format!("Agent '{}' failed and needs attention", agent.name),
-            "default",
-        )
-        .await;
-    }
+    // Notify per user-management.md §Notification Routing for Agent
+    // Escalations: spawning user (primary), workspace Admins if the spawner
+    // is offline, workspace Owners when the priority is Urgent.
+    // (AgentEscalation is HSI §8 priority 5 → High band; Admin fan-out when
+    // the spawner is offline is the operative branch here.)
+    crate::notification_dispatcher::notify_agent_escalation(
+        state.as_ref(),
+        &agent,
+        gyre_common::NotificationType::AgentEscalation,
+        &format!("Agent '{}' failed and needs attention", agent.name),
+        "default",
+        None,
+        Some(agent.id.to_string()),
+        None,
+    )
+    .await;
 
     // TASK-022: If this agent's task was a cascade test, report failure.
     if let Some(ref task_id) = agent.current_task_id {

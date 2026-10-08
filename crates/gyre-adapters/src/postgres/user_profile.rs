@@ -3,7 +3,8 @@ use async_trait::async_trait;
 use gyre_common::Id;
 use gyre_domain::{JudgmentEntry, JudgmentType, UserNotificationPreference, UserToken};
 use gyre_ports::{
-    JudgmentLedgerRepository, UserNotificationPreferenceRepository, UserTokenRepository,
+    JudgmentLedgerRepository, UserChannelPreferenceRepository,
+    UserNotificationPreferenceRepository, UserTokenRepository,
 };
 
 use super::PgStorage;
@@ -65,5 +66,20 @@ impl JudgmentLedgerRepository for PgStorage {
         _offset: u32,
     ) -> Result<Vec<JudgmentEntry>> {
         anyhow::bail!("JudgmentLedgerRepository not implemented for PgStorage")
+    }
+}
+
+#[async_trait]
+impl UserChannelPreferenceRepository for PgStorage {
+    async fn find(&self, _user_id: &Id) -> Result<Option<gyre_domain::NotificationChannels>> {
+        anyhow::bail!("UserChannelPreferenceRepository not implemented for PgStorage")
+    }
+
+    async fn upsert(
+        &self,
+        _user_id: &Id,
+        _channels: &gyre_domain::NotificationChannels,
+    ) -> Result<()> {
+        anyhow::bail!("UserChannelPreferenceRepository not implemented for PgStorage")
     }
 }
