@@ -216,8 +216,8 @@ mod tests {
 
     #[tokio::test]
     async fn create_and_get_round_trip() {
-        let s = storage();
         let tid = tenant_id();
+        let s = storage().with_tenant(tid.as_str());
         let ct = make_target(&tid, "my-container", ComputeTargetType::Container);
         let id = ct.id.clone();
         s.create(&ct).await.expect("create");
@@ -249,8 +249,8 @@ mod tests {
 
     #[tokio::test]
     async fn update_changes_fields() {
-        let s = storage();
         let tid = tenant_id();
+        let s = storage().with_tenant(tid.as_str());
         let mut ct = make_target(&tid, "orig", ComputeTargetType::Ssh);
         s.create(&ct).await.expect("create");
         ct.name = "renamed".to_string();

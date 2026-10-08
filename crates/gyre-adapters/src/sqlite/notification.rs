@@ -327,7 +327,10 @@ mod tests {
 
     fn setup() -> (NamedTempFile, SqliteStorage) {
         let tmp = NamedTempFile::new().unwrap();
-        let s = SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap();
+        // Scope the handle to the tenant the fixtures are created under —
+        // reads are tenant-filtered (hierarchy-enforcement §3), so a
+        // "default"-scoped handle would not see "tenant-1" rows.
+        let s = SqliteStorage::new_for_tenant(tmp.path().to_str().unwrap(), "tenant-1").unwrap();
         (tmp, s)
     }
 
