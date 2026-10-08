@@ -2,7 +2,7 @@
 title: "Implement meta-spec prompt assembly"
 spec_ref: "agent-runtime.md §2 Meta-Spec Prompt Assembly"
 depends_on: []
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "agent-runtime.md §2. Meta-Spec Prompt Assembly"
   - "agent-runtime.md §Meta-Specs Are Prompts"
