@@ -182,10 +182,9 @@ async fn create_under_tenant_a_is_invisible_to_a_default_scoped_handle() {
     // same tenant finds them and a "default"-scoped handle does not.
     let (_tmp, base) = {
         let tmp = NamedTempFile::new().unwrap();
-        (
-            tmp,
-            SqliteStorage::new_for_tenant(tmp.path().to_str().unwrap(), "default").unwrap(),
-        )
+        let path = tmp.path().to_str().unwrap().to_string();
+        let storage = SqliteStorage::new_for_tenant(&path, "default").unwrap();
+        (tmp, storage)
     };
     let sa = base.with_tenant("tenant-a");
 
