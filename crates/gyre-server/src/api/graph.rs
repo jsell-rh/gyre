@@ -2248,8 +2248,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        // Drain the SSE stream so the handler runs to completion.
-        let _ = axum::body::to_bytes(resp.into_body(), usize::MAX).await;
+        // Drain the SSE stream so the handler runs to completion, keeping
+        // the bytes so the terminal complete event can be checked too.
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let sse = String::from_utf8_lossy(&bytes).to_string();
+        let mut complete_payload: Option<serde_json::Value> = None;
+        let mut current_event: Option<String> = None;
+        for line in sse.lines() {
+            if let Some(kind) = line.strip_prefix("event: ") {
+                current_event = Some(kind.trim().to_string());
+            } else if let Some(data) = line.strip_prefix("data: ") {
+                if current_event.take().as_deref() == Some("complete") {
+                    complete_payload = Some(serde_json::from_str(data).unwrap());
+                }
+            }
+        }
 
         let prompts = prompts.lock();
         assert_eq!(prompts.len(), 1, "exactly one LLM call expected");
@@ -2278,10 +2293,24 @@ mod tests {
             "system prompt must replay conversation history, got: {prompt}"
         );
 
-        // The complete event must also carry sources derived from the
-        // seeded spec-linked MR.
-        // (sources assertion covered by the SSE payload test; here the
-        // grounding contract is the prompt itself.)
+        // HSI §1325: the complete event must also carry NON-EMPTY sources
+        // derived from the seeded spec-linked MR — fails if source
+        // derivation drops items or returns an empty array.
+        let complete = complete_payload.expect("expected a complete event");
+        let sources = complete["sources"]
+            .as_array()
+            .expect("sources must be a JSON array");
+        assert!(
+            !sources.is_empty(),
+            "seeded spec-linked MR must yield at least one source, got: {sources:?}"
+        );
+        assert!(
+            sources.iter().any(|s| s
+                ["spec_path"]
+                .as_str()
+                .is_some_and(|p| p.contains("specs/system/payment-retry.md"))),
+            "sources must include the seeded MR spec path, got: {sources:?}"
+        );
     }
 
     // ── Briefing cross_workspace + exceptions tests (TASK-013) ──────────
