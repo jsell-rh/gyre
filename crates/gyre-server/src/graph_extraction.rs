@@ -48,6 +48,10 @@ pub struct AgentPushContext {
 pub struct DivergencePorts<'a> {
     pub notification_repo: &'a dyn NotificationRepository,
     pub membership_repo: &'a dyn WorkspaceMembershipRepository,
+    /// Post-create channel fan-out (email/webhook/slack per
+    /// user-management.md §Delivery Channels). `None` in port-level tests.
+    pub on_created:
+        Option<Box<dyn Fn(&Notification) -> futures_util::future::BoxFuture<'static, ()> + Send + Sync>>,
 }
 
 /// Identity/scope parameters for a divergence check.
@@ -592,14 +596,13 @@ pub async fn check_divergence(
             now_i64,
         );
         notif.body = Some(body.clone());
-        notif.entity_ref = Some(spec_ref.to_string());
-        notif.repo_id = Some(repo_id.as_str().to_string());
-
         if let Err(e) = ports.notification_repo.create(&notif).await {
             warn!(
                 user_id = %member.user_id,
                 "failed to create divergence notification: {e}"
             );
+        } else if let Some(on_created) = ports.on_created.as_ref() {
+            on_created(&notif).await;
         }
     }
 
@@ -975,10 +978,11 @@ async fn check_spec_assertions_on_push(
                     user_id = %member.user_id,
                     "failed to create spec assertion notification: {e}"
                 );
+            } else if let Some(on_created) = ports.on_created.as_ref() {
+                on_created(&notif).await;
             }
         }
     }
-
     Ok(())
 }
 

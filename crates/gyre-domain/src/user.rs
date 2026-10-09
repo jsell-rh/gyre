@@ -67,16 +67,100 @@ impl Default for UserPreferences {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotificationChannels {
     pub in_app: bool,
-    pub email_enabled: bool,
-    pub email_digest: DigestFrequency,
+    pub email: EmailConfig,
+    pub webhook: Option<WebhookConfig>,
+    pub slack: Option<SlackConfig>,
 }
 
 impl Default for NotificationChannels {
     fn default() -> Self {
         Self {
-            in_app: true,
-            email_enabled: false,
-            email_digest: DigestFrequency::Off,
+            in_app: true, // Always true (can't disable) — per user-management.md §Delivery Channels.
+            email: EmailConfig::default(),
+            webhook: None,
+            slack: None,
+        }
+    }
+}
+
+/// Email channel configuration (user-management.md §Delivery Channels).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmailConfig {
+    pub enabled: bool,
+    pub digest: DigestFrequency,
+    /// Only email notifications at or above this priority.
+    pub min_priority: NotificationPriority,
+}
+
+impl Default for EmailConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            digest: DigestFrequency::Off,
+            min_priority: NotificationPriority::Medium,
+        }
+    }
+}
+
+/// Outbound webhook channel configuration. The secret signs payloads with HMAC-SHA256.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebhookConfig {
+    pub url: String,
+    pub secret: String,
+    /// Only deliver webhook notifications at or above this priority.
+    pub min_priority: NotificationPriority,
+}
+
+/// Slack incoming-webhook channel configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlackConfig {
+    pub webhook_url: String,
+    /// Override channel (default: DM).
+    pub channel: Option<String>,
+    /// Only deliver Slack notifications at or above this priority.
+    pub min_priority: NotificationPriority,
+}
+
+/// Delivery priority bands used for per-channel threshold filtering
+/// (user-management.md §Notification Entity).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum NotificationPriority {
+    Low,
+    Medium,
+    High,
+    Urgent,
+}
+
+impl NotificationPriority {
+    /// Parses the wire representation (case-insensitive).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "urgent" => Some(Self::Urgent),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Urgent => "urgent",
+        }
+    }
+
+    /// Maps a 1–10 HSI §8 notification priority onto the 4-band scale of
+    /// user-management.md §Notification Entity:
+    /// 1–3 Urgent, 4–6 High, 7–8 Medium, 9–10 Low.
+    pub fn from_band(p: u8) -> Self {
+        match p {
+            1..=3 => Self::Urgent,
+            4..=6 => Self::High,
+            7..=8 => Self::Medium,
+            _ => Self::Low,
         }
     }
 }

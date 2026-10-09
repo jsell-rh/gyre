@@ -443,8 +443,9 @@ pub async fn invite_member(
     state.workspace_memberships.create(&membership).await?;
 
     // Notify the invited user (TrustSuggestion priority 8 — workspace-scope action needed).
-    let notif = Notification::new(
-        new_id(),
+    // Channel fan-out per user-management.md §Delivery Channels.
+    crate::notifications::notify_rich(
+        state.as_ref(),
         membership.workspace_id.clone(),
         membership.user_id.clone(),
         NotificationType::TrustSuggestion,
@@ -453,9 +454,11 @@ pub async fn invite_member(
             membership.workspace_id
         ),
         auth.tenant_id.clone(),
-        now as i64,
-    );
-    let _ = state.notifications.create(&notif).await;
+        None,
+        None,
+        None,
+    )
+    .await;
 
     Ok((
         StatusCode::CREATED,
@@ -899,6 +902,65 @@ pub async fn update_notification_preferences(
     Ok(Json(serde_json::json!({ "preferences": items })))
 }
 
+// ─── task-112: Delivery Channel Preferences (user-management.md §Delivery Channels) ──
+
+/// GET /api/v1/notifications/preferences — the caller's channel configuration.
+/// Per-handler auth (self-scope only): the handler reads/writes exclusively
+/// the authenticated user's own row, so no cross-scope decision is possible.
+pub async fn get_channel_preferences(
+    auth: AuthenticatedAgent,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    let channels = state
+        .user_channel_prefs
+        .find(&user_id)
+        .await?
+        .unwrap_or_default();
+    Ok(Json(serde_json::json!({ "channels": channels })))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateChannelPrefsRequest {
+    pub channels: gyre_domain::NotificationChannels,
+}
+
+/// PUT /api/v1/notifications/preferences — update channel configuration.
+/// Per-handler auth (self-scope only). `in_app` is forced true: the spec
+/// marks it "Always true (can't disable)".
+pub async fn update_channel_preferences(
+    auth: AuthenticatedAgent,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateChannelPrefsRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    let channels = req.channels;
+    if !channels.in_app {
+        return Err(ApiError::InvalidInput(
+            "in_app cannot be disabled (user-management.md §Delivery Channels)".to_string(),
+        ));
+    }
+    // Validate configured channel endpoints are absolute URLs.
+    if let Some(hook) = &channels.webhook {
+        if reqwest::Url::parse(&hook.url).is_err() {
+            return Err(ApiError::InvalidInput(format!(
+                "webhook.url is not a valid absolute URL: {}",
+                hook.url
+            )));
+        }
+    }
+    if let Some(slack) = &channels.slack {
+        if reqwest::Url::parse(&slack.webhook_url).is_err() {
+            return Err(ApiError::InvalidInput(format!(
+                "slack.webhook_url is not a valid absolute URL: {}",
+                slack.webhook_url
+            )));
+        }
+    }
+    state.user_channel_prefs.upsert(&user_id, &channels).await?;
+    Ok(Json(serde_json::json!({ "channels": channels })))
+}
+
 // ─── HSI §12: Judgment Ledger ─────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -1262,5 +1324,134 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_channel_preferences_returns_defaults() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notifications/preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let channels = &json["channels"];
+        assert_eq!(channels["in_app"], true, "in_app defaults on");
+        assert_eq!(channels["email"]["enabled"], false, "email defaults off");
+        assert!(channels["webhook"].is_null(), "webhook defaults unconfigured");
+        assert!(channels["slack"].is_null(), "slack defaults unconfigured");
+    }
+
+    #[tokio::test]
+    async fn put_channel_preferences_round_trips() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let payload = serde_json::json!({
+            "channels": {
+                "in_app": true,
+                "email": {
+                    "enabled": true,
+                    "digest": "Daily",
+                    "min_priority": "Medium"
+                },
+                "webhook": {
+                    "url": "https://hooks.example.test/gyre",
+                    "secret": "s3cret",
+                    "min_priority": "High"
+                },
+                "slack": {
+                    "webhook_url": "https://hooks.slack.test/T/B/X",
+                    "channel": "#ops",
+                    "min_priority": "Low"
+                }
+            }
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/notifications/preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "valid config must be accepted");
+
+        // A fresh router over the same state must read the persisted config
+        // (durable store, not in-handler memory).
+        let resp = crate::api::api_router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notifications/preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let channels = &json["channels"];
+        assert_eq!(channels["email"]["enabled"], true);
+        assert_eq!(channels["email"]["digest"], "Daily");
+        assert_eq!(channels["webhook"]["url"], "https://hooks.example.test/gyre");
+        assert_eq!(channels["webhook"]["min_priority"], "High");
+        assert_eq!(channels["slack"]["channel"], "#ops");
+    }
+
+    #[tokio::test]
+    async fn put_channel_preferences_rejects_disabled_in_app() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/notifications/preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"channels":{"in_app":false,"email":{"enabled":false,"digest":"Off","min_priority":"Low"},"webhook":null,"slack":null}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "in_app=false must be rejected — spec marks it can't-disable"
+        );
+    }
+
+    #[tokio::test]
+    async fn put_channel_preferences_rejects_relative_webhook_url() {
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/notifications/preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"channels":{"in_app":true,"email":{"enabled":false,"digest":"Off","min_priority":"Low"},"webhook":{"url":"./local-hook","secret":"s","min_priority":"Low"},"slack":null}}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "non-absolute webhook URL must be rejected"
+        );
     }
 }

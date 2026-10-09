@@ -46,6 +46,7 @@ pub mod speculative_merge;
 // sqlite.rs (rusqlite) removed — use gyre_adapters::SqliteStorage (Diesel) instead.
 pub(crate) mod explorer_ws;
 pub mod notifications;
+pub mod notification_dispatcher;
 pub mod otlp_receiver;
 pub mod policy_engine;
 pub mod stale_agents;
@@ -394,6 +395,8 @@ pub struct AppState {
     pub llm: Option<Arc<dyn gyre_ports::LlmPortFactory>>,
     /// Per-user notification preferences (HSI §12).
     pub user_notification_prefs: Arc<dyn gyre_ports::UserNotificationPreferenceRepository>,
+    /// Per-user delivery-channel preferences (user-management.md §Delivery Channels).
+    pub user_channel_prefs: Arc<dyn gyre_ports::UserChannelPreferenceRepository>,
     /// Per-user API tokens (HSI §12). Hashed at rest; plaintext never stored.
     pub user_tokens: Arc<dyn gyre_ports::UserTokenRepository>,
     /// Secret repository (platform-model.md §7): scoped credential storage,
@@ -1086,6 +1089,10 @@ pub fn build_state(
             dyn gyre_ports::UserNotificationPreferenceRepository,
             mem::MemUserNotificationPreferenceRepository::default()
         ),
+        user_channel_prefs: store!(
+            dyn gyre_ports::UserChannelPreferenceRepository,
+            mem::MemUserChannelPreferenceRepository::default()
+        ),
         user_tokens: store!(
             dyn gyre_ports::UserTokenRepository,
             mem::MemUserTokenRepository::default()
@@ -1178,7 +1185,7 @@ pub async fn emit_reconciliation_completed(
     workspace_id: Id,
     payload: Option<serde_json::Value>,
 ) {
-    use gyre_common::{Notification, NotificationType};
+    use gyre_common::NotificationType;
     use gyre_domain::WorkspaceRole;
 
     // Emit Event-tier message.
@@ -1219,11 +1226,6 @@ pub async fn emit_reconciliation_completed(
         }
     };
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-
     for member in &members {
         if !matches!(
             member.role,
@@ -1231,22 +1233,16 @@ pub async fn emit_reconciliation_completed(
         ) {
             continue;
         }
-        let notif_id = Id::new(uuid::Uuid::new_v4().to_string());
-        let notif = Notification::new(
-            notif_id,
+        // Channel fan-out per user-management.md §Delivery Channels.
+        crate::notifications::notify(
+            state,
             workspace_id.clone(),
             member.user_id.clone(),
             NotificationType::MetaSpecDrift,
             "Meta-spec reconciliation completed — workspace specs may have drifted",
-            &tenant_id,
-            now,
-        );
-        if let Err(e) = state.notifications.create(&notif).await {
-            tracing::warn!(
-                "emit_reconciliation_completed: failed to create MetaSpecDrift notification for {}: {e}",
-                member.user_id
-            );
-        }
+            tenant_id.clone(),
+        )
+        .await;
     }
 }
 
