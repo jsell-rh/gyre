@@ -1757,6 +1757,9 @@ impl PersonaRepository for MemPersonaRepository {
 pub struct MemPolicyRepository {
     policies: Arc<Mutex<HashMap<String, gyre_domain::Policy>>>,
     decisions: Arc<Mutex<Vec<gyre_domain::PolicyDecision>>>,
+    /// Test hook: when set, `create` returns an error to simulate a policy-store
+    /// write failure (exercises fail-closed seeding, task-077 F6 class).
+    fail_creates: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MemPolicyRepository {
@@ -1767,13 +1770,27 @@ impl MemPolicyRepository {
         Self {
             policies,
             decisions: Arc::new(Mutex::new(Vec::new())),
+            fail_creates: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Test hook: cause subsequent `create` calls to fail.
+    #[cfg(test)]
+    pub fn fail_creates(&self) {
+        self.fail_creates
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
 #[async_trait]
 impl gyre_ports::PolicyRepository for MemPolicyRepository {
     async fn create(&self, policy: &gyre_domain::Policy) -> Result<()> {
+        if self
+            .fail_creates
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            anyhow::bail!("simulated policy store failure");
+        }
         self.policies
             .lock()
             .await
@@ -3209,6 +3226,22 @@ pub fn test_state_with_storage(
 pub fn test_state_failing_trust() -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(true);
     test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None)
+}
+
+/// Build a test AppState whose policy repo fails every `create`, used to
+/// exercise fail-closed built-in policy seeding (task-077 F6 class).
+#[cfg(test)]
+pub fn test_state_failing_policy_creates() -> Arc<crate::AppState> {
+    let pol_store = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    let policies = MemPolicyRepository::from_store(Arc::clone(&pol_store));
+    policies.fail_creates();
+    let workspaces = MemWorkspaceRepository::with_policy_store(pol_store);
+    test_state_inner(
+        Arc::new(NoopGitOps),
+        Arc::new(workspaces),
+        Arc::new(policies),
+        None,
+    )
 }
 
 /// Construct a paired workspace + policy repo that share a single in-memory

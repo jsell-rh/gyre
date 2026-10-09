@@ -6568,8 +6568,10 @@ mod tests {
     #[tokio::test]
     async fn guided_workspace_merge_proceeds_with_startup_seeded_builtins() {
         let state = test_state();
-        // Exactly what main.rs does at startup.
-        crate::abac_middleware::seed_builtin_policies(&state).await;
+        // Exactly what main.rs does at startup (fail-closed).
+        crate::abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed built-in policies");
 
         seed_workspace_with_trust(
             &state,
@@ -6622,7 +6624,9 @@ mod tests {
     #[tokio::test]
     async fn supervised_hold_survives_startup_seeded_builtins() {
         let state = test_state();
-        crate::abac_middleware::seed_builtin_policies(&state).await;
+        crate::abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed built-in policies");
 
         seed_workspace_with_trust(
             &state,
