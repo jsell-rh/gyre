@@ -368,7 +368,11 @@ describe('Mobile drawer section navigation (ui-navigation.md §8)', () => {
     await waitFor(() => expect(document.title).toBe('core — Payments | Gyre'), { timeout: 3000 });
     await openDrawer(container);
     await fireEvent.click(container.querySelector('[data-testid="drawer-item-specs"]'));
-    await waitFor(() => expect(window.location.pathname).toBe('/workspaces/payments/r/core/specs'), { timeout: 3000 });
+    // Specs is the default repo tab, so its canonical URL is the bare repo
+    // URL (see the urlFor tests). The history entry records the active tab —
+    // this is the observable that the tab actually switched from Code.
+    await waitFor(() => expect(window.location.pathname).toBe('/workspaces/payments/r/core'), { timeout: 3000 });
+    expect(window.history.state?.repoTab).toBe('specs');
   });
 });
 
