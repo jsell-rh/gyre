@@ -5,7 +5,7 @@ depends_on: []
 progress: not-started
 coverage_sections:
   - "spec-links.md §Forge-Maintained Spec Graph"
-commits: ["673fce33a1eb4e9273e1ecfff16da1d5bbab56a4", "2bc9b5bdc6a7e24aa0907af934469cd6f9fb3232", "071fd3b7e5aa81a7731cc1af67ffc1555d767d07", "9fb8d851175c88e4485215aa952da2bde6c32a16"]
+commits: ["ace1020febb028d141641fff44e70d9aed492d9c", "499d13729ebabd9e73f73704007e189024e5dd35", "a4c363e11765ea560ec7f6642261cbba51ad8c5e", "dc4a18d587e0474ef81b95ba114f12bf5962dbe1"]
 ---
 
 ## Spec Excerpt
