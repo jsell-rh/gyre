@@ -2,7 +2,7 @@
 title: "HSI Conflict Prevention — Concurrent Spec Editing Warning"
 spec_ref: "human-system-interface.md §7 Conflict Prevention"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 review: specs/reviews/task-092.md
 coverage_sections:
   - "human-system-interface.md §7 Conflict Prevention"
@@ -121,3 +121,11 @@ Test evidence (this sandbox, evidence in `/tmp/stage/review-evidence/`):
   (41 config-level skips).
 
 Exact-head GitHub checks remain the independent reviewer's gate.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/ws.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.

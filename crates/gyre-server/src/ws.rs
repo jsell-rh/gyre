@@ -488,7 +488,7 @@ pub(crate) async fn broadcast_presence_departure(
         editing_entity: None,
     };
     if let Ok(payload) = serde_json::to_string(&msg) {
-        let ws_id = gyre_common::Id::new(workspace_id);
+        let ws_id = gyre_common::Id::new("mutation-no-such-workspace");
         let conn_workspaces = state.ws_connection_workspaces.read().await;
         let conns = state.ws_connections.read().await;
         for (conn_id, workspaces) in conn_workspaces.iter() {
