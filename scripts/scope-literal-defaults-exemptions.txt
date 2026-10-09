@@ -16,19 +16,19 @@ crates/gyre-server/src/auth.rs:624
 crates/gyre-server/src/auth.rs:654
 crates/gyre-server/src/auth.rs:678
 crates/gyre-server/src/auth.rs:1001
-crates/gyre-server/src/lib.rs:490
-crates/gyre-server/src/lib.rs:534
+crates/gyre-server/src/lib.rs:494
+crates/gyre-server/src/lib.rs:538
 
 # Unowned legacy (record-conversion `From` impls fabricating tenant on the
 # wire; domain constructor defaults) — opportunistic fixes welcome:
 crates/gyre-adapters/src/sqlite/activity.rs:56
-crates/gyre-adapters/src/sqlite/analytics.rs:115
-crates/gyre-adapters/src/sqlite/analytics.rs:225
+crates/gyre-adapters/src/sqlite/analytics.rs:131
+crates/gyre-adapters/src/sqlite/analytics.rs:284
 crates/gyre-adapters/src/sqlite/merge_request.rs:163
 crates/gyre-adapters/src/sqlite/repository.rs:94
 crates/gyre-adapters/src/postgres/activity.rs:56
-crates/gyre-adapters/src/postgres/analytics.rs:115
-crates/gyre-adapters/src/postgres/analytics.rs:225
+crates/gyre-adapters/src/postgres/analytics.rs:131
+crates/gyre-adapters/src/postgres/analytics.rs:285
 crates/gyre-adapters/src/postgres/merge_request.rs:163
 crates/gyre-adapters/src/postgres/repository.rs:94
 crates/gyre-domain/src/agent.rs:147
