@@ -414,6 +414,7 @@ pub async fn get_workspace_presence(
 mod tests {
     use crate::mem::test_state;
     use axum::{body::Body, Router};
+    use gyre_common::Id;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
@@ -1043,8 +1044,8 @@ mod tests {
             .await
             .unwrap()
             .expect("JWT auth must provision the acting user");
-        assert_eq!(ev.user_id.as_deref().map(Id::as_str), Some(acting_user.id.as_str()));
-        assert_eq!(ev.workspace_id.as_deref().map(Id::as_str), Some(ws_id.as_str()));
+        assert_eq!(ev.user_id.as_ref().map(Id::as_str), Some(acting_user.id.as_str()));
+        assert_eq!(ev.workspace_id.as_ref().map(Id::as_str), Some(ws_id.as_str()));
         assert_eq!(ev.detail["from"], "Guided");
         assert_eq!(ev.detail["to"], "Supervised");
 
@@ -1061,7 +1062,8 @@ mod tests {
                     .unwrap(),
             )
             .await
-            .unwrap();
+        .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK, "same-value PUT must succeed");
         let events2 = state
             .audit
             .query(&AuditQueryFilter {

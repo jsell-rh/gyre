@@ -1221,6 +1221,93 @@ mod tests {
         assert_eq!(notifs[0]["notification_type"], "ConflictingInterpretations");
     }
 
+    /// HSI §12: disabling a notification type via
+    /// PUT /users/me/notification-preferences must exclude it from the inbox
+    /// list AND the badge count — the handler wiring, not just the query.
+    #[tokio::test]
+    async fn disabled_preference_excludes_type_from_inbox_and_count() {
+        let state = test_state();
+        seed_notification(&state, NotificationType::GateFailure, "Gate failed").await;
+        seed_notification(
+            &state,
+            NotificationType::SpecPendingApproval,
+            "Approve spec",
+        )
+        .await;
+
+        let app = crate::api::api_router().with_state(state);
+        // Baseline: both visible.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/notifications")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["notifications"].as_array().unwrap().len(),
+            2,
+            "baseline: both types visible: {json:?}"
+        );
+
+        // Disable GateFailure.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/users/me/notification-preferences")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"preferences":[{"notification_type":"GateFailure","enabled":false}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Inbox excludes the disabled type.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/notifications")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let notifs = json["notifications"].as_array().unwrap();
+        assert_eq!(notifs.len(), 1, "disabled type must be excluded: {json:?}");
+        assert_eq!(notifs[0]["notification_type"], "SpecPendingApproval");
+
+        // Badge count matches the inbox.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/notifications/count")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["count"], 1, "badge must not count the disabled type");
+    }
+
     #[tokio::test]
     async fn admin_creates_user_with_authenticating_api_key() {
         let state = test_state();

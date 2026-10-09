@@ -955,6 +955,7 @@ pub async fn get_attestation(
 mod tests {
     use crate::mem::test_state;
     use axum::{body::Body, Router};
+    use gyre_common::Id;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
@@ -1464,7 +1465,7 @@ mod tests {
             .await
             .unwrap()
             .expect("JWT auth must provision the acting user");
-        assert_eq!(ev.user_id.as_deref().map(Id::as_str), Some(acting_user.id.as_str()));
+        assert_eq!(ev.user_id.as_ref().map(Id::as_str), Some(acting_user.id.as_str()));
         assert_eq!(ev.detail["mr_id"], mr_id);
         assert_eq!(ev.detail["gate_id"], "gate-1");
         assert_eq!(ev.detail["from_status"], "failed");
