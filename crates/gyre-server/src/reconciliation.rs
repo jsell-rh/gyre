@@ -63,9 +63,12 @@ pub struct ReconciliationSummary {
 /// `changed_paths` are the meta-spec paths (set-entry `path` values, i.e.
 /// registry meta-spec names) whose pinned version changed in this update.
 /// For each, every repo in the workspace is a reconciliation candidate
-/// (the workspace binding governs all repos in the workspace — §2), and a
-/// task titled `Align code with updated {kind} {name} v{version}` is
-/// created unless an open task for the same title already exists.
+/// (the workspace binding governs all repos in the workspace — §2), and
+/// §6 step 2 requires a task per repo: "For each repo, creates a
+/// reconciliation task" titled `Align code with updated {kind} {name}
+/// v{version}`, scoped to that repo's orchestrator. A task is skipped only
+/// when an open task with the same (workspace, repo, title) already exists
+/// — a pending task elsewhere never suppresses this repo's reconciliation.
 ///
 /// Emits `ReconciliationStarted` (custom Event-tier kind, §11) when work is
 /// created and `ReconciliationCompleted` (existing `MessageKind`) via the
@@ -136,54 +139,61 @@ pub async fn run_reconciliation(
             ms.kind, ms.name, ms.version
         );
 
-        // Dedup: skip if a non-terminal task with the same title exists.
-        let exists = existing_tasks.iter().any(|t| {
-            t.title == title && !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled)
-        });
+        for repo in &repos {
+            // Dedup: skip only a non-terminal task with the same title in
+            // THIS repo. A pending task in another repo or workspace never
+            // suppresses this repo's reconciliation (§6 step 2).
+            let exists = existing_tasks.iter().any(|t| {
+                t.title == title
+                    && t.workspace_id == ws_id
+                    && t.repo_id == repo.id
+                    && !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled)
+            });
 
-        if exists {
-            summary.tasks_skipped += 1;
-            info!(title, "reconciliation: task already exists, skipping");
-            continue;
-        }
+            if exists {
+                summary.tasks_skipped += 1;
+                info!(title, repo_id = %repo.id, "reconciliation: task already exists, skipping");
+                continue;
+            }
 
-        let task_id = Id::new(uuid::Uuid::new_v4().to_string());
-        let mut task = gyre_domain::Task::new(task_id.clone(), &title, now);
-        task.priority = TaskPriority::Medium;
-        task.labels = vec![
-            RECONCILIATION_LABEL.to_string(),
-            "auto-created".to_string(),
-        ];
-        task.description = Some(format!(
-            "Auto-created by the meta-spec reconciliation controller \
-             (meta-spec-reconciliation.md §6).\nMeta-spec: {} ({}) v{}\n\
-             Content hash: {}\nRe-run affected work under the updated rules; \
-             no-op outcome (code already conforms) is valid.",
-            ms.name, ms.kind, ms.version, ms.content_hash
-        ));
-        task.workspace_id = ws_id.clone();
-        task.repo_id = repos[0].id.clone();
-        task.spec_path = Some(ms.name.clone());
-        // §6 flow step 5: the repo orchestrator spawns the reconciliation
-        // agent — delegation is the signal-chain discriminator for that.
-        task.task_type = Some(TaskType::Delegation);
+            let task_id = Id::new(uuid::Uuid::new_v4().to_string());
+            let mut task = gyre_domain::Task::new(task_id.clone(), &title, now);
+            task.priority = TaskPriority::Medium;
+            task.labels = vec![
+                RECONCILIATION_LABEL.to_string(),
+                "auto-created".to_string(),
+            ];
+            task.description = Some(format!(
+                "Auto-created by the meta-spec reconciliation controller \
+                 (meta-spec-reconciliation.md §6).\nMeta-spec: {} ({}) v{}\n\
+                 Content hash: {}\nRe-run affected work under the updated rules; \
+                 no-op outcome (code already conforms) is valid.",
+                ms.name, ms.kind, ms.version, ms.content_hash
+            ));
+            task.workspace_id = ws_id.clone();
+            task.repo_id = repo.id.clone();
+            task.spec_path = Some(ms.name.clone());
+            // §6 flow step 5: the repo orchestrator spawns the reconciliation
+            // agent — delegation is the signal-chain discriminator for that.
+            task.task_type = Some(TaskType::Delegation);
 
-        match state.tasks.create(&task).await {
-            Err(e) => warn!(title, error = %e, "reconciliation: failed to create task"),
-            Ok(()) => {
-                summary.tasks_created += 1;
-                info!(title, "reconciliation: created reconciliation task");
-                state
-                    .emit_event(
-                        Some(ws_id.clone()),
-                        gyre_common::message::Destination::Workspace(ws_id.clone()),
-                        gyre_common::message::MessageKind::TaskCreated,
-                        Some(serde_json::json!({
-                            "task_id": task_id.to_string(),
-                            "reason": "meta-spec-reconciliation",
-                        })),
-                    )
-                    .await;
+            match state.tasks.create(&task).await {
+                Err(e) => warn!(title, repo_id = %repo.id, error = %e, "reconciliation: failed to create task"),
+                Ok(()) => {
+                    summary.tasks_created += 1;
+                    info!(title, repo_id = %repo.id, "reconciliation: created reconciliation task");
+                    state
+                        .emit_event(
+                            Some(ws_id.clone()),
+                            gyre_common::message::Destination::Workspace(ws_id.clone()),
+                            gyre_common::message::MessageKind::TaskCreated,
+                            Some(serde_json::json!({
+                                "task_id": task_id.to_string(),
+                                "reason": "meta-spec-reconciliation",
+                            })),
+                        )
+                        .await;
+                }
             }
         }
     }
@@ -380,14 +390,19 @@ pub async fn run_conformance_sweep(state: &Arc<AppState>) -> anyhow::Result<Swee
         summary.drift_detected += drifted_repos.len();
 
         // §10: "ensure a reconciliation task exists (create if missing)".
-        // Dedup on the deterministic title for this workspace+set pair so
-        // repeated sweeps do not pile up tasks.
+        // Dedup on (workspace, title) — the title embeds the active set
+        // SHA, so a new set version yields a new task, but the workspace
+        // id (not the slug, which need not be globally unique) scopes the
+        // dedup: two workspaces with the same slug and same active set
+        // SHA never suppress each other's drift review.
         let title = format!(
             "Review meta-spec drift in workspace {} (active set {})",
             ws.slug, current_sha
         );
         let exists = existing_tasks.iter().any(|t| {
-            t.title == title && !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled)
+            t.title == title
+                && t.workspace_id == ws.id
+                && !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled)
         });
 
         if exists {
@@ -1038,46 +1053,54 @@ mod tests {
         );
     }
 
-    // PROBE (review): two workspaces binding the same meta-spec — does the
-    // second workspace get a task, or is it suppressed by the first's task?
+    // -- §6 step 2: task per repo, scoped per workspace ----------------------
+
     #[tokio::test(flavor = "multi_thread")]
-    async fn probe_two_workspaces_same_spec() {
+    async fn reconciliation_creates_task_per_repo() {
         let state = test_state();
-        let ws1 = make_workspace(&state, "ws-probe-a").await;
-        let _repo1 = make_repo(&state, "repo-pa", "ws-probe-a").await;
-        let ws2 = make_workspace(&state, "ws-probe-b").await;
-        let _repo2 = make_repo(&state, "repo-pb", "ws-probe-b").await;
+        let ws = make_workspace(&state, "ws-recon-multi").await;
+        let _r1 = make_repo(&state, "repo-m1", "ws-recon-multi").await;
+        let _r2 = make_repo(&state, "repo-m2", "ws-recon-multi").await;
+        let _r3 = make_repo(&state, "repo-m3", "ws-recon-multi").await;
+        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+
+        let s = run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
+        let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
+        assert_eq!(s.tasks_created, 3, "§6 step 2: task per affected repo");
+        assert_eq!(tasks.len(), 3);
+        let mut repo_ids: Vec<String> = tasks.iter().map(|t| t.repo_id.as_str().to_string()).collect();
+        repo_ids.sort();
+        assert_eq!(
+            repo_ids,
+            vec!["repo-m1".to_string(), "repo-m2".to_string(), "repo-m3".to_string()],
+            "each repo gets its own task"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reconciliation_two_workspaces_same_spec_not_suppressed() {
+        let state = test_state();
+        let ws1 = make_workspace(&state, "ws-recon-w1").await;
+        let _repo1 = make_repo(&state, "repo-pa", "ws-recon-w1").await;
+        let ws2 = make_workspace(&state, "ws-recon-w2").await;
+        let _repo2 = make_repo(&state, "repo-pb", "ws-recon-w2").await;
         let ms = make_meta_spec(&state, "backend-developer", 4).await;
 
         let s1 = run_reconciliation(&state, &ws1.id, &[ms.name.clone()]).await;
         assert_eq!(s1.tasks_created, 1);
         let s2 = run_reconciliation(&state, &ws2.id, &[ms.name.clone()]).await;
-        println!("probe: ws1 created={} skipped={}", s1.tasks_created, s1.tasks_skipped);
-        println!("probe: ws2 created={} skipped={}", s2.tasks_created, s2.tasks_skipped);
-        let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
-        println!("probe: total recon tasks={}", tasks.len());
-        for t in &tasks {
-            println!("probe: task ws={} repo={} title={}", t.workspace_id.as_str(), t.repo_id.as_str(), t.title);
-        }
         assert_eq!(s2.tasks_created, 1, "second workspace must get its own reconciliation task");
-    }
+        assert_eq!(s2.tasks_skipped, 0);
 
-    // PROBE (review): workspace with 3 repos — one task or one per repo?
-    #[tokio::test(flavor = "multi_thread")]
-    async fn probe_multi_repo_granularity() {
-        let state = test_state();
-        let ws = make_workspace(&state, "ws-probe-multi").await;
-        let _r1 = make_repo(&state, "repo-m1", "ws-probe-multi").await;
-        let _r2 = make_repo(&state, "repo-m2", "ws-probe-multi").await;
-        let _r3 = make_repo(&state, "repo-m3", "ws-probe-multi").await;
-        let ms = make_meta_spec(&state, "backend-developer", 4).await;
-
-        let s = run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
         let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
-        println!("probe-multi: created={} tasks={}", s.tasks_created, tasks.len());
-        for t in &tasks {
-            println!("probe-multi: repo={} title={}", t.repo_id.as_str(), t.title);
-        }
-        assert_eq!(s.tasks_created, 3, "spec §6: task per affected repo");
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(
+            tasks.iter().filter(|t| t.workspace_id.as_str() == "ws-recon-w1").count(),
+            1
+        );
+        assert_eq!(
+            tasks.iter().filter(|t| t.workspace_id.as_str() == "ws-recon-w2").count(),
+            1
+        );
     }
 }
