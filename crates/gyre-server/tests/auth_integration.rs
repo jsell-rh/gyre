@@ -36,7 +36,9 @@ async fn start_server() -> (String, reqwest::Client) {
     let base_url = format!("http://127.0.0.1:{port}");
 
     let state = build_state(GLOBAL_TOKEN, &base_url, None);
-    abac_middleware::seed_builtin_policies(&state).await;
+    abac_middleware::seed_builtin_policies(&state)
+        .await
+        .expect("seed built-in policies");
     let app = build_router(state);
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
@@ -52,7 +54,9 @@ async fn start_server_with_api_key() -> (String, reqwest::Client, String) {
     let base_url = format!("http://127.0.0.1:{port}");
 
     let state = build_state(GLOBAL_TOKEN, &base_url, None);
-    abac_middleware::seed_builtin_policies(&state).await;
+    abac_middleware::seed_builtin_policies(&state)
+        .await
+        .expect("seed built-in policies");
 
     // Pre-seed a user and API key before starting the server.
     let user = User::new(

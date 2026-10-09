@@ -15,6 +15,6 @@
 #   - NEVER add a new entry. A new resolve_ref call must not be fail-opened.
 #
 # crates/gyre-server/src/api/recovery.rs:224 — repo_status main_green fails open on ref-resolution failure (R3-F3 headline).
-crates/gyre-server/src/api/recovery.rs:224
+crates/gyre-server/src/api/recovery.rs:227
 # crates/gyre-server/src/api/recovery.rs:275 — revert_mr resolves "the merge commit" as current target-branch HEAD with a fail-open default (R3-F1).
-crates/gyre-server/src/api/recovery.rs:275
+crates/gyre-server/src/api/recovery.rs:279

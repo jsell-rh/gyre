@@ -396,7 +396,10 @@ mod tests {
             "user_agent",
             "timestamp",
         ] {
-            assert!(json.get(key).is_some(), "response missing envelope field {key}");
+            assert!(
+                json.get(key).is_some(),
+                "response missing envelope field {key}"
+            );
         }
     }
 
@@ -429,8 +432,14 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["detail"]["path"].as_str().unwrap(), "/etc/hosts");
         assert_eq!(json["detail"]["pid"].as_u64().unwrap(), 1234);
-        assert!(json.get("path").is_none(), "path must not be a top-level field");
-        assert!(json.get("pid").is_none(), "pid must not be a top-level field");
+        assert!(
+            json.get("path").is_none(),
+            "path must not be a top-level field"
+        );
+        assert!(
+            json.get("pid").is_none(),
+            "pid must not be a top-level field"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -440,7 +449,9 @@ mod tests {
         use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
         let state = make_test_state_with_jwt();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state))
+                .expect("seed built-in policies")
         });
 
         // Agent-role JWT with known sub.

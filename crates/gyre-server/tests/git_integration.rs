@@ -67,7 +67,9 @@ async fn start_server(auth_token: &str) -> (u16, String) {
     let base_url = format!("http://127.0.0.1:{port}");
 
     let state = build_state(auth_token, &base_url, None);
-    abac_middleware::seed_builtin_policies(&state).await;
+    abac_middleware::seed_builtin_policies(&state)
+        .await
+        .expect("seed built-in policies");
     merge_processor::spawn_merge_processor(state.clone());
 
     let app = build_router(state);
