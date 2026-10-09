@@ -530,7 +530,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn forward_tunnel_spec_format() {
         let kind = TunnelKind::Forward {
             local_port: 8080,
@@ -623,19 +622,6 @@ mod tests {
         std::env::var_os("PATH")
             .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).exists()))
             .unwrap_or(false)
-    }
-            remote_host: "localhost".to_string(),
-            remote_port: 80,
-        };
-        let spec = match &kind {
-            TunnelKind::Forward {
-                local_port,
-                remote_host,
-                remote_port,
-            } => format!("{}:{}:{}", local_port, remote_host, remote_port),
-            TunnelKind::Reverse { .. } => panic!("wrong variant"),
-        };
-        assert_eq!(spec, "8080:localhost:80");
     }
 
     #[test]
