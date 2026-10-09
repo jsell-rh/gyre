@@ -6,7 +6,7 @@ progress: needs-revision
 review: specs/reviews/task-106.md
 coverage_sections:
   - "source-control.md §4 Automatic Rebasing"
-commits: ["7120183ad2d8c52b8efd069a28b9c9d201f5c44f", "4500fd507f851d48d022179df9532184f185faca", "0a6804c4b2bcc084b047ca3ea3d89618fee9cc27"]
+commits: ["35819fa8da97907ef4c9ecbfffbce27fdb362d83", "5453a15ddfca5759e94b83b6f1c55d7a60141943", "a1b16c8c047693259333a8c743f89d7de7e1b9ef"]
 ---
 
 ## Spec Excerpt
