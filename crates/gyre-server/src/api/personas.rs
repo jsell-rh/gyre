@@ -304,9 +304,13 @@ pub async fn resolve_persona(
             ]
         }
         "Workspace" => {
-            let workspace = state.workspaces.find_by_id(&scope_id).await?.ok_or_else(|| {
-                ApiError::NotFound(format!("workspace '{}' not found", scope_id.as_str()))
-            })?;
+            let workspace = state
+                .workspaces
+                .find_by_id(&scope_id)
+                .await?
+                .ok_or_else(|| {
+                    ApiError::NotFound(format!("workspace '{}' not found", scope_id.as_str()))
+                })?;
             vec![
                 PersonaScope::Workspace(scope_id.clone()),
                 PersonaScope::Tenant(workspace.tenant_id),
@@ -496,26 +500,14 @@ mod tests {
     /// the persona belongs to so a test can prove the resolver returned the
     /// parent-scope persona rather than an exact-scope one.
     async fn seed_security(state: &crate::AppState, id: &str, scope: PersonaScope, prompt: &str) {
-        let mut persona = Persona::new(
-            Id::new(id),
-            "security",
-            "security",
-            scope,
-            prompt,
-            1000,
-        );
+        let mut persona = Persona::new(Id::new(id), "security", "security", scope, prompt, 1000);
         persona.approval_status = PersonaApprovalStatus::Approved;
         state.personas.create(&persona).await.unwrap();
     }
 
     async fn resolve_uri(app: &Router, uri: &str) -> axum::response::Response {
         app.clone()
-            .oneshot(
-                Request::builder()
-                    .uri(uri)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await
             .unwrap()
     }
@@ -664,7 +656,10 @@ mod tests {
         )
         .await;
         assert_eq!(bad_repo.status(), StatusCode::NOT_FOUND);
-        let msg = body_json(bad_repo).await["error"].as_str().unwrap().to_string();
+        let msg = body_json(bad_repo).await["error"]
+            .as_str()
+            .unwrap()
+            .to_string();
         assert!(
             msg.contains("repo"),
             "expected repo-not-found error, got: {msg}"
@@ -676,7 +671,10 @@ mod tests {
         )
         .await;
         assert_eq!(bad_ws.status(), StatusCode::NOT_FOUND);
-        let msg = body_json(bad_ws).await["error"].as_str().unwrap().to_string();
+        let msg = body_json(bad_ws).await["error"]
+            .as_str()
+            .unwrap()
+            .to_string();
         assert!(
             msg.contains("workspace"),
             "expected workspace-not-found error, got: {msg}"
