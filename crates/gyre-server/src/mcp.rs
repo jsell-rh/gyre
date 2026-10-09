@@ -5155,6 +5155,86 @@ mod tests {
         );
     }
 
+    /// TCP-twin shape assertion, proven in-process: a Focus-scope query must
+    /// round-trip through the §9 envelope so the integration twin's
+    /// `dryrun["query"]["scope"]["node"].is_string()` holds. Zoom is untagged,
+    /// so `"zoom": "fit"` deserializes to `Zoom::Named` and re-serializes as a
+    /// plain string.
+    #[tokio::test]
+    async fn mcp_graph_query_dryrun_focus_scope_envelope_round_trip() {
+        let state = test_state();
+        let n1 = graph_node("repo-t68", "Alpha", NodeType::Function);
+        let n2 = graph_node("repo-t68", "Beta", NodeType::Function);
+        state.graph_store.create_node(n1.clone()).await.unwrap();
+        state.graph_store.create_node(n2.clone()).await.unwrap();
+        state
+            .graph_store
+            .create_edge(GraphEdge {
+                id: Id::new(uuid::Uuid::new_v4().to_string()),
+                repo_id: Id::new("repo-t68"),
+                source_id: n1.id.clone(),
+                target_id: n2.id.clone(),
+                edge_type: EdgeType::Calls,
+                metadata: None,
+                first_seen_at: 0,
+                last_seen_at: 0,
+                deleted_at: None,
+            })
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 154,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_query_dryrun",
+                    "arguments": {
+                        "repo_id": "repo-t68",
+                        "query": {
+                            "scope": {
+                                "type": "focus",
+                                "node": "Alpha",
+                                "edges": ["calls"],
+                                "direction": "outgoing",
+                                "depth": 5
+                            },
+                            "emphasis": { "dim_unmatched": 0.12 },
+                            "zoom": "fit",
+                            "annotation": { "title": "Test" }
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!json["result"]["isError"].as_bool().unwrap_or(true));
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        let envelope: Value = serde_json::from_str(text).unwrap();
+        // Tagged-enum round-trip: Focus scope keeps its `node` string member.
+        assert!(
+            envelope["query"]["scope"]["type"] == "focus",
+            "focus scope tag must round-trip, got: {text}"
+        );
+        assert!(
+            envelope["query"]["scope"]["node"].is_string(),
+            "focus scope node must round-trip as a string, got: {text}"
+        );
+        // Untagged Zoom: "fit" round-trips as a plain JSON string.
+        assert!(
+            envelope["query"]["zoom"] == "fit",
+            "untagged zoom must round-trip as a string, got: {text}"
+        );
+        assert!(
+            envelope["result"]["matched_nodes"].as_u64().unwrap() >= 1,
+            "focus scope must match its neighbors, got: {text}"
+        );
+    }
+
     #[tokio::test]
     async fn mcp_graph_nodes_tool_call() {
         let state = test_state();

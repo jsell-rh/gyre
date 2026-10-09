@@ -5659,6 +5659,39 @@ mod tests {
     }
 
     #[test]
+    fn test_dry_run_warns_on_cluttered_scope() {
+        // Spec: scope >200 nodes warns "may be cluttered". Boundary: 200 is
+        // fine, 201 warns.
+        fn run(n: usize) -> DryRunResult {
+            let nodes: Vec<GraphNode> = (0..n)
+                .map(|i| make_node(&format!("n{i}"), &format!("node_{i}"), NodeType::Function))
+                .collect();
+            let query = base_query(); // Scope::All matches everything
+            dry_run(&query, &nodes, &[], None)
+        }
+        let at_limit = run(200);
+        assert_eq!(at_limit.matched_nodes, 200);
+        assert!(
+            !at_limit
+                .warnings
+                .iter()
+                .any(|w| w.contains("may be cluttered")),
+            "200 nodes is at the limit, must not warn, got: {:?}",
+            at_limit.warnings
+        );
+        let over_limit = run(201);
+        assert_eq!(over_limit.matched_nodes, 201);
+        assert!(
+            over_limit
+                .warnings
+                .iter()
+                .any(|w| w.contains("Scope matched 201 nodes - may be cluttered")),
+            "201 nodes must warn about clutter, got: {:?}",
+            over_limit.warnings
+        );
+    }
+
+    #[test]
     fn test_dry_run_warns_on_broad_group() {
         // Group pattern "n" matches 25 node names via substring fallback —
         // over the 20-node breadth threshold.
