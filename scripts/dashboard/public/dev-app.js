@@ -41,8 +41,10 @@ function title(task) { return task.title || snapshot?.titles?.[task.name]?.title
 function spec(task) { return task.spec_ref || snapshot?.titles?.[task.name]?.specRef || ""; }
 function prs(task) {
   const found = snapshot?.prs?.[task.name] || [];
-  return task.pr && !found.some((pr) => pr.url === task.pr)
-    ? [{ url: task.pr, number: Number(task.pr.match(/\/pull\/(\d+)$/)?.[1]), state: task.state === "merged" ? "MERGED" : "OPEN" }, ...found] : found;
+  // Explicit pipeline identity is authoritative; historical labels can reuse
+  // a task number for unrelated work.
+  return task.pr
+    ? [found.find((pr) => pr.url === task.pr) || { url: task.pr, number: Number(task.pr.match(/\/pull\/(\d+)$/)?.[1]), state: task.state === "merged" ? "MERGED" : "OPEN" }] : found;
 }
 function latestAttempt(name) { return (snapshot?.attempts || []).find((a) => a.task === name) || null; }
 function taskEvents(name) { return (snapshot?.events || []).filter((event) => event.task === name); }
