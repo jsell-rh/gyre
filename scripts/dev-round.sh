@@ -63,6 +63,7 @@ PY
     fi
     case "$role" in
       implementation) printf '%s\n' 'Make the next concrete production edit, then run a focused check. If blocked, record the specific blocker in the task file.' ;;
+      rebase) printf '%s\n' 'Resolve only the active Git rebase. Once no rebase remains and HEAD contains origin/main, end this role. The driver refreshes commit attribution and then runs implementation or independent review.' ;;
       review|audit-review)
         printf '%s\n' 'Review the remaining concrete findings independently. Write the verdict and task status when supported by evidence; do not restart implementation or broad exploration.'
         printf '\n## Current review scope\n\nComparison base: %s\nCurrent HEAD: %s\n' "$review_base" "$(git rev-parse HEAD)"
@@ -71,17 +72,21 @@ PY
         ;;
     esac
     printf '\n## Assigned task\n\n'
-    python3 /tmp/stage/dev-context.py task "$file"
+    if [ "$role" = rebase ]; then
+      python3 /tmp/stage/dev-context.py task "$file" --requirements-only
+    else
+      python3 /tmp/stage/dev-context.py task "$file"
+    fi
     if [ -f /tmp/stage/audit-contract.json ]; then
       printf '\n## Mechanically enforced fidelity scope\n\n'
       cat /tmp/stage/audit-contract.json
     fi
-    if [ -f /tmp/stage/repair.md ]; then
+    if [ "$role" != rebase ] && [ -f /tmp/stage/repair.md ]; then
       printf '\n## Findings from the rejected integration\n\n'
       python3 /tmp/stage/dev-context.py history /tmp/stage/repair.md
     fi
     review=$(bash scripts/task-field.sh "$file" review)
-    if [ -n "$review" ] && [ -f "$review" ]; then
+    if [ "$role" != rebase ] && [ -n "$review" ] && [ -f "$review" ]; then
       printf '\n## Existing review\n\n'
       python3 /tmp/stage/dev-context.py history "$review"
     fi

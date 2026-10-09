@@ -24,7 +24,7 @@ def bounded(text, path, limit=8192):
             + text[-half:])
 
 
-def task_context(text, path):
+def task_context(text, path, include_history=True):
     _, prose = contract.requirement_parts(text)
     front = text.split('---', 2)[1]
     # Unknown headings remain normative. Reuse generation's exact exclusions
@@ -35,7 +35,7 @@ def task_context(text, path):
         if section.strip() and section not in prose:
             history.append(section)
     projected = '---' + front + '---' + prose
-    if history:
+    if history and include_history:
         projected += '\n## Review\n\nCurrent operational history (full file: ' + str(path) + '):\n\n'
         projected += re.sub(r'^## ', '    ## ', bounded('\n'.join(history), path), flags=re.M)
     if contract.generation(projected, {}) != contract.generation(text, {}):
@@ -47,6 +47,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('kind', choices=['task', 'history'])
     parser.add_argument('path', type=Path)
+    parser.add_argument('--requirements-only', action='store_true')
     args = parser.parse_args()
     text = args.path.read_text()
-    print(task_context(text, args.path) if args.kind == 'task' else bounded(text, args.path))
+    print(task_context(text, args.path, not args.requirements_only) if args.kind == 'task' else bounded(text, args.path))
