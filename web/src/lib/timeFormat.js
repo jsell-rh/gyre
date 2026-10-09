@@ -9,7 +9,7 @@
  * Accepts: epoch seconds (number), epoch milliseconds (number > 1e12),
  * ISO string, or SystemTime object ({secs_since_epoch, nanos_since_epoch} or {tv_sec}).
  */
-function toEpochSec(ts) {
+export function toEpochSec(ts) {
   if (ts == null) return null;
   if (typeof ts === 'object') {
     // Rust SystemTime serialization
