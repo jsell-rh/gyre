@@ -404,6 +404,39 @@ impl ResourceResolver {
                     "workspace_member",
                     None,
                 ),
+                // Tenant/workspace invitations (task-110). Management
+                // routes run ABAC (tenant resource); the TenantAdmin-only
+                // and Owner/Admin constraints are additionally enforced
+                // per-handler in api/invitations.rs because the dev/system
+                // token bypasses ABAC and workspace-role conditions are not
+                // expressible in the global policy set.
+                RouteResourceMapping::api("/api/v1/tenant/invite", "tenant", Some("write")),
+                RouteResourceMapping::api(
+                    "/api/v1/tenant/invite/bulk",
+                    "tenant",
+                    Some("write"),
+                ),
+                RouteResourceMapping::api("/api/v1/tenant/invitations", "tenant", None),
+                RouteResourceMapping::api(
+                    "/api/v1/tenant/invitations/:id",
+                    "tenant",
+                    Some("delete"),
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/invite",
+                    "workspace_member",
+                    Some("write"),
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/invitations",
+                    "workspace_member",
+                    None,
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/invitations/:id",
+                    "workspace_member",
+                    Some("delete"),
+                ),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/teams", "team", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/teams/:team_id", "team", None),
                 RouteResourceMapping::api("/api/v1/workspaces/:id/graph", "graph", None),
