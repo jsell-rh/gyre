@@ -132,12 +132,14 @@ impl NotificationType {
             "CascadeTestFailed" => Some(Self::CascadeTestFailed),
             "DependencyChainTooDeep" => Some(Self::DependencyChainTooDeep),
             "AtomicGroupFailure" => Some(Self::AtomicGroupFailure),
+            "SpecConflict" => Some(Self::SpecConflict),
             "MrReverted" => Some(Self::MrReverted),
             "MergeQueueEscalation" => Some(Self::MergeQueueEscalation),
             "PersonaApprovalRequested" => Some(Self::PersonaApprovalRequested),
             "MergeQueuePaused" => Some(Self::MergeQueuePaused),
             "BudgetExhausted" => Some(Self::BudgetExhausted),
             "SecurityFinding" => Some(Self::SecurityFinding),
+            _ => None,
         }
     }
 
@@ -288,6 +290,10 @@ mod tests {
             NotificationType::SpecConflict,
             NotificationType::MrReverted,
             NotificationType::MergeQueueEscalation,
+            NotificationType::PersonaApprovalRequested,
+            NotificationType::MergeQueuePaused,
+            NotificationType::BudgetExhausted,
+            NotificationType::SecurityFinding,
         ];
         for v in &variants {
             assert_eq!(NotificationType::parse(v.as_str()).as_ref(), Some(v));
