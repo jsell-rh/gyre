@@ -1392,7 +1392,16 @@
       "type_lint_command": "Lint Command",
       "type_required_approvals": "Required Approvals",
       "type_agent_review": "Agent Review",
-      "type_agent_validation": "Agent Validation"
+      "type_agent_validation": "Agent Validation",
+      "update_failed": "Failed to update gate: {error}",
+      "configure_gate": "Configure",
+      "save_gate": "Save Gate",
+      "saving": "Saving\u2026",
+      "gate_approvals_label": "Required approvals",
+      "gate_persona_label": "Reviewer persona path",
+      "gate_timeout_label": "Timeout (seconds)",
+      "gate_timeout_placeholder": "Default (300s)",
+      "drag_hint": "Drag to reorder \u2014 gates execute in order"
     },
     "policies": {
       "title": "Policies",
@@ -1482,7 +1491,8 @@
       "teams": "Teams",
       "budget": "Budget",
       "compute": "Compute",
-      "audit": "Audit"
+      "audit": "Audit",
+      "repos": "Repos"
     },
     "tab_bar_label": "Workspace settings sections",
     "general": {
@@ -1573,6 +1583,24 @@
       "col_actor": "Actor",
       "col_detail": "Detail",
       "col_time": "Time"
+    },
+    "repos": {
+      "title": "Repositories",
+      "new_repo": "+ New Repo",
+      "import_repo": "Import Repo",
+      "refresh": "Refresh",
+      "loading": "Loading repos...",
+      "empty": "No repositories in this workspace yet.",
+      "name_label": "Name",
+      "description_label": "Description",
+      "clone_url_label": "Clone URL",
+      "creating": "Creating...",
+      "create": "Create Repo",
+      "importing": "Importing...",
+      "col_name": "Repo",
+      "col_status": "Status",
+      "col_agents": "Agents",
+      "col_last_activity": "Last Activity"
     },
     "save_failed_settings": "Failed to save settings",
     "save_failed_trust": "Failed to save trust level",

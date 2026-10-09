@@ -68,6 +68,14 @@
   let newGateRequired = $state(true);
   let gateCreating = $state(false);
   let gateCreateError = $state(null);
+  let togglingGateId = $state(null);
+  let editingGateId = $state(null);
+  let editGateForm = $state(null);
+  let editGateSaving = $state(false);
+  let editGateError = $state(null);
+  let dragGateId = $state(null);
+  let dragOverGateId = $state(null);
+  let reordering = $state(false);
   let deletingGateId = $state(null);
 
   // ── Push Gates ────────────────────────────────────────────────────────
@@ -240,6 +248,97 @@
     } catch (e) {
       toastError($t('repo_settings.gates.delete_failed', { values: { error: e.message } }));
     } finally { deletingGateId = null; }
+  }
+
+  /** Toggle a gate between enabled (blocking) and disabled (advisory-only).
+   *  repo-lifecycle.md §3 Gates: "enabled/disabled toggle". */
+  async function toggleGate(gate) {
+    if (!repo?.id) return;
+    togglingGateId = gate.id;
+    try {
+      const updated = await api.updateRepoGate(repo.id, gate.id, { required: !gate.required });
+      gates = gates.map(g => g.id === gate.id ? { ...g, ...updated } : g);
+    } catch (e) {
+      toastError($t('repo_settings.gates.update_failed', { values: { error: e.message } }));
+    } finally { togglingGateId = null; }
+  }
+
+  /** Per-gate configuration form (repo-lifecycle.md §3 Gates: "per-gate
+   *  configuration (test command, lint command, reviewer persona, etc.)"). */
+  function startEditGate(gate) {
+    editingGateId = gate.id;
+    editGateError = null;
+    editGateForm = {
+      name: gate.name ?? '',
+      command: gate.command ?? '',
+      persona: gate.persona ?? '',
+      required_approvals: gate.required_approvals ?? 1,
+      timeout_secs: gate.timeout_secs ?? '',
+    };
+  }
+
+  function cancelEditGate() {
+    editingGateId = null;
+    editGateForm = null;
+    editGateError = null;
+  }
+
+  async function saveEditGate() {
+    if (!repo?.id || !editingGateId || !editGateForm) return;
+    editGateSaving = true;
+    editGateError = null;
+    try {
+      const patch = { name: editGateForm.name.trim() };
+      if (editGateForm.timeout_secs !== '' && editGateForm.timeout_secs != null) {
+        patch.timeout_secs = Number(editGateForm.timeout_secs);
+      }
+      const type = gates.find(g => g.id === editingGateId)?.gate_type;
+      if (type === 'test_command' || type === 'lint_command') {
+        patch.command = editGateForm.command.trim();
+      } else if (type === 'required_approvals') {
+        patch.required_approvals = Number(editGateForm.required_approvals) || 1;
+      } else if (type === 'agent_review' || type === 'agent_validation') {
+        patch.persona = editGateForm.persona.trim();
+      }
+      const updated = await api.updateRepoGate(repo.id, editingGateId, patch);
+      gates = gates.map(g => g.id === editingGateId ? { ...g, ...updated } : g);
+      cancelEditGate();
+    } catch (e) {
+      editGateError = e.message;
+    } finally { editGateSaving = false; }
+  }
+
+  /** Drag-to-reorder (repo-lifecycle.md §3 Gates: "drag to reorder — gates
+   *  execute in order"). Rewrites 1-based positions for the whole chain and
+   *  persists each move via PUT. */
+  async function handleGateDrop(targetGateId) {
+    const draggedId = dragGateId;
+    dragGateId = null;
+    dragOverGateId = null;
+    if (!draggedId || draggedId === targetGateId) return;
+    const dragged = gates.find(g => g.id === draggedId);
+    const target = gates.find(g => g.id === targetGateId);
+    if (!dragged || !target) return;
+
+    const reordered = [...gates];
+    reordered.splice(reordered.indexOf(dragged), 1);
+    reordered.splice(reordered.indexOf(target) + 1, 0, dragged);
+    gates = reordered;
+
+    reordering = true;
+    try {
+      // Persist 1-based positions; on failure reload from the server so the
+      // list reflects stored state rather than a phantom local order.
+      for (let i = 0; i < gates.length; i++) {
+        if (gates[i].position !== i + 1) {
+          const updated = await api.updateRepoGate(repo.id, gates[i].id, { position: i + 1 });
+          gates = gates.map(g => g.id === updated.id ? { ...g, ...updated } : g);
+        }
+      }
+    } catch (e) {
+      toastError($t('repo_settings.gates.update_failed', { values: { error: e.message } }));
+      await loadGates(repo.id);
+    } finally { reordering = false; }
   }
 
   async function loadPushGates(repoId) {
@@ -597,19 +696,46 @@
           {#if gates.length === 0}
             <p class="empty-text">{$t('repo_settings.gates.empty')}</p>
           {:else}
-            <div class="gates-list" data-testid="gates-list">
+            <div class="gates-list" role="list" data-testid="gates-list">
               {#each gates as gate}
-                <div class="gate-card" data-testid="gate-card">
+                <div
+                  role="listitem"
+                  class="gate-card"
+                  class:gate-card-dragover={dragOverGateId === gate.id}
+                  class:gate-card-dragging={dragGateId === gate.id}
+                  draggable="true"
+                  ondragstart={(e) => { dragGateId = gate.id; e.dataTransfer?.setData('text/plain', gate.id); e.dataTransfer && (e.dataTransfer.effectAllowed = 'move'); }}
+                  ondragend={() => { dragGateId = null; dragOverGateId = null; }}
+                  ondragover={(e) => { e.preventDefault(); if (dragGateId && dragOverGateId !== gate.id) dragOverGateId = gate.id; }}
+                  ondragleave={() => { if (dragOverGateId === gate.id) dragOverGateId = null; }}
+                  ondrop={(e) => { e.preventDefault(); handleGateDrop(gate.id); }}
+                  data-testid="gate-card"
+                >
                   <div class="gate-header">
+                    <span class="gate-drag-handle" aria-hidden="true" title={$t('repo_settings.gates.drag_hint')} data-testid="gate-drag-handle">⋮⋮</span>
                     <span class="gate-name">{gate.name ?? shortId(gate.id)}</span>
                     {#if gate.gate_type}
                       <span class="gate-kind">{gate.gate_type}</span>
                     {/if}
-                    {#if gate.required !== undefined}
-                      <span class="gate-required" class:required={gate.required}>
+                    <label class="gate-toggle" data-testid="gate-toggle">
+                      <input
+                        type="checkbox"
+                        checked={gate.required}
+                        disabled={togglingGateId === gate.id}
+                        onchange={() => toggleGate(gate)}
+                      />
+                      <span class="gate-toggle-label">
                         {gate.required ? $t('repo_settings.gates.required') : $t('repo_settings.gates.optional')}
                       </span>
-                    {/if}
+                    </label>
+                    <button
+                      class="btn-gate-edit"
+                      onclick={() => editingGateId === gate.id ? cancelEditGate() : startEditGate(gate)}
+                      aria-label="{$t('repo_settings.gates.configure_gate')} {gate.name ?? gate.id}"
+                      data-testid="edit-gate-btn"
+                    >
+                      {editingGateId === gate.id ? $t('common.cancel') : $t('repo_settings.gates.configure_gate')}
+                    </button>
                     <button
                       class="btn-gate-delete"
                       onclick={() => deleteGate(gate.id)}
@@ -620,11 +746,49 @@
                       {deletingGateId === gate.id ? $t('repo_settings.gates.deleting') : $t('repo_settings.gates.delete_gate')}
                     </button>
                   </div>
-                  {#if gate.command}
+                  {#if editingGateId !== gate.id && gate.command}
                     <code class="gate-command">{gate.command}</code>
                   {/if}
-                  {#if gate.description}
+                  {#if editingGateId !== gate.id && gate.description}
                     <p class="gate-desc">{gate.description}</p>
+                  {/if}
+
+                  {#if editingGateId === gate.id}
+                    <form class="field-card gate-edit-form" data-testid="gate-edit-form" onsubmit={(e) => { e.preventDefault(); saveEditGate(); }}>
+                      <div class="field">
+                        <label class="field-label" for="gate-edit-name-{gate.id}">{$t('repo_settings.gates.gate_name_label')}</label>
+                        <input id="gate-edit-name-{gate.id}" class="field-input" type="text" bind:value={editGateForm.name} data-testid="gate-edit-name-input" />
+                      </div>
+                      {#if gate.gate_type === 'test_command' || gate.gate_type === 'lint_command'}
+                        <div class="field">
+                          <label class="field-label" for="gate-edit-command-{gate.id}">{$t('repo_settings.gates.gate_command_label')}</label>
+                          <input id="gate-edit-command-{gate.id}" class="field-input" type="text" bind:value={editGateForm.command} data-testid="gate-edit-command-input" />
+                        </div>
+                      {:else if gate.gate_type === 'required_approvals'}
+                        <div class="field">
+                          <label class="field-label" for="gate-edit-approvals-{gate.id}">{$t('repo_settings.gates.gate_approvals_label')}</label>
+                          <input id="gate-edit-approvals-{gate.id}" class="field-input" type="number" min="1" bind:value={editGateForm.required_approvals} data-testid="gate-edit-approvals-input" />
+                        </div>
+                      {:else if gate.gate_type === 'agent_review' || gate.gate_type === 'agent_validation'}
+                        <div class="field">
+                          <label class="field-label" for="gate-edit-persona-{gate.id}">{$t('repo_settings.gates.gate_persona_label')}</label>
+                          <input id="gate-edit-persona-{gate.id}" class="field-input" type="text" bind:value={editGateForm.persona} data-testid="gate-edit-persona-input" />
+                        </div>
+                      {/if}
+                      <div class="field">
+                        <label class="field-label" for="gate-edit-timeout-{gate.id}">{$t('repo_settings.gates.gate_timeout_label')}</label>
+                        <input id="gate-edit-timeout-{gate.id}" class="field-input" type="number" min="1" placeholder={$t('repo_settings.gates.gate_timeout_placeholder')} bind:value={editGateForm.timeout_secs} data-testid="gate-edit-timeout-input" />
+                      </div>
+                      {#if editGateError}
+                        <p class="error-text" role="alert">{editGateError}</p>
+                      {/if}
+                      <div class="confirm-actions">
+                        <button type="button" class="btn-secondary" onclick={cancelEditGate}>{$t('common.cancel')}</button>
+                        <button type="submit" class="btn-primary" disabled={editGateSaving} data-testid="gate-edit-save-btn">
+                          {editGateSaving ? $t('repo_settings.gates.saving') : $t('repo_settings.gates.save_gate')}
+                        </button>
+                      </div>
+                    </form>
                   {/if}
                 </div>
               {/each}
@@ -1650,6 +1814,62 @@
 
   .btn-gate-delete:disabled { opacity: 0.6; cursor: not-allowed; }
   .btn-gate-delete:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
+  .btn-gate-edit {
+    padding: var(--space-1) var(--space-3);
+    background: transparent;
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius);
+    color: var(--color-text-muted);
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    transition: color var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  .btn-gate-edit:hover:not(:disabled) { color: var(--color-primary); border-color: var(--color-primary); }
+  .btn-gate-edit:disabled { opacity: 0.6; cursor: not-allowed; }
+  .btn-gate-edit:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+
+  .gate-drag-handle {
+    cursor: grab;
+    color: var(--color-text-muted);
+    font-size: var(--text-sm);
+    letter-spacing: -2px;
+    user-select: none;
+    line-height: 1;
+    padding: 2px 2px;
+  }
+
+  .gate-drag-handle:active { cursor: grabbing; }
+
+  .gate-card[draggable='true'] { cursor: default; }
+  .gate-card-dragover { border-color: var(--color-primary); box-shadow: 0 0 0 1px var(--color-primary); }
+  .gate-card-dragging { opacity: 0.5; }
+
+  .gate-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0;
+    cursor: pointer;
+    font-size: var(--text-xs);
+    font-weight: 500;
+    color: var(--color-text-muted);
+  }
+
+  .gate-toggle input[type='checkbox'] { accent-color: var(--color-primary); cursor: pointer; }
+  .gate-toggle-label { user-select: none; }
+  .gate-toggle:has(input:checked) .gate-toggle-label { color: var(--color-warning); }
+  .gate-toggle:has(input:disabled) { opacity: 0.6; cursor: not-allowed; }
+
+  .gate-edit-form {
+    margin-top: var(--space-2);
+    border-top: 1px dashed var(--color-border);
+    border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+    background: var(--color-surface-elevated);
+    padding: var(--space-3);
+  }
 
   .action-row-left { justify-content: flex-start; }
 

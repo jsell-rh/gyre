@@ -1623,3 +1623,70 @@ async fn mirror_endpoint_with_full_middleware_returns_201() {
         "Expected 201 CREATED from POST /repos/mirror with full middleware stack, got {status}: {body}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 13: Archived repos reject pushes (repo-lifecycle.md §4 step 5)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn push_to_archived_repo_rejected() {
+    let token = "git-test-archived-push-token";
+    let (_port, base_url) = start_server(token).await;
+    let api = format!("{base_url}/api/v1");
+    let auth_hdr = format!("Bearer {token}");
+    let client = reqwest::Client::new();
+
+    let ws_id = uniq("ws-archived");
+    let repo_id = create_repo(&client, &api, &auth_hdr, &ws_id, "archived-repo").await;
+
+    // Archive the repo via the API.
+    let archive_resp = client
+        .post(format!("{api}/repos/{repo_id}/archive"))
+        .header("Authorization", &auth_hdr)
+        .send()
+        .await
+        .unwrap();
+    assert!(archive_resp.status().is_success());
+
+    // A real `git push` against the archived repo must fail.
+    let base_url_c = base_url.clone();
+    let token_owned = token.to_string();
+    let ws_id_c = ws_id.clone();
+
+    let (push_ok, push_stderr) = tokio::task::spawn_blocking(move || {
+        let work = TempDir::new().unwrap();
+        let dir = work.path().join("repo");
+        let clone_url = format!("{base_url_c}/git/{ws_id_c}/archived-repo.git");
+
+        // Clone still works — archived repos are read-only, not invisible.
+        let clone_out = git_with_token(&["clone", &clone_url, "repo"], work.path(), &token_owned);
+        let stderr = String::from_utf8_lossy(&clone_out.stderr).to_string();
+        let ok = clone_out.status.success()
+            || stderr.contains("empty repository")
+            || stderr.contains("warning");
+        assert!(ok, "clone failed: {stderr}");
+
+        git_local(&["config", "user.email", "test@gyre.local"], &dir);
+        git_local(&["config", "user.name", "Test Agent"], &dir);
+        std::fs::write(dir.join("readme.md"), "# test\n").unwrap();
+        git_local(&["add", "."], &dir);
+        git_local(&["commit", "-m", "feat: push to archived repo"], &dir);
+
+        let push_out = git_with_token(&["push", "origin", "HEAD:main"], &dir, &token_owned);
+        (
+            push_out.status.success(),
+            String::from_utf8_lossy(&push_out.stderr).to_string(),
+        )
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        !push_ok,
+        "push to archived repo should be rejected, but it succeeded"
+    );
+    assert!(
+        push_stderr.contains("archived"),
+        "push rejection should explain the repo is archived, got: {push_stderr}"
+    );
+}
