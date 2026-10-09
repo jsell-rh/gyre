@@ -3292,10 +3292,12 @@ fn test_state_inner(
     policies: Arc<dyn gyre_ports::PolicyRepository>,
     storage: Option<Arc<dyn gyre_ports::storage::StoragePort>>,
 ) -> Arc<crate::AppState> {
-    let spec_link_repo = Arc::new(MemSpecLinkRepository::default());
+    let spec_link_repo: Arc<dyn gyre_ports::SpecLinkRepository> =
+        Arc::new(MemSpecLinkRepository::default());
     let spec_links_store = crate::spec_registry::SpecLinksStore::default();
     crate::load_spec_links_into_store(&spec_link_repo, &spec_links_store);
     use std::collections::HashMap;
+    use tokio::sync::broadcast;
     Arc::new(crate::AppState {
         auth_token: "test-token".to_string(),
         base_url: "http://localhost:3000".to_string(),

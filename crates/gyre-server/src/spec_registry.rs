@@ -196,8 +196,11 @@ pub type SpecLedger = Arc<Mutex<HashMap<String, SpecLedgerEntry>>>;
 /// Type alias for the shared approval history store (in-memory).
 pub type SpecApprovalHistory = Arc<Mutex<Vec<SpecApprovalEvent>>>;
 
-/// Type alias for the shared spec links store.
-pub type SpecLinksStore = Arc<Mutex<Vec<SpecLinkEntry>>>;
+// in-memory-state-stores:ok — hot cache of the durable `spec_links` table
+// (spec-links.md §Forge-Maintained Spec Graph): the SQL table behind
+// `AppState.spec_link_repo` is authoritative, every mutation writes through,
+// and boot reloads via `load_spec_links_into_store` (lib.rs).
+pub type SpecLinksStore = Arc<Mutex<Vec<SpecLinkEntry>>>; // in-memory-state-stores:ok — see above
 
 /// Parsed cross-workspace target from an `@`-prefixed manifest link.
 #[derive(Debug, Clone, PartialEq)]

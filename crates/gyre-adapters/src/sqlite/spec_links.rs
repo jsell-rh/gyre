@@ -198,3 +198,149 @@ impl SpecLinkRepository for SqliteStorage {
         .await?
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    fn tmp_storage() -> (NamedTempFile, SqliteStorage) {
+        let tmp = NamedTempFile::new().unwrap();
+        let storage = SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap();
+        (tmp, storage)
+    }
+
+    fn entry(id: &str, link_type: SpecLinkType) -> SpecLinkEntry {
+        SpecLinkEntry {
+            id: id.to_string(),
+            source_path: format!("system/source-{id}.md"),
+            source_repo_id: Some("repo-1".to_string()),
+            source_sha: format!("sha-{id}"),
+            link_type,
+            target_path: "system/target.md".to_string(),
+            target_repo_id: Some("repo-2".to_string()),
+            target_display: Some("@ws/repo-2/system/target.md".to_string()),
+            target_sha: Some("target-sha".to_string()),
+            reason: Some("why".to_string()),
+            status: "active".to_string(),
+            created_at: 1_700_000_000,
+            stale_since: None,
+        }
+    }
+
+    /// Every SpecLinkType variant and every Option column must round-trip
+    /// losslessly through the SQLite table (task-198 AC).
+    #[tokio::test]
+    async fn round_trips_every_link_type_and_option_columns() {
+        let (_tmp, storage) = tmp_storage();
+        let variants = [
+            SpecLinkType::Implements,
+            SpecLinkType::Supersedes,
+            SpecLinkType::DependsOn,
+            SpecLinkType::ConflictsWith,
+            SpecLinkType::Extends,
+            SpecLinkType::References,
+        ];
+        let mut expected: Vec<SpecLinkEntry> = Vec::new();
+        for (i, lt) in variants.iter().enumerate() {
+            let e = entry(&format!("link-{i}"), lt.clone());
+            storage.save(&e).await.unwrap();
+            expected.push(e);
+        }
+        // Option columns exercised in their None forms too.
+        let mut none_opts = entry("link-none", SpecLinkType::DependsOn);
+        none_opts.source_repo_id = None;
+        none_opts.target_repo_id = None;
+        none_opts.target_display = None;
+        none_opts.target_sha = None;
+        none_opts.reason = None;
+        none_opts.stale_since = Some(1_700_000_500);
+        storage.save(&none_opts).await.unwrap();
+        expected.push(none_opts);
+
+        let all = storage.list_all().await.unwrap();
+        assert_eq!(all.len(), expected.len());
+        for exp in &expected {
+            let got = all.iter().find(|l| l.id == exp.id).expect("link present");
+            assert_eq!(got.source_path, exp.source_path);
+            assert_eq!(got.source_repo_id, exp.source_repo_id);
+            assert_eq!(got.source_sha, exp.source_sha, "source_sha must round-trip");
+            assert_eq!(got.link_type, exp.link_type);
+            assert_eq!(got.target_path, exp.target_path);
+            assert_eq!(got.target_repo_id, exp.target_repo_id);
+            assert_eq!(got.target_display, exp.target_display);
+            assert_eq!(got.target_sha, exp.target_sha);
+            assert_eq!(got.reason, exp.reason);
+            assert_eq!(got.status, exp.status);
+            assert_eq!(got.created_at, exp.created_at);
+            assert_eq!(got.stale_since, exp.stale_since);
+        }
+    }
+
+    /// Rows must survive a fresh `SqliteStorage` handle on the same file —
+    /// the restart-durability contract (task-198 AC). Fails against an
+    /// empty-init in-memory graph.
+    #[tokio::test]
+    async fn links_survive_reopened_database() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+        let e = entry("durable-1", SpecLinkType::Implements);
+        {
+            let storage = SqliteStorage::new(&path).unwrap();
+            storage.save(&e).await.unwrap();
+        }
+        // Simulated restart: brand-new storage handle over the same file.
+        let reopened = SqliteStorage::new(&path).unwrap();
+        let all = reopened.list_all().await.unwrap();
+        assert_eq!(all.len(), 1, "graph must not be empty after reopen");
+        let got = &all[0];
+        assert_eq!(got.id, e.id);
+        assert_eq!(got.source_sha, e.source_sha);
+        assert_eq!(got.link_type, e.link_type);
+    }
+
+    /// replace_for_source must atomically swap a source spec's link set.
+    #[tokio::test]
+    async fn replace_for_source_swaps_link_set() {
+        let (_tmp, storage) = tmp_storage();
+        let old = entry("old-1", SpecLinkType::Implements);
+        storage.save(&old).await.unwrap();
+        // An unrelated link that must NOT be touched.
+        let other = entry("other-1", SpecLinkType::Extends);
+        storage.save(&other).await.unwrap();
+
+        let replacement = entry("new-1", SpecLinkType::DependsOn);
+        storage
+            .replace_for_source(
+                // Keyed on (source_repo_id, source_path): the replacement
+                // must claim the same source spec as the row it swaps out.
+                "repo-1",
+                &old.source_path,
+                std::slice::from_ref(&replacement),
+            )
+            .await
+            .unwrap();
+
+        let all = storage.list_all().await.unwrap();
+        assert_eq!(all.len(), 2, "old row replaced, unrelated row kept");
+        assert!(all.iter().any(|l| l.id == "new-1"));
+        assert!(all.iter().any(|l| l.id == "other-1"));
+        assert!(!all.iter().any(|l| l.id == "old-1"));
+    }
+
+    /// delete_by_source_repo removes only the given repo's rows.
+    #[tokio::test]
+    async fn delete_by_source_repo_scopes_to_repo() {
+        let (_tmp, storage) = tmp_storage();
+        let a = entry("a-1", SpecLinkType::Implements);
+        storage.save(&a).await.unwrap();
+        let mut b = entry("b-1", SpecLinkType::Implements);
+        b.source_repo_id = Some("repo-other".to_string());
+        storage.save(&b).await.unwrap();
+
+        storage.delete_by_source_repo("repo-1").await.unwrap();
+        let all = storage.list_all().await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, "b-1");
+    }
+}
