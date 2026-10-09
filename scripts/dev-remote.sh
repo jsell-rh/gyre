@@ -84,6 +84,9 @@ PY
     worker_rc=$?
     set -e
     [ "$worker_rc" -ne 80 ] || { echo 'audit generation changed; requesting a fresh assignment' >&2; exit 80; }
+    # A cancelled baseline probe may leave production edits hidden in a stash.
+    # Restore only this task branch's work before reading progress/checkpointing.
+    python3 /tmp/stage/dev-checkpoint.py "$BRANCH"
     if [ "$(bash scripts/task-field.sh "specs/tasks/$TASK.md" progress)" = complete ] &&
        { [ "$worker_rc" -ne 0 ] || [ ! -f /tmp/stage/review-approved ]; }; then
       echo "completion has no successful review; returning to review" >&2
