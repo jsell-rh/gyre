@@ -39,6 +39,7 @@ def main():
     os.environ.update(HOME='/tmp', CARGO_BUILD_JOBS='2',
                       CARGO_TARGET_DIR='/tmp/gyre-target', CARGO_HOME='/tmp/cargo',
                       RUSTUP_HOME='/usr/local/rustup',
+                      PLAYWRIGHT_BROWSERS_PATH='/usr/local/share/gyre-playwright',
                       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER='cc',
                       RUSTFLAGS='-C link-arg=-fuse-ld=lld')
     # Fail before inference when the image cannot link Rust build scripts.
