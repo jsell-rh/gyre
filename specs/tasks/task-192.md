@@ -5,7 +5,7 @@ depends_on: [task-211]
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §CLI"
-commits: ["87fae32e02d6d4bdeca2070de71e5bec2eb7d458", "6abdfdec95bf12b68c2bdf9ba3e759944524af3f", "4d16c6c5b2ded0f53c67e528f4ecf5299fd714ca", "6f4d1366b84193c972c2e7c13a1a42059da2806a", "a5a82183d3e67df0aac25f30e2ba16c5709081f2"]
+commits: ["87fae32e02d6d4bdeca2070de71e5bec2eb7d458", "6abdfdec95bf12b68c2bdf9ba3e759944524af3f", "4d16c6c5b2ded0f53c67e528f4ecf5299fd714ca", "6f4d1366b84193c972c2e7c13a1a42059da2806a", "a5a82183d3e67df0aac25f30e2ba16c5709081f2", "97ee3df5a70648a818d8ae7a577471c65f43503"]
 ---
 
 ## Spec Excerpt
