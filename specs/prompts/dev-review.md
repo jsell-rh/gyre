@@ -19,6 +19,9 @@ checkout's test binary and make a mutation pass or a repair appear to fail.
 If a repair handoff is supplied, independently check each reported failure
 and its reproduction. Reject gate weakening, deleted meaningful tests, new
 exemptions, and unrelated changes made just to obtain a passing result.
+Edit only the assigned task and its review findings. Preserve the code and
+verifiers under review. If they require changes, record `needs-revision` so
+the implementation role repairs them before another independent review.
 
 Write concrete findings with file and behavior evidence to the task's review
 file. If any material gap remains, set `progress: needs-revision` and leave a

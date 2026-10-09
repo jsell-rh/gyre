@@ -20,7 +20,7 @@ run_prompt() {
     model=(--model "${GYRE_DEV_IMPLEMENTATION_MODEL:-${GYRE_DEV_MODEL:-enmaas-glm-5-3/rits/zai-org/glm-5-3}}")
   fi
   case "$role" in
-    review|audit-review) review_base=$(git merge-base origin/main HEAD) ;;
+    review|audit-review) review_base=$(git merge-base origin/main HEAD) || return $? ;;
   esac
   mkdir -p "$session_dir"
   session_file=$(find "$session_dir" -maxdepth 1 -name '*.jsonl' -print | sort | tail -n 1)
@@ -116,11 +116,26 @@ if [ -f /tmp/stage/audit-contract.json ]; then
   python3 /tmp/stage/dev-audit-check.py /tmp/stage/audit-contract.json --generation-only || exit 80
 fi
 if [ "$progress" = ready-for-review ]; then
+  python3 /tmp/stage/dev-review-guard.py snapshot /tmp/stage/review-source.json --task "$task"
+  review_rc=0
   if [ -f /tmp/stage/audit-contract.json ]; then
-    run_prompt audit-review
-    python3 /tmp/stage/dev-audit-check.py /tmp/stage/audit-contract.json --base origin/main --replay
+    run_prompt audit-review || review_rc=$?
   else
-    run_prompt review
+    run_prompt review || review_rc=$?
+  fi
+  if ! python3 /tmp/stage/dev-review-guard.py check /tmp/stage/review-source.json; then
+    # A reviewer who authored code must not resume and approve that code.
+    mkdir -p /tmp/stage/omp-archive
+    for role in review audit-review; do
+      for session in /tmp/stage/omp-sessions/"$role"/*.jsonl; do
+        [ ! -f "$session" ] || mv "$session" "/tmp/stage/omp-archive/$role-rejected-$(date +%s)-$(basename "$session")"
+      done
+    done
+    exit 1
+  fi
+  [ "$review_rc" -eq 0 ] || exit "$review_rc"
+  if [ -f /tmp/stage/audit-contract.json ]; then
+    python3 /tmp/stage/dev-audit-check.py /tmp/stage/audit-contract.json --base origin/main --replay
   fi
   if [ "$(bash scripts/task-field.sh "$file" progress)" = complete ]; then
     touch /tmp/stage/review-approved

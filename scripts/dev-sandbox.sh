@@ -71,7 +71,7 @@ stage_bundle() {
   local bundle stage_rc retry role stage_log
   bundle=$(mktemp -d "${TMPDIR:-/tmp}/gyre-stage.XXXXXX")
   cp "$ROOT/scripts/dev-remote.sh" "$ROOT/scripts/dev-round.sh" \
-    "$ROOT/scripts/dev-attach.py" "$ROOT/scripts/dev-process.sh" "$ROOT/scripts/dev-checkpoint.py" \
+    "$ROOT/scripts/dev-attach.py" "$ROOT/scripts/dev-process.sh" "$ROOT/scripts/dev-checkpoint.py" "$ROOT/scripts/dev-review-guard.py" \
     "$ROOT/scripts/dev-stream.mjs" "$ROOT/scripts/dev-check.sh" \
     "$ROOT/scripts/dev-merge-message.py" \
     "$ROOT/scripts/dev-static-gate.py" \
