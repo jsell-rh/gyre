@@ -89,7 +89,7 @@
     "import_submit": "Import",
     "specs_no_status": "No specs with that status.",
     "all_statuses": "All statuses",
-    "rules_reconciling": "Reconciling: {count} meta-spec(s) recently updated",
+    "rules_reconciling": "{count} meta-spec{count, plural, one {} other {s}} updated in the last 7 days",
     "rules_no_metaspecs": "No meta-specs configured.",
     "rules_summary": "{count} meta-spec{count, plural, one {} other {s}} active",
     "rules_summary_required": "({count} required)",
