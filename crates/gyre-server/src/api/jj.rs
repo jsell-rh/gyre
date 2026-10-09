@@ -247,6 +247,37 @@ pub async fn get_commit_signature(
         .ok_or_else(|| ApiError::NotFound(format!("no signature found for commit {sha}")))
 }
 
+/// GET /api/v1/repos/:id/commits/:sha/signature/verification
+///
+/// Verify the stored commit signature for `(repo_id, sha)` against the
+/// server's configured trust anchors (task-107 plan item 3):
+/// - fulcio records: (a) ECDSA signature over the commit SHA against the
+///   leaf certificate, (b) certificate chain rooted in the CONFIGURED
+///   Fulcio trust bundle within its validity window (F3/F5/F11), (c) leaf
+///   SAN/CN matches the recorded OIDC subject, (d) a Rekor entry whose
+///   hashedrekord body carries this commit's digest, signature, and
+///   certificate (F4).
+/// - local records: real Ed25519 verification of the signature over the
+///   commit SHA against the forge signing key.
+///
+/// ABAC: resource_type = repo, action = read (registered in
+/// abac_middleware.rs — F8).
+pub async fn get_commit_signature_verification(
+    State(state): State<Arc<AppState>>,
+    Path((repo_id, sha)): Path<(String, String)>,
+) -> Result<Json<crate::sigstore::SignatureVerificationResult>, ApiError> {
+    // Verify the repo exists.
+    let _ = repo_path(&state, &repo_id).await?;
+
+    match crate::sigstore::verify_state_commit_signature(&state, &repo_id, &sha).await {
+        Ok(Some(result)) => Ok(Json(result)),
+        Ok(None) => Err(ApiError::NotFound(format!(
+            "no signature found for commit {sha}"
+        ))),
+        Err(e) => Err(ApiError::Internal(e)),
+    }
+}
+
 /// POST /api/v1/repos/:id/jj/undo
 pub async fn jj_undo(
     State(state): State<Arc<AppState>>,

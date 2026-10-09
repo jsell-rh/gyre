@@ -247,6 +247,7 @@ mod tests {
                 "task_id": "task-107",
                 "spawned_by": "user-jsell",
             })),
+            bearer_token: None,
             deprecated_token_auth: false,
         };
         let attr = SigningAttribution::from_auth(&auth);
@@ -263,6 +264,7 @@ mod tests {
             roles: vec![],
             tenant_id: "default".into(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
         };
         let attr = SigningAttribution::from_auth(&auth);
