@@ -18,5 +18,5 @@ crates/gyre-server/src/merge_processor.rs:1479   # evaluate_attestation_abac —
 # --- task-099 revision round owns these (F2: void validate_persona whose
 # result is discarded; consults state.meta_specs while bootstrap populates
 # state.personas) ---
-crates/gyre-server/src/api/orchestrator.rs:187   # validate_persona — () result discarded, audit-only persona validation (task-099 F2 exact site)
-crates/gyre-server/src/api/orchestrator.rs:311   # validate_persona — () result discarded, audit-only persona validation (task-099 F2 exact site; re-anchored 283→311 after task-093 F3 tenant containment shifted lines)
+crates/gyre-server/src/api/orchestrator.rs:231   # validate_persona — () result discarded, audit-only persona validation (task-099 F2 exact site; re-anchored 187→231 after task-093 default-name respawn fix shifted lines)
+crates/gyre-server/src/api/orchestrator.rs:353   # validate_persona — () result discarded, audit-only persona validation (task-099 F2 exact site; re-anchored 283→311→353 after task-093 revisions shifted lines)

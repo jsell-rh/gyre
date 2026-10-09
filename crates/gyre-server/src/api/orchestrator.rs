@@ -69,6 +69,28 @@ async fn validate_persona(state: &AppState, name: &str) {
     }
 }
 
+/// Derive an unused agent name from the per-scope default (§3.2
+/// exactly-one-live). Dead orchestrators keep their rows, so the plain
+/// default can be taken by a tombstone; suffix `-2`, `-3`, ... until free.
+/// Deterministic and readable, mirroring the `-restart-N` convention in
+/// stale_agents.rs. A store read failure is a spawn failure (Internal) —
+/// guessing "free" on a failed read could mint a duplicate name.
+async fn unique_default_name(state: &AppState, base: &str) -> Result<String, ApiError> {
+    for n in 1.. {
+        let candidate = if n == 1 {
+            base.to_string()
+        } else {
+            format!("{base}-{n}")
+        };
+        match state.agents.find_by_name(&candidate).await {
+            Ok(None) => return Ok(candidate),
+            Ok(Some(_)) => continue,
+            Err(e) => return Err(ApiError::Internal(e)),
+        }
+    }
+    unreachable!("agent name suffix space exhausted")
+}
+
 /// Common tail: persist agent, mint scoped JWT, register it, bootstrap the
 /// signing keypair so the orchestrator can sign DerivedInputs for children,
 /// bump budgets, track analytics.
@@ -78,19 +100,32 @@ async fn spawn_orchestrator(
     workspace_id: &Id,
     repo_id: Option<&Id>,
     orchestrator_type: OrchestratorType,
-    name: String,
+    default_name: String,
+    explicit_name: Option<String>,
     parent_id: Option<String>,
     auth_agent_id: &str,
 ) -> Result<(gyre_domain::Agent, String), ApiError> {
     let now = now_secs();
 
+    // Name resolution (§3.2 exactly-one-live): a request-supplied name is
+    // strict — any existing agent (live or dead) with that name is a caller
+    // error. The *default* per-scope name, however, must not let a dead
+    // orchestrator's tombstone row block the respawn its freed slot allows:
+    // after `X` dies and auto-restart has produced `X-restart-1`, a fresh
+    // default spawn would otherwise collide with dead `X` forever.
+    let name = match explicit_name {
+        Some(name) => {
+            if let Ok(Some(_)) = state.agents.find_by_name(&name).await {
+                return Err(ApiError::InvalidInput(format!(
+                    "an agent named '{name}' already exists; choose a different name"
+                )));
+            }
+            name
+        }
+        None => unique_default_name(state, &default_name).await?,
+    };
+
     let mut agent = gyre_domain::Agent::new(new_id(), name, now);
-    if let Ok(Some(_)) = state.agents.find_by_name(&agent.name).await {
-        return Err(ApiError::InvalidInput(format!(
-            "an agent named '{}' already exists; choose a different name",
-            agent.name
-        )));
-    }
 
     agent.parent_id = parent_id.map(Id::new);
     agent.spawned_by = Some(auth_agent_id.to_string());
@@ -186,15 +221,13 @@ pub(crate) async fn spawn_workspace_orchestrator_core(
 
     validate_persona(state, "workspace-orchestrator").await;
 
-    let name = req
-        .name
-        .unwrap_or_else(|| format!("workspace-orchestrator-{}", workspace.id));
     spawn_orchestrator(
         state,
         &workspace.id,
         None,
         OrchestratorType::WorkspaceOrchestrator,
-        name,
+        format!("workspace-orchestrator-{}", workspace.id),
+        req.name,
         req.parent_id,
         auth_agent_id,
     )
@@ -310,15 +343,13 @@ pub(crate) async fn spawn_repo_orchestrator_core(
 
     validate_persona(state, "repo-orchestrator").await;
 
-    let name = req
-        .name
-        .unwrap_or_else(|| format!("repo-orchestrator-{}", repo.id));
     spawn_orchestrator(
         state,
         &ws_id,
         Some(&rid),
         OrchestratorType::RepoOrchestrator,
-        name,
+        format!("repo-orchestrator-{}", repo.id),
+        req.name,
         req.parent_id,
         auth_agent_id,
     )
@@ -1064,5 +1095,96 @@ mod tests {
             .unwrap()
             .expect("replacement spawned via stop path");
         assert_eq!(replacement.status, AgentStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn respawn_after_death_with_default_name_succeeds() {
+        // §3.2 exactly-one-live: a dead orchestrator frees its scope slot,
+        // so spawning again with NO explicit name must succeed even though
+        // the dead agent's tombstone row still holds the default name.
+        // Before the fix this returned InvalidInput forever (name taken by
+        // a dead agent), leaving the workspace unorchestrated.
+        let state = test_state();
+        seed(&state).await;
+
+        let (first, _t) = spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1")
+            .await
+            .unwrap();
+        assert_eq!(first.name, "workspace-orchestrator-ws-1");
+
+        kill(&state, &first.name).await;
+
+        let (second, _t) = spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1")
+            .await
+            .unwrap();
+        assert_eq!(second.name, "workspace-orchestrator-ws-1-2");
+        assert_eq!(second.status, AgentStatus::Active);
+
+        // Exactly one live workspace orchestrator after the respawn.
+        let live = state
+            .agents
+            .list_by_workspace(&Id::new("ws-1"))
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|a| {
+                a.orchestrator_type == OrchestratorType::WorkspaceOrchestrator && is_live(a)
+            })
+            .count();
+        assert_eq!(live, 1);
+
+        // Third cycle keeps suffixing, not colliding.
+        kill(&state, &second.name).await;
+        let (third, _t) = spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1")
+            .await
+            .unwrap();
+        assert_eq!(third.name, "workspace-orchestrator-ws-1-3");
+    }
+
+    #[tokio::test]
+    async fn repo_respawn_after_death_with_default_name_succeeds() {
+        // Same invariant on the repo tier: dead repo-orchestrator-r-1 must
+        // not block the default-name respawn for r-1.
+        let state = test_state();
+        seed(&state).await;
+
+        let (first, _t) = spawn_repo_orchestrator_core(&state, "r-1", req(None), "user-1")
+            .await
+            .unwrap();
+        assert_eq!(first.name, "repo-orchestrator-r-1");
+
+        kill(&state, &first.name).await;
+
+        let (second, _t) = spawn_repo_orchestrator_core(&state, "r-1", req(None), "user-1")
+            .await
+            .unwrap();
+        assert_eq!(second.name, "repo-orchestrator-r-1-2");
+
+        // A different repo's default name is unaffected.
+        let (other, _t) = spawn_repo_orchestrator_core(&state, "r-2", req(None), "user-1")
+            .await
+            .unwrap();
+        assert_eq!(other.name, "repo-orchestrator-r-2");
+    }
+
+    #[tokio::test]
+    async fn explicit_name_conflict_still_rejected_when_dead_agent_holds_it() {
+        // Explicit names stay strict: a caller-supplied name matching ANY
+        // existing agent (here: the dead tombstone) is a 400, not silently
+        // renamed. Only the per-scope default name auto-suffixes.
+        let state = test_state();
+        seed(&state).await;
+
+        let (first, _t) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("named-orch")), "user-1")
+                .await
+                .unwrap();
+        kill(&state, &first.name).await;
+
+        let err =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("named-orch")), "user-1")
+                .await
+                .unwrap_err();
+        assert!(matches!(err, ApiError::InvalidInput(_)), "got: {err}");
     }
 }
