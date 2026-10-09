@@ -3,7 +3,7 @@ title: "Graph Summary & Dry-Run MCP Tools"
 spec_ref: "explorer-implementation.md §9, §22–23"
 depends_on:
   - task-062
-progress: needs-revision
+progress: ready-for-review
 coverage_sections:
   - "explorer-implementation.md §9 MCP Tools Available to the Agent"
   - "explorer-implementation.md §22 Graph Summary MCP Tool"
