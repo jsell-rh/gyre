@@ -90,6 +90,70 @@ impl AttributeContext {
 }
 
 // ---------------------------------------------------------------------------
+// Dynamic references
+// ---------------------------------------------------------------------------
+
+/// Resolve dynamic references in a condition value (§Conditions).
+///
+/// A value starting with `$` (e.g. `"$resource.repo_id"`) is replaced at
+/// evaluation time by the current value of the referenced attribute in the
+/// context; list values resolve element-wise. Returns `None` when a reference
+/// does not resolve: the condition cannot be established and must evaluate to
+/// false. No value is fabricated for a missing attribute — an Allow with an
+/// unresolvable reference must not grant (fail closed), mirroring the
+/// `resolve_ref` discipline on git refs.
+fn resolve_condition_value(
+    value: &ConditionValue,
+    ctx: &AttributeContext,
+) -> Option<ConditionValue> {
+    match value {
+        ConditionValue::String(s) => {
+            if s.starts_with('$') {
+                resolve_dynamic_value(s, ctx)
+            } else {
+                Some(value.clone())
+            }
+        }
+        ConditionValue::StringList(list) => {
+            let mut resolved = Vec::with_capacity(list.len());
+            for s in list {
+                if s.starts_with('$') {
+                    resolved.push(resolve_dynamic_scalar(s, ctx)?);
+                } else {
+                    resolved.push(s.clone());
+                }
+            }
+            Some(ConditionValue::StringList(resolved))
+        }
+        other => Some(other.clone()),
+    }
+}
+
+/// Resolve a `$path` reference to a full condition value, preserving the
+/// referenced attribute's type (string, list, number, bool).
+fn resolve_dynamic_value(s: &str, ctx: &AttributeContext) -> Option<ConditionValue> {
+    let key = s.strip_prefix('$')?;
+    match ctx.get(key)? {
+        AttrValue::Single(v) => Some(ConditionValue::String(v.clone())),
+        AttrValue::List(v) => Some(ConditionValue::StringList(v.clone())),
+        AttrValue::Number(n) => Some(ConditionValue::Number(*n)),
+        AttrValue::Bool(b) => Some(ConditionValue::Bool(*b)),
+    }
+}
+
+/// Resolve a `$path` reference in scalar (string) position.
+fn resolve_dynamic_scalar(s: &str, ctx: &AttributeContext) -> Option<String> {
+    let key = s.strip_prefix('$')?;
+    match ctx.get(key)? {
+        AttrValue::Single(v) => Some(v.clone()),
+        AttrValue::Number(n) => Some(n.to_string()),
+        AttrValue::Bool(b) => Some(b.to_string()),
+        // List-valued attribute referenced in scalar position.
+        AttrValue::List(_) => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Condition evaluation
 // ---------------------------------------------------------------------------
 
@@ -101,7 +165,12 @@ fn eval_condition(cond: &Condition, ctx: &AttributeContext) -> bool {
             let Some(attr_val) = ctx.get(&cond.attribute) else {
                 return false;
             };
-            match (&cond.operator, attr_val, &cond.value) {
+            // Dynamic references resolve against the same context; an
+            // unresolvable reference fails the condition.
+            let Some(value) = resolve_condition_value(&cond.value, ctx) else {
+                return false;
+            };
+            match (&cond.operator, attr_val, &value) {
                 (ConditionOp::Equals, AttrValue::Single(s), ConditionValue::String(expected)) => {
                     s == expected
                 }
@@ -198,6 +267,23 @@ pub fn evaluate(
 ) -> EvalResult {
     let t0 = std::time::Instant::now();
 
+    // Action, resource.type, and env.time are evaluation inputs (§Attributes)
+    // owned by this function: inject them so conditions can reference them
+    // uniformly regardless of caller. `env.time` is only set when absent so a
+    // dry-run caller can pin a specific evaluation time. The context is small
+    // (a few dozen entries built per request); the clone is not on any hot
+    // loop.
+    let mut ctx = ctx.clone();
+    ctx.set("action", action);
+    ctx.set("resource.type", resource_type);
+    if !ctx.has("env.time") {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        ctx.set_number("env.time", now as i64);
+    }
+
     // Filter to enabled policies that apply to this action/resource_type.
     policies.retain(|p| p.enabled && p.applies_to(action, resource_type));
 
@@ -208,7 +294,7 @@ pub fn evaluate(
     for policy in &policies {
         if policy.immutable
             && policy.effect == PolicyEffect::Deny
-            && eval_policy_conditions(policy, ctx)
+            && eval_policy_conditions(policy, &ctx)
         {
             let ms = t0.elapsed().as_secs_f64() * 1000.0;
             return EvalResult {
@@ -233,7 +319,7 @@ pub fn evaluate(
     });
 
     for policy in &remaining {
-        if eval_policy_conditions(policy, ctx) {
+        if eval_policy_conditions(policy, &ctx) {
             let ms = t0.elapsed().as_secs_f64() * 1000.0;
             return EvalResult {
                 effect: policy.effect.clone(),
@@ -648,6 +734,125 @@ mod tests {
         p.resource_types = vec!["attestation".to_string()];
 
         let result = evaluate(vec![p], &ctx, "push", "attestation");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+    }
+
+    // --- Dynamic references (§Conditions) -----------------------------------
+
+    #[test]
+    fn dynamic_reference_resolves_resource_attr_at_eval_time() {
+        // "$resource.repo_id" in a condition value is replaced by the
+        // resource attribute at evaluation time. Used for e.g. "subject's
+        // repo scope must contain the repo they act on".
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.id", "agent-7");
+        ctx.set_list(
+            "subject.repo_scope",
+            vec!["repo:alpha".to_string(), "repo:beta".to_string()],
+        );
+        ctx.set("resource.repo_id", "repo:beta");
+
+        let cond = Condition {
+            attribute: "subject.repo_scope".to_string(),
+            operator: ConditionOp::Contains,
+            value: ConditionValue::String("$resource.repo_id".to_string()),
+        };
+        let result = evaluate(vec![allow_policy(10, vec![cond.clone()])], &ctx, "read", "repo");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+
+        // Same policy, different resource: the reference resolves to the
+        // resource in the evaluated context, not a baked-in value.
+        ctx.set("resource.repo_id", "repo:gamma");
+        let result = evaluate(vec![allow_policy(10, vec![cond])], &ctx, "read", "repo");
+        assert_eq!(result.effect, PolicyEffect::Deny);
+    }
+
+    #[test]
+    fn dynamic_reference_subject_attr_resolves_at_eval_time() {
+        // "$subject.tenant_id" as a condition value compares the resource's
+        // tenant against the subject's tenant.
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.tenant_id", "tenant-a");
+        ctx.set("resource.tenant_id", "tenant-a");
+
+        let cond = Condition {
+            attribute: "resource.tenant_id".to_string(),
+            operator: ConditionOp::Equals,
+            value: ConditionValue::String("$subject.tenant_id".to_string()),
+        };
+        let result = evaluate(vec![allow_policy(10, vec![cond.clone()])], &ctx, "read", "repo");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+
+        // Cross-tenant resource: reference resolves to tenant-a, mismatch denies.
+        ctx.set("resource.tenant_id", "tenant-b");
+        let result = evaluate(vec![allow_policy(10, vec![cond])], &ctx, "read", "repo");
+        assert_eq!(result.effect, PolicyEffect::Deny);
+    }
+
+    #[test]
+    fn dynamic_reference_unresolvable_fails_closed() {
+        // No resource.repo_id in the context: the reference does not resolve
+        // and the Allow condition cannot be established — must NOT grant.
+        let mut ctx = AttributeContext::default();
+        ctx.set_list("subject.repo_scope", vec!["repo:alpha".to_string()]);
+
+        let cond = Condition {
+            attribute: "subject.repo_scope".to_string(),
+            operator: ConditionOp::Contains,
+            value: ConditionValue::String("$resource.repo_id".to_string()),
+        };
+        let result = evaluate(vec![allow_policy(10, vec![cond])], &ctx, "read", "repo");
+        assert_eq!(result.effect, PolicyEffect::Deny);
+    }
+
+    #[test]
+    fn dynamic_reference_number_and_list_resolution() {
+        // A numeric reference preserves type: subject.chain_depth > $resource.min_depth.
+        let mut ctx = AttributeContext::default();
+        ctx.set_number("subject.chain_depth", 7);
+        ctx.set_number("resource.min_depth", 5);
+
+        let cond = Condition {
+            attribute: "subject.chain_depth".to_string(),
+            operator: ConditionOp::GreaterThan,
+            value: ConditionValue::String("$resource.min_depth".to_string()),
+        };
+        let result = evaluate(vec![allow_policy(10, vec![cond])], &ctx, "push", "attestation");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+
+        // A list-valued reference in scalar (StringList element) position
+        // does not resolve — no scalar is fabricated from a list. The
+        // Allow condition cannot be established and must fail closed.
+        let mut ctx2 = AttributeContext::default();
+        ctx2.set("subject.workspace_role", "Developer");
+        ctx2.set_list(
+            "resource.allowed_roles",
+            vec!["Owner".to_string(), "Developer".to_string()],
+        );
+        let cond2 = Condition {
+            attribute: "subject.workspace_role".to_string(),
+            operator: ConditionOp::In,
+            value: ConditionValue::StringList(vec!["$resource.allowed_roles".to_string()]),
+        };
+        let result2 = evaluate(vec![allow_policy(10, vec![cond2])], &ctx2, "push", "repo");
+        assert_eq!(result2.effect, PolicyEffect::Deny);
+    }
+
+    #[test]
+    fn dynamic_reference_scalar_number_coerces_for_string_compare() {
+        // A numeric reference used in scalar string position coerces to its
+        // string form (resolve_dynamic_scalar), matching the String-typed
+        // JSON claim convention.
+        let mut ctx = AttributeContext::default();
+        ctx.set("resource.owner_id", "user-42");
+        ctx.set("subject.id", "user-42");
+
+        let cond = Condition {
+            attribute: "resource.owner_id".to_string(),
+            operator: ConditionOp::Equals,
+            value: ConditionValue::String("$subject.id".to_string()),
+        };
+        let result = evaluate(vec![allow_policy(10, vec![cond])], &ctx, "delete", "repo");
         assert_eq!(result.effect, PolicyEffect::Allow);
     }
 }
