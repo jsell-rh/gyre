@@ -201,10 +201,11 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/meta-specs/{path}/blast-radius` | Affected workspaces and repos if this meta-spec changes — `{spec_path, affected_workspaces: [{id}], affected_repos: [{id, workspace_id, reason}]}`; path is URL-encoded (M32) |
 | `POST` | `/api/v1/workspaces/{id}/meta-specs/preview` | Trigger async preview of a meta-spec change — returns `{preview_id}`; runs reconciliation in background (M32, HSI §1) |
 | `GET` | `/api/v1/workspaces/{id}/meta-specs/preview/{preview_id}` | Poll preview status — `{status: pending\|running\|complete\|failed, result?: {affected_agents, drift_count, sample_diffs}}` (M32, HSI §1) |
-| `POST/GET` | `/api/v1/meta-specs-registry` | Create / list DB-backed meta-spec registry entries — `{id, name, kind, path, content, version, status: draft\|approved\|deprecated}`; separate from `specs/manifest.yaml`-backed spec ledger (agent-runtime spec) |
-| `GET/PUT/DELETE` | `/api/v1/meta-specs-registry/{id}` | Read / update / delete a meta-spec registry entry (**Admin only** for PUT/DELETE) |
-| `GET` | `/api/v1/meta-specs-registry/{id}/versions` | List all versions of a meta-spec registry entry |
-| `GET` | `/api/v1/meta-specs-registry/{id}/versions/{version}` | Get a specific version snapshot |
+| `POST/GET` | `/api/v1/meta-specs` | Create / list DB-backed meta-spec registry entries — `{id, name, kind, scope, scope_id, prompt, version, content_hash, required, approval_status}`; filters `?scope=&scope_id=&kind=&required=`; setting `required` requires scope-level admin (agent-runtime §2) |
+| `GET/PUT/DELETE` | `/api/v1/meta-specs/{id}` | Read / update / delete a meta-spec registry entry; PUT bumps version and archives the prior version; changing `required` requires scope-level admin; DELETE returns 409 if spec bindings reference it |
+| `GET` | `/api/v1/meta-specs/{id}/versions` | List all versions of a meta-spec registry entry |
+| `GET` | `/api/v1/meta-specs/{id}/versions/{version}` | Get a specific version snapshot |
+| `GET/PUT` | `/api/v1/specs/{path}/meta-spec-bindings` | List / replace the spec-level meta-spec binding set — PUT body `{bindings: [{meta_spec_id, pinned_version}]}` (declarative replace); pinned version must exist in the meta-spec's history; Developer role or above (agent-runtime §2 Spec-Level Binding; path is URL-encoded) |
 | `POST/GET` | `/api/v1/workspaces/{id}/llm/config` | **Admin only** — Create / list per-workspace LLM function overrides; each entry: `{function_name, model, temperature?, max_tokens?, provider: anthropic\|vertex}` (LLM integration) |
 | `GET/PUT/DELETE` | `/api/v1/workspaces/{id}/llm/config/{function}` | Get effective config / set override / remove override for a specific LLM function in this workspace (LLM integration) |
 | `POST/GET` | `/api/v1/workspaces/{id}/llm/prompts` | **Admin only** — List / manage per-workspace prompt template overrides for LLM functions (LLM integration) |

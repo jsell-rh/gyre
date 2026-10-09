@@ -135,6 +135,19 @@ jobs:
       - name: Run vitest component tests
         run: cd web && npm test
 
+  gyre-agent-tests:
+    name: Gyre agent runner tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Zero-dependency: node --test with the real runner against a stubbed
+      # SDK (meta-spec prompt delivery) and the cred-proxy suite.
+      - name: Run agent runner + cred-proxy tests
+        run: cd docker/gyre-agent && npm test
+
   build-release:
     name: Build (release)
     if: github.ref == 'refs/heads/main'
