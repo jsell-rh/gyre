@@ -2,10 +2,10 @@
 title: "Implement meta-spec preview mode: real agent preview runs with branches, diffs, and cleanup"
 spec_ref: "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
-commits: ["961293be186a902f0cd3e1ae47cbf6abbd235cc5", "2842238c2ba65f303e68c03afeca3dcbe2372227", "83961ddf2eab00c3cb1d055d4f72e7a97f7c0364", "079d9ec36964a850c26a537c69091c8458aab02e", "edff6d52fa5e693cf1d3aefd2efdb36a797ee822", "7488e163a0a77744f44906753dd79d76a293d52a", "4a769ae4145560612d22de8cbab97b1119548558"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -123,25 +123,4 @@ These are workspace-scoped; the spec specifies the global routes `POST /api/v1/m
 - Read `crates/gyre-server/src/jobs.rs` for background-job registration (see how the merge processor or stale agent detector registers).
 - Read `crates/gyre-server/src/api/mr.rs` (or wherever the MR diff endpoint lives) for the git diff plumbing to reuse for preview diffs.
 - Read `docs/server-config.md` for config-knob conventions before adding the preview budget and GC TTL settings.
-
-
-## Repair Log (2026-10-09)
-
-The prior round migrated `web/src/lib/api.js` to the spec-conformant global
-preview routes but left `web/src/components/MetaSpecs.svelte` referencing four
-deleted state variables (`previewProgress`, `previewApiResult`,
-`isSimulatedPreview`, `impactTab`) and calling the removed
-`api.previewPersona`/`api.previewPersonaStatus` — clicking Preview threw at
-runtime and silently fell back to a simulated diff (the handoff's reported
-defect).
-
-Repaired in commit `92093ee` (this branch): the workspace preview flow now
-targets the real contract — POST `/api/v1/meta-specs/preview` with
-`{draft, targets}` built from the `/specs` ledger entries, 2s status polling
-that mirrors per-agent state and the produced `DiffResult` patches, per-target
-tabs, bounded polling with a stalled notice (no fake completion), and Clean Up
-wired to `DELETE /api/v1/meta-specs/preview/{id}`. The simulated fallback,
-structural-impact tabs, dead styles, and orphaned i18n keys were removed.
-Workspace-scope tests rewritten against the real API mocks (106 pass; the only
-other full-suite failure, `ExplorerCanvas-performance`, pre-exists on HEAD and
-is a timing-sensitive test unrelated to this task).
+- Follow conventional commits; run `cargo test -p gyre-server` and `bash scripts/check-arch.sh` before completing.
