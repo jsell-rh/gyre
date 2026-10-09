@@ -20,7 +20,10 @@ def requirement_parts(body, *, include_baseline_diagnostics=False):
         operational.append('Baseline failure')
     prose = re.sub(r"^## (?:" + '|'.join(operational) + r")\s*\n.*?(?=^## |\Z)",
                    "", parts[2], flags=re.M | re.S)
-    return front, prose
+    # Operational sections can leave surrounding blank lines behind. Match
+    # the same canonical whitespace used by the generation hash so appending
+    # Shipped or Review notes does not masquerade as a contract amendment.
+    return front.strip(), prose.strip()
 
 
 def generation(body, specs, goal="", *, include_baseline_diagnostics=False):
