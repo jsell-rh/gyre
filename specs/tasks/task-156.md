@@ -2,7 +2,7 @@
 title: "Implement reconciliation controller and conformance sweep background job"
 spec_ref: "meta-spec-reconciliation.md §6, §10"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §6 Reconciliation: The Slow Rollout"
   - "meta-spec-reconciliation.md §10 Conformance Sweeps (Steady State)"
