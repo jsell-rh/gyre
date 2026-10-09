@@ -1396,6 +1396,18 @@ pub async fn record_agent_usage(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
 
+    let workspace = state
+        .workspaces
+        .find_by_id(&agent.workspace_id)
+        .await?
+        .ok_or_else(|| {
+            ApiError::Internal(anyhow::anyhow!(
+                "agent {} references missing workspace {}",
+                agent.id,
+                agent.workspace_id
+            ))
+        })?;
+
     let now = now_secs();
     let usage = AgentUsage {
         agent_id: agent.id.clone(),
@@ -1406,6 +1418,30 @@ pub async fn record_agent_usage(
     };
 
     state.agents.record_usage(&usage).await?;
+
+    // Platform-model.md §Budget Tracking: every usage report appends one
+    // per-call budget record and rolls into the workspace + tenant
+    // tokens_used_today / cost_today counters (the input check_spawn_budget
+    // evaluates). Best-effort — never fails the report.
+    super::budget::record_llm_call_usage(
+        &state,
+        &super::budget::LlmCallUsage {
+            tenant_id: workspace.tenant_id.clone(),
+            workspace_id: agent.workspace_id.clone(),
+            repo_id: agent.repo_id.clone(),
+            agent_id: Some(agent.id.clone()),
+            task_id: agent.current_task_id.clone(),
+            usage_type: "agent_run".to_string(),
+            input_tokens: req.tokens_input,
+            output_tokens: req.tokens_output,
+            cost_usd: req.cost_usd,
+            model: workspace
+                .llm_model
+                .clone()
+                .unwrap_or_else(|| crate::llm_helpers::DEFAULT_LLM_MODEL.to_string()),
+        },
+    )
+    .await;
 
     tracing::info!(
         agent_id = %id,
@@ -1820,6 +1856,7 @@ mod tests {
     use crate::mem::test_state;
     use axum::{body::Body, Router};
     use http::{Request, StatusCode};
+    use std::sync::Arc;
     use tower::ServiceExt;
 
     fn app() -> Router {
@@ -2644,6 +2681,104 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
         let json = body_json(resp).await;
         (app, json["id"].as_str().unwrap().to_string())
+    }
+
+    // ── Agent usage reporting → budget recording (task-190) ────────────────────
+
+    #[tokio::test]
+    async fn agent_usage_report_records_budget_call_and_increments_counters() {
+        // task-190 regression: POST /api/v1/agents/:id/usage must (a) append a
+        // BudgetCallRecord with usage_type "agent_run" and (b) increment the
+        // workspace AND tenant tokens_used_today/cost_today counters, so that
+        // GET /api/v1/workspaces/:id/budget reflects the usage and
+        // check_spawn_budget has real inputs. With the recording wiring
+        // removed, the counters stay frozen at 0 and this test fails.
+        let state = crate::mem::test_state();
+        let app = crate::api::api_router().with_state(Arc::clone(&state));
+        let (app, ws_id) = create_workspace(app, "ws-usage-budget").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "usage budget task").await;
+        let (_, spawn_json) = do_spawn(
+            app.clone(),
+            &repo_id,
+            &task_id,
+            "feat/usage-budget",
+        )
+        .await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let body = serde_json::json!({
+            "tokens_input": 600,
+            "tokens_output": 400,
+            "cost_usd": 0.12,
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/usage"))
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // (a) Per-call audit record retrievable via list_by_workspace.
+        let records = state
+            .budget_calls
+            .list_by_workspace(&ws_id, 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            records.len(),
+            1,
+            "usage report must append exactly one BudgetCallRecord"
+        );
+        let r = &records[0];
+        assert_eq!(r.usage_type, "agent_run");
+        assert_eq!(r.input_tokens, 600);
+        assert_eq!(r.output_tokens, 400);
+        assert!((r.cost_usd - 0.12).abs() < 1e-9);
+        assert_eq!(r.agent_id.as_ref().unwrap().as_str(), agent_id);
+        assert_eq!(r.workspace_id.as_str(), ws_id);
+
+        // (b) Workspace + tenant counters incremented.
+        let ws_usage = state
+            .budget_usages
+            .get_usage(&super::super::budget::workspace_key(&ws_id))
+            .await
+            .unwrap()
+            .expect("workspace budget usage must exist after usage report");
+        assert_eq!(ws_usage.tokens_used_today, 1000);
+        assert!((ws_usage.cost_today - 0.12).abs() < 1e-9);
+        let tenant_usage = state
+            .budget_usages
+            .get_usage(super::super::budget::tenant_key())
+            .await
+            .unwrap()
+            .expect("tenant budget usage must exist after usage report");
+        assert_eq!(tenant_usage.tokens_used_today, 1000);
+        assert!((tenant_usage.cost_today - 0.12).abs() < 1e-9);
+
+        // GET /api/v1/workspaces/:id/budget reflects the increased usage.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/workspaces/{ws_id}/budget"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["usage"]["tokens_used_today"], 1000);
+        assert!((v["usage"]["cost_today"].as_f64().unwrap() - 0.12).abs() < 1e-9);
     }
 
     #[tokio::test]
