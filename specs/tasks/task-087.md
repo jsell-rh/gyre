@@ -2,7 +2,7 @@
 title: "HSI Test-Time Trace Capture Gate"
 spec_ref: "human-system-interface.md §3 Test-Time Trace Capture"
 depends_on: []
-progress: ready-for-review
+progress: complete
 review: specs/reviews/task-087.md
 coverage_sections:
   - "human-system-interface.md §3 Test-Time Trace Capture"
@@ -82,6 +82,13 @@ The `TraceRepository` port already exists in `crates/gyre-ports/src/trace.rs` an
 - [x] Max spans per trace capped at configured limit
 - [x] Trace replaced on re-run for same MR
 - [x] `cargo test --all` passes
+
+## Shipped
+
+- **TraceCapture gate + OTLP receiver**: `trace_capture` gate type parses the spec's YAML config block (otlp_port/test_command/max_spans/capture_external/env), runs the 7-step lifecycle — tonic OTLP gRPC receiver bound before the test command, OTel env vars injected (user env overrides, `{{repo_name}}` templated), post-capture span→graph-node linkage (HTTP→Endpoint via `http.route`, function→Function via `code.function`, DB→Module, unresolved→None), `GateTrace` stored with real source-branch commit SHA; gate always passes (observational).
+- **Span payload endpoint with real authorization**: `GET /api/v1/trace-spans/:span_id/payload` takes only `:span_id` (compound trace-prefixed ids are globally unique), resolves span → trace → MR → workspace and returns 403 on cross-tenant access; tested for 200/401/403/404 and trace-replacement semantics. `GET /api/v1/merge-requests/:id/trace` and the `trace://` MCP resource share one assembler.
+- **Storage lifecycle on all three adapters**: one trace per MR with replace-on-re-run, payload rows built from raw summaries (4KB truncated columns + full-payload blobs retrievable by span), `promote_to_attestation` on merge and `delete_by_mr` on close; the mem adapter now mirrors the SQLite contract (payload rows populated, replacement cascade, 4KB truncation, permanence) so in-memory mode no longer 404s payloads.
+- **Spec-cased wire format**: `SpanKind`/`SpanStatus` serialize PascalCase (`"Server"`/`"Ok"`) per the HSI §3a JSON example with legacy-lowercase deserialization aliases and case-insensitive parse; all web span-status consumers (DetailPanel waterfall, ExplorerCanvas, FlowCanvas error ring, NodeDetailPanel, MoldableView normalization) handle both casings, with regression tests on both sides.
 
 ## Agent Instructions
 
