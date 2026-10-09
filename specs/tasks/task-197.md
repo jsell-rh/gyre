@@ -2,7 +2,7 @@
 title: "Materialize default Tenant entity on first-startup bootstrap"
 spec_ref: "hierarchy-enforcement.md §1 Bootstrap Behavior (§50-66)"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "hierarchy-enforcement.md §5"
 commits: ["71901c549c031a0a774ce71e87e9842bc7932048"]
@@ -110,3 +110,35 @@ Note: the demo `/admin/seed` path uses id `"default-tenant"` and name `"Default 
   early-return idempotency) rather than introducing a new pattern.
 - Skip formatters/linters/full-suite runs beyond the two commands above; the loop handles
   global validation.
+
+## Shipped
+
+`bootstrap_default_tenant` (crates/gyre-server/src/lib.rs) materializes the
+default Tenant row on startup: id `"default"` — the operative single-tenant
+scope every Diesel adapter filters on, so the row is the real tenant backing
+existing data, not an orphaned UUID (`deterministic_uuid` form is deferred
+multi-tenant work, spec §68-70). Fields per hierarchy-enforcement.md §1:
+name "Default", slug "default", `oidc_issuer: None`,
+`budget: Some(BudgetConfig::default())`, `max_workspaces: None`, `created_at:
+now()`. Early-return idempotency on `find_by_id`, `tracing::warn!` on create
+error — same convention as the other seed functions. Wired in main.rs
+immediately after `build_state` and before `seed_builtin_policies` so the
+tenant exists before any tenant-scoped seeding. The demo `/admin/seed` path
+and `POST /api/v1/tenants` are untouched.
+
+Verification (evidence: /tmp/stage/review-evidence/task-197-verification.md):
+
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib bootstrap_default_tenant`
+  → 1 passed. The test builds an `AppState` over a fresh temp SQLite DB wired
+  to the real `SqliteStorage` `TenantRepository`, asserts `find_by_id("default")`
+  is `None` before bootstrap, then asserts the row exists with the spec field
+  values after, and that a second call leaves exactly one default tenant.
+- Hardness probe: replacing the bootstrap body with a no-op makes that test
+  FAIL (0 passed; 1 failed) — it verifies the materialized row, not mirrored
+  logic. Probe reverted; post-revert re-run passes.
+- `bash scripts/check-arch.sh` → passed.
+
+This round changed no production code: commit 71901c54 (identical product
+code to the earlier attempt's a5f43d42) already carried the implementation;
+the resume flow had reset only this task file to not-started, which this
+commit restores to ready-for-review.
