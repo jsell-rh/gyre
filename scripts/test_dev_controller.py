@@ -344,6 +344,29 @@ class ControllerGitTest(unittest.TestCase):
             controller.schedule(self.db, slots=50, max_attempts=3, launch_burst=2)
         self.assertEqual([call.args[1]["name"] for call in spawn.call_args_list], ["task-001", "task-002"])
 
+    def test_inference_failure_retains_checkpoint_without_throttling_gateway(self):
+        sha = self.candidate()
+        git(self.work, 'push', 'origin', 'HEAD:devloop/task-001/attempt-1')
+        controller.sync(self.db)
+        directory = controller.STATE / 'attempts/inference'
+        directory.mkdir(parents=True)
+        (directory / 'exit').write_text('82\n')
+        self.db.execute("""INSERT INTO attempts(id,task,kind,branch,state,pid,started)
+                           VALUES('inference','task-001','worker','devloop/task-001/attempt-1','running',999999,1)""")
+        self.db.execute("UPDATE tasks SET state='running',attempts=1,seed=NULL WHERE name='task-001'")
+        self.db.execute('UPDATE controller_health SET admission=50')
+        self.db.commit()
+        with patch.object(controller.random, 'uniform', return_value=1), patch.object(controller.time, 'time', return_value=1000):
+            controller.reap(self.db)
+        task = self.db.execute("SELECT * FROM tasks WHERE name='task-001'").fetchone()
+        self.assertEqual((task['state'], task['condition'], task['retry_at'], task['retry_baseline'], task['seed']),
+                         ('deferred', 'InferenceUnavailable', 1030, 1, sha))
+        self.assertEqual(controller.health(self.db)['admission'], 50)
+        self.assertEqual(task['repairs'], 0)
+        with patch.object(controller, 'spawn') as dispatch, patch.object(controller.time, 'time', return_value=1029):
+            controller.schedule(self.db, 50, 3)
+            dispatch.assert_not_called()
+
     def test_capacity_failure_backs_off_without_using_task_budget_and_survives_restart(self):
         self.assertEqual([controller.backoff_seconds(n) for n in (1, 2, 3, 7)], [30, 60, 120, 900])
         controller.sync(self.db)

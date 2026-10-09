@@ -53,6 +53,19 @@ try {
         break;
       }
       case "message_end":
+        if (event.message?.role === "assistant") {
+          const reason = event.message.stopReason;
+          if (["error", "aborted", "length"].includes(reason)) {
+            flushText();
+            emit("text", { error: true, text: `\nAgent ${reason}: ${event.message.errorMessage || "response did not complete"}\n` });
+            // OMP can exit zero after a provider stream stalls. A partial
+            // response (even one containing PASS) must not approve a review.
+            process.exitCode = reason === "error" ? 82 : reason === "aborted" ? 130 : 1;
+          } else {
+            // An internal retry may recover before the overall round ends.
+            process.exitCode = 0;
+          }
+        }
         if (event.message?.role === "assistant" && !hadTextDelta) {
           appendText(outputText(event.message));
         }

@@ -78,6 +78,7 @@ PY
   fi
   rounds="${GYRE_DEV_WORKER_ROUNDS:-6}"
   [[ "$rounds" =~ ^[1-9][0-9]*$ ]] || exit 2
+  inference_failures=0
   for round in $(seq 1 "$rounds"); do
     set +e
     bash /tmp/stage/dev-round.sh "$TASK"
@@ -135,7 +136,19 @@ PY
     progress=$(bash scripts/task-field.sh "specs/tasks/$TASK.md" progress)
     echo "round=$round worker_exit=$worker_rc progress=$progress pushed=$(git rev-parse HEAD)"
     [ "$progress" = complete ] && break
+    if [ "$worker_rc" -eq 82 ]; then
+      inference_failures=$((inference_failures + 1))
+      delay=$((5 * 2 ** (inference_failures < 5 ? inference_failures - 1 : 4)))
+      [ "$delay" -le 60 ] || delay=60
+      if [ "$round" -lt "$rounds" ]; then
+        echo "inference unavailable; retrying saved session in this sandbox after ${delay}s" >&2
+        sleep "$delay"
+      fi
+    else
+      inference_failures=0
+    fi
   done
+  [ "$progress" = complete ] || [ "$worker_rc" -ne 82 ] || exit 82
   # A successful push preserves partial work; the controller decides whether
   # this is a candidate or a seed for the next attempt.
 elif [ "$MODE" = check ]; then

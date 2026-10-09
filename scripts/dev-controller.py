@@ -623,7 +623,7 @@ def reap(db):
             # Refresh before consuming the durable outcome. A fetch outage must
             # leave this attempt recoverable, rather than strand a running task.
             source()
-        outcome = "done" if rc == 0 else "deferred" if rc in (77, 78) else "failed"
+        outcome = "done" if rc == 0 else "deferred" if rc in (77, 78, 82) else "failed"
         db.execute("UPDATE attempts SET state=?,ended=?,detail=? WHERE id=?",
                    (outcome, int(time.time()), f"exit={rc}", attempt["id"]))
         if stale_audit(task):
@@ -636,6 +636,16 @@ def reap(db):
         elif rc in (77, 78):
             reason = "Capacity unavailable" if rc == 78 else "Sandbox or gateway infrastructure unavailable"
             defer_infrastructure(db, task, reason, worker=attempt["kind"] == "worker")
+        elif rc == 82:
+            failures = task['reconcile_failures'] + 1
+            delay = int(backoff_seconds(failures) * random.uniform(0.8, 1.2))
+            seed = ref_sha(f"origin/{attempt['branch']}") if attempt['kind'] == 'worker' else None
+            db.execute("""UPDATE tasks SET state='deferred',condition='InferenceUnavailable',
+                       retry_at=?,reconcile_failures=?,retry_baseline=retry_baseline+?,
+                       seed=COALESCE(?,seed) WHERE name=?""",
+                       (int(time.time()) + delay, failures, int(attempt['kind'] == 'worker'),
+                        seed, task['name']))
+            event(db, task['name'], f'inference unavailable; checkpoint retained, retry after {delay}s; gateway admission unchanged')
         elif rc == 79:
             db.execute("UPDATE tasks SET state='failed',condition='Sandbox configuration invalid' WHERE name=?", (task["name"],))
             db.execute("UPDATE controller_health SET condition='ConfigurationInvalid',admission=1 WHERE id=1")
