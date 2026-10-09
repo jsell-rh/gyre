@@ -141,13 +141,9 @@ pub async fn reindex_handler(
 #[cfg(test)]
 mod tests {
     use crate::mem::test_state;
-    use axum::{body::Body, Router};
+    use axum::body::Body;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
-
-    fn app() -> Router {
-        crate::api::api_router().with_state(test_state())
-    }
 
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)

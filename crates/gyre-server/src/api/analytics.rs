@@ -1315,8 +1315,11 @@ mod tests {
         let json = get_events(&app, "event_name=ev.iso&since=1970-01-01&until=1970-01-01").await;
         assert_eq!(json.as_array().unwrap().len(), 3);
 
-        // Offset form: 1970-01-01T02:00+02:00 == 0.
-        let json = get_events(&app, "event_name=ev.iso&since=1970-01-01T02:00+02:00").await;
+        // Offset form: 1970-01-01T02:00+02:00 == 0. The `+` must be
+        // percent-encoded as %2B — a raw `+` decodes as a space in query
+        // strings (application/x-www-form-urlencoded), which no timestamp
+        // format uses.
+        let json = get_events(&app, "event_name=ev.iso&since=1970-01-01T02:00%2B02:00").await;
         assert_eq!(json.as_array().unwrap().len(), 3);
 
         // Unix seconds still accepted (backward compat).
