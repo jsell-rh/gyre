@@ -2,7 +2,7 @@
 title: "Repair verified failure on main cd1c5f044e49"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 commits: ["d4ccd0078a9d332fe500a8dddd8f6cf5481fc7d2", "da633b5f0d4980958fd54ba3eba0b70df989761f", "6395092d14c9c1c5d383e934f63940e45bae2e3c", "04c9e46cda3eae8b038e14a8d34f7ebb7edc3475", "90d131e3c2af69ff3a1a9494c84de1f8ff3857e1", "7b38e944df4cb9b134621cd6f18432e99f212d41"]
 ---
 
@@ -1207,6 +1207,62 @@ unlisted). `scripts/check-task-commit-attribution.sh` → OK, exit 0.
 - `git diff --check b6b6f0e` → clean.
 - `python3 scripts/check-rustfmt-diff.py b6b6f0e` → "changed lines clean".
 - `python3 scripts/check-clippy-diff.py b6b6f0e` → "changed lines clean
+  (1 Rust files, 1145 existing warnings outside changes)", exit 0.
+- `scripts/check-arch.sh` → passed; `scripts/check-relative-path-defaults.sh`
+  → OK; `scripts/check-task-commit-attribution.sh` → OK.
+
+### Unresolved
+
+None within sandbox scope. Full Playwright E2E, full vitest, and full Rust
+suites remain the controller's host/GitHub gates on the exact merge SHA.
+
+## Repair record (2026-10-09, round 11 — upstream branch-scoped attribution inherited, gates green)
+
+Merge-base vs origin/main this round: `1e2e3962` (main advanced past `b6b6f0e`
+with `75b18f7`, `ddf090f`, and `1e2e3962` — dev-loop process fixes only, no
+product overlap with this task's 18-file diff).
+
+### Upstream attribution fix — verified and adopted
+
+Upstream `1e2e3962` ("fix(loop): attribute all production commits in the task
+branch") repairs the frozen-helper omission that retired attempt 4:
+`scripts/dev-attribution.py` now scopes by branch membership
+(`git rev-list --no-merges origin/main..HEAD`) in addition to task labels, so
+unlabeled production commits in the task branch are recorded at every
+checkpoint. Re-ran `python3 scripts/dev-attribution.py task-210` on this
+checkout: the computed list is exactly the frontmatter's six product commits
+(`d4ccd007`, `da633b5f`, `6395092d`, `04c9e46c`, `90d131e3`, `7b38e94`) — no
+drift, no omission, nothing to rework. The mechanical chain is preserved as
+the handoff requires.
+
+### Root scope restorations — still intact
+
+`git diff origin/main -- scripts/check-task-commit-attribution.sh
+specs/tasks/task-072.md task-077/087/092/106/107` is empty and the working
+tree is clean. The rejected reachability gate, unrelated task edits, and
+Python bytecode are not reintroduced anywhere in the diff.
+
+### Focused verification on the current tree (this session, fresh artifacts)
+
+- `CARGO_TARGET_DIR=/tmp/task210-target` (created empty this session, used
+  only by this checkout; no probe worktrees or shared targets exist):
+  `cargo test -p gyre-server --lib admin::tests` → **32 passed, 0 failed**,
+  including all four tenant-scope tests
+  (`admin_seed_rejects_caller_from_foreign_tenant`,
+  `admin_seed_rejects_when_workspace_id_already_owned_by_foreign_tenant`,
+  `admin_seed_inconsistent_repo_without_workspace_is_conflict`,
+  `admin_seed_workspace_visible_to_calling_tenant`).
+- Frontend (`web/`, `npm ci` fresh this session): WorkspaceHome suites
+  (Home + Sections + RulesFailure) → 44 passed / 41 pre-existing skipped;
+  shell suites (AppShell, NoSidebar, WorkspaceDrawerSectionNav) → 78/78
+  passed.
+
+### Gates on the current merge-base range (`1e2e3962..HEAD`)
+
+- `git diff --check 1e2e3962` → clean.
+- `python3 scripts/check-rustfmt-diff.py 1e2e3962` → "changed lines clean
+  (1 Rust files checked)".
+- `python3 scripts/check-clippy-diff.py 1e2e3962` → "changed lines clean
   (1 Rust files, 1145 existing warnings outside changes)", exit 0.
 - `scripts/check-arch.sh` → passed; `scripts/check-relative-path-defaults.sh`
   → OK; `scripts/check-task-commit-attribution.sh` → OK.
