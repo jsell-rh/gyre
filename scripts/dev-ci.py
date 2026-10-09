@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+import subprocess
 from pathlib import Path
 
 
@@ -39,7 +40,8 @@ def observe(run, url, head, base, directory):
         # admin push to evade GitHub's merge policy.
         return {'status': 'passed' if pr['mergeStateStatus'] == 'CLEAN' else 'policy_pending'}
     repo = re.fullmatch(r'https://github.com/([^/]+/[^/]+)/pull/\d+', url).group(1)
-    evidence, candidate_evidence, baseline_evidence = [], [], []
+    candidate_evidence, baseline_evidence = [], []
+    artifact_directories = []
     baseline_only = True
     baseline_runs = json.loads(run('gh', 'api',
         f'repos/{repo}/actions/runs?head_sha={base}&per_page=100', timeout=30).stdout)['workflow_runs']
@@ -54,6 +56,17 @@ def observe(run, url, head, base, directory):
         (directory / f'github-run-{ident}.log').write_text(candidate_log)
         allowance = max(1024, 60000 // (2 * len(failed)))
         candidate_evidence.append(f'## Current PR head {head}: {metadata["name"]}, run {ident}\n\n{candidate_log[-allowance:]}')
+        if metadata['name'] == 'E2E Tests':
+            artifacts = directory / f'github-run-{ident}-artifacts'
+            try:
+                downloaded = run('gh', 'run', 'download', str(ident), '--repo', repo,
+                                 '--name', 'playwright-screenshots', '--dir', str(artifacts),
+                                 timeout=90, check=False)
+                if downloaded.returncode == 0 and artifacts.exists():
+                    artifact_directories.append(str(artifacts))
+            except (OSError, subprocess.TimeoutExpired):
+                # Optional screenshots must not suppress known check failures.
+                pass
         matching = [item for item in baseline_runs if item['head_sha'] == base and
                     item['workflow_id'] == metadata['workflowDatabaseId'] and item['status'] == 'completed']
         latest = max(matching, key=lambda item: item['run_number'], default=None)
@@ -74,6 +87,7 @@ def observe(run, url, head, base, directory):
     return {'status': 'baseline_failed' if baseline_only else 'candidate_failed',
             'base': base, 'baseline_log': str(baseline_path), 'candidate_log': str(candidate_path),
             'pr': url, 'head': head, 'runs': sorted({run_id(check) for check in failed}, key=str),
+            'artifact_directories': artifact_directories,
             'environment': 'github-' + hashlib.sha256(json.dumps(sorted((item.get('workflowName', ''), item.get('name', ''), item.get('context', '')) for item in failed)).encode()).hexdigest(),
             'log': str(log)}
 

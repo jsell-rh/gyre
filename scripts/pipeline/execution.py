@@ -177,6 +177,35 @@ class Execution:
         bundle.mkdir(exist_ok=True)
         (bundle / 'job.json').write_text(json.dumps(job))
         (bundle / 'prompt.md').write_text(prompt)
+        repair = task['data'].get('repair') or {}
+        evidence_log = repair.get('baseline_log') if repair.get('category') == 'baseline' else repair.get('candidate_log')
+        if evidence_log:
+            source = Path(evidence_log).resolve()
+            if source.is_relative_to(self.store.directory) and source.is_file():
+                (bundle / 'findings.log').write_bytes(source.read_bytes()[-65536:])
+                with (bundle / 'prompt.md').open('a') as output:
+                    output.write('\nCurrent failure evidence is available at /tmp/stage/findings.log. Host paths in findings are provenance and are not accessible inside this sandbox.\n')
+        retained_bytes, retained_files = 0, 0
+        for directory in repair.get('artifact_directories', []):
+            source = Path(directory).resolve()
+            if not source.is_relative_to(self.store.directory) or not source.is_dir():
+                continue
+            for path in sorted(source.rglob('*')):
+                if not path.is_file() or path.suffix not in ('.png', '.md', '.txt'):
+                    continue
+                if not path.resolve().is_relative_to(self.store.directory):
+                    raise ValueError('CI artifact escapes private state')
+                size = path.stat().st_size
+                if retained_files >= 256 or retained_bytes + size > 32 * 1024 * 1024:
+                    continue
+                target = bundle / 'ci-artifacts' / source.name / path.relative_to(source)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(path.read_bytes())
+                retained_bytes += size
+                retained_files += 1
+        if retained_files:
+            with (bundle / 'prompt.md').open('a') as output:
+                output.write(f'\n{retained_files} current CI artifact files are available under /tmp/stage/ci-artifacts. Inspect expected/actual/diff images and error contexts before changing visual baselines.\n')
         artifacts = list(dict.fromkeys((task['data'].get('retained_artifacts') or []) +
                                       (task['data'].get('repair') or {}).get('stash_artifacts', [])))
         for index, value in enumerate(artifacts):
