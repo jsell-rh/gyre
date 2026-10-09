@@ -5,7 +5,7 @@ depends_on: []
 progress: not-started
 coverage_sections:
   - "search.md §CLI"
-commits: ["6db89c01744196d9387fb1f3c21351e5394bfa76", "9771fa5e08bd1751909f8e78478e760acec556bd", "df147d6dc3296fdf1149c43f4e0a7adeb302d984"]
+commits: ["0196a149bb5cfd42e6dfadc1e024a0149a45ddf4", "4e5b20d211eb17c7d00be369227dbab2e82b0f34", "6bc9a54dfd5bff0a78d0410ff997196612e02802"]
 ---
 
 ## Spec Excerpt
