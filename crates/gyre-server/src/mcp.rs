@@ -1000,7 +1000,7 @@ async fn handle_list_tasks(state: &AppState, args: &Value) -> Value {
     }
 }
 
-async fn handle_update_task(state: &AppState, args: &Value) -> Value {
+async fn handle_update_task(state: &std::sync::Arc<AppState>, args: &Value) -> Value {
     let id_str = match require_str(args, "id") {
         Ok(s) => s.to_string(),
         Err(_) => return tool_error("missing required field: id"),
@@ -1039,7 +1039,29 @@ async fn handle_update_task(state: &AppState, args: &Value) -> Value {
     }
     task.updated_at = now_secs();
     match state.tasks.update(&task).await {
-        Ok(()) => tool_result(format!("Updated task {id_str}")),
+        Ok(()) => {
+            // meta-spec-reconciliation.md §11: ReconciliationCompleted /
+            // MetaSpecDriftResolved fire when the last open reconciliation /
+            // drift-review task for a workspace reaches terminal status.
+            if matches!(task.status, TaskStatus::Done | TaskStatus::Cancelled)
+                && task.labels.iter().any(|l| {
+                    l == crate::reconciliation::RECONCILIATION_LABEL
+                        || l == crate::reconciliation::DRIFT_REVIEW_LABEL
+                })
+            {
+                crate::reconciliation::maybe_emit_reconciliation_completed(
+                    state,
+                    &task.workspace_id,
+                )
+                .await;
+                crate::reconciliation::maybe_emit_drift_resolved(
+                    state,
+                    &task.workspace_id,
+                )
+                .await;
+            }
+            tool_result(format!("Updated task {id_str}"))
+        }
         Err(e) => tool_error(format!("Failed to update task: {e}")),
     }
 }

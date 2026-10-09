@@ -270,6 +270,9 @@ pub async fn put_meta_spec_set(
     // reconciliation — an identical re-PUT is a no-op.
     let changed_paths = crate::reconciliation::diff_meta_spec_set(&old_set, &set);
     if !changed_paths.is_empty() {
+        // §11 MetaSpecSetUpdated: workspace meta-spec set binding changed.
+        crate::reconciliation::emit_meta_spec_set_updated(&state, &Id::new(&workspace_id), &changed_paths)
+            .await;
         let summary = crate::reconciliation::run_reconciliation(
             &state,
             &Id::new(&workspace_id),
@@ -1139,6 +1142,11 @@ pub async fn update_meta_spec_registry(
         .await
         .map_err(ApiError::Internal)?;
 
+    // §11 MetaSpecChanged: meta-spec content updated in the registry.
+    if req.prompt.is_some() {
+        crate::reconciliation::emit_meta_spec_changed(&state, None, &ms).await;
+    }
+
     // Meta-spec change approved and rolled out (§6 trigger): content changed
     // (new version) AND this update approves it. Every workspace whose
     // meta-spec set binds this meta-spec reconciles.
@@ -1369,6 +1377,111 @@ mod registry_tests {
         assert_eq!(update_resp.status(), StatusCode::OK);
         let update_json = body_json(update_resp).await;
         assert_eq!(update_json["version"].as_u64().unwrap(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn update_prompt_emits_meta_spec_changed_event() {
+        let state = test_state();
+        let app: Router = crate::api::api_router().with_state(state.clone());
+
+        // Workspace whose set binds the spec (so the event has a persisted
+        // destination) + repo so the §6 reconciliation side effect has scope.
+        let ws_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"name": "ws-changed", "slug": "ws-changed"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_json = body_json(ws_resp).await;
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+
+        let set_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/meta-spec-set"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "personas": { "worker": { "path": "event-worker", "sha": "a1" } },
+                            "principles": [], "standards": [], "process": []
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(set_resp.status(), StatusCode::OK);
+
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs-registry")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"kind":"meta:persona","name":"event-worker","scope":"Global","prompt":"v1 prompt"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let create_json = body_json(create_resp).await;
+        let id = create_json["id"].as_str().unwrap().to_string();
+
+        // Content update → meta_spec_changed fanned out to the binding workspace.
+        let update_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"prompt":"v2 prompt"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update_resp.status(), StatusCode::OK);
+
+        let msgs = state
+            .messages
+            .list_by_workspace(
+                &gyre_common::Id::new(&ws_id),
+                Some("meta_spec_changed"),
+                None,
+                None,
+                None,
+                Some(50),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            msgs.len(),
+            1,
+            "content update on a bound meta-spec must emit meta_spec_changed to the binding workspace"
+        );
+        let payload = msgs[0].payload.as_ref().unwrap();
+        assert_eq!(payload["name"].as_str().unwrap(), "event-worker");
+        assert_eq!(payload["version"].as_u64().unwrap(), 2);
     }
 
     #[tokio::test(flavor = "multi_thread")]

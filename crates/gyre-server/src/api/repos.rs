@@ -280,6 +280,19 @@ pub async fn archive_repo(
             task.cancelled_reason = Some("Repository archived".to_string());
             task.updated_at = now;
             state.tasks.update(&task).await?;
+            // meta-spec-reconciliation.md §11: cancellation of the last open
+            // reconciliation / drift-review task completes the wave.
+            if task.labels.iter().any(|l| {
+                l == crate::reconciliation::RECONCILIATION_LABEL
+                    || l == crate::reconciliation::DRIFT_REVIEW_LABEL
+            }) {
+                crate::reconciliation::maybe_emit_reconciliation_completed(
+                    &state,
+                    &task.workspace_id,
+                )
+                .await;
+                crate::reconciliation::maybe_emit_drift_resolved(&state, &task.workspace_id).await;
+            }
         }
     }
 
