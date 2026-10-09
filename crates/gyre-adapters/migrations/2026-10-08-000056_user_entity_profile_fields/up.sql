@@ -28,9 +28,12 @@ ALTER TABLE users ADD COLUMN global_role TEXT NOT NULL DEFAULT 'Member';
 -- which the pre-migration domain type aliased to the same value): lowercase,
 -- then map the separator and whitespace characters the sanitizer treats as
 -- '-' so freshly backfilled rows match what new SSO provisioning derives.
--- Remaining non-URL-safe characters are simply removed (a username like
--- "jörg" becomes "jrg") — a rare, acceptable degradation for legacy rows;
--- new users go through User::sanitize_username in Rust.
+-- Remaining non-URL-safe characters can survive the REPLACE pass (LOWER and
+-- REPLACE only handle ASCII); rows whose handle is still not URL-safe after
+-- this backfill are renamed to "u-<row id>" by the sanitize pass below —
+-- the handle contract is never violated for legacy rows, at the cost of a
+-- degraded (but unique, valid) handle; new users go through
+-- User::sanitize_username in Rust.
 UPDATE users
 SET username = LOWER(
     REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
@@ -106,7 +109,9 @@ UPDATE users SET tmp_username_scratch = REPLACE(tmp_username_scratch, '-', '');
 UPDATE users SET tmp_username_scratch = REPLACE(tmp_username_scratch, '_', '');
 UPDATE users
 SET username = 'u-' || id
-WHERE tmp_username_scratch <> ''
+WHERE username IS NULL
+   OR username = ''
+   OR tmp_username_scratch <> ''
    OR length(username) > 64
    OR substr(username, 1, 1) IN ('-','_')
    OR substr(username, length(username), 1) IN ('-','_')

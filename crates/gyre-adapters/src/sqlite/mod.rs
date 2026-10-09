@@ -304,6 +304,158 @@ mod tests {
         SqliteStorage::new(path).unwrap();
     }
 
+    /// Regression guard for migration 000056 (task-120): the username
+    /// backfill must actually run on SQLite and must leave every legacy row
+    /// with a unique, URL-safe handle.
+    ///
+    /// The first version of this migration expressed the "contains a
+    /// character outside [a-z0-9_-]" predicate as one 39-deep nested
+    /// REPLACE(...) chain, which dies with "parser stack overflow" on both
+    /// the bundled and system SQLite — since `SqliteStorage::new` runs the
+    /// embedded migrations on every construction, that broke the default
+    /// deployment's startup entirely. The fix runs the deletion as
+    /// sequential depth-1 UPDATEs over a scratch column.
+    ///
+    /// This test builds a pre-000056 database (all migrations except 000056
+    /// applied, legacy rows inserted), applies 000056 alone, and asserts the
+    /// backfill semantics: sanitization of non-URL-safe and over-long
+    /// handles, empty-handle coverage, de-duplication, and the pass-2
+    /// collision hardening where a dedup suffix collides with a distinct
+    /// pre-existing handle. It fails on every regression class above.
+    #[test]
+    fn migration_000056_backfills_unique_url_safe_usernames() {
+        use diesel::migration::MigrationSource;
+        use diesel::Connection;
+
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap();
+        let mut conn = SqliteConnection::establish(path).unwrap();
+
+        // Apply every migration except 000056: the pre-migration state.
+        let all = MIGRATIONS.migrations().unwrap();
+        let (pre, target): (Vec<_>, Vec<_>) = all
+            .into_iter()
+            .partition(|m| m.name().version().to_string() != "20261008000056");
+        assert_eq!(
+            target.len(),
+            1,
+            "000056 not found in embedded migrations"
+        );
+        conn.run_migrations(&pre).unwrap();
+
+        // Legacy rows exactly as a pre-000056 deployment would hold them
+        // (users: id, external_id, name NOT NULL; display_name from 000036
+        // left NULL so the backfill reads `name`).
+        use diesel::RunQueryDsl;
+        let long_name = "x".repeat(65);
+        for (id, ext, name, created) in [
+            ("u-alice-1", "ext-alice-1", "Alice Smith", 100),
+            ("u-alice-2", "ext-alice-2", "Alice Smith", 200),
+            ("u-jorg", "ext-jorg", "jörg", 300),
+            ("u-jsell-1", "ext-jsell-1", "jsell", 400),
+            ("u-jsell-2", "ext-jsell-2", "jsell", 500),
+            ("u-jsell-3", "ext-jsell-3", "jsell-2", 600),
+            ("u-empty", "", "", 700),
+            ("u-long", "ext-long", &long_name, 800),
+        ] {
+            diesel::sql_query(format!(
+                "INSERT INTO users (id, external_id, name, created_at, updated_at) \
+                 VALUES ('{id}', '{ext}', '{name}', {created}, {created})"
+            ))
+            .execute(&mut conn)
+            .unwrap();
+        }
+
+        // Run 000056 alone. Panics here on the original parser-overflow
+        // version and on a dedup collision aborting at CREATE UNIQUE INDEX.
+        conn.run_migrations(&target).unwrap();
+
+        #[derive(diesel::QueryableByName)]
+        struct Row {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            id: String,
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            username: String,
+        }
+        let rows: Vec<Row> = diesel::sql_query("SELECT id, username FROM users")
+            .load(&mut conn)
+            .unwrap();
+        let by_id: std::collections::HashMap<String, String> = rows
+            .into_iter()
+            .map(|r| (r.id, r.username))
+            .collect();
+
+        let expected = [
+            // Backfill from display name, lowercased, separators mapped.
+            ("u-alice-1", "alice-smith"),
+            // Duplicate display names get a numeric suffix (dedup pass 1).
+            ("u-alice-2", "alice-smith-2"),
+            // Non-URL-safe names are replaced wholesale with "u-<id>"
+            // (sanitization must never leave a non-URL-safe handle).
+            ("u-jorg", "u-u-jorg"),
+            // Dedup pass 1: second "jsell" becomes "jsell-2".
+            ("u-jsell-1", "jsell"),
+            ("u-jsell-2", "jsell-2"),
+            // Dedup pass 2: u-jsell-2's "jsell-2" collides with the distinct
+            // pre-existing "jsell-2" handle; the later row is renamed to
+            // "<handle>-<row id>" so CREATE UNIQUE INDEX cannot fail.
+            ("u-jsell-3", "jsell-2-u-jsell-3"),
+            // Empty legacy name + empty external id: still caught, never
+            // persisted as "".
+            ("u-empty", "u-u-empty"),
+            // Over 64 chars: replaced with "u-<id>".
+            ("u-long", "u-u-long"),
+        ];
+        for (id, want) in expected {
+            let got = by_id
+                .get(id)
+                .unwrap_or_else(|| panic!("user {id} missing after migration"));
+            assert_eq!(got, want, "unexpected backfilled username for {id}");
+            assert!(
+                gyre_domain::User::validate_username(got).is_ok(),
+                "backfilled username {got:?} for {id} violates the URL-safe handle contract"
+            );
+        }
+        let mut handles: Vec<&String> = by_id.values().collect();
+        handles.sort();
+        let distinct = {
+            let mut d = handles.clone();
+            d.dedup();
+            d.len()
+        };
+        assert_eq!(
+            handles.len(),
+            distinct,
+            "backfilled usernames are not unique: {handles:?}"
+        );
+
+        // Defaults backfilled for rows predating the new columns.
+        #[derive(diesel::QueryableByName)]
+        struct Defaults {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            timezone: String,
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            locale: String,
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            global_role: String,
+            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+            preferences: Option<String>,
+        }
+        let d: Defaults = diesel::sql_query(
+            "SELECT timezone, locale, global_role, preferences FROM users WHERE id = 'u-alice-1'",
+        )
+        .load(&mut conn)
+        .unwrap()
+        .pop()
+        .expect("row u-alice-1");
+        assert_eq!(d.timezone, "UTC");
+        assert_eq!(d.locale, "en-US");
+        assert_eq!(d.global_role, "Member");
+        let want_prefs =
+            serde_json::to_string(&gyre_domain::UserPreferences::default()).unwrap();
+        assert_eq!(d.preferences.as_deref(), Some(want_prefs.as_str()));
+    }
+
     /// Guard: detect duplicate migration version strings before they shadow each other.
     ///
     /// Diesel's `migrations_internals::version_from_string` extracts the version from a
