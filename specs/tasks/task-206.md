@@ -2,7 +2,7 @@
 title: "Implement meta-spec preview mode: real agent preview runs with branches, diffs, and cleanup"
 spec_ref: "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
 depends_on: []
-progress: complete
+progress: needs-revision
 coverage_sections:
   - "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
 commits: ["2ae25c17198e8c3d45bd7508d70af636bd33fd65", "b40714fa5c5f1f534abdbe13bca219d4f3ec1495", "608fd050412238f29da0706ef7bd52b41a932902", "05a8b4d1118c13a1a9e7ad791f961566373a629a", "930e6b1fefa73cfd1897e14362ed85d5699d861a", "f7d9168dea13760201ae40dfde2b45177a757056", "5955934352a6c3610b87c3727648782755dc11c0"]
@@ -262,3 +262,11 @@ HEAD 30422d2 (tree clean).
   selection, bounded 2s status polling with per-agent tabs and diff
   rendering, Clean Up calling DELETE; config knobs documented in
   server-config.md and routes in api-reference.md.
+
+## Review
+
+### Review changed source code
+
+- specs/coverage/system/meta-spec-reconciliation.md
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
