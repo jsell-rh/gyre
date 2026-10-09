@@ -922,7 +922,7 @@ When an agent completes a task (`agent.complete`), it produces a structured summ
 |---|---|---|
 | 1 | Agent clarification | Synchronous in `agent.complete` handler (reliability-critical) |
 | 2 | Spec pending approval | Synchronous in `specs/save` handler (human spec-edit MRs). For agent-authored specs: the `agent.complete` handler creates the notification when the agent's MR enters the merge queue with a pending spec approval gate (the gate evaluation detects the unapproved spec and creates the notification). Note: spec lifecycle's default-branch push handler creates *approval-invalidation* notifications, not *pending-approval* notifications. |
-| 3 | Gate failure | Via `MessageConsumer` consuming `GateFailure` events (amended by message-bus.md §Relationship to Notifications — the gate executor emits the `GateFailure` Event-tier message; the notification bridge derives the priority-3 Inbox item from it. Single creation path, off the gate hot path.) |
+| 3 | Gate failure | Synchronous in gate evaluation handler |
 | 4 | Cross-workspace spec change | Synchronous in spec lifecycle push handler (the push hook must query `spec_links` for inbound cross-workspace links and create notifications for dependent workspace members — amend `spec-lifecycle.md` to add this notification step alongside the existing task creation). One notification is created per dependent repo (the one that has the inbound link), so each repo-scope Inbox shows its own notification. The notification's `repo_id` is set to the dependent repo, not the changed repo. |
 | 5 | Conflicting interpretations | Synchronous in post-extraction divergence check |
 | 6 | Meta-spec drift | Via `MessageConsumer` consuming `ReconciliationCompleted` events |
