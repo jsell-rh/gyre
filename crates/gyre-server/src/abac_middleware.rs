@@ -811,6 +811,57 @@ pub async fn abac_middleware(
         return next.run(req).await;
     }
 
+    // Task-134 (agent-gates.md §Gate Agent Lifecycle): scoped tokens are
+    // allow-listed to their capability's routes. A `review:submit` gate
+    // agent may read MR context and submit its verdict — anything else is
+    // denied before policy evaluation, so no repo/admin policy can widen a
+    // single-purpose reviewer into a general-purpose caller.
+    if let Some(scope) = auth
+        .jwt_claims
+        .as_ref()
+        .and_then(|c| c.get("scope"))
+        .and_then(|s| s.as_str())
+    {
+        if scope.contains("review:submit") {
+            let allowed = matches!(
+                pattern.as_str(),
+                "/api/v1/merge-requests/:id"
+                    | "/api/v1/merge-requests/:id/reviews"
+                    | "/api/v1/merge-requests/:id/diff"
+                    | "/api/v1/merge-requests/:id/comments"
+                    | "/api/v1/merge-requests/:id/gates"
+                    | "/api/v1/version"
+            );
+            if !allowed {
+                tracing::warn!(
+                    subject_id = %auth.agent_id,
+                    pattern = %pattern,
+                    scope = %scope,
+                    "ABAC denied request: review-scoped token outside allow-list"
+                );
+                let decision = policy_engine::build_decision(
+                    &policy_engine::EvalResult {
+                        effect: gyre_domain::PolicyEffect::Deny,
+                        matched_policy: None,
+                        evaluated_count: 0,
+                        evaluation_ms: 0.0,
+                    },
+                    &auth.agent_id,
+                    "agent",
+                    action,
+                    resource_type,
+                    &pattern,
+                );
+                let _ = state.policies.record_decision(&decision).await;
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({"error": "review-scoped token is limited to review routes"})),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     // Build attribute context.
     let mut ctx = AttributeContext::default();
 
