@@ -347,6 +347,10 @@ Branch pushes use the remote's exact current SHA as their lease and retry
 transport failures in the same sandbox. If an attempt still exits with
 unpushed edits, the driver saves `attempts/<id>/recovery.patch` locally before
 deleting the sandbox.
+The accompanying `recovery.json` records the staged Git tree, upstream base,
+branch, patch digest, stash count, and last observed published ref. A missing
+receipt or unknown published ref cannot establish a safe automatic recovery;
+the patch remains available for inspection.
 Implementation and review rounds keep separate OMP sessions inside the sandbox
 so a timed-out round can continue its prior inspection without contaminating
 the independent review. When a session exceeds 400 KB, the next round archives

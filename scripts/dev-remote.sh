@@ -131,6 +131,7 @@ PY
       if [ "$remote_sha" = "$(git rev-parse HEAD)" ]; then pushed=1; break; fi
       if [ "$expected_remote" = unset ]; then
         expected_remote=$remote_sha
+        printf '%s\n' "$remote_sha" > /tmp/stage/push-expected
       elif [ "$remote_sha" != "$expected_remote" ]; then
         echo "branch changed during push; refusing to overwrite $BRANCH" >&2
         exit 76
@@ -142,6 +143,7 @@ PY
       sleep "$((push_try * 3))"
     done
     [ "$pushed" -eq 1 ] || { echo "branch push failed after four retries; preserving sandbox work" >&2; exit 76; }
+    git rev-parse HEAD > /tmp/stage/push-expected
     progress=$(bash scripts/task-field.sh "specs/tasks/$TASK.md" progress)
     echo "round=$round worker_exit=$worker_rc progress=$progress pushed=$(git rev-parse HEAD)"
     [ "$progress" = complete ] && break

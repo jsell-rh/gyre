@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Save sandbox branch/worktree and stash patches locally before deletion."""
 import base64
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -11,8 +14,19 @@ import time
 
 def main() -> int:
     sandbox, destination = sys.argv[1:]
+    metadata_script = (
+        "import json,pathlib,subprocess; "
+        "g=lambda *a:subprocess.check_output(['git',*a],text=True).strip(); "
+        "p=pathlib.Path('/tmp/stage/push-expected'); "
+        "print(json.dumps({'version':1,'base':g('rev-parse','origin/main'),"
+        "'head':g('rev-parse','HEAD'),'tree':g('write-tree'),"
+        "'branch':g('branch','--show-current'),'published_known':p.exists(),"
+        "'published_head':p.read_text().strip() if p.exists() else None}))"
+    )
     command = (
-        "set -euo pipefail; git add -A; printf 'GYRE_RECOVERY_BEGIN\\n'; "
+        "set -euo pipefail; git add -A; printf 'GYRE_RECOVERY_META '; "
+        f"python3 -c {shlex.quote(metadata_script)}; "
+        "printf 'GYRE_RECOVERY_BEGIN\\n'; "
         "git diff --binary --cached origin/main | base64 -w0 && "
         "printf '\\nGYRE_RECOVERY_END\\n'; "
         "stashes=$(git stash list --format=%H); "
@@ -56,6 +70,19 @@ def main() -> int:
                     path.write_bytes(patch)
                     path.chmod(0o600)
                     print(f"saved sandbox branch/worktree diff: {path} ({len(patch)} bytes)")
+                metadata_line = re.search(rb'(?m)^GYRE_RECOVERY_META (.+)\r?$', result.stdout)
+                if metadata_line:
+                    metadata = json.loads(metadata_line.group(1))
+                    metadata.update(patch_sha256=hashlib.sha256(patch).hexdigest(),
+                                    stash_count=len(stash_patches))
+                    if not patch:
+                        path.write_bytes(patch)
+                        path.chmod(0o600)
+                    receipt = path.with_suffix('.json')
+                    temporary = receipt.with_suffix('.json.tmp')
+                    temporary.write_text(json.dumps(metadata, sort_keys=True) + '\n')
+                    temporary.chmod(0o600)
+                    temporary.replace(receipt)
                 if stash_patches:
                     directory = path.with_suffix('.stashes')
                     directory.mkdir(exist_ok=True)
