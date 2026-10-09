@@ -2,7 +2,7 @@
 title: "Repair verified failure on main cd1c5f044e49"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 commits: ["14e30b9e9e28ff209d91b4e69e04e9335c970315", "f7d9ae7541f207eca50fe113f6966765e1801ae9", "bd77a46ad37fe9fe19d1c2ad9860eeab2f2dee70", "dc2d65dce1345916ce3a853149aeee90107d3f27", "28d321684ae3f39f97ded5cc7ce377fa83fd5419"]
 ---
 
@@ -1079,3 +1079,75 @@ Your isolated probe worktree and assigned checkout inherit /tmp/gyre-target. Res
 ### Current review comparison base
 
 Use git merge-base origin/main HEAD for the comparison base. It is currently 9db1fec3fb53387ad555453baa64494cd914daa4 after this round's successful rebase. Inspect git diff 9db1fec3fb53387ad555453baa64494cd914daa4 for current task changes, including uncommitted repairs. The cd1 failed-main Base and d1a4c17 checked base in historical findings are diagnostic provenance, not the current review range. Controller commits 2efd64a, acd2091, c37c349, and 9db1fec were inherited from upstream and are outside task-210's diff. Commit attribution is refreshed mechanically; do not repeat historical hash reconstruction unless a concrete behavioral finding needs it. Investigate the cache collision using isolated artifacts and conclude with an evidence-supported verdict. Final full suites and GitHub E2E are enforced separately.
+
+## Repair record (2026-10-09, round 9 — cache-collision investigation)
+
+Merge-base vs origin/main at investigation time: `e7929ef` (main advanced past
+the previously cited `9db1fec` with `dcd35bf`, `0a71b34`, `e7929ef` — dev-loop
+process commits only, no product overlap with this task's diff).
+
+### Cache-collision mechanism — independently reproduced
+
+Two-checkout probe fixture (`gyre_cache_probe`, identical package name/path
+layout, `scoped()` returns true vs false, test asserts true):
+
+- Shared `CARGO_TARGET_DIR`, good build first, mutant second, no clean:
+  mutant exits **0** — Cargo replays the good checkout's stale test binary.
+  The collision root described is real.
+- Isolated target dir for the mutant: exit **101** — correct failure.
+- Same shared target after `python3 scripts/dev-cargo-clean.py` (now wired as
+  the first host-gate step in `dev-controller.py:1103`, marker
+  `workspace-clean-v1`): mutant exits **101** — the clean gate repairs the
+  collision while retaining third-party artifacts (its own suite,
+  `scripts/test_dev_cargo_clean.py`, passes 2/2).
+
+### Current-tree verification with isolated artifacts
+
+This sandbox is fresh (`/tmp/gyre-target` does not exist), so no probe here
+could have inherited the poisoned artifacts; every compile below used a
+target dir created empty in this session:
+
+- Assigned checkout, `CARGO_TARGET_DIR=/tmp/task210-target`, fresh compile
+  (291s): `cargo test -p gyre-server --lib admin::tests` → **32 passed,
+  0 failed**, including all four tenant-scope tests
+  (`admin_seed_rejects_caller_from_foreign_tenant`,
+  `admin_seed_rejects_when_workspace_id_already_owned_by_foreign_tenant`,
+  `admin_seed_inconsistent_repo_without_workspace_is_conflict`,
+  `admin_seed_workspace_visible_to_calling_tenant`).
+- Mutation probe, isolated worktree + isolated target `/tmp/gyre-mutant-target`
+  (guard at admin.rs:443 disabled, `if false {`): the same suite → **31 passed,
+  1 FAILED — `admin_seed_rejects_caller_from_foreign_tenant` panicked 200 ≠
+  409**. The enforcement test is real: it fails when the guard is removed and
+  passes only when the code actually rejects the foreign-tenant seed. Probe
+  worktree and target were removed after the run.
+- Frontend (assigned checkout, `web/`, installed deps): WorkspaceHome rules
+  suites 2 files → 40 passed / 41 pre-existing skipped; shell suites
+  (AppShell, NoSidebar, WorkspaceDrawerSectionNav) → 78/78 passed.
+
+### Verdict on the current code
+
+With artifacts guaranteed fresh, the tenant enforcement on this branch passes
+on its own merits and the regression test kills a real mutation. The earlier
+shared-target green runs were unsound as evidence, but the current tree is
+sound: the behavior is correct, not cache-flattered. No production change was
+needed for this finding; the production fix is root's host-gate
+`dev-cargo-clean.py` step (inherited from upstream, outside this task's
+diff).
+
+### Gate re-verification on the current merge-base range (`e7929ef..HEAD`)
+
+- `git diff --check e7929ef` → clean (no trailing whitespace, including the
+  task file).
+- `python3 scripts/check-rustfmt-diff.py e7929ef` → "changed lines clean".
+- `python3 scripts/check-clippy-diff.py e7929ef` → "changed lines clean
+  (1 Rust files, 1145 existing warnings outside changes)", exit 0.
+- `scripts/check-relative-path-defaults.sh` → OK; `scripts/check-arch.sh` →
+  passed; `scripts/check-task-commit-attribution.sh` → OK.
+- Removed 22 accidentally force-added `scripts/__pycache__/*.pyc` build
+  artifacts that the `06f2b7f` checkpoint committed despite `.gitignore`;
+  they are derived files, not product changes (commit `668010f`).
+
+### Unresolved
+
+None within sandbox scope. Full Playwright E2E, full vitest, and full Rust
+suites remain the controller's host/GitHub gates on the exact merge SHA.
