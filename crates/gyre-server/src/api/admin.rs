@@ -507,21 +507,21 @@ pub async fn admin_seed(
         Id::new("seed-repo-1"),
         Id::new("default"),
         "gyre-core",
-        &seed_repo_path("gyre-core"),
+        seed_repo_path("gyre-core"),
         now - 3500,
     );
     let repo2 = Repository::new(
         Id::new("seed-repo-2"),
         Id::new("default"),
         "gyre-web",
-        &seed_repo_path("gyre-web"),
+        seed_repo_path("gyre-web"),
         now - 3400,
     );
     let repo3 = Repository::new(
         Id::new("seed-repo-3"),
         Id::new("default"),
         "infra-config",
-        &seed_repo_path("infra-config"),
+        seed_repo_path("infra-config"),
         now - 3300,
     );
     state.repos.create(&repo1).await?;
