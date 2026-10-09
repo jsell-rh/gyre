@@ -2,7 +2,7 @@
 title: "Repair verified failure on main cd1c5f044e49"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 commits: ["503b0b46cbf4039f1cdc8927e4b56f136e983c37", "01a25587bea99ebc24bfcbd1bc89929730bcf53c", "ae2b070d953130409afb861cf037b7eddc556fcf", "1e22f9899db66045a7b39ebc1dda670bf72957c2"]
 ---
 
