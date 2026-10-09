@@ -414,17 +414,57 @@ pub struct SeedResponse {
 }
 
 /// POST /api/v1/admin/seed — populate demo data (Admin only, idempotent).
+///
+/// The demo tenant/workspace is created in the CALLER's authenticated tenant
+/// scope (static system token resolves as tenant "default"). Every workspace
+/// query filters by the caller's tenant, so seeding into any other scope
+/// would produce data the caller cannot see. Because the seed fixture ids
+/// ("seed-repo-1", workspace "default") are global, only ONE tenant can own
+/// the demo seed — a caller from a different tenant gets a 409 naming the
+/// collision, never a success response for data outside its scope.
 pub async fn admin_seed(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
 ) -> Result<Json<SeedResponse>, ApiError> {
     use gyre_domain::{
         Agent, AgentStatus, MergeQueueEntry, MergeRequest, MrStatus, Repository, Task,
         TaskPriority, TaskStatus, Tenant, Workspace,
     };
 
-    // Idempotency: if seed repo already exists, return early.
-    let existing = state.repos.find_by_id(&Id::new("seed-repo-1")).await?;
-    if existing.is_some() {
+    // Scope: derived from the authenticated caller, never caller-supplied.
+    // The global token resolves as tenant "default" with Admin role; JWT
+    // callers seed their own tenant.
+    let tenant_id = auth.tenant_id;
+
+    // Idempotency + ownership: the demo seed repo uses a GLOBAL fixture id
+    // ("seed-repo-1"), so its presence alone does not prove this caller's
+    // tenant owns it. Load the actual seed workspace and compare its owner
+    // against the caller — a mismatch (another tenant, or a legacy seed
+    // created before caller-scoping) is rejected instead of silently
+    // reported as "this caller's seed already succeeded".
+    let seed_workspace_id = Id::new("default");
+    if let Some(existing_repo) = state.repos.find_by_id(&Id::new("seed-repo-1")).await? {
+        let ws = state
+            .workspaces
+            .find_by_id(&existing_repo.workspace_id)
+            .await?
+            .ok_or_else(|| {
+                ApiError::Conflict(format!(
+                    "seed repo '{}' exists but its workspace '{}' does not; \
+                     the seed data is inconsistent and must be repaired before seeding",
+                    existing_repo.id.as_str(),
+                    existing_repo.workspace_id.as_str()
+                ))
+            })?;
+        if ws.tenant_id != Id::new(&tenant_id) {
+            return Err(ApiError::Conflict(format!(
+                "demo seed is owned by tenant '{}'; caller is scoped to tenant '{}'. \
+                 Per-tenant demo seeding is not supported: the seed fixture ids \
+                 ('seed-repo-1', workspace 'default') are global and would collide",
+                ws.tenant_id.as_str(),
+                tenant_id
+            )));
+        }
         return Ok(Json(SeedResponse {
             projects: 0,
             repos: 3,
@@ -440,45 +480,64 @@ pub async fn admin_seed(
     let now = now_secs();
 
     // ── Tenant + Workspace ────────────────────────────────────────────────────
-    // Repos below reference workspace_id: "default". Upsert the tenant and
-    // workspace records so the frontend can resolve them (e.g. GET /workspaces/default).
-    let tenant = Tenant::new(
-        Id::new("default-tenant"),
-        "Default Tenant",
-        "default-tenant",
-        now,
-    );
-    let _ = state.tenants.create(&tenant).await;
+    // Repos below reference workspace_id: "default". The tenant and workspace
+    // records must exist so the frontend can resolve them (e.g. GET
+    // /workspaces/default). Both are checked deliberately: an existing row is
+    // fine (idempotent re-run), but a storage failure propagates — a dropped
+    // error here leaves repos pointing at a workspace that does not exist.
+    let tenant_row = state.tenants.find_by_id(&Id::new(&tenant_id)).await?;
+    if tenant_row.is_none() {
+        let tenant = Tenant::new(Id::new(&tenant_id), "Default Tenant", &tenant_id, now);
+        state.tenants.create(&tenant).await?;
+    }
 
-    let workspace = Workspace::new(
-        Id::new("default"),
-        Id::new("default-tenant"),
-        "Default Workspace",
-        "default",
-        now,
-    );
-    let _ = state.workspaces.create(&workspace).await;
-
-    // ── Repos ─────────────────────────────────────────────────────────────────
+    // The seed workspace id is global ("default"). If it already exists but
+    // belongs to a different tenant, the repos we are about to create would
+    // be scoped into a workspace invisible to this caller — same collision
+    // class as the seeded-repo check above, caught before any write.
+    if let Some(existing_ws) = state.workspaces.find_by_id(&seed_workspace_id).await? {
+        if existing_ws.tenant_id != Id::new(&tenant_id) {
+            return Err(ApiError::Conflict(format!(
+                "workspace 'default' already exists in tenant '{}'; caller is scoped \
+                 to tenant '{}'. Per-tenant demo seeding is not supported: the seed \
+                 fixture workspace id is global",
+                existing_ws.tenant_id.as_str(),
+                tenant_id
+            )));
+        }
+    } else {
+        let workspace = Workspace::new(
+            Id::new("default"),
+            Id::new(&tenant_id),
+            "Default Workspace",
+            "default",
+            now,
+        );
+        state.workspaces.create(&workspace).await?;
+    }
+    // Repo paths are derived from the configured repos root (same source as
+    // repos.rs create handlers) — never relative "./..." literals, which a
+    // child process resolves against its own cwd (task-106 R2-F6 class).
+    let seed_repo_path = |name: &str| format!("{}/default/{}.git", state.repos_root, name);
     let repo1 = Repository::new(
         Id::new("seed-repo-1"),
         Id::new("default"),
         "gyre-core",
-        "./repos/default/gyre-core.git",
+        seed_repo_path("gyre-core"),
         now - 3500,
     );
     let repo2 = Repository::new(
         Id::new("seed-repo-2"),
         Id::new("default"),
         "gyre-web",
-        "./repos/default/gyre-web.git",
+        seed_repo_path("gyre-web"),
         now - 3400,
     );
     let repo3 = Repository::new(
         Id::new("seed-repo-3"),
         Id::new("default"),
         "infra-config",
-        "./repos/default/infra-config.git",
+        seed_repo_path("infra-config"),
         now - 3300,
     );
     state.repos.create(&repo1).await?;
@@ -1450,5 +1509,196 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// A JWT carrying a tenant_id claim scopes the caller to that tenant.
+    fn tenant_admin_jwt(tenant: &str) -> String {
+        sign_test_jwt(
+            &serde_json::json!({
+                "sub": "tenant-admin-sub",
+                "preferred_username": "tenant-admin",
+                "tenant_id": tenant,
+                "realm_access": { "roles": ["admin"] }
+            }),
+            3600,
+        )
+    }
+
+    #[tokio::test]
+    async fn admin_seed_workspace_visible_to_calling_tenant() {
+        // The original defect: the seed created its workspace in a hardcoded
+        // tenant while every workspace listing filters by the caller's tenant
+        // — the seeding caller got zero workspaces back. The workspace must
+        // land in the caller's tenant and be visible through the same
+        // filtered listing the SPA uses.
+        let state = test_state();
+        let app = api_router().with_state(state.clone());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/seed")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Same query path as GET /api/v1/workspaces for this caller:
+        // list_by_tenant filtered by the authenticated tenant ("default"
+        // for the static token).
+        let visible = state
+            .workspaces
+            .list_by_tenant(&gyre_common::Id::new("default"))
+            .await
+            .unwrap();
+        let seed_ws = visible
+            .iter()
+            .find(|ws| ws.slug == "default")
+            .expect("seeded workspace 'default' must be visible to the calling tenant");
+        assert_eq!(seed_ws.tenant_id.as_str(), "default");
+    }
+
+    #[tokio::test]
+    async fn admin_seed_rejects_caller_from_foreign_tenant() {
+        // The seed fixture ids are global: once tenant "default" owns the
+        // demo seed, a caller from another tenant must NOT receive a success
+        // response describing data outside its scope — the handler must
+        // load the actual seed workspace owner and reject the mismatch.
+        // State carries a JWT config so the second caller below (a tenant-
+        // scoped Keycloak JWT) authenticates; the static token still
+        // resolves first as tenant "default" (global token check precedes
+        // JWT validation).
+        let state = make_test_state_with_jwt();
+        let app = api_router().with_state(state.clone());
+
+        // First seed as the static token (tenant "default").
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/seed")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Second seed from a different tenant's admin: 409, and no workspace
+        // is created in the foreign tenant.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/seed")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", tenant_admin_jwt("acme-corp")),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let json = body_json(resp).await;
+        let err = json["error"].as_str().unwrap_or_default();
+        assert!(
+            err.contains("acme-corp"),
+            "409 body must name the ownership collision, got: {err}"
+        );
+
+        let foreign = state
+            .workspaces
+            .list_by_tenant(&gyre_common::Id::new("acme-corp"))
+            .await
+            .unwrap();
+        assert!(
+            foreign.is_empty(),
+            "no workspace may be created in the foreign tenant"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_seed_rejects_when_workspace_id_already_owned_by_foreign_tenant() {
+        // Legacy/collision path: no seed repo exists yet, but workspace
+        // "default" is already owned by another tenant (e.g. a pre-scoping
+        // seed). Creating the seed repos would scope them into a workspace
+        // invisible to this caller — rejected before any write.
+        let state = test_state();
+
+        // Foreign tenant already owns workspace "default".
+        let foreign_ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("default"),
+            gyre_common::Id::new("legacy-tenant"),
+            "Legacy Workspace",
+            "default",
+            1000,
+        );
+        state.workspaces.create(&foreign_ws).await.unwrap();
+
+        let app = api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/seed")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // Nothing was written: no repos, and the workspace row is untouched.
+        let repos = state.repos.list().await.unwrap();
+        assert!(repos.is_empty(), "no repos may be created on collision");
+        let ws = state
+            .workspaces
+            .find_by_id(&gyre_common::Id::new("default"))
+            .await
+            .unwrap()
+            .expect("workspace row must still exist");
+        assert_eq!(
+            ws.tenant_id.as_str(),
+            "legacy-tenant",
+            "existing workspace ownership must not be reassigned by seeding"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_seed_inconsistent_repo_without_workspace_is_conflict() {
+        // A seed repo whose workspace row is missing means the seed data is
+        // corrupt; the handler must not paper over it by reporting success.
+        let state = test_state();
+        let orphan_repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("seed-repo-1"),
+            gyre_common::Id::new("default"),
+            "orphan",
+            "./repos/default/orphan.git",
+            1000,
+        );
+        state.repos.create(&orphan_repo).await.unwrap();
+
+        let app = api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/seed")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
 }
