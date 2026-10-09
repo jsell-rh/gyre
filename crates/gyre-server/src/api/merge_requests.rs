@@ -1184,6 +1184,10 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
                     .header("content-type", "application/json")
+                    // submit_review extracts AuthenticatedAgent; the bare
+                    // api_router() used here has no require_auth layer, so
+                    // the test must present the test_state auth token itself.
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1221,6 +1225,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1246,6 +1251,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1304,6 +1310,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/merge-requests/no-such/reviews")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
