@@ -11,7 +11,7 @@ def refresh(task):
     if not re.fullmatch(r'task-\d+', task):
         raise ValueError('invalid task name')
     history = subprocess.check_output(
-        ['git', 'log', '--no-merges', '--format=%x1e%H%x1f%s', '--name-only'], text=True)
+        ['git', 'log', '--no-merges', '--no-renames', '--format=%x1e%H%x1f%s', '--name-only'], text=True)
     hashes = []
     for record in history.split('\x1e')[1:]:
         header, *paths = record.splitlines()
