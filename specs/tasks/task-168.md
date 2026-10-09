@@ -7,7 +7,7 @@ coverage_sections:
   - "repo-lifecycle.md §Admin → Workspace Scope → Repos Tab"
   - "repo-lifecycle.md §Gates (Admin → Repo Scope → Gates)"
   - "repo-lifecycle.md §API Summary"
-commits: ["c8bce8e1a52f25780f3e11ab8862b7983cea3954", "40d6e2f29885f88069244f14ebecdd35a0f6b0b3", "3a637aa88f874ac373d7deb37ea4e90dcea069f8", "890a8c0f579ec1b8688d5513f1c05c9784a933b3", "70acfe57564b030abb0a5939d1585c9657696383", "92ca412ec2ccd5c32b38b737339a61c628dfb46c", "deb8c7a49c6982aa9286594f56a113ed2580704a", "50af038424bb27ba23eea00855863f8b65881cb1"]
+commits: ["7132a453e130447dc4f384dccbfc12fff3458b89", "c8bce8e1a52f25780f3e11ab8862b7983cea3954", "40d6e2f29885f88069244f14ebecdd35a0f6b0b3", "3a637aa88f874ac373d7deb37ea4e90dcea069f8", "890a8c0f579ec1b8688d5513f1c05c9784a933b3", "70acfe57564b030abb0a5939d1585c9657696383", "92ca412ec2ccd5c32b38b737339a61c628dfb46c", "deb8c7a49c6982aa9286594f56a113ed2580704a", "50af038424bb27ba23eea00855863f8b65881cb1"]
 ---
 
 ## Spec Excerpt
