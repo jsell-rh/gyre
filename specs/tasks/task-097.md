@@ -2,7 +2,7 @@
 title: "Platform Model Secrets Domain Types + Port"
 spec_ref: "platform-model.md §7 Secrets Delivery"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 coverage_sections:
   - "platform-model.md §7 Secrets Delivery"
   - "platform-model.md §7 Principle"
@@ -122,3 +122,16 @@ Product fixes in `d5fe703a` (+ `7968dcf1` test-import fix):
 - Platform Model §7 secrets: `Secret`/`SecretScope`/`SecretType` domain types (no value field in metadata), `SecretRepository` port (create/get/list/delete/rotate/resolve_for_agent with nearest-scope-wins cascade and expired-secret exclusion), SQLite adapter with AES-256-GCM at rest via `ring` (per-value nonce, `GYRE_SECRET_ENCRYPTION_KEY` hex/passphrase or auto-generated persisted key with operator-visible degradation warning), and the `secrets` migration (000053) with scope index.
 - Agent spawn now resolves scoped secrets (tenant → workspace → repo → task) from the repository and injects them as `GYRE_CRED_*` env vars — the hardcoded `GYRE_AGENT_CREDENTIALS`/`GYRE_AGENT_GCP_SA_JSON` injection is gone; unresolvable workspace, resolve errors, and non-UTF-8 values each skip-and-warn (naming the secret, never the value) instead of fabricating tenants or corrupting values.
 - Both adapters enforce the port's duplicate-rejection contract (SQLite via UNIQUE constraints, mem via an in-code guard with contract tests), and five end-to-end spawn tests deliver secrets through a real spawned process and pin every fallback branch of the injection path.
+
+## Integration Repair Round (rejected candidate e189359c, attempt 6c98c36a)
+
+Rejection cause: `check-rustfmt-diff.py` failed on changed lines in `api/spawn.rs` (2945–2950, 2993–2995, 3072–3078) and `mem.rs` (3203, 3214, 4273, 4291, 4309, 4315, 4316) — rustfmt drift introduced during the F1–F5 revision, not a product-behavior defect. Repaired by formatting the two files; no code changes beyond formatting (the four Rust-file diffs vs main are byte-identical to the reviewed round-2 tree apart from the formatting repair).
+
+Verification on the repaired tree (all against merge-base `8cde8130`, current main; earlier in the round also against the rejection base `51636f2` and the then-main `d5ed37a`):
+
+- `python3 scripts/check-rustfmt-diff.py <base>` → changed lines clean (4 Rust files) — the exact gate that rejected the candidate.
+- `python3 scripts/check-clippy-diff.py <base>` → changed lines clean (4 Rust files, 1145 existing warnings outside changes). Note: a bare `cargo clippy -p gyre-domain --lib` in this sandbox fails with `clippy::never_loop` at `rust_extractor.rs:1071` (rustc 1.99.0, deny-by-default) — pre-existing main code landed in `1056059`, zero diff on this branch; the controller gate invokes clippy with `-W clippy::all`, which downgrades it to a warning outside the changed lines.
+- `cargo test -p gyre-adapters --lib sqlite::secret` → 17 passed; `cargo test -p gyre-common --lib secret` → 5 passed; `cargo test -p gyre-server --lib mem::secret_contract_tests` → 4 passed; `cargo test -p gyre-server --lib api::spawn::tests` → 34 passed (module grew from 22 to 34 with unrelated main-side spawn tests; all five F2 secret-delivery tests pass by name).
+- `check-arch.sh`, `check-migration-versions.sh`, `check-mem-port-contracts.sh`, `check-fabricated-scope-defaults.sh`, `check-lossy-secret-conversion.sh`, `check-task-commit-attribution.sh` → all OK.
+
+No exemption files grew; no checks weakened; no test deletions.
