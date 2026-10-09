@@ -277,6 +277,8 @@ mod tests {
             workspace_memberships: base.workspace_memberships.clone(),
             teams: base.teams.clone(),
             notifications: base.notifications.clone(),
+            tenant_invitations: base.tenant_invitations.clone(),
+            workspace_invitations: base.workspace_invitations.clone(),
             graph_store: base.graph_store.clone(),
             saved_views: base.saved_views.clone(),
             wg_config: base.wg_config.clone(),
