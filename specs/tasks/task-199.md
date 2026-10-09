@@ -5,7 +5,7 @@ depends_on: []
 progress: in-progress
 coverage_sections:
   - "dependency-graph.md §Dependency Entity"
-commits: ["55dadd6d58b1809747f9e874e850c28ef516ce39", "2f312a4be7d66486f1231a1d12d4e962a8746000", "d532fe1b38f80cd7e5a2fc8f74b9da5968cdc76a"]
+commits: ["cfca9a0aa1b71efa17f52c741bc35558468c4f82", "e246df3a1f7d14b685514fb3bdffa0183efad30c", "b9834b68332d5441681a46d5e62f7421d2b431c8"]
 ---
 
 ## Spec Excerpt
