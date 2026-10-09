@@ -551,7 +551,17 @@
       "budget_warning": "Budget",
       "trust_suggestion": "Trust",
       "spec_assertion_failure": "Assertion Fail",
-      "suggested_link": "Suggested Link"
+      "suggested_link": "Suggested Link",
+      "abandoned_branch": "Abandoned Branch",
+      "agent_escalation": "Escalation",
+      "constraint_violation": "Constraint",
+      "cascade_test_triggered": "Cascade Test",
+      "cascade_test_failed": "Cascade Fail",
+      "dependency_chain_too_deep": "Deep Chain",
+      "atomic_group_failure": "Atomic Fail",
+      "spec_conflict": "Spec Conflict",
+      "mr_reverted": "MR Reverted",
+      "merge_queue_escalation": "Queue Escalation"
     },
     "status_resolved": "Resolved",
     "gate_label": "Gate: {name}",

@@ -45,18 +45,17 @@
     trust_suggestion: 'default',
     spec_assertion_failure: 'danger',
     suggested_link: 'default',
-    // PascalCase variants from the server
-    AgentCompleted: 'success',
-    AgentFailed: 'danger',
-    SpecPendingApproval: 'warning',
-    SpecApproved: 'success',
-    SpecRejected: 'danger',
-    MrMerged: 'success',
-    MrCreated: 'info',
-    GateFailure: 'danger',
-    SuggestedSpecLink: 'default',
-    TaskCreated: 'info',
-    BudgetWarning: 'warning',
+    // Newly normalized extended variants
+    abandoned_branch: 'info',
+    agent_escalation: 'danger',
+    constraint_violation: 'warning',
+    cascade_test_triggered: 'info',
+    cascade_test_failed: 'danger',
+    dependency_chain_too_deep: 'info',
+    atomic_group_failure: 'danger',
+    spec_conflict: 'warning',
+    mr_reverted: 'danger',
+    merge_queue_escalation: 'danger',
   };
 
   // Human-readable type labels — derived from i18n
@@ -104,6 +103,19 @@
         // Other NotificationType variants with template branches
         AgentCompleted: 'agent_completed',
         SpecRejected: 'spec_rejected',
+        // Extended NotificationType variants (gyre-common/src/notification.rs) —
+        // each is emitted by a server path and previously rendered a card with
+        // no action buttons when unmapped.
+        AbandonedBranch: 'abandoned_branch',
+        AgentEscalation: 'agent_escalation',
+        ConstraintViolation: 'constraint_violation',
+        CascadeTestTriggered: 'cascade_test_triggered',
+        CascadeTestFailed: 'cascade_test_failed',
+        DependencyChainTooDeep: 'dependency_chain_too_deep',
+        AtomicGroupFailure: 'atomic_group_failure',
+        SpecConflict: 'spec_conflict',
+        MrReverted: 'mr_reverted',
+        MergeQueueEscalation: 'merge_queue_escalation',
         // Legacy/defensive entries kept for older rows
         AgentFailed: 'agent_failed',
         SpecApproved: 'spec_approved',
@@ -475,6 +487,33 @@
       actionStates = {
         ...actionStates,
         [n.id]: { loading: false, success: false, message: e.message || $t('decisions.pause_failed') },
+      };
+    }
+  }
+
+  // MergeQueueEscalation (platform-model.md §6): the repo's merge queue stays
+  // paused until a human intervenes. "Resume Queue" clears the pause via
+  // PUT /repos/:id/queue/resume; "View MR" shows the failing merge that
+  // tripped the circuit breaker.
+  async function handleResumeQueue(n) {
+    const body = getBody(n);
+    const repoId = n.repo_id ?? body.repo_id;
+    if (!repoId) return;
+    actionStates = { ...actionStates, [n.id]: { loading: true, action: 'resume' } };
+    try {
+      await api.resumeMergeQueue(repoId);
+      api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
+      notifications = notifications.map(item =>
+        item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
+      );
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: true, message: $t('decisions.queue_resumed') },
+      };
+    } catch (e) {
+      actionStates = {
+        ...actionStates,
+        [n.id]: { loading: false, success: false, message: e.message || $t('decisions.resume_failed') },
       };
     }
   }
@@ -1026,7 +1065,51 @@
                         </Button>
                       {/if}
                       <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>{$t('common.dismiss')}</Button>
-                    {:else if n.notification_type === 'mr_merged' || n.notification_type === 'spec_approved' || n.notification_type === 'spec_rejected' || n.notification_type === 'task_created' || n.notification_type === 'spec_changed' || n.notification_type === 'agent_failed'}
+                    {:else if n.notification_type === 'agent_escalation'}
+                      <!-- AgentEscalation (priority 5): an agent failed/escalated and needs
+                           human attention. Emitted with mr_id/repo_id (post-merge circuit
+                           breaker) or bare (agent failure). -->
+                      {@const b = getBody(n)}
+                      {#if b.mr_id}
+                        <Button variant="primary" size="sm" onclick={() => handleViewMr(n)}>
+                          {$t('decisions.view_mr')}
+                        </Button>
+                      {/if}
+                      {#if b.agent_id || n.entity_ref}
+                        <Button variant="ghost" size="sm" onclick={() => openDetail({ type: 'agent', id: b.agent_id || n.entity_ref, data: n })}>
+                          {$t('decisions.view_agent')}
+                        </Button>
+                      {/if}
+                      <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>{$t('common.dismiss')}</Button>
+                    {:else if n.notification_type === 'merge_queue_escalation'}
+                      <!-- MergeQueueEscalation (priority 1): the repo's merge queue stays
+                           paused until a human intervenes (platform-model.md §6). -->
+                      <Button
+                        variant="primary"
+                        size="sm"
+                        disabled={state?.loading}
+                        onclick={() => handleResumeQueue(n)}
+                      >
+                        {state?.loading && state?.action === 'resume' ? $t('decisions.resuming_queue') : $t('decisions.resume_queue')}
+                      </Button>
+                      {@const b = getBody(n)}
+                      {#if b.mr_id}
+                        <Button variant="ghost" size="sm" onclick={() => handleViewMr(n)}>
+                          {$t('decisions.view_mr')}
+                        </Button>
+                      {/if}
+                      <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>{$t('common.dismiss')}</Button>
+                    {:else if n.notification_type === 'atomic_group_failure'}
+                      <!-- AtomicGroupFailure (priority 3): group rolled back and requeued;
+                           the failing member MR is in body.failing_mr_id. -->
+                      {@const b = getBody(n)}
+                      {#if b.failing_mr_id}
+                        <Button variant="primary" size="sm" onclick={() => openDetail({ type: 'mr', id: b.failing_mr_id, data: n })}>
+                          {$t('decisions.view_mr')}
+                        </Button>
+                      {/if}
+                      <Button variant="ghost" size="sm" disabled={state?.loading} onclick={() => handleDismiss(n)}>{$t('common.dismiss')}</Button>
+                    {:else if n.notification_type === 'mr_merged' || n.notification_type === 'spec_approved' || n.notification_type === 'spec_rejected' || n.notification_type === 'task_created' || n.notification_type === 'spec_changed' || n.notification_type === 'agent_failed' || n.notification_type === 'mr_reverted' || n.notification_type === 'cascade_test_triggered' || n.notification_type === 'cascade_test_failed' || n.notification_type === 'abandoned_branch' || n.notification_type === 'spec_conflict' || n.notification_type === 'constraint_violation' || n.notification_type === 'dependency_chain_too_deep'}
                       {@const b = getBody(n)}
                       {#if b.mr_id}
                         <Button variant="ghost" size="sm" onclick={() => openDetail({ type: 'mr', id: b.mr_id, data: { repository_id: n.repo_id } })}>

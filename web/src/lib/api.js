@@ -133,6 +133,10 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(reason ? { reason } : {}),
     }),
+  resumeMergeQueue: (repoId) =>
+    request(`/repos/${repoId}/queue/resume`, {
+      method: 'PUT',
+    }),
   // Manual revert of a merged MR (recovery protocol, platform-model.md §6).
   // Used by Inbox P5 arbitration: "Pick A"/"Pick B" revert the losing side's MR.
   revertMr: (repoId, mrId) =>
