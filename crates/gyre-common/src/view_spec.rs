@@ -131,8 +131,15 @@ pub fn validate_view_spec(spec: &ViewSpec) -> Result<(), String> {
             return Err("data.filter.spec_path requires data.repo_id".to_string());
         }
     }
-
-    // side-by-side: sub-views cannot themselves be side-by-side (depth=1 max).
+    // `left`/`right` sub-views are meaningful only for `side-by-side`. On any
+    // other layout they are smuggled content that no renderer consumes —
+    // reject rather than silently store (the nesting-depth rule above would
+    // otherwise never see them).
+    if spec.layout != LayoutType::SideBySide && (spec.left.is_some() || spec.right.is_some()) {
+        return Err(
+            "'left'/'right' sub-views are only allowed with layout 'side-by-side'".to_string()
+        );
+    }
     if spec.layout == LayoutType::SideBySide {
         let (left, right) = match (&spec.left, &spec.right) {
             (Some(l), Some(r)) => (l, r),

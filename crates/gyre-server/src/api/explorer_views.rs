@@ -156,17 +156,67 @@ async fn seed_system_views_if_needed(
 
 // ── ViewSpec validation helper ────────────────────────────────────────────────
 
+/// Top-level fields of the ViewQuery grammar (view-query-grammar.md).
+const VIEW_QUERY_FIELDS: &[&str] = &[
+    "scope",
+    "emphasis",
+    "edges",
+    "zoom",
+    "annotation",
+    "groups",
+    "callouts",
+    "narrative",
+];
+
+/// Top-level fields of the ViewSpec grammar (ui-layout.md §4).
+const VIEW_SPEC_FIELDS: &[&str] = &[
+    "name",
+    "description",
+    "data",
+    "layout",
+    "encoding",
+    "annotations",
+    "highlight",
+    "explanation",
+    "left",
+    "right",
+];
+
 fn parse_and_validate(spec_json: &serde_json::Value) -> Result<(), ApiError> {
-    // Accept both ViewQuery (canonical per spec) and ViewSpec (legacy) formats.
-    // Try ViewQuery first since it's the primary grammar defined in view-query-grammar.md.
-    if let Ok(vq) = serde_json::from_value::<gyre_common::view_query::ViewQuery>(spec_json.clone())
-    {
+    let obj = spec_json.as_object().ok_or_else(|| {
+        ApiError::BadRequest("view spec must be a JSON object".to_string())
+    })?;
+    // The two grammars have disjoint top-level field sets (view-query-grammar.md
+    // supersedes ui-layout.md §4's grammar but saved views in either format are
+    // accepted). serde ignores unknown fields by default, so "try ViewQuery
+    // first, else ViewSpec" would let a hybrid payload ride the ViewQuery
+    // branch and smuggle unvalidated ViewSpec fields (e.g. nested
+    // side-by-side) into storage. Classify the document by its top-level keys
+    // instead: a payload is one grammar or the other — never both, never
+    // unknown fields.
+    let view_query_fields = obj.keys().any(|k| VIEW_QUERY_FIELDS.contains(&k.as_str()));
+    let view_spec_fields = obj.keys().any(|k| VIEW_SPEC_FIELDS.contains(&k.as_str()));
+    if view_query_fields && view_spec_fields {
+        return Err(ApiError::BadRequest(
+            "view spec mixes ViewQuery and ViewSpec fields — submit exactly one grammar"
+                .to_string(),
+        ));
+    }
+    if view_query_fields {
+        // ViewQuery (canonical grammar per view-query-grammar.md).
+        let vq: gyre_common::view_query::ViewQuery = serde_json::from_value(spec_json.clone())
+            .map_err(|e| ApiError::BadRequest(format!("invalid view query: {e}")))?;
         let errors = vq.validate();
         if errors.is_empty() {
             return Ok(());
         }
-        // Fall through to try ViewSpec if ViewQuery validation fails
+        return Err(ApiError::BadRequest(format!(
+            "invalid view query: {}",
+            errors.join("; ")
+        )));
     }
+    // ViewSpec (legacy grammar per ui-layout.md §4) — or an unrecognized
+    // object, which fails ViewSpec parsing with a 400.
     let spec: ViewSpec = serde_json::from_value(spec_json.clone())
         .map_err(|e| ApiError::BadRequest(format!("invalid view spec: {e}")))?;
     validate_view_spec(&spec).map_err(ApiError::BadRequest)
