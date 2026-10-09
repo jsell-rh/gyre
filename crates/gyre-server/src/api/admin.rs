@@ -504,25 +504,29 @@ pub async fn admin_seed(
         );
         state.workspaces.create(&workspace).await?;
     }
+    // Repo paths are derived from the configured repos root (same source as
+    // repos.rs create handlers) — never relative "./..." literals, which a
+    // child process resolves against its own cwd (task-106 R2-F6 class).
+    let seed_repo_path = |name: &str| format!("{}/default/{}.git", state.repos_root, name);
     let repo1 = Repository::new(
         Id::new("seed-repo-1"),
         Id::new("default"),
         "gyre-core",
-        "./repos/default/gyre-core.git",
+        &seed_repo_path("gyre-core"),
         now - 3500,
     );
     let repo2 = Repository::new(
         Id::new("seed-repo-2"),
         Id::new("default"),
         "gyre-web",
-        "./repos/default/gyre-web.git",
+        &seed_repo_path("gyre-web"),
         now - 3400,
     );
     let repo3 = Repository::new(
         Id::new("seed-repo-3"),
         Id::new("default"),
         "infra-config",
-        "./repos/default/infra-config.git",
+        &seed_repo_path("infra-config"),
         now - 3300,
     );
     state.repos.create(&repo1).await?;
@@ -1553,7 +1557,11 @@ mod tests {
         // demo seed, a caller from another tenant must NOT receive a success
         // response describing data outside its scope — the handler must
         // load the actual seed workspace owner and reject the mismatch.
-        let state = test_state();
+        // State carries a JWT config so the second caller below (a tenant-
+        // scoped Keycloak JWT) authenticates; the static token still
+        // resolves first as tenant "default" (global token check precedes
+        // JWT validation).
+        let state = make_test_state_with_jwt();
         let app = api_router().with_state(state.clone());
 
         // First seed as the static token (tenant "default").
