@@ -6,7 +6,7 @@ progress: needs-revision
 review: specs/reviews/task-106.md
 coverage_sections:
   - "source-control.md §4 Automatic Rebasing"
-commits: ["5546b0859d07182a3a880a19e6c3bb52d001f754", "a84f2e8604b66e25dc78aaba5981a4d4f4b09af2", "c8d148fbf4a9ab9ae2716def6f4e58f678121a24", "602ce920b96d8b1b8e119b1e928b5a7b53a168d0", "8d9e3e2c1b09ae7ef2c85f15d1313a2c3ba1d7f8", "dcfb69b98328e0e43854a601e7e7b5f7ae054a00", "b57dd17167fd6fcb6948ab3880919c8a9e6060c0", "d79ffd61d37c84ad52e4559304db6d9ad14acc1b"]
+commits: ["64f29b06c154f772a35cf0af66872ffc43badeda", "5546b0859d07182a3a880a19e6c3bb52d001f754", "a84f2e8604b66e25dc78aaba5981a4d4f4b09af2", "c8d148fbf4a9ab9ae2716def6f4e58f678121a24", "602ce920b96d8b1b8e119b1e928b5a7b53a168d0", "8d9e3e2c1b09ae7ef2c85f15d1313a2c3ba1d7f8", "dcfb69b98328e0e43854a601e7e7b5f7ae054a00", "b57dd17167fd6fcb6948ab3880919c8a9e6060c0", "d79ffd61d37c84ad52e4559304db6d9ad14acc1b"]
 ---
 
 ## Spec Excerpt
