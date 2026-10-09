@@ -144,10 +144,10 @@ impl SpecApprovalRepository for PgStorage {
                 rejected_reason: a.rejected_reason.as_deref(),
                 rejected_by: a.rejected_by.as_deref(),
             };
+            // Port contract: create fails when an id already exists (the mem
+            // adapter enforces the same in code) — no silent no-op.
             diesel::insert_into(spec_approvals::table)
                 .values(&row)
-                .on_conflict(spec_approvals::id)
-                .do_nothing()
                 .execute(&mut *conn)
                 .context("insert spec approval")?;
             Ok(())

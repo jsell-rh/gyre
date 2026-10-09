@@ -142,10 +142,11 @@ impl SpecApprovalRepository for SqliteStorage {
                 rejected_reason: a.rejected_reason.as_deref(),
                 rejected_by: a.rejected_by.as_deref(),
             };
+            // Port contract: create fails when an id already exists (duplicate
+            // ids indicate a bug). The PK constraint raises; no silent no-op
+            // (mem adapter enforces the same contract in code).
             diesel::insert_into(spec_approvals::table)
                 .values(&row)
-                .on_conflict(spec_approvals::id)
-                .do_nothing()
                 .execute(&mut *conn)
                 .context("insert spec approval")?;
             Ok(())
@@ -286,5 +287,234 @@ impl SpecApprovalRepository for SqliteStorage {
             Ok(revoked)
         })
         .await?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sqlite::SqliteStorage;
+    use tempfile::NamedTempFile;
+
+    fn tmp_storage() -> (NamedTempFile, SqliteStorage) {
+        let tmp = NamedTempFile::new().unwrap();
+        let storage = SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap();
+        (tmp, storage)
+    }
+
+    fn sha(seed: char) -> String {
+        std::iter::repeat(seed).take(40).collect()
+    }
+
+    #[tokio::test]
+    async fn create_find_and_list_by_path() {
+        let (_tmp, storage) = tmp_storage();
+        let a1 = SpecApproval::new(Id::new("apr-1"), "system/design.md", sha('a'), "user:alice");
+        let a2 = SpecApproval::new(Id::new("apr-2"), "system/design.md", sha('b'), "user:bob");
+        let a3 = SpecApproval::new(Id::new("apr-3"), "system/other.md", sha('a'), "user:alice");
+        storage.create(&a1).await.unwrap();
+        storage.create(&a2).await.unwrap();
+        storage.create(&a3).await.unwrap();
+
+        // Multiple approvals for the same path (different SHAs) coexist.
+        let by_path = storage.list_by_path("system/design.md").await.unwrap();
+        assert_eq!(by_path.len(), 2);
+
+        let found = storage.find_by_id(&Id::new("apr-1")).await.unwrap();
+        assert!(found.is_some());
+        let found = found.unwrap();
+        assert_eq!(found.spec_path, "system/design.md");
+        assert_eq!(found.spec_sha, sha('a'));
+        assert_eq!(found.status(), gyre_domain::spec_approval::ApprovalStatus::Pending);
+
+        let missing = storage.find_by_id(&Id::new("nope")).await.unwrap();
+        assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    async fn approve_persists_and_active_list_finds_only_approved() {
+        let (_tmp, storage) = tmp_storage();
+        let id = Id::new("apr-1");
+        storage
+            .create(&SpecApproval::new(
+                id.clone(),
+                "system/design.md",
+                sha('a'),
+                "user:alice",
+            ))
+            .await
+            .unwrap();
+
+        let res = storage.approve(&id, 1700000100).await.unwrap();
+        assert_eq!(res, Some(()), "existing entry transitions");
+
+        let active = storage.list_active_by_path("system/design.md").await.unwrap();
+        assert_eq!(active.len(), 1);
+        assert!(active[0].is_active());
+        assert_eq!(active[0].approved_at, Some(1700000100));
+
+        // Transitioning a missing entry returns Ok(None), not an error.
+        let missing = storage.approve(&Id::new("nope"), 1).await.unwrap();
+        assert_eq!(missing, None);
+    }
+
+    #[tokio::test]
+    async fn revoke_enforces_transition_and_mutual_exclusivity() {
+        let (_tmp, storage) = tmp_storage();
+        let id = Id::new("apr-1");
+        storage
+            .create(&SpecApproval::new(
+                id.clone(),
+                "system/design.md",
+                sha('a'),
+                "user:alice",
+            ))
+            .await
+            .unwrap();
+        storage.approve(&id, 1700000100).await.unwrap().unwrap();
+
+        // Revoking a Pending entry is invalid — but this one is Approved.
+        // Revocation of an Approved entry clears approved_at (mutual exclusivity).
+        storage
+            .revoke(&id, "user:admin", "spec withdrawn", 1700000200)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let reloaded = storage.find_by_id(&id).await.unwrap().unwrap();
+        assert_eq!(reloaded.status(), gyre_domain::spec_approval::ApprovalStatus::Revoked);
+        assert_eq!(reloaded.approved_at, None, "mutual exclusivity: approved_at cleared");
+        assert_eq!(reloaded.revoked_at, Some(1700000200));
+        assert_eq!(reloaded.revoked_by.as_deref(), Some("user:admin"));
+        assert_eq!(reloaded.revocation_reason.as_deref(), Some("spec withdrawn"));
+        assert!(!reloaded.is_active());
+
+        // Already revoked — a second revoke is an invalid transition.
+        let again = storage
+            .revoke(&id, "user:admin", "again", 1700000300)
+            .await;
+        assert!(again.is_err(), "Revoked → Revoked must be rejected");
+
+        // No longer in the active list.
+        let active = storage.list_active_by_path("system/design.md").await.unwrap();
+        assert!(active.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reject_only_from_pending_and_closes_lifecycle() {
+        let (_tmp, storage) = tmp_storage();
+        let id = Id::new("apr-1");
+        storage
+            .create(&SpecApproval::new(
+                id.clone(),
+                "system/design.md",
+                sha('a'),
+                "user:alice",
+            ))
+            .await
+            .unwrap();
+
+        storage
+            .reject(&id, "user:reviewer", "not ready", 1700000100)
+            .await
+            .unwrap()
+            .unwrap();
+        let reloaded = storage.find_by_id(&id).await.unwrap().unwrap();
+        assert_eq!(reloaded.status(), gyre_domain::spec_approval::ApprovalStatus::Rejected);
+        assert_eq!(reloaded.rejected_by.as_deref(), Some("user:reviewer"));
+        assert!(!reloaded.is_active());
+
+        // Approved entries cannot be rejected (only revoked).
+        let id2 = Id::new("apr-2");
+        storage
+            .create(&SpecApproval::new(
+                id2.clone(),
+                "system/design.md",
+                sha('b'),
+                "user:alice",
+            ))
+            .await
+            .unwrap();
+        storage.approve(&id2, 1700000100).await.unwrap().unwrap();
+        let res = storage
+            .reject(&id2, "user:reviewer", "no", 1700000200)
+            .await;
+        assert!(res.is_err(), "Approved → Rejected must be rejected");
+    }
+
+    #[tokio::test]
+    async fn revoke_all_for_path_only_touches_approved_rows() {
+        let (_tmp, storage) = tmp_storage();
+        let sha_a = sha('a');
+        let approved = Id::new("apr-approved");
+        let pending = Id::new("apr-pending");
+        let rejected = Id::new("apr-rejected");
+        let other_path = Id::new("apr-other");
+        for (id, path) in [
+            (&approved, "system/design.md"),
+            (&pending, "system/design.md"),
+            (&rejected, "system/design.md"),
+            (&other_path, "system/other.md"),
+        ] {
+            storage
+                .create(&SpecApproval::new(
+                    id.clone(),
+                    path,
+                    sha_a.clone(),
+                    "user:alice",
+                ))
+                .await
+                .unwrap();
+        }
+        storage.approve(&approved, 1700000100).await.unwrap().unwrap();
+        storage
+            .reject(&rejected, "user:reviewer", "no", 1700000100)
+            .await
+            .unwrap()
+            .unwrap();
+        storage.approve(&other_path, 1700000100).await.unwrap().unwrap();
+
+        let count = storage
+            .revoke_all_for_path("system/design.md", "system:spec-lifecycle", "spec modified", 1700000200)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "only the Approved row for the path is revoked");
+
+        let approved_row = storage.find_by_id(&approved).await.unwrap().unwrap();
+        assert_eq!(
+            approved_row.status(),
+            gyre_domain::spec_approval::ApprovalStatus::Revoked
+        );
+        let pending_row = storage.find_by_id(&pending).await.unwrap().unwrap();
+        assert_eq!(
+            pending_row.status(),
+            gyre_domain::spec_approval::ApprovalStatus::Pending,
+            "Pending rows keep their state"
+        );
+        let rejected_row = storage.find_by_id(&rejected).await.unwrap().unwrap();
+        assert_eq!(
+            rejected_row.status(),
+            gyre_domain::spec_approval::ApprovalStatus::Rejected,
+            "Rejected rows keep their terminal state"
+        );
+        let other_row = storage.find_by_id(&other_path).await.unwrap().unwrap();
+        assert_eq!(
+            other_row.status(),
+            gyre_domain::spec_approval::ApprovalStatus::Approved,
+            "other paths untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_duplicate_id_fails() {
+        let (_tmp, storage) = tmp_storage();
+        let a = SpecApproval::new(Id::new("apr-dup"), "system/design.md", sha('a'), "user:alice");
+        storage.create(&a).await.unwrap();
+        // Same id must not silently replace the first row (port contract:
+        // create fails if an entry with the same id already exists).
+        let res = storage.create(&a).await;
+        assert!(res.is_err(), "duplicate id create must fail");
+        let rows = storage.list_by_path("system/design.md").await.unwrap();
+        assert_eq!(rows.len(), 1);
     }
 }
