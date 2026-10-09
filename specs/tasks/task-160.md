@@ -1,12 +1,13 @@
 ---
 title: "Hierarchy enforcement scripts — check-hierarchy, check-tenant-filter, check-api-auth"
 spec_ref: "hierarchy-enforcement.md §7"
-progress: complete
+depends_on: []
+progress: not-started
 coverage_sections:
   - "hierarchy-enforcement.md §Invariant Enforcement"
   - "hierarchy-enforcement.md §Enforcement"
   - "hierarchy-enforcement.md §New Scripts"
-commits: ["d876f8883cc4d7d374786a6b56255a9549af75bc", "f29a3464eaca73ac6e932dfd95da6522a10e438e", "ceb62097a1dac7012bb7156add686b54a75f8c25", "a4d0980a972f0a268cb5406b467077d416100589", "affd4788cb6c8aa825c0d5e8a0e1d0c503d5b1d6", "1f092d62dc5680fb49bd02f960b9c79ced0c33c5"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -56,38 +57,3 @@ REQUIRED_FIELDS=(
 ## Agent Instructions
 
 Read `specs/system/hierarchy-enforcement.md` §2 (Invariant Enforcement), §3 (Enforcement), and §7 (Mechanical Enforcement) for the full script requirements. The scripts are purely static analysis (grep/regex) — no runtime execution. Check the existing `scripts/check-arch.sh` for style conventions used by other enforcement scripts in this codebase.
-
-
-## Round-3 Repair (review findings F1, F2 — commit 06df8bf)
-
-**F1 — dead scope-literal-defaults exemption entries.** Deleted the six
-lines for the sites this task's record-conversion fixes already repaired
-(`sqlite/activity.rs:56`, `sqlite/analytics.rs:115`+`225`,
-`postgres/activity.rs:56`, `postgres/analytics.rs:115`+`225` — all now
-stamp the storage's real tenant) and lowered `FROZEN_EXEMPTION_COUNT`
-18→12 in both the header comment and the Python constant of
-`scripts/check-scope-literal-defaults.sh`; exemption-file header updated.
-Verified: no-exemption scan of `crates/` finds exactly 12 live violations,
-all covered by the remaining 12 lines; `check-scope-literal-defaults.sh`
-passes on clean HEAD.
-
-**F2 — check-tenant-filter.sh read-name blind spot.** Added `record` /
-`resolve` to the `is_read` prefix set. Pre-extension enumeration over both
-adapter dirs: exactly two `record*`/`resolve*` fns carry pure-read
-terminals — `sqlite/agent.rs::record_usage` (read-modify-write; `.first()`
-on `agents`, already filters `agents::tenant_id.eq(&tenant)`) and
-`sqlite/secret.rs::resolve_for_agent` (pure read; `.load()` on `secrets`,
-already filters `secrets::tenant_id.eq(tenant_id)`); every other
-`record*`/`resolve*` fn is a pure insert/update with no `.load/.first/
-.get_result` terminal so the `has_diesel` gate excludes them, and the pg
-`resolve_for_agent` twin is a `bail!` stub with no terminal. Clean HEAD:
-111 checked / 0 violations (was 109). Mutation probes in an isolated
-worktree (restored after each): removing the tenant predicate from either
-fn fails the lint with exit 1 naming file and line.
-
-## Shipped
-
-- Three spec §7 enforcement scripts, wired into pre-commit and as blocking CI steps: `check-hierarchy.sh` (domain hierarchy fields must be non-optional `Id`; scans by struct name across the domain crate, kills `Option<Id>` and deleted-field mutations), `check-tenant-filter.sh` (every Diesel read method touching a tenant-column table must carry a `tenant_id` predicate; table set derived from the migrations with DROP/RENAME-recreation handling; 111 fns checked, 0 violations on HEAD), `check-api-auth.sh` (middleware chain + per-handler auth on exempt routes + route→ABAC registry coverage via the registry owner).
-- Real adapter enforcement behind the lint, both backends: every tenant-column read filters `tenant_id.eq(&storage.tenant_id)`, raw SQL carries `AND tenant_id = ?/$4`, and the four create() sites (merge_request/repository/analytics × sqlite+postgres) stamp the storage's real tenant instead of `"default"` — proven by `tests/tenant_isolation.rs` (two storages over one db file), which fails with exact leak diagnostics when either defect class is reintroduced.
-- Scope-literal-defaults exemption file cut 24→12 (dead entries for sites this task actually fixed removed; `FROZEN_EXEMPTION_COUNT` lowered to match), so a future `"default"` scope stamp at any formerly-exempted position now fails the lint.
-- Read-by-behavior coverage of `record_*`/`resolve*` prefixes closes the last known name-heuristic blind spot (`record_usage`, `resolve_for_agent`); independent cross-check confirms the heuristic is now exhaustive over the tenant-column read surface.
