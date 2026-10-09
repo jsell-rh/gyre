@@ -8,6 +8,7 @@ pub mod attestation;
 pub mod audit_simulator;
 pub(crate) mod auth;
 pub mod commit_signatures;
+pub mod sigstore;
 pub(crate) mod constraint_check;
 pub mod container_audit;
 pub mod dep_staleness;
@@ -301,10 +302,13 @@ pub struct AppState {
     pub trusted_issuers: Vec<String>,
     /// Cached JWKS from trusted remote Gyre instances: issuer URL -> entry (G11).
     pub remote_jwks_cache: Arc<tokio::sync::RwLock<HashMap<String, auth::RemoteJwksEntry>>>,
-    /// Commit signatures produced by jj squash (M13.8 Sigstore): commit_sha -> CommitSignature.
-    pub commit_signatures: commit_signatures::CommitSignatureStore,
-    /// Sigstore signing mode (local Ed25519 or Fulcio CA).  Set via `GYRE_SIGSTORE_MODE`.
-    pub sigstore_mode: commit_signatures::SigstoreMode,
+    /// Commit signatures produced by jj squash (M13.8, task-107): persisted
+    /// via `CommitSignatureRepository`, keyed by `(repo_id, commit_sha)`.
+    pub commit_signatures: Arc<dyn gyre_ports::commit_signature_repo::CommitSignatureRepository>,
+    /// Signing configuration — mode plus the Fulcio/Rekor trust anchors
+    /// (task-107 F3: verification resolves trust from here, never from the
+    /// record being verified).
+    pub signing_config: commit_signatures::SigningConfig,
     /// Active SSH tunnels: tunnel_id -> TunnelRecord (G12).
     pub tunnel_store: Arc<Mutex<HashMap<String, api::compute::TunnelRecord>>>,
     /// Container audit records (persisted).
@@ -966,9 +970,12 @@ pub fn build_state(
                     .collect()
             })
             .unwrap_or_default(),
+        commit_signatures: store!(
+            dyn gyre_ports::commit_signature_repo::CommitSignatureRepository,
+            mem::MemCommitSignatureRepository::default()
+        ),
+        signing_config: commit_signatures::SigningConfig::from_env(),
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        commit_signatures: Arc::new(Mutex::new(HashMap::new())),
-        sigstore_mode: commit_signatures::SigstoreMode::from_env(),
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
         container_audits: store!(
             dyn ContainerAuditRepository,
