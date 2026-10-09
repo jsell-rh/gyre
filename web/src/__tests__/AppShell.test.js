@@ -288,9 +288,9 @@ vi.mock('../components/UserProfile.svelte', () => ({ default: function UserProfi
 import { api } from '../lib/api.js';
 import App from '../App.svelte';
 
-// ── App shell — topbar-first ─────────────────────────────────────────
+// ── App shell — topbar-first, no sidebar (ui-navigation.md §1) ─────────
 
-describe('App shell — stable sidebar (HSI §1.3)', () => {
+describe('App shell — topbar first, no sidebar (ui-navigation.md §1)', () => {
   beforeEach(() => {
     window.history.pushState({}, '', '/');
     localStorage.clear();
@@ -301,57 +301,21 @@ describe('App shell — stable sidebar (HSI §1.3)', () => {
     api.notificationCount.mockResolvedValue(0);
   });
 
-  it('renders permanent sidebar with 6 items alongside topbar', async () => {
+  it('renders topbar without a sidebar', async () => {
     const { container } = render(App);
     await waitFor(() => {
       expect(container.querySelector('[data-testid="topbar"]')).toBeTruthy();
-      expect(container.querySelector('[data-testid="sidebar"]')).toBeTruthy();
-      // Verify all 6 sidebar items are present
-      expect(container.querySelector('[data-testid="sidebar-item-inbox"]')).toBeTruthy();
-      expect(container.querySelector('[data-testid="sidebar-item-briefing"]')).toBeTruthy();
-      expect(container.querySelector('[data-testid="sidebar-item-explorer"]')).toBeTruthy();
-      expect(container.querySelector('[data-testid="sidebar-item-specs"]')).toBeTruthy();
-      expect(container.querySelector('[data-testid="sidebar-item-meta-specs"]')).toBeTruthy();
-      expect(container.querySelector('[data-testid="sidebar-item-admin"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="sidebar"]')).toBeNull();
     }, { timeout: 3000 });
   });
 
-  it('shows workspace selector in topbar', async () => {
-    const { container } = render(App);
-    await waitFor(() => {
-      expect(container.querySelector('[data-testid="ws-selector"]')).toBeTruthy();
-    }, { timeout: 3000 });
-  });
-
-  it('shows decisions badge in topbar', async () => {
-    const { container } = render(App);
-    await waitFor(() => {
-      expect(container.querySelector('[data-testid="decisions-badge"]')).toBeTruthy();
-    }, { timeout: 3000 });
-  });
-
-  it('shows decisions count when nonzero', async () => {
-    api.notificationCount.mockResolvedValue(5);
-    const { container } = render(App);
-    await waitFor(() => {
-      const badge = container.querySelector('.decisions-count');
-      expect(badge).toBeTruthy();
-      expect(badge.textContent).toBe('5');
-    }, { timeout: 3000 });
-  });
-
-  it('shows 99+ when decisions count > 99', async () => {
-    api.notificationCount.mockResolvedValue(150);
-    const { container } = render(App);
-    await waitFor(() => {
-      expect(container.querySelector('.decisions-count')?.textContent).toBe('99+');
-    }, { timeout: 3000 });
-  });
 });
 
-// ── Sidebar active item (HSI §1.3 — F1/F3/F4) ─────────────────────────
+// ── Mobile drawer section navigation (ui-navigation.md §8) ──────────────
+// The drawer is the only navigation chrome besides the topbar; its links
+// are the workspace-home sections and must preserve scope.
 
-describe('Sidebar active item highlight (HSI §1.3)', () => {
+describe('Mobile drawer section navigation (ui-navigation.md §8)', () => {
   const WS = [{ id: 'ws-1', name: 'Payments', slug: 'payments' }];
 
   beforeEach(() => {
@@ -363,86 +327,56 @@ describe('Sidebar active item highlight (HSI §1.3)', () => {
     api.workspaceBudget.mockResolvedValue(null);
     api.notificationCount.mockResolvedValue(0);
     api.version.mockResolvedValue({ version: '0.1.0' });
+    Element.prototype.scrollIntoView = vi.fn();
   });
 
-  function activeItem(container) {
-    const active = container.querySelector('.sidebar-item.active');
-    return active?.getAttribute('data-testid')?.replace('sidebar-item-', '') ?? null;
+  function activeDrawerItem(container) {
+    const active = container.querySelector('.drawer-link.active');
+    return active?.getAttribute('data-testid')?.replace('drawer-item-', '') ?? null;
   }
 
-  // F4: clicking Briefing at workspace scope highlights Briefing, not Inbox.
-  it('highlights Briefing after clicking it at workspace scope', async () => {
+  function openDrawer(container) {
+    return waitFor(() => {
+      expect(container.querySelector('[data-testid="hamburger-btn"]')).toBeTruthy();
+    }, { timeout: 3000 }).then(() => {
+      fireEvent.click(container.querySelector('[data-testid="hamburger-btn"]'));
+    });
+  }
+
+  it('clicking Briefing navigates to workspace home Briefing section', async () => {
+    window.history.pushState({}, '', '/workspaces/payments/r/core/specs');
     const { container } = render(App);
-    await waitFor(() => expect(container.querySelector('[data-testid="sidebar-item-briefing"]')).toBeTruthy(), { timeout: 3000 });
-    // Default active item is Inbox per the entrypoint flow.
-    expect(activeItem(container)).toBe('inbox');
-    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-briefing"]'));
-    await waitFor(() => expect(activeItem(container)).toBe('briefing'), { timeout: 3000 });
+    // RepoMode is stubbed in jsdom; the document title proves repo mode.
+    await waitFor(() => expect(document.title).toBe('core — Payments | Gyre'), { timeout: 3000 });
+    await openDrawer(container);
+    await fireEvent.click(container.querySelector('[data-testid="drawer-item-briefing"]'));
+    await waitFor(() => expect(window.location.pathname).toBe('/workspaces/payments'), { timeout: 3000 });
   });
 
-  // F4: clicking Specs highlights Specs.
-  it('highlights Specs after clicking it at workspace scope', async () => {
+  it('clicking Agent Rules navigates to agent-rules page', async () => {
+    window.history.pushState({}, '', '/workspaces/payments');
     const { container } = render(App);
-    await waitFor(() => expect(container.querySelector('[data-testid="sidebar-item-specs"]')).toBeTruthy(), { timeout: 3000 });
-    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-specs"]'));
-    await waitFor(() => expect(activeItem(container)).toBe('specs'), { timeout: 3000 });
+    await openDrawer(container);
+    await fireEvent.click(container.querySelector('[data-testid="drawer-item-agent-rules"]'));
+    await waitFor(() => expect(window.location.pathname).toBe('/workspaces/payments/agent-rules'), { timeout: 3000 });
   });
 
-  // F4: clicking Inbox after Briefing returns highlight to Inbox.
-  it('returns highlight to Inbox after clicking Inbox', async () => {
-    const { container } = render(App);
-    await waitFor(() => expect(container.querySelector('[data-testid="sidebar-item-briefing"]')).toBeTruthy(), { timeout: 3000 });
-    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-briefing"]'));
-    await waitFor(() => expect(activeItem(container)).toBe('briefing'), { timeout: 3000 });
-    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-inbox"]'));
-    await waitFor(() => expect(activeItem(container)).toBe('inbox'), { timeout: 3000 });
-  });
-
-  // F1: at repo scope, the Code tab highlights Explorer (Code is part of Explorer per §1.3).
-  it('highlights Explorer when the repo Code tab is active', async () => {
+  it('repo mode drawer click on Specs switches to the Specs repo tab', async () => {
     window.history.pushState({}, '', '/workspaces/payments/r/core/code');
     const { container } = render(App);
-    await waitFor(() => expect(activeItem(container)).toBe('explorer'), { timeout: 3000 });
-  });
-
-  // F3: at repo scope, the MRs tab highlights Explorer (MRs are part of the Code tab).
-  it('highlights Explorer when the repo MRs tab is active', async () => {
-    window.history.pushState({}, '', '/workspaces/payments/r/core/mrs');
-    const { container } = render(App);
-    await waitFor(() => expect(activeItem(container)).toBe('explorer'), { timeout: 3000 });
-  });
-
-  // Regression: the Specs repo tab still highlights Specs (not swept into Explorer).
-  it('highlights Specs when the repo Specs tab is active', async () => {
-    window.history.pushState({}, '', '/workspaces/payments/r/core/specs');
-    const { container } = render(App);
-    await waitFor(() => expect(activeItem(container)).toBe('specs'), { timeout: 3000 });
-  });
-
-  // F5: at repo scope, clicking Briefing highlights Briefing (not Inbox).
-  // Repo mode has no briefing tab, so the click goes to workspace home and must
-  // still highlight Briefing — goToWorkspaceHome resets to Inbox, then the repo
-  // branch re-sets workspaceActiveSection to 'briefing'.
-  it('highlights Briefing after clicking it at repo scope', async () => {
-    window.history.pushState({}, '', '/workspaces/payments/r/core/specs');
-    const { container } = render(App);
-    await waitFor(() => expect(activeItem(container)).toBe('specs'), { timeout: 3000 });
-    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-briefing"]'));
-    await waitFor(() => expect(activeItem(container)).toBe('briefing'), { timeout: 3000 });
+    // RepoMode is stubbed in jsdom; the document title proves repo mode.
+    await waitFor(() => expect(document.title).toBe('core — Payments | Gyre'), { timeout: 3000 });
+    await openDrawer(container);
+    await fireEvent.click(container.querySelector('[data-testid="drawer-item-specs"]'));
+    await waitFor(() => expect(window.location.pathname).toBe('/workspaces/payments/r/core/specs'), { timeout: 3000 });
   });
 });
 
-// ── Tenant scope (/all) — scope preservation + highlight (HSI §1.3) ──
-// At tenant scope the sidebar must preserve tenant scope: Inbox/Briefing/
-// Specs are scroll sections of the cross-workspace dashboard, Meta-specs is
-// the tenant agent-rules catalog, Admin is tenant settings (admin-only).
-// Before this fix every sidebar click at /all escaped to workspace scope.
-describe('Sidebar tenant-scope navigation (HSI §1.3)', () => {
-  function activeItem(container) {
-    const active = container.querySelector('.sidebar-item.active');
-    return active?.getAttribute('data-testid')?.replace('sidebar-item-', '') ?? null;
-  }
-
+// ── Tenant scope (/all) — scope preservation (ui-navigation.md §10) ────
+// At tenant scope drawer clicks must preserve tenant scope: sections are
+// scroll sections of the cross-workspace dashboard, Agent Rules is the
+// tenant meta-spec catalog, settings is tenant settings (admin-only).
+describe('Drawer tenant-scope navigation (ui-navigation.md §10)', () => {
   beforeEach(() => {
     window.history.pushState({}, '', '/');
     localStorage.clear();
@@ -453,93 +387,56 @@ describe('Sidebar tenant-scope navigation (HSI §1.3)', () => {
     api.notificationCount.mockResolvedValue(0);
     api.version.mockResolvedValue({ version: '0.1.0' });
     // jsdom lacks scrollIntoView; the cross-workspace sections render for
-    // real, so the sidebar click's section scroll would throw.
+    // real, so the section scroll would throw.
     Element.prototype.scrollIntoView = vi.fn();
   });
 
-  it('defaults to Explorer highlight at /all (workspace cards grid)', async () => {
-    window.history.pushState({}, '', '/all');
-    const { container } = render(App);
-    await waitFor(() => expect(activeItem(container)).toBe('explorer'), { timeout: 3000 });
-  });
+  function openDrawer(container) {
+    return waitFor(() => {
+      expect(container.querySelector('[data-testid="hamburger-btn"]')).toBeTruthy();
+    }, { timeout: 3000 }).then(() => {
+      fireEvent.click(container.querySelector('[data-testid="hamburger-btn"]'));
+    });
+  }
 
-  it('clicking Briefing at /all stays at /all and highlights Briefing', async () => {
+  it('clicking Briefing at /all stays at /all', async () => {
     window.history.pushState({}, '', '/all');
     const { container } = render(App);
-    await waitFor(() => expect(container.querySelector('[data-testid="sidebar-item-briefing"]')).toBeTruthy(), { timeout: 3000 });
-    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-briefing"]'));
-    await waitFor(() => expect(activeItem(container)).toBe('briefing'), { timeout: 3000 });
+    await openDrawer(container);
+    await fireEvent.click(container.querySelector('[data-testid="drawer-item-briefing"]'));
+    await new Promise(r => setTimeout(r, 50));
     expect(window.location.pathname).toBe('/all');
   });
 
-  it('clicking Inbox at /all stays at /all and highlights Inbox', async () => {
+  it('clicking Specs at /all stays at /all', async () => {
     window.history.pushState({}, '', '/all');
     const { container } = render(App);
-    await waitFor(() => expect(container.querySelector('[data-testid="sidebar-item-inbox"]')).toBeTruthy(), { timeout: 3000 });
-    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-inbox"]'));
-    await waitFor(() => expect(activeItem(container)).toBe('inbox'), { timeout: 3000 });
+    await openDrawer(container);
+    await fireEvent.click(container.querySelector('[data-testid="drawer-item-specs"]'));
+    await new Promise(r => setTimeout(r, 50));
     expect(window.location.pathname).toBe('/all');
   });
 
-  it('clicking Specs at /all stays at /all and highlights Specs', async () => {
+  it('clicking Agent Rules at /all navigates to /all/agent-rules', async () => {
     window.history.pushState({}, '', '/all');
     const { container } = render(App);
-    await waitFor(() => expect(container.querySelector('[data-testid="sidebar-item-specs"]')).toBeTruthy(), { timeout: 3000 });
-    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-specs"]'));
-    await waitFor(() => expect(activeItem(container)).toBe('specs'), { timeout: 3000 });
-    expect(window.location.pathname).toBe('/all');
-  });
-
-  it('clicking Meta-specs at /all navigates to /all/agent-rules and highlights Meta-specs', async () => {
-    window.history.pushState({}, '', '/all');
-    const { container } = render(App);
-    await waitFor(() => expect(container.querySelector('[data-testid="sidebar-item-meta-specs"]')).toBeTruthy(), { timeout: 3000 });
-    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-meta-specs"]'));
+    await openDrawer(container);
+    await fireEvent.click(container.querySelector('[data-testid="drawer-item-agent-rules"]'));
     await waitFor(() => expect(window.location.pathname).toBe('/all/agent-rules'), { timeout: 3000 });
-    await waitFor(() => expect(activeItem(container)).toBe('meta-specs'), { timeout: 3000 });
   });
 
-  it('clicking Admin at /all as admin navigates to /all/settings and highlights Admin', async () => {
-    api.me.mockResolvedValue({ role: 'Admin' });
-    window.history.pushState({}, '', '/all');
-    const { container } = render(App);
-    await waitFor(() => expect(container.querySelector('[data-testid="sidebar-item-admin"]')).toBeTruthy(), { timeout: 3000 });
-    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-admin"]'));
-    await waitFor(() => expect(window.location.pathname).toBe('/all/settings'), { timeout: 3000 });
-    await waitFor(() => expect(activeItem(container)).toBe('admin'), { timeout: 3000 });
-  });
-
-  it('clicking Admin at /all as non-admin stays at /all (tenant settings are admin-only)', async () => {
+  it('tenant settings are admin-only: drawer has no settings escape at /all', async () => {
     api.me.mockResolvedValue({ role: 'Member' });
     window.history.pushState({}, '', '/all');
     const { container } = render(App);
-    await waitFor(() => expect(container.querySelector('[data-testid="sidebar-item-admin"]')).toBeTruthy(), { timeout: 3000 });
-    // Let api.me resolve so userIsAdmin settles
-    await new Promise(r => setTimeout(r, 50));
-    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-admin"]'));
-    await new Promise(r => setTimeout(r, 50));
+    // The drawer lists home sections only; settings lives behind the
+    // admin-gated gear, not a drawer item (§10).
+    await openDrawer(container);
+    expect(container.querySelector('[data-testid="drawer-item-settings"]')).toBeNull();
     expect(window.location.pathname).toBe('/all');
-  });
-
-  it('clicking Explorer at /all keeps Explorer highlight (workspace cards grid)', async () => {
-    window.history.pushState({}, '', '/all');
-    const { container } = render(App);
-    await waitFor(() => expect(container.querySelector('[data-testid="sidebar-item-explorer"]')).toBeTruthy(), { timeout: 3000 });
-    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-explorer"]'));
-    await waitFor(() => expect(activeItem(container)).toBe('explorer'), { timeout: 3000 });
-    expect(window.location.pathname).toBe('/all');
-  });
-
-  it('clicking Briefing from /all/settings returns to /all and highlights Briefing (no workspace-scope escape)', async () => {
-    api.me.mockResolvedValue({ role: 'Admin' });
-    window.history.pushState({}, '', '/all/settings');
-    const { container } = render(App);
-    await waitFor(() => expect(container.querySelector('[data-testid="sidebar-item-briefing"]')).toBeTruthy(), { timeout: 3000 });
-    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-briefing"]'));
-    await waitFor(() => expect(window.location.pathname).toBe('/all'), { timeout: 3000 });
-    await waitFor(() => expect(activeItem(container)).toBe('briefing'), { timeout: 3000 });
   });
 });
+
 
 // ── Entrypoint flow ───────────────────────────────────────────────────
 
@@ -767,7 +664,7 @@ describe('Keyboard shortcuts', () => {
     });
   });
 
-  it('shortcut overlay shows ⌘1-6 sidebar shortcuts (HSI §1.8)', async () => {
+  it('shortcut overlay has no ⌘1-6 sidebar shortcuts (superseded by ui-navigation.md §6)', async () => {
     const { container } = render(App);
     await waitFor(() => {
       expect(container.querySelector('[data-testid="topbar"]')).toBeTruthy();
@@ -776,18 +673,8 @@ describe('Keyboard shortcuts', () => {
     await fireEvent.keyDown(window, { key: '?' });
     await waitFor(() => {
       const overlay = document.querySelector('.shortcuts-overlay');
-      expect(overlay?.textContent).toContain('⌘1');
-      expect(overlay?.textContent).toContain('Inbox');
-      expect(overlay?.textContent).toContain('⌘2');
-      expect(overlay?.textContent).toContain('Briefing');
-      expect(overlay?.textContent).toContain('⌘3');
-      expect(overlay?.textContent).toContain('Explorer');
-      expect(overlay?.textContent).toContain('⌘4');
-      expect(overlay?.textContent).toContain('Specs');
-      expect(overlay?.textContent).toContain('⌘5');
-      expect(overlay?.textContent).toContain('Meta-specs');
-      expect(overlay?.textContent).toContain('⌘6');
-      expect(overlay?.textContent).toContain('Admin');
+      expect(overlay?.textContent).not.toContain('⌘1');
+      expect(overlay?.textContent).not.toContain('⌘6');
     });
   });
 
@@ -856,7 +743,7 @@ describe('Responsive — hamburger button', () => {
     });
   });
 
-  it('mobile drawer has 6 sidebar navigation items (HSI §1.3)', async () => {
+  it('mobile drawer lists the workspace-home sections (ui-navigation.md §8)', async () => {
     const { container } = render(App);
     await waitFor(() => {
       expect(container.querySelector('[data-testid="hamburger-btn"]')).toBeTruthy();
@@ -866,12 +753,11 @@ describe('Responsive — hamburger button', () => {
     await waitFor(() => {
       const drawer = container.querySelector('[data-testid="mobile-drawer"]');
       expect(drawer).toBeTruthy();
-      expect(drawer.textContent).toContain('Inbox');
+      expect(drawer.textContent).toContain('Decisions');
+      expect(drawer.textContent).toContain('Repos');
       expect(drawer.textContent).toContain('Briefing');
-      expect(drawer.textContent).toContain('Explorer');
       expect(drawer.textContent).toContain('Specs');
-      expect(drawer.textContent).toContain('Meta-specs');
-      expect(drawer.textContent).toContain('Admin');
+      expect(drawer.textContent).toContain('Agent Rules');
     });
   });
 
