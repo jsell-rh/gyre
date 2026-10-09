@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('remote', Path(__file__).with_name('pipeline-remote.py'))
 remote = importlib.util.module_from_spec(spec)
@@ -12,6 +13,18 @@ spec.loader.exec_module(remote)
 
 
 class DetachedCandidateTest(unittest.TestCase):
+    def test_checkout_retries_materialized_seed_in_same_worker(self):
+        attempts = []
+        def execute(*args):
+            attempts.append(args)
+            if len(attempts) == 2:
+                raise subprocess.CalledProcessError(128, args)
+            return subprocess.CompletedProcess(args, 0)
+        with patch.object(remote, 'run', side_effect=execute), patch.object(remote.time, 'sleep') as sleep:
+            remote.checkout_seed('private-branch', 'seed')
+        self.assertEqual(attempts[2], ('git', 'fetch', '--quiet', '--refetch', '--no-filter', 'origin', 'main', 'seed'))
+        self.assertEqual(attempts[-1], ('git', 'checkout', '-b', 'private-branch', 'seed'))
+        sleep.assert_called_once_with(5)
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
