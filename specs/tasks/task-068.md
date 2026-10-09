@@ -8,7 +8,7 @@ coverage_sections:
   - "explorer-implementation.md §9 MCP Tools Available to the Agent"
   - "explorer-implementation.md §22 Graph Summary MCP Tool"
   - "explorer-implementation.md §23 Dry-Run MCP Tool"
-commits: ["92b6aa188c3b3a3c5fb094031adb4556a3b028b3", "be0f528c4b7ed9f43af9d4d66192b2bfba48c7c6", "0d0a62f933e48c1804a341e0641c6a735292b387", "eb9ad82a562284ad4ab40821c976a36517a712db", "cc10a0a7d66aeb7b64fde4b6e6de532c642d70c5", "01121b1992555ee004f99c8e2e8723917790bd9b", "2dc019d1cd79653fdbd1a2723075a29f3f3c2140"]
+commits: ["a212bc9a74de37e5385ad44f1fc3f571166d7b90", "2b2d923cbe53c6238c5f1b795f3d19193352b341", "9255a5762e01a4d858352f4db0ceafd9e15feffc", "1607616acc94607f01d1a6a21892759b99c553f6", "e194f1c8271c11372a6b3c5651c80f9afe9fa4ce", "7e3a2b05145b6294f130d65819449af6a4bc4b28", "d55bb16ff9e1d9becb80fd1b1856d5c294713076"]
 ---
 
 ## Spec Excerpt
