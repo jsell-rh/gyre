@@ -15,6 +15,12 @@ that require a running server or browser; the host and GitHub run those gates.
 Do not install browsers or repeat full suites here to reproduce those failures.
 Give isolated worktrees their own CARGO_TARGET_DIR. Sharing it can reuse another
 checkout's test binary and make a mutation pass or a repair appear to fail.
+For expensive probes, save the command, source revision and diff, working
+directory, output, and actual exit status under /tmp/stage/review-evidence/.
+Background job handles disappear when the model session ends. On a resumed
+round, inspect persisted results before starting another build; reuse evidence
+only after confirming the relevant source is unchanged. Run mutations in an
+isolated worktree and restore them even when the command is interrupted.
 
 If a repair handoff is supplied, independently check each reported failure
 and its reproduction. Reject gate weakening, deleted meaningful tests, new
