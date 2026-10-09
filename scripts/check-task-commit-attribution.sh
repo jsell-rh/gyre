@@ -71,6 +71,16 @@ if [ "$EXEMPT_TOTAL" -gt "$FROZEN_EXEMPTION_COUNT" ]; then
     exit 1
 fi
 
+#   4. Every SHA in a task's `commits:` frontmatter is an ancestor of HEAD.
+#      A SHA can exist as an object while being unreachable: rejected
+#      sibling attempts leave their chains behind after a rebase, and the
+#      attribution scan above stays green because those dead commits carry
+#      no task label. A dead SHA in the review-scoping list reviews nothing
+#      (task-210: the frontmatter listed a rejected sibling's chain while
+#      the branch carried a different one). After a rebase the controller
+#      refreshes the list mechanically; this check holds it to the tree it
+#      will actually gate.
+
 
 # ── Scan history ─────────────────────────────────────────────────────────
 VIOLATIONS=""
@@ -132,18 +142,47 @@ while IFS='|' read -r sha subject; do
     done
 done < <(git log --no-merges --format='%h|%s' 2>/dev/null)
 
+
 if [ -n "$VIOLATIONS" ]; then
     echo "FAIL: task-labeled product-surface commits missing from their task's commits: frontmatter:"
-    echo ""
-    echo "$VIOLATIONS"
     echo "A task-labeled commit absent from the task's commits: list is invisible"
     echo "to review scoping — the verifier scopes each round to that list"
-    echo "(task-095 R3-F4: 5aaded21, +880 lines, was never examined). Fix by"
+    echo "(task-095 R3-F4: 5aadded21, +880 lines, was never examined). Fix by"
     echo "adding the short SHA to specs/tasks/task-NNN.md's commits: frontmatter."
     echo "Do NOT add entries to $EXEMPTIONS_FILE."
     FAIL=1
 fi
 
+# ── Frontmatter SHAs must be reachable from HEAD (active tasks) ─────────
+# Objects from rejected sibling attempts survive rebases; a `commits:` entry
+# pointing at one scopes review at a chain the branch does not carry
+# (task-210: the list named a rejected sibling's chain while the branch
+# carried a different one). After a rebase the controller refreshes the list
+# mechanically; this holds it to the tree it will actually gate.
+# Completed tasks are out of scope: their chains were routinely rebased away
+# at merge time, and no further review round reads the list.
+while IFS='|' read -r task_file sha; do
+    [ -n "$sha" ] || continue
+    if ! git merge-base --is-ancestor "$sha" HEAD 2>/dev/null; then
+        echo "FAIL: $task_file lists commit $sha which is not reachable from HEAD"
+        echo "  (stale chain from a rejected/rebased attempt? re-run the"
+        echo "   controller's attribution bookkeeping to repoint the list)"
+        FAIL=1
+    fi
+done < <(
+    for task_file in "$SCRIPT_DIR/../specs/tasks"/task-*.md; do
+        [ -f "$task_file" ] || continue
+        grep -q '^progress: complete' "$task_file" && continue
+        while IFS= read -r short; do
+            [ -n "$short" ] || continue
+            full=$(git rev-parse --quiet "$short^{commit}" 2>/dev/null) || {
+                echo "$task_file|$short"
+                continue
+            }
+            echo "$task_file|$full"
+        done < <(frontmatter_commits "$task_file")
+    done
+)
 if [ "$FAIL" -ne 0 ]; then exit 1; fi
 
-echo "OK: every task-labeled product-surface commit is recorded in its task's commits: frontmatter (or exempted legacy drift)."
+echo "OK: every task-labeled product-surface commit is recorded in its task's commits: frontmatter (or exempted legacy drift); every listed SHA is reachable from HEAD."

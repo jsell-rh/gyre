@@ -9,7 +9,6 @@ coverage_sections:
 commits:
   - 1ac15418
   - eee00dba
-  - 330f8d61
 ---
 
 ## Spec Excerpt
