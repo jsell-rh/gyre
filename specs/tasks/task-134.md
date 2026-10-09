@@ -2,7 +2,7 @@
 title: "Define AgentReview and AgentValidation gate types with review protocol"
 spec_ref: "agent-gates.md §Part 1"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Gate Types (Extended)"
   - "agent-gates.md §AgentReview Gate"
