@@ -1,80 +1,64 @@
 ---
-title: "HSI Nav Item Scope Content Matrix"
-spec_ref: "human-system-interface.md §1.5"
+title: "Canonical Navigation — Scope-Aware Content Routing"
+spec_ref: "ui-navigation.md §2, §3, §7, §10"
 depends_on:
   - task-082
 progress: not-started
 coverage_sections:
-  - "human-system-interface.md §1.5 What Each Nav Item Shows at Each Scope"
+  - "ui-navigation.md §2 Workspace Home"
+  - "ui-navigation.md §3 Repo Mode"
+  - "ui-navigation.md §10 Cross-Workspace View"
 commits: []
 ---
 
-## Spec Excerpt
+## Authority and Scope
 
-| Nav Item | Tenant Scope | Workspace Scope | Repo Scope |
-|---|---|---|---|
-| **Inbox** | Action queue across all workspaces | Action queue for this workspace | Action queue for this repo (filtered by `repo_id`) |
-| **Briefing** | Narrative across all workspaces (client-side aggregation) | Narrative for this workspace | Narrative for this repo |
-| **Explorer** | Workspace cards with summary stats (card grid, not graph canvas) | Realized architecture (C4 progressive drill-down) | Repo-level architecture detail |
-| **Specs** | Spec registry across all workspaces | Specs across repos in workspace | Specs in this repo + implementation progress |
-| **Meta-specs** | Persona/principle/standard catalog | Persona editor, preview loop, reconciliation progress | (redirects to workspace scope) |
-| **Admin** | Users, compute, tenant budget, audit, workspace creation | Workspace settings, budget, trust level, teams, Policies, Repos | Repo settings, gates, policies, danger zone |
+`ui-navigation.md` explicitly supersedes `human-system-interface.md` §1,
+including the six-item sidebar and its 6×3 content matrix. The original
+task-083 plan targeted that superseded matrix. Implement scope-aware content
+in the current workspace-home / repo-mode navigation instead. The deeper HSI
+§2–§12 behaviors remain valid; this task changes their navigation and scoping,
+not their underlying requirements.
 
-Key notes:
-- Explorer at tenant scope is a **card grid** (workspace cards), not a graph canvas
-- Explorer at repo scope has two tabs: **Architecture** (default — C4 graph) and **Code** (branches, commits, MRs, merge queue)
-- Meta-specs at repo scope redirects to workspace scope
-- Inbox repo-scope filters by `repo_id` on notifications; workspace-scoped notifications with `repo_id: NULL` only visible at workspace scope
+Task-082 is historical shell work, not an instruction to restore its obsolete
+sidebar. Preserve the canonical shell restored by the main-baseline repair.
 
-## Implementation Plan
+## Required Behavior
 
-1. **Create scope-aware content routing** for each nav item:
-   - Each nav item component receives the current scope (tenant/workspace/repo) and renders accordingly
-   - The scope is derived from the URL route and breadcrumb state
+1. **Cross-workspace view (`/all`, §10):** Show the Decisions, Workspaces,
+   Specs, Briefing, and Agent Rules sections for workspaces the caller can
+   access. Preserve workspace/repo attribution on aggregated items; opening
+   an item must enter its actual owning scope. Briefing aggregates the real
+   per-workspace API results. Tenant settings and tenant-rule editing retain
+   their authorization gates.
+2. **Workspace home (`/workspaces/:slug`, §2):** Decisions, Specs, Architecture,
+   Repos, Briefing, and Agent Rules use the selected workspace's real data.
+   A repo or spec click carries the owning repo into repo mode. Rules merge
+   the actual Global/Workspace sources. Settings and rule management use the
+   canonical workspace routes, not a sidebar or fabricated scope identity.
+3. **Repo mode (§3, §7):** Specs is the default landing tab; Architecture,
+   Decisions, Code, and Settings are independently addressable tabs for the
+   selected repo. Repo Decisions filter by the actual repo; workspace-only
+   notifications are not silently assigned to a repo. Agent/entity drill-downs
+   preserve the selected workspace/repo and the back path.
+4. **Scope transitions:** Use client-side navigation with URL/history support.
+   After switching scopes, a delayed response from the old scope must not
+   overwrite the new scope's content. Lookup/request errors must surface as
+   errors, rather than successful empty data or fallback scope identities.
 
-2. **Inbox adaptation:**
-   - Tenant scope: `GET /api/v1/users/me/notifications` (no workspace filter)
-   - Workspace scope: `GET /api/v1/users/me/notifications?workspace_id=<id>`
-   - Repo scope: query notifications with repo-scoped filter
+## Acceptance and Verification
 
-3. **Briefing adaptation:**
-   - Tenant scope: client-side aggregation calling `GET /api/v1/workspaces/:id/briefing` per workspace
-   - Workspace scope: `GET /api/v1/workspaces/:id/briefing`
-   - Repo scope: `GET /api/v1/workspaces/:id/briefing?repo_id=<id>`
+- [ ] Cross-workspace attribution links enter the item's owning workspace/repo.
+- [ ] Workspace sections and repo tabs issue queries for their selected scope.
+- [ ] Repo-mode entry defaults to Specs; deep links and back navigation retain scope.
+- [ ] Delayed old-scope responses cannot replace current-scope content.
+- [ ] Scoped request failures are visible and recoverable.
+- [ ] The canonical shell and mobile workspace-section navigation remain intact.
+- [ ] Existing meaningful navigation tests pass; add a regression only for a
+  demonstrated missing behavior, with real API arguments and rendered results.
 
-4. **Explorer adaptation:**
-   - Tenant scope: workspace card grid (fetch from `GET /api/v1/workspaces` + budget stats)
-   - Workspace scope: C4 graph (existing ExplorerCanvas)
-   - Repo scope: repo-level graph with Architecture/Code tabs
-
-5. **Specs adaptation:**
-   - Tenant scope: spec registry across workspaces
-   - Workspace scope: specs filtered by workspace repos
-   - Repo scope: specs for specific repo + progress
-
-6. **Meta-specs adaptation:**
-   - Tenant scope: catalog view
-   - Workspace scope: persona editor, preview loop
-   - Repo scope: redirect to workspace scope
-
-7. **Admin adaptation:**
-   - Tenant scope: users, compute, budget, audit, + New Workspace
-   - Workspace scope: settings, budget, trust level, teams, Policies, Repos
-   - Repo scope: repo settings, gates, policies, danger zone
-
-## Acceptance Criteria
-
-- [ ] Each nav item renders different content based on scope (tenant/workspace/repo)
-- [ ] Explorer at tenant scope shows workspace card grid (not graph canvas)
-- [ ] Explorer at repo scope shows Architecture and Code tabs
-- [ ] Meta-specs at repo scope redirects to workspace scope
-- [ ] Inbox at repo scope filters notifications by `repo_id`
-- [ ] Briefing at tenant scope aggregates per-workspace briefings client-side
-- [ ] Admin at tenant scope includes workspace creation button
-- [ ] Admin at workspace scope includes Policies tab and Repos tab
-- [ ] Content transitions are smooth (no full page reload on scope change)
-- [ ] `npm test` passes in `web/`
-
-## Agent Instructions
-
-Read `specs/system/human-system-interface.md` §1.5 (What Each Nav Item Shows at Each Scope) for the full 6×3 matrix. This task depends on task-082 (stable sidebar). Check the existing App.svelte routing to understand how scope is currently determined. The scope indicator (breadcrumb) in the topbar determines the current scope. Key design rule: sidebar items never change — only the content area adapts. For "contextual drill-downs" (Task Board, Agent List, MR Detail, etc.), these are accessed by clicking entity references, not sidebar items. The Code tab at repo scope is part of the Explorer, not a separate nav item.
+Read `docs/ui.md`, the cited navigation sections, and the actual routing/data
+loaders before editing. Reuse working behavior. Do not introduce the permanent
+sidebar, legacy scope breadcrumb control, or Architecture-as-default routing
+from the superseded plan. Do not mark unrelated partial navigation features
+verified as a side effect of this task.

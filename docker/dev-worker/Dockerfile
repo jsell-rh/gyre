@@ -17,6 +17,13 @@ RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-to
 ENV PATH=/usr/local/cargo/bin:$PATH
 RUN rustup component add rustfmt clippy
 
+# Match the repository's Playwright lockfile. Focused browser probes must not
+# depend on runtime downloads or writes to the sandbox's read-only system.
+ENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/gyre-playwright
+RUN npx --yes --package=playwright@1.58.2 playwright install --with-deps chromium \
+    && npm cache clean --force \
+    && rm -rf /var/lib/apt/lists/*
+
 # Portable, pinned jj for source-control code and integration tests.
 ARG JJ_VERSION=0.39.0
 ARG JJ_SHA256=8da8d96e9c8696c21ad47847a63d533e249acb0449d9af0f0562b5ea7b024f04

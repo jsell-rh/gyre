@@ -452,10 +452,10 @@ fi
 
 # Controller status
 echo "${BOLD}Development Controller${RESET}"
-if [ -f "$REPO_ROOT/.gyre-dev-controller/state.sqlite3" ]; then
-    python3 "$REPO_ROOT/scripts/dev-controller.py" status | head -8 | sed 's/^/  /'
+if [ -f "$REPO_ROOT/.gyre-pipeline/pipeline.sqlite3" ]; then
+    python3 "$REPO_ROOT/scripts/dev-pipeline.py" status | head -8 | sed 's/^/  /'
 else
-    echo "  ${DIM}(no ledger — run: python3 scripts/dev-controller.py sync)${RESET}"
+    echo "  ${DIM}(no ledger — run: python3 scripts/dev-pipeline.py discover triage)${RESET}"
 fi
 echo "  ${DIM}Cockpit: http://127.0.0.1:7690${RESET}"
 echo ""
