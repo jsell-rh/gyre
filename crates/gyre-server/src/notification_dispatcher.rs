@@ -306,6 +306,212 @@ pub async fn notify_agent_escalation(
     }
 }
 
+/// Deliver a "persona approval requested" notification to the persona's
+/// owner (user-management.md §Who Gets Notified). No-op when the persona has
+/// no owner or the owner id is empty.
+pub async fn notify_persona_approval_requested(
+    state: &AppState,
+    persona: &gyre_domain::Persona,
+) {
+    let Some(owner) = persona.owner.as_deref() else {
+        return;
+    };
+    let owner = owner.strip_prefix("user:").unwrap_or(owner);
+    if owner.is_empty() {
+        return;
+    }
+    // Workspace scope comes from the persona's scope; Tenant/Repo scopes
+    // resolve to their entity's workspace when possible, else the
+    // notification is skipped (never fabricated — see
+    // check-fabricated-scope-defaults).
+    let scope_ws: Option<Id> = match &persona.scope {
+        gyre_domain::PersonaScope::Workspace(ws_id) => Some(ws_id.clone()),
+        gyre_domain::PersonaScope::Tenant(tenant_id) => state
+            .workspaces
+            .list_by_tenant(tenant_id)
+            .await
+            .ok()
+            .and_then(|ws_list| ws_list.into_iter().next().map(|ws| ws.id)),
+        gyre_domain::PersonaScope::Repo(repo_id) => state
+            .repos
+            .find_by_id(repo_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.workspace_id),
+    };
+    let Some(workspace_id) = scope_ws else {
+        tracing::warn!(
+            persona_id = %persona.id,
+            "persona-approval routing: cannot resolve workspace scope — skipping notification"
+        );
+        return;
+    };
+    let tenant_id = match state.workspaces.find_by_id(&workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        _ => {
+            tracing::warn!(
+                persona_id = %persona.id,
+                workspace_id = %workspace_id,
+                "persona-approval routing: cannot resolve tenant for workspace — skipping notification"
+            );
+            return;
+        }
+    };
+    crate::notifications::notify_rich(
+        state,
+        workspace_id,
+        Id::new(owner.to_string()),
+        NotificationType::PersonaApprovalRequested,
+        format!("Persona '{}' requires your approval", persona.name),
+        tenant_id,
+        Some(
+            serde_json::json!({
+                "persona_id": persona.id.to_string(),
+                "persona_slug": persona.slug,
+                "approval_status": "Pending",
+            })
+            .to_string(),
+        ),
+        Some(persona.id.to_string()),
+        None,
+    )
+    .await;
+}
+
+/// Deliver a "merge queue paused" notification to all workspace
+/// Admins/Owners (user-management.md §Who Gets Notified). Skips (with a
+/// log) when the workspace's tenant cannot be resolved.
+pub async fn notify_merge_queue_paused(
+    state: &AppState,
+    workspace_id: &Id,
+    repo: &gyre_domain::Repository,
+    reason: &str,
+) {
+    let tenant_id = match state.workspaces.find_by_id(workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        _ => {
+            tracing::warn!(
+                workspace_id = %workspace_id,
+                repo_id = %repo.id,
+                "merge-queue-pause routing: cannot resolve tenant for workspace — skipping notification"
+            );
+            return;
+        }
+    };
+    let recipients =
+        members_with_roles(state, workspace_id, &[WorkspaceRole::Admin, WorkspaceRole::Owner]).await;
+    let body = serde_json::json!({
+        "repo_id": repo.id.to_string(),
+        "repo_name": repo.name,
+        "reason": reason,
+    })
+    .to_string();
+    for user_id in recipients {
+        crate::notifications::notify_rich(
+            state,
+            workspace_id.clone(),
+            user_id,
+            NotificationType::MergeQueuePaused,
+            format!("Merge queue paused on {}: {}", repo.name, reason),
+            &tenant_id,
+            Some(body.clone()),
+            Some(repo.id.to_string()),
+            Some(repo.id.to_string()),
+        )
+        .await;
+    }
+}
+
+/// Deliver an "agent budget warning" notification to the agent's spawning
+/// user plus the workspace Admins (user-management.md §Who Gets Notified).
+///
+/// Routing contract only — the emission *trigger* (80% threshold crossing)
+/// is owned by task-191's enforcement helper, which calls this function.
+pub async fn notify_agent_budget_warning(
+    state: &AppState,
+    agent: &gyre_domain::Agent,
+    usage_pct: f64,
+    tenant_id: &str,
+) {
+    let mut recipients: Vec<Id> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    if let Some(sb) = &agent.spawned_by {
+        if seen.insert(sb.clone()) {
+            recipients.push(Id::new(sb.clone()));
+        }
+    }
+    for admin in members_with_roles(state, &agent.workspace_id, &[WorkspaceRole::Admin]).await {
+        if seen.insert(admin.as_str().to_string()) {
+            recipients.push(admin);
+        }
+    }
+    let body = serde_json::json!({
+        "agent_id": agent.id.to_string(),
+        "usage_pct": usage_pct,
+    })
+    .to_string();
+    for user_id in recipients {
+        crate::notifications::notify_rich(
+            state,
+            agent.workspace_id.clone(),
+            user_id,
+            NotificationType::BudgetWarning,
+            format!(
+                "Agent '{}' budget warning: {:.0}% of workspace budget used",
+                agent.name, usage_pct
+            ),
+            tenant_id,
+            Some(body.clone()),
+            Some(agent.id.to_string()),
+            None,
+        )
+        .await;
+    }
+}
+
+/// Deliver an "agent budget exhausted" notification to the agent's spawning
+/// user plus the workspace Owner (user-management.md §Who Gets Notified).
+///
+/// Routing contract only — the emission *trigger* (100% threshold) is owned
+/// by task-191's enforcement helper, which calls this function.
+pub async fn notify_agent_budget_exhausted(
+    state: &AppState,
+    agent: &gyre_domain::Agent,
+    tenant_id: &str,
+) {
+    let mut recipients: Vec<Id> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    if let Some(sb) = &agent.spawned_by {
+        if seen.insert(sb.clone()) {
+            recipients.push(Id::new(sb.clone()));
+        }
+    }
+    for owner in members_with_roles(state, &agent.workspace_id, &[WorkspaceRole::Owner]).await {
+        if seen.insert(owner.as_str().to_string()) {
+            recipients.push(owner);
+        }
+    }
+    let body = serde_json::json!({
+        "agent_id": agent.id.to_string(),
+    })
+    .to_string();
+    for user_id in recipients {
+        crate::notifications::notify_rich(
+            state,
+            agent.workspace_id.clone(),
+            user_id,
+            NotificationType::BudgetExhausted,
+            format!("Agent '{}' budget exhausted — agents stopping", agent.name),
+            tenant_id,
+            Some(body.clone()),
+            Some(agent.id.to_string()),
+            None,
+        )
+        .await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -662,6 +868,197 @@ mod tests {
         assert_eq!(
             spawner_notifs[0].notification_type,
             NotificationType::AgentEscalation
+        );
+    }
+
+    // ─── Routing table rows: persona approval, merge-queue pause, budget ──
+
+    #[tokio::test]
+    async fn persona_approval_requested_notifies_owner() {
+        let state = test_state();
+        let ws = Id::new("ws-1");
+        seed_member(&state, &ws, "owner-1", WorkspaceRole::Owner).await;
+
+        let mut persona = gyre_domain::Persona::new(
+            Id::new("persona-1"),
+            "security",
+            "security",
+            gyre_domain::PersonaScope::Workspace(ws.clone()),
+            "You are a security reviewer.",
+            1000,
+        );
+        persona.owner = Some("user:persona-owner".to_string());
+        // Persona starts Pending (PersonaApprovalStatus::default()).
+        assert_eq!(
+            persona.approval_status,
+            gyre_domain::PersonaApprovalStatus::Pending
+        );
+
+        notify_persona_approval_requested(&state, &persona).await;
+
+        // Owner (with "user:" prefix stripped) got the notification.
+        let owner_notifs = state
+            .notifications
+            .list_for_user(&Id::new("persona-owner"), Some(&ws), None, None, None, 50, 0)
+            .await
+            .unwrap();
+        assert_eq!(owner_notifs.len(), 1, "persona owner must be notified");
+        assert_eq!(
+            owner_notifs[0].notification_type,
+            NotificationType::PersonaApprovalRequested
+        );
+        assert_eq!(
+            owner_notifs[0].entity_ref.as_deref(),
+            Some("persona-1"),
+            "entity_ref must deep-link the persona"
+        );
+
+        // Nobody else was notified (routing table: owner only).
+        let owner_member_notifs = state
+            .notifications
+            .list_for_user(&Id::new("owner-1"), Some(&ws), None, None, None, 50, 0)
+            .await
+            .unwrap();
+        assert!(
+            owner_notifs.len() == 1 && owner_member_notifs.is_empty(),
+            "workspace members must not receive persona approval requests"
+        );
+    }
+
+    #[tokio::test]
+    async fn persona_approval_requested_without_owner_is_noop() {
+        let state = test_state();
+        let persona = gyre_domain::Persona::new(
+            Id::new("persona-2"),
+            "reviewer",
+            "reviewer",
+            gyre_domain::PersonaScope::Workspace(Id::new("ws-1")),
+            "Review code.",
+            1000,
+        );
+        // owner: None (default).
+        notify_persona_approval_requested(&state, &persona).await;
+        let all = state
+            .notifications
+            .list_for_user(&Id::new("reviewer"), None, None, None, None, 50, 0)
+            .await
+            .unwrap();
+        assert!(all.is_empty(), "no owner → no notification");
+    }
+
+    #[tokio::test]
+    async fn merge_queue_paused_notifies_all_admins_and_owners() {
+        let state = test_state();
+        let ws = Id::new("ws-1");
+        seed_member(&state, &ws, "admin-1", WorkspaceRole::Admin).await;
+        seed_member(&state, &ws, "admin-2", WorkspaceRole::Admin).await;
+        seed_member(&state, &ws, "owner-1", WorkspaceRole::Owner).await;
+        seed_member(&state, &ws, "dev-1", WorkspaceRole::Developer).await;
+        seed_member(&state, &ws, "viewer-1", WorkspaceRole::Viewer).await;
+
+        let repo = gyre_domain::Repository::new(
+            Id::new("repo-pause"),
+            ws.clone(),
+            "repo-pause",
+            "/tmp/repo-pause",
+            1000,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        notify_merge_queue_paused(&state, &ws, &repo, "post-merge validation failed").await;
+
+        for user in ["admin-1", "admin-2", "owner-1"] {
+            let notifs = state
+                .notifications
+                .list_for_user(&Id::new(user), Some(&ws), None, None, None, 50, 0)
+                .await
+                .unwrap();
+            assert_eq!(
+                notifs.len(),
+                1,
+                "{user} (Admin/Owner) must receive the pause notification"
+            );
+            assert_eq!(notifs[0].notification_type, NotificationType::MergeQueuePaused);
+            assert_eq!(notifs[0].repo_id.as_deref(), Some("repo-pause"));
+        }
+        for user in ["dev-1", "viewer-1"] {
+            let notifs = state
+                .notifications
+                .list_for_user(&Id::new(user), Some(&ws), None, None, None, 50, 0)
+                .await
+                .unwrap();
+            assert!(
+                notifs.is_empty(),
+                "{user} (non-Admin/Owner) must not receive the pause notification"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn budget_warning_notifies_spawner_and_admins() {
+        let state = test_state();
+        let ws = Id::new("ws-1");
+        seed_member(&state, &ws, "admin-1", WorkspaceRole::Admin).await;
+        seed_member(&state, &ws, "owner-1", WorkspaceRole::Owner).await;
+
+        let agent = agent_spawned_by(&ws, Some("spawner-1"));
+        notify_agent_budget_warning(&state, &agent, 85.0, "tenant-1").await;
+
+        for user in ["spawner-1", "admin-1"] {
+            let notifs = state
+                .notifications
+                .list_for_user(&Id::new(user), Some(&ws), None, None, None, 50, 0)
+                .await
+                .unwrap();
+            assert_eq!(
+                notifs.len(),
+                1,
+                "{user} must receive the budget warning (spawner + Admins)"
+            );
+            assert_eq!(notifs[0].notification_type, NotificationType::BudgetWarning);
+        }
+        let owner_notifs = state
+            .notifications
+            .list_for_user(&Id::new("owner-1"), Some(&ws), None, None, None, 50, 0)
+            .await
+            .unwrap();
+        assert!(
+            owner_notifs.is_empty(),
+            "budget warning must not notify Owners (that is the exhausted row)"
+        );
+    }
+
+    #[tokio::test]
+    async fn budget_exhausted_notifies_spawner_and_owner() {
+        let state = test_state();
+        let ws = Id::new("ws-1");
+        seed_member(&state, &ws, "admin-1", WorkspaceRole::Admin).await;
+        seed_member(&state, &ws, "owner-1", WorkspaceRole::Owner).await;
+
+        let agent = agent_spawned_by(&ws, Some("spawner-1"));
+        notify_agent_budget_exhausted(&state, &agent, "tenant-1").await;
+
+        for user in ["spawner-1", "owner-1"] {
+            let notifs = state
+                .notifications
+                .list_for_user(&Id::new(user), Some(&ws), None, None, None, 50, 0)
+                .await
+                .unwrap();
+            assert_eq!(
+                notifs.len(),
+                1,
+                "{user} must receive the budget-exhausted notification (spawner + Owner)"
+            );
+            assert_eq!(notifs[0].notification_type, NotificationType::BudgetExhausted);
+        }
+        let admin_notifs = state
+            .notifications
+            .list_for_user(&Id::new("admin-1"), Some(&ws), None, None, None, 50, 0)
+            .await
+            .unwrap();
+        assert!(
+            admin_notifs.is_empty(),
+            "budget exhausted must not notify Admins (that is the warning row)"
         );
     }
 }
