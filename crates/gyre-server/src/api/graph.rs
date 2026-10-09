@@ -6,7 +6,7 @@
 //!   GET  /api/v1/repos/{id}/graph/modules      — nodes by NodeType::Module + containment
 //!   GET  /api/v1/repos/{id}/graph/node/{nid}   — single node + all connected edges
 //!   GET  /api/v1/repos/{id}/graph/spec/{path}  — nodes governed by a spec path
-//!   GET  /api/v1/repos/{id}/graph/concept/{n}  — concept view by name pattern
+//!   GET  /api/v1/repos/{id}/graph/concept/{n}  — concept view projection (manifest-defined)
 //!   GET  /api/v1/repos/{id}/graph/timeline     — architectural deltas (?since=&until=)
 //!   GET  /api/v1/repos/{id}/graph/risks        — risk metrics per module
 //!   GET  /api/v1/repos/{id}/graph/diff         — graph diff between commits (?from=&to=)
@@ -649,18 +649,73 @@ pub async fn assemble_concept_results(
     })
 }
 
+/// Resolve the `ConceptView` named `concept_name` (case-insensitive exact
+/// match on the concept name) from the `concepts:` block of the repo's
+/// `specs/manifest.yaml` at its default branch. Returns `None` when the repo
+/// has no manifest, the manifest is unparseable, or no concept with that
+/// name is defined.
+async fn resolve_concept_view(repo: &gyre_domain::Repository, concept_name: &str) -> Option<gyre_common::graph::ConceptView> {
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let yaml = crate::spec_registry::read_git_file(
+        &git_bin,
+        &repo.path,
+        &repo.default_branch,
+        "specs/manifest.yaml",
+    )
+    .await?;
+    let manifest = crate::spec_registry::parse_manifest(&yaml).ok()?;
+    manifest
+        .concepts
+        .iter()
+        .find(|c| c.name.eq_ignore_ascii_case(concept_name))
+        .map(gyre_common::graph::ConceptView::from)
+}
+
 /// GET /api/v1/repos/{id}/graph/concept/{name}
-/// Returns nodes matching the concept name pattern (case-insensitive substring match).
-///
-/// In the full implementation this would use ConceptView definitions from the spec manifest.
-/// For now, it matches nodes whose `name` or `qualified_name` contains the concept name.
+/// Concept view projection (realized-model.md §4): resolves the named
+/// concept from the repo's spec manifest and returns the union of nodes
+/// matching its include patterns (types/traits/modules/endpoints/specs),
+/// with edges between matched nodes. Returns 404 when the concept is not
+/// defined in the manifest — there is no substring fallback.
 pub async fn get_graph_concept(
     State(state): State<Arc<AppState>>,
     Path((id, concept_name)): Path<(String, String)>,
 ) -> Result<Json<KnowledgeGraphResponse>, ApiError> {
-    require_repo(&state, &id).await?;
-    let response = assemble_concept_results(&state, &[id], &concept_name).await?;
-    Ok(Json(response))
+    let repo = state
+        .repos
+        .find_by_id(&Id::new(&id))
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+
+    let concept = resolve_concept_view(&repo, &concept_name)
+        .await
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "concept '{concept_name}' is not defined in the spec manifest"
+            ))
+        })?;
+
+    let repo_id = Id::new(&id);
+    let nodes = state
+        .graph_store
+        .list_nodes(&repo_id, None)
+        .await
+        .map_err(ApiError::Internal)?;
+    let edges = state
+        .graph_store
+        .list_edges(&repo_id, None)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    let (matched_nodes, matched_edges) = concept.project(nodes.iter(), edges.iter());
+
+    Ok(Json(KnowledgeGraphResponse {
+        repo_id: id,
+        nodes: matched_nodes.into_iter().map(Into::into).collect(),
+        edges: matched_edges.into_iter().map(Into::into).collect(),
+        warnings: vec![],
+    }))
 }
 
 /// GET /api/v1/repos/{id}/graph/timeline
@@ -1277,27 +1332,55 @@ pub async fn link_node_to_spec(
 }
 
 /// GET /workspaces/{id}/graph/concept/{name}
-/// Workspace-scoped concept search — filters nodes across all repos in the workspace
-/// by case-insensitive substring match on `name` or `qualified_name`.
-///
-/// This avoids downloading the full workspace graph for concept queries.
+/// Workspace-scoped concept view projection (realized-model.md §4): each
+/// repo in the workspace resolves the named concept from its own spec
+/// manifest; matched nodes/edges are unioned across repos. A repo lacking
+/// the named concept contributes nothing.
 pub async fn get_workspace_graph_concept(
     State(state): State<Arc<AppState>>,
     Path((id, concept_name)): Path<(String, String)>,
 ) -> Result<Json<KnowledgeGraphResponse>, ApiError> {
     require_workspace(&state, &id).await?;
 
-    let repo_ids: Vec<String> = state
+    let repos = state
         .repos
         .list_by_workspace(&Id::new(&id))
         .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|r| r.id.to_string())
-        .collect();
+        .map_err(ApiError::Internal)?;
 
-    let response = assemble_concept_results(&state, &repo_ids, &concept_name).await?;
-    Ok(Json(response))
+    let mut matched_nodes: Vec<GraphNodeResponse> = Vec::new();
+    let mut matched_edges: Vec<GraphEdgeResponse> = Vec::new();
+
+    for repo in &repos {
+        let Some(concept) = resolve_concept_view(repo, &concept_name).await else {
+            continue; // repo does not define this concept
+        };
+        let nodes = state
+            .graph_store
+            .list_nodes(&repo.id, None)
+            .await
+            .map_err(ApiError::Internal)?;
+        let edges = state
+            .graph_store
+            .list_edges(&repo.id, None)
+            .await
+            .map_err(ApiError::Internal)?;
+
+        let (mn, me) = concept.project(nodes.iter(), edges.iter());
+        matched_nodes.extend(mn.into_iter().map(Into::into));
+        matched_edges.extend(me.into_iter().map(Into::into));
+    }
+
+    Ok(Json(KnowledgeGraphResponse {
+        repo_id: if repos.len() == 1 {
+            repos[0].id.to_string()
+        } else {
+            "multi-repo".to_string()
+        },
+        nodes: matched_nodes,
+        edges: matched_edges,
+        warnings: vec![],
+    }))
 }
 
 /// Request body for structural prediction.
@@ -2325,5 +2408,278 @@ mod tests {
             briefing.exceptions.is_empty(),
             "old MR reverts should be filtered out"
         );
+    }
+    // ── Concept view projection (realized-model.md §4) ─────────────────────
+
+    /// Create a real (non-bare) git repo at a tempdir with the given
+    /// `specs/manifest.yaml` committed on `main`. Returns the repo path.
+    fn init_manifest_repo(manifest_yaml: &str) -> (tempfile::TempDir, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                status.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&status.stderr)
+            );
+        };
+        git(&["init", "--initial-branch=main"]);
+        git(&["config", "user.email", "test@gyre.dev"]);
+        git(&["config", "user.name", "Gyre Test"]);
+        std::fs::create_dir_all(repo_path.join("specs")).unwrap();
+        std::fs::write(repo_path.join("specs/manifest.yaml"), manifest_yaml).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "seed manifest"]);
+        let path_str = repo_path.to_str().unwrap().to_string();
+        (tmp, path_str)
+    }
+
+    const AUTH_CONCEPT_MANIFEST: &str = r#"
+version: 1
+specs:
+  - path: system/identity-security.md
+    title: Identity Security
+    owner: user:test
+concepts:
+  - name: Authentication
+    description: "Token validation, RBAC, ABAC, JWT handling"
+    include:
+      - types: ["*Auth*"]
+      - modules: ["*::auth*"]
+      - endpoints: ["/api/v1/auth/*"]
+      - specs: ["identity-security.md"]
+"#;
+
+    /// Seed the graph store with an authentication-flavored node set.
+    /// Returns (auth-matching node names, unrelated node name).
+    async fn seed_concept_graph(state: &Arc<AppState>, repo_id: &str) {
+        let auth_type = _new_node(repo_id, "JwtAuthProvider", NodeType::Type);
+        let unrelated_type = _new_node(repo_id, "Invoice", NodeType::Type);
+        let auth_module = {
+            let mut m = _new_node(repo_id, "auth", NodeType::Module);
+            m.qualified_name = "gyre_domain::auth::tokens".to_string();
+            m
+        };
+        let auth_endpoint = {
+            let mut e = _new_node(repo_id, "login", NodeType::Endpoint);
+            e.qualified_name = "api::v1::auth::login".to_string();
+            e
+        };
+        let governed = {
+            let mut g = _new_node(repo_id, "TokenStore", NodeType::Type);
+            g.spec_path = Some("specs/system/identity-security.md".to_string());
+            g
+        };
+        for n in [
+            auth_type.clone(),
+            unrelated_type.clone(),
+            auth_module.clone(),
+            auth_endpoint.clone(),
+            governed.clone(),
+        ] {
+            state.graph_store.create_node(n).await.unwrap();
+        }
+        // Endpoint route path in edge metadata (extractor convention).
+        let mut route_edge = _new_edge(
+            repo_id,
+            &auth_endpoint.id,
+            &auth_type.id,
+            EdgeType::RoutesTo,
+        );
+        route_edge.metadata =
+            Some(r#"{"path":"/api/v1/auth/login","method":"POST"}"#.to_string());
+        state.graph_store.create_edge(route_edge).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn graph_concept_returns_manifest_projection_not_substring() {
+        let state = test_state();
+        let (_ws_id, repo_id) = setup_workspace_and_repo(&state).await;
+        let (_tmp, repo_path) = init_manifest_repo(AUTH_CONCEPT_MANIFEST);
+
+        // Point the repo at the real git checkout so the manifest resolves.
+        let repo = state.repos.find_by_id(&Id::new(&repo_id)).await.unwrap().unwrap();
+        let mut repo = repo;
+        repo.path = repo_path;
+        state.repos.update(&repo).await.unwrap();
+
+        seed_concept_graph(&state, &repo_id).await;
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/v1/repos/{repo_id}/graph/concept/Authentication"
+                    ))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+
+        let names: Vec<&str> = json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        // Concept-matching nodes.
+        assert!(names.contains(&"JwtAuthProvider"), "type glob: {names:?}");
+        assert!(names.contains(&"auth"), "module glob: {names:?}");
+        assert!(names.contains(&"login"), "endpoint glob: {names:?}");
+        assert!(names.contains(&"TokenStore"), "spec-governed: {names:?}");
+        // The unrelated node must be excluded. Discriminating assertion
+        // against substring regression: every included node must satisfy a
+        // concept include rule, and exactly the 4 seeded concept nodes do.
+        assert!(
+            !names.contains(&"Invoice"),
+            "unrelated node must be excluded: {names:?}"
+        );
+        assert_eq!(
+            json["nodes"].as_array().unwrap().len(),
+            4,
+            "exactly the 4 concept-matching nodes: {names:?}"
+        );
+
+        // Edge between matched endpoint and matched type is included.
+        assert_eq!(json["edges"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn graph_concept_undefined_concept_returns_404() {
+        let state = test_state();
+        let (_ws_id, repo_id) = setup_workspace_and_repo(&state).await;
+        let (tmp, repo_path) = init_manifest_repo(AUTH_CONCEPT_MANIFEST);
+
+        let repo = state.repos.find_by_id(&Id::new(&repo_id)).await.unwrap().unwrap();
+        let mut repo = repo;
+        repo.path = repo_path;
+        state.repos.update(&repo).await.unwrap();
+
+        seed_concept_graph(&state, &repo_id).await;
+
+        let app = crate::api::api_router().with_state(state);
+        // "auth" is a substring of the concept name but not a defined
+        // concept — must 404, not fall back to substring matching.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/repos/{repo_id}/graph/concept/auth"))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        drop(tmp);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn graph_concept_repo_without_manifest_returns_404() {
+        let state = test_state();
+        let (_ws_id, repo_id) = setup_workspace_and_repo(&state).await;
+        // Repo path /repos/billing-service has no git repo — no manifest.
+        seed_concept_graph(&state, &repo_id).await;
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/repos/{repo_id}/graph/concept/Authentication"))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn workspace_graph_concept_unions_manifest_projections() {
+        let state = test_state();
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+        let (tmp, repo_path) = init_manifest_repo(AUTH_CONCEPT_MANIFEST);
+
+        // repo-1 gets a real manifest checkout + concept nodes.
+        let repo = state.repos.find_by_id(&Id::new("repo-1")).await.unwrap().unwrap();
+        let mut repo = repo;
+        repo.path = repo_path;
+        state.repos.update(&repo).await.unwrap();
+        seed_concept_graph(&state, "repo-1").await;
+
+        // repo-2 in the same workspace lacks the concept in its manifest —
+        // contributes nothing.
+        let no_concept_manifest = r#"
+version: 1
+specs:
+  - path: system/other.md
+    title: Other
+    owner: user:test
+"#;
+        let (tmp2, repo2_path) = init_manifest_repo(no_concept_manifest);
+        let repo2 = gyre_domain::Repository::new(
+            Id::new("repo-2"),
+            Id::new("ws-briefing"),
+            "other-service",
+            repo2_path,
+            1000,
+        );
+        state.repos.create(&repo2).await.unwrap();
+        // A node that WOULD match the concept patterns — must not appear
+        // because repo-2's manifest doesn't define the concept.
+        let mut extra = _new_node("repo-2", "JwtAuthProvider", NodeType::Type);
+        extra.qualified_name = "other::JwtAuthProvider".to_string();
+        state.graph_store.create_node(extra).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/graph/concept/Authentication"))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let names: Vec<&str> = json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        // Only repo-1's concept nodes — repo-2's JwtAuthProvider must be
+        // absent (its manifest does not define the concept). repo_id fields
+        // distinguish the two repos' identically-named nodes.
+        let repo_ids: Vec<&str> = json["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["repo_id"].as_str().unwrap())
+            .collect();
+        assert!(
+            !repo_ids.contains(&"repo-2"),
+            "repo without the concept must contribute nothing: {names:?} {repo_ids:?}"
+        );
+        assert_eq!(names.len(), 4, "only repo-1's projection: {names:?}");
+        drop(tmp);
+        drop(tmp2);
     }
 }
