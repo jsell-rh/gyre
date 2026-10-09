@@ -2,12 +2,12 @@
 title: "Platform Model Orchestrator Lifecycle Protocol"
 spec_ref: "platform-model.md §3 Two-Level Orchestration"
 depends_on: []
-progress: complete
+progress: needs-revision
 coverage_sections:
   - "platform-model.md §3 Two-Level Orchestration"
   - "platform-model.md §3 Workspace Orchestrator"
   - "platform-model.md §3 Repo Orchestrator"
-commits: ["c158eb6853538d989766f84b3f4b236f7fb73ad7", "c83dc841a282381a36a130853c846de4c13e1195", "d2f3765dc9be6aaf8ef418a1193e8f6b644e73a5", "2ae69e973fce1e3a316205af1f238c3a457bd458"]
+commits: ["2ae69e973fce1e3a316205af1f238c3a457bd458", "d2f3765dc9be6aaf8ef418a1193e8f6b644e73a5"]
 review: specs/reviews/task-093.md
 ---
 
@@ -80,17 +80,6 @@ One per repo. Manages the Ralph loop for its repo. Uses the `repo-orchestrator` 
 - [x] Stale orchestrator auto-restart works
 - [x] Workspace orchestrator can spawn repo orchestrators via MCP
 - [x] `cargo test --all` passes
-
-## Shipped
-
-- Two-level orchestrator lifecycle: `OrchestratorType` on agents, one-live-per-scope spawn endpoints (REST + MCP, 409 on conflict) minting workspace- or repo-scoped JWTs, with per-repo ABAC plus tenant containment on both REST paths and both routes registered in the ABAC resolver.
-- Auto-restart and escalation on every terminal path (stale-detector abort, fail, stop) via shared `handle_orchestrator_death`: budget-symmetric replacement that inherits the full lifecycle config (`disconnected_behavior`, `restart_on_failure`) and repo-tier deaths escalate to the live workspace orchestrator with an informational payload naming the replacement.
-- MCP tool suite with tier gates: `gyre_spawn_repo_orchestrator`/`gyre_list_repo_orchestrators`/`gyre_cross_repo_task` (workspace tier) and `gyre_decompose_spec`/`gyre_spawn_worker` (repo tier), all delegating to shared `_core` fns; `gyre_message_send` restored to the write-role gate.
-- Verified by 16 orchestrator + 9 message-send handler tests (cross-tenant Forbidden paths, budget exhaustion, second-death restart chain, escalation payload) plus the ABAC registry, MCP write-tool, and exempt-handler mechanical checks.
-
-## Integration Repair (attempt 35e4850835de47f4)
-
-
 
 ## Agent Instructions
 
