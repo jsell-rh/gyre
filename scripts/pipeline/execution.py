@@ -24,6 +24,11 @@ class Retry(RuntimeError):
         self.fresh_model = fresh_model
 
 
+class Wait(Retry):
+    """An expected external observation is pending, rather than failing."""
+    retry_delay = 30
+
+
 class Execution:
     def __init__(self, store, claim):
         self.store, self.claim = store, claim

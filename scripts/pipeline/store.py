@@ -192,10 +192,10 @@ class Store:
                                 ((updates or {})['review']['candidate'], row['task'], row['generation']))
             self.event('completed', result, row['task'], ident)
 
-    def retry(self, ident, token, reason, delay=None):
+    def retry(self, ident, token, reason, delay=None, count_failure=True):
         with self.transaction():
             row = self._current(ident, token)
-            failures = row['failures'] + 1
+            failures = row['failures'] + 1 if count_failure else 0
             delay = min(900, 5 * 2 ** min(failures - 1, 8) * random.uniform(.8, 1.2)) if delay is None else delay
             self.db.execute("UPDATE work SET state='retry',failures=?,retry_at=?,result=?,owner=NULL,expires=NULL,updated=? WHERE id=?",
                             (failures, time.time() + delay, json.dumps(reason), time.time(), ident))

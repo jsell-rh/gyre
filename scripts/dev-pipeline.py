@@ -14,7 +14,7 @@ import time
 import uuid
 
 from pipeline.catalog import discover, generation_for, metadata, sync_checkout
-from pipeline.execution import Execution, ROOT, Retry
+from pipeline.execution import Execution, ROOT, Retry, Wait
 from pipeline.eligibility import eligible
 from pipeline.stages import HANDLERS
 from pipeline.store import STAGES, Store, StaleClaim
@@ -135,9 +135,10 @@ def run_one(store, stage, task=None):
                               'review': None, 'verified': None}, [finding])
                 return True
             store.retry(claim['id'], claim['token'],
-                        {'category': stage if getattr(exc, 'fresh_model', False) else
+                        {'category': 'observation' if isinstance(exc, Wait) else stage if getattr(exc, 'fresh_model', False) else
                                      'infrastructure' if isinstance(exc, (Retry, OSError, subprocess.TimeoutExpired)) else 'execution',
-                         'message': str(exc)[-4000:], 'fresh_model': getattr(exc, 'fresh_model', False)})
+                         'message': str(exc)[-4000:], 'fresh_model': getattr(exc, 'fresh_model', False)},
+                        delay=getattr(exc, 'retry_delay', None), count_failure=not isinstance(exc, Wait))
         except StaleClaim:
             pass
         except Exception as recovery_error:

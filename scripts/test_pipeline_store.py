@@ -109,6 +109,19 @@ print(json.dumps(c['id'] if c else None))
         with self.assertRaises(StaleClaim):
             self.store.reserve('same-sandbox', ident, old['token'], 'sandbox', 1)
 
+    def test_pending_observation_does_not_accumulate_failure_backoff(self):
+        ident = self.work('publish')
+        for _ in range(10):
+            claim = self.store.claim('publish', 'observer')
+            before = time.time()
+            self.store.retry(ident, claim['token'], {'category': 'observation'},
+                             delay=30, count_failure=False)
+            row = self.store.db.execute('SELECT retry_at,failures FROM work WHERE id=?', (ident,)).fetchone()
+            self.assertEqual(row['failures'], 0)
+            self.assertGreaterEqual(row['retry_at'], before + 30)
+            self.assertLess(row['retry_at'], before + 31)
+            self.store.db.execute('UPDATE work SET retry_at=0 WHERE id=?', (ident,))
+
     def test_main_movement_does_not_reset_implementation_backoff(self):
         first = self.work(inputs={'base': 'old', 'candidate': None, 'repair': None})
         claim = self.store.claim('implement', 'one')

@@ -9,7 +9,7 @@ import subprocess
 import time
 
 from .catalog import contract, helper, metadata, safe_metadata
-from .execution import ROOT, Retry, gateway
+from .execution import ROOT, Retry, Wait, gateway
 
 
 def prompt(execution, task):
@@ -350,7 +350,7 @@ def publish(execution, task):
         return observation, {'repair': finding, 'candidate': head,
                              'candidate_base': verified['base'], 'review': None, 'verified': None}, [finding]
     if observation['status'] != 'passed':
-        raise Retry('GitHub merge gate: ' + observation['status'])
+        raise Wait('GitHub merge gate: ' + observation['status'])
     permit = 'merge-' + execution.claim['id']
     if not execution.store.reserve(permit, execution.claim['id'], execution.claim['token'], 'merge', 1,
                                    {'url': url, 'head': head, 'base': verified['base']}):
@@ -363,7 +363,7 @@ def publish(execution, task):
                       '--subject', f"feat({task['name']}): {data['title']}",
                       '--body-file', str(description), timeout=60)
     # The next observation confirms the authoritative merge and its tree.
-    raise Retry('merge requested; awaiting upstream confirmation')
+    raise Wait('merge requested; awaiting upstream confirmation')
 
 
 def baseline_repair(execution, observation):
