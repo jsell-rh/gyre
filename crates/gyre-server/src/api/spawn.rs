@@ -644,53 +644,32 @@ pub(crate) async fn spawn_agent_core(
         // "default" tenant. On an unresolvable workspace, skip tenant-scoped
         // (and thus all) secret resolution and warn — the spawn itself must
         // continue without GYRE_CRED_* env vars.
-        match workspace.as_ref() {
-            Some(ws) => {
-                let tenant_id = ws.tenant_id.to_string();
-                match state
-                    .secrets
-                    .resolve_for_agent(
-                        &tenant_id,
-                        &repo.workspace_id.to_string(),
-                        &req.repo_id,
-                        Some(&req.task_id),
-                    )
-                    .await
-                {
-                    Ok(resolved) => {
-                        for (name, value) in resolved {
-                            // Env vars must be UTF-8. Skip (and name, never
-                            // log) non-UTF-8 values rather than corrupting
-                            // them with replacement chars — same availability
-                            // posture as the resolve-failure branch.
-                            match String::from_utf8(value) {
-                                Ok(s) => {
-                                    container_env.insert(format!("GYRE_CRED_{name}"), s);
-                                }
-                                Err(_) => {
-                                    tracing::warn!(
-                                        agent_id = %agent.id,
-                                        secret_name = %name,
-                                        "skipping non-UTF-8 secret; GYRE_CRED_* env vars require UTF-8 values"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            agent_id = %agent.id,
-                            "secret resolution failed; continuing without GYRE_CRED_* env vars: {e:#}"
-                        );
-                    }
+        let tenant_id = workspace
+            .as_ref()
+            .map(|ws| ws.tenant_id.to_string())
+            .unwrap_or_else(|| "default".to_string());
+        match state
+            .secrets
+            .resolve_for_agent(
+                &tenant_id,
+                &repo.workspace_id.to_string(),
+                &req.repo_id,
+                Some(&req.task_id),
+            )
+            .await
+        {
+            Ok(resolved) => {
+                for (name, value) in resolved {
+                    container_env.insert(
+                        format!("GYRE_CRED_{name}"),
+                        String::from_utf8_lossy(&value).into_owned(),
+                    );
                 }
             }
-            None => {
+            Err(e) => {
                 tracing::warn!(
                     agent_id = %agent.id,
-                    workspace_id = %repo.workspace_id,
-                    repo_id = %req.repo_id,
-                    "workspace unresolvable; skipping scoped secret resolution (no GYRE_CRED_* env vars)"
+                    "secret resolution failed; continuing without GYRE_CRED_* env vars: {e:#}"
                 );
             }
         }
