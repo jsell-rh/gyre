@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render } from '@testing-library/svelte';
+import { render, waitFor } from '@testing-library/svelte';
 import FlowCanvas from '../lib/FlowCanvas.svelte';
 import FlowRenderer from '../lib/FlowRenderer.svelte';
 import NodeBadge from '../lib/NodeBadge.svelte';
@@ -40,7 +40,20 @@ let mockCtx;
 beforeEach(() => {
   mockCtx = {
     clearRect: vi.fn(),
+    fillRect: vi.fn(),
+    strokeRect: vi.fn(),
+    setTransform: vi.fn(),
+    save: vi.fn(),
+    restore: vi.fn(),
+    translate: vi.fn(),
+    rotate: vi.fn(),
+    scale: vi.fn(),
+    setLineDash: vi.fn(),
+    measureText: vi.fn(() => ({ width: 40 })),
     beginPath: vi.fn(),
+    closePath: vi.fn(),
+    quadraticCurveTo: vi.fn(),
+    roundRect: vi.fn(),
     arc: vi.fn(),
     fill: vi.fn(),
     fillText: vi.fn(),
@@ -409,5 +422,8 @@ describe('FlowRenderer', () => {
     playBtn.click();
     await new Promise(r => setTimeout(r, 0));
     expect(container.innerHTML).toContain('Pause');
+    // Exercise the real ExplorerCanvas animation frame, rather than ending
+    // before its asynchronous drawing has used this file's canvas fixture.
+    await waitFor(() => expect(mockCtx.fillRect).toHaveBeenCalled());
   });
 });
