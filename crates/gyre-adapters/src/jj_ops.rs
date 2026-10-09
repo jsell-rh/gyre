@@ -532,4 +532,410 @@ mod tests {
             .await
             .expect("jj squash should succeed");
     }
+
+    // ── TASK-106 recorded-fixture tests ─────────────────────────────────────
+    //
+    // These run in CI (a `jj_available()` precondition skips them only when
+    // the binary is genuinely absent). They pin the external-tool contracts
+    // the adapter depends on, against the real jj binary — the flaw class
+    // from specs/reviews/task-106.md F1: jj writes rebase progress to
+    // stderr (stdout is empty), and conflict state is an exit-code
+    // contract, not a string in the output.
+
+    /// Set up a real bare git repo (default branch `main`, one commit on
+    /// it) plus a standalone jj main checkout backed by it — the
+    /// source-control.md §4 layout: `{repo.path}` bare, `{repo.path}/jj-main`
+    /// shared jj checkout, `{repo.path}/workspaces/<name>` workspaces.
+    async fn fixture_shared_checkout(dir: &tempfile::TempDir) -> String {
+        let repo_path = dir.path().join("repo.git");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        git(&repo_path, &["init", "--bare", "--initial-branch=main"]);
+        git(&repo_path, &["config", "user.email", "test@gyre.local"]);
+        git(&repo_path, &["config", "user.name", "Gyre Test"]);
+
+        // Seed `main` with one commit via a scratch clone.
+        let scratch = dir.path().join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        git(&scratch, &["init", "--initial-branch=main"]);
+        git(&scratch, &["config", "user.email", "test@gyre.local"]);
+        git(&scratch, &["config", "user.name", "Gyre Test"]);
+        std::fs::write(scratch.join("base.txt"), "base\n").unwrap();
+        git(&scratch, &["add", "."]);
+        git(&scratch, &["commit", "-m", "base"]);
+        git(&scratch, &["push", repo_path.to_str().unwrap(), "main"]);
+
+        // Shared jj main checkout backed by the bare repo (standalone, not
+        // colocated — jj refuses colocated repos inside git worktrees).
+        let main_checkout = dir.path().join("jj-main");
+        let adapter = JjOpsAdapter::new();
+        adapter
+            .jj_main_checkout_init(
+                main_checkout.to_str().unwrap(),
+                repo_path.to_str().unwrap(),
+            )
+            .await
+            .expect("jj main checkout init");
+        repo_path.to_str().unwrap().to_string()
+    }
+
+    fn git(repo: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .expect("git binary");
+        assert!(
+            out.status.success(),
+            "git {args:?} in {repo:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+
+    /// Run jj directly (test harness), asserting success.
+    async fn jj_direct(cwd: &std::path::Path, args: &[&str]) {
+        let out = Command::new("jj")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .await
+            .expect("jj binary");
+        assert!(
+            out.status.success(),
+            "jj {args:?} in {cwd:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// F1 contract, clean path: after the target branch moves in the git
+    /// repo, `jj_rebase` succeeds, reports the moved stack, and detects no
+    /// conflicts. Pinned against real jj 0.39.0: rebase progress is on
+    /// stderr, `jj resolve --list` exits 2 when clean.
+    #[tokio::test]
+    async fn jj_rebase_clean_after_target_moves() {
+        if !jj_available() {
+            return;
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo_path = fixture_shared_checkout(&dir).await;
+        let main_checkout = dir.path().join("jj-main");
+
+        // Agent workspace on a branch off main.
+        let ws = dir.path().join("workspaces").join("agent-1");
+        let adapter = JjOpsAdapter::new();
+        adapter
+            .jj_workspace_add(
+                main_checkout.to_str().unwrap(),
+                ws.to_str().unwrap(),
+                "agent-1",
+                "main",
+                "agent work",
+            )
+            .await
+            .expect("workspace add");
+        // In-progress work lives in @ (the working-copy change) — exactly
+        // the production flow: spawn's jj_new creates the change, the
+        // agent edits files, nothing is committed until MR time.
+        std::fs::write(ws.join("feature.txt"), "agent change\n").unwrap();
+
+        // Target branch moves in the bare repo (another agent's MR merged):
+        // new commit on main, pushed.
+        let scratch = dir.path().join("scratch");
+        std::fs::write(scratch.join("landed.txt"), "landed\n").unwrap();
+        git(&scratch, &["add", "."]);
+        git(&scratch, &["commit", "-m", "landed on main"]);
+        git(&scratch, &["push", &repo_path, "main"]);
+
+        // The agent's in-flight stack moves onto the new main.
+        // The agent's in-flight work moves onto the new main.
+        let outcome = adapter
+            .jj_rebase(ws.to_str().unwrap(), "@", "main")
+            .await
+            .expect("rebase must succeed");
+        match outcome {
+            JjRebaseOutcome::Success { rebased_count } => {
+                // The workspace's working-copy change (with the edit in it)
+                // was rebased onto the new main.
+                assert!(
+                    rebased_count >= 1,
+                    "expected >=1 rebased commit, got {rebased_count}"
+                );
+            }
+            JjRebaseOutcome::Conflict { .. } => panic!("disjoint files must not conflict"),
+        }
+
+        // The rebase really moved the stack onto the new main: @'s parent
+        // is the moved main tip, and the in-progress edit survived.
+        let out = Command::new("jj")
+            .current_dir(&ws)
+            .args([
+                "log",
+                "-r",
+                "@-",
+                "--no-graph",
+                "--color",
+                "never",
+                "-T",
+                "commit_id",
+            ])
+            .output()
+            .await
+            .expect("jj binary");
+        assert!(
+            out.status.success(),
+            "jj log failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let parent = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let scratch_head = git_head(&dir);
+        assert_eq!(
+            parent, scratch_head,
+            "@- must be the moved main tip after rebase"
+        );
+        assert!(
+            std::fs::read_to_string(ws.join("feature.txt"))
+                .is_ok_and(|c| c == "agent change\n"),
+            "in-progress edit must survive the rebase in @"
+        );
+    }
+
+    /// F1 contract, conflict path: overlapping edits on the same file
+    /// produce a Conflict outcome carrying the conflicted file list (jj's
+    /// conflict-as-state model — `jj resolve --list` exits 0 and lists
+    /// paths on stdout).
+    #[tokio::test]
+    async fn jj_rebase_conflict_surfaces_files() {
+        if !jj_available() {
+            return;
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo_path = fixture_shared_checkout(&dir).await;
+        let main_checkout = dir.path().join("jj-main");
+
+        let ws = dir.path().join("workspaces").join("agent-2");
+        let adapter = JjOpsAdapter::new();
+        adapter
+            .jj_workspace_add(
+                main_checkout.to_str().unwrap(),
+                ws.to_str().unwrap(),
+                "agent-2",
+                "main",
+                "agent work",
+            )
+            .await
+            .expect("workspace add");
+        // Same file, same region as the incoming change — work in @.
+        std::fs::write(ws.join("base.txt"), "agent edit\n").unwrap();
+
+        // Conflicting movement of main.
+        let scratch = dir.path().join("scratch");
+        std::fs::write(scratch.join("base.txt"), "main edit\n").unwrap();
+        git(&scratch, &["add", "."]);
+        git(&scratch, &["commit", "-m", "main edits base.txt"]);
+        git(&scratch, &["push", &repo_path, "main"]);
+
+        let outcome = adapter
+            .jj_rebase(ws.to_str().unwrap(), "@", "main")
+            .await
+            .expect("rebase itself must succeed (conflicts are state)");
+        match outcome {
+            JjRebaseOutcome::Conflict { files, .. } => {
+                assert!(
+                    files.iter().any(|f| f.ends_with("base.txt")),
+                    "conflicted file list must contain base.txt, got {files:?}"
+                );
+            }
+            JjRebaseOutcome::Success { .. } => panic!("same-region edits must conflict"),
+        }
+    }
+
+
+    /// F1 exit-code contract pin: `jj resolve --list -r <rev>` exits 2
+    /// when the revision is clean and exits 0 listing conflicted paths on
+    /// stdout when it is not — the contract `jj_rebase` uses to classify
+    /// a completed rebase (conflict-as-state, not an error).
+    #[tokio::test]
+    async fn jj_resolve_list_exit_code_contract() {
+        if !jj_available() {
+            return;
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let r = dir.path().join("r");
+        std::fs::create_dir_all(&r).unwrap();
+        jj_direct(&r, &["git", "init", "--colocate"]).await;
+
+        // Clean revision: no conflicts anywhere.
+        let out = Command::new("jj")
+            .current_dir(&r)
+            .args(["resolve", "--list", "-r", "@"])
+            .output()
+            .await
+            .expect("jj binary");
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "clean rev must exit 2, stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        // Conflicted revision: a merge of two divergent edits to c.txt.
+        std::fs::write(r.join("c.txt"), "one\n").unwrap();
+        jj_direct(&r, &["commit", "-m", "one"]).await;
+        let one = current_commit_id(&r).await;
+        jj_direct(&r, &["new", "root()"]).await;
+        std::fs::write(r.join("c.txt"), "two\n").unwrap();
+        jj_direct(&r, &["commit", "-m", "two"]).await;
+        let two = current_commit_id(&r).await;
+        // Merge of the two divergent changes: c.txt conflicts.
+        jj_direct(&r, &["new", &one, &two]).await;
+        let out = Command::new("jj")
+            .current_dir(&r)
+            .args(["resolve", "--list", "-r", "@"])
+            .output()
+            .await
+            .expect("jj binary");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "conflicted rev must exit 0, stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            stdout.lines().any(|l| l.contains("c.txt")),
+            "conflicted path c.txt must be listed on stdout, got: {stdout}"
+        );
+    }
+
+    /// F5 contract pin: `jj rebase -b @` moves the WHOLE branch containing
+    /// the working copy — a stacked change below @ moves with it (the
+    /// spec's "agent's in-progress work", not just the working-copy commit
+    /// that `-r @` would move).
+    #[tokio::test]
+    async fn jj_rebase_b_moves_whole_stack() {
+        if !jj_available() {
+            return;
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let r = dir.path().join("r");
+        std::fs::create_dir_all(&r).unwrap();
+        jj_direct(&r, &["git", "init", "--colocate"]).await;
+        std::fs::write(r.join("f.txt"), "base\n").unwrap();
+        jj_direct(&r, &["commit", "-m", "base"]).await;
+        let old_main = current_commit_id(&r).await;
+
+        // Agent stack: two committed changes on top of the old main, then
+        // a working-copy change on top of those.
+        std::fs::write(r.join("stack.txt"), "one\n").unwrap();
+        jj_direct(&r, &["commit", "-m", "stack one"]).await;
+        std::fs::write(r.join("top.txt"), "two\n").unwrap();
+        jj_direct(&r, &["commit", "-m", "stack two"]).await;
+        let stack_tip = current_change_id(&r).await;
+
+        // Another agent's MR lands: sibling commit on the old main.
+        jj_direct(&r, &["new", "-r", &old_main, "-m", "landed"]).await;
+        std::fs::write(r.join("landed.txt"), "landed\n").unwrap();
+        jj_direct(&r, &["commit", "-m", "landed work"]).await;
+        let new_main = current_commit_id(&r).await;
+
+        // Agent's working change back on top of their stack.
+        jj_direct(&r, &["new", "-r", &stack_tip, "-m", "agent wip"]).await;
+        std::fs::write(r.join("wip.txt"), "wip\n").unwrap();
+
+        let outcome = JjOpsAdapter::new()
+            .jj_rebase(r.to_str().unwrap(), "@", &new_main)
+            .await
+            .expect("rebase must succeed");
+        assert!(
+            matches!(outcome, JjRebaseOutcome::Success { rebased_count } if rebased_count >= 3),
+            "stack rebase must move all 3 changes (stack one, stack two, wip), got {outcome:?}"
+        );
+
+        // Every change of the stack is now above the new base.
+        let out = Command::new("jj")
+            .current_dir(&r)
+            .args([
+                "log",
+                "-r",
+                &format!("{new_main}..@"),
+                "--no-graph",
+                "--color",
+                "never",
+                "-T",
+                "description.first_line() ++ \"\\n\"",
+            ])
+            .output()
+            .await
+            .expect("jj binary");
+        assert!(
+            out.status.success(),
+            "jj log failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let above: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .collect();
+        assert_eq!(
+            above,
+            vec!["agent wip", "stack two", "stack one"],
+            "the whole stack must be above the new base"
+        );
+    }
+
+    /// Current commit id of @- (the last committed change) — used to
+    /// navigate back to a stack tip by commit id.
+    async fn current_commit_id(cwd: &std::path::Path) -> String {
+        let out = Command::new("jj")
+            .current_dir(cwd)
+            .args([
+                "log",
+                "-r",
+                "@-",
+                "--no-graph",
+                "--color",
+                "never",
+                "-T",
+                "commit_id",
+            ])
+            .output()
+            .await
+            .expect("jj binary");
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Current change id of @- — stable across rebases, unlike commit ids.
+    async fn current_change_id(cwd: &std::path::Path) -> String {
+        let out = Command::new("jj")
+            .current_dir(cwd)
+            .args([
+                "log",
+                "-r",
+                "@-",
+                "--no-graph",
+                "--color",
+                "never",
+                "-T",
+                "change_id",
+            ])
+            .output()
+            .await
+            .expect("jj binary");
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// HEAD of the scratch clone (the pushed main tip).
+    fn git_head(dir: &tempfile::TempDir) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path().join("scratch"))
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git binary");
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
 }
