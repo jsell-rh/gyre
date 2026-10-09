@@ -4850,11 +4850,11 @@ mod tests {
     /// `specs/manifest.yaml` committed on `main`. Returns the repo path.
     fn init_concept_manifest_repo(manifest_yaml: &str) -> (tempfile::TempDir, String) {
         let tmp = tempfile::tempdir().unwrap();
-        let repo_path = tmp.path();
+        let repo_path = tmp.path().to_str().unwrap().to_string();
         let git = |args: &[&str]| {
             let status = std::process::Command::new("git")
                 .args(args)
-                .current_dir(repo_path)
+                .current_dir(&repo_path)
                 .output()
                 .unwrap();
             assert!(
@@ -4866,11 +4866,15 @@ mod tests {
         git(&["init", "--initial-branch=main"]);
         git(&["config", "user.email", "test@gyre.dev"]);
         git(&["config", "user.name", "Gyre Test"]);
-        std::fs::create_dir_all(repo_path.join("specs")).unwrap();
-        std::fs::write(repo_path.join("specs/manifest.yaml"), manifest_yaml).unwrap();
+        std::fs::create_dir_all(std::path::Path::new(&repo_path).join("specs")).unwrap();
+        std::fs::write(
+            std::path::Path::new(&repo_path).join("specs/manifest.yaml"),
+            manifest_yaml,
+        )
+        .unwrap();
         git(&["add", "."]);
         git(&["commit", "-m", "seed manifest"]);
-        (tmp, repo_path.to_str().unwrap().to_string())
+        (tmp, repo_path)
     }
 
     /// graph_concept must be a manifest-based concept-view projection, not a
@@ -4917,12 +4921,12 @@ concepts:
         state.repos.create(&repo).await.unwrap();
 
         // Seed the graph: concept-matching + unrelated nodes.
-        let mut node = |name: &str,
-                        node_type: gyre_common::NodeType,
-                        qualified_name: &str,
-                        spec_path: Option<&str>|
+        let node = |name: &str,
+                    node_type: gyre_common::NodeType,
+                    qualified_name: &str,
+                    spec_path: Option<&str>|
          -> gyre_common::graph::GraphNode {
-            let mut n = gyre_common::graph::GraphNode {
+            gyre_common::graph::GraphNode {
                 id: gyre_common::Id::new(format!("node-{name}")),
                 repo_id: repo.id.clone(),
                 node_type,
@@ -4950,9 +4954,7 @@ concepts:
                 test_node: false,
                 spec_approved_at: None,
                 milestone_completed_at: None,
-            };
-            n.id = gyre_common::Id::new(format!("node-{name}"));
-            n
+            }
         };
         let auth_type = node(
             "JwtAuthProvider",
