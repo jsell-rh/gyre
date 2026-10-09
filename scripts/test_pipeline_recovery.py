@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import unittest
 
-from pipeline.recovery import restore
+from pipeline.recovery import restore, unchanged_bootstrap
 
 
 class RecoveryTests(unittest.TestCase):
@@ -62,6 +62,18 @@ class RecoveryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             restore(self.artifact, self.repo)
         self.assertEqual(self.git('ls-remote', 'origin', self.branch), '')
+
+    def test_empty_bootstrap_requires_matching_base_and_tree(self):
+        tree = self.git('rev-parse', self.base + '^{tree}')
+        self.receipt.update(branch='main', head=self.base, base=self.base, tree=tree,
+                            published_known=False, patch_sha256=hashlib.sha256(b'').hexdigest())
+        (self.artifact / 'recovery.patch').write_bytes(b'')
+        self.save()
+        self.assertTrue(unchanged_bootstrap(self.artifact, self.base, tree))
+        self.assertFalse(unchanged_bootstrap(self.artifact, 'a' * 40, tree))
+        self.assertFalse(unchanged_bootstrap(self.artifact, self.base, 'b' * 40))
+        (self.artifact / 'recovery.patch').write_bytes(b'actual edit')
+        self.assertFalse(unchanged_bootstrap(self.artifact, self.base, tree))
 
     def test_tree_mismatch_cannot_publish(self):
         self.receipt['tree'] = self.base
