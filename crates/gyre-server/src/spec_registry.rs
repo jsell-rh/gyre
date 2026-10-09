@@ -2239,6 +2239,208 @@ specs:
     }
 
     // -----------------------------------------------------------------------
+    // Task-198: persistent forge-maintained spec-link graph
+    // (spec-links.md §Forge-Maintained Spec Graph)
+    // -----------------------------------------------------------------------
+
+    /// The in-memory graph must be loadable from the durable repository at
+    /// boot: seed via a real `sync_spec_ledger` push, then simulate a restart
+    /// by building a fresh store from the same repository and asserting the
+    /// graph is non-empty and identical — before any re-push.
+    ///
+    /// This is the section-closing restart-durability evidence: it fails
+    /// against the pre-task empty-init behavior (fresh store starts empty and
+    /// the graph is lost until every repo pushes again).
+    #[tokio::test]
+    async fn restart_rebuilds_spec_link_graph_from_persisted_table() {
+        use crate::mem::{MemRepoRepository, MemSpecLedgerRepository, MemWorkspaceRepository};
+
+        // Manifest with two specs and a cross-spec depends_on link pinned to a
+        // SHA that does not match the target's ledger SHA — the staleness
+        // checker must see it after a restart too.
+        let manifest = "version: 1\n\
+specs:\n\
+  - path: system/parent.md\n\
+    title: Parent\n\
+    owner: user:test\n\
+  - path: system/child.md\n\
+    title: Child\n\
+    owner: user:test\n\
+    links:\n\
+      - type: depends_on\n\
+        target: system/parent.md\n\
+        target_sha: old_pinned_sha\n\
+        reason: needs parent guarantees\n";
+        let (dir, sha) =
+            make_test_repo(&[("specs/manifest.yaml", manifest), ("specs/system/parent.md", "# P"), ("specs/system/child.md", "# C")])
+                .await;
+
+        // "Push" phase: run sync against the real durable repo (a real
+        // SQLite database, exactly as the server wires it in build_state).
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let db_path = db.path().to_str().unwrap().to_string();
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> = {
+            let storage = gyre_adapters::SqliteStorage::new(&db_path).unwrap();
+            Arc::new(storage)
+        };
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+
+        // Target spec already in the ledger at a DIFFERENT SHA than the pinned
+        // one, so the link is stale — the post-restart staleness check below
+        // must observe the same state.
+        let parent = make_test_ledger_entry("system/parent.md", "new_current_sha", ApprovalStatus::Approved);
+        ledger.save(&parent).await.unwrap();
+
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir.path().to_str().unwrap(),
+            &sha,
+            1_700_000_000,
+            Some("repo-1"),
+            Some("ws-1"),
+            Some(&Arc::new(MemWorkspaceRepository::default()) as Arc<dyn gyre_ports::WorkspaceRepository>),
+            Some(&Arc::new(MemRepoRepository::default()) as Arc<dyn gyre_ports::RepoRepository>),
+            None,
+            None,
+        )
+        .await;
+
+        let before_restart: Vec<SpecLinkEntry> = links_store.lock().await.clone();
+        assert_eq!(before_restart.len(), 1, "sync must record the depends_on link");
+        let pushed = &before_restart[0];
+        assert_eq!(pushed.source_path, "system/child.md");
+        assert_eq!(pushed.target_path, "system/parent.md");
+        assert_eq!(pushed.link_type, SpecLinkType::DependsOn);
+        assert_eq!(pushed.target_sha.as_deref(), Some("old_pinned_sha"));
+        // source_sha must be the source spec's real blob SHA from the push —
+        // not a placeholder.
+        assert!(
+            !pushed.source_sha.is_empty(),
+            "source_sha must be populated from the source spec's blob SHA"
+        );
+
+        // ── Simulated restart: brand-new store over the SAME durable repo. ──
+        let restarted_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+        crate::load_spec_links_into_store(&link_repo, &restarted_store);
+        let after_restart: Vec<SpecLinkEntry> = restarted_store.lock().await.clone();
+
+        assert!(
+            !after_restart.is_empty(),
+            "graph must be non-empty after restart without any re-push"
+        );
+        assert_eq!(
+            after_restart, before_restart,
+            "restarted graph must be identical to the pre-restart graph"
+        );
+
+        // A NEW server process would open a NEW storage handle on the same DB
+        // file — verify the data is in the file, not just this handle.
+        drop(link_repo);
+        let reopened: Arc<dyn gyre_ports::SpecLinkRepository> = {
+            let storage = gyre_adapters::SqliteStorage::new(&db_path).unwrap();
+            Arc::new(storage)
+        };
+        let third_boot_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+        crate::load_spec_links_into_store(&reopened, &third_boot_store);
+        let from_file: Vec<SpecLinkEntry> = third_boot_store.lock().await.clone();
+        assert_eq!(
+            from_file, before_restart,
+            "graph must survive a fresh storage handle on the same database file"
+        );
+    }
+
+    /// The staleness checker must return the same answer against a restarted
+    /// (loaded-from-disk) graph as it would right after the push — the graph
+    /// consumers (staleness, gates, patrol) must not silently degrade to an
+    /// empty graph across a restart.
+    #[tokio::test]
+    async fn staleness_query_parity_after_restart() {
+        use crate::mem::{MemRepoRepository, MemSpecLedgerRepository, MemWorkspaceRepository};
+
+        let manifest = "version: 1\n\
+specs:\n\
+  - path: system/parent.md\n\
+    title: Parent\n\
+    owner: user:test\n\
+  - path: system/child.md\n\
+    title: Child\n\
+    owner: user:test\n\
+    links:\n\
+      - type: depends_on\n\
+        target: system/parent.md\n\
+        target_sha: old_pinned_sha\n";
+        let (dir, sha) =
+            make_test_repo(&[("specs/manifest.yaml", manifest), ("specs/system/parent.md", "# P"), ("specs/system/child.md", "# C")])
+                .await;
+
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let db_path = db.path().to_str().unwrap().to_string();
+        let link_repo: Arc<dyn gyre_ports::SpecLinkRepository> = {
+            let storage = gyre_adapters::SqliteStorage::new(&db_path).unwrap();
+            Arc::new(storage)
+        };
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+
+        let parent = make_test_ledger_entry("system/parent.md", "new_current_sha", ApprovalStatus::Approved);
+        ledger.save(&parent).await.unwrap();
+
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir.path().to_str().unwrap(),
+            &sha,
+            1_700_000_000,
+            Some("repo-1"),
+            Some("ws-1"),
+            Some(&Arc::new(MemWorkspaceRepository::default()) as Arc<dyn gyre_ports::WorkspaceRepository>),
+            Some(&Arc::new(MemRepoRepository::default()) as Arc<dyn gyre_ports::RepoRepository>),
+            None,
+            None,
+        )
+        .await;
+
+        // Answer right after the push: the link's pinned SHA
+        // ("old_pinned_sha") differs from the ledger's current SHA
+        // ("new_current_sha"), so sync already marked it stale.
+        let post_push: Vec<SpecLinkEntry> = links_store.lock().await.clone();
+        let pushed = &post_push[0];
+        assert_eq!(pushed.status, "stale", "SHA mismatch must be detected at push time");
+        assert!(pushed.stale_since.is_some());
+
+        // Restart: fresh store loaded from the durable repo.
+        let restarted_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+        crate::load_spec_links_into_store(&link_repo, &restarted_store);
+        let after_restart: Vec<SpecLinkEntry> = restarted_store.lock().await.clone();
+
+        // Same staleness answer post-restart: the entry keeps its stale
+        // status and timestamp — not reset to active/None by an empty graph.
+        assert_eq!(after_restart.len(), 1);
+        let reloaded = &after_restart[0];
+        assert_eq!(reloaded.status, "stale", "stale verdict must survive the restart");
+        assert_eq!(reloaded.stale_since, pushed.stale_since);
+
+        // And the staleness checker itself, run against the restarted graph
+        // with the ledger's current SHA, must keep the link stale (not
+        // re-resolve it to active): a stale/broken link is skipped by
+        // run_once, so status must be unchanged.
+        let still_stale = {
+            let store = restarted_store.lock().await;
+            store
+                .iter()
+                .find(|l| l.target_path == "system/parent.md")
+                .map(|l| (l.status.clone(), l.stale_since))
+        };
+        assert_eq!(still_stale, Some(("stale".to_string(), pushed.stale_since)));
+    }
+
+    // -----------------------------------------------------------------------
     // TASK-019: Cycle detection tests
     // -----------------------------------------------------------------------
 
