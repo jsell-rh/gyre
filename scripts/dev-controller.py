@@ -415,26 +415,36 @@ def task_progress(ref, name):
 
 
 def sync(db):
+    db.commit()
     source()
-    paths = git("ls-tree", "-r", "--name-only", "origin/main", "specs/tasks").splitlines()
-    spec_paths = git("ls-tree", "-r", "--name-only", "origin/main", "specs/system", "specs/development").splitlines()
-    spec_bodies = {path: git("show", f"origin/main:{path}") for path in spec_paths if path.endswith(".md")}
-    goal = run("git", "show", "origin/main:specs/GOAL.md", check=False).stdout
-    upgrade_baseline_generations(db, goal)
+    main_sha = ref_sha('origin/main')
+    if not main_sha:
+        raise SourceUnavailable('source main does not resolve')
+    paths = git("ls-tree", "-r", "--name-only", main_sha, "specs/tasks").splitlines()
+    spec_paths = git("ls-tree", "-r", "--name-only", main_sha, "specs/system", "specs/development").splitlines()
+    spec_bodies = {path: git("show", f"{main_sha}:{path}") for path in spec_paths if path.endswith(".md")}
+    goal = run("git", "show", f"{main_sha}:specs/GOAL.md", check=False).stdout
+    observations = []
     for path in paths:
         match = TASK_RE.match(path)
         if not match:
             continue
         name = match.group(1)
-        body = task_body("origin/main", name)
+        body = task_body(main_sha, name)
+        branch = f"origin/worker/{name}"
+        seed = ref_sha(branch)
+        candidate = seed if seed and task_progress(seed, name) == "complete" and run(
+            "git", "merge-base", "--is-ancestor", seed, main_sha, check=False).returncode != 0 else None
+        observations.append((name, body, seed, candidate))
+    # Lazy Git blob downloads and subprocess reads can take seconds. Observe
+    # them before opening the SQLite write transaction so cockpit controls
+    # remain writable, and bind all desired definitions to one main snapshot.
+    upgrade_baseline_generations(db, goal)
+    for name, body, seed, candidate in observations:
         progress = field(body, "progress")
         old = db.execute("SELECT * FROM tasks WHERE name=?", (name,)).fetchone()
         generation = contract.generation(body, spec_bodies, goal)
         changed = bool(old and old["generation"] and generation != old["generation"])
-        branch = f"origin/worker/{name}"
-        seed = ref_sha(branch)
-        candidate = seed if seed and task_progress(branch, name) == "complete" and run(
-            "git", "merge-base", "--is-ancestor", seed, "origin/main", check=False).returncode != 0 else None
         if progress == "complete":
             state = "merged"
         elif old and old["state"] in ("running", "checking", "promoting", "candidate", "published", "blocked", "failed", "deferred"):
@@ -460,7 +470,7 @@ def sync(db):
                                "with these requirements; previous completion is stale. Preserve useful code, "
                                "reproduce relevant acceptance behavior, and obtain independent review.\n")
             state = old["state"] if old["state"] in ("running", "checking") else "ready"
-            candidate, seed = None, old["candidate"] or old["seed"] or ref_sha("origin/main")
+            candidate, seed = None, old["candidate"] or old["seed"] or main_sha
         elif old and old["generation"] and old["observed_generation"] and old["observed_generation"] != generation and progress == "complete":
             state, candidate = old["state"], old["candidate"]
         db.execute("""INSERT INTO tasks(name,progress,deps,state,seed,candidate) VALUES(?,?,?,?,?,?)
@@ -484,7 +494,7 @@ def sync(db):
             event(db, name, reason)
     db.execute("UPDATE tasks SET condition=NULL WHERE condition LIKE 'InvalidDependencies:%' AND name NOT IN (SELECT value FROM json_each(?))", (json.dumps(list(errors)),))
     db.commit()
-    current_main = ref_sha("origin/main")
+    current_main = main_sha
     for task in db.execute("SELECT * FROM tasks WHERE state='blocked' AND blocked_base IS NOT NULL").fetchall():
         prerequisite = re.search(r'repair (task-\d+)', task['condition'] or '')
         if prerequisite:

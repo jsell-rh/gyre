@@ -2,6 +2,7 @@
 """Local Git integration checks for the durable controller; no cloud access."""
 import importlib.util
 import json
+import sqlite3
 import fcntl
 import os
 from pathlib import Path
@@ -343,6 +344,25 @@ class ControllerGitTest(unittest.TestCase):
         with patch.object(controller, "spawn") as spawn:
             controller.schedule(self.db, slots=50, max_attempts=3, launch_burst=2)
         self.assertEqual([call.args[1]["name"] for call in spawn.call_args_list], ["task-001", "task-002"])
+
+    def test_source_observation_does_not_hold_sqlite_writer_lock(self):
+        (self.work / 'specs/tasks/task-002.md').write_text('---\ntitle: second task\nprogress: not-started\ndepends_on: []\ncommits: []\n---\nRequired behavior\n')
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-m', 'second task')
+        git(self.work, 'push', 'origin', 'main')
+        actual_body = controller.task_body
+        observations = []
+        def body(ref, name):
+            observations.append(ref)
+            if name == 'task-002':
+                with sqlite3.connect(controller.STATE / 'state.sqlite3', timeout=.1) as other:
+                    other.execute("INSERT INTO events(at,task,message) VALUES(1,NULL,'concurrent control write')")
+            return actual_body(ref, name)
+        with patch.object(controller, 'task_body', side_effect=body):
+            controller.sync(self.db)
+        self.assertEqual(len(set(observations)), 1)
+        self.assertRegex(observations[0], r'^[0-9a-f]{40}$')
+        self.assertEqual(self.db.execute("SELECT count(*) FROM events WHERE message='concurrent control write'").fetchone()[0], 1)
 
     def test_main_repair_blocks_integration_but_allows_independent_workers(self):
         sha = self.candidate()
