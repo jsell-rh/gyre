@@ -22,6 +22,13 @@ pub struct QualityGate {
     pub required_approvals: Option<u32>,
     /// Persona file path for AgentReview / AgentValidation gates.
     pub persona: Option<String>,
+    /// Domain-specific check identifier for AgentValidation gates
+    /// (e.g. "license-scan", "accessibility"). Delivered to the validation
+    /// agent as `GYRE_VALIDATION_TYPE` so it knows which check to run;
+    /// surfaced in gate output for attribution. `None` for other gate types
+    /// or when the validator is generic.
+    #[serde(default)]
+    pub validation_type: Option<String>,
     /// When false, a failing gate is advisory only — it does not block the MR from merging.
     /// Defaults to true (blocking).
     #[serde(default = "default_required")]

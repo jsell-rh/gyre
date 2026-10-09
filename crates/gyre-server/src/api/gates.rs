@@ -30,6 +30,10 @@ pub struct CreateGateRequest {
     pub required_approvals: Option<u32>,
     /// Persona path (used by AgentReview / AgentValidation).
     pub persona: Option<String>,
+    /// Domain-specific check identifier for AgentValidation gates
+    /// (e.g. "license-scan"). Delivered to the validation agent as
+    /// `GYRE_VALIDATION_TYPE`.
+    pub validation_type: Option<String>,
     /// When false, gate is advisory only — failures do not block merging. Defaults to true.
     pub required: Option<bool>,
     /// When this gate runs: "pre_merge" (blocking, before merge) or
@@ -49,6 +53,8 @@ pub struct GateResponse {
     pub command: Option<String>,
     pub required_approvals: Option<u32>,
     pub persona: Option<String>,
+    /// Domain-specific check identifier for AgentValidation gates.
+    pub validation_type: Option<String>,
     /// Whether this gate is blocking (true) or advisory-only (false).
     pub required: bool,
     /// "pre_merge" or "post_merge".
@@ -68,6 +74,7 @@ impl From<QualityGate> for GateResponse {
             command: g.command,
             required_approvals: g.required_approvals,
             persona: g.persona,
+            validation_type: g.validation_type,
             required: g.required,
             gate_phase: g.gate_phase.as_str().to_string(),
             timeout_secs: g.timeout_secs,
@@ -221,6 +228,7 @@ pub async fn create_gate(
         command: req.command,
         required_approvals: req.required_approvals,
         persona: req.persona,
+        validation_type: req.validation_type,
         required: req.required.unwrap_or(true),
         gate_phase: req.gate_phase.unwrap_or_default(),
         timeout_secs: req.timeout_secs,
@@ -504,7 +512,8 @@ mod tests {
         let body = serde_json::json!({
             "name": "domain-validation",
             "gate_type": "agent_validation",
-            "persona": "personas/accountability.md"
+            "persona": "personas/accountability.md",
+            "validation_type": "license-scan"
         });
         let resp = app
             .clone()
@@ -522,6 +531,31 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
         let json = body_json(resp).await;
         assert_eq!(json["gate_type"], "agent_validation");
+        assert_eq!(json["validation_type"], "license-scan");
+
+        // Round-trip through list: the stored gate must carry the config.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/repos/repo-1/gates")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let stored = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["gate_type"] == "agent_validation")
+            .expect("agent_validation gate in list");
+        assert_eq!(stored["validation_type"], "license-scan");
+        assert_eq!(stored["persona"], "personas/accountability.md");
     }
 
     #[tokio::test]

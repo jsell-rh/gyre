@@ -399,26 +399,43 @@ fn persona_slug(persona: &str) -> &str {
 
 /// Resolve a review persona nearest-wins (repo → workspace → tenant) for the
 /// MR's workspace, mirroring `personas::resolve_persona`.
+///
+/// A workspace that cannot be loaded has no resolvable tenant: the tenant
+/// scope is skipped (logged) rather than fabricated as `"default"` — a
+/// fabricated scope identity would silently re-target persona lookup and
+/// leak a real tenant named "default" (frozen-baseline check on scope
+/// fabrication).
 async fn resolve_review_persona(
     state: &Arc<AppState>,
     repo: &gyre_domain::Repository,
     slug: &str,
 ) -> Option<gyre_domain::Persona> {
-    let workspace = state
-        .workspaces
-        .find_by_id(&repo.workspace_id)
-        .await
-        .ok()
-        .flatten();
-    let tenant_id = workspace
-        .map(|ws| ws.tenant_id)
-        .unwrap_or_else(|| Id::new("default"));
+    let workspace = match state.workspaces.find_by_id(&repo.workspace_id).await {
+        Ok(ws) => ws,
+        Err(e) => {
+            warn!(
+                workspace_id = %repo.workspace_id,
+                error = %e,
+                "agent_review gate: workspace lookup failed; skipping tenant persona scope"
+            );
+            None
+        }
+    };
 
-    for scope in [
+    let mut scopes = vec![
         gyre_domain::PersonaScope::Repo(repo.id.clone()),
         gyre_domain::PersonaScope::Workspace(repo.workspace_id.clone()),
-        gyre_domain::PersonaScope::Tenant(tenant_id),
-    ] {
+    ];
+    if let Some(ws) = workspace {
+        scopes.push(gyre_domain::PersonaScope::Tenant(ws.tenant_id));
+    } else {
+        warn!(
+            workspace_id = %repo.workspace_id,
+            "agent_review gate: workspace not found; skipping tenant persona scope"
+        );
+    }
+
+    for scope in scopes {
         if let Ok(Some(persona)) = state.personas.find_by_slug_and_scope(slug, &scope).await {
             return Some(persona);
         }
@@ -799,8 +816,10 @@ async fn run_agent_validation_gate(
             (
                 GateStatus::Failed,
                 format!(
-                    "agent_validation gate failed: no agent command configured (persona={persona}); \
-                     configure the gate's command to spawn a validation agent"
+                    "agent_validation gate failed: no agent command configured \
+                     (persona={persona}, validation_type={}); \
+                     configure the gate's command to spawn a validation agent",
+                    gate.validation_type.as_deref().unwrap_or("<none>")
                 ),
             )
         }
@@ -816,27 +835,44 @@ async fn run_validation_agent_process(
     persona: &str,
 ) -> (GateStatus, String) {
     // Scoped validator identity: `review:submit` lets the validator read MR
-    // context and report its result, and nothing else.
+    // context and report its result, and nothing else. A mint failure fails
+    // the gate before anything is spawned — a fabricated fallback token is
+    // an identity the auth extractor can never validate, so the agent could
+    // not authenticate at all ("cannot determine state" is not "state is
+    // fine"). Mirrors build_review_agent_context's fail-closed mint path.
     let gate_agent_id = format!("gate-validate-{}", Uuid::new_v4());
-    let gate_token = state
-        .agent_signing_key
-        .mint_scoped(
-            &gate_agent_id,
-            gate.id.as_str(),
-            "forge",
-            &state.base_url,
-            AGENT_GATE_TIMEOUT_SECS + 60,
-            "review:submit",
-        )
-        .unwrap_or_else(|e| {
-            tracing::error!("scoped token mint failed, falling back to UUID token: {e}");
-            format!("gyre_gate_{}", Uuid::new_v4().simple())
-        });
-
-    let _ = state
+    let gate_token = match state.agent_signing_key.mint_scoped(
+        &gate_agent_id,
+        gate.id.as_str(),
+        "forge",
+        &state.base_url,
+        AGENT_GATE_TIMEOUT_SECS + 60,
+        "review:submit",
+    ) {
+        Ok(token) => token,
+        Err(e) => {
+            warn!(
+                gate_id = %gate.id,
+                mr_id = %mr_id,
+                error = %e,
+                "agent_validation gate: scoped token mint failed"
+            );
+            return (
+                GateStatus::Failed,
+                format!("agent_validation gate failed: scoped token mint failed: {e}"),
+            );
+        }
+    };
+    if let Err(e) = state
         .kv_store
         .kv_set("agent_tokens", &gate_agent_id, gate_token.clone())
-        .await;
+        .await
+    {
+        return (
+            GateStatus::Failed,
+            format!("agent_validation gate failed: token registration failed: {e:#}"),
+        );
+    }
 
     let spec_ref = state
         .merge_requests
@@ -873,6 +909,10 @@ async fn run_validation_agent_process(
         .env("GYRE_DIFF_URL", &diff_url)
         .env("GYRE_SPEC_REF", &spec_ref)
         .env("GYRE_PERSONA", persona)
+        .env(
+            "GYRE_VALIDATION_TYPE",
+            gate.validation_type.as_deref().unwrap_or(""),
+        )
         .output();
 
     let timeout = Duration::from_secs(gate.timeout_secs.unwrap_or(AGENT_GATE_TIMEOUT_SECS));
@@ -911,7 +951,11 @@ async fn run_validation_agent_process(
                 info!(gate_id = %gate.id, mr_id = %mr_id, "agent_validation gate: validation agent passed");
                 (
                     GateStatus::Passed,
-                    format!("agent_validation gate: validation passed (persona={persona})\n{process_output}"),
+                    format!(
+                        "agent_validation gate: validation passed \
+                         (persona={persona}, validation_type={})\n{process_output}",
+                        gate.validation_type.as_deref().unwrap_or("<none>")
+                    ),
                 )
             } else {
                 warn!(
@@ -923,7 +967,9 @@ async fn run_validation_agent_process(
                 (
                     GateStatus::Failed,
                     format!(
-                        "agent_validation gate: validation failed (persona={persona}, exit {:?}):\n{process_output}",
+                        "agent_validation gate: validation failed \
+                         (persona={persona}, validation_type={}, exit {:?}):\n{process_output}",
+                        gate.validation_type.as_deref().unwrap_or("<none>"),
                         output.status.code()
                     ),
                 )
@@ -1387,6 +1433,7 @@ mod tests {
             command,
             required_approvals: None,
             persona: Some("personas/test.md".to_string()),
+            validation_type: None,
             required: true,
             gate_phase: Default::default(),
             timeout_secs: None,
@@ -1867,6 +1914,56 @@ mod tests {
         assert!(output.contains("validation failed"), "output: {output}");
     }
 
+    /// `validation_type` from the gate config must reach the spawned
+    /// validation agent (`GYRE_VALIDATION_TYPE`) and the gate output — the
+    /// implementation plan's AgentValidation config carrier.
+    #[tokio::test]
+    async fn agent_validation_type_reaches_agent_and_output() {
+        let state = test_state();
+        // `printenv GYRE_VALIDATION_TYPE` exits 0 and echoes the env var:
+        // proves both delivery to the process and surfacing in the output.
+        let mut gate = make_gate(
+            GateType::AgentValidation,
+            Some("printenv GYRE_VALIDATION_TYPE".to_string()),
+        );
+        gate.validation_type = Some("license-scan".to_string());
+        let mr_id = make_mr_id();
+
+        let (status, output) = run_agent_validation_gate(&state, &gate, &mr_id).await;
+
+        assert_eq!(status, GateStatus::Passed, "output: {output}");
+        assert!(
+            output.contains("license-scan"),
+            "validation_type not delivered/surfaced: {output}"
+        );
+        // Attribution: the gate output names the configured check even
+        // when the agent prints nothing.
+        assert!(
+            output.contains("validation_type=license-scan"),
+            "validation_type not in gate output header: {output}"
+        );
+    }
+
+    /// A validation agent that reads `GYRE_VALIDATION_TYPE` as empty (gate
+    /// with no validation_type configured) must see an empty string, not a
+    /// stale value from a prior run — and the gate still attributes the
+    /// check as `<none>`.
+    #[tokio::test]
+    async fn agent_validation_type_absent_defaults_to_none() {
+        let state = test_state();
+        let gate = make_gate(GateType::AgentValidation, Some("true".to_string()));
+        assert!(gate.validation_type.is_none());
+        let mr_id = make_mr_id();
+
+        let (status, output) = run_agent_validation_gate(&state, &gate, &mr_id).await;
+
+        assert_eq!(status, GateStatus::Passed, "output: {output}");
+        assert!(
+            output.contains("validation_type=<none>"),
+            "missing validation_type must be attributed as <none>: {output}"
+        );
+    }
+
     #[tokio::test]
     async fn agent_validation_bad_command_fails() {
         let state = test_state();
@@ -2173,6 +2270,7 @@ mod tests {
                 command: Some("false".to_string()),
                 required_approvals: None,
                 persona: None,
+                validation_type: None,
                 required: false,
                 gate_phase: Default::default(),
                 timeout_secs: None,
