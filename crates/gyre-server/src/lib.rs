@@ -1589,4 +1589,62 @@ mod tests {
         assert_eq!(json["checks"]["database"], "not_configured");
         assert_eq!(json["checks"]["migrations"], "not_configured");
     }
+
+    /// Serialize env-mutating tests: GYRE_REPOS_PATH is process-global and
+    /// parallel test threads race on it.
+    static REPOS_PATH_ENV_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    /// F6 pin: a relative GYRE_REPOS_PATH (e.g. "repos" or "./repos") must
+    /// resolve to an ABSOLUTE path anchored at the process cwd —
+    /// `repos_root` is persisted into `repo.path` rows and handed to jj/git
+    /// child processes, which resolve paths against the COMMAND's cwd, not
+    /// the server's. A relative root silently breaks every child-process
+    /// operation in default deployments.
+    #[test]
+    fn configured_repos_path_makes_relative_config_absolute() {
+        let _guard = REPOS_PATH_ENV_LOCK.lock();
+        let cwd = std::env::current_dir().unwrap();
+
+        std::env::set_var("GYRE_REPOS_PATH", "repos");
+        let p = configured_repos_path();
+        assert!(
+            p.is_absolute(),
+            "relative GYRE_REPOS_PATH must resolve absolute, got {p:?}"
+        );
+        assert_eq!(p, cwd.join("repos"));
+
+        std::env::set_var("GYRE_REPOS_PATH", "./repos");
+        let p = configured_repos_path();
+        assert_eq!(
+            p,
+            cwd.join("repos"),
+            "'./repos' must normalize to <cwd>/repos"
+        );
+
+        std::env::remove_var("GYRE_REPOS_PATH");
+    }
+
+    /// F6 pin (default): with no GYRE_REPOS_PATH configured, the root
+    /// defaults to an absolute <cwd>/repos — never the bare relative
+    /// "./repos" the default deployment used before the fix.
+    #[test]
+    fn configured_repos_path_default_is_absolute() {
+        let _guard = REPOS_PATH_ENV_LOCK.lock();
+        std::env::remove_var("GYRE_REPOS_PATH");
+
+        let p = configured_repos_path();
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(p, cwd.join("repos"));
+        assert!(p.is_absolute());
+    }
+
+    /// F6 pin (absolute passthrough): an absolute GYRE_REPOS_PATH must be
+    /// used verbatim.
+    #[test]
+    fn configured_repos_path_absolute_passthrough() {
+        let _guard = REPOS_PATH_ENV_LOCK.lock();
+        std::env::set_var("GYRE_REPOS_PATH", "/srv/gyre/repos");
+        assert_eq!(configured_repos_path(), std::path::PathBuf::from("/srv/gyre/repos"));
+        std::env::remove_var("GYRE_REPOS_PATH");
+    }
 }
