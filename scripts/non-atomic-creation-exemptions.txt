@@ -1,0 +1,29 @@
+# Non-atomic-creation exemptions
+# One `path:line` per line (relative to repo root), `#` starts a comment.
+# The line is the reported function's start line, as printed by
+# scripts/check-non-atomic-creation.sh.
+#
+# These are PRE-EXISTING multi-repository creation sequences that predate the
+# check (introduced for specs/reviews/task-077.md F2; the F2 site itself —
+# create_workspace trust-policy seeding — is FIXED via apply_trust_transition
+# and is NOT exempted here). They are baselined so the gate runs green while
+# each site's owning task fixes it properly. When you fix one, DELETE its
+# exemption line — never add new entries.
+#
+
+# --- independent-record fan-out (each record stands alone; mid-sequence
+# failure leaves complete-but-partial seed/apply output, no parent-child
+# invariant violated) ---
+crates/gyre-server/src/api/admin.rs:401        # admin_seed: dev bootstrap; tenants/workspaces/repos/agents/tasks/MRs are independent seed records
+crates/gyre-server/src/api/compose.rs:52       # compose_apply: fan-out creates independent tasks + agents per compose item
+crates/gyre-server/src/snapshot.rs:132         # restore_snapshot: bulk re-creation of an already-consistent snapshot bundle
+
+# --- best-effort dependent (second create is `let _ =` notification, not a
+# required dependent record) ---
+crates/gyre-server/src/api/users.rs:428        # invite_member: notification is best-effort (`let _ =`); membership invariant is not tied to it
+
+# --- real compensation gaps (pre-existing partial-state risk; owned by the
+# respective subsystem's hardening task, out of task-077's trust-gradient
+# deliverable) ---
+crates/gyre-server/src/api/spawn.rs:330        # spawn_agent_core: agent row + worktree row via `?`; worktree failure leaves agent record — needs rollback-on-failure or transaction
+crates/gyre-server/src/git_http.rs:2789        # process_breaking_changes: spec + task records created per breaking change without a transaction

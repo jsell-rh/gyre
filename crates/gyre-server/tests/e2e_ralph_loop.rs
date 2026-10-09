@@ -51,7 +51,9 @@ async fn full_ralph_loop_via_gyre() {
     let auth_token = "e2e-ralph-token";
 
     let state = build_state(auth_token, &base_url, None);
-    abac_middleware::seed_builtin_policies(&state).await;
+    abac_middleware::seed_builtin_policies(&state)
+        .await
+        .expect("seed built-in policies");
     merge_processor::spawn_merge_processor(state.clone());
 
     let app = build_router(state);

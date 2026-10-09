@@ -29,7 +29,9 @@ impl Ctx {
         let base_url = format!("http://127.0.0.1:{port}");
 
         let state = build_state(TOKEN, &base_url, None);
-        abac_middleware::seed_builtin_policies(&state).await;
+        abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed built-in policies");
         let app = build_router(Arc::clone(&state));
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
@@ -50,7 +52,9 @@ impl Ctx {
         let mut s = (*base_state).clone();
         s.llm = Some(Arc::new(MockLlmPortFactory::echo()) as Arc<dyn LlmPortFactory>);
         let state = Arc::new(s);
-        abac_middleware::seed_builtin_policies(&state).await;
+        abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed built-in policies");
         let app = build_router(Arc::clone(&state));
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
@@ -666,7 +670,9 @@ async fn test_push_triggers_graph_extraction() {
     let api = format!("{base_url}/api/v1");
 
     let state = gyre_server::build_state(token, &base_url, None);
-    abac_middleware::seed_builtin_policies(&state).await;
+    abac_middleware::seed_builtin_policies(&state)
+        .await
+        .expect("seed built-in policies");
     merge_processor::spawn_merge_processor(state.clone());
     let app = gyre_server::build_router(Arc::clone(&state));
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
