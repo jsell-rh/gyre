@@ -5,7 +5,7 @@ depends_on: []
 progress: needs-revision
 coverage_sections:
   - "business-continuity.md §5. Data Retention Policies"
-commits: ["124fa33dcb9968c38030574cfb84dbdf529bf231", "15472064171c6f6fbf4e66b0a44e570a1b9148bb", "09f3659611ca60e1ec73095405495c3d6b9d8e74", "6a908460b4d37971938a6f9cc4bfca182fefd592"]
+commits: ["48606a14c9fe2fe685f53fd33672a3f7bf9be6df", "300e172722be202a94f91e01caeebff9bd933674", "295e789c08aff78faf5e29ede58973dfa034a84b", "6a908460b4d37971938a6f9cc4bfca182fefd592"]
 review: specs/reviews/task-207.md
 ---
 
