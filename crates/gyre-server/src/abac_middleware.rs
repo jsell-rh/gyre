@@ -137,6 +137,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/post-merge-gates", "gate", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/stack-policy", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/spec-policy", "repo", None),
+                RouteResourceMapping::api("/api/v1/repos/:id/settings/spec-lifecycle", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/abac-policy", "policy", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/blame", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/hot-files", "repo", None),

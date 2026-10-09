@@ -254,6 +254,7 @@ mod tests {
             storage: base.storage.clone(),
             spec_approvals: base.spec_approvals.clone(),
             spec_policies: base.spec_policies.clone(),
+            spec_lifecycle_configs: base.spec_lifecycle_configs.clone(),
             attestation_store: base.attestation_store.clone(),
             chain_attestations: base.chain_attestations.clone(),
             key_bindings: base.key_bindings.clone(),
