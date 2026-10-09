@@ -3,7 +3,7 @@ title: "ExplorerCanvas — Unified Canvas with Semantic Zoom Treemap"
 spec_ref: "explorer-canvas.md §1–3, §8; explorer-implementation.md §1–2, §17, §25"
 depends_on:
   - task-062
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "explorer-canvas.md §1 Problem"
   - "explorer-canvas.md §2 Design"
@@ -14,7 +14,7 @@ coverage_sections:
   - "explorer-implementation.md §16 Frontend Components"
   - "explorer-implementation.md §17 ExplorerCanvas (Svelte)"
   - "explorer-implementation.md §25 Phase 1: Canvas + Filters"
-commits: []
+commits: ["6110fe43dbbf19aee4ef9dbf5cab751d89007e90", "58dddc244728efcb163cf07c3f0109a6937d93fc", "d82a5a560e2d6e9b1420da503951b75a97763a16"]
 ---
 
 ## Spec Excerpt
@@ -110,3 +110,68 @@ Read `specs/system/explorer-canvas.md` §1–3, §8 and `specs/system/explorer-i
 The existing code is 6000+ lines and likely implements most of this spec. Your job is to **audit and complete**, not rewrite. Check each acceptance criterion against the code. Fix gaps. Run `cd web && npm test` to verify.
 
 Key question: Does the current ExplorerView still have separate Graph/Flow tabs, or has it already been unified? If separate tabs remain, merge them into a single Explorer view.
+
+## Shipped
+
+**Contract-repair round (2026-10-09).** The prior candidate's task-file edit
+strayed into the assigned contract region (a stray blank line inside the
+Agent Instructions and a reordered `commits:` list), which the harness
+flagged as a contract violation (9b96b72f). This round restored the task
+contract byte-for-byte to the assigned baseline and re-verified the shipped
+work without touching the contract region. No code changes were needed —
+the lineage already carries the full implementation; this round is
+verification plus lifecycle bookkeeping.
+
+Shipped behavior (from the branch lineage):
+
+- **Unified cutover** (d82a5a56 lineage): MoldableView with its separate
+  Graph/Flow tabs, FlowCanvas, FlowRenderer, ExplorerFilterPanel, and the
+  duplicate NodeBadge components deleted (−3852 lines). The live surface is
+  ExplorerView's Architecture tab hosting a single ExplorerCanvas.
+- **Props per §17**: `repoId`, `nodes`, `edges`, `activeQuery`,
+  `filter` ($bindable), `lens` ($bindable) — verified at
+  ExplorerCanvas.svelte:20-45.
+- **Three lenses**: Structural (default/active), Evaluative (functional —
+  OTLP trace particles, heat, badges, PlaybackControls), Observable
+  (`aria-disabled`, grayed at 0.35 opacity, "requires production telemetry
+  integration" label, ObservableBanner on click).
+- **Five filter presets**: All/Endpoints/Types/Calls/Dependencies via
+  FILTER_PRESETS, node dimming (nodeFilterOpacity) + edge gating
+  (edgePassesFilter) in canvas-filters.js.
+- **Semantic zoom treemap**: path-tree hierarchy, LOD rules per zoom band,
+  double-click drill-down via Contains edges with breadcrumb update and
+  eased camera transition (drillInto/onDblClick/navigateBreadcrumb).
+- **View query rendering**: scope resolution (focus/filter/concept/
+  test_gaps/diff/all + $clicked/$selected), emphasis (highlight, dim,
+  tiered_colors, heat, badges), groups as labeled dashed clusters,
+  callouts as annotated nodes, narrative as numbered steps, annotation
+  title/description with $name and {{var}} substitution.
+- **Interactions**: mousedown pan, wheel zoom, dblclick drill, click
+  select, right-click context menu, minimap click+drag navigation.
+- **Minimap**: drawMinimap renders full graph + viewport rect;
+  minimapToWorld + onMinimapMouseDown/drag navigate.
+- **F1 repair** (6110fe43, re-verified this round): node-side filter
+  dimming extracted to canvas-filters.js (`collectEdgeParticipants`,
+  `nodeFilterOpacity`) and pinned by 18 unit tests + 6 component-level
+  draw-path tests that capture `ctx.globalAlpha` at leaf-label `fillText`
+  and assert participant/non-participant ratios.
+
+Test evidence (2026-10-09, this round, sandbox):
+
+- `cd web && npm test` → **56 files passed, 1513 passed | 41 skipped,
+  0 failed**.
+- Focused: `canvas-filters.test.js` + `ExplorerCanvas.test.js` →
+  157 passed.
+- **Mutation re-proof** (evidence:
+  /tmp/stage/review-evidence/task-065-repair-mutation-proof.txt): all
+  three prior mutations re-applied against the pristine tree and killed —
+  (1) `dependencies` reverted to unconditional 0.1 → 2 tests fail;
+  (2) depends_on participant term dropped → 2 tests fail; (3) dim constant
+  0.1→0.5 → 2 tests fail. Sources restored pristine after each mutation
+  (verified by `git diff`).
+
+Pre-existing, not this task's: check-task-commit-attribution.sh fails on
+task-210 commit a781ede2, which is an ancestor of the assignment base
+8c2d1775 (verified via merge-base; identical failure at base checkout).
+Sandbox note: vitest fork workers are load-sensitive on 8 shared CPUs;
+this round's runs completed at normal load.

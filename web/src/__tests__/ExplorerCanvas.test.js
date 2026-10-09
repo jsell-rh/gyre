@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render } from '@testing-library/svelte';
+import { render, fireEvent } from '@testing-library/svelte';
 import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
 
 // Mock canvas context
@@ -95,16 +95,22 @@ describe('ExplorerCanvas', () => {
     expect(stats?.textContent).toContain('7 nodes');
   });
 
-  it('renders toolbar with lens toggle (filter presets removed per spec)', () => {
+  it('renders toolbar with lens toggle and all five filter presets', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
-    const buttons = container.querySelectorAll('.tb-btn');
-    // 3 lens buttons (Structural, Evaluative, Observable)
-    expect(buttons.length).toBeGreaterThanOrEqual(3);
-    const labels = Array.from(buttons).map(b => b.textContent.trim());
-    expect(labels.some(l => l.includes('Structural'))).toBe(true);
-    expect(labels.some(l => l.includes('Evaluative'))).toBe(true);
+    const lensButtons = container.querySelectorAll('.lens-group .tb-btn');
+    expect(lensButtons.length).toBe(3);
+    const lensLabels = Array.from(lensButtons).map(b => b.textContent.trim());
+    expect(lensLabels[0]).toContain('Structural');
+    expect(lensLabels[1]).toContain('Evaluative');
+    expect(lensLabels[2]).toContain('Observable');
+    // Filter presets (explorer-implementation.md §25 Phase 1)
+    const filterButtons = container.querySelectorAll('.filter-preset-group .tb-btn-filter');
+    const filterLabels = Array.from(filterButtons).map(b => b.textContent.trim());
+    expect(filterLabels).toEqual(['All', 'Endpoints', 'Types', 'Calls', 'Dependencies']);
+    // All is active by default
+    expect(filterButtons[0].classList.contains('active')).toBe(true);
   });
 
   it('renders lens toggle with structural active', () => {
@@ -798,6 +804,33 @@ describe('ExplorerCanvas — lens switching', () => {
     expect(legendLabels).toContain('OK span');
     expect(legendLabels).toContain('Error span');
   });
+
+  it('clicking a filter preset switches active preset and updates aria-pressed', async () => {
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: NODES, edges: EDGES },
+    });
+    const filterButtons = container.querySelectorAll('.filter-preset-group .tb-btn-filter');
+    const [all, endpoints, types, calls, dependencies] = filterButtons;
+    expect(all.getAttribute('aria-pressed')).toBe('true');
+
+    // Endpoints preset: no endpoint nodes in fixture, but toggle still switches
+    await fireEvent.click(endpoints);
+    expect(endpoints.getAttribute('aria-pressed')).toBe('true');
+    expect(all.getAttribute('aria-pressed')).toBe('false');
+
+    await fireEvent.click(calls);
+    expect(calls.getAttribute('aria-pressed')).toBe('true');
+    expect(endpoints.getAttribute('aria-pressed')).toBe('false');
+
+    await fireEvent.click(types);
+    expect(types.getAttribute('aria-pressed')).toBe('true');
+
+    await fireEvent.click(dependencies);
+    expect(dependencies.getAttribute('aria-pressed')).toBe('true');
+
+    await fireEvent.click(all);
+    expect(all.getAttribute('aria-pressed')).toBe('true');
+  });
 });
 
 describe('ExplorerCanvas — heat map coloring', () => {
@@ -1361,15 +1394,20 @@ describe('ExplorerCanvas — semantic zoom levels', () => {
     expect(metricGroup).toBeTruthy();
   });
 
-  it('observable button is visually disabled with tooltip', () => {
+  it('observable button is aria-disabled with spec label, click shows banner', async () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
     });
     const obsBtn = container.querySelector('.tb-btn-observable');
     expect(obsBtn).toBeTruthy();
-    expect(obsBtn.disabled).toBe(true);
+    // Lens stays disabled (spec: grayed out until production telemetry integration)
     expect(obsBtn.getAttribute('aria-disabled')).toBe('true');
-    expect(obsBtn.title).toMatch(/disabled.*pending production/i);
+    expect(obsBtn.textContent).toContain('requires production telemetry integration');
+    // Click is reachable (not a native disabled button) and shows the notice banner
+    await fireEvent.click(obsBtn);
+    const banner = container.querySelector('.observable-banner');
+    expect(banner).toBeTruthy();
+    expect(banner.textContent).toContain('OpenTelemetry collector');
   });
 });
 
@@ -1683,5 +1721,118 @@ describe('ExplorerCanvas -- interactive query template storage', () => {
 
     expect(resolved.scope.node).toBe('create_user');
     expect(resolved.annotation.title).toBe('Blast radius: create_user');
+  });
+});
+
+// ── Filter preset node dimming (task-065 F1) ────────────────────────────
+//
+// The aria-pressed test above only pins toolbar toggling — the dimming math
+// in filterOpacity (now nodeFilterOpacity in canvas-filters.js) had no
+// component-level pin: a mutation reverting the 'dependencies' case to
+// unconditional dimming passed the whole suite. These render the component
+// per filter and read ctx.globalAlpha at each leaf label fillText — the
+// composed draw opacity (semantic-zoom fade × filter dimming). The zoom fade
+// factor is identical for every leaf in the fixture, so participant vs
+// non-participant ratios isolate the filter term exactly.
+
+describe('ExplorerCanvas — filter preset node dimming (draw path)', () => {
+  // Multi-segment qualified names: graph nodes land as LEAF cells inside one
+  // shared tree-group (layoutLeafNodes path), all visible at initial fit zoom.
+  // 'ep' (endpoint) and 'ty' (type) give the endpoints/types presets a lit
+  // reference; part1/part2/lone1/lone2 are functions.
+  const DN = (id, node_type = 'function') => ({
+    id, node_type, name: id, qualified_name: `app.svc.${id}`,
+    file_path: 'app/svc.py', line_start: 0, line_end: 0,
+    visibility: 'public', spec_confidence: 'none', test_node: false,
+  });
+  const DIM_NODES = [
+    DN('part1'), DN('part2'), DN('lone1'), DN('lone2'),
+    DN('ep', 'endpoint'), DN('ty', 'type'),
+  ];
+  // part1—part2 calls; part1—lone1 depends_on; lone2/ep/ty isolated.
+  const DIM_EDGES = [
+    { id: 'de1', source_id: 'part1', target_id: 'part2', edge_type: 'calls' },
+    { id: 'de2', source_id: 'part1', target_id: 'lone1', edge_type: 'depends_on' },
+  ];
+  const ALL_LABELS = ['part1', 'part2', 'lone1', 'lone2', 'ep', 'ty'];
+
+  // Returns map label → array of globalAlpha values captured at the label
+  // fillText call (drawLeafNode label, not the node-type sub-label).
+  function renderCapturingLeafLabelAlphas(filter) {
+    const labelAlphas = new Map();
+    mockCtx.fillText = vi.fn(function (text) {
+      const t = String(text);
+      if (ALL_LABELS.includes(t)) {
+        if (!labelAlphas.has(t)) labelAlphas.set(t, []);
+        labelAlphas.get(t).push(mockCtx.globalAlpha);
+      }
+    });
+    const rendered = render(ExplorerCanvas, {
+      props: { nodes: DIM_NODES, edges: DIM_EDGES, filter },
+    });
+    return { labelAlphas, rendered };
+  }
+
+  it('renders the fixture with all six leaf labels visible under filter=all (fixture sanity)', () => {
+    const { labelAlphas } = renderCapturingLeafLabelAlphas('all');
+    for (const t of ALL_LABELS) {
+      expect(labelAlphas.get(t)?.length, `leaf ${t} must draw its label`).toBeGreaterThan(0);
+    }
+  });
+
+  it("filter='dependencies': calls and depends_on participants stay lit, isolated node dims to 1/10 (task-065 F1 — unconditional dimming regression)", () => {
+    const { labelAlphas } = renderCapturingLeafLabelAlphas('dependencies');
+    const part1 = labelAlphas.get('part1');
+    const lone2 = labelAlphas.get('lone2');
+    expect(part1?.length).toBeGreaterThan(0);
+    expect(lone2?.length).toBeGreaterThan(0);
+    // Participants (calls part1/part2, depends_on part1/lone1) share the
+    // zoom-fade factor; the dimmed node is exactly filterOpacity 0.1 vs 1.0.
+    expect(lone2[0] / part1[0]).toBeCloseTo(0.1, 5);
+    // lone1 participates via depends_on only — must ALSO stay lit under
+    // dependencies even though it has no calls edge (the F1 fix).
+    const lone1 = labelAlphas.get('lone1');
+    expect(lone1[0] / part1[0]).toBeCloseTo(1.0, 5);
+    const part2 = labelAlphas.get('part2');
+    expect(part2[0] / part1[0]).toBeCloseTo(1.0, 5);
+  });
+
+  it("filter='calls': calls participants stay lit; depends_on-only and isolated nodes dim to 1/10", () => {
+    const { labelAlphas } = renderCapturingLeafLabelAlphas('calls');
+    const part1 = labelAlphas.get('part1');
+    expect(part1?.length).toBeGreaterThan(0);
+    // lone1 is a depends_on participant but NOT a calls participant → dims.
+    expect(labelAlphas.get('lone1')[0] / part1[0]).toBeCloseTo(0.1, 5);
+    expect(labelAlphas.get('lone2')[0] / part1[0]).toBeCloseTo(0.1, 5);
+    expect(labelAlphas.get('part2')[0] / part1[0]).toBeCloseTo(1.0, 5);
+  });
+
+  it("filter='endpoints': endpoint node stays lit, function nodes dim to 1/10", () => {
+    const { labelAlphas } = renderCapturingLeafLabelAlphas('endpoints');
+    const ep = labelAlphas.get('ep');
+    expect(ep?.length).toBeGreaterThan(0);
+    // All function nodes (including calls participants — the filter is
+    // node-type-based, not edge-based) dim.
+    for (const t of ['part1', 'part2', 'lone1', 'lone2', 'ty']) {
+      expect(labelAlphas.get(t)[0] / ep[0]).toBeCloseTo(0.1, 5);
+    }
+  });
+
+  it("filter='types': type node stays lit, function nodes dim to 1/10", () => {
+    const { labelAlphas } = renderCapturingLeafLabelAlphas('types');
+    const ty = labelAlphas.get('ty');
+    expect(ty?.length).toBeGreaterThan(0);
+    for (const t of ['part1', 'part2', 'lone1', 'lone2', 'ep']) {
+      expect(labelAlphas.get(t)[0] / ty[0]).toBeCloseTo(0.1, 5);
+    }
+  });
+
+  it("filter='all': no dimming — all leaves share the same draw opacity", () => {
+    const { labelAlphas } = renderCapturingLeafLabelAlphas('all');
+    const part1 = labelAlphas.get('part1');
+    expect(part1?.length).toBeGreaterThan(0);
+    for (const t of ['part2', 'lone1', 'lone2', 'ep', 'ty']) {
+      expect(labelAlphas.get(t)[0] / part1[0]).toBeCloseTo(1.0, 5);
+    }
   });
 });

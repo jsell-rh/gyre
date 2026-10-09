@@ -1318,9 +1318,8 @@
                 nodes={effectiveGraph.nodes ?? []}
                 edges={effectiveGraph.edges ?? []}
                 activeQuery={activeViewQuery}
-                filter={explorerFilter}
-                lens={explorerLens}
-                filters={null}
+                bind:filter={explorerFilter}
+                bind:lens={explorerLens}
                 bind:canvasState={explorerCanvasState}
                 onNodeDetail={(n) => {
                   detailNode = n;
