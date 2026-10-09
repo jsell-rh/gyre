@@ -1,12 +1,12 @@
 ---
 title: "Hierarchy enforcement scripts — check-hierarchy, check-tenant-filter, check-api-auth"
 spec_ref: "hierarchy-enforcement.md §7"
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "hierarchy-enforcement.md §Invariant Enforcement"
   - "hierarchy-enforcement.md §Enforcement"
   - "hierarchy-enforcement.md §New Scripts"
-commits: ["d876f8883cc4d7d374786a6b56255a9549af75bc", "f29a3464eaca73ac6e932dfd95da6522a10e438e", "ceb62097a1dac7012bb7156add686b54a75f8c25", "a4d0980a972f0a268cb5406b467077d416100589", "affd4788cb6c8aa825c0d5e8a0e1d0c503d5b1d6", "1f092d62dc5680fb49bd02f960b9c79ced0c33c5"]
+commits: ["d876f8883cc4d7d374786a6b56255a9549af75bc", "f29a3464eaca73ac6e932dfd95da6522a10e438e", "ceb62097a1dac7012bb7156add686b54a75f8c25", "a4d0980a972f0a268cb5406b467077d416100589", "affd4788cb6c8aa825c0d5e8a0e1d0c503d5b1d6", "1f092d62dc5680fb49bd02f960b9c79ced0c33c5", "06df8bfb02cbf0c50059c580f1f87860708543ff"]
 ---
 
 ## Spec Excerpt
@@ -84,3 +84,10 @@ already filters `secrets::tenant_id.eq(tenant_id)`); every other
 111 checked / 0 violations (was 109). Mutation probes in an isolated
 worktree (restored after each): removing the tenant predicate from either
 fn fails the lint with exit 1 naming file and line.
+
+## Shipped
+
+- Three spec §7 enforcement scripts, wired into pre-commit and as blocking CI steps: `check-hierarchy.sh` (domain hierarchy fields must be non-optional `Id`; scans by struct name across the domain crate, kills `Option<Id>` and deleted-field mutations), `check-tenant-filter.sh` (every Diesel read method touching a tenant-column table must carry a `tenant_id` predicate; table set derived from the migrations with DROP/RENAME-recreation handling; 111 fns checked, 0 violations on HEAD), `check-api-auth.sh` (middleware chain + per-handler auth on exempt routes + route→ABAC registry coverage via the registry owner).
+- Real adapter enforcement behind the lint, both backends: every tenant-column read filters `tenant_id.eq(&storage.tenant_id)`, raw SQL carries `AND tenant_id = ?/$4`, and the four create() sites (merge_request/repository/analytics × sqlite+postgres) stamp the storage's real tenant instead of `"default"` — proven by `tests/tenant_isolation.rs` (two storages over one db file), which fails with exact leak diagnostics when either defect class is reintroduced.
+- Scope-literal-defaults exemption file cut 24→12 (dead entries for sites this task actually fixed removed; `FROZEN_EXEMPTION_COUNT` lowered to match), so a future `"default"` scope stamp at any formerly-exempted position now fails the lint.
+- Read-by-behavior coverage of `record_*`/`resolve*` prefixes closes the last known name-heuristic blind spot (`record_usage`, `resolve_for_agent`); independent cross-check confirms the heuristic is now exhaustive over the tenant-column read surface.

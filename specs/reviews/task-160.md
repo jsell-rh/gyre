@@ -1,8 +1,8 @@
 # Review — task-160 (Hierarchy enforcement scripts — check-hierarchy, check-tenant-filter, check-api-auth)
 
 Spec: `specs/system/hierarchy-enforcement.md` §2 (Invariant Enforcement), §3 (Enforcement — Consistent Tenant Filtering), §7 (New Scripts table).
-Comparison base: `66422bd4b99de70536cce8422ec23db5eaec082d` → HEAD `31cad3d76743aebbefa81919b940844883ea7527` (uncommitted repairs included; none present — tree clean).
-Verdict: **needs-revision** (two material findings; behavior itself is real and verified).
+Comparison base: `66422bd4b99de70536cce8422ec23db5eaec082d` → HEAD `f5157996f1457faee6efd7de6183631e3a8123a8` (tree clean).
+Verdict: **complete** (round-3 findings F1/F2 repaired in `06df8bf` and independently verified; no new material findings on the repair diff). Round-3 detail below is superseded; see "Round 4".
 
 ## Verified working
 
@@ -40,3 +40,20 @@ The pg twin of `resolve_for_agent` is a pre-existing `bail!` stub (postgres/secr
 1. F1: delete the 6 dead exemption lines (activity/analytics × sqlite+postgres), lower `FROZEN_EXEMPTION_COUNT` 18→12 in both the comment and the constant in `scripts/check-scope-literal-defaults.sh`; update the exemptions header comment. Re-run `bash scripts/check-scope-literal-defaults.sh crates` (must stay OK) and confirm no-exemption count is 12.
 2. F2: extend `scripts/check-tenant-filter.sh`'s `is_read` prefix set with `record`/`resolve` (or implement the pure-read-terminal rule); re-run on clean HEAD — must remain 0 violations (both fns already filter); re-run the probe to confirm the blind spot is closed; add a one-line comment documenting why the prefixes are reads-by-behavior.
 3. No product-code changes required. Both repairs are lint/tracking hygiene on files this task already owns.
+
+
+## Round 4 — repair verification (verdict: complete)
+
+Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f515799` updating this task file). HEAD `f515799` tree clean. Each round-3 finding independently re-verified:
+
+**F1 — dead exemption entries (FIXED).** Zero-exemption scan (script copy with emptied exemption file, `crates/` arg) finds exactly **12** live violations, and `diff` against the remaining 12 exemption lines shows **identity** — the file is now exactly the live set, no dead slots. `FROZEN_EXEMPTION_COUNT=12` in both the header comment and the Python constant; header updated with the 24→18→12 history. Mutation probe: reintroducing `tenant_id: "default"` at the formerly exempted `sqlite/activity.rs` ctor position fails `check-scope-literal-defaults.sh crates/` with exit 1 and exact file:line — the dead slots no longer silently absorb a regression. Clean run with real exemptions: OK.
+
+**F2 — read-name blind spot (FIXED).** Prefix set extended with `record|resolve`. Ablation: dropping the two prefixes returns 109 checked; with them, 111 — the +2 is exactly `sqlite/agent.rs::record_usage` (read-modify-write, `.first()` on `agents` — my own enumeration initially missed it because of `.load::<…>` turbofish, the awk regex `[^a-z_]` handles it) and `sqlite/secret.rs::resolve_for_agent` (pure read, `.load::<…>` on `secrets`). Mutation probes (isolated worktree `/tmp/stage/task160-mutate` at review HEAD, restored clean after each): stripping the tenant predicate from either fn → exit 1 with exact file:line. Every other `record*`/`resolve*` fn across both adapter dirs has no read terminal (pure insert/update `execute()` bodies, or `bail!` stubs) — enumerated independently, zero false positives.
+
+**Residual blind-spot sweep (new probe this round).** Independent harness replicating the lint's table derivation + fn walk (validated: reproduces exactly the lint's 111-fn checked set once the per-file SKIP_LIST is honored) found **zero** read-terminal fns on tenant-column tables outside the name heuristic. Remaining name-uncovered read terminals (`kv_get`/`kv_list`/`is_token_revoked`/`upsert_*` read-backs/`meta_spec update`'s archive fetch) all touch tenant-less tables (`kv_store`, `revoked_tokens`, `budget_usages`, `llm_function_configs`, `prompt_templates`, `meta_specs` — verified against migrations: none has a `tenant_id` column) and are already reported in the visible backlog. The name heuristic is currently exhaustive over the tenant-column read surface.
+
+**Regression re-runs on clean HEAD.** `check-hierarchy.sh` exit 0 (and still kills `Task.workspace_id → Option<Id>` with exit 1 naming `task.rs:60` — re-probed this round); `check-tenant-filter.sh` exit 0, 111 checked / 0 violations; `check-api-auth.sh` exit 0; `check-scope-literal-defaults.sh crates/` OK; `check-task-commit-attribution.sh` OK (repair commit `06df8bf` is process-clean: scripts+specs only, no product surface, so no frontmatter requirement — and `(task-160)` labeled).
+
+**Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
+
+Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
