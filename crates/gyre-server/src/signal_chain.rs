@@ -220,7 +220,8 @@ async fn ensure_workspace_orchestrator(
         crate::api::orchestrator::SpawnOrchestratorRequest::default(),
         "system",
     )
-    .await?;
+    .await
+    .map_err(|e| anyhow::anyhow!("workspace orchestrator spawn: {e:?}"))?;
     tracing::info!(
         orchestrator_id = %agent.id,
         workspace_id = %workspace_id,
@@ -267,15 +268,21 @@ async fn run_workspace_orchestrator(
         .to_string();
 
     // 1. Read the approved spec content (real git object read at the
-    //    approved SHA; None when the repo/sha is not available here).
-    let mut spec_content: Option<String> = None;
+    //    approved SHA). The workspace orchestrator's own run only needs the
+    //    spec reference for task creation — the repo orchestrator reads the
+    //    full content during decomposition (Phase 3) — so a failed read
+    //    here is non-fatal and logged by `read_git_file` itself.
     if let (Some(rid), true) = (&repo_id, !spec_sha.is_empty()) {
         if let Ok(Some(repo)) = state.repos.find_by_id(rid).await {
             let git_bin =
                 std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
-            spec_content =
-                crate::spec_registry::read_git_file(&git_bin, &repo.path, &spec_sha, &spec_path)
-                    .await;
+            let _ = crate::spec_registry::read_git_file(
+                &git_bin,
+                &repo.path,
+                &spec_sha,
+                &spec_path,
+            )
+            .await;
         }
     }
 
@@ -303,7 +310,11 @@ async fn run_workspace_orchestrator(
         task.task_type = Some(TaskType::Delegation);
         task.repo_id = rid.clone();
         task.workspace_id = workspace_id.clone();
-        task.spec_path = Some(spec_path.clone());
+        // spec_ref pins the approved SHA (agent-runtime.md §1 Phase 2.3):
+        // the repo orchestrator decomposes against this exact blob, so a
+        // later push (which invalidates the approval) cannot redirect
+        // decomposition to unapproved content.
+        task.spec_path = Some(spec_ref.clone());
         task.description = Some(format!(
             "Delegation task created by workspace orchestrator {} for approved spec {spec_ref} (agent-runtime.md §1 Phase 2).",
             orchestrator.id
@@ -440,7 +451,7 @@ async fn notify_cross_workspace_change(
             member.user_id.clone(),
             NotificationType::CrossWorkspaceSpecChange,
             format!(
-                "Cross-workspace spec change: {spec_path} (source workspace {source_workspace_id})"
+                "Cross-workspace spec change: {spec_path}@{spec_sha} (source workspace {source_workspace_id})"
             ),
             &tenant_id,
             now as i64,
@@ -485,7 +496,7 @@ pub async fn scheduler_run_once(state: &AppState) -> anyhow::Result<()> {
         let Some(repo) = repo else {
             tracing::warn!(
                 task_id = %task.id,
-                task_type = %task_type,
+                task_type = ?task_type,
                 "signal-chain scheduler: task has no resolvable repo; leaving Backlog"
             );
             continue;
@@ -528,28 +539,29 @@ async fn run_repo_orchestrator(
     repo: &Repository,
     task: &Task,
 ) -> anyhow::Result<()> {
-    let orchestrator = match find_live_repo_orchestrator(state, repo).await? {
-        Some(existing) => existing,
-        None => {
-            let (agent, _token) = crate::api::orchestrator::spawn_repo_orchestrator_core(
-                state,
-                &repo.id.to_string(),
-                crate::api::orchestrator::SpawnOrchestratorRequest {
-                    name: None,
-                    parent_id: task.assigned_to.map(|a| a.to_string()),
-                },
-                "system",
-            )
-            .await?;
-            tracing::info!(
-                orchestrator_id = %agent.id,
-                repo_id = %repo.id,
-                "signal-chain: spawned repo orchestrator for {:?} task",
-                task.task_type
-            );
-            agent
-        }
-    };
+    // Spawn (or find) the repo orchestrator for this repo. The agent handle
+    // itself is not needed beyond existence — the spawn core enforces the
+    // durable one-live check and the per-repo registry lock (held by the
+    // caller) serializes concurrent signals.
+    if find_live_repo_orchestrator(state, repo).await?.is_none() {
+        let (agent, _token) = crate::api::orchestrator::spawn_repo_orchestrator_core(
+            state,
+            &repo.id.to_string(),
+            crate::api::orchestrator::SpawnOrchestratorRequest {
+                name: None,
+                parent_id: task.assigned_to.as_ref().map(|a| a.to_string()),
+            },
+            "system",
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("repo orchestrator spawn: {e:?}"))?;
+        tracing::info!(
+            orchestrator_id = %agent.id,
+            repo_id = %repo.id,
+            "signal-chain: spawned repo orchestrator for {:?} task",
+            task.task_type
+        );
+    }
 
     match task.task_type {
         Some(TaskType::Delegation) => {
@@ -817,12 +829,9 @@ async fn decompose(
          {{\"title\": string, \"description\": string, \"order\": number}}, \
          where lower order runs first and same-order tasks may run in parallel.",
         repo_name = repo.name,
+        repo_id = repo.id,
     );
-    let parsed: Result<serde_json::Value> = port
-        .predict_json(&persona, &user_prompt)
-        .await
-        .map_err(Into::into);
-    let value = match parsed {
+    let value = match port.predict_json(&persona, &user_prompt).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(
@@ -903,11 +912,8 @@ async fn coordinate(
         task_id = task.id,
         desc = task.description.as_deref().unwrap_or(""),
     );
-    let parsed: Result<serde_json::Value> = port
-        .predict_json(&persona, &user_prompt)
-        .await
-        .map_err(Into::into);
-    let value = match parsed {
+
+    let value = match port.predict_json(&persona, &user_prompt).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!("signal-chain: LLM coordination assessment failed ({e:#}); assuming action needed");
@@ -1035,5 +1041,347 @@ mod tests {
         );
         drop(g1);
         assert!(task.await.unwrap(), "second acquisition completes after release");
+    }
+
+    // ── Full-chain integration tests ─────────────────────────────────────
+    //
+    // These exercise the real production path with the mem test state:
+    // on_spec_approved → workspace orchestrator spawn → delegation +
+    // coordination task creation → scheduler_run_once → repo orchestrator
+    // → decomposition into ordered sub-tasks.
+
+    use crate::mem::test_state;
+    use gyre_domain::spec_ledger::ApprovalStatus;
+
+    /// Seed ws-1 (tenant t1) with repos r-1 (own repo) and r-2 (dependent
+    /// repo in the same workspace), a spec ledger entry for
+    /// `specs/system/auth.md` in r-1, and a depends_on link from r-2's
+    /// `specs/system/api.md` to it.
+    async fn chain_state() -> Arc<crate::AppState> {
+        let state = test_state();
+        let ws = gyre_domain::Workspace::new(Id::new("ws-1"), Id::new("t1"), "Ws", "ws", 0);
+        state.workspaces.create(&ws).await.unwrap();
+        for rid in ["r-1", "r-2"] {
+            let repo = gyre_domain::Repository::new(
+                Id::new(rid),
+                Id::new("ws-1"),
+                rid,
+                format!("/tmp/gyre-test-{rid}"),
+                0,
+            );
+            state.repos.create(&repo).await.unwrap();
+        }
+        let entry = gyre_domain::SpecLedgerEntry {
+            path: "specs/system/auth.md".to_string(),
+            title: "Auth".to_string(),
+            owner: "owner".to_string(),
+            kind: None,
+            current_sha: "abc123".to_string(),
+            approval_mode: "single".to_string(),
+            approval_status: ApprovalStatus::Pending,
+            linked_tasks: vec![],
+            linked_mrs: vec![],
+            drift_status: "clean".to_string(),
+            created_at: 0,
+            updated_at: 0,
+            repo_id: Some("r-1".to_string()),
+            workspace_id: Some("ws-1".to_string()),
+        };
+        state.spec_ledger.save(&entry).await.unwrap();
+        state.spec_links_store.lock().await.push(
+            crate::spec_registry::SpecLinkEntry {
+                id: "link-1".to_string(),
+                source_path: "specs/system/api.md".to_string(),
+                source_repo_id: Some("r-2".to_string()),
+                link_type: crate::spec_registry::SpecLinkType::DependsOn,
+                target_path: "specs/system/auth.md".to_string(),
+                target_repo_id: Some("r-1".to_string()),
+                target_display: None,
+                target_sha: None,
+                reason: None,
+                status: "active".to_string(),
+                created_at: 0,
+                stale_since: None,
+            },
+        );
+        state
+    }
+
+    fn approved_payload() -> serde_json::Value {
+        serde_json::json!({
+            "repo_id": "r-1",
+            "spec_path": "specs/system/auth.md",
+            "spec_sha": "abc123",
+            "approved_by": "user:alice",
+            "approval_id": "approval-1",
+            "workspace_id": "ws-1",
+        })
+    }
+
+    // Phase 2 acceptance: SpecApproved spawns exactly one workspace
+    // orchestrator, delivers the message to its inbox, creates a Delegation
+    // task for the spec's repo and a Coordination task for the dependent
+    // repo, then completes the orchestrator (Idle).
+    #[tokio::test]
+    async fn spec_approved_creates_orchestrator_and_tasks() {
+        let state = chain_state().await;
+
+        on_spec_approved(&state, &approved_payload()).await;
+
+        // Exactly one live workspace orchestrator was spawned for ws-1.
+        let agents = state.agents.list_by_workspace(&Id::new("ws-1")).await.unwrap();
+        let orch: Vec<_> = agents
+            .iter()
+            .filter(|a| a.orchestrator_type == OrchestratorType::WorkspaceOrchestrator)
+            .collect();
+        assert_eq!(orch.len(), 1, "exactly one workspace orchestrator spawned");
+        assert_eq!(orch[0].status, AgentStatus::Idle, "completes after processing inbox");
+
+        // The SpecApproved message was delivered to the orchestrator's inbox
+        // (Directed tier, persisted).
+        let inbox = state
+            .messages
+            .list_after(&orch[0].id, 0, None, 100)
+            .await
+            .unwrap();
+        assert!(
+            inbox
+                .iter()
+                .any(|m| m.kind == MessageKind::SpecApproved
+                    && m.payload.as_ref().and_then(|p| p.get("approval_id"))
+                        == Some(&serde_json::json!("approval-1"))),
+            "SpecApproved delivered to orchestrator inbox, got {inbox:?}"
+        );
+
+        // Delegation task created for the spec's own repo (r-1), with the
+        // spec_ref path@sha and the orchestrator as assignee.
+        let tasks = state.tasks.list().await.unwrap();
+        let delegation = tasks
+            .iter()
+            .find(|t| t.task_type == Some(TaskType::Delegation))
+            .expect("delegation task created for r-1");
+        assert_eq!(delegation.repo_id, Id::new("r-1"));
+        assert_eq!(delegation.workspace_id, Id::new("ws-1"));
+        assert_eq!(
+            delegation.spec_path.as_deref(),
+            Some("specs/system/auth.md@abc123")
+        );
+        assert_eq!(delegation.assigned_to.as_ref(), Some(&orch[0].id));
+        assert_eq!(delegation.status, TaskStatus::Backlog);
+
+        // Coordination task created for the dependent repo (r-2).
+        let coordination = tasks
+            .iter()
+            .find(|t| t.task_type == Some(TaskType::Coordination))
+            .expect("coordination task created for dependent repo r-2");
+        assert_eq!(coordination.repo_id, Id::new("r-2"));
+        assert_eq!(coordination.workspace_id, Id::new("ws-1"));
+    }
+
+    // Phase 2 routing: a SpecApproved without a workspace scope must not
+    // spawn anything (Broadcast-destined specs have no orchestrator scope).
+    #[tokio::test]
+    async fn spec_approved_without_workspace_is_noop() {
+        let state = chain_state().await;
+        let mut payload = approved_payload();
+        payload["workspace_id"] = serde_json::json!(null);
+
+        on_spec_approved(&state, &payload).await;
+
+        let agents = state.agents.list_by_workspace(&Id::new("ws-1")).await.unwrap();
+        assert!(
+            agents
+                .iter()
+                .all(|a| a.orchestrator_type != OrchestratorType::WorkspaceOrchestrator),
+            "no orchestrator spawned for unscoped spec"
+        );
+        let tasks = state.tasks.list().await.unwrap();
+        assert!(tasks.is_empty(), "no tasks created");
+    }
+
+    // Phase 2 exactly-one-active: a second SpecApproved reuses the live
+    // (Idle) orchestrator — its message lands in the same inbox — instead
+    // of spawning a second session.
+    #[tokio::test]
+    async fn second_approval_reuses_then_respawns() {
+        let state = chain_state().await;
+
+        on_spec_approved(&state, &approved_payload()).await;
+        on_spec_approved(&state, &approved_payload()).await;
+
+        // Two runs → two delegation tasks (one per signal). Exactly-one-
+        // active: the first run's orchestrator is Idle (live, not Active)
+        // when the second signal arrives, so the second run reuses it —
+        // same agent record, both messages in one inbox — rather than
+        // spawning a second session (agent-runtime.md §1 Phase 2 "if an
+        // active workspace orchestrator exists, the message is delivered
+        // to its inbox").
+        let tasks = state.tasks.list().await.unwrap();
+        let delegations: Vec<_> = tasks
+            .iter()
+            .filter(|t| t.task_type == Some(TaskType::Delegation))
+            .collect();
+        assert_eq!(delegations.len(), 2, "each signal creates its delegation task");
+        let agents = state.agents.list_by_workspace(&Id::new("ws-1")).await.unwrap();
+        let orch: Vec<_> = agents
+            .iter()
+            .filter(|a| a.orchestrator_type == OrchestratorType::WorkspaceOrchestrator)
+            .collect();
+        assert_eq!(orch.len(), 1, "no second orchestrator session spawned");
+        assert_eq!(orch[0].status, AgentStatus::Idle);
+        let inbox = state
+            .messages
+            .list_after(&orch[0].id, 0, None, 100)
+            .await
+            .unwrap();
+        let delivered: Vec<_> = inbox
+            .iter()
+            .filter(|m| m.kind == MessageKind::SpecApproved)
+            .collect();
+        assert_eq!(
+            delivered.len(),
+            2,
+            "both SpecApproved signals delivered to the same orchestrator inbox"
+        );
+        assert!(
+            delivered.iter().all(|m| m.acknowledged),
+            "both signals processed (acked) by the orchestrator runs"
+        );
+    }
+
+    // Phase 3 acceptance: the scheduler claims the Backlog Delegation task,
+    // spawns a repo orchestrator for its repo, decomposes into ordered
+    // Implementation sub-tasks chained with depends_on, and marks the
+    // delegation task Done.
+    #[tokio::test]
+    async fn scheduler_decomposes_delegation_into_ordered_subtasks() {
+        let state = chain_state().await;
+
+        on_spec_approved(&state, &approved_payload()).await;
+        scheduler_run_once(&state).await.unwrap();
+
+        // Repo orchestrator spawned for r-1 (Delegation task's repo).
+        let agents = state.agents.list_by_workspace(&Id::new("ws-1")).await.unwrap();
+        assert!(
+            agents.iter().any(|a| a.orchestrator_type == OrchestratorType::RepoOrchestrator
+                && a.repo_id.as_ref() == Some(&Id::new("r-1"))),
+            "repo orchestrator spawned for r-1"
+        );
+
+        let tasks = state.tasks.list().await.unwrap();
+        let delegation = tasks
+            .iter()
+            .find(|t| t.task_type == Some(TaskType::Delegation))
+            .expect("delegation task exists");
+        assert_eq!(
+            delegation.status,
+            TaskStatus::Done,
+            "delegation task marked Completed after decomposition"
+        );
+
+        // Implementation sub-tasks: spec_ref, parent_task_id, order, and
+        // depends_on chaining the previous sub-task. The spec content is
+        // unreachable at /tmp/gyre-test-r-1 (no git repo), so decomposition
+        // falls back to the single-task proposal — the chain still creates
+        // a real ordered sub-task.
+        let subs: Vec<_> = tasks
+            .iter()
+            .filter(|t| t.parent_task_id.as_ref() == Some(&delegation.id)
+                && t.task_type == Some(TaskType::Implementation))
+            .collect();
+        assert!(
+            !subs.is_empty(),
+            "implementation sub-tasks created under the delegation task"
+        );
+        for sub in &subs {
+            assert_eq!(sub.parent_task_id.as_ref(), Some(&delegation.id));
+            assert_eq!(sub.repo_id, Id::new("r-1"));
+            assert!(sub.order.is_some(), "sub-task has an order");
+            assert!(sub.spec_path.as_deref().unwrap_or("").contains('@'));
+        }
+        // Ordering: depends_on chains previous sub-task IDs in order.
+        let mut sorted: Vec<&gyre_domain::Task> = subs.clone();
+        sorted.sort_by_key(|t| t.order.unwrap_or(0));
+        for pair in sorted.windows(2) {
+            assert!(
+                pair[1].depends_on.contains(&pair[0].id),
+                "sub-task {:?} must depend on order-{:?} predecessor",
+                pair[1].order,
+                pair[0].order
+            );
+        }
+
+        // The scheduler must not touch Implementation tasks: re-running the
+        // cycle leaves the sub-tasks Backlog (they are Phase 4's path).
+        let before = tasks.len();
+        scheduler_run_once(&state).await.unwrap();
+        let after = state.tasks.list().await.unwrap();
+        assert_eq!(before, after.len(), "no new tasks on second cycle");
+        assert!(
+            after
+                .iter()
+                .filter(|t| t.task_type == Some(TaskType::Implementation))
+                .all(|t| t.status == TaskStatus::Backlog),
+            "implementation tasks stay Backlog for the worker-spawn path"
+        );
+    }
+
+    // Phase 2 coordination processing: the scheduler runs the repo
+    // orchestrator for the Coordination task in the dependent repo (r-2)
+    // and marks it Done with a review sub-task (deterministic no-LLM path
+    // is conservative: action needed).
+    #[tokio::test]
+    async fn scheduler_processes_coordination_task() {
+        let state = chain_state().await;
+
+        on_spec_approved(&state, &approved_payload()).await;
+        // First cycle claims the Delegation (r-1); the Coordination task
+        // (r-2) is also Backlog and gets claimed in the same cycle.
+        scheduler_run_once(&state).await.unwrap();
+
+        let tasks = state.tasks.list().await.unwrap();
+        let coordination = tasks
+            .iter()
+            .find(|t| t.task_type == Some(TaskType::Coordination))
+            .expect("coordination task exists");
+        assert_eq!(
+            coordination.status,
+            TaskStatus::Done,
+            "coordination task processed to Done"
+        );
+        let review_subs: Vec<_> = tasks
+            .iter()
+            .filter(|t| t.parent_task_id.as_ref() == Some(&coordination.id))
+            .collect();
+        assert_eq!(
+            review_subs.len(),
+            1,
+            "conservative assessment creates one review sub-task"
+        );
+        assert_eq!(review_subs[0].repo_id, Id::new("r-2"));
+        assert_eq!(review_subs[0].task_type, Some(TaskType::Implementation));
+    }
+
+    // The scheduler ignores tasks without a task_type (pre-approval
+    // push-hook tasks) — they stay Backlog untouched.
+    #[tokio::test]
+    async fn scheduler_ignores_untyped_tasks() {
+        let state = chain_state().await;
+
+        let mut t = Task::new(Id::new("push-hook-1"), "Pre-approval hook task", 0);
+        t.workspace_id = Id::new("ws-1");
+        t.repo_id = Id::new("r-1");
+        t.spec_path = Some("specs/system/auth.md".to_string());
+        state.tasks.create(&t).await.unwrap();
+
+        scheduler_run_once(&state).await.unwrap();
+
+        let after = state
+            .tasks
+            .find_by_id(&Id::new("push-hook-1"))
+            .await
+            .unwrap()
+            .expect("task survives");
+        assert_eq!(after.status, TaskStatus::Backlog, "untyped task untouched");
     }
 }
