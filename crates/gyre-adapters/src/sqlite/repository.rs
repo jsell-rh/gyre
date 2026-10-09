@@ -78,6 +78,7 @@ impl RepoRepository for SqliteStorage {
     async fn create(&self, repo: &Repository) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let r = repo.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
             let status_str = r.status.to_string();
@@ -91,7 +92,7 @@ impl RepoRepository for SqliteStorage {
                 mirror_url: r.mirror_url.as_deref(),
                 mirror_interval_secs: r.mirror_interval_secs.map(|v| v as i64),
                 last_mirror_sync: r.last_mirror_sync.map(|v| v as i64),
-                tenant_id: "default",
+                tenant_id: &tenant,
                 workspace_id: r.workspace_id.as_str(),
                 description: r.description.as_deref(),
                 status: &status_str,
@@ -218,9 +219,12 @@ impl RepoRepository for SqliteStorage {
         let pool = Arc::clone(&self.pool);
         let workspace_id = workspace_id.clone();
         let name = name.to_string();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Option<Repository>> {
             let mut conn = pool.get().context("get db connection")?;
+            // Spec hierarchy-enforcement.md §3: every read filters by tenant_id.
             let result = repositories::table
+                .filter(repositories::tenant_id.eq(&tenant))
                 .filter(repositories::workspace_id.eq(workspace_id.as_str()))
                 .filter(repositories::name.eq(&name))
                 .first::<RepositoryRow>(&mut *conn)

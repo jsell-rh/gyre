@@ -45,15 +45,17 @@ struct ActivityEventRecord<'a> {
     tenant_id: &'a str,
 }
 
-impl<'a> From<&'a ActivityEvent> for ActivityEventRecord<'a> {
-    fn from(e: &'a ActivityEvent) -> Self {
+impl<'a> ActivityEventRecord<'a> {
+    /// Tenant rides in the VALUES clause from the storage's tenant scope —
+    /// the same identity every tenant_id read filter matches against.
+    fn new(e: &'a ActivityEvent, tenant_id: &'a str) -> Self {
         ActivityEventRecord {
             id: e.id.as_str(),
             agent_id: &e.agent_id,
             event_type: &e.event_type,
             description: &e.description,
             timestamp: e.timestamp as i64,
-            tenant_id: "default",
+            tenant_id,
         }
     }
 }
@@ -63,9 +65,10 @@ impl ActivityRepository for SqliteStorage {
     async fn append(&self, event: &ActivityEvent) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let e = event.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
-            let record = ActivityEventRecord::from(&e);
+            let record = ActivityEventRecord::new(&e, &tenant);
             diesel::insert_into(activity_events::table)
                 .values(&record)
                 .execute(&mut *conn)
@@ -81,12 +84,15 @@ impl ActivityRepository for SqliteStorage {
         let limit = q.limit;
         let agent_id = q.agent_id.clone();
         let event_type = q.event_type.clone();
+        let tenant = self.tenant_id.clone();
 
         tokio::task::spawn_blocking(move || -> Result<Vec<ActivityEvent>> {
             let mut conn = pool.get().context("get db connection")?;
             let mut query = activity_events::table
                 .order(activity_events::timestamp.asc())
                 .into_boxed();
+            // Spec hierarchy-enforcement.md §3: every read filters by tenant_id.
+            query = query.filter(activity_events::tenant_id.eq(&tenant));
             if let Some(s) = since {
                 query = query.filter(activity_events::timestamp.ge(s as i64));
             }

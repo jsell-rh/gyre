@@ -1,60 +1,123 @@
 #!/usr/bin/env bash
 # Architecture lint: verify domain types enforce the ownership hierarchy.
 #
-# The ownership hierarchy (Tenant -> Workspace -> Repo) must be non-optional
-# in domain types. This script checks that specific fields are declared as
-# `Id` (not `Option<Id>`) in domain struct definitions.
+# specs/system/hierarchy-enforcement.md §2 — Non-Optional Hierarchy Fields:
+# a hierarchy edge that is Option<Id> allows an entity with NO parent to
+# bypass the tenant check entirely (hierarchy-enforcement review F1: 35 of
+# 50 breached tasks had workspace_id = None). The M34 Slice 3 migration made
+# the fields below non-optional (workspace_id: Id / tenant_id: Id). This
+# script scans every domain struct definition and fails if any of those
+# fields is declared as Option<...>, or if a struct that must carry the
+# field has lost the field entirely (a deleted field silently re-opens the
+# same bypass by removing the edge, not just its optionality).
 #
-# Checked fields:
-#   - workspace_id on: Task, Agent, MergeRequest, Repository
-#   - tenant_id on: Workspace
+# Scanned (struct, required non-optional fields):
+#   Task            — workspace_id, repo_id
+#   Agent           — workspace_id
+#   MergeRequest    — workspace_id
+#   Repository      — workspace_id
+#   Workspace       — tenant_id
 #
-# Run by pre-commit and CI. On failure, the message explains the invariant.
+# Scanning by struct NAME across the whole domain crate (not a fixed file
+# map) means the check survives file moves and catches a struct of the same
+# name defined anywhere, while leaving legitimate Option<Id> fields on
+# other structs untouched (audit events, tenant-level LLM/prompt defaults,
+# user preferences — those are not hierarchy edges).
 #
-# NOTE: This script is DISABLED by default until the non-optional migration
-# lands (M34 Slice 3). Enable by removing the guard below.
+# Enabled by default since the M34 Slice 3 non-optional migration landed
+# (spec §2 note). Set GYRE_CHECK_HIERARCHY=0 only to temporarily bypass.
+#
+# Run by pre-commit, dev-check and CI. On failure, the message explains
+# the invariant.
 
 set -euo pipefail
 
-# ── Guard: remove this block to enable the check ────────────────────────
-if [ "${GYRE_CHECK_HIERARCHY:-0}" != "1" ]; then
-    echo "Hierarchy lint skipped (GYRE_CHECK_HIERARCHY != 1). Enable after M34 Slice 3."
+if [ "${GYRE_CHECK_HIERARCHY:-1}" = "0" ]; then
+    echo "Hierarchy lint skipped (GYRE_CHECK_HIERARCHY=0)."
     exit 0
 fi
-# ────────────────────────────────────────────────────────────────────────
 
 DOMAIN_SRC="crates/gyre-domain/src"
 
+if [ ! -d "$DOMAIN_SRC" ]; then
+    echo "check-hierarchy: ERROR — domain source directory '$DOMAIN_SRC' not found (run from repo root)"
+    exit 2
+fi
+
 FAIL=0
 
-# Map of (file, field) pairs that must be non-optional
-declare -A REQUIRED_FIELDS
-REQUIRED_FIELDS["task.rs:workspace_id"]="Task"
-REQUIRED_FIELDS["agent.rs:workspace_id"]="Agent"
-REQUIRED_FIELDS["merge_request.rs:workspace_id"]="MergeRequest"
-REQUIRED_FIELDS["repository.rs:workspace_id"]="Repository"
-REQUIRED_FIELDS["workspace.rs:tenant_id"]="Workspace"
-
-for key in "${!REQUIRED_FIELDS[@]}"; do
-    file="${key%%:*}"
-    field="${key##*:}"
-    entity="${REQUIRED_FIELDS[$key]}"
-    filepath="$DOMAIN_SRC/$file"
-
-    if [ ! -f "$filepath" ]; then
-        echo "WARNING: Cannot find $filepath — skipping $entity.$field check"
-        continue
+# awk state machine over every domain .rs file. mawk-compatible: no match()
+# array capture, no \\s, no word-boundary escapes.
+while IFS= read -r file; do
+    if ! out=$(awk '
+        BEGIN {
+            req["Task"]        = "workspace_id repo_id"
+            req["Agent"]       = "workspace_id"
+            req["MergeRequest"]= "workspace_id"
+            req["Repository"]  = "workspace_id"
+            req["Workspace"]   = "tenant_id"
+        }
+        function flushstruct(   nf, j, f) {
+            if (cur == "") return
+            nf = split(req[cur], fields, " ")
+            for (j = 1; j <= nf; j++) {
+                f = fields[j]
+                if (!(f in found)) {
+                    printf "HIERARCHY VIOLATION: %s.%s is missing from the struct at %s\n", cur, f, FILENAME
+                    printf "  The M34 hierarchy migration made this edge mandatory; deleting the field\n"
+                    printf "  silently re-opens the no-parent bypass (same flaw class as Option<Id>).\n"
+                    printf "  See: specs/system/hierarchy-enforcement.md section 2 - Non-Optional Hierarchy Fields\n"
+                    bad = 1
+                }
+            }
+            cur = ""
+        }
+        # struct header: `pub struct Name {` / `pub(crate) struct Name {`
+        /struct[ \t]/ {
+            flushstruct()
+            n = split($0, w, /[ \t]+/)
+            name = ""
+            for (i = 1; i < n; i++) {
+                if (w[i] == "struct") { name = w[i + 1]; break }
+            }
+            gsub(/[^A-Za-z0-9_]/, "", name)
+            if (name != "" && name in req) {
+                cur = name
+                delete found
+            }
+            next
+        }
+        # top-level closing brace ends the struct body
+        /^\}/ { flushstruct() }
+        cur != "" {
+            nf = split(req[cur], fields, " ")
+            for (j = 1; j <= nf; j++) {
+                f = fields[j]
+                if ($0 ~ ("^[ \t]*pub[ \t]+" f "[ \t]*:[ \t]*Option")) {
+                    printf "HIERARCHY VIOLATION: %s.%s is declared Option at %s:%d\n", cur, f, FILENAME, FNR
+                    printf "  The ownership hierarchy requires this field to be non-optional (Id, not Option<Id>).\n"
+                    printf "  An Option parent edge lets an entity bypass the tenant check entirely (review F1).\n"
+                    found[f] = 1
+                    printf "  See: specs/system/hierarchy-enforcement.md section 2 - Non-Optional Hierarchy Fields\n"
+                    bad = 1
+                } else if ($0 ~ ("^[ \t]*pub[ \t]+" f "[ \t]*:")) {
+                    found[f] = 1
+                }
+            }
+            next
+        }
+        END { flushstruct() }
+    ' "$file"); then
+        echo "check-hierarchy: ERROR — scanner failed on $file"
+        exit 2
     fi
-
-    # Check if the field is declared as Option<Id> or Option<gyre_common::Id>
-    if grep -P "pub\s+${field}\s*:\s*Option" "$filepath" > /dev/null 2>&1; then
-        echo "HIERARCHY VIOLATION: ${entity}.${field} is Option<Id> in ${filepath}"
-        echo "  The ownership hierarchy requires this field to be non-optional (Id, not Option<Id>)."
-        echo "  See: specs/system/hierarchy-enforcement.md §2 — Non-Optional Hierarchy Fields"
-        echo ""
+    if [ -n "$out" ]; then
+        echo "$out"
         FAIL=1
     fi
-done
+done <<FILES
+$(find "$DOMAIN_SRC" -name '*.rs' | sort)
+FILES
 
 if [ "$FAIL" -eq 0 ]; then
     echo "Hierarchy lint passed: all hierarchy fields are non-optional."
