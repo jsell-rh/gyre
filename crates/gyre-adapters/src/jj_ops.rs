@@ -618,6 +618,145 @@ mod tests {
         );
     }
 
+    /// F7 contract: a branch created in the backing git repo AFTER the
+    /// shared jj main checkout was initialized is invisible to jj until
+    /// `jj git import` runs there. `jj_workspace_add` must refresh its
+    /// view before resolving `-r <branch>` — this is the production
+    /// sequence (main checkout initialized on the first spawn; every
+    /// later branch arrives via `git worktree add -b` against the bare
+    /// repo). Empirically pinned: without the import, jj 0.39.0 fails
+    /// with "Revision '<branch>' doesn't exist".
+    #[tokio::test]
+    async fn jj_workspace_add_resolves_branch_created_after_init() {
+        if !jj_available() {
+            return;
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo_path = fixture_shared_checkout(&dir).await;
+        let main_checkout = dir.path().join("jj-main");
+
+        // Create a NEW branch in the bare git repo after jj-main exists —
+        // exactly what `create_worktree`'s `git worktree add -b` does on
+        // every post-first spawn for a branch that does not exist yet.
+        let scratch = dir.path().join("scratch");
+        std::fs::write(scratch.join("post-init.txt"), "post\n").unwrap();
+        git(&scratch, &["add", "."]);
+        git(&scratch, &["commit", "-m", "post-init branch work"]);
+        git(&scratch, &["push", &repo_path, "HEAD:refs/heads/feat/post-init"]);
+
+        // The workspace add must resolve the new branch name.
+        let ws = dir.path().join("workspaces").join("agent-late");
+        JjOpsAdapter::new()
+            .jj_workspace_add(
+                main_checkout.to_str().unwrap(),
+                ws.to_str().unwrap(),
+                "agent-late",
+                "feat/post-init",
+                "late agent work",
+            )
+            .await
+            .expect("workspace add must resolve a branch created after jj-main init");
+
+        // The workspace really checked the branch out: its working-copy
+        // parent is the pushed branch tip.
+        let out = Command::new("jj")
+            .current_dir(&ws)
+            .args([
+                "log",
+                "-r",
+                "@-",
+                "--no-graph",
+                "--color",
+                "never",
+                "-T",
+                "commit_id",
+            ])
+            .output()
+            .await
+            .expect("jj binary");
+        assert!(
+            out.status.success(),
+            "jj log failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let parent = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let branch_tip = git_rev_parse(&scratch, "HEAD");
+        assert_eq!(
+            parent, branch_tip,
+            "workspace must start on the branch tip, not the pre-init main"
+        );
+    }
+
+    /// F7 aggravator pin: a FAILED `workspace add` must not leave a
+    /// half-created workspace (dir present with `.jj/` but nothing
+    /// checked out) that defeats the caller's existence-guarded git
+    /// fallback. The adapter must forget the workspace and remove the
+    /// directory before returning the error.
+    #[tokio::test]
+    async fn jj_workspace_add_failure_cleans_half_created_dir() {
+        if !jj_available() {
+            return;
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        fixture_shared_checkout(&dir).await;
+        let main_checkout = dir.path().join("jj-main");
+
+        // A branch that does not exist anywhere: workspace add fails at
+        // revision resolution.
+        let ws = dir.path().join("workspaces").join("agent-bad");
+        let err = JjOpsAdapter::new()
+            .jj_workspace_add(
+                main_checkout.to_str().unwrap(),
+                ws.to_str().unwrap(),
+                "agent-bad",
+                "does/not/exist",
+                "bad revision",
+            )
+            .await
+            .expect_err("workspace add on unknown revision must fail");
+        assert!(
+            err.to_string().contains("workspace add failed"),
+            "error must name the failing step, got: {err}"
+        );
+
+        // The half-created dir must be gone: the git fallback stays
+        // reachable.
+        assert!(
+            !ws.exists(),
+            "failed workspace add must not leave the half-created dir behind"
+        );
+
+        // And the workspace must not stay registered: a subsequent add
+        // with the same name succeeds (no stale registration).
+        let ws2 = dir.path().join("workspaces").join("agent-retry");
+        JjOpsAdapter::new()
+            .jj_workspace_add(
+                main_checkout.to_str().unwrap(),
+                ws2.to_str().unwrap(),
+                "agent-bad",
+                "main",
+                "retry after failure",
+            )
+            .await
+            .expect("re-adding under the same workspace name must succeed after cleanup");
+    }
+
+    /// HEAD of a scratch clone, by rev-parse (helper for F7 pins).
+    fn git_rev_parse(cwd: &std::path::Path, rev: &str) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(["rev-parse", rev])
+            .output()
+            .expect("git binary");
+        assert!(
+            out.status.success(),
+            "git rev-parse {rev} in {cwd:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
     /// F1 contract, clean path: after the target branch moves in the git
     /// repo, `jj_rebase` succeeds, reports the moved stack, and detects no
     /// conflicts. Pinned against real jj 0.39.0: rebase progress is on
