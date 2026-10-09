@@ -2,7 +2,7 @@
 title: "Implement reconciliation controller and conformance sweep background job"
 spec_ref: "meta-spec-reconciliation.md §6, §10"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §6 Reconciliation: The Slow Rollout"
   - "meta-spec-reconciliation.md §10 Conformance Sweeps (Steady State)"
@@ -75,18 +75,36 @@ From §10 — Conformance Sweeps:
 - Read `crates/gyre-common/src/message.rs` for ReconciliationCompleted MessageKind
 - The task creation pattern is in `crates/gyre-server/src/git_http.rs` (spec lifecycle task creation) — follow the same deduplication pattern
 
-## Review
+## Implementation Result
 
-### Review changed source code
+Review findings from the prior two rounds are repaired in the working tree:
 
-- crates/gyre-server/src/reconciliation.rs
+1. **§10 SHA-flip defect (reconciliation.rs finding)** — `MetaSpecSet.personas`
+   and `UpdateMetaSpecSetRequest.personas` are `BTreeMap` instead of `HashMap`
+   (`crates/gyre-server/src/api/meta_specs.rs`): the stored set bytes feed
+   `compute_meta_spec_set_sha`, and `HashMap` iteration order is seed-random
+   per deserialization, so an identical re-PUT could flip the set SHA and make
+   the §10 conformance sweep manufacture false drift against provenance
+   recorded minutes earlier. Regression test
+   `reconciliation::tests::identical_reput_keeps_set_sha_stable` (5 persona
+   bindings, re-PUT, SHA equality, then sweep asserts zero drift) — fails on
+   the old HashMap behavior.
+2. **Review probe test (zz_review_probe.rs finding)** — the temporary
+   integration probe was deleted; the regression test now lives in-crate as
+   `reconciliation::tests::identical_reput_keeps_set_sha_stable`, and the
+   `make_set` test helper uses distinct persona keys so multi-entry sets no
+   longer collapse to their last entry.
+3. **Baseline reproduction (no-test-inflation evidence)** — in an isolated
+   worktree at the pre-fix base (own `CARGO_TARGET_DIR`), a temporary in-crate
+   probe asserting `distinct > 1` over 40 identical re-PUTs **passed on the
+   old HashMap code**, mechanically proving the SHA flip; the committed fix
+   inverts that outcome (stable SHA across re-PUTs).
 
-Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
+Focused checks (this sandbox): `cargo test -p gyre-server --lib reconciliation`
+(14 passed incl. the new regression test), `cargo test -p gyre-server --lib
+meta_specs` (14 passed), `cargo build -p gyre-server` clean, clippy adds no
+new findings (the `-D warnings` error in `gyre-common/src/view_query.rs:798`
+is baseline code untouched by this task).
 
-## Review
-
-### Review changed source code
-
-- crates/gyre-server/tests/zz_review_probe.rs
-
-Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
+Unresolved: none for §6/§10/§11 — full-suite and lint gates left to the
+controller per round instructions.
