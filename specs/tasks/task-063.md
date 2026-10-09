@@ -3,7 +3,7 @@ title: "View Query Grammar — Scope Resolution, Emphasis & Rendering Primitives
 spec_ref: "view-query-grammar.md §4–9"
 depends_on:
   - task-062
-progress: ready-for-review
+progress: complete
 review: "specs/reviews/task-063.md"
 coverage_sections:
   - "view-query-grammar.md §4 2. Scope — What Subgraph to Show"
@@ -97,6 +97,13 @@ All three R1 findings addressed:
 - **F1** (frontend `diff` dead field): fixed in `dce939e` — client diff scope now reads `created_sha`/`last_modified_sha`/`created_at`/`last_modified_at` (the fields `GraphNodeResponse` actually serializes) and ports the Rust resolver's SHA semantics (≥7-hex prefix on `to_commit`, from-commit exclusion, `~epoch` temporal half-open ranges). Test helper + fixtures use real field names. Component-level behavioral test added in `a07b912` kills reversion to `last_commit_sha`.
 - **F2** (`all` scope inert): fixed in `dce939e` — `queryMatchedWithDepth` now has an `all` branch returning every node at depth 0, so `dim_unmatched`, edge restriction, `zoom: "fit"`, `{{count}}`/`{{group_count}}`, `highlight.matched`, and `tiered_colors` all operate for `all`-scope queries. Component-level test added in `a07b912` kills deletion of the branch.
 - **F3** (vacuous/tautological tests): fixed in `a07b912` — positive label test captures `fillStyle` at each `fillText` call and asserts `#ef4444`; negative test uses the flat fixture (matched leaf drawn, asserted) so deleting the `hlLabel` guard draws `'undefined'` and fails. All four mutations (guard deletion, `all`-branch deletion, dead-field reversion, color substitution) verified to fail their tests.
+
+## Shipped
+
+- `highlight.matched.label` renders on matched nodes in the configured matched color (LOD-gated below the node box), completing the §5 emphasis primitive set alongside dim, tiered_colors, heat, and badges.
+- Client-side `diff` scope reads the real `GraphNodeResponse` commit fields (`created_sha`/`last_modified_sha`/`created_at`/`last_modified_at`) and ports the Rust resolver's semantics: `~epoch` temporal half-open ranges, ≥7-char SHA-prefix matching on `to_commit`, from-commit exclusion.
+- Client-side `all` scope produces a full-graph result set, so `dim_unmatched`, edge restriction to result-set connections, `zoom: "fit"`, `{{count}}`/`{{group_count}}`, `highlight.matched`, and `tiered_colors` all operate for `all`-scope queries.
+- Component-level behavioral tests for the label rendering (fillStyle captured at draw time), `all`-scope count resolution, and diff-scope resolution against real field names — all four identified mutations verified to fail their targeted tests.
 
 ## Agent Instructions
 

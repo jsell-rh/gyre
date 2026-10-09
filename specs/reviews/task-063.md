@@ -114,3 +114,67 @@ F1 and F2 are correctness breaks of checked acceptance criteria ("All 6 scope ty
 correctly", "Emphasis primitives render correctly", "Annotation templates resolve `{{count}}`/
 `{{group_count}}`"); F3 is test inflation on this task's own new tests. Setting
 `progress: needs-revision`.
+
+## Round 2 (revision verdict)
+
+Comparison base `8cde8130`, HEAD `5201eb7`. Repairs independently verified; each R1 finding
+re-checked against the current diff, not the task prose.
+
+- **F1 — fixed.** The client diff scope (`ExplorerCanvas.svelte:2035-2070`) now reads
+  `created_sha`/`last_modified_sha`/`created_at`/`last_modified_at` — exactly the fields
+  `GraphNodeResponse` serializes (`api/graph.rs:59-63`; no `last_commit_sha` exists in
+  production data; the name survives only in explanatory test comments). Semantics ported
+  faithfully from `view_query_resolver.rs:722-818`: both refs required (missing `to_commit` →
+  empty), `~epoch` temporal mode with half-open `(from, to]` ranges, SHA mode with ≥7-char
+  target-prefix guard, to-match on either sha, from-exclusion when both shas match from.
+  Only cosmetic difference: Rust's `sha_lower.starts_with(target) || sha_lower == target`
+  (:797) is redundant under `startsWith`; the JS omits it — identical truth table. The
+  component-level test (`ExplorerCanvas.test.js:365-389`) feeds real field names and asserts
+  `{{count}}` renders `1`; the mirror helper was rewritten to the same semantics.
+- **F2 — fixed.** `queryMatchedWithDepth` has an `all` branch (`:1940-1944`) returning every
+  node at depth 0, consistent with sibling scopes (all iterate raw `nodes`). Downstream
+  consumers confirmed keyed on `queryMatchedIds` (`:2081`): `dim_unmatched` `:2117`,
+  edge restriction `:3575-3576`, `zoom: "fit"` bbox `:4782-4798`, `{{count}}` `:4992`,
+  `{{group_count}}` `:4995`, `highlight.matched`/`tiered_colors` `:2179-2183`. For `all` +
+  `fit`, the bbox is the full graph — spec-correct (result set = everything).
+- **F3 — fixed, and mutation-verified in this environment.** Positive label test captures
+  `fillStyle` at each `fillText` call via spy and asserts `#ef4444` on every `'Untested'`
+  draw; negative test uses the flat fixture (matched leaf `get_user` asserted drawn first,
+  so the draw path executes) and additionally asserts every drawn text is a real string —
+  deleting the `hlLabel` guard draws `'undefined'` and fails. All four mutations
+  independently reproduced here, each failing exactly its targeted test:
+  guard deletion → "does not draw highlight label…" fails; `all`-branch deletion →
+  "all scope: {{count}}…" fails; dead-field reversion → "diff scope: {{count}} resolves
+  against real commit fields…" fails; label color substitution → "draws
+  highlight.matched.label… with the matched color" fails. Working tree restored clean
+  after each probe.
+- **Suite:** `cd web && npx vitest run src/__tests__/ExplorerCanvas.test.js` → **139 passed,
+  0 failed** in this environment.
+- **Commit attribution:** `bash scripts/check-task-commit-attribution.sh` → OK. The four
+  frontmatter SHAs (`d22f50f`, `f27ff43`, `2d45617`, `2bb9fdf`) are the rebased branch
+  commits and match their content (label rendering+dist / source fix / test fix / F3
+  hardening); the prose SHAs `dce939e`/`a07b912` are pre-rebase equivalents — diagnostic
+  provenance only, not the comparison base.
+- **web/dist staleness — checked, defused.** HEAD's committed dist is the pre-F1/F2 bundle
+  (`last_commit_sha` present, no `type === 'all'` branch; last dist commit `d22f50f` predates
+  the source fix `f27ff43`). This is not a task defect: the loop's checkpoint machinery
+  explicitly classifies `web/dist` as a build artifact — `dev-remote.sh:105-108` runs
+  `git restore --worktree -- web/dist && git clean -fd -- web/dist` before every checkpoint
+  commit, so fix commits mechanically cannot carry a dist rebuild — and the integration gate
+  `dev-check.sh:83-86` rebuilds web from source (`npm ci && npm run build`) before promotion,
+  then restores committed dist. Historical precedent: task-097/095/102 source fixes shipped
+  the same way, with the dedicated `44a8187 build(web): regenerate dist from merged sources`
+  landing at merge. No mechanical gate enforces dist freshness; none is needed given the
+  integration rebuild.
+
+Residual notes (unchanged from R1, triaged, not blockers):
+
+- `filter` `name_pattern`: frontend regex vs Rust `contains`; `{{group_count}}`: frontend
+  qualified-name split vs Rust Contains-edge/file_path parents. Both pre-existing from
+  task-062's resolver, can disagree on edge-case graphs, and belong to the prospective
+  frontend-resolver-unification task.
+- Task-file npm caveat (23 pre-existing full-suite failures reproducing on a clean checkout)
+  was A/B-verified by the implementer; the ExplorerCanvas file itself is green here.
+
+F1, F2, F3 all genuinely repaired with mutation-verified regression coverage. The task's
+checked criteria are met on the verifiable surface. Setting `progress: complete`.
