@@ -49,7 +49,7 @@ osrun() {
   local cursor="${GYRE_DEV_STATE:-$ROOT/.gyre-dev-controller}/attempts/$ARG3/remote-log.offset"
   local offset=0
   local -a retry=()
-  [ "${1:-}" != registry ] || retry=(--retry-failed)
+  case "${1:-}" in registry|git) retry=(--retry-failed);; esac
   [ ! -f "$cursor" ] || offset=$(cat "$cursor")
   timeout "${GYRE_DEV_EXEC_TIMEOUT:-14400}" "$OS" -g gyre-gyre sandbox exec \
     -n "$SANDBOX" --no-login-shell --workdir /tmp \
@@ -167,7 +167,7 @@ if [ "$create_rc" -ne 0 ]; then
     else
       rm -f "$create_log"; echo "sandbox provisioning deferred for capacity" >&2; exit 78
     fi
-  elif grep -Eiq 'h2 protocol error|tls handshake eof|peer closed connection|failed to connect to gateway' "$create_log"; then
+  elif grep -Eiq 'h2 protocol error|tls handshake eof|peer closed connection|failed to connect to gateway|Internal error.*create sandbox failed' "$create_log"; then
     rm -f "$create_log"; echo "gateway transport unavailable during create" >&2; exit 77
   else
     rm -f "$create_log"; exit 75
@@ -221,11 +221,16 @@ for reconnect in 1 2 3 4; do
        grep -Eq 'Failed to connect to (static|index)\.crates\.io|failed to download from .*static\.crates\.io' "$run_log"; then
     retry_reason="Cargo registry unavailable"
     restart_reason=registry
+  elif [ "$remote_rc" -ne 0 ] &&
+       ! grep -q 'GYRE_BOOTSTRAP_COMPLETE' "$transport_log" &&
+       grep -Eiq 'RPC failed; curl (7|28|35|52|55|56)\b|Could not resolve host|Failed to connect to github\.com|unexpected disconnect|remote end hung up|fatal: early EOF' "$run_log"; then
+    retry_reason="Git transport unavailable"
+    restart_reason=git
   fi
   rm "$run_log"
   [ -n "$retry_reason" ] && [ "$reconnect" -lt 4 ] || break
   echo "$retry_reason; retrying in $SANDBOX ($reconnect/4)" >&2
-  sleep "$((reconnect * 5))"
+  sleep "$((5 * 2 ** (reconnect - 1)))"
 done
 if [ -n "$retry_reason" ]; then
   echo "$retry_reason persisted after four reconnects; retry task explicitly" >&2

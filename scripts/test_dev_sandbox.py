@@ -29,6 +29,7 @@ elif 'get' in args:
     print('Phase: Ready')
 elif 'exec' in args and '/tmp/stage/dev-attach.py' in args:
     print('GYRE_BOOTSTRAP_COMPLETE task=task-001')
+    print('error: RPC failed; curl 56 connection reset during branch push')
     record.open('a').write('remote\\n')
     sys.exit(76)
 elif 'exec' in args and 'GYRE_RECOVERY_BEGIN' in args[-1]:
@@ -114,7 +115,12 @@ elif 'exec' in args and '/tmp/stage/dev-attach.py' in args:
         sys.exit(42)
     count = sum(line == 'remote' for line in record.read_text().splitlines())
     record.open('a').write('remote\\n')
+    if count > 0 and (os.environ.get('GYRE_FAKE_GIT') or os.environ.get('GYRE_FAKE_REGISTRY')):
+        assert '--retry-failed' in args
     if count == 0:
+        if os.environ.get('GYRE_FAKE_GIT'):
+            print('error: RPC failed; curl 56 getpeername() failed with errno 95: Operation not supported')
+            sys.exit(75)
         if os.environ.get('GYRE_FAKE_REGISTRY'):
             print('GYRE_BOOTSTRAP_COMPLETE task=task-001')
             print('Failed to connect to static.crates.io:443')
@@ -142,6 +148,17 @@ elif 'delete' in args:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual((root / "calls").read_text().splitlines(),
                              ["create", "stage", "stage", "remote", "remote", "delete"])
+
+            (root / 'calls').unlink()
+            (root / 'attempts/1123456789abcdef').mkdir()
+            git_retry = subprocess.run(
+                ['bash', str(Path(__file__).with_name('dev-sandbox.sh')), 'worker', 'task-001',
+                 'devloop/task-001/attempt-1', 'origin/main', '1123456789abcdef'],
+                env={**env, 'GYRE_FAKE_GIT': '1'}, capture_output=True, text=True, timeout=30)
+            self.assertEqual(git_retry.returncode, 0, git_retry.stdout + git_retry.stderr)
+            self.assertIn('Git transport unavailable; retrying in', git_retry.stderr + git_retry.stdout)
+            self.assertEqual((root / 'calls').read_text().splitlines(),
+                             ['create', 'stage', 'stage', 'remote', 'remote', 'delete'])
             (root / "calls").write_text("")
             result = subprocess.run(
                 ["bash", str(Path(__file__).with_name("dev-sandbox.sh")), "worker", "task-001",
@@ -232,6 +249,7 @@ exit 1
             env = {**os.environ, "OPENSHELL": str(fake), "DELETE_RECORD": str(record),
                    "OPENSHELL_OIDC_CLIENT_SECRET": "test", "GYRE_DEV_STATE": str(root)}
             for message, code in (("Created sandbox: gyre-001-w-01234567", 75),
+                                  ("Internal error: create sandbox failed: sandbox not found", 77),
                                   ("provider 'gyre-github-rw' not found", 79)):
                 with self.subTest(message=message):
                     result = subprocess.run(
