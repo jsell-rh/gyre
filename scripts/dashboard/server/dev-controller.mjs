@@ -8,10 +8,10 @@ import { promisify } from "node:util";
 const execFileP = promisify(execFile);
 
 export function controllerPaths(root, env = process.env) {
-  const state = env.GYRE_DEV_STATE || join(root, ".gyre-dev-controller");
-  return { root, state, db: join(state, "state.sqlite3"), lock: join(state, "controller.lock"),
+  const state = env.GYRE_PIPELINE_STATE || join(root, ".gyre-pipeline");
+  return { root, state, db: join(state, "pipeline.sqlite3"), lock: join(state, "supervisor.lock"),
     slots: join(state, "slots"), attempts: join(state, "attempts"),
-    command: join(root, "scripts", "dev-controller.py") };
+    command: join(root, "scripts", "dev-pipeline.py") };
 }
 
 export async function controllerAlive(paths) {
@@ -19,7 +19,7 @@ export async function controllerAlive(paths) {
     const pid = Number((await readFile(paths.lock, "utf8")).trim());
     if (!Number.isInteger(pid) || pid <= 0) return false;
     const cmd = await readFile(`/proc/${pid}/cmdline`, "utf8");
-    return cmd.includes("dev-controller.py") && cmd.includes("run");
+    return cmd.includes("dev-pipeline.py") && cmd.includes("serve");
   } catch { return false; }
 }
 
@@ -27,7 +27,7 @@ export async function collectController(paths) {
   try { await stat(paths.db); } catch { return { present: false, online: false }; }
   try {
     const [{ stdout }, online, dbStat] = await Promise.all([
-      execFileP("python3", [paths.command, "status", "--json"],
+      execFileP("python3", [paths.command, "--state", paths.state, "status", "--json"],
         { cwd: paths.root, timeout: 5000, maxBuffer: 4 * 1024 * 1024 }),
       controllerAlive(paths), stat(paths.db),
     ]);
@@ -70,7 +70,7 @@ export async function taskTitles(root) {
 }
 
 async function coverageRevision(root) {
-  const source = join(root, ".gyre-dev-controller", "source");
+  const source = join(process.env.GYRE_PIPELINE_STATE || join(root, ".gyre-pipeline"), "source");
   try {
     const { stdout } = await execFileP("git", ["rev-parse", "origin/main"],
       { cwd: source, timeout: 5000 });
@@ -186,30 +186,28 @@ export async function taskPullRequests(root) {
 export async function setSlots(paths, value) {
   if (!Number.isInteger(value) || value < 0 || value > 1000) throw new Error("slots must be 0–1000");
   await stat(paths.db); // never create a controller state directory from the UI
-  const temp = `${paths.slots}.${process.pid}.tmp`;
-  await writeFile(temp, `${value}\n`, { mode: 0o600 });
-  await rename(temp, paths.slots);
+  await execFileP("python3", [paths.command, "--state", paths.state, "slots", String(value)],
+    { cwd: paths.root, timeout: 5000 });
   return value;
 }
 
 export async function retryTask(paths, task) {
   if (!/^task-\d+$/.test(task)) throw new Error("invalid task");
-  const { stdout } = await execFileP("python3", [paths.command, "retry", task],
+  const { stdout } = await execFileP("python3", [paths.command, "--state", paths.state, "retry", task],
     { cwd: paths.root, timeout: 5000, maxBuffer: 1024 * 1024 });
   return stdout.trim();
 }
 
 export async function retryAllTasks(paths) {
-  const { stdout } = await execFileP("python3", [paths.command, "retry-all"],
+  const { stdout } = await execFileP("python3", [paths.command, "--state", paths.state, "retry-all"],
     { cwd: paths.root, timeout: 120000, maxBuffer: 1024 * 1024 });
-  const match = stdout.trim().match(/retried (\d+) failed tasks$/);
+  const match = stdout.trim().match(/retried (\d+) work items$/);
   if (!match) throw new Error("retry-all did not report a task count");
   return Number(match[1]);
 }
 
 export async function attemptLog(paths, id) {
-  if (!/^[a-f0-9]{16}$/.test(id)) throw new Error("invalid attempt id");
-  const file = join(paths.attempts, id, "output.log");
+  const file = attemptLogPath(paths, id);
   const fh = await open(file, "r");
   try {
     const size = (await fh.stat()).size;
@@ -218,4 +216,10 @@ export async function attemptLog(paths, id) {
     await fh.read(buf, 0, len, size - len);
     return buf.toString("utf8");
   } finally { await fh.close(); }
+}
+
+export function attemptLogPath(paths, id) {
+  const match = /^([a-f0-9]{32})-([1-9]\d*)$/.exec(id);
+  if (!match) throw new Error("invalid attempt id");
+  return join(paths.attempts, match[1], match[2], "output.log");
 }

@@ -203,8 +203,9 @@ function renderOverview() {
   const metrics = e("div", { class: "dev-metrics" }, cards.map(([label, count]) =>
     e("div", { class: "dev-metric" }, e("div", { class: "label", text: label }), e("div", { class: "number", text: count }))));
   const control = e("section", { class: "dev-panel" },
-    e("h2", { text: "Controller" }),
-    e("p", { text: s.online ? `Reconciling specs to code · ${gate.condition || "Healthy"}` : s.present ? "Stopped. Run: python3 scripts/dev-controller.py run --slots 8" : "No ledger yet. Run: python3 scripts/dev-controller.py sync" }),
+    e("h2", { text: "Independent reconcilers" }),
+    e("p", { text: s.online ? `Supervisor online · ${gate.condition || "Reconciling"}` : "Run: python3 scripts/dev-pipeline.py serve. Stages can also run independently with tick." }),
+    ...Object.entries(s.stages || {}).map(([stage, count]) => e("div", { class: "dev-control-line", text: `${stage}: ${count.claimed || 0} running · ${count.ready || 0} ready · ${count.retry || 0} backing off · ${count.succeeded || 0} completed` })),
     e("p", { class: "muted", text: s.resources?.inventory_ready ? `Remote resource inventory current · ${s.resources.used} charged · ${s.resources.deletion_pending} awaiting deletion` : "Admission waits for a complete remote sandbox inventory." }),
     gate.inventory_error ? e("p", { class: "muted", text: `Inventory: ${gate.inventory_error}` }) : null,
     e("p", { class: "muted", text: `${(s.metrics?.deliveries_per_hour || 0).toFixed(2)} recorded deliveries/hour · ${s.metrics?.candidate_backlog || 0} candidates awaiting delivery · ${s.metrics?.automatic_repairs || 0} automatic repairs` }),
@@ -212,9 +213,9 @@ function renderOverview() {
     (s.metrics?.candidate_backlog || 0) >= (s.dispatch?.candidate_limit || 8) ? e("p", { class: "muted", text: `Implementation admission paused: candidate backlog reached ${s.dispatch?.candidate_limit || 8}. Integration and CI continue reconciling.` }) : null,
     s.dispatch?.only_task ? e("p", { text: `Dispatch restricted to ${s.dispatch.only_task}. Eligible counts include tasks excluded by this restriction.` }) : null,
     s.dispatch?.publication === "pr" ? e("p", { class: "muted", text: "PR review mode: checks reconcile automatically; passing PRs wait for merge mode." }) : null,
-    e("p", { class: "muted", text: /^(MissingProviders:|ProviderCheckUnavailable:)/.test(gate.condition || "") ? "Admission paused: required gateway providers are missing or unavailable. Setup is checked again each cycle." : gate.condition === "ConfigurationInvalid" ? "Admission paused: repair gateway configuration, then retry the failed task." : gate.retry_at > Date.now() / 1000 ? `Gateway backoff: next admission probe in ${until(gate.retry_at)} · ${gate.failures} consecutive infrastructure failures` : gate.failures ? `Gateway capacity probe ${gate.effective_slots > s.running ? "due on next cycle" : "running"} · existing sandboxes continue working` : `Gateway admission: ${gate.effective_slots ?? 0} of ${s.slots ?? 0} desired slots · expands as sandboxes become Ready` }),
+    e("p", { class: "muted", text: `Global sandbox budget: ${s.resources?.used || 0} charged / ${s.slots || 0} desired. Pending deletion continues to consume capacity.` }),
     e("p", { class: "muted", text: "Set sandboxes to 0 to drain. Active attempts finish and keep their checkpoints." }),
-    e("div", { class: "dev-control-line", text: `${(s.attempts || []).filter((a) => a.state === "running" && a.kind === "worker").length} implementing · ${(s.attempts || []).filter((a) => a.state === "running" && a.kind === "check").length} checking · ${s.slots ?? "—"} slots` }));
+    e("div", { class: "dev-control-line", text: `${(s.attempts || []).filter((a) => a.state === "running" && a.kind === "implement").length} implementing · ${(s.attempts || []).filter((a) => a.state === "running" && ["review", "verify"].includes(a.kind)).length} reviewing/verifying · ${s.slots ?? "—"} slots` }));
   const live = e("section", { class: "dev-panel" }, e("h2", { text: `Active attempts · ${active.length}` }),
     active.length ? active.map((task) => {
       const a = latestAttempt(task.name);
@@ -468,7 +469,7 @@ function renderDrawer() {
       e("span", { text: "Seed" }), e("span", { class: "mono", text: task.seed || "—" }),
       e("span", { text: "Prerequisites" }), e("span", { text: (task.deps || []).join(", ") || "none" })),
     task.state === "deferred" ? e("p", { text: `${task.condition || "Infrastructure unavailable"}. ${infrastructureQueueReason(task)}.` }) : null,
-    task.feedback ? e("p", { text: `${task.condition === "RepairLimitExceeded" ? "Repair limit reached" : "Integration repair"} · ${task.repairs || 0}/3 automatic repairs. Gate findings are retained and supplied to the next implementation and review rounds.` }) : null,
+    task.feedback ? e("p", { text: `Repair queued: ${task.feedback.category || "findings"}. Structured findings are retained and supplied to implementation and fresh independent review.` }) : null,
     task.generation ? e("p", { class: "muted", text: `Desired generation ${task.generation.slice(0, 12)} · observed ${task.observed_generation?.slice(0, 12) || "pending"}` }) : null,
     task.state === "failed" ? e("button", { class: "dev-action", onclick: () => retry(task.name), text: "Retry task" }) : null,
     e("h3", { text: `Attempts · ${attempts.length} recent` }),
