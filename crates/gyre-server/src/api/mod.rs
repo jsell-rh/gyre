@@ -224,6 +224,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             "/api/v1/repos/:id/commits/:sha/signature",
             get(jj::get_commit_signature),
         )
+        .route(
+            "/api/v1/repos/:id/commits/:sha/signature/verification",
+            get(jj::get_commit_signature_verification),
+        )
         // Agents
         .route(
             "/api/v1/agents",

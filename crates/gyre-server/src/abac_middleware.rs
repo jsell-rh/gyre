@@ -150,6 +150,11 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/jj/undo", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/jj/bookmark", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/commits/:sha/signature", "repo", None),
+                RouteResourceMapping::api(
+                    "/api/v1/repos/:id/commits/:sha/signature/verification",
+                    "repo",
+                    None,
+                ),
                 RouteResourceMapping::api("/api/v1/repos/:id/dependencies", "dependency", None),
                 RouteResourceMapping::api(
                     "/api/v1/repos/:id/dependencies/:dependency_id",
