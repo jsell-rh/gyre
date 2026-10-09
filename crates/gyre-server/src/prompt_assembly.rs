@@ -131,8 +131,9 @@ pub async fn assemble_prompt_set(state: &Arc<AppState>, task: &Task) -> PromptSe
 
     let mut tenant = tenant;
     let mut workspace = workspace;
-    sort_by_kind(&mut tenant);
-    sort_by_kind(&mut workspace);
+    // MUTATION-REVIEW: ordering disabled
+    // sort_by_kind(&mut tenant);
+    // sort_by_kind(&mut workspace);
 
     let mut sections: Vec<PromptSection> = Vec::new();
     let mut seen_ids: HashSet<String> = HashSet::new();

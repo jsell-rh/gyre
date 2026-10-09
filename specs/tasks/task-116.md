@@ -2,7 +2,7 @@
 title: "Implement meta-spec prompt assembly"
 spec_ref: "agent-runtime.md §2 Meta-Spec Prompt Assembly"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "agent-runtime.md §2. Meta-Spec Prompt Assembly"
   - "agent-runtime.md §Meta-Specs Are Prompts"
@@ -155,3 +155,11 @@ authority for transport-level checks.
 ## Agent Instructions
 
 Read `specs/system/agent-runtime.md` §2 (Meta-Spec Prompt Assembly) in its entirety. The existing Persona model is in `gyre-domain/src/` — grep for `Persona`. Meta-spec API stubs may exist in `gyre-server/src/api/meta_specs.rs`. The persona scope enum is in `gyre-domain`. Agent spawn is in `gyre-server/src/api/spawn.rs`. MCP prompt delivery is in `gyre-server/src/mcp.rs` — look for `system://persona`. Bootstrap seeding patterns: grep for `seed` or `bootstrap` in the server startup code.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/prompt_assembly.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
