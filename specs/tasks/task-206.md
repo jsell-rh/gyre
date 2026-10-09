@@ -2,7 +2,7 @@
 title: "Implement meta-spec preview mode: real agent preview runs with branches, diffs, and cleanup"
 spec_ref: "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
 commits: ["c7176fc27f3a23298e9cf7ca7b2b17bf0f668dd0", "2ae25c17198e8c3d45bd7508d70af636bd33fd65", "b40714fa5c5f1f534abdbe13bca219d4f3ec1495", "608fd050412238f29da0706ef7bd52b41a932902", "05a8b4d1118c13a1a9e7ad791f961566373a629a", "930e6b1fefa73cfd1897e14362ed85d5699d861a", "f7d9168dea13760201ae40dfde2b45177a757056", "5955934352a6c3610b87c3727648782755dc11c0"]
@@ -309,3 +309,88 @@ Verification this round (all at HEAD 8a13fa1, tree clean):
   findings exclusively in files untouched by task-206 (verified
   PipelineOverview.svelte, repos.rs:449, graph.rs:1205, and the
   spawn.rs let-_-discard sites all exist in baseline 66422bd4).
+
+## Review Findings (2026-10-09, round 3, HEAD d60a850, base 66422bd4)
+
+Verdict: **complete**. This round's scope was the rejected-integration
+follow-up: the coverage-row re-issue in d60a850 plus the code delta since the
+last fully-reviewed HEAD (30422d2). Tree clean; `git diff 30422d2..d60a850`
+touches exactly three product files — meta_specs.rs, warn-continue
+exemptions, MetaSpecs.test.js — all carried by c7176fc.
+
+### Delta audit (since 30422d2)
+
+- **c7176fc `finish_preview_agent` reorder**: teardown (worktree removal,
+  token revocation, slot release) now completes before the ledger flips to
+  Stopped. This closes a real observation window: previously a client could
+  read status "complete" while a live worktree and valid token still existed
+  behind it. Interaction with the helpers is safe: `count_running_preview_agents`
+  skips released slots (an in-teardown agent is Active-but-released →
+  uncounted, same as before), and the status label honestly reports "running"
+  until the row flips. The corrupt-record early path (`stop_preview_agent_row`
+  only) is intentionally narrower — it has no branch/worktree identity to tear
+  down — and remains terminal-in-ledger.
+- **c7176fc test hardening**: the dead `if (acceptBtn)` guard in
+  MetaSpecs.test.js is replaced with a loud `toBeTruthy()` assertion — a
+  meaningful test strengthened, not weakened.
+- **c7176fc exemption re-anchor**: `abac_middleware.rs:728 → :734` is a
+  line-number re-anchor made stale by task-206's own route-mapping
+  insertions; the exempted call site (idempotent startup seeding in
+  `seed_builtin_policies`) is unchanged. Comment lines removed were header
+  scaffolding ("task-077 owns these"), not exemption entries.
+- **d60a850 coverage re-issue**: row 9 + audit header re-issued as
+  implementation-owned (author gyre-dev-controller, carried in a task-206
+  commit, distinct from the review-owned dfdb4f1 text — diff confirmed a
+  rewrite, not a copy). Independently verified every anchor at HEAD:
+  mod.rs:735-739, abac_middleware.rs:449-455 (the mapping block spans
+  :449-455 including the blast-radius entry above it), mcp.rs:2962-2982,
+  meta_specs.rs:420-571/:648/:1217-1223/:901-928/:930-962/:1351-1358,
+  spawn.rs:736-737, jobs.rs:508-524, main.rs:74 — all accurate. No
+  `| not-started |` rows remain in this coverage file (grep -c -F = 0).
+
+### Verification (all at HEAD d60a850, this round, evidence appended to
+task206-rust-tests.md)
+
+- `cargo test -p gyre-server --lib meta_spec` — 18 passed, 0 failed
+  (private CARGO_TARGET_DIR; includes all six preview behavior tests).
+- `cargo test -p gyre-server --lib mcp_preview` — 1 passed, 0 failed.
+- `npx vitest run src/__tests__/MetaSpecs.test.js` — 106 passed, 0 failed.
+- Invariant scripts: check-arch, check-abac-route-registry,
+  check-abac-exempt-handlers, check-mem-port-contracts,
+  check-in-memory-state-stores, check-fabricated-scope-defaults,
+  check-lossy-secret-conversion, check-relative-path-defaults,
+  check-warn-continue-creation — all exit 0.
+- `check-task-commit-attribution.sh` — OK. All 8 task-labeled product-surface
+  commits in range (frontmatter's 7 plus c7176fc) are recorded; d60a850's
+  only product-file delta vs 8a13fa1 is nil (specs/tasks only).
+
+### Independent spot-checks beyond the prior rounds
+
+- `GitOpsPort` extension (`force_remove_worktree`, `delete_branch`): both
+  implementers (git2_ops.rs, mem.rs NoopGitOps + ConfigurableGitOps)
+  implement the new methods; no-op semantics match the port contract's
+  idempotence clauses, so check-mem-port-contracts' invariant holds.
+- `launch_agent_process`/`AgentLaunchParams` refactor: task-agnostic launch
+  path extracted verbatim; `GYRE_TASK_ID` injection correctly conditional on
+  `task_id: Option`; extra_env merged before server-owned vars so a caller
+  key can never shadow `GYRE_AUTH_TOKEN`/`GYRE_SERVER_URL`/identity vars.
+- All three monitor call sites route through `on_agent_process_exit`, whose
+  preview discrimination is a single kv lookup; normal agents keep the
+  Active→Idle transition.
+- Hollow-symbol removal re-confirmed: zero matches for StructuralImpact /
+  compute_preview_blast_radius / previewPersona / previewProgress /
+  isSimulatedPreview / impactTab / previewApiResult across web/src and crates.
+
+### Non-blocking nits (unchanged from round 1, no repair required)
+
+- Millisecond budget-counter double-decrement window (saturating,
+  accounting-only).
+- `ui-navigation.md` coverage rows 16/21 still describe the pre-task-206
+  `api.previewPersona` preview flow — point-in-time audit notes owned by that
+  spec's own re-audit cycles, not task-206 scope; flag for the next
+  ui-navigation audit round.
+- Committed `web/dist/` still bundles the pre-task-206 UI (4 `previewPersona`
+  references). Per repo convention dist is regenerated controller-side after
+  merge (cf. 44a8187 "build(web): regenerate dist from merged sources") and
+  CI's test job builds web from source, so this is an integration-time step,
+  not a task defect.
