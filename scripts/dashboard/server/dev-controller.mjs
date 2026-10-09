@@ -32,7 +32,8 @@ export async function collectController(paths) {
       controllerAlive(paths), stat(paths.db),
     ]);
     const ledger = JSON.parse(stdout);
-    return { present: true, online, updated: dbStat.mtimeMs, ...ledger };
+    return { present: true, updated: dbStat.mtimeMs, ...ledger,
+      supervisor_online: online, online: online || ledger.running > 0 };
   } catch (error) {
     return { present: true, online: await controllerAlive(paths), error: String(error.message || error) };
   }

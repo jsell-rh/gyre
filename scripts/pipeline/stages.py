@@ -274,7 +274,7 @@ def publish(execution, task):
                 raise RuntimeError('upstream merge tree differs from verified tree')
             for resource in execution.store.db.execute("SELECT name FROM resources WHERE work=? AND kind='merge'", (execution.claim['id'],)).fetchall():
                 execution.store.resource_state(resource['name'], 'absent')
-            return {'merged': sha, 'pr': url}, {'delivered': {'sha': sha, 'pr': url,
+            return {'merged': sha, 'pr': url}, {'progress': 'complete', 'delivered': {'sha': sha, 'pr': url,
                      'candidate': head, 'tree': tree, 'generation': task['generation']}}, []
     path = checkout(execution, head)
     shipped = helper('dev-merge-message').message(task['name'],

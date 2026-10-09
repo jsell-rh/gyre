@@ -37,12 +37,12 @@ function e(tag, props = {}, ...children) {
   return node;
 }
 function badge(text, kind = text) { return e("span", { class: `badge ${kind}`, text: text || "—" }); }
-function title(task) { return snapshot?.titles?.[task.name]?.title || task.name; }
-function spec(task) { return snapshot?.titles?.[task.name]?.specRef || ""; }
+function title(task) { return task.title || snapshot?.titles?.[task.name]?.title || task.name; }
+function spec(task) { return task.spec_ref || snapshot?.titles?.[task.name]?.specRef || ""; }
 function prs(task) {
   const found = snapshot?.prs?.[task.name] || [];
-  return task.pr_url && !found.some((pr) => pr.url === task.pr_url)
-    ? [{ url: task.pr_url, number: task.pr_number, state: task.state === "merged" ? "MERGED" : "OPEN" }, ...found] : found;
+  return task.pr && !found.some((pr) => pr.url === task.pr)
+    ? [{ url: task.pr, number: Number(task.pr.match(/\/pull\/(\d+)$/)?.[1]), state: task.state === "merged" ? "MERGED" : "OPEN" }, ...found] : found;
 }
 function latestAttempt(name) { return (snapshot?.attempts || []).find((a) => a.task === name) || null; }
 function taskEvents(name) { return (snapshot?.events || []).filter((event) => event.task === name); }
@@ -204,15 +204,11 @@ function renderOverview() {
     e("div", { class: "dev-metric" }, e("div", { class: "label", text: label }), e("div", { class: "number", text: count }))));
   const control = e("section", { class: "dev-panel" },
     e("h2", { text: "Independent reconcilers" }),
-    e("p", { text: s.online ? `Supervisor online · ${gate.condition || "Reconciling"}` : "Run: python3 scripts/dev-pipeline.py serve. Stages can also run independently with tick." }),
+    e("p", { text: s.online ? `${s.supervisor_online ? "Supervisor online" : "Independent stage workers active"} · ${gate.condition || "Reconciling"}` : "Run: python3 scripts/dev-pipeline.py serve. Stages can also run independently with tick." }),
     ...Object.entries(s.stages || {}).map(([stage, count]) => e("div", { class: "dev-control-line", text: `${stage}: ${count.claimed || 0} running · ${count.ready || 0} ready · ${count.retry || 0} backing off · ${count.succeeded || 0} completed` })),
     e("p", { class: "muted", text: s.resources?.inventory_ready ? `Remote resource inventory current · ${s.resources.used} charged · ${s.resources.deletion_pending} awaiting deletion` : "Admission waits for a complete remote sandbox inventory." }),
     gate.inventory_error ? e("p", { class: "muted", text: `Inventory: ${gate.inventory_error}` }) : null,
-    e("p", { class: "muted", text: `${(s.metrics?.deliveries_per_hour || 0).toFixed(2)} recorded deliveries/hour · ${s.metrics?.candidate_backlog || 0} candidates awaiting delivery · ${s.metrics?.automatic_repairs || 0} automatic repairs` }),
-    s.dispatch?.prerequisite_repairs?.length ? e("p", { text: `Main-baseline repair has integration priority: ${s.dispatch.prerequisite_repairs.join(", ")}. Independent implementation continues; other candidates wait for the repair to ship.` }) : null,
-    (s.metrics?.candidate_backlog || 0) >= (s.dispatch?.candidate_limit || 8) ? e("p", { class: "muted", text: `Implementation admission paused: candidate backlog reached ${s.dispatch?.candidate_limit || 8}. Integration and CI continue reconciling.` }) : null,
     s.dispatch?.only_task ? e("p", { text: `Dispatch restricted to ${s.dispatch.only_task}. Eligible counts include tasks excluded by this restriction.` }) : null,
-    s.dispatch?.publication === "pr" ? e("p", { class: "muted", text: "PR review mode: checks reconcile automatically; passing PRs wait for merge mode." }) : null,
     e("p", { class: "muted", text: `Global sandbox budget: ${s.resources?.used || 0} charged / ${s.slots || 0} desired. Pending deletion continues to consume capacity.` }),
     e("p", { class: "muted", text: "Set sandboxes to 0 to drain. Active attempts finish and keep their checkpoints." }),
     e("div", { class: "dev-control-line", text: `${(s.attempts || []).filter((a) => a.state === "running" && a.kind === "implement").length} implementing · ${(s.attempts || []).filter((a) => a.state === "running" && ["review", "verify"].includes(a.kind)).length} reviewing/verifying · ${s.slots ?? "—"} slots` }));
@@ -373,7 +369,7 @@ function showStream(id) {
   nodes.streamControls.hidden = false;
   updateStreamBottom();
   const body = nodes.drawerBody;
-  const status = e("p", { class: "muted", text: "No structured agent events yet. This round may have started before streaming was enabled; showing its attempt log below." });
+  const status = e("p", { class: "muted", text: "No agent events for this attempt. Its output log is shown below; verification, publication, and cleanup run commands without a model." });
   streamFallback = e("pre", { class: "rawlog", text: "Loading attempt log…" });
   const feed = e("div", { class: "dev-agent-feed" });
   body.replaceChildren(status, streamFallback, feed);

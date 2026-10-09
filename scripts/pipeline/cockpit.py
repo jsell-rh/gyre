@@ -20,7 +20,7 @@ def snapshot(store):
         retry = next((item for item in related if item['state'] == 'retry'), None)
         attention = next((item for item in related if item['state'] == 'attention'), None)
         state = ('merged' if data.get('delivered') else 'failed' if attention else
-                 'running' if active else 'deferred' if retry else
+                 'running' if active else 'published' if retry and retry['stage'] == 'publish' and data.get('pr') else 'deferred' if retry else
                  'blocked' if task['name'] in errors or not set(graph[task['name']]) <= delivered else
                  'ready' if data.get('repair') or not data.get('candidate') else
                  'published' if data.get('pr') else 'candidate')
@@ -54,6 +54,7 @@ def snapshot(store):
                          'started': event['at'], 'phase': phase.get('phase'),
                          'reason': phase.get('reason'), 'detail': json.dumps(result)[:3000]})
     resources = store.db.execute("SELECT state,count(*) FROM resources WHERE kind='sandbox' AND state<>'absent' GROUP BY state").fetchall()
+    inventory = store.db.execute("SELECT at FROM events WHERE kind='gateway_inventory' ORDER BY id DESC LIMIT 1").fetchone()
     events = []
     for row in store.db.execute('SELECT * FROM events ORDER BY id DESC LIMIT 100'):
         detail = json.loads(row['detail'])
@@ -66,6 +67,7 @@ def snapshot(store):
             'running': counts.get('running', 0), 'eligible': sum(task['state'] == 'ready' for task in tasks),
             'slots': store.setting('slots', 8), 'stages': stages,
             'confirmed_merges': sum(bool(task['merge_sha']) for task in tasks),
-            'resources': {'used': sum(row[1] for row in resources), 'deletion_pending': dict(resources).get('deleting', 0)},
+            'resources': {'used': sum(row[1] for row in resources), 'deletion_pending': dict(resources).get('deleting', 0),
+                          'inventory_ready': bool(inventory and time.time() - inventory['at'] < 180)},
             'health': {'condition': store.setting('admission_condition', 'Reconciling'), 'effective_slots': store.setting('slots', 8)},
             'dispatch': {'only_task': store.setting('only_task')}}
