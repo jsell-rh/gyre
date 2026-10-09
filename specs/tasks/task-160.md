@@ -1,7 +1,7 @@
 ---
 title: "Hierarchy enforcement scripts — check-hierarchy, check-tenant-filter, check-api-auth"
 spec_ref: "hierarchy-enforcement.md §7"
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "hierarchy-enforcement.md §Invariant Enforcement"
   - "hierarchy-enforcement.md §Enforcement"
