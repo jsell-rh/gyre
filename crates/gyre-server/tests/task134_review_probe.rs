@@ -203,16 +203,24 @@ async fn revoked_scoped_token_is_rejected() {
         .await
         .unwrap();
 
+    // /api/v1/version is intentionally public (require_auth_middleware
+    // short-circuits it), so it can never observe revocation. Use an
+    // authenticated route inside the review allow-list instead: after
+    // kv_remove, the auth middleware must reject the token with 401.
     let resp = app
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/v1/version")
+                .uri("/api/v1/merge-requests/some-mr")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "revoked scoped token must fail auth");
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "revoked scoped token must fail auth"
+    );
 }
