@@ -15,7 +15,10 @@
 //! - `audit_events` / `analytics_events` — hard DELETE via the repository
 //!   ports (`delete_older_than`), SQLite + Postgres adapters.
 //! - `snapshots` — tiered file policy `24h×24 + 7d×7 + 4w×4` on
-//!   `snapshot_dir()` files, oldest-first deletion beyond tier caps.
+//!   `snapshot_dir()` files. A file's tier is fixed by its age band
+//!   (≤24h / 1–7d / 7–28d); each band keeps its newest `keep_*` files,
+//!   band surplus is deleted with no spillover into deeper bands, and
+//!   files older than 4 weeks are always deleted.
 //! - `attestations` — never purged (`max_age_days: u64::MAX`); the
 //!   attestation store has no delete path (non-repudiation).
 //! - `notifications` — read (resolved or dismissed) older than
@@ -52,10 +55,11 @@ pub struct RetentionPolicy {
     /// days, unread ones after `max_age_days`. `None` elsewhere.
     #[serde(default)]
     pub max_age_days_read: Option<u64>,
-    /// Snapshot tier counts. Only meaningful for `snapshots`: at most
-    /// `keep_24h` snapshots younger than 24h, `keep_7d` younger than 7d,
-    /// `keep_4w` younger than 4 weeks are kept (newest first); everything
-    /// else is deleted. `None` elsewhere.
+    /// Snapshot tier counts. Only meaningful for `snapshots`: a snapshot's
+    /// tier is its age band (≤24h / 1–7d / 7–28d); at most `keep_24h`
+    /// snapshots in the 24h band, `keep_7d` in the 7d band, and `keep_4w`
+    /// in the 4w band are kept (newest first per band, no spillover);
+    /// everything else is deleted. `None` elsewhere.
     #[serde(default)]
     pub snapshot_tiers: Option<SnapshotTiers>,
 }
@@ -481,16 +485,20 @@ async fn purge_snapshots(tiers: SnapshotTiers) -> u64 {
 }
 
 /// Pure tiered-policy decision: given `now`, snapshot files `(name, mtime)`,
-/// and tier counts, return the file names to delete. Keep at most
-/// `tiers.keep_24h` snapshots with mtime in the last 24h, at most
-/// `tiers.keep_7d` within the last 7 days, at most `tiers.keep_4w` within
-/// the last 4 weeks; delete the rest, oldest first.
+/// and tier counts, return the file names to delete.
+///
+/// A snapshot's tier is fixed by its age band — ≤24h, 1–7d, 7–28d — and
+/// bands never share budget: each band keeps its newest `keep_*` files and
+/// deletes its surplus. A surplus fresh file does not spill into the deeper
+/// tiers, so "at most `keep_24h` snapshots from the last 24 hours" holds as
+/// a window cap, and no cascade can defeat a tightened tier. Files older
+/// than 4 weeks are always deleted.
 fn snapshot_tier_deletions(
     now_secs: u64,
     files: &[(String, u64)],
     tiers: SnapshotTiers,
 ) -> Vec<String> {
-    // Sort newest-first; within a tier, the newest entries are kept.
+    // Sort newest-first; within a band, the newest entries are kept.
     let mut sorted: Vec<&(String, u64)> = files.iter().collect();
     sorted.sort_by(|a, b| b.1.cmp(&a.1)); // newest first
 
@@ -502,12 +510,26 @@ fn snapshot_tier_deletions(
 
     for (name, mtime) in sorted {
         let age = now_secs.saturating_sub(*mtime);
-        if age <= day && kept_24h < tiers.keep_24h {
-            kept_24h += 1;
-        } else if age <= 7 * day && kept_7d < tiers.keep_7d {
-            kept_7d += 1;
-        } else if age <= 28 * day && kept_4w < tiers.keep_4w {
-            kept_4w += 1;
+        // Band membership is age-only; a full band does not admit
+        // spillover from a fresher band.
+        if age <= day {
+            if kept_24h < tiers.keep_24h {
+                kept_24h += 1;
+            } else {
+                deletions.push(name.clone());
+            }
+        } else if age <= 7 * day {
+            if kept_7d < tiers.keep_7d {
+                kept_7d += 1;
+            } else {
+                deletions.push(name.clone());
+            }
+        } else if age <= 28 * day {
+            if kept_4w < tiers.keep_4w {
+                kept_4w += 1;
+            } else {
+                deletions.push(name.clone());
+            }
         } else {
             deletions.push(name.clone());
         }
@@ -835,43 +857,114 @@ mod tests {
     fn snapshot_tiering_keeps_24h_24_7d_7_4w_4() {
         let now = 1_000 * DAY;
         let mut files = Vec::new();
-        // 30 files aged 0..29 hours. The newest 24 fill the 24h tier; the 6
-        // oldest (24h–29h) spill toward the 7d tier.
+        // 24h band: 30 snapshots aged 30min..15.5h (30-min steps), all
+        // strictly within the last 24 hours. Keep the 24 newest; the 6
+        // oldest are band surplus — deleted, no spillover.
         for i in 0..30 {
-            files.push((format!("recent-{i}"), now - i * 3_600));
+            let age = 1_800 + i * 1_800;
+            files.push((format!("h-{i}"), now - age));
         }
-        // 4 files aged 3–6 days.
-        for i in 3..7 {
-            files.push((format!("week-{i}"), now - i * DAY));
+        // 7d band: 10 snapshots aged 25h..133h (12h steps), strictly older
+        // than 24h and younger than 7d. Keep the 7 newest; 3 surplus.
+        for i in 0..10 {
+            let age = 25 * 3_600 + i * 12 * 3_600;
+            files.push((format!("d-{i}"), now - age));
         }
-        // 6 files aged 15,17,19,21,23,25 days (all within the 4w tier).
+        // 4w band: 6 snapshots aged 8,11,14,17,20,23 days. Keep 4 newest.
         for i in 0..6 {
-            files.push((format!("month-{i}"), now - (15 + 2 * i) * DAY));
+            files.push((format!("w-{i}"), now - (8 + 3 * i) * DAY));
         }
-        // 3 files older than 4 weeks — always deleted.
+        // Older than 4 weeks — always deleted.
         for i in 0..3 {
             files.push((format!("ancient-{i}"), now - (40 + i) * DAY));
         }
 
         // Expected survivors (35 = 24 + 7 + 4):
-        // - 24h tier (24): recent-0..recent-23
-        // - 7d tier (7): recent-24..recent-29 (the hour-aged spillover) + week-3
-        // - 4w tier (4): week-4, week-5, week-6, month-0 (newest first)
-        // Deleted (8): month-1..month-5, ancient-0..2
+        // - 24h band (24): h-0..h-23
+        // - 7d band (7): d-0..d-6
+        // - 4w band (4): w-0..w-3
+        // Deleted (14): h-24..h-29, d-7..d-9, w-4, w-5, ancient-0..2
         let deletions = snapshot_tier_deletions(now, &files, SnapshotTiers::spec_default());
-        assert_eq!(deletions.len(), 8, "deleted: {deletions:?}");
-        for name in ["month-1", "month-2", "month-3", "month-4", "month-5"] {
+        assert_eq!(deletions.len(), 14, "deleted: {deletions:?}");
+        for i in 24..30 {
+            assert!(
+                deletions.contains(&format!("h-{i}")),
+                "h-{i} is 24h-band surplus, must be deleted without spilling into deeper bands"
+            );
+        }
+        for i in 7..10 {
+            assert!(deletions.contains(&format!("d-{i}")), "d-{i} should be deleted");
+        }
+        for name in ["w-4", "w-5"] {
             assert!(deletions.contains(&name.to_string()), "{name} should be deleted");
         }
         for i in 0..3 {
             assert!(deletions.contains(&format!("ancient-{i}")));
         }
         for i in 0..24 {
-            assert!(!deletions.contains(&format!("recent-{i}")), "recent-{i} must survive");
+            assert!(!deletions.contains(&format!("h-{i}")), "h-{i} must survive");
         }
-        for name in ["week-3", "week-4", "week-5", "week-6", "month-0"] {
-            assert!(!deletions.contains(&name.to_string()), "{name} must survive");
+        for i in 0..7 {
+            assert!(!deletions.contains(&format!("d-{i}")), "d-{i} must survive");
         }
+        for i in 0..4 {
+            assert!(!deletions.contains(&format!("w-{i}")), "w-{i} must survive");
+        }
+    }
+
+    #[test]
+    fn snapshot_tiering_band_boundaries() {
+        // Band membership is fixed by age alone, edges inclusive: exactly
+        // 24h old is in the 24h band, exactly 7d in the 7d band, exactly
+        // 28d in the 4w band.
+        let now = 1_000 * DAY;
+        let tiers = SnapshotTiers { keep_24h: 1, keep_7d: 1, keep_4w: 1 };
+        let files = vec![
+            ("a".to_string(), now),             // 0h  — 24h band
+            ("b".to_string(), now - DAY),       // exactly 24h — 24h band
+            ("c".to_string(), now - 2 * DAY),   // 7d band
+            ("d".to_string(), now - 7 * DAY),   // exactly 7d — 7d band
+            ("e".to_string(), now - 8 * DAY),   // 4w band
+            ("f".to_string(), now - 28 * DAY),  // exactly 28d — 4w band
+            ("g".to_string(), now - 29 * DAY),  // older than 4w — deleted
+        ];
+        let deletions = snapshot_tier_deletions(now, &files, tiers);
+        // Each band keeps only its newest ("a", "c", "e"); "g" is past 4w.
+        assert_eq!(
+            deletions,
+            vec!["b".to_string(), "d".to_string(), "f".to_string(), "g".to_string()]
+        );
+    }
+
+    #[test]
+    fn snapshot_tiering_window_cap_not_defeated_by_cascade() {
+        // The defect this guards against: cascade tiering let surplus
+        // hour-aged files spill into the 7d/4w bands, so tightening
+        // keep_24h never reduced the number of snapshots kept from the
+        // last 24 hours (the window cap was dead).
+        let now = 1_000 * DAY;
+        let mut files = Vec::new();
+        for i in 0..10 {
+            files.push((format!("recent-{i}"), now - i * 3_600));
+        }
+        let tiers = SnapshotTiers { keep_24h: 2, keep_7d: 7, keep_4w: 4 };
+        let deletions = snapshot_tier_deletions(now, &files, tiers);
+
+        // Hard window-cap invariant: at most keep_24h snapshots from the
+        // last 24 hours survive — all 10 files are within 24h, so at most
+        // 2 may survive.
+        let survivors: Vec<_> = files
+            .iter()
+            .filter(|(name, _)| !deletions.contains(name))
+            .collect();
+        assert!(
+            survivors.len() <= 2,
+            "window cap violated: {} snapshots from the last 24h survive keep_24h=2",
+            survivors.len()
+        );
+        assert!(!deletions.contains(&"recent-0".to_string()));
+        assert!(!deletions.contains(&"recent-1".to_string()));
+        assert!(deletions.contains(&"recent-9".to_string()));
     }
 
     #[test]
@@ -890,10 +983,11 @@ mod tests {
         // this is the pure-function half of F2 (configurable retention).
         let now = 1_000 * DAY;
         let mut files = Vec::new();
+        // All within the 24h band; keep_24h = 2 means only the 2 newest
+        // survive — surplus is deleted, not spilled into 7d/4w.
         for i in 0..10 {
             files.push((format!("recent-{i}"), now - i * 3_600));
         }
-        // keep_24h = 2: only the 2 newest hour-aged files survive.
         let tiers = SnapshotTiers { keep_24h: 2, keep_7d: 7, keep_4w: 4 };
         let deletions = snapshot_tier_deletions(now, &files, tiers);
         assert_eq!(deletions.len(), 8, "deleted: {deletions:?}");
@@ -949,7 +1043,8 @@ mod tests {
         // Real snapshot names as create_snapshot writes them (<unix_secs>.json),
         // plus a non-.json file that must survive.
         for i in 0..30u64 {
-            // 30 files aged 0..29 hours: newest 24 fill the 24h tier, 6 spill.
+            // 30 files aged 0..29 hours: newest 24 fill the 24h band; the
+            // 6 oldest are band surplus — deleted, no spillover.
             make_file(&dir, &format!("{}.json", now - i * 3_600), now - i * 3_600);
         }
         for i in 3..7u64 {
@@ -964,13 +1059,20 @@ mod tests {
         make_file(&dir, "README.txt", now - 99 * DAY);
 
         let purged = purge_snapshots_in(dir.clone(), SnapshotTiers::spec_default()).await;
-        assert_eq!(purged, 8, "month-1..5 + ancient-0..2 deleted");
+        assert_eq!(purged, 11, "recent-24..29 (surplus) + month-4..5 + ancient-0..2 deleted");
 
         let left = remaining_names(&dir);
-        // 35 survivors = 24 + 7 + 4 snapshot tiers + README.txt.
-        assert_eq!(left.len(), 36, "survivors: {left:?}");
+        // 32 survivors = 24 + 4 + 4 snapshot bands + README.txt.
+        assert_eq!(left.len(), 33, "survivors: {left:?}");
         assert!(left.contains(&"README.txt".to_string()), "non-json files survive");
-        for i in [1u64, 2, 3, 4, 5] {
+        // Hour-aged surplus did NOT spill into deeper bands — deleted on disk.
+        for i in 24..30u64 {
+            assert!(
+                !left.contains(&format!("{}.json", now - i * 3_600)),
+                "recent-{i} is 24h-band surplus, must be deleted"
+            );
+        }
+        for i in [4u64, 5] {
             assert!(
                 !left.contains(&format!("{}.json", now - (15 + 2 * i) * DAY)),
                 "month-{i} must be deleted"
@@ -988,11 +1090,14 @@ mod tests {
         for i in [3u64, 4, 5, 6] {
             assert!(left.contains(&format!("{}.json", now - i * DAY)));
         }
+        for i in 0..4u64 {
+            assert!(left.contains(&format!("{}.json", now - (15 + 2 * i) * DAY)));
+        }
 
         // Idempotent on disk: a second run deletes nothing new.
         let purged_again = purge_snapshots_in(dir.clone(), SnapshotTiers::spec_default()).await;
         assert_eq!(purged_again, 0);
-        assert_eq!(remaining_names(&dir).len(), 36);
+        assert_eq!(remaining_names(&dir).len(), 33);
     }
 
     #[tokio::test]
