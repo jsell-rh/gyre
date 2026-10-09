@@ -2,10 +2,11 @@
 title: "Seed built-in personas at tenant bootstrap"
 spec_ref: "platform-model.md §2 Built-In Personas"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "platform-model.md §Built-In Personas"
 commits: ["151cf7d2fef662f87f0306ba70b8f3197fb41802", "fcb712c51c1f27b597e4a0cb798e63d7f341f6e9", "f16e969ce52622e8f6133deb60550d77dd7ed47e"]
+review: specs/reviews/task-140.md
 ---
 
 ## Spec Excerpt
@@ -76,6 +77,12 @@ Built-in personas can be overridden at workspace or repo scope (with human appro
   isolation, tenant-create seeds), adapter (SQLite round-trip + idempotent
   reseed against real rows — added this round; the production storage path was
   previously covered only by mem-adapter tests). All pass.
+
+## Shipped
+
+- The four built-in personas (`workspace-orchestrator`, `repo-orchestrator`, `accountability`, `security`) are seeded as pre-approved `PersonaScope::Tenant` entities with prompts embedded byte-for-byte from `specs/personas/<slug>.md` and SHA-256 content hashes — `gyre_domain::BUILTIN_PERSONA_DEFS` / `builtin_personas()`.
+- Seeding runs at server startup (main.rs, before the listener binds), on `POST /api/v1/tenants` tenant creation, and on the admin demo-seed path, so every tenant gets the §2 table the moment it exists; existing slug+scope personas are never overwritten (customizations survive restarts).
+- Idempotency and durability proven against real SQLite rows (scope-JSON symmetry between `create` and `find_by_slug_and_scope`, reseed-after-restart produces no duplicates) plus a full-router test that tenant creation returns the four approved personas over HTTP.
 
 ## Agent Instructions
 
