@@ -360,6 +360,7 @@ pub async fn record_llm_budget_call(
     output_tokens: u64,
     cost_usd: f64,
     model: &str,
+    prompt_template_sha: Option<&str>,
 ) {
     let record = gyre_domain::BudgetCallRecord {
         id: new_id(),
@@ -373,6 +374,7 @@ pub async fn record_llm_budget_call(
         output_tokens,
         cost_usd,
         model: model.to_string(),
+        prompt_template_sha: prompt_template_sha.map(str::to_string),
         timestamp: now_secs(),
     };
     if let Err(e) = state.budget_calls.save(&record).await {
@@ -638,7 +640,6 @@ mod tests {
         let state = crate::mem::test_state();
         let ws_key = super::workspace_key("ws-budget-rec");
         let tenant_key = super::tenant_key().to_string();
-
         super::record_llm_budget_call(
             &state,
             "tenant-1",
@@ -651,6 +652,7 @@ mod tests {
             300,
             0.01,
             "test-model",
+            Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
         )
         .await;
 
@@ -685,6 +687,12 @@ mod tests {
         assert_eq!(records[0].output_tokens, 300);
         assert_eq!(records[0].tenant_id.as_str(), "tenant-1");
         assert_eq!(records[0].model, "test-model");
+        // Prompt-template provenance persisted on the audit record
+        // (ui-layout.md §2 "git SHA recorded in cost entries").
+        assert_eq!(
+            records[0].prompt_template_sha.as_deref(),
+            Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+        );
     }
 
     #[tokio::test]
@@ -704,7 +712,6 @@ mod tests {
             )
             .await
             .unwrap();
-
         super::record_llm_budget_call(
             &state,
             "tenant-1",
@@ -717,6 +724,7 @@ mod tests {
             600,
             0.0,
             "test-model",
+            None,
         )
         .await;
 

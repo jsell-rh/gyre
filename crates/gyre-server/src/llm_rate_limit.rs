@@ -38,6 +38,21 @@ pub const LLM_WINDOW_SECS: u64 = 60;
 /// In-memory rate limiter state: (user_id, workspace_id) → timestamps of recent requests.
 pub type LlmRateLimiterMap = HashMap<(String, String), VecDeque<Instant>>;
 
+/// The rate-limit principal extracted from the auth context
+/// (ui-layout.md §2: "The handler extracts `(user_id, workspace_id)` from
+/// the auth context").
+///
+/// Human principals key on their immutable `user_id`; agent/system tokens
+/// (no `user_id`) key on `agent_id`. Keying on the display-name `agent_id`
+/// alone would let two different humans with the same display name share a
+/// budget and, worse, let one user's requests exhaust another's.
+pub fn rate_limit_principal(auth: &crate::auth::AuthenticatedAgent) -> String {
+    match &auth.user_id {
+        Some(uid) => uid.as_str().to_string(),
+        None => format!("agent:{}", auth.agent_id),
+    }
+}
+
 /// Check whether a request from `(user_id, workspace_id)` is within the rate limit.
 ///
 /// - Drains timestamps older than `window_secs` from the front of the deque.

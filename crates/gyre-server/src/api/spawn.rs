@@ -1430,6 +1430,7 @@ pub async fn record_agent_usage(
                 req.tokens_output,
                 req.cost_usd,
                 &model,
+                None,
             )
             .await;
         }

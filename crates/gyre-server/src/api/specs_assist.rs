@@ -307,13 +307,14 @@ pub async fn assist_spec(
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("repo {} not found", repo_id)))?;
 
-    // Per-user/workspace sliding-window rate limit (HSI §6): 10 req/60 s.
+    // Per-user/workspace sliding-window rate limit (ui-layout.md §2):
+    // 10 req/60 s, keyed on the auth-context user_id.
     {
         let workspace_id = repo.workspace_id.to_string();
         let mut limiter = state.llm_rate_limiter.lock().await;
         if let Err(retry_after) = check_rate_limit(
             &mut limiter,
-            &caller.agent_id,
+            &crate::llm_rate_limit::rate_limit_principal(&caller),
             &workspace_id,
             LLM_RATE_LIMIT,
             LLM_WINDOW_SECS,
@@ -393,25 +394,29 @@ pub async fn assist_spec(
         }
     };
 
-    // Load effective prompt; fall back to hardcoded default.
-    let template_content = state
-        .prompt_templates
-        .get_effective(&repo.workspace_id, "specs-assist")
-        .await
-        .map_err(ApiError::Internal)?
-        .map(|t| t.content)
-        .unwrap_or_else(|| crate::llm_defaults::PROMPT_SPECS_ASSIST.to_string());
-
-    let system_prompt = template_content
-        .replace("{{spec_path}}", &req.spec_path)
-        .replace("{{spec_content}}", &spec_content)
-        .replace("{{graph_context}}", &graph_context)
-        .replace("{{instruction}}", &req.instruction)
-        // Backward compat: old templates may use {{draft_content}}
-        .replace(
-            "{{draft_content}}",
-            req.draft_content.as_deref().unwrap_or(&spec_content),
-        );
+    // Prompt template (ui-layout.md §2): DB override → this repo's git tree
+    // (specs/prompts/specs-assist.md on the default branch) → hardcoded
+    // fallback. `sha` carries git provenance for the cost entry.
+    let template = crate::llm_helpers::resolve_prompt_template(
+        &state,
+        &repo.workspace_id,
+        Some(&repo.id),
+        "specs-assist",
+        crate::llm_defaults::PROMPT_SPECS_ASSIST,
+    )
+    .await;
+    // Spec content and graph context travel in the system template as
+    // grounding variables; the instruction is the user prompt only
+    // (injection containment — blank its template placeholder).
+    let system_prompt = crate::llm_helpers::substitute_template(
+        &template.content,
+        &[
+            ("spec_path", req.spec_path.as_str()),
+            ("spec_content", spec_content.as_str()),
+            ("graph_context", graph_context.as_str()),
+            ("instruction", ""),
+        ],
+    );
     let user_prompt = format!("Instruction: {}", req.instruction);
 
     // Resolve model and call streaming LLM.
@@ -469,6 +474,7 @@ pub async fn assist_spec(
                 (estimated_tokens - estimated_input as f64) as u64,
                 0.0,
                 &model,
+                template.sha.as_deref(),
             )
             .await;
         }

@@ -1155,12 +1155,13 @@ pub async fn briefing_ask(
 {
     require_workspace(&state, &id).await?;
 
-    // Per-user/workspace sliding-window rate limit (HSI §6): 10 req/60 s.
+    // Per-user/workspace sliding-window rate limit (ui-layout.md §2):
+    // 10 req/60 s, keyed on the auth-context user_id.
     {
         let mut limiter = state.llm_rate_limiter.lock().await;
         if let Err(retry_after) = check_rate_limit(
             &mut limiter,
-            &caller.agent_id,
+            &crate::llm_rate_limit::rate_limit_principal(&caller),
             &id,
             LLM_RATE_LIMIT,
             LLM_WINDOW_SECS,
@@ -1170,39 +1171,69 @@ pub async fn briefing_ask(
     }
 
     // Cap history at 20 entries (truncate oldest).
-    if let Some(ref mut history) = req.history {
+    if let Some(history) = &mut req.history {
         if history.len() > 20 {
             let excess = history.len() - 20;
             history.drain(..excess);
         }
     }
+    let history = req.history.take().unwrap_or_default();
 
     // Require LLM to be configured.
     let factory = state.llm.as_ref().ok_or(ApiError::LlmUnavailable)?;
 
     let workspace_id_obj = Id::new(&id);
 
-    // Load effective prompt; fall back to hardcoded default.
-    let template_content = state
-        .prompt_templates
-        .get_effective(&workspace_id_obj, "briefing-ask")
-        .await
-        .map_err(ApiError::Internal)?
-        .map(|t| t.content)
-        .unwrap_or_else(|| crate::llm_defaults::PROMPT_BRIEFING_ASK.to_string());
+    // Grounding (HSI §9): the briefing-ask prompt is grounded in the
+    // workspace's actual briefing data — recent MRs, tasks, completed
+    // agents, exceptions — not an empty context string.
+    let since = now_secs().saturating_sub(24 * 3600);
+    let briefing = assemble_briefing(&state, &id, since).await?;
+    let briefing_context = serde_json::to_string(&serde_json::json!({
+        "summary": briefing.summary,
+        "completed": briefing.completed,
+        "in_progress": briefing.in_progress,
+        "exceptions": briefing.exceptions,
+        "metrics": briefing.metrics,
+        "completed_agents": briefing.completed_agents,
+    }))
+    .unwrap_or_default();
 
-    let system_prompt = template_content
-        .replace("{{workspace_id}}", &id)
-        .replace("{{context}}", "")
-        .replace("{{question}}", &req.question);
+    let template = crate::llm_helpers::resolve_prompt_template(
+        &state,
+        &workspace_id_obj,
+        None,
+        "briefing-ask",
+        crate::llm_defaults::PROMPT_BRIEFING_ASK,
+    )
+    .await;
+
+    // Prompt template (ui-layout.md §2): DB override → git tree
+    // (specs/prompts/briefing-ask.md) → hardcoded fallback. `sha` carries
+    // git provenance for the cost entry. Variables match the committed
+    // template (`{{briefing_json}}`, `{{graph_summary}}`, `{{history}}`);
+    // the hardcoded default uses `{{context}}` — both are substituted.
+    let graph_summary =
+        crate::llm_helpers::workspace_graph_summary(&state, &workspace_id_obj, None).await;
+    let history_json = serde_json::to_string(&history).unwrap_or_default();
+    let system_prompt = crate::llm_helpers::substitute_template(
+        &template.content,
+        &[
+            ("workspace_id", id.as_str()),
+            ("context", briefing_context.as_str()),
+            ("briefing_json", briefing_context.as_str()),
+            ("graph_summary", graph_summary.as_str()),
+            ("history", history_json.as_str()),
+        ],
+    );
     let user_prompt = req.question.clone();
 
-    // Resolve model and call streaming LLM.
-    let (model, _) =
-        crate::llm_helpers::resolve_llm_model(&state, &Id::new(&id), "briefing-ask").await;
+    // Model + per-endpoint max output tokens (ui-layout.md §2).
+    let (model, max_tokens) =
+        crate::llm_helpers::resolve_llm_model(&state, &workspace_id_obj, "briefing-ask").await;
     let stream = factory
         .for_model(&model)
-        .stream_complete(&system_prompt, &user_prompt, None)
+        .stream_complete(&system_prompt, &user_prompt, max_tokens)
         .await
         .map_err(ApiError::Internal)?;
 
@@ -1210,11 +1241,11 @@ pub async fn briefing_ask(
     let full_text = chunks.join("");
     // Budget Tracking (platform-model.md §5): charge the workspace for the
     // briefing Q&A as an `llm_query` budget call — persist the audit record
-    // and increment the workspace + tenant counters. The LlmPort does not
-    // report actual usage for stream_complete; estimate from prompt/response
-    // size the same way the other LLM endpoints do (~4 chars per token).
-    // Skip and log if the workspace cannot be resolved rather than
-    // fabricating a tenant scope.
+    // (with prompt-template git SHA, ui-layout.md §2) and increment the
+    // workspace + tenant counters. The LlmPort does not report actual usage
+    // for stream_complete; estimate from prompt/response size the same way
+    // the other LLM endpoints do (~4 chars per token). Skip and log if the
+    // workspace cannot be resolved rather than fabricating a tenant scope.
     let estimated_input = (user_prompt.len() + system_prompt.len()) / 4;
     let estimated_output = full_text.len() / 4;
     if let Some(ws) = state
@@ -1236,6 +1267,7 @@ pub async fn briefing_ask(
             estimated_output as u64,
             0.0,
             &model,
+            template.sha.as_deref(),
         )
         .await;
     } else {
@@ -1244,7 +1276,6 @@ pub async fn briefing_ask(
             "briefing/ask: workspace unresolvable; budget counters not incremented"
         );
     }
-
     let mut events: Vec<Result<Event, std::convert::Infallible>> = Vec::new();
     for chunk in &chunks {
         let data = serde_json::to_string(&serde_json::json!({"text": chunk})).unwrap_or_default();
@@ -1365,12 +1396,13 @@ pub async fn predict_graph(
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
 
-    // Per-user/repo sliding-window rate limit: 10 req/60 s.
+    // Per-user/repo sliding-window rate limit: 10 req/60 s, keyed on the
+    // auth-context user_id (same principal rule as the LLM endpoints).
     {
         let mut limiter = state.llm_rate_limiter.lock().await;
         if let Err(retry_after) = check_rate_limit(
             &mut limiter,
-            &caller.agent_id,
+            &crate::llm_rate_limit::rate_limit_principal(&caller),
             &id,
             LLM_RATE_LIMIT,
             LLM_WINDOW_SECS,

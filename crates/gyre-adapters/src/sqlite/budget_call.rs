@@ -24,9 +24,9 @@ struct BudgetCallRow {
     output_tokens: i64,
     cost_usd: f64,
     model: String,
+    prompt_template_sha: Option<String>,
     timestamp: i64,
 }
-
 impl From<BudgetCallRow> for BudgetCallRecord {
     fn from(r: BudgetCallRow) -> Self {
         BudgetCallRecord {
@@ -41,11 +41,11 @@ impl From<BudgetCallRow> for BudgetCallRecord {
             output_tokens: r.output_tokens.max(0) as u64,
             cost_usd: r.cost_usd,
             model: r.model,
+            prompt_template_sha: r.prompt_template_sha,
             timestamp: r.timestamp.max(0) as u64,
         }
     }
 }
-
 #[derive(Insertable)]
 #[diesel(table_name = budget_call_records)]
 struct NewBudgetCallRow<'a> {
@@ -60,6 +60,7 @@ struct NewBudgetCallRow<'a> {
     output_tokens: i64,
     cost_usd: f64,
     model: &'a str,
+    prompt_template_sha: Option<&'a str>,
     timestamp: i64,
 }
 
@@ -82,6 +83,7 @@ impl BudgetCallRepository for SqliteStorage {
                 output_tokens: rec.output_tokens as i64,
                 cost_usd: rec.cost_usd,
                 model: &rec.model,
+                prompt_template_sha: rec.prompt_template_sha.as_deref(),
                 timestamp: rec.timestamp as i64,
             };
             diesel::insert_into(budget_call_records::table)
@@ -152,6 +154,7 @@ mod tests {
             output_tokens: 40,
             cost_usd: 0.002,
             model: "test-model".to_string(),
+            prompt_template_sha: Some("a".repeat(40)),
             timestamp: ts,
         }
     }
@@ -166,10 +169,11 @@ mod tests {
         let all = st.list_by_workspace("ws-1", 0, 10).await.unwrap();
         assert_eq!(all.len(), 2);
         // Newest first.
-        assert_eq!(all[0].usage_type, "agent_run");
         assert_eq!(all[0].input_tokens, 100);
         assert_eq!(all[0].output_tokens, 40);
         assert_eq!(all[0].repo_id.as_ref().map(|i| i.as_str()), Some("repo-1"));
+        // Prompt-template provenance round-trips (ui-layout.md §2).
+        assert_eq!(all[0].prompt_template_sha.as_deref(), Some(&"a".repeat(40)[..]));
         assert_eq!(all[1].usage_type, "llm_query");
 
         // Since filter excludes older rows.

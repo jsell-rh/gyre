@@ -28,6 +28,7 @@ use gyre_ports::saved_view::SavedView;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::{error::ApiError, new_id, now_secs, saved_views::system_default_views};
 use crate::{
@@ -458,12 +459,13 @@ pub async fn generate_explorer_view(
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError>
 {
     check_workspace_membership(&state, &workspace_id, &caller).await?;
-    // Per-user/workspace sliding-window rate limit (HSI §6): 10 req/60 s.
+    // Per-user/workspace sliding-window rate limit (ui-layout.md §2):
+    // 10 req/60 s, keyed on the auth-context user_id.
     {
         let mut limiter = state.llm_rate_limiter.lock().await;
         if let Err(retry_after) = check_rate_limit(
             &mut limiter,
-            &caller.agent_id,
+            &crate::llm_rate_limit::rate_limit_principal(&caller),
             &workspace_id,
             LLM_RATE_LIMIT,
             LLM_WINDOW_SECS,
@@ -477,38 +479,87 @@ pub async fn generate_explorer_view(
 
     let ws_id = Id::new(&workspace_id);
 
-    // Load effective prompt; fall back to hardcoded default.
-    let template_content = state
-        .prompt_templates
-        .get_effective(&ws_id, "explorer-generate")
+    // Grounding (ui-layout.md §2 Available Data): the explorer-generate
+    // prompt carries the question, the workspace's node types and counts,
+    // and the view spec grammar schema.
+    let ws = state
+        .workspaces
+        .find_by_id(&ws_id)
         .await
         .map_err(ApiError::Internal)?
-        .map(|t| t.content)
-        .unwrap_or_else(|| crate::llm_defaults::PROMPT_EXPLORER_GENERATE.to_string());
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {} not found", workspace_id)))?;
+    let workspace_name = ws.name.clone();
+    let tenant_id = ws.tenant_id.to_string();
 
-    // Do NOT inject user input into the system prompt — that enables prompt injection.
-    // The template may contain {{question}} for backward compatibility, but we strip it
-    // and pass the user's question solely as the user prompt.
-    let system_prompt = template_content.replace("{{question}}", "");
+    let repo_filter: Option<Id> = req.repo_id.as_ref().map(|r| Id::new(r));
+    if let Some(rid) = &repo_filter {
+        // A repo_id from another workspace must not leak its graph into
+        // this prompt — validate ownership like the saved-views CRUD does.
+        match state.repos.find_by_id(rid).await {
+            Ok(Some(r)) if r.workspace_id == ws_id => {}
+            Ok(Some(_)) => {
+                return Err(ApiError::Forbidden(
+                    "repo does not belong to this workspace".into(),
+                ))
+            }
+            Ok(None) => {
+                return Err(ApiError::NotFound(format!(
+                    "repo {} not found",
+                    req.repo_id.clone().unwrap_or_default()
+                )))
+            }
+            Err(e) => return Err(ApiError::Internal(e)),
+        }
+    }
+    let (node_type_summary, node_count) =
+        crate::llm_helpers::workspace_graph_summary_parts(&state, &ws_id, repo_filter.as_ref())
+            .await;
+
+    // Prompt template (ui-layout.md §2 Prompt storage): DB override →
+    // specs/prompts/explorer-generate.md in the repo git tree → hardcoded
+    // fallback. `template.sha` carries git provenance for the cost entry.
+    let template = crate::llm_helpers::resolve_prompt_template(
+        &state,
+        &ws_id,
+        repo_filter.as_ref(),
+        "explorer-generate",
+        crate::llm_defaults::PROMPT_EXPLORER_GENERATE,
+    )
+    .await;
+
+    // The user's question travels as the user prompt only — never into the
+    // system template (prompt-injection containment). The committed
+    // template's `{{question}}` placeholder is explicitly blanked so no
+    // literal placeholder text leaks into the system prompt.
+    let system_prompt = crate::llm_helpers::substitute_template(
+        &template.content,
+        &[
+            ("workspace_name", workspace_name.as_str()),
+            ("node_type_summary", node_type_summary.as_str()),
+            ("node_count", &node_count.to_string()),
+            ("view_spec_grammar", crate::llm_helpers::VIEW_SPEC_GRAMMAR),
+            ("question", ""),
+        ],
+    );
     let user_prompt = req.question.clone();
 
-    // Resolve model and call LLM for structured JSON output.
-    let (model, _) =
+    // Model + per-endpoint max output tokens (ui-layout.md §2).
+    let (model, max_tokens) =
         crate::llm_helpers::resolve_llm_model(&state, &ws_id, "explorer-generate").await;
-    let view_spec = factory
+    let result = factory
         .for_model(&model)
-        .predict_json(&system_prompt, &user_prompt)
+        .predict_json(&system_prompt, &user_prompt, max_tokens)
         .await
         .map_err(|e| {
             tracing::error!(model = %model, workspace_id = %workspace_id, error = ?e, "LLM predict_json failed in generate_explorer_view");
             ApiError::Internal(e)
         })?;
 
-    // Charge budget: estimate token cost from prompt size.
-    // The LlmPort doesn't return actual usage, so we estimate:
-    // ~4 chars per token for English, plus response overhead (~500 tokens).
-    // Explorer view generation involves structured JSON output and multi-step
-    // reasoning, so we apply a 3x multiplier to the base estimate.
+    // Budget charging: `llm_query` cost entries (ui-layout.md §2). The
+    // LlmPort does not report actual usage, so estimate from prompt size
+    // (~4 chars/token) plus a response overhead floor. Structured view
+    // generation involves multi-step reasoning, so apply the existing 3x
+    // multiplier.
     let estimated_input = (user_prompt.len() + system_prompt.len()) / 4;
     let base_estimate = (estimated_input + 500) as f64;
     let estimated_tokens = base_estimate * 3.0;
@@ -523,46 +574,50 @@ pub async fn generate_explorer_view(
     );
     let _ = state.costs.record(&cost_entry).await;
 
-    // Budget Tracking (platform-model.md §5): persist an `llm_query`
-    // BudgetCallRecord and increment the workspace + tenant counters. The
-    // LlmPort does not report actual usage for predict_json, so the existing
-    // estimate is split into input/output tokens. If the workspace cannot be
-    // resolved, skip and log rather than fabricate a tenant.
-    let tenant_id = state
-        .workspaces
-        .find_by_id(&ws_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|ws| ws.tenant_id.to_string());
-    match tenant_id {
-        Some(tenant_id) => {
-            super::budget::record_llm_budget_call(
-                &state,
-                &tenant_id,
-                &workspace_id,
-                None,
-                None,
-                None,
-                "llm_query",
-                estimated_input as u64,
-                (estimated_tokens - estimated_input as f64) as u64,
-                0.0,
-                &model,
-            )
-            .await;
-        }
-        None => tracing::warn!(
-            workspace_id = %workspace_id,
-            "explorer-views/generate: workspace unresolvable; budget counters not incremented"
+    // Persist the `llm_query` BudgetCallRecord with prompt-template git SHA
+    // for audit (ui-layout.md §2 "git SHA recorded in cost entries") and
+    // increment the workspace + tenant counters.
+    super::budget::record_llm_budget_call(
+        &state,
+        &tenant_id,
+        &workspace_id,
+        repo_filter.as_ref().map(|i| i.as_str()),
+        None,
+        None,
+        "llm_query",
+        estimated_input as u64,
+        (estimated_tokens - estimated_input as f64) as u64,
+        0.0,
+        &model,
+        template.sha.as_deref(),
+    )
+    .await;
+
+    // Validate the LLM's output against the view spec grammar before
+    // `event: complete` (ui-layout.md §2 Canvas+Controls). An invalid spec
+    // is NOT an error event: the client renders the list-layout fallback.
+    let (view_spec, explanation, fallback) = match parse_and_validate(&result) {
+        Ok(()) => (
+            result,
+            format!("Generated view for: {}", req.question),
+            None,
         ),
-    }
+        Err(_) => (
+            serde_json::Value::Null,
+            "Generated view was invalid — try rephrasing".to_string(),
+            Some(serde_json::json!({
+                "layout": "list",
+                "data": {"node_types": [], "edge_types": [], "depth": 1},
+            })),
+        ),
+    };
 
     let partial_data =
         serde_json::to_string(&json!({"explanation": "Generating view..."})).unwrap_or_default();
     let complete_data = serde_json::to_string(&json!({
         "view_spec": view_spec,
-        "explanation": format!("Generated view for: {}", req.question)
+        "explanation": explanation,
+        "fallback": fallback,
     }))
     .unwrap_or_default();
 
@@ -572,7 +627,11 @@ pub async fn generate_explorer_view(
     ];
 
     let s = stream::iter(events);
-    Ok(Sse::new(s))
+    Ok(Sse::new(s).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    ))
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -882,6 +941,199 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"], "llm_unavailable");
     }
+
+    /// App with a mock LLM returning a fixed response and a registered
+    /// workspace, sharing state so budget calls are inspectable.
+    async fn app_with_llm_and_ws(response: &str) -> (axum::Router, Arc<crate::AppState>, String) {
+        let state = crate::mem::test_state();
+        let ws_id = "ws-gen-tpl".to_string();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new(&ws_id),
+                gyre_common::Id::new("tenant-1"),
+                "gen-ws",
+                "gen-ws",
+                0,
+            ))
+            .await
+            .unwrap();
+        let mut s = (*state).clone();
+        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
+            inner: Arc::new(gyre_adapters::MockLlmAdapter::new(response)),
+        }));
+        let s = Arc::new(s);
+        (crate::build_router(s.clone()), s, ws_id)
+    }
+
+    #[tokio::test]
+    async fn generate_explorer_view_invalid_spec_emits_null_view_spec_and_fallback() {
+        // ui-layout.md §2: an LLM view spec that fails grammar validation is
+        // NOT an error event — complete carries view_spec: null plus a
+        // list-layout fallback.
+        let (app, _state, ws_id) =
+            app_with_llm_and_ws(&serde_json::json!({"nonsense": true}).to_string()).await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/explorer-views/generate"))
+                    .header("Authorization", auth())
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"question":"How does auth work?"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+
+        // Find the complete event and check its payload.
+        let complete = body
+            .lines()
+            .find(|l| l.starts_with("data:") && l.contains("\"view_spec\""))
+            .expect("complete event with view_spec");
+        let payload: serde_json::Value =
+            serde_json::from_str(complete.trim_start_matches("data:").trim()).unwrap();
+        assert!(payload["view_spec"].is_null(), "invalid spec must null");
+        assert_eq!(
+            payload["explanation"], "Generated view was invalid — try rephrasing"
+        );
+        assert_eq!(payload["fallback"]["layout"], "list");
+    }
+
+    #[tokio::test]
+    async fn generate_explorer_view_valid_spec_completes_with_view_spec() {
+        // A grammar-valid spec must pass through as view_spec with no
+        // fallback — kills the inverse bug of always nulling.
+        let valid = serde_json::json!({
+            "name": "Auth view",
+            "description": "d",
+            "data": {"node_types": ["Type"], "edge_types": [], "depth": 1},
+            "layout": "graph"
+        });
+        let (app, _state, ws_id) = app_with_llm_and_ws(&valid.to_string()).await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/explorer-views/generate"))
+                    .header("Authorization", auth())
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"question":"How does auth work?"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        let complete = body
+            .lines()
+            .find(|l| l.starts_with("data:") && l.contains("\"view_spec\""))
+            .expect("complete event");
+        let payload: serde_json::Value =
+            serde_json::from_str(complete.trim_start_matches("data:").trim()).unwrap();
+        assert_eq!(payload["view_spec"]["name"], "Auth view");
+        assert!(payload.get("fallback").map(|f| f.is_null()).unwrap_or(true));
+    }
+
+    #[tokio::test]
+    async fn generate_explorer_view_charges_llm_query_budget_record() {
+        // ui-layout.md §2: every generate call appends an `llm_query`
+        // BudgetCallRecord. With no git-tree template in the workspace, the
+        // prompt_template_sha is None (hardcoded fallback).
+        let valid = serde_json::json!({
+            "name": "v", "description": "d",
+            "data": {"node_types": [], "edge_types": [], "depth": 1},
+            "layout": "list"
+        });
+        let (app, state, ws_id) = app_with_llm_and_ws(&valid.to_string()).await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/explorer-views/generate"))
+                    .header("Authorization", auth())
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"question":"q?"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+
+        let records = state
+            .budget_calls
+            .list_by_workspace(&ws_id, 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].usage_type, "llm_query");
+        assert!(records[0].input_tokens + records[0].output_tokens > 0);
+    }
+
+    #[tokio::test]
+    async fn generate_explorer_view_rejects_foreign_repo_id() {
+        // A repo_id belonging to another workspace must not leak its graph
+        // into this prompt — 403, not a grounded generation.
+        let valid = serde_json::json!({
+            "name": "v", "description": "d",
+            "data": {"node_types": [], "edge_types": [], "depth": 1},
+            "layout": "list"
+        });
+        let (app, state, ws_id) = app_with_llm_and_ws(&valid.to_string()).await;
+
+        // Repo in a DIFFERENT workspace.
+        let other_ws = gyre_common::Id::new("ws-other");
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                other_ws.clone(),
+                gyre_common::Id::new("tenant-1"),
+                "other-ws",
+                "other-ws",
+                0,
+            ))
+            .await
+            .unwrap();
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-foreign"),
+            other_ws,
+            "foreign-repo",
+            "/nonexistent",
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/explorer-views/generate"))
+                    .header("Authorization", auth())
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"question":"q?","repo_id":"repo-foreign"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
 
     #[tokio::test]
     async fn generate_explorer_view_rate_limited_after_10_requests() {

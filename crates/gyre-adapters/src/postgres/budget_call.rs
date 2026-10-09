@@ -24,6 +24,7 @@ struct BudgetCallRow {
     output_tokens: i64,
     cost_usd: f64,
     model: String,
+    prompt_template_sha: Option<String>,
     timestamp: i64,
 }
 
@@ -41,11 +42,11 @@ impl From<BudgetCallRow> for BudgetCallRecord {
             output_tokens: r.output_tokens.max(0) as u64,
             cost_usd: r.cost_usd,
             model: r.model,
+            prompt_template_sha: r.prompt_template_sha,
             timestamp: r.timestamp.max(0) as u64,
         }
     }
 }
-
 #[derive(Insertable)]
 #[diesel(table_name = budget_call_records)]
 struct NewBudgetCallRow<'a> {
@@ -60,6 +61,7 @@ struct NewBudgetCallRow<'a> {
     output_tokens: i64,
     cost_usd: f64,
     model: &'a str,
+    prompt_template_sha: Option<&'a str>,
     timestamp: i64,
 }
 
@@ -82,6 +84,7 @@ impl BudgetCallRepository for PgStorage {
                 output_tokens: rec.output_tokens as i64,
                 cost_usd: rec.cost_usd,
                 model: &rec.model,
+                prompt_template_sha: rec.prompt_template_sha.as_deref(),
                 timestamp: rec.timestamp as i64,
             };
             diesel::insert_into(budget_call_records::table)
