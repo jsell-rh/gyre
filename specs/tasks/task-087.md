@@ -2,11 +2,11 @@
 title: "HSI Test-Time Trace Capture Gate"
 spec_ref: "human-system-interface.md §3 Test-Time Trace Capture"
 depends_on: []
-progress: complete
+progress: ready-for-review
 review: specs/reviews/task-087.md
 coverage_sections:
   - "human-system-interface.md §3 Test-Time Trace Capture"
-commits: ["14486b0658f81293863a3fd05ebc7821fc4d648a", "6eccbfcda08b781b901525ed73152726a93e5aa0", "0012451d8e4ca60498420955b846a453e2203628", "337b61ab6294a53be6f3908f132e182d1cd68c95", "7d9dfce9463218daa5ce949cf07ae57a5f1b8e84", "92ab65db6968bf34d45866a97922eaede28bd0c8", "e3bbe650f0f496178a92e51f1cbd290048096b87", "998a3518a94e63fa3527145f82890f906a300587"]
+commits: ["e3bbe650f0f496178a92e51f1cbd290048096b87", "92ab65db6968bf34d45866a97922eaede28bd0c8", "7d9dfce9463218daa5ce949cf07ae57a5f1b8e84", "337b61ab6294a53be6f3908f132e182d1cd68c95", "0012451d8e4ca60498420955b846a453e2203628", "6eccbfcda08b781b901525ed73152726a93e5aa0", "14486b0658f81293863a3fd05ebc7821fc4d648a", "998a3518a94e63fa3527145f82890f906a300587", "4c868136c6e11b7cb2bc5f05da6a8cfe166ea3f2"]
 ---
 
 ## Spec Excerpt
@@ -89,6 +89,7 @@ The `TraceRepository` port already exists in `crates/gyre-ports/src/trace.rs` an
 - **Span payload endpoint with real authorization**: `GET /api/v1/trace-spans/:span_id/payload` takes only `:span_id` (compound trace-prefixed ids are globally unique), resolves span → trace → MR → workspace and returns 403 on cross-tenant access; tested for 200/401/403/404 and trace-replacement semantics. `GET /api/v1/merge-requests/:id/trace` and the `trace://` MCP resource share one assembler.
 - **Storage lifecycle on all three adapters**: one trace per MR with replace-on-re-run, payload rows built from raw summaries (4KB truncated columns + full-payload blobs retrievable by span), `promote_to_attestation` on merge and `delete_by_mr` on close; the mem adapter now mirrors the SQLite contract (payload rows populated, replacement cascade, 4KB truncation, permanence) so in-memory mode no longer 404s payloads.
 - **Spec-cased wire format**: `SpanKind`/`SpanStatus` serialize PascalCase (`"Server"`/`"Ok"`) per the HSI §3a JSON example with legacy-lowercase deserialization aliases and case-insensitive parse; all web span-status consumers (DetailPanel waterfall, ExplorerCanvas, FlowCanvas error ring, NodeDetailPanel, MoldableView normalization) handle both casings, with regression tests on both sides.
+- **Resume (cutover-task-087, this round)**: the branch's trace sources were byte-identical to the round-2-verified resume source `dd17bb74` (0 diff lines across gyre-common/trace.rs, api/traces.rs, otlp_receiver.rs, gate_executor.rs, mem.rs, sqlite/trace.rs, ports/trace.rs, and all web span-status consumers); the only regression was bookkeeping — the cutover applied a stale pre-repair task body (frontmatter `commits: [998a3518, 4c868136, 1d08e5a3]`, where `1d08e5a3` matches no git object) that dropped the 7 repair commits from review scoping (failing `check-task-commit-attribution.sh`), deleted `## Shipped`, and reset progress. This round restores the verified 9-commit list, the Shipped record, and sets progress; no source change was needed. Evidence: `/tmp/stage/review-evidence/task-087-resume.md`.
 
 ## Agent Instructions
 
