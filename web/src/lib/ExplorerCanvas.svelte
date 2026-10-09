@@ -14,7 +14,7 @@
     computeTestReachable as computeTestReachableSet,
     computeTestUnreachable as computeTestUnreachableSet,
   } from './test-reachability.js';
-  import { edgePassesFilter } from './canvas-filters.js';
+  import { edgePassesFilter, collectEdgeParticipants, nodeFilterOpacity } from './canvas-filters.js';
 
   /** @type {{ repoId: string, nodes: any[], edges: any[], activeQuery: import('./types/view-query.ts').ViewQuery | null, filter: 'all'|'endpoints'|'types'|'calls'|'dependencies', lens: 'structural'|'evaluative'|'observable' }} */
   let {
@@ -1548,38 +1548,24 @@
     scheduleRedraw();
   }
 
-  // Pre-computed node participants of 'calls' and 'depends_on' edges.
+  // Pre-computed node participants of 'calls' and 'depends_on' edges —
+  // collectEdgeParticipants lives in canvas-filters.js (unit-testable).
   // 'calls' feeds the Calls preset; both feed the Dependencies preset
   // (edgePassesFilter('dependencies') renders depends_on + calls edges).
-  let nodesWithCallsEdges = $derived.by(() => edgeParticipants('calls'));
-  let nodesWithDependencyEdges = $derived.by(() => edgeParticipants('depends_on'));
-
-  function edgeParticipants(type) {
-    const s = new Set();
-    for (const e of edges) {
-      if ((e.edge_type ?? e.type ?? '').toLowerCase() === type) {
-        s.add(edgeSrc(e));
-        s.add(edgeTgt(e));
-      }
-    }
-    return s;
-  }
+  let nodesWithCallsEdges = $derived.by(() => collectEdgeParticipants(edges, 'calls'));
+  let nodesWithDependencyEdges = $derived.by(() => collectEdgeParticipants(edges, 'depends_on'));
 
   // filter-panel category matching (CATEGORY_NODE_TYPES/matchesActiveFilters) removed with
   // ExplorerFilterPanel — spec explorer-implementation.md "Replaces" lists the panel; filter
   // presets + view queries are the filtering surfaces now.
 
+  // Node dimming per active filter — mapping lives in canvas-filters.js
+  // (unit-testable; must stay in agreement with edgePassesFilter above).
   function filterOpacity(ln) {
-    if (ln.kind === 'tree-group') return 1.0;
-    if (!ln.node) return 0.1;
-    if (filter === 'all') return 1.0;
-    switch (filter) {
-      case 'endpoints': return ln.node.node_type === 'endpoint' ? 1.0 : 0.1;
-      case 'types': return (ln.node.node_type === 'type' || ln.node.node_type === 'interface' || ln.node.node_type === 'field') ? 1.0 : 0.1;
-      case 'calls': return nodesWithCallsEdges.has(ln.node.id) ? 1.0 : 0.1;
-      case 'dependencies': return (nodesWithDependencyEdges.has(ln.node.id) || nodesWithCallsEdges.has(ln.node.id)) ? 1.0 : 0.1;
-      default: return 1.0;
-    }
+    return nodeFilterOpacity(filter, ln, {
+      calls: nodesWithCallsEdges,
+      dependencies: nodesWithDependencyEdges,
+    });
   }
 
   // Edge rendering per active filter — mapping lives in canvas-filters.js
