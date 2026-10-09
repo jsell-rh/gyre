@@ -1,7 +1,7 @@
 ---
 title: "Hierarchy enforcement scripts — check-hierarchy, check-tenant-filter, check-api-auth"
 spec_ref: "hierarchy-enforcement.md §7"
-progress: needs-revision
+progress: ready-for-review
 coverage_sections:
   - "hierarchy-enforcement.md §Invariant Enforcement"
   - "hierarchy-enforcement.md §Enforcement"
@@ -56,3 +56,31 @@ REQUIRED_FIELDS=(
 ## Agent Instructions
 
 Read `specs/system/hierarchy-enforcement.md` §2 (Invariant Enforcement), §3 (Enforcement), and §7 (Mechanical Enforcement) for the full script requirements. The scripts are purely static analysis (grep/regex) — no runtime execution. Check the existing `scripts/check-arch.sh` for style conventions used by other enforcement scripts in this codebase.
+
+
+## Round-3 Repair (review findings F1, F2 — commit 06df8bf)
+
+**F1 — dead scope-literal-defaults exemption entries.** Deleted the six
+lines for the sites this task's record-conversion fixes already repaired
+(`sqlite/activity.rs:56`, `sqlite/analytics.rs:115`+`225`,
+`postgres/activity.rs:56`, `postgres/analytics.rs:115`+`225` — all now
+stamp the storage's real tenant) and lowered `FROZEN_EXEMPTION_COUNT`
+18→12 in both the header comment and the Python constant of
+`scripts/check-scope-literal-defaults.sh`; exemption-file header updated.
+Verified: no-exemption scan of `crates/` finds exactly 12 live violations,
+all covered by the remaining 12 lines; `check-scope-literal-defaults.sh`
+passes on clean HEAD.
+
+**F2 — check-tenant-filter.sh read-name blind spot.** Added `record` /
+`resolve` to the `is_read` prefix set. Pre-extension enumeration over both
+adapter dirs: exactly two `record*`/`resolve*` fns carry pure-read
+terminals — `sqlite/agent.rs::record_usage` (read-modify-write; `.first()`
+on `agents`, already filters `agents::tenant_id.eq(&tenant)`) and
+`sqlite/secret.rs::resolve_for_agent` (pure read; `.load()` on `secrets`,
+already filters `secrets::tenant_id.eq(tenant_id)`); every other
+`record*`/`resolve*` fn is a pure insert/update with no `.load/.first/
+.get_result` terminal so the `has_diesel` gate excludes them, and the pg
+`resolve_for_agent` twin is a `bail!` stub with no terminal. Clean HEAD:
+111 checked / 0 violations (was 109). Mutation probes in an isolated
+worktree (restored after each): removing the tenant predicate from either
+fn fails the lint with exit 1 naming file and line.
