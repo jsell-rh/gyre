@@ -579,72 +579,87 @@ pub async fn get_graph_by_spec(
     }))
 }
 
-/// Shared concept-search logic used by both REST and MCP handlers (HSI §11 parity).
-///
-/// Searches nodes across the given `repo_ids` whose `name` or `qualified_name`
-/// contains the `pattern` (case-insensitive substring match). Returns matched
-/// nodes and edges where both source and target are in the matched node set.
-pub async fn assemble_concept_results(
+/// Shared concept-view projection logic used by both REST and MCP handlers
+/// (HSI §11 parity). Resolves the `ConceptView` named `concept_name` from
+/// the repo's `specs/manifest.yaml` (case-insensitive exact match on the
+/// concept name) and returns the union projection of nodes/edges matching
+/// its include patterns. Fails with `NotFound` when the repo has no
+/// manifest, the manifest is unparseable, or no concept with that name is
+/// defined — there is no substring fallback.
+pub async fn assemble_concept_projection(
     state: &AppState,
-    repo_ids: &[String],
-    pattern: &str,
+    repo: &gyre_domain::Repository,
+    concept_name: &str,
 ) -> Result<KnowledgeGraphResponse, ApiError> {
-    let pattern = pattern.to_lowercase();
-    let mut matched_nodes = Vec::new();
-    let mut matched_edges = Vec::new();
-    let mut matched_node_ids = std::collections::HashSet::new();
+    let concept = resolve_concept_view(repo, concept_name)
+        .await
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "concept '{concept_name}' is not defined in the spec manifest"
+            ))
+        })?;
 
-    for rid in repo_ids {
-        let repo_id = Id::new(rid);
-        let all_nodes = state
-            .graph_store
-            .list_nodes(&repo_id, None)
-            .await
-            .map_err(ApiError::Internal)?;
+    let nodes = state
+        .graph_store
+        .list_nodes(&repo.id, None)
+        .await
+        .map_err(ApiError::Internal)?;
+    let edges = state
+        .graph_store
+        .list_edges(&repo.id, None)
+        .await
+        .map_err(ApiError::Internal)?;
 
-        let nodes: Vec<GraphNode> = all_nodes
-            .into_iter()
-            .filter(|n| {
-                n.name.to_lowercase().contains(&pattern)
-                    || n.qualified_name.to_lowercase().contains(&pattern)
-            })
-            .collect();
-
-        for n in &nodes {
-            matched_node_ids.insert(n.id.to_string());
-        }
-        matched_nodes.extend(nodes);
-    }
-
-    for rid in repo_ids {
-        let repo_id = Id::new(rid);
-        let all_edges = state
-            .graph_store
-            .list_edges(&repo_id, None)
-            .await
-            .map_err(ApiError::Internal)?;
-
-        let edges: Vec<GraphEdge> = all_edges
-            .into_iter()
-            .filter(|e| {
-                matched_node_ids.contains(e.source_id.as_str())
-                    && matched_node_ids.contains(e.target_id.as_str())
-            })
-            .collect();
-
-        matched_edges.extend(edges);
-    }
-
-    let repo_id_label = if repo_ids.len() == 1 {
-        repo_ids[0].clone()
-    } else {
-        "multi-repo".to_string()
-    };
+    let (matched_nodes, matched_edges) = concept.project(nodes.iter(), edges.iter());
 
     Ok(KnowledgeGraphResponse {
-        repo_id: repo_id_label,
+        repo_id: repo.id.to_string(),
         nodes: matched_nodes.into_iter().map(Into::into).collect(),
         edges: matched_edges.into_iter().map(Into::into).collect(),
+        warnings: vec![],
+    })
+}
+
+/// Workspace-scoped concept-view projection shared by REST and MCP handlers
+/// (HSI §11 parity): each repo in the workspace resolves the named concept
+/// from its own spec manifest; matched nodes/edges are unioned across repos.
+/// A repo lacking the named concept contributes nothing. Unlike the
+/// single-repo variant this never 404s on a missing concept — an empty
+/// union is a valid workspace-wide answer (repos carry their own manifests).
+pub async fn assemble_workspace_concept_projection(
+    state: &AppState,
+    workspace_id: &Id,
+    concept_name: &str,
+) -> Result<KnowledgeGraphResponse, ApiError> {
+    require_workspace(state, &workspace_id.to_string()).await?;
+
+    let repos = state
+        .repos
+        .list_by_workspace(workspace_id)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    let mut matched_nodes: Vec<GraphNodeResponse> = Vec::new();
+    let mut matched_edges: Vec<GraphEdgeResponse> = Vec::new();
+
+    for repo in &repos {
+        // Repo does not define this concept — contributes nothing.
+        if resolve_concept_view(repo, concept_name).await.is_none() {
+            continue;
+        }
+        let projection = assemble_concept_projection(state, repo, concept_name).await?;
+        matched_nodes.extend(projection.nodes);
+        matched_edges.extend(projection.edges);
+    }
+
+    Ok(KnowledgeGraphResponse {
+        repo_id: if repos.len() == 1 {
+            repos[0].id.to_string()
+        } else {
+            "multi-repo".to_string()
+        },
+        nodes: matched_nodes,
+        edges: matched_edges,
         warnings: vec![],
     })
 }
@@ -688,53 +703,11 @@ pub async fn get_graph_concept(
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
 
-    let concept = resolve_concept_view(&repo, &concept_name)
-        .await
-        .ok_or_else(|| {
-            ApiError::NotFound(format!(
-                "concept '{concept_name}' is not defined in the spec manifest"
-            ))
-        })?;
-
-    let repo_id = Id::new(&id);
-    let nodes = state
-        .graph_store
-        .list_nodes(&repo_id, None)
-        .await
-        .map_err(ApiError::Internal)?;
-    let edges = state
-        .graph_store
-        .list_edges(&repo_id, None)
-        .await
-        .map_err(ApiError::Internal)?;
-
-    let (matched_nodes, matched_edges) = concept.project(nodes.iter(), edges.iter());
-
-    Ok(Json(KnowledgeGraphResponse {
-        repo_id: id,
-        nodes: matched_nodes.into_iter().map(Into::into).collect(),
-        edges: matched_edges.into_iter().map(Into::into).collect(),
-        warnings: vec![],
-    }))
-}
-
-/// GET /api/v1/repos/{id}/graph/timeline
-/// Returns architectural deltas, optionally filtered by ?since=<epoch>&until=<epoch>.
-pub async fn get_graph_timeline(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    Query(q): Query<TimelineQuery>,
-) -> Result<Json<Vec<DeltaResponse>>, ApiError> {
-    require_repo(&state, &id).await?;
-    let repo_id = Id::new(&id);
-
-    let deltas = state
-        .graph_store
-        .list_deltas(&repo_id, q.since, q.until)
-        .await
-        .map_err(ApiError::Internal)?;
-
-    Ok(Json(deltas.into_iter().map(Into::into).collect()))
+    // Delegate to the same assembly logic the MCP graph_concept tool uses
+    // (HSI §11 parity).
+    Ok(Json(
+        assemble_concept_projection(&state, &repo, &concept_name).await?,
+    ))
 }
 
 /// GET /api/v1/repos/{id}/graph/risks
@@ -745,13 +718,11 @@ pub async fn get_graph_risks(
 ) -> Result<Json<Vec<RiskMetricsResponse>>, ApiError> {
     require_repo(&state, &id).await?;
     let repo_id = Id::new(&id);
-
     let all_nodes = state
         .graph_store
         .list_nodes(&repo_id, None)
         .await
         .map_err(ApiError::Internal)?;
-
     let all_edges = state
         .graph_store
         .list_edges(&repo_id, None)
@@ -784,6 +755,25 @@ pub async fn get_graph_risks(
         .collect();
 
     Ok(Json(risks))
+}
+
+/// GET /api/v1/repos/{id}/graph/timeline
+/// Returns architectural deltas, optionally filtered by ?since=<epoch>&until=<epoch>.
+pub async fn get_graph_timeline(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<TimelineQuery>,
+) -> Result<Json<Vec<DeltaResponse>>, ApiError> {
+    require_repo(&state, &id).await?;
+    let repo_id = Id::new(&id);
+
+    let deltas = state
+        .graph_store
+        .list_deltas(&repo_id, q.since, q.until)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    Ok(Json(deltas.into_iter().map(Into::into).collect()))
 }
 
 /// GET /api/v1/repos/{id}/graph/diff
