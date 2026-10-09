@@ -1421,6 +1421,127 @@ mod registry_tests {
         assert_eq!(update_json["version"].as_u64().unwrap(), 2);
     }
 
+    /// HSI §12 Judgment Ledger: creating and version-bumping a registry
+    /// meta-spec must each write a `meta_spec_publish` audit event attributed
+    /// to the acting human user, carrying kind/name/version/content_hash —
+    /// the event the judgment ledger aggregates as `meta-spec` entries.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publish_writes_meta_spec_publish_audit_event() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use gyre_ports::AuditQueryFilter;
+
+        let state = make_test_state_with_jwt();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // A human (OIDC JWT) publishes a Workspace-scoped meta-spec.
+        let jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "ms-pub-sub",
+                "preferred_username": "ms-publisher",
+                "realm_access": { "roles": ["admin"] }
+            }),
+            3600,
+        );
+        let create_body = serde_json::json!({
+            "kind": "meta:principle",
+            "name": "conventional-commits",
+            "scope": "Workspace",
+            "scope_id": "ws-pub-1",
+            "prompt": "Use CC."
+        });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs-registry")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let id = body_json(create_resp).await["id"].as_str().unwrap().to_string();
+
+        let events = state
+            .audit
+            .query(&AuditQueryFilter {
+                event_type: Some("meta_spec_publish".to_string()),
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "create must record one publish event");
+        let ev = &events[0];
+        let acting_user = state
+            .users
+            .find_by_external_id("ms-pub-sub")
+            .await
+            .unwrap()
+            .expect("JWT auth must provision the acting user");
+        assert_eq!(ev.user_id.as_ref().map(|u| u.as_str()), Some(acting_user.id.as_str()));
+        assert_eq!(ev.resource_id.as_deref(), Some(id.as_str()));
+        // Workspace attribution from the meta-spec's own scope.
+        assert_eq!(ev.workspace_id.as_ref().map(|w| w.as_str()), Some("ws-pub-1"));
+        assert_eq!(ev.detail["kind"], "meta:principle");
+        assert_eq!(ev.detail["name"], "conventional-commits");
+        assert_eq!(ev.detail["version"], 1);
+        assert!(ev.detail["content_hash"].is_string(), "content_hash required");
+
+        // Version bump (update) records a second publish event.
+        let update_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"prompt":"Updated."}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update_resp.status(), StatusCode::OK);
+        let events2 = state
+            .audit
+            .query(&AuditQueryFilter {
+                event_type: Some("meta_spec_publish".to_string()),
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(events2.len(), 2, "update must record a second publish event");
+        // Both events may share the same wall-clock second, so assert the
+        // version set rather than a specific order.
+        let versions: Vec<u64> = events2
+            .iter()
+            .map(|e| e.detail["version"].as_u64().unwrap_or(0))
+            .collect();
+        assert!(versions.contains(&1) && versions.contains(&2), "versions: {versions:?}");
+        let ledger = crate::api::api_router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/judgments?type=meta-spec")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ledger.status(), StatusCode::OK);
+        let ledger_json = body_json(ledger).await;
+        let items = ledger_json["judgments"].as_array().unwrap();
+        assert_eq!(items.len(), 2, "ledger must surface both publishes: {items:?}");
+        assert_eq!(items[0]["judgment_type"], "meta-spec");
+        assert_eq!(items[0]["entity_ref"], "conventional-commits");
+        assert_eq!(items[0]["workspace_id"], "ws-pub-1");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn get_not_found_returns_404() {
         let resp = app()

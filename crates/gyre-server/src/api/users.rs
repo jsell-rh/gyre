@@ -1308,6 +1308,69 @@ mod tests {
         assert_eq!(json["count"], 1, "badge must not count the disabled type");
     }
 
+    /// HSI §12 auth provider info: a successful OIDC/JWT authentication must
+    /// record the verified issuer + login time, and GET /users/me must return
+    /// both read-only. PUT /users/me has no field for either, so they cannot
+    /// be client-set.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_me_returns_recorded_auth_provider_info() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+
+        let state = make_test_state_with_jwt();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Authenticate via a real OIDC JWT — this drives validate_jwt's
+        // record_login path against the user store.
+        let jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "me-issuer-sub",
+                "preferred_username": "issuer-user",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let me = body_json(resp).await;
+        // The issuer is the test JwtConfig's verified issuer.
+        assert_eq!(me["oidc_issuer"], "http://localhost:8080/realms/gyre");
+        let login = me["last_login_at"].as_u64().expect("last_login_at recorded");
+        assert!(login > 0);
+
+        // Editable profile fields round-trip without touching auth-provider info.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/users/me")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"display_name":"Renamed","timezone":"Europe/Berlin"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let me2 = body_json(resp).await;
+        assert_eq!(me2["display_name"], "Renamed");
+        assert_eq!(me2["timezone"], "Europe/Berlin");
+        assert_eq!(me2["oidc_issuer"], "http://localhost:8080/realms/gyre");
+        assert_eq!(me2["last_login_at"].as_u64(), Some(login));
+    }
+
     #[tokio::test]
     async fn admin_creates_user_with_authenticating_api_key() {
         let state = test_state();
