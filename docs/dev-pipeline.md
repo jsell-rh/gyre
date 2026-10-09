@@ -93,6 +93,15 @@ the existing sandbox. Failed Git clones retry there. No failure retains a sandbo
 for debugging: artifacts are captured locally, deletion is attempted immediately,
 and cleanup retries unresolved deletion while the reservation remains charged.
 
+Model admission also checks the pinned inference endpoint before reserving a
+sandbox. The shared probe uses `ENMAAS_API_KEY` or the local secret-store entry
+`service=pricetag key=api-token`. Successful probes are cached for one minute;
+failures back off up to fifteen minutes and appear as `InferenceUnavailable` in
+the cockpit. A changed key bypasses the failed cache and updates the gateway
+provider before new model workers are admitted. Credentials and response bodies
+are never included in these diagnostics. Set slots to zero to drain existing
+work while replacing an expired credential, then restore the desired budget.
+
 A code, review, rebase, verification, or candidate CI defect becomes a structured
 finding and a new implementation assignment on the retained source. Findings
 carry exact source identity and bounded diagnostic evidence. Reproducible failures
