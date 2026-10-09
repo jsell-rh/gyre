@@ -161,7 +161,8 @@ class Execution:
             self.store.set_setting('admission_condition', reason)
             self.phase('WaitingForConfiguration', reason=reason)
             raise Retry(reason)
-        self.store.set_setting('admission_condition', 'Ready')
+        from .inference import check as check_inference
+        check_inference(self.store)
         inventory = gateway.inventory()
         observed = {item['name'] for item in inventory}
         item = next((item for item in inventory if item['name'] == sandbox), None)
