@@ -6,7 +6,7 @@ import sys
 
 
 def main():
-    result = subprocess.run(['cargo', 'metadata', '--no-deps', '--format-version', '1'],
+    result = subprocess.run(['cargo', '--color', 'never', 'metadata', '--no-deps', '--format-version', '1'],
                             capture_output=True, text=True)
     if result.returncode:
         print(result.stderr or result.stdout, file=sys.stderr)
@@ -16,7 +16,7 @@ def main():
     packages = [p['id'] for p in metadata['packages'] if p['id'] in members]
     if not packages:
         raise RuntimeError('Cargo workspace has no packages to rebuild')
-    command = ['cargo', 'clean']
+    command = ['cargo', '--color', 'never', 'clean']
     for package in packages:
         command += ['--package', package]
     return 0 if subprocess.run(command).returncode == 0 else 75
