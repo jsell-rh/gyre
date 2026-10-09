@@ -5,7 +5,7 @@ depends_on: []
 progress: not-started
 coverage_sections:
   - "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
-commits: ["70b5fc3938bee08980e1efa428fc46fea5c25b6d", "a7003f56dd511d1c365632787bf9c2937c3eee1a", "695a15c2e1e646676f2362792050dd515231845c", "adfade871a259533cb14cf477ca04f9c7d5847fd", "d5abebe5ca1575e34ccf8c9fe258bf1c20e76cac", "3ff2a0591facf4a3918c555dffa67de187c21e5e"]
+commits: ["f0803d05d2e8e9a63785429e68e4574e2cafc275", "57d9fef038c92a3fcfe1fd1dbe44acec088d8a5d", "f3b6a80ee33219a463a14af2f1079a605dc38660", "8d327fabbfeb90311bb8504718fcb9caba9895f3", "087451ad9b1f7303aa65922a88fc9b2dd7f3f6b7", "2d23757cf971450ee26341a8945a19dff0ada628"]
 ---
 
 ## Spec Excerpt
