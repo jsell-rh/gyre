@@ -24,7 +24,7 @@
 //! are downstream observers (message-bus.md §Relationship to Notifications).
 
 use crate::AppState;
-use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin};
+use gyre_common::message::{Message, MessageKind};
 use gyre_common::{Id, Notification, NotificationType};
 use gyre_domain::WorkspaceRole;
 use gyre_ports::MessageConsumer;
@@ -407,13 +407,14 @@ impl NotificationBridge {
             return;
         };
 
-        let title = "Meta-spec reconciliation completed — workspace specs may have drifted";
+        let title =
+            "Meta-spec reconciliation completed — workspace specs may have drifted".to_string();
         for user_id in self.workspace_human_members(&ws_id).await {
             self.create(
                 &ws_id,
                 user_id,
                 NotificationType::MetaSpecDrift,
-                title,
+                title.clone(),
                 tenant_id.clone(),
                 msg.payload.as_ref().map(|p| p.to_string()),
                 None,
@@ -432,12 +433,13 @@ impl NotificationBridge {
         body: Option<String>,
         entity_ref: Option<String>,
     ) {
+        let priority = notification_type.default_priority();
         let notif = Notification {
             id: Id::new(uuid::Uuid::new_v4().to_string()),
             workspace_id: workspace_id.clone(),
             user_id,
             notification_type,
-            priority: notification_type.default_priority(),
+            priority,
             title,
             body,
             entity_ref,
@@ -469,7 +471,7 @@ impl MessageConsumer for NotificationBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gyre_domain::WorkspaceMembership;
+    use gyre_common::message::{Destination, MessageOrigin};
 
     fn test_message(kind: MessageKind, ws: &str, payload: serde_json::Value) -> Message {
         Message {
@@ -488,19 +490,25 @@ mod tests {
     }
 
     async fn seed_workspace(state: &AppState, ws: &str, tenant: &str) {
-        let ws_entity = gyre_domain::Workspace::new(Id::new(ws.to_string()), tenant.to_string());
+        let ws_entity = gyre_domain::Workspace::new(
+            Id::new(ws.to_string()),
+            Id::new(tenant.to_string()),
+            format!("Workspace {ws}"),
+            ws.to_string(),
+            0,
+        );
         state.workspaces.create(&ws_entity).await.unwrap();
     }
 
     async fn seed_member(state: &AppState, ws: &str, user: &str, role: WorkspaceRole) {
-        let m = WorkspaceMembership {
-            id: Id::new(uuid::Uuid::new_v4().to_string()),
-            workspace_id: Id::new(ws.to_string()),
-            user_id: Id::new(user.to_string()),
+        let m = gyre_domain::WorkspaceMembership::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            Id::new(user.to_string()),
+            Id::new(ws.to_string()),
             role,
-            accepted_at: Some(0),
-            created_at: 0,
-        };
+            Id::new("inviter".to_string()),
+            0,
+        );
         state.workspace_memberships.create(&m).await.unwrap();
     }
 
@@ -526,13 +534,16 @@ mod tests {
         seed_member(&state, "ws-1", "user-1", WorkspaceRole::Admin).await;
         seed_agent(&state, "agent-1", "ws-1", Some("user-1")).await;
 
-        let mr = gyre_domain::MergeRequest::new(
+        let mut mr = gyre_domain::MergeRequest::new(
             Id::new("mr-1".to_string()),
             Id::new("repo-1".to_string()),
+            "Feature".to_string(),
             "feature".to_string(),
             "main".to_string(),
-            Some(Id::new("agent-1".to_string())),
+            0,
         );
+        mr.workspace_id = Id::new("ws-1".to_string());
+        mr.author_agent_id = Some(Id::new("agent-1".to_string()));
         state.merge_requests.create(&mr).await.unwrap();
 
         let bridge = NotificationBridge::new(state.clone());
@@ -692,5 +703,175 @@ mod tests {
             2,
             "dispatcher must deliver both messages to the consumer"
         );
+    }
+
+    /// A stored message with an arbitrary created_at, for TTL tests.
+    fn stored_message(
+        id: &str,
+        to: Destination,
+        created_at: u64,
+        acknowledged: bool,
+    ) -> Message {
+        Message {
+            id: Id::new(id.to_string()),
+            tenant_id: Id::new("default"),
+            from: MessageOrigin::Server,
+            workspace_id: Some(Id::new("ws-1".to_string())),
+            to,
+            kind: MessageKind::TaskCreated,
+            payload: None,
+            created_at,
+            signature: None,
+            key_id: None,
+            acknowledged,
+        }
+    }
+
+    #[tokio::test]
+    async fn message_expiry_deletes_old_events_and_dead_inboxes() {
+        // Short TTLs so the cutoff is deterministic relative to now_ms().
+        std::env::set_var("GYRE_EVENT_TTL_SECS", "1000");
+        std::env::set_var("GYRE_DEAD_INBOX_TTL_SECS", "1000");
+
+        let state = crate::mem::test_state();
+        let now = now_ms();
+
+        // Event-tier (workspace-targeted): one expired, one fresh.
+        state
+            .messages
+            .store(&stored_message("old-event", Destination::Workspace(Id::new("ws-1".to_string())), now - 2000_000, false))
+            .await
+            .unwrap();
+        state
+            .messages
+            .store(&stored_message("new-event", Destination::Workspace(Id::new("ws-1".to_string())), now, false))
+            .await
+            .unwrap();
+        // Directed (agent-targeted): never touched by expire_events.
+        state
+            .messages
+            .store(&stored_message("old-directed", Destination::Agent(Id::new("agent-1".to_string())), now - 2000_000, false))
+            .await
+            .unwrap();
+        // Agent-targeted, acked as agent_completed long ago: dead inbox.
+        state
+            .messages
+            .store(&stored_message("old-dead-inbox", Destination::Agent(Id::new("agent-1".to_string())), now - 2000_000, true))
+            .await
+            .unwrap();
+        state
+            .messages
+            .acknowledge_all(&Id::new("agent-1".to_string()), "agent_completed")
+            .await
+            .unwrap();
+        // Agent-targeted, explicitly acked long ago: NOT a dead inbox — retained.
+        state
+            .messages
+            .store(&stored_message("old-explicit-ack", Destination::Agent(Id::new("agent-2".to_string())), now - 2000_000, false))
+            .await
+            .unwrap();
+        state
+            .messages
+            .acknowledge(&Id::new("old-explicit-ack".to_string()), &Id::new("agent-2".to_string()))
+            .await
+            .unwrap();
+
+        let (events_deleted, inboxes_deleted) = run_message_expiry(&state).await.unwrap();
+
+        assert_eq!(events_deleted, 1, "expired Event-tier message deleted");
+        assert_eq!(inboxes_deleted, 1, "agent_completed inbox deleted");
+        assert!(
+            state
+                .messages
+                .find_by_id(&Id::new("new-event".to_string()))
+                .await
+                .unwrap()
+                .is_some(),
+            "fresh Event-tier message retained"
+        );
+        assert!(
+            state
+                .messages
+                .find_by_id(&Id::new("old-directed".to_string()))
+                .await
+                .unwrap()
+                .is_some(),
+            "unacked Directed message retained (expire_events must not touch it)"
+        );
+        assert!(
+            state
+                .messages
+                .find_by_id(&Id::new("old-explicit-ack".to_string()))
+                .await
+                .unwrap()
+                .is_some(),
+            "explicitly-acked message retained (not a dead inbox)"
+        );
+    }
+
+    #[tokio::test]
+    async fn message_expiry_env_ttl_respected() {
+        // 1-second TTL: only messages older than 1s are deleted.
+        std::env::set_var("GYRE_EVENT_TTL_SECS", "1");
+        let state = crate::mem::test_state();
+        let now = now_ms();
+
+        state
+            .messages
+            .store(&stored_message("ancient-event", Destination::Workspace(Id::new("ws-1".to_string())), now - 10_000, false))
+            .await
+            .unwrap();
+        state
+            .messages
+            .store(&stored_message("recent-event", Destination::Workspace(Id::new("ws-1".to_string())), now, false))
+            .await
+            .unwrap();
+
+        let (events_deleted, _) = run_message_expiry(&state).await.unwrap();
+        assert_eq!(events_deleted, 1, "1s TTL deletes only the >1s-old event");
+
+        // Restore defaults for other tests in this process.
+        std::env::set_var("GYRE_EVENT_TTL_SECS", "604800");
+    }
+
+    #[tokio::test]
+    async fn spawn_message_consumer_end_to_end() {
+        let state = crate::mem::test_state();
+        seed_workspace(&state, "ws-1", "tenant-1").await;
+        seed_member(&state, "ws-1", "user-1", WorkspaceRole::Admin).await;
+
+        spawn_message_consumer(state.clone()).await;
+
+        // Emit a ReconciliationCompleted event through the real send path —
+        // it must reach the notification bridge via the dispatch channel.
+        state
+            .emit_event(
+                Some(Id::new("ws-1".to_string())),
+                Destination::Workspace(Id::new("ws-1".to_string())),
+                MessageKind::ReconciliationCompleted,
+                Some(serde_json::json!({ "workspace_id": "ws-1" })),
+            )
+            .await;
+
+        // The dispatcher runs in a background task — poll for the
+        // notification to appear rather than assuming synchronous delivery.
+        let mut notifs = Vec::new();
+        for _ in 0..100 {
+            notifs = list_notifications(&state, "user-1").await;
+            if !notifs.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(notifs.len(), 1, "bridge must create the p6 notification");
+        assert_eq!(
+            notifs[0].notification_type,
+            NotificationType::MetaSpecDrift
+        );
+
+        // Second spawn must not create a second dispatcher (single-owner rx).
+        spawn_message_consumer(state.clone()).await;
+        let rx = state.take_message_dispatch_rx().await;
+        assert!(rx.is_none(), "rx was already taken by the first dispatcher");
     }
 }
