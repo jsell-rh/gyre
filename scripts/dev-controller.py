@@ -1390,14 +1390,17 @@ def schedule(db, slots, max_attempts, only_task=None, launch_burst=8):
             continue
         if task["name"] in exhausted:
             continue
-        if baseline_repairs and task["name"] not in baseline_repairs:
-            continue
         if only_task and task["name"] != only_task and task["name"] not in baseline_repairs:
             continue
         if running >= effective_slots or launches >= launch_burst:
             break
         is_due = task["state"] == "deferred" and task["retry_at"] <= now
         if (task["state"] == "candidate" or (is_due and task["candidate"])) and set(json.loads(task["deps"])) <= merged:
+            # A broken delivery baseline blocks integration, not independent
+            # implementation. Repair owns the lane while workers can progress
+            # within admission and candidate-backlog limits.
+            if baseline_repairs and task['name'] not in baseline_repairs:
+                continue
             if integration_busy:
                 continue
             source()

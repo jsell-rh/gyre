@@ -344,6 +344,25 @@ class ControllerGitTest(unittest.TestCase):
             controller.schedule(self.db, slots=50, max_attempts=3, launch_burst=2)
         self.assertEqual([call.args[1]["name"] for call in spawn.call_args_list], ["task-001", "task-002"])
 
+    def test_main_repair_blocks_integration_but_allows_independent_workers(self):
+        sha = self.candidate()
+        controller.sync(self.db)
+        self.db.execute("INSERT INTO tasks(name,progress,deps,state,origin_key) VALUES('task-002','needs-revision','[]','ready','baseline:broken:env')")
+        self.db.execute("INSERT INTO tasks(name,progress,deps,state) VALUES('task-003','not-started','[]','ready')")
+        self.db.execute("INSERT INTO tasks(name,progress,deps,state,blocked_base) VALUES('task-004','not-started','[]','blocked','broken')")
+        self.db.execute('UPDATE controller_health SET admission=5')
+        self.db.commit()
+        with patch.object(controller, 'spawn') as dispatch:
+            controller.schedule(self.db, 5, 3)
+        self.assertEqual([(call.args[1]['name'], call.args[2]) for call in dispatch.call_args_list],
+                         [('task-002', 'worker'), ('task-003', 'worker')])
+        self.db.execute("UPDATE tasks SET state='candidate',candidate=? WHERE name='task-002'", (sha,))
+        self.db.commit()
+        with patch.object(controller, 'spawn') as dispatch:
+            controller.schedule(self.db, 5, 3)
+        self.assertIn(('task-002', 'check'), [(call.args[1]['name'], call.args[2]) for call in dispatch.call_args_list])
+        self.assertNotIn(('task-001', 'check'), [(call.args[1]['name'], call.args[2]) for call in dispatch.call_args_list])
+
     def test_inference_failure_retains_checkpoint_without_throttling_gateway(self):
         sha = self.candidate()
         git(self.work, 'push', 'origin', 'HEAD:devloop/task-001/attempt-1')
