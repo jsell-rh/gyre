@@ -1337,6 +1337,17 @@ pub async fn complete_agent(
     );
     let _ = state.analytics.record(&ev).await;
 
+    // Auto-track MR creation
+    let ev = AnalyticsEvent::new(
+        new_id(),
+        "mr.created",
+        Some(agent.id.to_string()),
+        serde_json::json!({ "mr_id": mr.id.to_string(), "source_branch": mr.source_branch }),
+        now,
+    );
+    let _ = state.analytics.record(&ev).await;
+
+
     // M22.2: Decrement budget active-agent counter when agent completes.
     if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {
         super::budget::decrement_active_agents(&state, &repo.workspace_id.to_string()).await;
@@ -2373,6 +2384,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
+        let mr_json = body_json(resp).await;
+        let mr_id = mr_json["id"].as_str().unwrap().to_string();
 
         let events = state
             .analytics
@@ -2387,6 +2400,18 @@ mod tests {
             ev.properties["duration_secs"].as_u64().is_some(),
             "duration_secs must be present"
         );
+
+        // The pre-existing mr.created event must survive task-146's additions
+        // (contract repair): completing an agent creates an MR, and that MR
+        // creation is still tracked.
+        let created = state
+            .analytics
+            .query(Some("mr.created"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(created.len(), 1, "one mr.created event expected");
+        assert_eq!(created[0].properties["mr_id"], mr_id);
+        assert_eq!(created[0].properties["source_branch"], "feat/analytics-complete");
     }
 
     #[tokio::test]
