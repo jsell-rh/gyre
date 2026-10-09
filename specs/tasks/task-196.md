@@ -2,7 +2,7 @@
 title: "Ground Briefing Q&A in real briefing data with sources and history validation"
 spec_ref: "human-system-interface.md §9 Briefing Q&A (§1295-1332)"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §47"
 commits: ["62ed0595e07339870bc71f0bf7da7bd2a7aae42c", "875e2a1117854605168cb558a9d6dcfcbb9d0964", "40a77abf3d05ec0b9e8173091626797f31e52d3a", "17c356a8c1d2b1b746e1a1ec27848efca823612f", "5645f939ecee5f083ef83ef19e769db8fff528c7"]
@@ -130,6 +130,26 @@ All work in `crates/gyre-server/src/api/graph.rs` unless noted.
   loopback listeners (both fail at the shared request helper with
   `hyper IncompleteMessage`, including the pre-existing 404 path untouched by
   this task). Controller should run `cargo test -p gyre-server --test
+  graph_integration` on host.
+
+## Repair (review round 2026-10-09, attempt 12)
+
+**Finding:** commit `62ed059` had reintroduced a silent-truncation mutant at
+`graph.rs:1216-1223` (`history.drain(..excess)` with comment "MUTANT: silently
+truncate instead of rejecting") in place of the spec-required 400 rejection.
+The hard test `briefing_ask_rejects_history_over_20_entries_with_400` fails
+against it (21 entries returned 200).
+
+**Repair:** replaced the drain block with the HSI §1325 rejection
+(`ApiError::InvalidInput` → 400) before the rate limiter; no truncation.
+Verified no other `MUTANT` markers remain in `crates/` or `web/src/`.
+
+**Checks (this sandbox):**
+- `cargo test -p gyre-server --lib briefing_ask` — 5/5 pass, including the
+  400-cap test that kills the mutant.
+- vitest: `Briefing.test.js` + `InlineChat.test.js` — 40/40 pass.
+- Sandbox limitation unchanged: `tests/graph_integration.rs` requires loopback
+  listeners; controller to run `cargo test -p gyre-server --test
   graph_integration` on host.
 
 ## Review
