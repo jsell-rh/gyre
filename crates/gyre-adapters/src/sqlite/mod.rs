@@ -261,6 +261,8 @@ mod tests {
             "trust_anchors",
             "key_bindings",
             "chain_attestations",
+            // Spec-link graph (migration 000056, task-198)
+            "spec_links",
             // Raw-SQL tables (not in schema.rs but created by migrations)
             "explorer_views",
             "prompt_templates",
