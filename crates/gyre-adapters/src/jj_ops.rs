@@ -284,6 +284,16 @@ impl JjOpsPort for JjOpsAdapter {
             .await
             .context("jj git import before workspace add")?;
 
+        // jj does not create intermediate directories — `workspace add`
+        // fails with "Cannot access <path>" when the workspace's parent
+        // (e.g. `{repo}/workspaces/`) does not exist yet. Verified against
+        // jj 0.39.0. Same treatment as `jj_main_checkout_init`.
+        if let Some(parent) = std::path::Path::new(workspace_path).parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("create workspace parent dir {}", parent.display())
+            })?;
+        }
+
         let (status, _stdout, stderr) = self
             .run_jj_raw(
                 main_checkout_path,

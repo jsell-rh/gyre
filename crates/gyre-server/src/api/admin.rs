@@ -290,7 +290,7 @@ pub async fn admin_kill_agent(
             if let Ok(Some(repo)) = state.repos.find_by_id(&wt.repository_id).await {
                 // jj workspace teardown (source-control.md §4).
                 crate::api::spawn::cleanup_jj_workspace(
-                    state,
+                    &state,
                     &agent.id.to_string(),
                     &repo.path,
                     &wt.path,
