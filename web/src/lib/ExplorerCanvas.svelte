@@ -3765,8 +3765,12 @@
     lerpCam();
 
     // Advance ghost pulse animation (1 cycle per 1.5 seconds at ~60fps)
-    // Stop after 3 full cycles to avoid perpetual CPU usage
-    if (hasGhosts && ghostAnimCycles < 3) {
+    // Stop after 3 full cycles to avoid perpetual CPU usage.
+    // Structural lens renders ghosts without a pulse — drawGhostOverlays
+    // hardcodes basePulse=0 there ("No particles. No animation. Pure
+    // structure." — explorer-canvas.md §Structural) — so animating in the
+    // structural lens only burns rAF frames redrawing identical output.
+    if (hasGhosts && lens !== 'structural' && ghostAnimCycles < 3) {
       const prev = ghostPulsePhase;
       ghostPulsePhase = (ghostPulsePhase + 0.011) % 1;
       if (ghostPulsePhase < prev) ghostAnimCycles++;
@@ -3796,9 +3800,7 @@
     const dx = Math.abs(cam.x - targetCam.x);
     const dy = Math.abs(cam.y - targetCam.y);
     const dz = Math.abs(cam.zoom - targetCam.zoom);
-    // Keep animating when camera moving or a one-time redraw is needed.
-    // For ghosts: only animate the pulse for 3 cycles then stop to save CPU.
-    const ghostNeedsAnim = hasGhosts && ghostAnimCycles < 3;
+    const ghostNeedsAnim = hasGhosts && lens !== 'structural' && ghostAnimCycles < 3;
     const particlesPlaying = lens === 'evaluative' && evalPlaying;
     const fading = drillFadeTarget || drillFadeAlpha < 1.0;
     if (dx > 0.1 || dy > 0.1 || dz > 0.0001 || needsAnim || ghostNeedsAnim || particlesPlaying || fading || drillTransitioning) {
