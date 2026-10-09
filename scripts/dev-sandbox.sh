@@ -167,8 +167,14 @@ if [ "$create_rc" -ne 0 ]; then
     else
       rm -f "$create_log"; echo "sandbox provisioning deferred for capacity" >&2; exit 78
     fi
-  elif grep -Eiq 'h2 protocol error|tls handshake eof|peer closed connection|failed to connect to gateway|Internal error.*create sandbox failed' "$create_log"; then
-    rm -f "$create_log"; echo "gateway transport unavailable during create" >&2; exit 77
+  elif grep -Eiq 'h2 protocol error|tls handshake eof|peer closed connection|failed to connect to gateway|Internal error.*create sandbox failed|sandbox provisioning stream ended before reaching terminal phase' "$create_log"; then
+    # Losing the response stream does not cancel the remote allocation.
+    # Observe the existing object rather than deleting and reallocating it.
+    if timeout 30 "$OS" -g gyre-gyre sandbox get "$SANDBOX" >/dev/null 2>&1; then
+      echo "create response interrupted; existing sandbox will continue provisioning" >&2
+    else
+      rm -f "$create_log"; echo "gateway transport unavailable during create" >&2; exit 77
+    fi
   else
     rm -f "$create_log"; exit 75
   fi

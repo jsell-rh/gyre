@@ -182,7 +182,7 @@ record = pathlib.Path(os.environ['RECORD'])
 if args[:2] == ['gateway', 'login']: sys.exit(0)
 if 'create' in args:
     record.open('a').write('create\\n')
-    print('ProvisioningTimedOut: waiting for capacity'); sys.exit(1)
+    print(os.environ['CREATE_ERROR']); sys.exit(1)
 if 'get' in args:
     count = record.read_text().splitlines().count('get')
     record.open('a').write('get\\n')
@@ -200,14 +200,18 @@ sys.exit(1)
             fake.chmod(0o755)
             env = {**os.environ, 'OPENSHELL': str(fake), 'OPENSHELL_OIDC_CLIENT_SECRET': 'test',
                    'GYRE_DEV_STATE': str(root), 'GYRE_DEV_READY_POLL': '0', 'RECORD': str(record)}
-            result = subprocess.run(['bash', str(Path(__file__).with_name('dev-sandbox.sh')), 'worker', 'task-1000',
-                                     'devloop/task-1000/attempt-1', 'origin/main', '0123456789abcdef'],
-                                    env=env, capture_output=True, text=True, timeout=15)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            calls = record.read_text().splitlines()
-            self.assertEqual(calls.count('create'), 1)
-            self.assertEqual(calls[-3:], ['stage', 'remote', 'delete'])
-            self.assertIn('gyr-zrs-w-01234567', result.stderr)
+            for message in ('ProvisioningTimedOut: waiting for capacity',
+                            'sandbox provisioning stream ended before reaching terminal phase'):
+                with self.subTest(message=message):
+                    record.write_text('')
+                    result = subprocess.run(['bash', str(Path(__file__).with_name('dev-sandbox.sh')), 'worker', 'task-1000',
+                                             'devloop/task-1000/attempt-1', 'origin/main', '0123456789abcdef'],
+                                            env={**env, 'CREATE_ERROR': message}, capture_output=True, text=True, timeout=15)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    calls = record.read_text().splitlines()
+                    self.assertEqual(calls.count('create'), 1)
+                    self.assertEqual(calls[-3:], ['stage', 'remote', 'delete'])
+                    self.assertIn('gyr-zrs-w-01234567', result.stderr)
 
     def test_capacity_timeout_is_retryable_and_deletes_partial_sandbox(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -250,6 +254,7 @@ exit 1
                    "OPENSHELL_OIDC_CLIENT_SECRET": "test", "GYRE_DEV_STATE": str(root)}
             for message, code in (("Created sandbox: gyre-001-w-01234567", 75),
                                   ("Internal error: create sandbox failed: sandbox not found", 77),
+                                  ("sandbox provisioning stream ended before reaching terminal phase", 77),
                                   ("provider 'gyre-github-rw' not found", 79)):
                 with self.subTest(message=message):
                     result = subprocess.run(
