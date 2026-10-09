@@ -10,7 +10,7 @@ coverage_sections:
   - "agent-runtime.md §Phase 1: Spec Approval Triggers Orchestration"
   - "agent-runtime.md §Phase 2: Workspace Orchestrator — Cross-Repo Coordination"
   - "agent-runtime.md §Phase 3: Repo Orchestrator — Task Decomposition"
-commits: ["0a13a2ee8fd20987829dab377cebbe75e2edc768", "e2153b406a60c0565053e1792731eef3d1d1557c"]
+commits: ["e62a9d7e8943ad0ece7495c2ae9b8f3e5ad57d78", "0a13a2ee8fd20987829dab377cebbe75e2edc768", "e2153b406a60c0565053e1792731eef3d1d1557c"]
 ---
 
 ## Spec Excerpt
