@@ -18,6 +18,7 @@ pub mod chain_attestation;
 pub mod compute_target;
 pub mod container_audit;
 pub mod conversation;
+pub mod commit_signature;
 pub mod dependency;
 pub mod graph;
 pub mod key_binding;
