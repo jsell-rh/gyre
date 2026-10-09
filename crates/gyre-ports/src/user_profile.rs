@@ -51,14 +51,22 @@ pub trait SessionRepository: Send + Sync {
         ip_address: &str,
         user_agent: &str,
     ) -> Result<Option<UserSession>>;
-    /// Update `last_active_at` (throttled by the caller to ≤ once per minute).
-    async fn touch(&self, id: &Id, last_active_at: u64) -> Result<()>;
+    /// Refresh activity on a still-live session: set `last_active_at` and
+    /// `expires_at` (the session TTL restarts on use — a daily-active
+    /// device must never lapse into a state where its credential still
+    /// authenticates but its session is filtered out of the active list).
+    /// Callers throttle to ≤ once per minute to avoid write amplification.
+    async fn touch(&self, id: &Id, last_active_at: u64, expires_at: u64) -> Result<()>;
     /// Revoke a single session. No-op if already revoked or not found.
     async fn revoke(&self, id: &Id, user_id: &Id) -> Result<()>;
     /// Revoke every session for a user ("sign out everywhere").
     async fn revoke_all_for_user(&self, user_id: &Id) -> Result<()>;
     /// Delete sessions that expired before `cutoff` (retention cleanup).
-    /// Returns the number of rows deleted.
+    /// Revoked sessions are NEVER deleted, whatever their age: a revoked
+    /// row is the durable record that keeps a signed-out credential
+    /// rejected ("sign out everywhere"); deleting one would silently
+    /// re-authorize the API key it belonged to. Returns the number of
+    /// rows deleted.
     async fn delete_expired_before(&self, cutoff: u64) -> Result<u64>;
 }
 

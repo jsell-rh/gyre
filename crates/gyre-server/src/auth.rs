@@ -55,6 +55,12 @@ pub(crate) const SESSION_TOUCH_THROTTLE_SECS: u64 = 60;
 /// a row per request); a different device is a new session row, so revoking
 /// one device does not sign out every device (SessionRepository port doc).
 ///
+/// A session found expired-but-not-revoked is re-minted (same device, new
+/// row with a fresh TTL) rather than silently kept: expiry is not a logout
+/// gesture for the credential, and the row must not linger in a state where
+/// auth succeeds but `GET /users/me/sessions` filters the device out
+/// forever. Re-minting keeps exactly one live row per device.
+///
 /// `credential_hash` is the SHA-256 of the raw API key (`hash_api_key`) —
 /// the same value stored in the session's `token_hash` column.
 ///
@@ -74,42 +80,73 @@ pub(crate) async fn track_session(
         .await;
 
     match existing {
-        Ok(Some(session)) => {
+        Ok(Some(session)) if session.revoked => {
             // A revoked session for this device is a logout gesture for
             // that device: reject the request instead of touching or
             // replacing the row.
-            if session.revoked {
-                return false;
-            }
-            // Throttled last-active update (at most once per minute).
-            if now.saturating_sub(session.last_active_at) >= SESSION_TOUCH_THROTTLE_SECS {
-                if let Err(e) = state.sessions.touch(&session.id, now).await {
-                    tracing::warn!(session_id = %session.id, "session touch failed: {e}");
+            false
+        }
+        Ok(Some(session)) => {
+            // Sliding expiry: the found session's TTL restarts on use, so
+            // a live device never crosses its expiry wall while still
+            // authenticating. A found-but-expired row (device returned
+            // after > TTL idle) is re-minted as a new session.
+            if session.expires_at > now {
+                // Throttled activity write; also slides `expires_at`.
+                if now.saturating_sub(session.last_active_at) >= SESSION_TOUCH_THROTTLE_SECS {
+                    if let Err(e) = state
+                        .sessions
+                        .touch(&session.id, now, now + SESSION_TTL_SECS)
+                        .await
+                    {
+                        tracing::warn!(session_id = %session.id, "session touch failed: {e}");
+                    }
                 }
+                true
+            } else {
+                // Expired row: the credential is still valid (expiry is
+                // not revocation), so re-mint the session for this device
+                // with a fresh TTL. The stale row remains (revoked=false,
+                // expired) until retention cleanup removes it.
+                mint_session(state, user_id, credential_hash, ip_address, user_agent, now).await;
+                true
             }
-            true
         }
         Ok(None) => {
             // First presentation of this credential from this device:
             // create the session row.
-            let session = gyre_domain::UserSession::new(
-                Id::new(uuid::Uuid::new_v4().to_string()),
-                user_id.clone(),
-                credential_hash,
-                ip_address,
-                user_agent,
-                now,
-                now + SESSION_TTL_SECS,
-            );
-            if let Err(e) = state.sessions.create(&session).await {
-                tracing::warn!(user_id = %user_id, "session create failed: {e}");
-            }
+            mint_session(state, user_id, credential_hash, ip_address, user_agent, now).await;
             true
         }
         Err(e) => {
             tracing::warn!(user_id = %user_id, "session lookup failed: {e}");
             true
         }
+    }
+}
+
+/// Create a new session row for (credential, device), logging (not
+/// propagating) storage failures — session tracking must not lock an
+/// already-authenticated credential out.
+async fn mint_session(
+    state: &AppState,
+    user_id: &Id,
+    credential_hash: &str,
+    ip_address: &str,
+    user_agent: &str,
+    now: u64,
+) {
+    let session = gyre_domain::UserSession::new(
+        Id::new(uuid::Uuid::new_v4().to_string()),
+        user_id.clone(),
+        credential_hash,
+        ip_address,
+        user_agent,
+        now,
+        now + SESSION_TTL_SECS,
+    );
+    if let Err(e) = state.sessions.create(&session).await {
+        tracing::warn!(user_id = %user_id, "session create failed: {e}");
     }
 }
 
@@ -1364,8 +1401,8 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        test_helpers::*, AuthenticatedAgent, WsTicketStore, SESSION_TOUCH_THROTTLE_SECS,
-        track_session,
+        test_helpers::*, AuthenticatedAgent, WsTicketStore, SESSION_TTL_SECS,
+        SESSION_TOUCH_THROTTLE_SECS, track_session,
     };
     use crate::mem::test_state;
     use gyre_domain::UserRole;
@@ -2358,6 +2395,14 @@ mod tests {
             touched.last_active_at,
             stale.last_active_at
         );
+        // Sliding expiry: the same throttled write must restart the TTL —
+        // a daily-active device never crosses its expiry wall.
+        assert!(
+            touched.expires_at >= now + SESSION_TTL_SECS,
+            "touch must slide expires_at to now + TTL (got {}, seeded {})",
+            touched.expires_at,
+            stale.expires_at
+        );
 
         // Fresh session: last active seconds ago (inside the window) → must
         // NOT be re-written.
@@ -2372,6 +2417,7 @@ mod tests {
         );
         state.sessions.create(&fresh).await.unwrap();
         let seeded_active = fresh.last_active_at;
+        let seeded_expiry = fresh.expires_at;
         assert!(
             track_session(
                 &state,
@@ -2393,6 +2439,155 @@ mod tests {
             after.last_active_at, seeded_active,
             "session inside the throttle window must not get a last_active_at \
              write (write amplification)"
+        );
+        assert_eq!(
+            after.expires_at, seeded_expiry,
+            "session inside the throttle window must not get an expires_at \
+             write (write amplification)"
+        );
+    }
+
+    /// A device returning after an idle expiry (session found but
+    /// `expires_at` in the past) keeps authenticating and gets exactly one
+    /// fresh session row — the auth path must re-mint, not return to a row
+    /// that `GET /users/me/sessions` would filter out forever.
+    #[tokio::test]
+    async fn expired_session_is_reminted_not_zombified() {
+        let state = test_state();
+        let user_id = Id::new("remint-user");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Expired-but-not-revoked row for this device.
+        let expired = gyre_domain::UserSession::new(
+            Id::new("sess-expired"),
+            user_id.clone(),
+            "cred-remint",
+            "10.1.1.1",
+            "gyre-old/1.0",
+            now - SESSION_TTL_SECS - 100,
+            now - 50,
+        );
+        state.sessions.create(&expired).await.unwrap();
+
+        assert!(
+            track_session(
+                &state,
+                &user_id,
+                "cred-remint",
+                "10.1.1.1",
+                "gyre-old/1.0"
+            )
+            .await,
+            "an expired-but-not-revoked session must not reject auth \
+             (expiry is not revocation)"
+        );
+
+        // Exactly one live row for the device now exists.
+        let all = state.sessions.list_for_user(&user_id).await.unwrap();
+        let live: Vec<_> = all
+            .iter()
+            .filter(|s| s.ip_address == "10.1.1.1" && s.user_agent == "gyre-old/1.0")
+            .filter(|s| !s.revoked && s.expires_at > now)
+            .collect();
+        assert_eq!(
+            live.len(),
+            1,
+            "expired session must be re-minted as exactly one live row, got {live:?}"
+        );
+        assert_ne!(
+            live[0].id,
+            expired.id,
+            "the re-minted row must be a new row (fresh TTL), not the expired one"
+        );
+        assert!(
+            live[0].expires_at > now,
+            "re-minted session must be live (expires_at in the future)"
+        );
+
+        // Second request on the same device must find the new row (no
+        // re-mint-per-request explosion).
+        assert!(
+            track_session(
+                &state,
+                &user_id,
+                "cred-remint",
+                "10.1.1.1",
+                "gyre-old/1.0"
+            )
+            .await
+        );
+        let all = state.sessions.list_for_user(&user_id).await.unwrap();
+        let live: Vec<_> = all
+            .iter()
+            .filter(|s| s.ip_address == "10.1.1.1" && s.user_agent == "gyre-old/1.0")
+            .filter(|s| !s.revoked && s.expires_at > now)
+            .collect();
+        assert_eq!(
+            live.len(),
+            1,
+            "re-presenting the same device must not mint a second live row"
+        );
+    }
+
+    /// "Sign out everywhere" must survive retention cleanup: revoked rows
+    /// are never deleted, so a credential whose every session was revoked
+    /// stays rejected forever — the cleanup job must not re-authorize it.
+    #[tokio::test]
+    async fn signout_everywhere_survives_retention_cleanup() {
+        let state = test_state();
+        let user_id = Id::new("retention-user");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Two long-expired sessions for this credential, both revoked.
+        for i in 0..2 {
+            let s = gyre_domain::UserSession::new(
+                Id::new(format!("sess-ret-{i}")),
+                user_id.clone(),
+                "cred-ret",
+                "10.2.2.2",
+                "gyre-ret/1.0",
+                now - 2 * SESSION_TTL_SECS,
+                now - SESSION_TTL_SECS,
+            );
+            state.sessions.create(&s).await.unwrap();
+            state.sessions.revoke(&s.id, &user_id).await.unwrap();
+        }
+        // An unrevoked long-expired row for another credential: this one
+        // MUST be deleted by retention cleanup.
+        let garbage = gyre_domain::UserSession::new(
+            Id::new("sess-ret-garbage"),
+            user_id.clone(),
+            "cred-other",
+            "10.2.2.2",
+            "gyre-ret/1.0",
+            now - 2 * SESSION_TTL_SECS,
+            now - SESSION_TTL_SECS,
+        );
+        state.sessions.create(&garbage).await.unwrap();
+
+        assert!(
+            credential_revoked(&state, &user_id, "cred-ret").await,
+            "all-revoked credential must be rejected (sign out everywhere)"
+        );
+
+        // Retention cleanup with a cutoff past everything.
+        let deleted = state
+            .sessions
+            .delete_expired_before(now - 100)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1, "only the unrevoked expired row is deleted");
+
+        // The signed-out credential is STILL rejected.
+        assert!(
+            credential_revoked(&state, &user_id, "cred-ret").await,
+            "retention cleanup must not re-authorize a signed-out credential"
         );
     }
 }

@@ -4043,7 +4043,8 @@ impl gyre_ports::SessionRepository for MemSessionRepository {
             .read()
             .await
             .iter()
-            .find(|s| s.token_hash == token_hash)
+            .filter(|s| s.token_hash == token_hash)
+            .max_by_key(|s| (s.created_at, s.id.to_string()))
             .cloned())
     }
 
@@ -4059,19 +4060,23 @@ impl gyre_ports::SessionRepository for MemSessionRepository {
             .read()
             .await
             .iter()
-            .find(|s| {
+            .filter(|s| {
                 &s.user_id == user_id
                     && s.token_hash == credential_hash
                     && s.ip_address == ip_address
                     && s.user_agent == user_agent
             })
+            // Newest match first: after a re-mint both the stale expired
+            // row and the fresh row match; the fresh one must be found.
+            .max_by_key(|s| (s.created_at, s.id.to_string()))
             .cloned())
     }
 
-    async fn touch(&self, id: &Id, last_active_at: u64) -> Result<()> {
+    async fn touch(&self, id: &Id, last_active_at: u64, expires_at: u64) -> Result<()> {
         let mut guard = self.sessions.write().await;
         if let Some(s) = guard.iter_mut().find(|s| &s.id == id) {
             s.last_active_at = last_active_at;
+            s.expires_at = expires_at;
         }
         Ok(())
     }
@@ -4098,7 +4103,9 @@ impl gyre_ports::SessionRepository for MemSessionRepository {
     async fn delete_expired_before(&self, cutoff: u64) -> Result<u64> {
         let mut guard = self.sessions.write().await;
         let before = guard.len();
-        guard.retain(|s| s.expires_at >= cutoff);
+        // Port contract: revoked rows are never deleted — they are the
+        // durable record that keeps a signed-out credential rejected.
+        guard.retain(|s| s.revoked || s.expires_at >= cutoff);
         Ok((before - guard.len()) as u64)
     }
 }

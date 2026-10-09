@@ -443,6 +443,10 @@ impl SessionRepository for SqliteStorage {
             let mut conn = pool.get().context("get db connection")?;
             let row = user_sessions::table
                 .filter(user_sessions::token_hash.eq(&hash))
+                // Newest first: a credential shared by several devices has
+                // several rows with the same hash.
+                .order(user_sessions::created_at.desc())
+                .then_order_by(user_sessions::id.desc())
                 .first::<UserSessionRow>(&mut *conn)
                 .optional()
                 .context("find user_session by token hash")?;
@@ -465,11 +469,17 @@ impl SessionRepository for SqliteStorage {
         let ua = user_agent.to_string();
         tokio::task::spawn_blocking(move || -> Result<Option<UserSession>> {
             let mut conn = pool.get().context("get db connection")?;
+            // Newest matching row first: after a re-mint (device returning
+            // after an idle expiry), both the stale expired row and the
+            // fresh row match this tuple; the fresh one must be found or
+            // the auth path would re-mint on every request.
             let row = user_sessions::table
                 .filter(user_sessions::user_id.eq(&uid))
                 .filter(user_sessions::token_hash.eq(&cred))
                 .filter(user_sessions::ip_address.eq(&ip))
                 .filter(user_sessions::user_agent.eq(&ua))
+                .order(user_sessions::created_at.desc())
+                .then_order_by(user_sessions::id.desc())
                 .first::<UserSessionRow>(&mut *conn)
                 .optional()
                 .context("find user_session by credential+device")?;
@@ -478,13 +488,18 @@ impl SessionRepository for SqliteStorage {
         .await?
     }
 
-    async fn touch(&self, id: &Id, last_active_at: u64) -> Result<()> {
+    async fn touch(&self, id: &Id, last_active_at: u64, expires_at: u64) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
+            // Sliding expiry: each throttled activity write also restarts
+            // the session TTL (port contract on `touch`).
             diesel::update(user_sessions::table.find(id.as_str()))
-                .set(user_sessions::last_active_at.eq(last_active_at as i64))
+                .set((
+                    user_sessions::last_active_at.eq(last_active_at as i64),
+                    user_sessions::expires_at.eq(expires_at as i64),
+                ))
                 .execute(&mut *conn)
                 .context("touch user_session")?;
             Ok(())
@@ -535,8 +550,11 @@ impl SessionRepository for SqliteStorage {
         let pool = Arc::clone(&self.pool);
         tokio::task::spawn_blocking(move || -> Result<u64> {
             let mut conn = pool.get().context("get db connection")?;
+            // Port contract: revoked rows are never deleted — they are the
+            // durable record that keeps a signed-out credential rejected.
             let n = diesel::delete(user_sessions::table)
                 .filter(user_sessions::expires_at.lt(cutoff as i64))
+                .filter(user_sessions::revoked.eq(0))
                 .execute(&mut *conn)
                 .context("delete expired user_sessions")?;
             Ok(n as u64)
@@ -748,24 +766,92 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_touch_updates_last_active() {
+    async fn session_touch_slides_expiry() {
         let (_tmp, s) = setup();
-        let u = make_user("s-u4");
+        let u = make_user("s-u4b");
         UserRepository::create(&s, &u).await.unwrap();
 
-        let sess = make_session("sess-touch", &u.id, "hash-touch", 2_000);
+        let sess = make_session("sess-slide", &u.id, "hash-slide", 2_000);
         SessionRepository::create(&s, &sess).await.unwrap();
 
-        SessionRepository::touch(&s, &Id::new("sess-touch"), 1_500)
+        // Throttled activity write slides the TTL: a daily-active device
+        // must never cross its expiry wall while still authenticating.
+        SessionRepository::touch(&s, &Id::new("sess-slide"), 1_500, 1_500 + 30 * 24 * 3600)
             .await
             .unwrap();
-        let after = SessionRepository::find_by_id(&s, &Id::new("sess-touch"))
+        let after = SessionRepository::find_by_id(&s, &Id::new("sess-slide"))
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(after.last_active_at, 1_500, "touch must persist last_active_at");
         assert_eq!(
-            after.last_active_at, 1_500,
-            "touch must persist last_active_at"
+            after.expires_at,
+            1_500 + 30 * 24 * 3600,
+            "touch must slide expires_at (session TTL restarts on use)"
+        );
+    }
+
+    /// Port contract: revoked rows are never deleted by retention cleanup —
+    /// a revoked row is the durable record keeping a signed-out credential
+    /// rejected; deleting it would re-authorize the API key.
+    #[tokio::test]
+    async fn session_retention_never_deletes_revoked_rows() {
+        let (_tmp, s) = setup();
+        let u = make_user("s-u9");
+        UserRepository::create(&s, &u).await.unwrap();
+
+        let old_expired_revoked = make_session("sess-rr", &u.id, "h-rr", 1_000);
+        let old_expired_live = make_session("sess-rl", &u.id, "h-rl", 2_000);
+        SessionRepository::create(&s, &old_expired_revoked).await.unwrap();
+        SessionRepository::create(&s, &old_expired_live).await.unwrap();
+        SessionRepository::revoke(&s, &Id::new("sess-rr"), &u.id)
+            .await
+            .unwrap();
+
+        // Cutoff well past both rows' expiry.
+        let deleted = SessionRepository::delete_expired_before(&s, 5_000)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1, "only the unrevoked expired row is deleted");
+        let revoked = SessionRepository::find_by_id(&s, &Id::new("sess-rr"))
+            .await
+            .unwrap()
+            .expect("revoked rows must survive retention cleanup forever");
+        assert!(revoked.revoked);
+        assert!(
+            SessionRepository::find_by_id(&s, &Id::new("sess-rl"))
+                .await
+                .unwrap()
+                .is_none(),
+            "expired live rows are removed by retention cleanup"
+        );
+    }
+
+    /// After a re-mint (device returning after idle expiry), both the stale
+    /// expired row and the fresh row match the (user, credential, ip,
+    /// user-agent) tuple; the find must return the newest row or the auth
+    /// path would re-mint on every request.
+    #[tokio::test]
+    async fn session_find_by_credential_and_device_returns_newest_match() {
+        let (_tmp, s) = setup();
+        let u = make_user("s-u10");
+        UserRepository::create(&s, &u).await.unwrap();
+
+        let stale = make_session("sess-old-dev", &u.id, "cred-x", 1_000);
+        let fresh = make_session("sess-new-dev", &u.id, "cred-x", 9_000);
+        SessionRepository::create(&s, &stale).await.unwrap();
+        SessionRepository::create(&s, &fresh).await.unwrap();
+
+        let found = SessionRepository::find_by_credential_and_device(
+            &s, &u.id, "cred-x", "127.0.0.1", "gyre-test/1.0",
+        )
+        .await
+        .unwrap()
+        .expect("a row must match the device tuple");
+        assert_eq!(
+            found.id,
+            Id::new("sess-new-dev"),
+            "the newest matching row must be returned after a re-mint"
         );
     }
 
@@ -838,21 +924,38 @@ mod tests {
             "revoke-all must not touch other users' sessions"
         );
 
-        // Retention cleanup deletes only sessions expired before cutoff.
+        // Retention cleanup deletes only UNREVOKED rows expired before the
+        // cutoff: sess-a1 (revoked, expired) survives as the durable
+        // sign-out record; sess-b1 (unrevoked, expired) is deleted;
+        // sess-a2 (unrevoked, unexpired) survives.
         let deleted = SessionRepository::delete_expired_before(&s, 5_000)
             .await
             .unwrap();
-        assert_eq!(deleted, 2, "expired rows (sess-a1, sess-b1) must be deleted");
+        assert_eq!(
+            deleted, 1,
+            "only the unrevoked expired row (sess-b1) is deleted; the revoked \
+             sess-a1 survives as the durable sign-out record"
+        );
         let remaining: Vec<_> = SessionRepository::list_for_user(&s, &u.id)
             .await
             .unwrap()
             .into_iter()
             .chain(SessionRepository::list_for_user(&s, &other.id).await.unwrap())
             .collect();
-        assert!(
-            remaining.iter().all(|x| x.expires_at >= 5_000),
-            "no row expired before the cutoff may survive"
+        // sess-a2 (unexpired) and sess-a1 (revoked, expired) both survive;
+        // sess-b1 (unrevoked, expired) is gone.
+        assert_eq!(
+            remaining.len(),
+            2,
+            "unexpired session and revoked session survive; expired live row deleted"
         );
-        assert_eq!(remaining.len(), 1, "only the unexpired session remains");
+        assert!(
+            remaining.iter().any(|x| x.id == Id::new("sess-a1") && x.revoked),
+            "the revoked row must survive retention cleanup"
+        );
+        assert!(
+            remaining.iter().any(|x| x.id == Id::new("sess-a2") && !x.revoked),
+            "the unexpired row must survive"
+        );
     }
 }

@@ -128,6 +128,10 @@ impl SessionRepository for PgStorage {
             let mut conn = pool.get().context("get db connection")?;
             let row = user_sessions::table
                 .filter(user_sessions::token_hash.eq(&hash))
+                // Newest first: a credential shared by several devices has
+                // several rows with the same hash.
+                .order(user_sessions::created_at.desc())
+                .then_order_by(user_sessions::id.desc())
                 .first::<UserSessionRow>(&mut *conn)
                 .optional()
                 .context("find user_session by token hash")?;
@@ -150,11 +154,18 @@ impl SessionRepository for PgStorage {
         let ua = user_agent.to_string();
         tokio::task::spawn_blocking(move || -> Result<Option<UserSession>> {
             let mut conn = pool.get().context("get db connection")?;
+            // Newest matching row first: after a re-mint (device
+            // returning after an idle expiry), both the stale expired
+            // row and the fresh row match this tuple; the fresh one
+            // must be found or the auth path would re-mint on every
+            // request.
             let row = user_sessions::table
                 .filter(user_sessions::user_id.eq(&uid))
                 .filter(user_sessions::token_hash.eq(&cred))
                 .filter(user_sessions::ip_address.eq(&ip))
                 .filter(user_sessions::user_agent.eq(&ua))
+                .order(user_sessions::created_at.desc())
+                .then_order_by(user_sessions::id.desc())
                 .first::<UserSessionRow>(&mut *conn)
                 .optional()
                 .context("find user_session by credential+device")?;
@@ -163,13 +174,18 @@ impl SessionRepository for PgStorage {
         .await?
     }
 
-    async fn touch(&self, id: &Id, last_active_at: u64) -> Result<()> {
+    async fn touch(&self, id: &Id, last_active_at: u64, expires_at: u64) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
+            // Sliding expiry: each throttled activity write also restarts
+            // the session TTL (port contract on `touch`).
             diesel::update(user_sessions::table.find(id.as_str()))
-                .set(user_sessions::last_active_at.eq(last_active_at as i64))
+                .set((
+                    user_sessions::last_active_at.eq(last_active_at as i64),
+                    user_sessions::expires_at.eq(expires_at as i64),
+                ))
                 .execute(&mut *conn)
                 .context("touch user_session")?;
             Ok(())
@@ -220,8 +236,11 @@ impl SessionRepository for PgStorage {
         let pool = Arc::clone(&self.pool);
         tokio::task::spawn_blocking(move || -> Result<u64> {
             let mut conn = pool.get().context("get db connection")?;
+            // Port contract: revoked rows are never deleted — they are the
+            // durable record that keeps a signed-out credential rejected.
             let n = diesel::delete(user_sessions::table)
                 .filter(user_sessions::expires_at.lt(cutoff as i64))
+                .filter(user_sessions::revoked.eq(0))
                 .execute(&mut *conn)
                 .context("delete expired user_sessions")?;
             Ok(n as u64)
