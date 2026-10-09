@@ -2,7 +2,7 @@
 title: "Enhance User entity with profile fields and preferences"
 spec_ref: "user-management.md §User Entity"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 coverage_sections:
   - "user-management.md §User Entity"
   - "user-management.md §Username vs Display Name"
@@ -47,6 +47,25 @@ Test-harness note: the migration regression test initially failed with
 `no such table: __diesel_schema_migrations` — raw
 `MigrationHarness::run_migrations` (unlike `run_pending_migrations`) does
 not set up the bookkeeping table; fixed by calling `conn.setup()` first.
+
+## Revision Round 2 (2026-10-09) — integration-rejection repair
+
+The rejected integration's only preserved item was `specs/coverage/SUMMARY.md`
+(review-changed source: the reviewer cannot approve its own or verifier
+edits). Verified the committed summary was already a byte-faithful mechanical
+regeneration (`bash scripts/update-coverage-summary.sh` reproduces it
+exactly), and its business-continuity/HSI number changes were accumulated
+sync drift from accepted audit commits on the matrices — correct numbers,
+verifier-owned provenance. Repaired by making the coverage bookkeeping
+implementation-owned per repo convention (task-151 `1e8141f`, task-207
+`ff3fbb8`): user-management.md rows 2 (User Entity), 3 (Username vs
+Display Name), and 11 (User Preferences) flipped task-assigned → implemented
+with evidence notes citing the code paths, header counts updated
+(26/3 → 23/3), SUMMARY regenerated via the script. No product code changes
+this round — the F1/F2/F3 repairs from Round 1 are already on this tree and
+re-verified (focused probes: `migration_000056_backfills_unique_url_safe_usernames`
+ok; `gyre-domain --lib user` 11/11; scim/users/auth suites previously green
+on this tree).
 
 ## Spec Excerpt
 
