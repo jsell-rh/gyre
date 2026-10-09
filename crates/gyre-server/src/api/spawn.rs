@@ -709,9 +709,9 @@ pub(crate) async fn spawn_agent_core(
     let spawned_container_image: Option<String>; // M19.3/M19.4
 
     {
-        // Docker requires an absolute working directory path. Canonicalize the
-        // worktree path to ensure it's absolute even when GYRE_REPOS_PATH is
-        // relative (e.g. the default "./repos/").
+        // Docker requires an absolute working directory path. Canonicalize
+        // the worktree path so legacy relative paths (older repo.path rows
+        // persisted before repos_root was made absolute) still resolve.
         let effective_work_dir = if std::path::Path::new(&jj_workspace_path).exists() {
             std::fs::canonicalize(&jj_workspace_path)
                 .map(|p| p.to_string_lossy().into_owned())
