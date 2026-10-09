@@ -2,10 +2,10 @@
 title: "Implement spec-lifecycle accountability patrol (task-age checks + orchestrator escalation)"
 spec_ref: "spec-lifecycle.md §Accountability Integration"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "spec-lifecycle.md §Accountability Integration"
-commits: []
+commits: ["31a278afec1fa2af446b444b9f4d35bfae47ee52", "e3134107b28a5785bc0c5a2db5a33a891ad91b90", "b291d66ccc2c2c1234bd70e9b6856cd11e9b2b4d", "6a6a63ec97809d1766e0441b8f70f5b0eed01705"]
 ---
 
 ## Spec Excerpt
