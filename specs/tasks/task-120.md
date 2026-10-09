@@ -2,7 +2,7 @@
 title: "Enhance User entity with profile fields and preferences"
 spec_ref: "user-management.md §User Entity"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "user-management.md §User Entity"
   - "user-management.md §Username vs Display Name"
@@ -147,3 +147,11 @@ Transport note (recorded per assignment): this sandbox's listener probe
 over HTTP cannot run here; the SQLite migration-boot path is instead proven by
 every `SqliteStorage::new`-constructing adapter test (349/349). Host-side
 checks: `cargo test --all` + GitHub CI on this exact head.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-domain/src/user.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.

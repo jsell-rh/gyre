@@ -119,28 +119,11 @@ impl UserPreferences {
     /// Merge a patch over `self`: `Some` fields replace, `None` fields keep
     /// the current value (PUT /api/v1/users/me partial-update semantics).
     pub fn apply_patch(&mut self, patch: UserPreferencesPatch) {
-        if let Some(v) = patch.default_workspace_id {
-            self.default_workspace_id = Some(v);
-        }
-        if let Some(v) = patch.theme {
-            self.theme = v;
-        }
-        if let Some(v) = patch.notification_channels {
-            self.notification_channels = v;
-        }
-        if let Some(v) = patch.ui_density {
-            self.ui_density = v;
-        }
-        if let Some(v) = patch.code_font_size {
-            self.code_font_size = v;
-        }
-        if let Some(v) = patch.diff_view {
-            self.diff_view = v;
-        }
-        if let Some(v) = patch.activity_feed_scope {
-            self.activity_feed_scope = v;
-        }
+        // MUTANT: replace-with-defaults semantics
+        let _ = patch;
+        *self = UserPreferences::default();
     }
+
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
