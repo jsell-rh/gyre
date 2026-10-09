@@ -361,11 +361,27 @@ def publish(execution, task):
     if latest != verified['base']:
         execution.store.resource_state(permit, 'absent')
         return {'base_changed': latest}, {'verified': None}, []
-    execution.command('gh', 'pr', 'merge', url, '--merge', '--match-head-commit', head,
-                      '--subject', f"feat({task['name']}): {data['title']}",
-                      '--body-file', str(description), timeout=60)
+    method = merge_method(execution, repo)
+    command = ['gh', 'pr', 'merge', url, method, '--match-head-commit', head]
+    if method != '--rebase':
+        command += ['--subject', f"feat({task['name']}): {data['title']}",
+                    '--body-file', str(description)]
+    execution.command(*command, timeout=60)
     # The next observation confirms the authoritative merge and its tree.
     raise Wait('merge requested; awaiting upstream confirmation')
+
+
+def merge_method(execution, repository):
+    """Honor repository merge policy without an administrator bypass."""
+    fields = ('allow_merge_commit', 'allow_squash_merge', 'allow_rebase_merge')
+    policy = json.loads(execution.command('gh', 'api', 'repos/' + repository, '--jq',
+                        '{allow_merge_commit,allow_squash_merge,allow_rebase_merge}', timeout=30).stdout)
+    if not isinstance(policy, dict) or any(type(policy.get(field)) is not bool for field in fields):
+        raise Retry('repository merge policy observation incomplete')
+    for field, method in zip(fields, ('--merge', '--squash', '--rebase')):
+        if policy[field]:
+            return method
+    raise Wait('repository policy currently disables every merge method')
 
 
 def baseline_repair(execution, observation):

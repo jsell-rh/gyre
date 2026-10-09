@@ -76,6 +76,21 @@ class CrashTest(unittest.TestCase):
         claim = self.store.claim('publish', 'next-publisher')
         self.assertTrue(self.store.reserve('merge-new', claim['id'], claim['token'], 'merge', 1))
 
+    def test_merge_method_honors_repository_policy(self):
+        from pipeline.stages import merge_method
+        from pipeline.execution import Retry, Wait
+        execution = Execution(self.store, self.claim)
+        fields = ('allow_merge_commit', 'allow_squash_merge', 'allow_rebase_merge')
+        for index, expected in enumerate(('--merge', '--squash', '--rebase')):
+            policy = dict.fromkeys(fields, False)
+            policy[fields[index]] = True
+            with patch.object(execution, 'command', return_value=subprocess.CompletedProcess([], 0, json.dumps(policy), '')):
+                self.assertEqual(merge_method(execution, 'jsell-rh/gyre'), expected)
+        for policy, error in (({}, Retry), (dict.fromkeys(fields, False), Wait)):
+            with patch.object(execution, 'command', return_value=subprocess.CompletedProcess([], 0, json.dumps(policy), '')):
+                with self.assertRaises(error):
+                    merge_method(execution, 'jsell-rh/gyre')
+
     def test_queued_merge_retains_its_global_permit(self):
         from pipeline.execution import Wait
         with self.assertRaises(Wait):
