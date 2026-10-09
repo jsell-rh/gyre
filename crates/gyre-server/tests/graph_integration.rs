@@ -1828,9 +1828,13 @@ async fn test_mcp_graph_query_dryrun() {
         content.contains("matched_nodes"),
         "dryrun should return matched_nodes"
     );
-    // Parse the dry-run result
+    // Parse the §9 envelope: {"query": {...}, "result": {DryRunResult}}
     let dryrun: Value = serde_json::from_str(content).unwrap();
-    assert!(dryrun["matched_nodes"].as_u64().unwrap() >= 1);
+    assert!(
+        dryrun["query"]["scope"]["node"].is_string(),
+        "dryrun should echo the query, got: {dryrun}"
+    );
+    assert!(dryrun["result"]["matched_nodes"].as_u64().unwrap() >= 1);
 }
 
 /// MCP graph_nodes tool returns nodes by pattern.

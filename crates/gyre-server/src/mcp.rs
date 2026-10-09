@@ -2150,7 +2150,14 @@ async fn handle_graph_query_dryrun(state: &AppState, args: &Value) -> Value {
     };
 
     let result = gyre_domain::view_query_resolver::dry_run(&query, &nodes, &edges, selected);
-    tool_result(serde_json::to_string_pretty(&result).unwrap_or_default())
+    // §9: the dry-run tool response echoes the query alongside the preview
+    // (`{"query": ..., "result": {...}}`); the `result` member carries the
+    // §23 DryRunResult shape.
+    let envelope = json!({
+        "query": serde_json::to_value(&query).unwrap_or(Value::Null),
+        "result": result,
+    });
+    tool_result(serde_json::to_string_pretty(&envelope).unwrap_or_default())
 }
 
 async fn handle_graph_nodes(state: &AppState, args: &Value) -> Value {
@@ -5084,7 +5091,13 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(!json["result"]["isError"].as_bool().unwrap_or(true), "tool must succeed");
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
-        let result: Value = serde_json::from_str(text).unwrap();
+        let envelope: Value = serde_json::from_str(text).unwrap();
+        // §9: response is {"query": {...}, "result": {DryRunResult}}.
+        assert!(
+            envelope["query"]["scope"]["type"] == "filter",
+            "dryrun must echo the query, got: {text}"
+        );
+        let result = &envelope["result"];
         assert_eq!(result["matched_nodes"], 1);
         assert!(
             result["matched_node_names"]
@@ -5130,8 +5143,8 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
-        let result: Value = serde_json::from_str(text).unwrap();
-        assert_eq!(result["matched_nodes"], 0);
+        let envelope: Value = serde_json::from_str(text).unwrap();
+        let result = &envelope["result"];
         assert!(
             result["warnings"]
                 .as_array()
