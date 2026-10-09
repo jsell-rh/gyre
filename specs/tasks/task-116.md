@@ -2,7 +2,7 @@
 title: "Implement meta-spec prompt assembly"
 spec_ref: "agent-runtime.md §2 Meta-Spec Prompt Assembly"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "agent-runtime.md §2. Meta-Spec Prompt Assembly"
   - "agent-runtime.md §Meta-Specs Are Prompts"
@@ -114,8 +114,10 @@ Read `specs/system/agent-runtime.md` §2 (Meta-Spec Prompt Assembly) in its enti
 - **Registry + bindings API**: flat `/api/v1/meta-specs` CRUD with version
   history and per-version lookup, `PUT/GET /api/v1/specs/:path/meta-spec-bindings`
   with pin validation (409-guarded deletes, version-bumping updates with
-  archival), scope-admin gate on the `required` flag, ABAC route mappings
-  registered and legacy exemptions removed.
+  archival), scope-admin gate on ALL registry writes — POST/PUT/DELETE require
+  tenant Admin for Global scope and workspace Owner/Admin for Workspace scope
+  (agent tokens 403; closes cross-workspace prompt injection via band-2
+  assembly) — ABAC route mappings registered and legacy exemptions removed.
 - **Provenance + maintenance**: merge attestation records `meta_specs_used`
   from the spawn-time prompt-set record; `meta_spec_set_sha` returned from
   spawn; hourly stale-pin detection creates priority-6 `MetaSpecDrift`

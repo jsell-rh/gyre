@@ -1,17 +1,59 @@
 # Review — task-116: Implement meta-spec prompt assembly
 
-Round: 3 (ready-for-review → complete)
+Round: 5 (rounds 4–5 re-reviewed the registry-write governance gate).
+Reviewer scope: `git diff 66422bd..9205a9e` for `crates/gyre-server/src/api/meta_specs.rs`
+(rounds 4–5 delta over the round-3 base); all other task files verified byte-identical
+between the round-3-tested HEAD (`2cbca13`) and current HEAD (`9205a9e`), so round-3
+evidence carries over. Mutation evidence persisted at
+`/tmp/stage/review-evidence/task116-round5-mutation-evidence.md`.
+
+## Round 4/5 verdict
+
+`progress: complete`. Round 4 extended the scope-admin gate from "`required` flag
+only" to **all registry writes** (POST/PUT/DELETE on `/api/v1/meta-specs`), closing a
+cross-workspace prompt-injection hole (any authenticated caller could create a
+workspace-scoped meta-spec in a workspace it had no membership in; assembly band 2
+injects it into every agent spawned there). Round 5 independently re-verified:
+
+- **Gate correctness** (`api/meta_specs.rs:978-1026`): Global → tenant Admin only;
+  Workspace → Owner/Admin membership of the entry's own workspace (global Admin
+  passes); agent tokens (no user identity) always 403. Applied unconditionally on
+  create (against the caller-supplied scope/scope_id), and on update/delete against
+  the loaded entry's own scope — a Developer in workspace A cannot PUT/DELETE into
+  workspace B.
+- **Mutation-verified**: (1) reverting to the pre-round-4 conditional gate fails
+  both new tests at the create assertion (201 vs 403); (2) removing update+delete
+  gates only, the PUT prompt-rewrite assertion fails (200 vs 403); (3) removing
+  the delete gate only, the DELETE assertion fails (204 vs 403). Each gate
+  assertion bites independently.
+- **No collateral breakage**: all 18 `api::meta_specs` tests pass at HEAD
+  (incl. `put_meta_spec_set_requires_admin`, preview JWT tests); e2e script uses
+  the admin token; `publishPersona` (web UI) now correctly requires workspace
+  Owner/Admin — consistent with NEW-26 (the same principle enforced on
+  `PUT /workspaces/:id/meta-spec-set` in commit 6694d94: "agents could rewrite
+  their governance rules"). Spec-level bindings route keeps its separate
+  Developer/Admin gate (spec-authorship level — bindings select registry content,
+  which is itself now admin-gated).
+- **NEW-26 citation verified**: real security finding (commit 6694d94), not a
+  fabricated reference.
+
+Non-blocking: the tightened gate is stricter than §2's literal text ("Only
+scope-level admins can set `required`") — it governs the whole write surface on
+the NEW-26 rationale. This is the safe direction (the registry IS injected prompt
+content; restricting who can write prompts is strictly tighter than who can set
+the flag) and consistent with the enforcement the repo already shipped for the
+workspace meta-spec-set route. If the spec owner wants the literal reading, amend
+the spec via lifecycle rather than weakening the gate.
+
+## Round 3 and earlier
+Round 3 (ready-for-review → complete)
 Reviewer scope: commits `9b15d3e`, `9a7079b` + this round's repair commit.
 
-## Verdict
+### Verdict (round 3)
 
-`progress: complete`. One material gap found and repaired this round
+One material gap found and repaired that round
 (agent-side delivery of the assembled prompt); everything else checked out
 against `agent-runtime.md` §2 with file-level evidence below.
-
-## Findings
-
-### 1. MATERIAL (fixed this round): meta-spec prompt never reached the agent
 
 The previous rounds wired assembly, storage, attestation, and env injection,
 but the last hop was missing:
@@ -65,7 +107,9 @@ Repair (this round):
   `PUT` bumps version + recomputes `content_hash` (`update_bumps_version`).
   DELETE is guarded by binding count (409) in both adapters — port contract
   mirrored in mem.
-- **Scope-admin gate** (`api/meta_specs.rs` `check_scope_admin`): Global →
+- **Scope-admin gate** (`api/meta_specs.rs` `check_scope_admin`) [superseded
+  by rounds 4–5: the gate now applies to ALL registry writes, not just the
+  `required` flag — see Round 4/5 verdict above]: Global →
   tenant Admin only; Workspace → workspace Owner/Admin membership (global
   Admin passes); agent tokens (no user identity) 403. Gated on create-with-
   `required` and on any `required` flip in update (both directions).
