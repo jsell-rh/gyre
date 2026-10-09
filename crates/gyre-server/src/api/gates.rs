@@ -652,10 +652,11 @@ mod tests {
         create_repo(state.clone()).await;
         let app = crate::api::api_router().with_state(state);
 
-        // Create three gates; the second is explicitly positioned first.
+        // Create unit-tests first with explicit position 1; lint and review
+        // get default positions appended after the current max (2, 3).
         for (name, gate_type, command, position) in [
-            ("lint", "lint_command", Some("cargo clippy"), None),
             ("unit-tests", "test_command", Some("cargo test"), Some(1)),
+            ("lint", "lint_command", Some("cargo clippy"), None),
             ("review", "agent_review", None, None),
         ] {
             let mut body = serde_json::json!({
@@ -700,8 +701,8 @@ mod tests {
             .iter()
             .map(|g| g["name"].as_str().unwrap())
             .collect();
-        // unit-tests (position 1) sorts before lint (default 3) and review (default 4);
-        // creation-order defaults append after existing max.
+        // Explicit position 1 sorts first; lint/review defaults (2, 3)
+        // append after the existing max, preserving creation order.
         assert_eq!(names, vec!["unit-tests", "lint", "review"]);
 
         // Reorder via PUT: move review to the front.
