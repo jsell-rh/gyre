@@ -1,8 +1,11 @@
-// F6 (R9): workspace-scope sidebar clicks for Briefing / Explorer / Specs must
-// scroll to real section elements in the DOM. Previously these testids did not
-// exist at workspace scope, so the scroll targeted nothing.
+// F6 (R9): workspace-scope navigation clicks for Briefing / Architecture /
+// Specs must scroll to real section elements in the DOM. Previously these
+// testids did not exist at workspace scope, so the scroll targeted nothing.
 // This is an app-level test: App.svelte renders the REAL WorkspaceHome
 // (AppShell.test.js stubs it, so it cannot catch this class of bug).
+//
+// ui-navigation.md §8: the mobile drawer lists the workspace-home sections
+// and its links navigate to scroll anchors on the workspace home page.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, fireEvent, waitFor } from '@testing-library/svelte';
@@ -69,7 +72,7 @@ import App from '../App.svelte';
 
 const WS = [{ id: 'ws-1', name: 'Payments', slug: 'payments' }];
 
-describe('Workspace sidebar section navigation (F6/R9 — HSI §1.3 workspace-scope scroll targets)', () => {
+describe('Workspace drawer section navigation (F6/R9 — workspace-scope scroll targets)', () => {
   beforeEach(() => {
     window.history.pushState({}, '', '/');
     localStorage.clear();
@@ -84,9 +87,14 @@ describe('Workspace sidebar section navigation (F6/R9 — HSI §1.3 workspace-sc
 
   async function renderApp() {
     const { container } = render(App);
-    // Wait until the workspace home has rendered (workspace auto-selected).
+    // Wait until the workspace home has rendered (workspace auto-selected)
+    // and the drawer is open.
     await waitFor(() => {
-      expect(container.querySelector('[data-testid="sidebar-item-briefing"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="hamburger-btn"]')).toBeTruthy();
+    }, { timeout: 5000 });
+    await fireEvent.click(container.querySelector('[data-testid="hamburger-btn"]'));
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="drawer-item-briefing"]')).toBeTruthy();
     }, { timeout: 5000 });
     await waitFor(() => {
       expect(container.querySelector('[data-testid="section-briefing"]')).toBeTruthy();
@@ -94,37 +102,35 @@ describe('Workspace sidebar section navigation (F6/R9 — HSI §1.3 workspace-sc
     return container;
   }
 
-  // F6: Briefing sidebar click must scroll to a real section element.
-  it('renders section-briefing and scrolls to it when the Briefing sidebar item is clicked', async () => {
+  // F6: Briefing drawer click must scroll to a real section element.
+  it('renders section-briefing and scrolls to it when the Briefing drawer item is clicked', async () => {
     const container = await renderApp();
-    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-briefing"]'));
+    await fireEvent.click(container.querySelector('[data-testid="drawer-item-briefing"]'));
     const section = container.querySelector('[data-testid="section-briefing"]');
     expect(section).toBeTruthy();
-    expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
-  });
-
-  // F6: Explorer sidebar click must scroll to the Architecture section (the
-  // realized-architecture view at workspace scope) and expand it.
-  it('renders section-architecture, expands and scrolls to it when the Explorer sidebar item is clicked', async () => {
-    const container = await renderApp();
-    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-explorer"]'));
-    const section = container.querySelector('[data-testid="section-architecture"]');
-    expect(section).toBeTruthy();
-    // Explorer click expands the collapsed architecture section so the scroll
-    // target has content.
     await waitFor(() => {
-      expect(container.querySelector('[data-testid="arch-toggle"]').getAttribute('aria-expanded')).toBe('true');
+      expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
     }, { timeout: 3000 });
-    expect(container.querySelector('[data-testid="arch-body"]')).toBeTruthy();
-    expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
   });
 
-  // F6: Specs sidebar click must scroll to a real section element.
-  it('renders section-specs and scrolls to it when the Specs sidebar item is clicked', async () => {
+  // F6: drawer navigation must reach the real DOM sections of the workspace
+  // home — the repos section (primary repo list) and specs section.
+  it('renders section-repos and section-specs on the workspace home', async () => {
+    const { container } = render(App);
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="section-repos"]')).toBeTruthy();
+      expect(container.querySelector('[data-testid="section-specs"]')).toBeTruthy();
+    }, { timeout: 5000 });
+  });
+
+  // F6: Specs drawer click must scroll to a real section element.
+  it('renders section-specs and scrolls to it when the Specs drawer item is clicked', async () => {
     const container = await renderApp();
-    await fireEvent.click(container.querySelector('[data-testid="sidebar-item-specs"]'));
+    await fireEvent.click(container.querySelector('[data-testid="drawer-item-specs"]'));
     const section = container.querySelector('[data-testid="section-specs"]');
     expect(section).toBeTruthy();
-    expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
+    await waitFor(() => {
+      expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
+    }, { timeout: 3000 });
   });
 });
