@@ -13,6 +13,8 @@ evidence rather than repeating unchanged, previously supported findings.
 OpenShell disallows loopback listeners. Use supplied exact-SHA logs for failures
 that require a running server or browser; the host and GitHub run those gates.
 Do not install browsers or repeat full suites here to reproduce those failures.
+Give isolated worktrees their own CARGO_TARGET_DIR. Sharing it can reuse another
+checkout's test binary and make a mutation pass or a repair appear to fail.
 
 If a repair handoff is supplied, independently check each reported failure
 and its reproduction. Reject gate weakening, deleted meaningful tests, new

@@ -25,6 +25,8 @@ trace historical commits only when the task requires provenance. Compare with
 current main for unrelated failures. Use an isolated worktree for baseline probes;
 never stash or reset the assigned checkout to run them. Preserve the spec and
 verification gates.
+Give isolated worktrees their own CARGO_TARGET_DIR; a shared target can reuse
+another checkout's test binary instead of compiling the code under inspection.
 Do not silence failures by deleting tests, weakening checks, growing
 exemption files, or marking unfinished requirements complete. When implementation
 is ready for an independent review, set `progress: ready-for-review`; never set

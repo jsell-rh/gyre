@@ -31,8 +31,12 @@ gyre-cli    --> gyre-common
 ## Key Commands
 
 Cargo uses each checkout's `target/` by default. To share build artifacts
-across local worktrees, set `CARGO_TARGET_DIR` to an absolute path in your
-shell; do not commit a machine-specific path to `.cargo/config.toml`.
+within a checkout, set `CARGO_TARGET_DIR` to an absolute path in your shell;
+do not commit a machine-specific path to `.cargo/config.toml`. Isolated baseline
+and mutation worktrees need separate target directories. If a serialized gate
+shares a target across worktrees, it must invalidate workspace packages first
+(`python3 scripts/dev-cargo-clean.py`); otherwise Cargo can reuse the wrong
+checkout's artifacts. The controller does this before every host Rust gate.
 
 ```bash
 # Build everything

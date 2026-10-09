@@ -869,7 +869,14 @@ def promote(db):
                 return
             if time.time() - (check["host_started"] or 0) < 30:
                 return
-        if not gate_ok.exists() or gate_ok.read_text().strip() != merge_sha:
+        if not host_gate_marker_valid(gate_dir, merge_sha):
+            if gate_ok.exists() and gate_exit.exists() and gate_exit.read_text().strip() == '0':
+                gate_ok.unlink(missing_ok=True)
+                gate_exit.unlink(missing_ok=True)
+                db.execute("UPDATE attempts SET host_pid=NULL,host_started=NULL WHERE id=?", (check['id'],))
+                db.commit()
+                event(db, task['name'], 'prior host proof lacks workspace artifact isolation; rechecking exact tree')
+                return
             if not gate_exit.exists() and check["host_pid"] and alive(check["host_pid"], gate_dir / "host-tests.exit.process.json"):
                 return  # keep reconciling other tasks while the host gate runs
             if not gate_exit.exists() and not check["host_pid"]:
@@ -1056,13 +1063,27 @@ def ensure_pull_request(db, task, check, merge_sha):
     return pr
 
 
+HOST_ARTIFACT_POLICY = 'workspace-clean-v1'
+
+
+def host_gate_marker_valid(directory, sha):
+    try:
+        result = json.loads((directory / 'host-tests.result.json').read_text())
+        return ((directory / 'host-tests.ok').read_text().strip() == sha
+                and result.get('status') == 'passed' and result.get('sha') == sha
+                and result.get('artifact_policy') == HOST_ARTIFACT_POLICY)
+    except (OSError, ValueError):
+        return False
+
+
 def host_test_verified(merge_sha, check_id):
     """Run full Rust and frontend suites on the exact verified merge tree."""
     attempt_dir = STATE / "attempts" / check_id
     attempt_dir.mkdir(parents=True, exist_ok=True)
     marker = attempt_dir / "host-tests.ok"
-    if marker.exists() and marker.read_text().strip() == merge_sha:
+    if host_gate_marker_valid(attempt_dir, merge_sha):
         return True
+    marker.unlink(missing_ok=True)
     worktree = STATE / "host-check" / check_id
     worktree.parent.mkdir(parents=True, exist_ok=True)
     if worktree.exists():
@@ -1079,6 +1100,7 @@ def host_test_verified(merge_sha, check_id):
         with (attempt_dir / "host-tests.log").open("wb") as log:
             passed = True
             for command, cwd, timeout in (
+                ([sys.executable, str(ROOT / 'scripts/dev-cargo-clean.py')], worktree, 120),
                 (["cargo", "test", "--all", "--quiet"], worktree, 1800),
                 (["npm", "ci", "--no-audit", "--no-fund"], worktree / "web", 600),
                 (["npm", "test"], worktree / "web", 1800),
@@ -1089,7 +1111,9 @@ def host_test_verified(merge_sha, check_id):
                                             stderr=subprocess.STDOUT, timeout=timeout)
                     if result.returncode:
                         log.flush()
-                        if command[:2] == ['npm', 'ci'] or command[0] == 'cargo':
+                        if command[0] == sys.executable:
+                            operational = True
+                        elif command[:2] == ['npm', 'ci'] or command[0] == 'cargo':
                             text = (attempt_dir / 'host-tests.log').read_text(errors='replace')[-65536:]
                             operational = bool(re.search(r'failed to download|failed to get .* dependency|Could not resolve (?:host|proxy)|Temporary failure in name resolution|ENOTFOUND|ENETUNREACH|EAI_AGAIN|ECONNRESET|ETIMEDOUT', text))
                         passed = False
@@ -1120,7 +1144,8 @@ def host_test_verified(merge_sha, check_id):
         run("git", "worktree", "remove", "--force", str(worktree), check=False)
     if passed:
         marker.write_text(merge_sha + "\n")
-        (attempt_dir / "host-tests.result.json").write_text(json.dumps({"status": "passed", "sha": merge_sha}))
+        (attempt_dir / "host-tests.result.json").write_text(json.dumps({"status": "passed", "sha": merge_sha,
+                                                                     "artifact_policy": HOST_ARTIFACT_POLICY}))
     else:
         db = db_open()
         check = db.execute("SELECT base FROM attempts WHERE id=?", (check_id,)).fetchone()
@@ -1146,6 +1171,7 @@ def host_test_verified(merge_sha, check_id):
 
 def host_environment_signature():
     values = {key: value for key, value in sorted(os.environ.items()) if key not in ('GYRE_DEV_ROOT', '_', 'SHLVL')}
+    values['artifact_policy'] = HOST_ARTIFACT_POLICY
     for tool in ('cargo', 'rustc', 'node', 'npm'):
         try:
             result = subprocess.run([tool, '--version'], capture_output=True, text=True, timeout=5)

@@ -132,6 +132,9 @@ class ControllerGitTest(unittest.TestCase):
             (directory / "host-tests.exit").write_text("0\n" if passed else "1\n")
             if passed:
                 (directory / "host-tests.ok").write_text(merge_sha + "\n")
+                (directory / 'host-tests.result.json').write_text(json.dumps({
+                    'status': 'passed', 'sha': merge_sha,
+                    'artifact_policy': controller.HOST_ARTIFACT_POLICY}))
         host_start = patch.object(controller, "start_host_gate", side_effect=fake_host_gate)
         host_start.start()
         self.addCleanup(host_start.stop)
@@ -943,13 +946,17 @@ elif 'delete' in args:
         controller.sync(self.db)
         fake_bin = Path(self.temp.name) / "bin"
         fake_bin.mkdir()
-        for name, script in (("cargo", "#!/bin/sh\nexit 0\n"),
+        for name, script in (("cargo", "#!/bin/sh\n[ \"$1\" = metadata ] && echo '{\"workspace_members\":[\"fixture\"],\"packages\":[{\"id\":\"fixture\"}]}'\nexit 0\n"),
                              ("npm", "#!/bin/sh\n[ \"$1\" != test ]\n")):
             path = fake_bin / name
             path.write_text(script)
             path.chmod(0o755)
         with patch.dict(os.environ, {"PATH": f"{fake_bin}:{os.environ['PATH']}"}), \
              patch.object(controller, "host_test_verified", REAL_HOST_TEST):
+            old = controller.STATE / 'attempts/check1'
+            old.mkdir(parents=True, exist_ok=True)
+            (old / 'host-tests.ok').write_text(sha + '\n')
+            (old / 'host-tests.result.json').write_text(json.dumps({'status': 'passed', 'sha': sha}))
             self.assertFalse(controller.host_test_verified(sha, "check1"))
         log = (controller.STATE / "attempts/check1/host-tests.log").read_text()
         self.assertIn("$ cargo test --all --quiet", log)
@@ -965,7 +972,7 @@ elif 'delete' in args:
         sha = self.candidate()
         controller.sync(self.db)
         fake_bin = Path(self.temp.name) / 'bin'; fake_bin.mkdir()
-        for name, script in [('cargo', '#!/bin/sh\n[ "$1" = --version ] && { echo cargo-version; exit 0; }\n[ ! -f broken.txt ]\n'),
+        for name, script in [('cargo', '#!/bin/sh\n[ "$1" = metadata ] && { echo \'{"workspace_members":["fixture"],"packages":[{"id":"fixture"}]}\'; exit 0; }\n[ "$1" = clean ] && exit 0\n[ "$1" = --version ] && { echo cargo-version; exit 0; }\n[ ! -f broken.txt ]\n'),
                              ('npm', '#!/bin/sh\nexit 0\n')]:
             path = fake_bin / name; path.write_text(script); path.chmod(0o755)
         with patch.dict(os.environ, {'PATH': str(fake_bin) + ':' + os.environ['PATH']}), patch.object(controller, 'host_test_verified', REAL_HOST_TEST):
@@ -993,7 +1000,7 @@ elif 'delete' in args:
         fake_bin.mkdir()
         for name in ("cargo", "npm"):
             path = fake_bin / name
-            path.write_text("#!/bin/sh\nexit 0\n")
+            path.write_text("#!/bin/sh\n[ \"$1\" = metadata ] && echo '{\"workspace_members\":[\"fixture\"],\"packages\":[{\"id\":\"fixture\"}]}'\nexit 0\n" if name == 'cargo' else "#!/bin/sh\nexit 0\n")
             path.chmod(0o755)
         check_id = "a" * 16
         self.db.execute("INSERT INTO attempts(id,task,kind,state,started) VALUES(?, 'task-001','check','done',1)", (check_id,))
