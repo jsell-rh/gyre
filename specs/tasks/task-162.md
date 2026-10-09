@@ -6,7 +6,7 @@ progress: not-started
 coverage_sections:
   - "message-bus.md §Relationship to Notifications"
   - "message-bus.md §Implementation Notes"
-commits: ["ba9f4ec7e308e7ad843ded00dab5e688961e29a6", "aab90fd3b9decfbbfe249faa8137aab5b8ce8206"]
+commits: ["fe8b62c7f3300aa4eb668735778445d3b2f4d867", "4e44ad26c61478e07bbfa42e7fb43e612c48247f"]
 ---
 
 ## Spec Excerpt
