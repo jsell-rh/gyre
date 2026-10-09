@@ -8,6 +8,22 @@ import subprocess
 import tempfile
 
 
+def unchanged_bootstrap(directory, base, tree):
+    """Recognize an attested empty clone before its claim branch existed."""
+    directory = Path(directory)
+    try:
+        receipt = json.loads((directory / 'recovery.json').read_text())
+        patch = (directory / 'recovery.patch').read_bytes()
+    except (OSError, ValueError):
+        return False
+    return (bool(re.fullmatch(r'[a-f0-9]{40}', base or ''))
+            and bool(re.fullmatch(r'[a-f0-9]{40}', tree or ''))
+            and receipt.get('version') == 1 and receipt.get('branch') == 'main'
+            and receipt.get('head') == receipt.get('base') == base
+            and receipt.get('tree') == tree and receipt.get('stash_count') == 0
+            and patch == b'' and receipt.get('patch_sha256') == hashlib.sha256(patch).hexdigest())
+
+
 def restore(directory, repository, expected_branch=None):
     directory, repository = Path(directory), Path(repository)
     patch = directory / 'recovery.patch'
