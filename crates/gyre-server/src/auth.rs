@@ -1363,7 +1363,11 @@ mod tests {
     use std::sync::Arc;
     use tower::ServiceExt;
 
-    use super::{test_helpers::*, AuthenticatedAgent, WsTicketStore};
+    use super::{
+        test_helpers::*, AuthenticatedAgent, WsTicketStore, SESSION_TOUCH_THROTTLE_SECS,
+        track_session,
+    };
+    use crate::mem::test_state;
     use gyre_domain::UserRole;
 
     async fn authenticated_handler(
