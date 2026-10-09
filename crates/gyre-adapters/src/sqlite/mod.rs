@@ -341,6 +341,12 @@ mod tests {
             1,
             "000056 not found in embedded migrations"
         );
+        use diesel::migration::MigrationConnection;
+        // run_migrations is the raw harness method — unlike
+        // run_pending_migrations (used by SqliteStorage::new) it does not
+        // set up __diesel_schema_migrations, so initialize the bookkeeping
+        // table first.
+        conn.setup().unwrap();
         conn.run_migrations(&pre).unwrap();
 
         // Legacy rows exactly as a pre-000056 deployment would hold them
