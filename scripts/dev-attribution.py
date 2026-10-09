@@ -12,6 +12,8 @@ def refresh(task, commit=False):
         raise ValueError('invalid task name')
     history = subprocess.check_output(
         ['git', 'log', '--no-merges', '--no-renames', '--format=%x1e%H%x1f%s', '--name-only'], text=True)
+    branch_commits = set(subprocess.check_output(
+        ['git', 'rev-list', '--no-merges', 'origin/main..HEAD'], text=True).splitlines())
     hashes = []
     for record in history.split('\x1e')[1:]:
         header, *paths = record.splitlines()
@@ -19,7 +21,8 @@ def refresh(task, commit=False):
         labels = set()
         for first, siblings in re.findall(r'task-(\d+)((?:\+\d+)*)', subject):
             labels.update('task-' + number for number in [first] + siblings.split('+')[1:])
-        if task in labels and not subject.startswith(('process:', 'review:')) and any(
+        scoped = sha in branch_commits or (task in labels and not subject.startswith(('process:', 'review:')))
+        if scoped and any(
                 path.startswith(('crates/', 'web/src', 'web/tests')) for path in paths):
             hashes.append(sha)
     path = Path('specs/tasks') / (task + '.md')
