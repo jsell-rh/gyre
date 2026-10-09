@@ -97,6 +97,22 @@ class CrashTest(unittest.TestCase):
             cleanup(execution, self.store.task('task-001'))
         remote.assert_called_once()
 
+    def test_deleted_compute_is_released_even_if_source_recovery_retries(self):
+        self.store.reserve('gone', self.work, self.claim['token'], 'sandbox', 1)
+        self.store.resource_state('gone', 'deleting')
+        self.store.retry(self.work, self.claim['token'], {'message': 'bootstrap failed'})
+        original = self.store.directory / 'attempts' / self.work / str(self.claim['token'])
+        original.mkdir(parents=True)
+        (original / 'recovery.json').write_text(json.dumps({'base': 'base'}))
+        self.store.enqueue('cleanup', 'task-001', 'g', {'resource': 'gone'})
+        execution = Execution(self.store, self.store.claim('cleanup', 'cleaner'))
+        with patch.object(execution, 'login'), patch('pipeline.stages.gateway.inventory', return_value=[]), patch('pipeline.stages.checkout', return_value=self.store.directory), patch.object(execution, 'command', return_value=subprocess.CompletedProcess([], 0, 'tree\n', '')), patch('pipeline.recovery.restore', side_effect=ValueError('incomplete receipt')):
+            with self.assertRaisesRegex(ValueError, 'incomplete receipt'):
+                cleanup(execution, self.store.task('task-001'))
+        self.assertEqual(self.store.db.execute("SELECT state FROM resources WHERE name='gone'").fetchone()[0], 'absent')
+        self.assertTrue((original / 'recovery.json').exists())
+        self.assertIsNone(self.store.task('task-001')['data'].get('candidate'))
+
     def merge_cleanup(self, observation):
         self.store.reserve('merge-old', self.work, self.claim['token'], 'merge', 1,
                            {'url': 'https://github.com/jsell-rh/gyre/pull/633'})
