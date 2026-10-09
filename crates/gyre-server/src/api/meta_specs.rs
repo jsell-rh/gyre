@@ -271,8 +271,12 @@ pub async fn put_meta_spec_set(
     let changed_paths = crate::reconciliation::diff_meta_spec_set(&old_set, &set);
     if !changed_paths.is_empty() {
         // §11 MetaSpecSetUpdated: workspace meta-spec set binding changed.
-        crate::reconciliation::emit_meta_spec_set_updated(&state, &Id::new(&workspace_id), &changed_paths)
-            .await;
+        crate::reconciliation::emit_meta_spec_set_updated(
+            &state,
+            &Id::new(&workspace_id),
+            &changed_paths,
+        )
+        .await;
         let summary = crate::reconciliation::run_reconciliation(
             &state,
             &Id::new(&workspace_id),
@@ -1006,7 +1010,7 @@ fn parse_approval_status(s: &str) -> Result<MetaSpecApprovalStatus, ApiError> {
 
 pub async fn list_meta_specs_registry(
     State(state): State<Arc<AppState>>,
-    _auth: AuthenticatedAgent,
+    auth: AuthenticatedAgent,
     Query(q): Query<ListMetaSpecsQuery>,
 ) -> Result<Json<Vec<MetaSpec>>, ApiError> {
     let scope = match q.scope.as_deref() {
@@ -1017,6 +1021,46 @@ pub async fn list_meta_specs_registry(
         None => None,
         Some(k) => Some(parse_kind(k)?),
     };
+
+    // Per-handler authorization (route is ABAC-exempt): a Workspace-scoped
+    // listing is a workspace membership view — the caller must belong to the
+    // workspace whose entries they enumerate (tenant containment for user
+    // tokens, membership via the explorer-views pattern). Global-scope
+    // registry entries are shared reference data, readable by any
+    // authenticated principal (docs/api-reference.md §meta-specs-registry).
+    if let (Some(MetaSpecScope::Workspace), Some(scope_id)) = (&scope, &q.scope_id) {
+        let wid = Id::new(scope_id);
+        match state.workspaces.find_by_id(&wid).await? {
+            Some(ws) => {
+                if ws.tenant_id.as_str() != auth.tenant_id {
+                    return Err(ApiError::Forbidden(
+                        "Access denied: workspace not in your tenant".to_string(),
+                    ));
+                }
+                if let Some(user_id) = &auth.user_id {
+                    match state
+                        .workspace_memberships
+                        .find_by_user_and_workspace(user_id, &wid)
+                        .await
+                    {
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            return Err(ApiError::Forbidden(
+                                "Access denied: not a member of this workspace".to_string(),
+                            ));
+                        }
+                        Err(e) => return Err(ApiError::Internal(e)),
+                    }
+                }
+            }
+            None => {
+                return Err(ApiError::NotFound(format!(
+                    "workspace '{scope_id}' not found"
+                )));
+            }
+        }
+    }
+
     let filter = MetaSpecFilter {
         scope,
         scope_id: q.scope_id,
@@ -1040,6 +1084,16 @@ pub async fn create_meta_spec_registry(
     auth: AuthenticatedAgent,
     Json(req): Json<CreateMetaSpecRequest>,
 ) -> Result<(StatusCode, Json<MetaSpec>), ApiError> {
+    // Admin-only (per-handler authorization; route is ABAC-exempt):
+    // registry content governs agent behavior across every workspace that
+    // binds it — the same NEW-26 rule as `put_meta_spec_set`. A non-Admin
+    // principal creating governing content could pre-write the persona a
+    // reconciliation wave later re-reads.
+    if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may create meta-spec registry entries".to_string(),
+        ));
+    }
     let kind = parse_kind(&req.kind)?;
     let scope = parse_scope(&req.scope)?;
     let prompt = req.prompt.unwrap_or_default();
@@ -1100,6 +1154,16 @@ pub async fn update_meta_spec_registry(
     Path(id): Path<String>,
     Json(req): Json<UpdateMetaSpecRequest>,
 ) -> Result<Json<MetaSpec>, ApiError> {
+    // Admin-only (per-handler authorization; route is ABAC-exempt):
+    // PUT edits governing content and can approve it — meta-spec approval is
+    // human-only (meta-spec-reconciliation.md §1: `human_only` approval for
+    // personas/principles/process). A non-Admin approval would forge the §6
+    // reconciliation trigger with content the caller wrote.
+    if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may update meta-spec registry entries".to_string(),
+        ));
+    }
     let mut ms = state
         .meta_specs
         .get_by_id(&Id::new(&id))
@@ -1121,10 +1185,7 @@ pub async fn update_meta_spec_registry(
         ms.approved_by = None;
         ms.approved_at = None;
     }
-    if let Some(required) = req.required {
-        ms.required = required;
-    }
-    if let Some(ref status_str) = req.approval_status {
+    if let Some(status_str) = &req.approval_status {
         let status = parse_approval_status(status_str)?;
         if status == MetaSpecApprovalStatus::Approved {
             ms.approved_by = Some(auth.agent_id.as_str().to_string());
@@ -1166,12 +1227,9 @@ pub async fn update_meta_spec_registry(
                 })
                 .unwrap_or(false);
             if binds {
-                let summary = crate::reconciliation::run_reconciliation(
-                    &state,
-                    &ws.id,
-                    &[spec_path.clone()],
-                )
-                .await;
+                let summary =
+                    crate::reconciliation::run_reconciliation(&state, &ws.id, &[spec_path.clone()])
+                        .await;
                 tracing::info!(
                     workspace_id = %ws.id,
                     meta_spec = %spec_path,
@@ -1192,9 +1250,17 @@ pub async fn update_meta_spec_registry(
 
 pub async fn delete_meta_spec_registry(
     State(state): State<Arc<AppState>>,
-    _auth: AuthenticatedAgent,
+    auth: AuthenticatedAgent,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    // Admin-only (per-handler authorization; route is ABAC-exempt, and
+    // docs/api-reference.md marks DELETE Admin-only): deleting a registry
+    // entry removes governing content every bound workspace depends on.
+    if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may delete meta-spec registry entries".to_string(),
+        ));
+    }
     let rid = Id::new(&id);
     let has_bindings = state
         .meta_spec_bindings
@@ -1395,8 +1461,7 @@ mod registry_tests {
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::json!({"name": "ws-changed", "slug": "ws-changed"})
-                            .to_string(),
+                        serde_json::json!({"name": "ws-changed", "slug": "ws-changed"}).to_string(),
                     ))
                     .unwrap(),
             )
@@ -1536,5 +1601,166 @@ mod registry_tests {
             .await
             .unwrap();
         assert_eq!(del_resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    // -- per-handler authorization (ABAC-exempt routes) ---------------------
+
+    /// Agent-role tokens must not write registry entries or approve content:
+    /// meta-spec approval is human-only (meta-spec-reconciliation.md §1) and
+    /// an approved content change is the §6 reconciliation trigger.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn registry_writes_reject_non_admin() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+
+        let state = make_test_state_with_jwt();
+        let app: Router = crate::api::api_router().with_state(state.clone());
+
+        // Developer-role OIDC JWT (no Admin role).
+        let dev_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "dev-registry",
+                "preferred_username": "dev-registry",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+
+        let authz = |method: &str, uri: String, token: &str, body: Option<&str>| {
+            let app = app.clone();
+            let method = method.to_string();
+            let token = token.to_string();
+            let body = body.map(|b| b.to_string());
+            async move {
+                let mut builder = Request::builder()
+                    .method(method.as_str())
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {token}"));
+                if body.is_some() {
+                    builder = builder.header("content-type", "application/json");
+                }
+                app.oneshot(builder.body(Body::from(body.unwrap_or_default())).unwrap())
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+
+        // Create as admin so a target exists for update/delete attempts.
+        let created = authz(
+            "POST",
+            "/api/v1/meta-specs-registry".to_string(),
+            "test-token",
+            Some(r#"{"kind":"meta:persona","name":"authz-worker","scope":"Global","prompt":"p"}"#),
+        )
+        .await;
+        assert_eq!(created, StatusCode::CREATED);
+        let all = state
+            .meta_specs
+            .list(&gyre_ports::MetaSpecFilter::default())
+            .await
+            .unwrap();
+        let id = all
+            .iter()
+            .find(|ms| ms.name == "authz-worker")
+            .expect("created meta-spec must exist")
+            .id
+            .to_string();
+
+        // Non-admin create → 403.
+        assert_eq!(
+            authz(
+                "POST",
+                "/api/v1/meta-specs-registry".to_string(),
+                &dev_token,
+                Some(r#"{"kind":"meta:standard","name":"forged","scope":"Global","prompt":"p"}"#),
+            )
+            .await,
+            StatusCode::FORBIDDEN,
+            "non-Admin create must be Forbidden"
+        );
+
+        // Non-admin approve (the §6 trigger) → 403, approval unchanged.
+        assert_eq!(
+            authz(
+                "PUT",
+                format!("/api/v1/meta-specs-registry/{id}"),
+                &dev_token,
+                Some(r#"{"approval_status":"Approved"}"#),
+            )
+            .await,
+            StatusCode::FORBIDDEN,
+            "non-Admin approval must be Forbidden"
+        );
+        let ms = state
+            .meta_specs
+            .get_by_id(&gyre_common::Id::new(&id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            ms.approval_status,
+            gyre_domain::MetaSpecApprovalStatus::Pending
+        );
+        assert!(
+            ms.approved_by.is_none(),
+            "rejected approval must not record an approver"
+        );
+
+        // Non-admin delete → 403.
+        assert_eq!(
+            authz(
+                "DELETE",
+                format!("/api/v1/meta-specs-registry/{id}"),
+                &dev_token,
+                None,
+            )
+            .await,
+            StatusCode::FORBIDDEN,
+            "non-Admin delete must be Forbidden"
+        );
+
+        // Non-admin workspace-scoped list of a workspace they are not in
+        // → 403 (Global list stays authenticated-readable).
+        let ws_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"name": "ws-authz", "slug": "ws-authz"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_json = body_json(ws_resp).await;
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+        assert_eq!(
+            authz(
+                "GET",
+                format!("/api/v1/meta-specs-registry?scope=Workspace&scope_id={ws_id}"),
+                &dev_token,
+                None,
+            )
+            .await,
+            StatusCode::FORBIDDEN,
+            "workspace-scoped list must require membership"
+        );
+
+        // Admin path still works end-to-end: approve as admin.
+        assert_eq!(
+            authz(
+                "PUT",
+                format!("/api/v1/meta-specs-registry/{id}"),
+                "test-token",
+                Some(r#"{"approval_status":"Approved"}"#),
+            )
+            .await,
+            StatusCode::OK
+        );
     }
 }
