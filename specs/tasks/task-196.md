@@ -2,7 +2,7 @@
 title: "Ground Briefing Q&A in real briefing data with sources and history validation"
 spec_ref: "human-system-interface.md §9 Briefing Q&A (§1295-1332)"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "human-system-interface.md §47"
 commits: ["fb19bdc44b06840994de7bcc8b42e46dc76c6557", "62ed0595e07339870bc71f0bf7da7bd2a7aae42c", "875e2a1117854605168cb558a9d6dcfcbb9d0964", "40a77abf3d05ec0b9e8173091626797f31e52d3a", "17c356a8c1d2b1b746e1a1ec27848efca823612f", "5645f939ecee5f083ef83ef19e769db8fff528c7"]
@@ -158,4 +158,102 @@ Verified no other `MUTANT` markers remain in `crates/` or `web/src/`.
 
 - crates/gyre-server/src/api/graph.rs
 
-Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
+
+## Review (round 2026-10-09, independent)
+
+Comparison base 3214c982 → HEAD c3174c1. Diff touches only `graph.rs`,
+`task-196.md`, and the three web files — route registration (`api/mod.rs`),
+ABAC `generate` mapping (`abac_middleware.rs:417`), rate limiter, and
+`LlmUnavailable` handling are byte-identical to the base, as instructed.
+
+### Verified behavior
+
+1. **History cap (§1325).** `graph.rs:1219-1223` rejects `history.len() > 20`
+   with `ApiError::InvalidInput` → HTTP 400 (`error.rs:56`), placed after
+   `require_workspace` and before the rate limiter. No truncation path
+   remains. Boundary case covered: exactly 20 accepted, 21 rejected.
+2. **Grounding (§1327 bullets 1+3).** `graph.rs:1245-1246` resolves `since`
+   via the shared `resolve_since` (last_seen_at → 24h fallback — same logic
+   as `get_workspace_briefing`, now factored into one helper used by both) and
+   calls the real `assemble_briefing`; the JSON-serialized briefing replaces
+   `{{context}}` in the system prompt (§1283), with history replayed as
+   `"{role}: {content}"` lines so follow-ups work.
+3. **Response contract (§1325).** The terminal `complete` SSE event carries
+   `{answer, sources}` where `answer` is the full concatenated stream text and
+   `sources` is a de-duplicated array derived from briefing items' spec_paths
+   and completed agents (agent_id + spec_ref). Frontend `InlineChat.svelte`
+   reads `parsed.answer ?? parsed.text ?? streamBuffer` and `Briefing.svelte`
+   now tracks both user and assistant turns, sending full history on
+   follow-ups (client owns conversation state per §1325).
+
+### Mutation probes (isolated worktree, private target dir; both restored,
+worktree verified identical to HEAD afterward)
+
+- **Truncation mutant** (replaced rejection with `history.drain(..excess)`):
+  `briefing_ask_rejects_history_over_20_entries_with_400` FAILED (21 entries
+  → 200, expected 400). Test kills the exact bug class from review attempt 12.
+- **Hollow-context mutant** (restored `.replace("{{context}}", "")`):
+  `briefing_ask_prompt_is_grounded_in_real_briefing_data` FAILED ("system
+  prompt must contain the seeded MR title"; prompt shows empty `Context:`).
+  Test kills the original hollowness finding.
+
+The SSE-shape test uses `MockLlmPortFactory::echo()` which chunks the real
+user_prompt into 3 stream chunks, so `answer == concatenated partials` is
+checked against real streamed content, not a mirrored constant.
+
+### Checks run in this sandbox
+
+- `cargo test -p gyre-server --lib briefing_ask` — 5/5 pass (HEAD).
+- `cargo test -p gyre-server --lib briefing` — 19/19 pass (no regressions in
+  neighboring briefing/MCP tests).
+- vitest `Briefing.test.js` — 24/24 pass; `InlineChat.test.js` — 16/16 pass.
+- `scripts/check-arch.sh`, `check-abac-route-registry.sh`,
+  `check-mcp-write-tools.sh`, `check-inert-enforcement.sh`,
+  `check-dead-message-kinds.sh` — all pass.
+- No `MUTANT` markers in `crates/` or `web/src/`.
+- Evidence: `/tmp/stage/review-evidence/task196-lib-tests.log`.
+- Not run here (loopback listeners disallowed): `--test graph_integration`
+  (`test_briefing_ask_sse`, `test_briefing_ask_not_found` — pre-existing
+  tests, still assert 200/SSE/404, compatible with the new payload). Host
+  gate should run them.
+
+### Findings
+
+None material. One scope note, not a gap for this task: §1327 bullet 2 gives
+the LLM read access to "the knowledge graph (for structural context)". The
+task plan (auditor finding + implementation plan step 2) scoped grounding to
+the assembled briefing (bullets 1+3), and the briefing JSON (entity types,
+spec paths, MR/task items) does provide structural context. KG-node
+injection into the prompt remains uncovered by task-196's plan; if the
+controller wants literal KG data in the Q&A context, that is a follow-up
+task, not a revision of this one — the section's hollowness finding (empty
+`{{context}}`, no `sources`, truncation) is fully resolved.
+
+Minor, non-blocking observations (no change requested):
+- `partial`/`complete` payloads gained a `type` discriminator field; the spec
+  allows extra fields (`sources: [..., ...]`), and the SSE envelope was
+  already an extension of the §1325 JSON response (transport), so this
+  conforms.
+- `briefing_sources` collects spec_path from briefing items and
+  `{spec_ref, agent_id}` from completed agents; exceptions items carry
+  entity_ref as spec_path — all real derivations, non-empty for the seeded
+  spec-linked MR in the grounding test.
+
+**Verdict: complete.** The repaired code implements the spec: grounded
+prompt, `{answer, sources}` response contract, 400 rejection for oversized
+history, with regression tests that kill both reintroduced bug classes.
+
+## Shipped
+
+- `POST /workspaces/:id/briefing/ask` rejects `history` > 20 entries with
+  HTTP 400 before the rate limiter (no silent truncation); exactly 20 passes.
+- The Q&A system prompt is grounded in the real assembled briefing
+  (specs/tasks/MRs/completion summaries via `assemble_briefing`, same
+  `since` resolution as the briefing endpoint) with conversation history
+  replayed for follow-ups.
+- The SSE `complete` event now carries the spec §1325 response object
+  `{answer, sources}` — sources de-duplicated from briefing spec_paths and
+  completed agents; `partial` events keep streaming chunks.
+- Frontend: `InlineChat` commits `answer` (not the partial buffer) from the
+  complete event and notifies its caller; `Briefing` tracks full user+assistant
+  history client-side and sends it as `history` on follow-up asks.
