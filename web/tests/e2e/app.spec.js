@@ -14,12 +14,12 @@
  *              /profile                      → user profile
  */
 
-import { test, expect } from './fixtures/seeded.js';
+import { test, expect, SEED_WORKSPACE_SLUG, SEED_REPO_NAME } from './fixtures/seeded.js';
 
-// Seed workspace slug — matches the seed fixture data.
-// The seed endpoint creates a workspace with this slug; adjust if fixture changes.
-const SEED_SLUG = 'default';
-const SEED_REPO = 'sample-repo'; // first repo in seeded workspace; adjust if fixture changes
+// Real fixture identities from the server's admin_seed (admin.rs):
+// workspace slug "default", first repo "gyre-core".
+const SEED_SLUG = SEED_WORKSPACE_SLUG;
+const SEED_REPO = SEED_REPO_NAME;
 
 // ---------------------------------------------------------------------------
 // App shell structure
