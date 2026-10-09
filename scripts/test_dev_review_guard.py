@@ -16,7 +16,7 @@ class ReviewGuardTest(unittest.TestCase):
         self.work = root / 'work'
         self.work.mkdir()
         self.state = root / 'review.json'
-        self.git('init', '-q', '-b', 'devloop/task-001/attempt-1')
+        self.git('init', '-q', '-b', 'pipeline/task-001/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-1')
         self.git('config', 'user.name', 'Test')
         self.git('config', 'user.email', 'test@example.com')
         self.git('config', 'commit.gpgsign', 'false')
