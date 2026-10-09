@@ -2,10 +2,10 @@
 title: "Ground Briefing Q&A in real briefing data with sources and history validation"
 spec_ref: "human-system-interface.md §9 Briefing Q&A (§1295-1332)"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §47"
-commits: ["50830f641ca44bb7a8e6b6af69a949eccc2289cc", "f5d462d5930a3a4f691d8359b67e3fb38686a2a6", "fb19bdc44b06840994de7bcc8b42e46dc76c6557", "62ed0595e07339870bc71f0bf7da7bd2a7aae42c", "875e2a1117854605168cb558a9d6dcfcbb9d0964", "40a77abf3d05ec0b9e8173091626797f31e52d3a", "17c356a8c1d2b1b746e1a1ec27848efca823612f", "5645f939ecee5f083ef83ef19e769db8fff528c7"]
+commits: ["88b57180cf1397df7966381d3289b8d497c79c20"]
 ---
 
 ## Spec Excerpt
@@ -115,3 +115,62 @@ All work in `crates/gyre-server/src/api/graph.rs` unless noted.
   leaving mirrored/self-confirming assertions.
 - Skip formatters/linters/full-suite runs beyond the two test commands above; the loop
   handles global validation.
+
+## Shipped
+
+Recovered interrupted assignment (checkpoint 88b57180); implementation is
+byte-identical to the previously reviewed tree (independently reviewed at
+c3174c12 with mutation probes), re-verified fresh in this round:
+
+- **History cap (§1325):** `briefing_ask` rejects `history.len() > 20` with
+  `ApiError::InvalidInput` → HTTP 400 after `require_workspace`, before the rate
+  limiter; exactly 20 accepted. No truncation path remains (the `drain` block is
+  gone).
+- **Grounding (§1327 bullets 1+3):** `resolve_since` (new shared helper:
+  last_seen_at → 24h fallback) is used by both `get_workspace_briefing` and
+  `briefing_ask`; the real `assemble_briefing` output is JSON-serialized into
+  `{{context}}` of the system prompt, with `req.history` replayed as
+  `"{role}: {content}"` lines so follow-ups work. Server stays stateless.
+- **Response contract (§1325):** the terminal SSE `complete` event carries
+  `{answer, sources}` — `answer` is the full concatenated stream text, `sources`
+  is a de-duplicated array derived from briefing items' `spec_path` and
+  completed agents' `{spec_ref, agent_id}` (`briefing_sources()`). `partial`
+  events still stream incremental `{type, text}` chunks.
+- **Frontend:** `InlineChat.svelte` reads `parsed.answer ?? parsed.text ??
+  streamBuffer` on `complete` and notifies the caller via new `onassistant`;
+  `Briefing.svelte` tracks both user and assistant turns (client owns
+  conversation state) and sends full history (capped client-side at 20) on
+  follow-ups.
+- Untouched as instructed: route registration (`api/mod.rs`), ABAC `generate`
+  mapping (`abac_middleware.rs`), 10 req/60s rate limiter, `LlmUnavailable` →
+  503.
+- Dropped the accidental `web/dist` rebuild the interrupted checkpoint had
+  captured (build.rs rebuild during cargo test) — task branches don't ship dist
+  rebuilds (task-210 round 12 precedent) and the regenerated bundle carried a
+  `git diff --check` trailing-whitespace failure. `web/dist` is byte-identical
+  to main again.
+
+### Verification (this round; product source at 88b57180, unchanged through 4b98f3b2)
+
+- `cargo test -p gyre-server --lib api::graph::tests::briefing` — 15/15 pass
+  (400 cap incl. 20-accepted boundary, prompt grounding via PromptCaptureFactory
+  asserting the seeded MR title + spec path + history replay in the captured
+  system prompt, SSE `{answer, sources}` shape with answer == concatenated
+  partials, non-empty sources for the seeded spec-linked MR, 503, rate limit).
+  Evidence: `/tmp/stage/review-evidence/task-196-server-briefing-tests.txt`.
+- `cd web && npx vitest run Briefing.test.js InlineChat.test.js
+  DetailPanelChat.test.js` — 49/49 pass (complete-event `{answer, sources}`
+  consumption, follow-up history accumulation, no regressions in shared
+  InlineChat consumers). Evidence:
+  `/tmp/stage/review-evidence/task-196-frontend-tests.txt`.
+- `bash scripts/check-arch.sh` — passes.
+- `git diff --check 8c2d1775 HEAD` — clean (dist rebuild whitespace failure
+  resolved).
+- No `MUTANT` markers in `crates/` or `web/src/`.
+- Sandbox limitation: loopback listeners are unsupported here
+  (`capabilities.json`: tcp_listener_probe errno 95), so
+  `tests/graph_integration.rs::test_briefing_ask_sse` and
+  `test_briefing_ask_not_found` cannot run in this sandbox. Both are
+  payload-agnostic (assert 200/SSE content-type/`partial`+`complete` presence
+  and 404) and compatible with the new payload; host verification must run
+  `cargo test -p gyre-server --test graph_integration`.
