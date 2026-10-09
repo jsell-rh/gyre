@@ -100,6 +100,24 @@ class Execution:
         return self.os('sandbox', 'exec', '-n', sandbox, '--no-login-shell', '--workdir', '/tmp',
                        '--env', 'HOME=/tmp', '--', *args, **kwargs)
 
+    def wait_ready(self, sandbox):
+        delay = 5
+        deadline = time.monotonic() + 1800
+        while True:
+            self.current()
+            item = next((item for item in gateway.inventory() if item['name'] == sandbox), None)
+            phase = item['phase'].lower() if item else 'unknown'
+            if phase == 'ready':
+                return
+            if phase in ('error', 'failed', 'stopped', 'terminated', 'deleted'):
+                self.phase('InfrastructureFailed', sandbox=sandbox, gateway_phase=item['phase'])
+                raise Retry(f"sandbox entered terminal infrastructure phase {item['phase']}; purge and retry with backoff")
+            if time.monotonic() >= deadline:
+                raise Retry('sandbox readiness exceeded autoscaler deadline')
+            self.phase('WaitingForInfrastructure', sandbox=sandbox, retry_after=delay)
+            self.cancelled.wait(delay)
+            delay = min(60, delay * 2)
+
     def cloud_step(self, task, prompt):
         claim = self.claim
         # A driver can disappear after publication and purge, before the SQL
@@ -143,7 +161,8 @@ class Execution:
             self.store.set_setting('admission_condition', reason)
             self.phase('WaitingForConfiguration', reason=reason)
             raise Retry(reason)
-        self.store.set_setting('admission_condition', 'Ready')
+        from .inference import check as check_inference
+        check_inference(self.store)
         inventory = gateway.inventory()
         observed = {item['name'] for item in inventory}
         item = next((item for item in inventory if item['name'] == sandbox), None)
@@ -230,6 +249,7 @@ class Execution:
             for path in bundle.iterdir():
                 tar.add(path, arcname=path.name)
         allocated = False
+        ready = False
         completed = False
         try:
             allocated = any(item['name'] == sandbox for item in inventory)
@@ -250,18 +270,8 @@ class Execution:
                 if not allocated:
                     raise Retry('sandbox creation not observed: ' + (result.stderr or result.stdout)[-2000:])
             self.store.resource_state(sandbox, 'present')
-            delay = 5
-            deadline = time.monotonic() + 1800
-            while True:
-                self.current()
-                item = next((item for item in gateway.inventory() if item['name'] == sandbox), None)
-                if item and item['phase'].lower() == 'ready':
-                    break
-                if time.monotonic() >= deadline:
-                    raise Retry('sandbox readiness exceeded autoscaler deadline')
-                self.phase('WaitingForInfrastructure', sandbox=sandbox, retry_after=delay)
-                self.cancelled.wait(delay)
-                delay = min(60, delay * 2)
+            self.wait_ready(sandbox)
+            ready = True
             self.phase('Staging', sandbox=sandbox)
             cli = os.environ.get('OPENSHELL', 'openshell')
             persistent = self.remote(sandbox, 'test', '-f', '/tmp/stage/step.intent', check=False)
@@ -332,7 +342,7 @@ class Execution:
             # Retain logs and source before releasing expensive compute. A
             # separate cleanup reconciler handles crashes and failed deletes.
             self.phase('Deleting', sandbox=sandbox)
-            if allocated:
+            if allocated and (ready or any(self.directory.parent.glob('*/remote.offset'))):
                 if not completed:
                     try:
                         code = """import json,os,pathlib,signal,time
