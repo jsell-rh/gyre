@@ -51,6 +51,15 @@ class AttributionTest(unittest.TestCase):
             self.assertIn('depends_on: []\n---\nBody\n---\nMore body\n', text)
             subprocess.run(['python3', str(SCRIPT), 'task-001'], cwd=root, check=True)
             self.assertEqual(task.read_text(), text)
+            (root / 'unrelated-staged.txt').write_text('preserve independently staged work\n')
+            git('add', 'unrelated-staged.txt')
+            subprocess.run(['python3', str(SCRIPT), 'task-001', '--commit'], cwd=root, check=True)
+            self.assertEqual(git('show', 'HEAD:specs/tasks/task-001.md'), text.strip())
+            self.assertEqual(git('show', '--format=', '--name-only', 'HEAD'), 'specs/tasks/task-001.md')
+            self.assertEqual(git('diff', '--cached', '--name-only'), 'unrelated-staged.txt')
+            checkpoint = git('rev-parse', 'HEAD')
+            subprocess.run(['python3', str(SCRIPT), 'task-001', '--commit'], cwd=root, check=True)
+            self.assertEqual(git('rev-parse', 'HEAD'), checkpoint)
 
     def test_blobless_history_needs_no_network_for_rename_attribution(self):
         with tempfile.TemporaryDirectory() as directory:
