@@ -7,7 +7,7 @@ coverage_sections:
   - "meta-spec-reconciliation.md §6 Reconciliation: The Slow Rollout"
   - "meta-spec-reconciliation.md §10 Conformance Sweeps (Steady State)"
   - "meta-spec-reconciliation.md §11 Observability"
-commits: ["18d4bd09d57f7f3c948a018cd43ea080a3d1d846", "6b81157a0ba1d2be20964a65c3e2394a05745fa0", "2d9e12829867c4f1149dd48ed521aaf86a729bae", "4514cb92e3ff3397a8463f739a7f991b2111ec08", "2c4c42bb862cc71e33262ba151f1b604ba047f64", "b85168762d29927ddb813b65acb4bbaed963bde8"]
+commits: ["d0c1d9a75ccdef99ada0da887239b0e04c6760c8", "6ed3c5c37225f0db021e25d7d00fe09926a727ba", "77dbd920e954d7dd52ba883e061bd762db8a064f", "8c8e5056b80cc28d713dd88e3993c975b280e109", "f078e3af143024d9fd271e774d0eb6c1cf5d0d61", "82833df6483d1965d978419cbe34bd731a1627ef"]
 ---
 
 ## Spec Excerpt
