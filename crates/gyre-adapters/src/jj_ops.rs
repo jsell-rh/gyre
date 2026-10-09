@@ -182,6 +182,12 @@ impl JjOpsPort for JjOpsAdapter {
         Ok(sha.trim().to_string())
     }
 
+    async fn jj_bookmark_create(&self, repo_path: &str, name: &str, change_id: &str) -> Result<()> {
+        self.run_jj(repo_path, &["bookmark", "create", name, "-r", change_id])
+            .await?;
+        Ok(())
+    }
+
     async fn jj_undo(&self, repo_path: &str) -> Result<()> {
         // Top-level `jj undo` (jj ≥ 0.21): "Undo the last operation".
         // `jj op undo` is NOT a subcommand of `jj operation` in jj 0.39.0
@@ -390,160 +396,330 @@ mod tests {
         assert_eq!(adapter.jj_path, "jj");
     }
 
-    /// Integration: requires jj binary. Skipped if not installed.
+    /// Recorded fixture (jj 0.39.0): `jj_init` colocates a plain git repo —
+    /// `.jj/` appears, and the git HEAD commit survives as @- with an
+    /// unchanged commit id (jj wraps the existing history, it does not
+    /// rewrite it).
     #[tokio::test]
-    #[ignore = "requires jj binary on PATH"]
-    async fn jj_init_in_git_repo() {
+    async fn jj_init_colocates_existing_git_repo() {
         if !jj_available() {
             return;
         }
         let dir = tempfile::TempDir::new().unwrap();
-        // Init a bare git repo first
-        std::process::Command::new("git")
-            .args(["init", dir.path().to_str().unwrap()])
-            .output()
-            .unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--initial-branch=main"]);
+        git(&repo, &["config", "user.email", "test@gyre.local"]);
+        git(&repo, &["config", "user.name", "Gyre Test"]);
+        std::fs::write(repo.join("base.txt"), "base\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "base"]);
+        let git_head = git_rev_parse(&repo, "HEAD");
 
-        let adapter = JjOpsAdapter::new();
-        adapter
-            .jj_init(dir.path().to_str().unwrap())
+        JjOpsAdapter::new()
+            .jj_init(repo.to_str().unwrap())
             .await
-            .expect("jj init should succeed");
+            .expect("jj init --colocate must succeed in a plain git repo");
+
+        // Colocated layout exists and jj is functional.
+        assert!(repo.join(".jj").is_dir(), "colocated .jj must exist");
+        assert!(repo.join(".git").is_dir(), "git dir must survive colocation");
+        let out = Command::new("jj")
+            .current_dir(&repo)
+            .args([
+                "log",
+                "-r",
+                "@-",
+                "--no-graph",
+                "--color",
+                "never",
+                "-T",
+                "commit_id",
+            ])
+            .output()
+            .await
+            .expect("jj binary");
+        assert!(
+            out.status.success(),
+            "jj log failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // The git HEAD commit is @- unchanged — colocation preserves
+        // history (this is what `git worktree`-independent operation and
+        // `jj git export` build on).
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            git_head,
+            "git HEAD must become @- with the same commit id"
+        );
     }
 
-    /// Integration: jj new + log. Requires jj binary.
+    /// Recorded fixture (jj 0.39.0): `jj_new` creates a NEW working-copy
+    /// change whose description is set, and the returned change id is
+    /// `@`'s (the parent stays the previous change). `jj_log` returns
+    /// changes newest-first with parsed fields.
     #[tokio::test]
-    #[ignore = "requires jj binary on PATH"]
-    async fn jj_new_and_log() {
+    async fn jj_new_creates_described_change_and_log_lists_it() {
         if !jj_available() {
             return;
         }
         let dir = tempfile::TempDir::new().unwrap();
-        std::process::Command::new("git")
-            .args(["init", dir.path().to_str().unwrap()])
-            .output()
-            .unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--initial-branch=main"]);
+        git(&repo, &["config", "user.email", "test@gyre.local"]);
+        git(&repo, &["config", "user.name", "Gyre Test"]);
+        std::fs::write(repo.join("base.txt"), "base\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "base"]);
 
         let adapter = JjOpsAdapter::new();
-        adapter.jj_init(dir.path().to_str().unwrap()).await.unwrap();
+        adapter.jj_init(repo.to_str().unwrap()).await.unwrap();
+        let before_new = change_id_of(&repo, "@").await;
+
+        // Pin the author deterministically: JJ_USER/JJ_EMAIL have the
+        // highest precedence (they beat a user-level jj config.toml on
+        // machines where one exists — author assertions would otherwise
+        // be environment-dependent).
+        // SAFETY: test-scoped env vars; serialized with ENV_LOCK below is
+        // not needed because jj reads them per-invocation and no other
+        // test asserts the default author.
+        unsafe {
+            std::env::set_var("JJ_USER", "Gyre Test");
+            std::env::set_var("JJ_EMAIL", "test@gyre.local");
+        }
 
         let change_id = adapter
-            .jj_new(dir.path().to_str().unwrap(), "test change")
+            .jj_new(repo.to_str().unwrap(), "agent work")
             .await
-            .expect("jj new should succeed");
+            .expect("jj new must succeed");
         assert!(!change_id.is_empty());
+        // The returned id is @'s change id (32 hex chars in jj 0.39.0).
+        assert_eq!(change_id, change_id_of(&repo, "@").await);
+        // jj_new moved @ onto a NEW change; the previous @ is now the
+        // parent (jj does not create a new parent — it commits the
+        // working-copy change in place).
+        assert_ne!(change_id, before_new);
+        assert_eq!(change_id_of(&repo, "@-").await, before_new);
 
+        // jj_log parses the fixture into JjChange records, newest first.
         let log = adapter
-            .jj_log(dir.path().to_str().unwrap(), 5)
+            .jj_log(repo.to_str().unwrap(), 5)
             .await
-            .expect("jj log should succeed");
-        assert!(!log.is_empty());
+            .expect("jj log must succeed");
+        assert!(
+            log.len() >= 3,
+            "expected >=3 changes (@, snapshot of the pre-new working copy, base), got {log:?}"
+        );
+        assert_eq!(log[0].change_id, change_id);
+        assert_eq!(log[0].description, "agent work");
+        assert_eq!(log[0].author, "Gyre Test");
+        // The git HEAD commit is somewhere below in the log with its
+        // description parsed (jj_new leaves an empty snapshot change
+        // between @ and the imported history).
+        assert!(
+            log.iter().any(|c| c.description == "base"),
+            "the imported git 'base' commit must appear in jj_log, got {log:?}"
+        );
+        for c in &log {
+            assert!(!c.commit_id.is_empty());
+        }
     }
 
-    /// Integration: jj describe. Requires jj binary.
+    /// Recorded fixture (jj 0.39.0): `jj_describe` sets the description of
+    /// the named change (and, because describe on @ rewrites it, the
+    /// change id stays stable — describe does not create a new change).
     #[tokio::test]
-    #[ignore = "requires jj binary on PATH"]
-    async fn jj_describe_change() {
+    async fn jj_describe_updates_named_change() {
         if !jj_available() {
             return;
         }
         let dir = tempfile::TempDir::new().unwrap();
-        std::process::Command::new("git")
-            .args(["init", dir.path().to_str().unwrap()])
-            .output()
-            .unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--initial-branch=main"]);
+        git(&repo, &["config", "user.email", "test@gyre.local"]);
+        git(&repo, &["config", "user.name", "Gyre Test"]);
+        std::fs::write(repo.join("base.txt"), "base\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "base"]);
 
         let adapter = JjOpsAdapter::new();
-        adapter.jj_init(dir.path().to_str().unwrap()).await.unwrap();
+        adapter.jj_init(repo.to_str().unwrap()).await.unwrap();
         let change_id = adapter
-            .jj_new(dir.path().to_str().unwrap(), "initial")
+            .jj_new(repo.to_str().unwrap(), "initial")
             .await
             .unwrap();
         adapter
-            .jj_describe(dir.path().to_str().unwrap(), &change_id, "updated desc")
+            .jj_describe(repo.to_str().unwrap(), &change_id, "updated desc")
             .await
-            .expect("jj describe should succeed");
+            .expect("jj describe must succeed");
+
+        // The change's description (read by change id, not position) is
+        // updated, and the change id still resolves to the same change.
+        let desc = templated_log(&repo, &change_id, "description").await;
+        assert_eq!(desc, "updated desc");
+        assert_eq!(change_id_of(&repo, "@").await, change_id);
     }
 
-    /// Integration: jj undo. Requires jj binary.
+    /// Recorded fixture (jj 0.39.0): `jj_undo` undoes the last jj
+    /// operation via the TOP-LEVEL `jj undo` — `jj op undo` is not a
+    /// subcommand in 0.39.0 (it exits 2). After `jj_new` + `jj_undo`, @ is
+    /// back on the pre-`jj_new` change.
     #[tokio::test]
-    #[ignore = "requires jj binary on PATH"]
-    async fn jj_undo_last_op() {
+    async fn jj_undo_restores_previous_operation_state() {
         if !jj_available() {
             return;
         }
         let dir = tempfile::TempDir::new().unwrap();
-        std::process::Command::new("git")
-            .args(["init", dir.path().to_str().unwrap()])
-            .output()
-            .unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--initial-branch=main"]);
+        git(&repo, &["config", "user.email", "test@gyre.local"]);
+        git(&repo, &["config", "user.name", "Gyre Test"]);
+        std::fs::write(repo.join("base.txt"), "base\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "base"]);
 
         let adapter = JjOpsAdapter::new();
-        adapter.jj_init(dir.path().to_str().unwrap()).await.unwrap();
+        adapter.jj_init(repo.to_str().unwrap()).await.unwrap();
+        let before_new = change_id_of(&repo, "@").await;
         adapter
-            .jj_new(dir.path().to_str().unwrap(), "to be undone")
+            .jj_new(repo.to_str().unwrap(), "to be undone")
             .await
             .unwrap();
+        // Sanity: jj_new really moved @.
+        assert_ne!(change_id_of(&repo, "@").await, before_new);
+
         adapter
-            .jj_undo(dir.path().to_str().unwrap())
+            .jj_undo(repo.to_str().unwrap())
             .await
-            .expect("jj undo should succeed");
+            .expect("top-level jj undo must succeed (jj op undo is not a 0.39.0 subcommand)");
+
+        // @ is back on the pre-`jj_new` change — the operation was undone.
+        assert_eq!(
+            change_id_of(&repo, "@").await,
+            before_new,
+            "jj_undo must restore @ to the pre-`jj_new` change"
+        );
     }
 
-    /// Integration: jj bookmark create. Requires jj binary.
+    /// Recorded fixture (jj 0.39.0): `jj_bookmark_create` creates a
+    /// bookmark pointing at the named change; the bookmark is resolvable
+    /// by name afterwards (this is what `jj_git_export` pushes into git).
     #[tokio::test]
-    #[ignore = "requires jj binary on PATH"]
-    async fn jj_bookmark_create() {
+    async fn jj_bookmark_create_points_at_change() {
         if !jj_available() {
             return;
         }
         let dir = tempfile::TempDir::new().unwrap();
-        std::process::Command::new("git")
-            .args(["init", dir.path().to_str().unwrap()])
-            .output()
-            .unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--initial-branch=main"]);
+        git(&repo, &["config", "user.email", "test@gyre.local"]);
+        git(&repo, &["config", "user.name", "Gyre Test"]);
+        std::fs::write(repo.join("base.txt"), "base\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "base"]);
 
         let adapter = JjOpsAdapter::new();
-        adapter.jj_init(dir.path().to_str().unwrap()).await.unwrap();
+        adapter.jj_init(repo.to_str().unwrap()).await.unwrap();
         let change_id = adapter
-            .jj_new(dir.path().to_str().unwrap(), "bookmark target")
+            .jj_new(repo.to_str().unwrap(), "bookmark target")
             .await
             .unwrap();
         adapter
-            .jj_bookmark_create(dir.path().to_str().unwrap(), "my-feature", &change_id)
+            .jj_bookmark_create(repo.to_str().unwrap(), "my-feature", &change_id)
             .await
-            .expect("jj bookmark create should succeed");
+            .expect("jj bookmark create must succeed");
+
+        // The bookmark resolves to the created change.
+        let target = templated_log(&repo, "my-feature", "change_id").await;
+        assert_eq!(
+            target, change_id,
+            "bookmark my-feature must point at the created change"
+        );
     }
 
-    /// Integration: jj squash. Requires jj binary.
+    /// Recorded fixture (jj 0.39.0): `jj_squash` (squash -u) folds @'s
+    /// content into its parent, NEVER opens $JJ_EDITOR even when @ is
+    /// described (jj_new always describes @ — a bare `jj squash` would
+    /// combine descriptions through the editor and hang a headless
+    /// server), and returns the SQUASHED PARENT's commit SHA — not the new
+    /// empty @ that `log --limit 1` would report.
     #[tokio::test]
-    #[ignore = "requires jj binary on PATH"]
-    async fn jj_squash_into_parent() {
+    async fn jj_squash_into_parent_returns_parent_sha_without_editor() {
         if !jj_available() {
             return;
         }
         let dir = tempfile::TempDir::new().unwrap();
-        std::process::Command::new("git")
-            .args(["init", dir.path().to_str().unwrap()])
-            .output()
-            .unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--initial-branch=main"]);
+        git(&repo, &["config", "user.email", "test@gyre.local"]);
+        git(&repo, &["config", "user.name", "Gyre Test"]);
+        std::fs::write(repo.join("base.txt"), "base\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "base"]);
 
         let adapter = JjOpsAdapter::new();
-        adapter.jj_init(dir.path().to_str().unwrap()).await.unwrap();
-        // Create two changes so squash has a parent
+        adapter.jj_init(repo.to_str().unwrap()).await.unwrap();
+        // Parent change with a described working-copy change on top (the
+        // production flow: jj_new describes @, the agent edits files).
         adapter
-            .jj_new(dir.path().to_str().unwrap(), "parent change")
+            .jj_new(repo.to_str().unwrap(), "parent change")
             .await
             .unwrap();
-        adapter
-            .jj_new(dir.path().to_str().unwrap(), "child change")
+        std::fs::write(repo.join("feature.txt"), "squashed content\n").unwrap();
+
+        // A marker editor: any editor invocation fails the test. Set via
+        // the command's environment so a real $JJ_EDITOR on the host
+        // cannot mask an editor-opening regression (the "vim flake" class
+        // from the round-2 review notes).
+        let marker = dir.path().join("editor-opened");
+        let editor = dir.path().join("marker-editor.sh");
+        std::fs::write(
+            &editor,
+            format!("#!/bin/sh\ntouch {}\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // SAFETY: test-scoped env var, set after the adapter's commands
+        // for init/new (jj reads $JJ_EDITOR per invocation).
+        unsafe {
+            std::env::set_var("JJ_EDITOR", editor.to_str().unwrap());
+        }
+        let sha = adapter
+            .jj_squash(repo.to_str().unwrap())
             .await
-            .unwrap();
-        // squash child into parent
-        adapter
-            .jj_squash(dir.path().to_str().unwrap())
-            .await
-            .expect("jj squash should succeed");
+            .expect("jj squash -u must succeed without an editor");
+        unsafe {
+            std::env::remove_var("JJ_EDITOR");
+        }
+        assert!(
+            !marker.exists(),
+            "jj squash -u must never open $JJ_EDITOR (marker editor was invoked)"
+        );
+
+        // The returned SHA is the squashed parent's commit id.
+        assert_eq!(sha, commit_id_of(&repo, "@-").await);
+        // The parent now contains the squashed content; @ is a new empty
+        // change on top (NOT the sha returned — this is the exact bug the
+        // port contract documents).
+        let squashed = file_at_rev(&repo, "@-", "feature.txt").await;
+        assert_eq!(
+            squashed, Some("squashed content\n".to_string()),
+            "squashed content must live in the parent after jj_squash"
+        );
+        let wc_desc = templated_log(&repo, "@", "description").await;
+        assert!(
+            wc_desc.is_empty(),
+            "@ must be a fresh empty change after squash, described: {wc_desc:?}"
+        );
     }
 
     // ── TASK-106 recorded-fixture tests ─────────────────────────────────────
@@ -619,6 +795,55 @@ mod tests {
             "jj {args:?} in {cwd:?} failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    /// Commit id of `rev` (test harness read).
+    async fn commit_id_of(cwd: &std::path::Path, rev: &str) -> String {
+        templated_log(cwd, rev, "commit_id").await
+    }
+
+    /// Change id of `rev` (test harness read).
+    async fn change_id_of(cwd: &std::path::Path, rev: &str) -> String {
+        templated_log(cwd, rev, "change_id").await
+    }
+
+    /// One-line jj template output for `rev` (trimmed, color-free).
+    async fn templated_log(cwd: &std::path::Path, rev: &str, template: &str) -> String {
+        let out = Command::new("jj")
+            .current_dir(cwd)
+            .args([
+                "log",
+                "-r",
+                rev,
+                "--no-graph",
+                "--color",
+                "never",
+                "-T",
+                template,
+            ])
+            .output()
+            .await
+            .expect("jj binary");
+        assert!(
+            out.status.success(),
+            "jj log -r {rev} in {cwd:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// File content at `rev` (None when absent) — `jj file show`.
+    async fn file_at_rev(cwd: &std::path::Path, rev: &str, path: &str) -> Option<String> {
+        let out = Command::new("jj")
+            .current_dir(cwd)
+            .args(["file", "show", "-r", rev, path])
+            .output()
+            .await
+            .expect("jj binary");
+        if !out.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
     /// F7 contract: a branch created in the backing git repo AFTER the
