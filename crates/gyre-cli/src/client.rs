@@ -133,7 +133,30 @@ pub struct SpawnOrchestratorAgent {
     pub restart_on_failure: Option<bool>,
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Search response types (mirrors GET /api/v1/search) ───────────────────────
+
+/// One search result row. `facets` mirrors the server's result facets
+/// (status, priority, repo_id, ...).
+#[derive(Deserialize, Debug, Clone)]
+pub struct SearchResult {
+    pub entity_type: String,
+    pub entity_id: String,
+    pub title: String,
+    #[serde(default)]
+    pub snippet: String,
+    #[serde(default)]
+    pub score: f64,
+    #[serde(default)]
+    pub facets: std::collections::HashMap<String, String>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct SearchResponse {
+    pub query: String,
+    pub total: usize,
+    #[serde(default)]
+    pub results: Vec<SearchResult>,
+}
 
 /// Percent-encode a spec path for use as a single URL path segment.
 /// Encodes `/` as `%2F` so axum receives the full path in one `:path` param.
@@ -296,6 +319,43 @@ impl GyreClient {
             anyhow::bail!("create MR failed (HTTP {status}): {text}");
         }
         serde_json::from_str(&text).context("parsing MR response")
+    }
+
+    /// GET /api/v1/search — full-text search across all entities.
+    ///
+    /// `q` uses the server's query language (terms, quoted phrases, and
+    /// `facet:value` tokens); the CLI folds its `--type`/`--status`/`--since`
+    /// flags into that string so every filter reaches the same parser.
+    /// `workspace_id` is the pre-resolved workspace filter (see
+    /// `resolve_workspace_slug`).
+    pub async fn search(
+        &self,
+        q: &str,
+        entity_type: Option<&str>,
+        workspace_id: Option<&str>,
+        limit: usize,
+    ) -> Result<SearchResponse> {
+        let mut req = self
+            .client
+            .get(format!("{}/api/v1/search", self.base_url))
+            .header("Authorization", self.auth_header());
+        if !q.is_empty() {
+            req = req.query(&[("q", q)]);
+        }
+        if let Some(t) = entity_type {
+            req = req.query(&[("entity_type", t)]);
+        }
+        if let Some(w) = workspace_id {
+            req = req.query(&[("workspace_id", w)]);
+        }
+        req = req.query(&[("limit", limit.to_string())]);
+        let resp = req.send().await.context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("search failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing search response")
     }
 
     /// GET /api/v1/workspaces — list all accessible workspaces.

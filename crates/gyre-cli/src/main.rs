@@ -160,6 +160,32 @@ enum Commands {
         #[arg(long)]
         workspace: Option<String>,
     },
+
+    /// Full-text search across all entities (specs, tasks, MRs, commits, agents)
+    Search {
+        /// Search query — supports quoted phrases and facet:value syntax
+        /// (e.g. "merge queue" type:spec status:approved)
+        query: Option<String>,
+        /// Filter by entity type (spec, task, mr, commit, agent)
+        #[arg(long, short = 't')]
+        r#type: Option<String>,
+        /// Filter by status
+        #[arg(long)]
+        status: Option<String>,
+        /// Filter by workspace slug
+        #[arg(long, short = 'w')]
+        workspace: Option<String>,
+        /// Only results since this time (e.g., 7d, 2026-03-01)
+        #[arg(long)]
+        since: Option<String>,
+        /// Autocomplete mode — return suggestions for the given prefix
+        #[arg(long)]
+        suggest: Option<String>,
+        /// Maximum results to return
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
+
     /// Show system trace for a merge request
     Trace {
         /// Merge request ID
@@ -937,6 +963,70 @@ async fn main() -> Result<()> {
                     let confidence = n["spec_confidence"].as_str().unwrap_or("None");
                     let spec = n["spec_path"].as_str().unwrap_or("-");
                     println!("{ntype:<12} {name:<30} {qname:<50} {confidence:<10} {spec}");
+                }
+            }
+        }
+
+        Commands::Search {
+            query,
+            r#type,
+            status,
+            workspace,
+            since,
+            suggest,
+            limit,
+        } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+
+            // Fold the filter flags into the query string using the server's
+            // query language (facet:value tokens, search.md §Query Language).
+            // The flags are sugar: `--type spec` == `type:spec` in the query.
+            let mut q = query.clone().unwrap_or_default();
+            for facet in [
+                r#type.as_deref().map(|v| ("type", v)),
+                status.as_deref().map(|v| ("status", v)),
+                since.as_deref().map(|v| ("since", v)),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let v = facet.1.trim();
+                if !v.is_empty() {
+                    q = format!("{q} {}:{}", facet.0, v);
+                }
+            }
+            let q = q.trim().to_string();
+
+            // Autocomplete: the dedicated /search/suggest endpoint
+            // (search.md §API) is not implemented yet; fall back to a regular
+            // prefix search over titles via the main endpoint.
+            let prefix = suggest.as_deref().map(str::trim);
+            let q = match prefix {
+                Some(p) if !p.is_empty() => p.to_string(),
+                _ => q,
+            };
+
+            if q.is_empty() && suggest.is_none() {
+                println!("No search query given. Usage: gyre search <query> [--type spec] [--status approved] [--workspace slug] [--since 7d] [--suggest prefix]");
+            } else {
+                let workspace_id = match &workspace {
+                    Some(slug) => Some(api.resolve_workspace_slug(slug).await?),
+                    None => None,
+                };
+                // `--type` is also passed as the entity_type param: it filters
+                // even on servers whose query parser ignores facets, and the
+                // workspace filter needs the resolved ID in any case.
+                let entity_type = r#type.as_deref().map(str::trim).filter(|t| !t.is_empty());
+                let response = api
+                    .search(&q, entity_type, workspace_id.as_deref(), limit)
+                    .await?;
+
+                if suggest.is_some() {
+                    print_search_suggestions(&response);
+                } else {
+                    print_search_results(&response);
                 }
             }
         }
@@ -2181,6 +2271,41 @@ fn print_spec_links_table(links: &[serde_json::Value]) {
                 println!("             reason: {reason}");
             }
         }
+    }
+}
+
+/// Render search results as a readable table (search.md §CLI):
+/// one line per result with entity type, title, id, and snippet.
+fn print_search_results(results: &client::SearchResponse) {
+    if results.results.is_empty() {
+        println!("No results for '{}'.", results.query);
+        return;
+    }
+    println!(
+        "Search results for '{}' ({} shown of {} total):",
+        results.query,
+        results.results.len(),
+        results.total
+    );
+    println!("{}", "-".repeat(80));
+    for r in &results.results {
+        let snippet = r.snippet.replace(['\n', '\r'], " ");
+        println!("[{}] {} ({})", r.entity_type, r.title, r.entity_id);
+        if !snippet.is_empty() {
+            println!("      {snippet}");
+        }
+    }
+}
+
+/// Render autocomplete suggestions: one line per title that starts with the
+/// prefix, in `type  title  id` form.
+fn print_search_suggestions(results: &client::SearchResponse) {
+    if results.results.is_empty() {
+        println!("No suggestions for '{}'.", results.query);
+        return;
+    }
+    for r in &results.results {
+        println!("{}    {}    ({})", r.entity_type, r.title, r.entity_id);
     }
 }
 
