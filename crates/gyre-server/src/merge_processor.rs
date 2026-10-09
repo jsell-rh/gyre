@@ -5805,6 +5805,17 @@ mod tests {
     #[tokio::test]
     async fn atomic_group_post_merge_fail_reverts_all_members() {
         let state = test_state();
+        // Seed the workspace record: notify_mr_reverted resolves the tenant
+        // from it and skips (never fabricates a "default" tenant) when the
+        // workspace is missing.
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-1"),
+            Id::new("tenant-grp"),
+            "ws-1",
+            "ws-1",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
         let repo = create_repo_in_workspace(&state, "recovery-repo", "ws-1").await;
 
         let mut agent_a = gyre_domain::Agent::new(Id::new("agent-grpa"), "agent-grpa", 1000);

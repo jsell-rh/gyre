@@ -467,6 +467,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn channel_prefs_roundtrip_and_upsert_replaces() {
+        let (_tmp, s) = setup();
+        let u = make_user("u6");
+
+        // No row for an unknown user → None (callers apply defaults).
+        assert!(UserChannelPreferenceRepository::find(&s, &u.id)
+            .await
+            .unwrap()
+            .is_none());
+
+        let mut channels = NotificationChannels {
+            in_app: true,
+            email: gyre_domain::EmailConfig {
+                enabled: true,
+                digest: gyre_domain::DigestFrequency::Daily,
+                min_priority: gyre_domain::NotificationPriority::High,
+            },
+            webhook: Some(gyre_domain::WebhookConfig {
+                url: "https://hooks.example.test/g".to_string(),
+                secret: "s3cret".to_string(),
+                min_priority: gyre_domain::NotificationPriority::Medium,
+            }),
+            slack: None,
+        };
+        UserChannelPreferenceRepository::upsert(&s, &u.id, &channels)
+            .await
+            .unwrap();
+
+        let stored = UserChannelPreferenceRepository::find(&s, &u.id)
+            .await
+            .unwrap()
+            .expect("row must exist after upsert");
+        assert_eq!(
+            serde_json::to_string(&stored).unwrap(),
+            serde_json::to_string(&channels).unwrap(),
+            "round-trip must preserve the config"
+        );
+
+        // Upsert replaces the whole config (no stale webhook).
+        channels.webhook = None;
+        channels.slack = Some(gyre_domain::SlackConfig {
+            webhook_url: "https://hooks.slack.test/T/B/X".to_string(),
+            channel: Some("#ops".to_string()),
+            min_priority: gyre_domain::NotificationPriority::Low,
+        });
+        UserChannelPreferenceRepository::upsert(&s, &u.id, &channels)
+            .await
+            .unwrap();
+        let stored = UserChannelPreferenceRepository::find(&s, &u.id)
+            .await
+            .unwrap()
+            .expect("row must exist after second upsert");
+        assert_eq!(
+            serde_json::to_string(&stored).unwrap(),
+            serde_json::to_string(&channels).unwrap()
+        );
+        assert!(stored.webhook.is_none(), "upsert must replace, not merge");
+    }
+
+    #[tokio::test]
     async fn token_create_list_delete() {
         let (_tmp, s) = setup();
         let u = make_user("u3");
