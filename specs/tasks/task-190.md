@@ -2,7 +2,7 @@
 title: "Record real per-call LLM usage into budget counters and audit log"
 spec_ref: "platform-model.md §Budget Tracking"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Budget Tracking"
 commits: ["a83872cce9bf803feddc194c60ca9f39b82e9827"]
@@ -80,3 +80,63 @@ Net effect: the forge does not aggregate LLM usage in real time, and per-day tok
 - This task is the tracking foundation consumed by task-191 (enforcement) and shares subject with task-119 (agent-runtime §4). Build the recording helpers so both can reuse them; do not create a second parallel usage path.
 - Verify the diesel `budget_call_records` table mapping in `crates/gyre-adapters/src/schema.rs` before writing the adapter.
 - Run only the touched crates' tests plus `scripts/check-arch.sh`; do not run the full workspace suite or formatters.
+
+## Shipped
+
+Real per-call LLM usage recording now exists end to end (platform-model.md §Budget Tracking).
+
+**Port + adapters.** `BudgetCallRepository` (`crates/gyre-ports/src/budget_call.rs`: append-only
+`save`, `list_by_workspace` newest-first with `since`/`limit`). SQLite implementation
+(`crates/gyre-adapters/src/sqlite/budget_call.rs`) issues real INSERT/SELECT against the existing
+`budget_call_records` table (PK `id` makes duplicate inserts fail); reads are tenant-scoped via
+`self.tenant_id`, matching the sibling adapters. Postgres implementation mirrors it
+(`crates/gyre-adapters/src/postgres/budget_call.rs`). In-memory implementation for tests/dev
+(`MemBudgetCallRepository` in `mem.rs`) enforces the same duplicate-id contract in code.
+Wired into `AppState.budget_calls` through the `store!` macro (PG > SQLite > mem).
+
+**Single recording entry point.** `budget::record_llm_call_usage(state, &LlmCallUsage)`
+(`api/budget.rs`): appends one `BudgetCallRecord` and then delegates the counter increment to the
+existing `record_budget_usage` (workspace + tenant `tokens_used_today`/`cost_today`). No
+duplicated increment logic at call sites. Best-effort by design: a failed append logs a warning
+and never fails the caller's request.
+
+**Call sites wired** (all LLM invocation paths funneled through the single entry point):
+- `POST /api/v1/agents/:id/usage` (`spawn.rs`): after `agents.record_usage`, records
+  `usage_type: "agent_run"` with real reported tokens/cost, `tenant_id`/`workspace_id` derived
+  from the agent's own workspace row (never caller-supplied), `repo_id`/`agent_id`/`task_id`
+  from the agent row.
+- User-initiated `llm_query` paths: `specs/assist` REST (`specs_assist.rs`), MCP `spec_assist`
+  (`mcp.rs`), `explorer-views/generate` (`explorer_views.rs`), briefing/ask (`graph.rs`). Each
+  keeps the pre-existing analytics `CostEntry` estimate unchanged and splits the same estimate
+  into input/output for the per-call record (input = prompt estimate; output = remainder), with
+  `agent_id: None`, `task_id: None`. Scope (`tenant_id`, `workspace_id`) is resolved from the
+  workspace/repo row the handler already loaded.
+
+**Test evidence** (all commands and exit codes in
+`/tmp/stage/review-evidence/task-190-evidence.md`):
+- SQLite adapter round-trip: 3 tests pass (every field round-trips; workspace/since/limit
+  filtering newest-first; duplicate id rejected).
+- `api::budget::tests`: `record_llm_call_usage_increments_workspace_and_tenant_counters` and
+  `recorded_usage_makes_token_budget_limit_fire` (500/1000 → Ok; 1100/1000 → Err naming
+  `max_tokens_per_day`) pass.
+- `api::spawn::tests::agent_usage_report_records_budget_call_and_increments_counters`: full HTTP
+  path — POST usage (600+400 tokens, $0.12) → exactly one `agent_run` BudgetCallRecord via
+  `list_by_workspace`, workspace AND tenant counters at 1000/$0.12, and
+  `GET /workspaces/:id/budget` reflects it.
+- Discrimination (kill) tests: removing the `record_llm_call_usage` call from
+  `record_agent_usage` makes the spawn test FAIL; removing the `record_budget_usage`
+  increment makes the token-limit test FAIL. Restored and re-verified green.
+- `cargo build --all` (exit 0), `cargo test -p gyre-adapters` (347 passed / 0 failed),
+  `gyre-ports`/`gyre-domain` suites pass, touched server modules (mcp, specs_assist,
+  explorer_views, graph, budget, spawn) pass, `scripts/check-arch.sh` passes, and the related
+  invariant checks (mcp-write-tools, mem-port-contracts, in-memory-state-stores,
+  abac-route-registry, migration-versions, byte-slice-truncation, relative-path-defaults,
+  scope-literal-defaults, forged-scope-fields, lossy-secret-conversion,
+  fabricated-scope-defaults, dead-message-kinds, inert-enforcement) all pass.
+
+**Recovery note.** This assignment recovered an interrupted checkpoint (durable finding
+`6674a54d`). The source at HEAD `25feb84e` is the recovered implementation; its web/dist
+rebuild is byte-identical to a fresh deterministic `npm run build` (rebuild produced zero diff).
+Pre-existing, unrelated: `scripts/check-task-commit-attribution.sh` fails at the base commit
+`8c2d1775` for task-210 (`a781ede2` missing from that task's frontmatter) — present before this
+branch, not introduced or widened by it.
