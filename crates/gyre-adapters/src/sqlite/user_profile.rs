@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
+use gyre_common::Id;
 use gyre_domain::{
     JudgmentEntry, JudgmentType, UserNotificationPreference, UserSession, UserToken,
 };
