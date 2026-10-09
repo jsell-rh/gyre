@@ -3,7 +3,7 @@ title: "Repair verified failure on main cd1c5f044e49"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
 progress: complete
-commits: ["96b50773e6a118edb97fcaea57cdc6f7e42fb7da", "887611b1dea39ea7e8b19c172bdc22482608e38a", "f61f0a4ad4434e49dcdf1029429b76f8e92b98fc", "f9abdf065be5d3c01f47597e6689515de5f6624a", "8bfbf263763f53ad3c211dc54a69dac7d3b36ef3", "0484dd6ad10157e54ed2edd96c57d70fdb3654d4", "402f9f74cb8e60894003cf0c8ac5974c7f3b72d4", "cefb7c6eb6aa8d30212328ecb186d4c528f083d4"]
+commits: ["a781ede2ea21a5153dbcb49c65771f990344a093", "96b50773e6a118edb97fcaea57cdc6f7e42fb7da", "887611b1dea39ea7e8b19c172bdc22482608e38a", "f61f0a4ad4434e49dcdf1029429b76f8e92b98fc", "f9abdf065be5d3c01f47597e6689515de5f6624a", "8bfbf263763f53ad3c211dc54a69dac7d3b36ef3", "0484dd6ad10157e54ed2edd96c57d70fdb3654d4", "402f9f74cb8e60894003cf0c8ac5974c7f3b72d4", "cefb7c6eb6aa8d30212328ecb186d4c528f083d4"]
 ---
 
 ## Required behavior
