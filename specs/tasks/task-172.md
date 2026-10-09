@@ -5,7 +5,7 @@ depends_on: []
 progress: not-started
 coverage_sections:
   - "ui-layout.md §Editor Split"
-commits: ["3a0d12141acbcc63dfa7ac878731b332760bf44d", "5b1b9b11cff278c65aced30bb012c7af48225316"]
+commits: ["80925c2145b51e64ddb69ef1b4fb900c44ee0a89", "3688b5cddbfddbed2f4cdc158f03ce35bb172951"]
 ---
 
 ## Spec Excerpt
