@@ -1437,7 +1437,9 @@ fn build_get_workspace_budget(
     workspace_id: &str,
 ) -> reqwest::RequestBuilder {
     client
-        .get(format!("{base_url}/api/v1/workspaces/{workspace_id}/budget"))
+        .get(format!(
+            "{base_url}/api/v1/workspaces/{workspace_id}/budget"
+        ))
         .header("Authorization", auth)
 }
 
@@ -1449,16 +1451,14 @@ fn build_set_workspace_budget(
     merged: &BudgetConfig,
 ) -> reqwest::RequestBuilder {
     client
-        .put(format!("{base_url}/api/v1/workspaces/{workspace_id}/budget"))
+        .put(format!(
+            "{base_url}/api/v1/workspaces/{workspace_id}/budget"
+        ))
         .header("Authorization", auth)
         .json(merged)
 }
 
-fn build_budget_summary(
-    client: &Client,
-    base_url: &str,
-    auth: &str,
-) -> reqwest::RequestBuilder {
+fn build_budget_summary(client: &Client, base_url: &str, auth: &str) -> reqwest::RequestBuilder {
     client
         .get(format!("{base_url}/api/v1/budget/summary"))
         .header("Authorization", auth)
@@ -1587,8 +1587,12 @@ mod tests {
     #[test]
     fn get_workspace_budget_builds_real_route() {
         let c = Client::new();
-        let (method, url, auth, body) =
-            realize_request(build_get_workspace_budget(&c, "http://srv", "Bearer tok", "ws-1"));
+        let (method, url, auth, body) = realize_request(build_get_workspace_budget(
+            &c,
+            "http://srv",
+            "Bearer tok",
+            "ws-1",
+        ));
         assert_eq!(method, "GET");
         assert_eq!(url, "http://srv/api/v1/workspaces/ws-1/budget");
         assert_eq!(auth, "Bearer tok");
@@ -1601,16 +1605,15 @@ mod tests {
         // send the current config merged with the new override, so unset
         // limits keep their values instead of being wiped to null.
         let current: BudgetResponse = serde_json::from_str(WS_BUDGET_CURRENT_JSON).unwrap();
-        let merged = merge_budget_config(
-            &current.config,
-            Some(500000),
-            None,
-            None,
-            None,
-        );
+        let merged = merge_budget_config(&current.config, Some(500000), None, None, None);
         let c = Client::new();
-        let (method, url, auth, body) =
-            realize_request(build_set_workspace_budget(&c, "http://srv", "Bearer tok", "ws-1", &merged));
+        let (method, url, auth, body) = realize_request(build_set_workspace_budget(
+            &c,
+            "http://srv",
+            "Bearer tok",
+            "ws-1",
+            &merged,
+        ));
         assert_eq!(method, "PUT");
         assert_eq!(url, "http://srv/api/v1/workspaces/ws-1/budget");
         assert_eq!(auth, "Bearer tok");

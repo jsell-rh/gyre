@@ -1,7 +1,7 @@
 ---
 title: "Add gyre budget CLI: show and set at repo/workspace/tenant scope"
 spec_ref: "platform-model.md §CLI"
-depends_on: []
+depends_on: [task-211]
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §CLI"
@@ -82,3 +82,13 @@ The `SetBudgetRequest` shape (`crates/gyre-server/src/api/budget.rs:63-69`) acce
 - `cargo run -p gyre-cli -- budget --help` / `show --help` / `set --help` → exit 0, help text confirmed (evidence file `task192-budget-help.txt`).
 - `tests/ws_integration.rs::test_auth_and_ping_roundtrip` fails in this sandbox with `Os { code: 95, kind: Unsupported }` at the TCP listener bind — matches the recorded `capabilities.json` restriction (`tcp_listener_probe.supported=false`, errno 95). Infrastructure limitation, not a code defect; requires host/CI verification.
 - Live end-to-end HTTP against a running server could not be exercised here (sandbox cannot bind listeners); the client-level tests assert the exact request wire format (method, URL, auth header, JSON body) which the routes in `api/mod.rs:610-613` accept, and error paths are exercised with real `reqwest::Response` objects carrying the server's exact wire shape.
+
+## Repair round 2 (baseline findings 4f40bb82)
+
+The baseline gate run failed on three findings; all resolved at this head:
+
+- **rustfmt on task-192 changed lines** (`client.rs` 12 lines, `main.rs` 12 lines): applied rustfmt's exact output to only the flagged changed lines (budget builders, tenant-summary print, budget CLI tests). Pre-existing bootstrap-region formatting debt (main.rs 1672–1878 vs rustfmt) is outside the changed-line gate and left untouched. `python3 scripts/check-rustfmt-diff.py f38abb7e` → clean.
+- **check-relative-path-defaults FAILED at main.rs:1863**: this task's +460 lines in `main.rs` shifted the pre-existing task-099 F6 hazard (`.unwrap_or_else(|| PathBuf::from(&repo_name))` in `run_bootstrap`) from line 1737 to 1863, voiding its line-keyed exemption entry and failing the gate on this branch. Fixed the hazard instead of sliding the exemption: `--starter-kit` now requires `--repo-path` (explicit error otherwise; same fix the task-099 review round wrote in e54363c8, which never landed on main), help text updated, `docs/cli.md` updated, and the stale exemption entry deleted per the file's own instruction. Gate passes with zero entries for this site.
+- **task-commit-attribution FAILED (task-210 commit a781ede2 unlisted)**: already fixed by the base merge f38abb7e (task-211 repair); verified `bash scripts/check-task-commit-attribution.sh` → OK at this head.
+
+Evidence: `/tmp/stage/review-evidence/task192-repair-gates.txt`, `task192-repair-cli-tests.txt`, `task192-repair-smoke.txt` (107 passed; rustfmt/relative-path-defaults/arch/attribution/clippy-diff clean; `check-cli-spec-parity.sh` exits 1 with byte-identical output at base f38abb7e — pre-existing spec_assist advisories, untouched here). The `--starter-kit` guard sits after the health check, so the sandbox's listener restriction (errno 95) prevented exercising it against a live server; the mechanical backstop is the now-unexempted relative-path gate.

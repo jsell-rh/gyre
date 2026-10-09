@@ -94,7 +94,7 @@ enum Commands {
         /// workspace "default"
         #[arg(long)]
         dev: bool,
-        /// Create a starter spec structure in the repo path (or --repo-path)
+        /// Create a starter spec structure in the repo path (requires --repo-path)
         #[arg(long)]
         starter_kit: bool,
     },
@@ -1469,8 +1469,7 @@ async fn main() -> Result<()> {
                              --max-agents, or --max-agent-lifetime-secs"
                         );
                     }
-                    let ws_id =
-                        resolve_budget_workspace(&api, workspace_name.as_deref()).await?;
+                    let ws_id = resolve_budget_workspace(&api, workspace_name.as_deref()).await?;
                     let budget = api
                         .set_workspace_budget(
                             &ws_id,
@@ -1858,9 +1857,16 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
         _ => println!("  No spec manifest found - spec registry stays empty until specs are pushed"),
     }
     if args.starter_kit {
-        let target = repo_path
-            .clone()
-            .unwrap_or_else(|| std::path::PathBuf::from(&repo_name));
+        // F6: the starter kit must land in an explicit directory. Writing it
+        // to a bare repo name would resolve against the process cwd -- an
+        // arbitrary directory -- so require --repo-path.
+        let target = repo_path.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "--starter-kit requires --repo-path: the kit is written into your local \
+                 repo checkout, and a bare repo name would resolve against the \
+                 current directory"
+            )
+        })?;
         bootstrap::write_starter_kit(&target)?;
         println!("  Starter kit written to {}", target.display());
     }
@@ -2251,8 +2257,7 @@ async fn resolve_budget_workspace(
 
 /// Format an optional numeric budget limit for display ("-" = unlimited).
 fn fmt_budget_limit(v: Option<u64>) -> String {
-    v.map(|n| n.to_string())
-        .unwrap_or_else(|| "-".to_string())
+    v.map(|n| n.to_string()).unwrap_or_else(|| "-".to_string())
 }
 
 /// Utilization percentage of used/limit; "-" when the limit is unset.
@@ -2349,11 +2354,7 @@ fn print_tenant_budget_summary(s: &client::TenantBudgetSummary) {
         "{:<22} {:>14} {:>14} {:>6}",
         "Active agents",
         s.tenant_usage.active_agents,
-        fmt_budget_limit(
-            s.tenant_config
-                .max_concurrent_agents
-                .map(|m| m as u64)
-        ),
+        fmt_budget_limit(s.tenant_config.max_concurrent_agents.map(|m| m as u64)),
         budget_util(
             s.tenant_usage.active_agents as f64,
             s.tenant_config.max_concurrent_agents.map(|m| m as f64)
@@ -2404,7 +2405,10 @@ fn print_tenant_budget_summary(s: &client::TenantBudgetSummary) {
     println!("{}", "-".repeat(88));
     println!(
         "{:<36} {:>19} {:>19} {:>10}",
-        "TOTAL (workspaces)", tot_tokens, format!("{tot_cost:.2}"), tot_agents
+        "TOTAL (workspaces)",
+        tot_tokens,
+        format!("{tot_cost:.2}"),
+        tot_agents
     );
 }
 
@@ -3861,10 +3865,7 @@ mod tests {
         let args = Cli::try_parse_from(["gyre", "budget", "show", "--workspace-name", "core"]);
         assert!(args.is_ok());
         if let Commands::Budget {
-            command:
-                BudgetCommands::Show {
-                    workspace_name, ..
-                },
+            command: BudgetCommands::Show { workspace_name, .. },
         } = args.unwrap().command
         {
             assert_eq!(workspace_name.as_deref(), Some("core"));

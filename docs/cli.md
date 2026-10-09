@@ -51,6 +51,8 @@ gyre bootstrap --dev
 
 # Also write a starter spec structure (specs/manifest.yaml, specs/index.md,
 # specs/system/design-principles.md, AGENTS.md, .prek.yaml) into --repo-path
+# (--starter-kit requires --repo-path: the kit is written into your local repo
+# checkout; there is no cwd-relative default)
 gyre bootstrap --dev --starter-kit --repo-path ./myrepo
 ```
 
