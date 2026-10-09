@@ -6,7 +6,7 @@ progress: needs-revision
 review: specs/reviews/task-107.md
 coverage_sections:
   - "identity-security.md §Layer 3: Sigstore/Fulcio"
-commits: ["bb87769d23cf9859f48fc03b1daac512cc0cd89c", "5cf71800e9ed07592cd59fdebf48b61c667e7058", "167e19dad342b786c034eca67bd7560efa4b799d", "9c6e01e97bc0c8c936b0b4b617e2648fd003db83"]
+commits: ["0438224175eb631d51f08a75542969fe46c8a834", "bb87769d23cf9859f48fc03b1daac512cc0cd89c", "5cf71800e9ed07592cd59fdebf48b61c667e7058", "167e19dad342b786c034eca67bd7560efa4b799d", "9c6e01e97bc0c8c936b0b4b617e2648fd003db83"]
 ---
 
 ## Spec Excerpt
