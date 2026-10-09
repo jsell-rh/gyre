@@ -80,7 +80,7 @@ pub use dependency::DependencyRepository;
 pub use dependency_policy::DependencyPolicyRepository;
 pub use git_ops::GitOpsPort;
 pub use graph::GraphPort;
-pub use jj_ops::{JjChange, JjOpsPort};
+pub use jj_ops::{JjChange, JjOpsPort, JjRebaseOutcome};
 pub use key_binding_repo::KeyBindingRepository;
 pub use kv_store::KvJsonStore;
 pub use llm::{
