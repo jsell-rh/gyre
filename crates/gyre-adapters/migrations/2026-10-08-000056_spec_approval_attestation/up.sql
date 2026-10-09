@@ -1,4 +1,4 @@
--- TASK-198 (spec-registry.md §9 Approval Status Resolution): capture the
+-- TASK-193 (spec-registry.md §9 Approval Status Resolution): capture the
 -- agent's attestation level and stack fingerprint on each approval event so
 -- the mode-based resolver can evaluate agent-approval validity
 -- (attestation_level >= min_attestation_level, stack_hash exact match).

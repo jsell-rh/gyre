@@ -2292,6 +2292,359 @@ mod tests {
         assert_eq!(entry.approval_status, ApprovalStatus::Pending);
     }
 
+    // -----------------------------------------------------------------------
+    // §9 mode-based approval resolution — end-to-end API tests.
+    // Real git repo + manifest, real minted agent JWT with workload claims,
+    // real KV-stored workload attestation, assertions on the ledger status
+    // and the recorded event.
+    // -----------------------------------------------------------------------
+
+    /// Manifest for the E2E approval tests: three specs covering the three
+    // approval modes plus the attestation/stack_hash agent constraints.
+    const E2E_APPROVAL_MANIFEST: &str = r#"
+version: 1
+defaults:
+  requires_approval: true
+specs:
+  - path: system/both.md
+    title: Both Required
+    owner: user:jsell
+    approval:
+      mode: human_and_agent
+      human_approvers:
+        - user:jsell
+      agent_approvers:
+        - persona: accountability
+  - path: system/agent-min.md
+    title: Agent With Minimum Attestation
+    owner: user:jsell
+    approval:
+      mode: agent_only
+      agent_approvers:
+        - persona: accountability
+          min_attestation_level: 3
+  - path: system/agent-pinned.md
+    title: Agent With Pinned Stack
+    owner: user:jsell
+    approval:
+      mode: agent_only
+      agent_approvers:
+        - persona: accountability
+          stack_hash: "sha256:pinned"
+"#;
+
+    /// Build a real git repo containing the E2E approval manifest and spec
+    /// files. Returns (tempdir, map of spec path → blob SHA at HEAD).
+    async fn make_manifest_repo() -> (
+        tempfile::TempDir,
+        std::collections::HashMap<String, String>,
+    ) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.email", "test@gyre.dev"]);
+        run(&["config", "user.name", "Test"]);
+
+        std::fs::create_dir_all(path.join("specs/system")).unwrap();
+        std::fs::write(path.join("specs/manifest.yaml"), E2E_APPROVAL_MANIFEST).unwrap();
+        for spec in ["system/both.md", "system/agent-min.md", "system/agent-pinned.md"] {
+            std::fs::write(
+                path.join("specs").join(spec),
+                format!("# {}\n", spec),
+            )
+            .unwrap();
+        }
+        run(&["add", "."]);
+        run(&["commit", "-m", "manifest + specs"]);
+
+        // Blob SHA for each spec file at HEAD — the ledger's current_sha.
+        let mut shas = std::collections::HashMap::new();
+        for spec in ["system/both.md", "system/agent-min.md", "system/agent-pinned.md"] {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", &format!("HEAD:specs/{spec}")])
+                .current_dir(path)
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            shas.insert(
+                spec.to_string(),
+                String::from_utf8(out.stdout).trim().to_string(),
+            );
+        }
+        (dir, shas)
+    }
+
+    /// Seed workspace, repo, and ledger entries for all three E2E specs.
+    async fn seed_e2e_specs(
+        state: &crate::AppState,
+        dir: &tempfile::TempDir,
+        shas: &std::collections::HashMap<String, String>,
+    ) {
+        let ws = gyre_domain::Workspace {
+            id: gyre_common::Id::new("ws-e2e"),
+            tenant_id: gyre_common::Id::new("default"),
+            name: "E2E WS".to_string(),
+            slug: "e2e-ws".to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: 0,
+            compute_target_id: None,
+        };
+        state.workspaces.create(&ws).await.unwrap();
+
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-e2e"),
+            gyre_common::Id::new("ws-e2e"),
+            "e2e-repo",
+            dir.path().to_str().unwrap(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        for (spec, sha) in shas {
+            state
+                .spec_ledger
+                .save(&SpecLedgerEntry {
+                    path: spec.clone(),
+                    title: spec.clone(),
+                    owner: "user:jsell".to_string(),
+                    kind: None,
+                    current_sha: sha.clone(),
+                    approval_mode: "human_and_agent".to_string(),
+                    approval_status: ApprovalStatus::Pending,
+                    linked_tasks: vec![],
+                    linked_mrs: vec![],
+                    drift_status: "unknown".to_string(),
+                    created_at: 0,
+                    updated_at: 0,
+                    repo_id: Some("repo-e2e".to_string()),
+                    workspace_id: Some("ws-e2e".to_string()),
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    /// Mint an agent JWT with workload claims, register it in agent_tokens,
+    /// and store a workload attestation deriving the requested level.
+    /// Level 3 = stack fingerprint + container_id + image_hash.
+    async fn register_e2e_agent(
+        state: &crate::AppState,
+        agent_id: &str,
+        stack_hash: &str,
+        level: u32,
+    ) -> String {
+        let jwt = state
+            .agent_signing_key
+            .mint_with_workload(
+                agent_id,
+                "task-e2e",
+                "system",
+                &state.base_url,
+                3600,
+                None,                // wl_pid
+                None,                // wl_hostname
+                Some("local".to_string()), // wl_compute_target
+                Some(stack_hash.to_string()), // wl_stack_hash
+                if level >= 3 {
+                    Some("container-1".to_string())
+                } else {
+                    None
+                },
+                if level >= 3 {
+                    Some("sha256:image".to_string())
+                } else {
+                    None
+                },
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", agent_id, jwt.clone())
+            .await
+            .unwrap();
+
+        let attestation = crate::workload_attestation::attest_agent_with_container(
+            agent_id,
+            None,
+            "local",
+            stack_hash,
+            if level >= 3 {
+                Some("container-1".to_string())
+            } else {
+                None
+            },
+            if level >= 3 {
+                Some("sha256:image".to_string())
+            } else {
+                None
+            },
+        );
+        state
+            .kv_store
+            .kv_set(
+                "workload_attestations",
+                agent_id,
+                serde_json::to_string(&attestation).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        jwt
+    }
+
+    async fn approve_via_api(
+        app: &Router,
+        token: &str,
+        spec_path: &str,
+        sha: &str,
+        persona: Option<&str>,
+    ) -> axum::response::Response {
+        let mut body = serde_json::json!({ "sha": sha });
+        if let Some(p) = persona {
+            body["persona"] = serde_json::json!(p);
+        }
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/specs/{}/approve",
+                        spec_path.replace('/', "%2F")
+                    ))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn ledger_status(
+        state: &crate::AppState,
+        spec_path: &str,
+    ) -> ApprovalStatus {
+        state
+            .spec_ledger
+            .find_by_path(spec_path)
+            .await
+            .unwrap()
+            .unwrap()
+            .approval_status
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn human_and_agent_requires_both_approvals_e2e() {
+        let state = test_state();
+        let (dir, shas) = make_manifest_repo().await;
+        seed_e2e_specs(&state, &dir, &shas).await;
+
+        let agent_jwt = register_e2e_agent(&state, "agent-e2e-1", "sha256:free", 3).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let spec = "system/both.md";
+        let sha = &shas[spec];
+
+        // Agent approval alone → still Pending (would be Approved if the
+        // resolver were reverted to "any valid approval").
+        let resp = approve_via_api(&app, &agent_jwt, spec, sha, Some("accountability")).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(ledger_status(&state, spec).await, ApprovalStatus::Pending);
+
+        // Human approval completes the pair → Approved.
+        let resp = approve_via_api(&app, "test-token", spec, sha, None).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(ledger_status(&state, spec).await, ApprovalStatus::Approved);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_only_rejects_attestation_below_minimum_e2e() {
+        let state = test_state();
+        let (dir, shas) = make_manifest_repo().await;
+        seed_e2e_specs(&state, &dir, &shas).await;
+
+        let spec = "system/agent-min.md";
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Level 2 agent (stack, no container) — manifest requires 3.
+        let weak_jwt = register_e2e_agent(&state, "agent-e2e-2", "sha256:free", 2).await;
+        let resp = approve_via_api(&app, &weak_jwt, spec, &shas[spec], Some("accountability")).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(ledger_status(&state, spec).await, ApprovalStatus::Pending);
+
+        // Level 3 agent on the same spec → Approved.
+        let strong_jwt = register_e2e_agent(&state, "agent-e2e-3", "sha256:free", 3).await;
+        let resp = approve_via_api(&app, &strong_jwt, spec, &shas[spec], Some("accountability")).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(ledger_status(&state, spec).await, ApprovalStatus::Approved);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_only_requires_exact_stack_hash_match_e2e() {
+        let state = test_state();
+        let (dir, shas) = make_manifest_repo().await;
+        seed_e2e_specs(&state, &dir, &shas).await;
+
+        let spec = "system/agent-pinned.md";
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Agent running a different stack → Pending.
+        let other_jwt = register_e2e_agent(&state, "agent-e2e-4", "sha256:other", 3).await;
+        let resp = approve_via_api(&app, &other_jwt, spec, &shas[spec], Some("accountability")).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(ledger_status(&state, spec).await, ApprovalStatus::Pending);
+
+        // Agent running the pinned stack → Approved.
+        let pinned_jwt = register_e2e_agent(&state, "agent-e2e-5", "sha256:pinned", 3).await;
+        let resp = approve_via_api(&app, &pinned_jwt, spec, &shas[spec], Some("accountability")).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        assert_eq!(ledger_status(&state, spec).await, ApprovalStatus::Approved);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_attestation_fields_round_trip_via_history_api() {
+        let state = test_state();
+        let (dir, shas) = make_manifest_repo().await;
+        seed_e2e_specs(&state, &dir, &shas).await;
+
+        let agent_jwt = register_e2e_agent(&state, "agent-e2e-6", "sha256:pinned", 3).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let spec = "system/agent-pinned.md";
+        let resp = approve_via_api(&app, &agent_jwt, spec, &shas[spec], Some("accountability")).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // The recorded event carries the JWT-derived attestation fields.
+        let events = state
+            .spec_approval_history
+            .list_by_path(spec)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].approver_type, "agent");
+        assert_eq!(events[0].attestation_level, Some(3));
+        assert_eq!(events[0].stack_hash.as_deref(), Some("sha256:pinned"));
+        assert_eq!(events[0].persona.as_deref(), Some("accountability"));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn list_pending_filters_correctly() {
         let state = test_state();
