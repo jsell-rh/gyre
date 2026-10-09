@@ -419,10 +419,30 @@ pub async fn approve_spec(
         ));
     }
 
-    // Verify spec is in the ledger.
-    if state.spec_ledger.find_by_path(&spec_path).await?.is_none() {
-        return Err(ApiError::NotFound(format!(
-            "spec '{spec_path}' not in registry"
+    // Verify spec is in the ledger, and that the caller is approving the
+    // version that is actually current. The ledger's `current_sha` is the git
+    // blob SHA synced from the manifest at push (agent-gates.md §The
+    // Provenance Chain, step 8): accepting a fabricated or stale SHA would
+    // mint an approval `verify_spec_ref` honors at merge even though nobody
+    // ever saw that content. An empty `current_sha` means the manifest entry
+    // has no resolvable file at HEAD — there is no version to approve.
+    let ledger_current = match state.spec_ledger.find_by_path(&spec_path).await? {
+        Some(entry) if !entry.current_sha.is_empty() => entry.current_sha,
+        Some(_) => {
+            return Err(ApiError::Conflict(format!(
+                "spec '{spec_path}' has no current version to approve (ledger current_sha is empty)"
+            )));
+        }
+        None => {
+            return Err(ApiError::NotFound(format!(
+                "spec '{spec_path}' not in registry"
+            )));
+        }
+    };
+    if req.sha != ledger_current {
+        return Err(ApiError::Conflict(format!(
+            "sha {} does not match current spec version {} — refresh and approve the current version",
+            req.sha, ledger_current
         )));
     }
 
@@ -3424,7 +3444,7 @@ specs:
 
         // No KeyBinding pre-created → should skip SignedInput.
         let body = serde_json::json!({
-            "sha": "b".repeat(40),
+            "sha": "a".repeat(40),
         });
         let resp = app
             .oneshot(
@@ -3471,7 +3491,7 @@ specs:
         state.key_bindings.store("default", &kb).await.unwrap();
 
         let body = serde_json::json!({
-            "sha": "d".repeat(40),
+            "sha": "a".repeat(40),
         });
         let resp = app
             .oneshot(
@@ -3522,7 +3542,7 @@ specs:
         // Pre-compute the InputContent the server will build (default scope, no persona).
         let input_content = gyre_common::InputContent {
             spec_path: "system/design-principles.md".to_string(),
-            spec_sha: "c".repeat(40),
+            spec_sha: "a".repeat(40),
             workspace_id: String::new(),
             repo_id: String::new(),
             persona_constraints: vec![],
@@ -3536,7 +3556,7 @@ specs:
 
         // Approve with output_constraints but no scope.
         let body = serde_json::json!({
-            "sha": "c".repeat(40),
+            "sha": "a".repeat(40),
             "output_constraints": [
                 {"name": "no new deps", "expression": "output.changed_files.all(f, f != \"Cargo.toml\")"}
             ],
@@ -3593,7 +3613,7 @@ specs:
 
         // Provide a bogus user_content_signature that won't verify.
         let body = serde_json::json!({
-            "sha": "e".repeat(40),
+            "sha": "a".repeat(40),
             "user_content_signature": base64::engine::general_purpose::STANDARD
                 .encode(b"this-is-not-a-valid-signature-at-all-needs-to-be-long-enough-for-ed25519!!")
         });
@@ -3611,6 +3631,60 @@ specs:
             .unwrap();
         // Should reject with 400 — signature verification failed.
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approve_spec_mismatched_sha_rejected() {
+        let (app, state) = app_with_spec();
+
+        // Approve a fabricated 40-hex SHA that does not match the ledger's
+        // current version — must be rejected (agent-gates.md §The Provenance
+        // Chain, step 8: approvals bind the version that actually exists).
+        let body = serde_json::json!({
+            "sha": "f".repeat(40),
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fdesign-principles.md/approve")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // No partial writes: no ledger approval row, no history event.
+        let approvals = state
+            .spec_approvals
+            .list_by_path("system/design-principles.md")
+            .await
+            .unwrap();
+        assert!(
+            approvals.is_empty(),
+            "mismatched sha must not create a spec approval ledger row"
+        );
+        let history = state
+            .spec_approval_history
+            .list_by_path("system/design-principles.md")
+            .await
+            .unwrap();
+        assert!(
+            history.is_empty(),
+            "mismatched sha must not record an approval history event"
+        );
+
+        // Ledger approval_status unchanged (still Pending).
+        let entry = state
+            .spec_ledger
+            .find_by_path("system/design-principles.md")
+            .await
+            .unwrap()
+            .expect("seeded ledger entry must exist");
+        assert_eq!(entry.approval_status, ApprovalStatus::Pending);
     }
 
     // ── Constraint validation (§7.6 dry-run) ─────────────────────────────
