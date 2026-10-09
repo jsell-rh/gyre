@@ -1,6 +1,6 @@
 # Spec Coverage Summary
 
-**Last updated:** 2026-10-05
+**Last updated:** 2026-10-08
 
 | Spec | Total | n/a | Not Started | Assigned | Implemented | Verified | Coverage |
 |------|-------|-----|-------------|----------|-------------|----------|----------|
@@ -11,7 +11,7 @@
 | agent-runtime.md | 33 | 1 | 0 | 32 | 0 | 0 | 0% |
 | analytics.md | 12 | 0 | 0 | 12 | 0 | 0 | 0% |
 | authorization-provenance.md | 47 | 7 | 0 | 1 | 12 | 27 | 97% |
-| business-continuity.md | 10 | 4 | 0 | 1 | 4 | 1 | 83% |
+| business-continuity.md | 10 | 4 | 0 | 0 | 5 | 1 | 100% |
 | dependency-graph.md | 19 | 3 | 0 | 5 | 2 | 9 | 68% |
 | design-principles.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
 | explorer-canvas.md | 10 | 3 | 0 | 7 | 0 | 0 | 0% |
@@ -32,7 +32,7 @@
 | sdlc.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
 | search.md | 18 | 4 | 0 | 10 | 3 | 1 | 28% |
 | source-control.md | 13 | 2 | 0 | 1 | 0 | 10 | 90% |
-| spec-lifecycle.md | 13 | 3 | 0 | 2 | 3 | 5 | 80% |
+| spec-lifecycle.md | 13 | 3 | 0 | 1 | 4 | 5 | 90% |
 | spec-links.md | 17 | 3 | 0 | 1 | 3 | 10 | 92% |
 | spec-registry.md | 19 | 1 | 0 | 4 | 5 | 9 | 77% |
 | supply-chain.md | 18 | 4 | 0 | 7 | 6 | 1 | 50% |
@@ -44,4 +44,4 @@
 | user-management.md | 36 | 10 | 0 | 26 | 0 | 0 | 0% |
 | view-query-grammar.md | 16 | 0 | 0 | 16 | 0 | 0 | 0% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **218** | **0** | **314** | **108** | **162** | **46%** |
+| **TOTAL** | **802** | **218** | **0** | **312** | **110** | **162** | **46%** |

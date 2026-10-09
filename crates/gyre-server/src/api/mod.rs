@@ -368,6 +368,12 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/specs/conflicts", get(specs::get_conflicts))
         // TASK-023: Accountability agent patrol (spec-links.md §Accountability Agent Integration)
         .route("/api/v1/patrol/spec-links", post(specs::patrol_spec_links))
+        // task-204: spec-lifecycle accountability patrol (spec-lifecycle.md
+        // §Accountability Integration) — findings escalate to the orchestrator.
+        .route(
+            "/api/v1/patrol/spec-lifecycle",
+            post(specs::patrol_spec_lifecycle),
+        )
         .route("/api/v1/specs/:path", get(specs::get_spec))
         .route("/api/v1/specs/:path/approve", post(specs::approve_spec))
         .route(
