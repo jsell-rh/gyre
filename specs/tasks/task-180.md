@@ -2,11 +2,10 @@
 title: "Executable Spec Assertions — gyre:assert parsing and knowledge graph validation"
 spec_ref: "system-explorer.md §9"
 depends_on: []
-progress: complete
-review: specs/reviews/task-180.md
+progress: not-started
 coverage_sections:
   - "system-explorer.md §9. Executable Spec Assertions"
-commits: ["4119f9bd2385a50ef3a80df1438ef44328ac9a96", "6aadd3a0240a9ec0066bb0e730e0e9b16c220ef1", "f09e23603dbc4626523d05d06e34b26d4749b820", "3778c14a06aab7bac9df7bd185d8a81409d39d3b", "483f9b1b3029eb6fd7c7b9139ad27dcdb77bfab8", "68548e19f5ff2060c83ea2357525c9f225f280bc", "b8143187c42389e6c10a593d354ddb27e4664134", "cda15008584c10c66ad0d256483098b48ed4c5c3"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -71,35 +70,15 @@ system-explorer.md §9 defines executable spec assertions — HTML comments embe
 
 ## Acceptance Criteria
 
-- [x] `<!-- gyre:assert -->` comments parsed from spec markdown
-- [x] `no_dependency` assertion validates against knowledge graph
-- [x] `implements` assertion validates against knowledge graph
-- [x] `all_have` assertion validates against knowledge graph
-- [x] Failed assertions create priority-9 Inbox notifications
-- [x] `GET /repos/:id/specs/:path/assertions` returns assertion results
-- [x] Assertion results shown in spec inline view (green ✓ / red ✗)
-- [x] Tests pass
+- [ ] `<!-- gyre:assert -->` comments parsed from spec markdown
+- [ ] `no_dependency` assertion validates against knowledge graph
+- [ ] `implements` assertion validates against knowledge graph
+- [ ] `all_have` assertion validates against knowledge graph
+- [ ] Failed assertions create priority-9 Inbox notifications
+- [ ] `GET /repos/:id/specs/:path/assertions` returns assertion results
+- [ ] Assertion results shown in spec inline view (green ✓ / red ✗)
+- [ ] Tests pass
 
 ## Agent Instructions
 
 Read `system-explorer.md` §9 "Executable Spec Assertions" for the full specification. The knowledge graph API is in `crates/gyre-server/src/api/graph.rs` — check how nodes and edges are queried. The spec content is retrieved via `GET /api/v1/specs/:path?repo_id=` — check `crates/gyre-server/src/api/specs.rs`. For Inbox notifications, check the existing notification creation pattern in `crates/gyre-domain/` (search for priority levels and notification types). The new endpoint should be registered in `crates/gyre-server/src/api/mod.rs`. Verify the route path matches this task before implementing: `GET /api/v1/repos/:id/specs/:path/assertions`.
-
-## Shipped
-
-- `<!-- gyre:assert ... -->` comments in spec markdown are parsed (attribute
-  form: `no_dependency`, `implements`, `all_have`) and evaluated against the
-  knowledge graph with fail-closed semantics (missing subjects, unknown
-  properties, and empty node sets all fail, never vacuously pass).
-- After every push — git HTTP receive-pack, mirror sync, and initial mirror
-  clone — the post-extraction check persists per-assertion results (SQLite +
-  PostgreSQL adapters, migration 000056, replace-per-spec semantics, cleanup on
-  repo delete) and creates priority-9 `SpecAssertionFailure` Inbox
-  notifications for workspace Admin/Developer/Owner members, with same-commit
-  duplicate suppression.
-- `GET /api/v1/repos/:id/specs/:path/assertions` returns the persisted
-  last-push results; the Explorer spec inline view renders green ✓ / red ✗ per
-  assertion (live check with fallback to persisted results), and the Inbox
-  card offers View Code / Update Spec actions linking to the failing spec.
-- ABAC coverage strengthened: the previously exempt
-  `POST /repos/:id/spec-assertions/check` route moved into the ABAC resolver
-  (`spec`/`write`); the new GET route is resolver-mapped as `spec` read.
