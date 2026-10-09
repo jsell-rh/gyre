@@ -7,7 +7,7 @@ coverage_sections:
   - "user-management.md §Delivery Channels"
   - "user-management.md §Who Gets Notified"
   - "user-management.md §Notification Routing for Agent Escalations"
-commits: ["37f8f1d469f14f8b375510d86d4865dbc46442f9", "9596245fea726c2d3d2033927ce075464bcb23d7", "56543f839d438b2c7118778d5e8717718a8b9719", "2453dfe45dfa7018838c7e6ff8e22561c455221e", "7ee0636e0d395060a072554c45a29204ba55a323", "2f1ac064a753c4402e002001d8b4015c3019b654", "cff5ef3203fc5b3e4baff33473a72154c3fb2ee9"]
+commits: ["f186a8283121560655869c960bfd87adcd10f1c8", "7b71e879ab91aba9550e7463c56f8c36c0973e2f", "9ab3b6232218b78b56d810dcd4e8e21f7e97a9a1", "70ecbc4200d532215cda7c14c0dce9de4f697ae8", "b7304b6f9875fc87946fbfd4ac5308ad368080e1", "3b34ddaee2294c1cf473d8c934adc5975738685f", "24f1c5e5b90f6943d1dc09e71343de045754bdad"]
 ---
 
 ## Spec Excerpt
