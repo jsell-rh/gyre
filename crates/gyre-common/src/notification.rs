@@ -71,7 +71,11 @@ pub enum NotificationType {
     /// Priority 2 — agent budget is exhausted; spawner + workspace Owner
     /// are notified (user-management.md §Who Gets Notified).
     BudgetExhausted,
-}
+    /// Priority 3 — a Critical/High security finding was detected; the
+    /// workspace Owner and tenant Admin are notified
+    /// (user-management.md §Who Gets Notified).
+    SecurityFinding,
+ }
 
 impl NotificationType {
     /// Returns the canonical string used for DB storage.
@@ -102,6 +106,7 @@ impl NotificationType {
             Self::PersonaApprovalRequested => "PersonaApprovalRequested",
             Self::MergeQueuePaused => "MergeQueuePaused",
             Self::BudgetExhausted => "BudgetExhausted",
+            Self::SecurityFinding => "SecurityFinding",
         }
     }
 
@@ -132,7 +137,7 @@ impl NotificationType {
             "PersonaApprovalRequested" => Some(Self::PersonaApprovalRequested),
             "MergeQueuePaused" => Some(Self::MergeQueuePaused),
             "BudgetExhausted" => Some(Self::BudgetExhausted),
-            _ => None,
+            "SecurityFinding" => Some(Self::SecurityFinding),
         }
     }
 
@@ -164,6 +169,7 @@ impl NotificationType {
             Self::PersonaApprovalRequested => 2,
             Self::MergeQueuePaused => 3,
             Self::BudgetExhausted => 2,
+            Self::SecurityFinding => 3,
         }
     }
 }

@@ -105,6 +105,7 @@
         BudgetExhausted: 'budget_exhausted',
       };
       data = data.map(n => ({
+        ...n,
         notification_type: typeNormMap[n.notification_type] ?? n.notification_type,
       }));
 

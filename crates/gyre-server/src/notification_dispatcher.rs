@@ -512,6 +512,79 @@ pub async fn notify_agent_budget_exhausted(
     }
 }
 
+/// Deliver a "security finding" notification to the workspace Owners plus
+/// the tenant Admins (user-management.md §Who Gets Notified: "Security
+/// finding (Critical/High) → Workspace Owner + tenant Admin").
+///
+/// Routing contract only — the emission *trigger* (a Critical/High severity
+/// finding from the security gate, agent-gates.md §Gate Failure Feedback
+/// Escalation) is owned by task-137's escalation protocol, which calls this
+/// function. `severity` must be "Critical" or "High" per the routing row —
+/// callers gate lower severities before invoking.
+pub async fn notify_security_finding(
+    state: &AppState,
+    workspace_id: &Id,
+    severity: &str,
+    title: &str,
+    detail: &str,
+    entity_ref: Option<String>,
+    repo_id: Option<String>,
+) {
+    let tenant_id = match state.workspaces.find_by_id(workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        _ => {
+            tracing::warn!(
+                workspace_id = %workspace_id,
+                "security-finding routing: cannot resolve tenant for workspace — skipping notification"
+            );
+            return;
+        }
+    };
+
+    let mut recipients: Vec<Id> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    // Workspace Owners.
+    for owner in members_with_roles(state, workspace_id, &[WorkspaceRole::Owner]).await {
+        if seen.insert(owner.as_str().to_string()) {
+            recipients.push(owner);
+        }
+    }
+    // Tenant Admins — platform-wide users holding the Admin role
+    // (create_user maps UserRole::Admin → GlobalRole::TenantAdmin).
+    for admin in state
+        .users
+        .list()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|u| u.roles.contains(&gyre_domain::UserRole::Admin))
+    {
+        if seen.insert(admin.id.as_str().to_string()) {
+            recipients.push(admin.id);
+        }
+    }
+
+    let body = serde_json::json!({
+        "severity": severity,
+        "detail": detail,
+    })
+    .to_string();
+    for user_id in recipients {
+        crate::notifications::notify_rich(
+            state,
+            workspace_id.clone(),
+            user_id,
+            NotificationType::SecurityFinding,
+            format!("[{severity}] {title}"),
+            &tenant_id,
+            Some(body.clone()),
+            entity_ref.clone(),
+            repo_id.clone(),
+        )
+        .await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1075,5 +1148,65 @@ mod tests {
             admin_notifs.is_empty(),
             "budget exhausted must not notify Admins (that is the warning row)"
         );
+    }
+
+    #[tokio::test]
+    async fn security_finding_notifies_owners_and_tenant_admins() {
+        let state = test_state();
+        let ws = Id::new("ws-1");
+        seed_workspace(&state, &ws).await;
+        seed_member(&state, &ws, "owner-1", WorkspaceRole::Owner).await;
+        seed_member(&state, &ws, "admin-1", WorkspaceRole::Admin);
+        seed_member(&state, &ws, "dev-1", WorkspaceRole::Developer).await;
+        // Platform tenant admin (not a workspace member).
+        let mut tenant_admin = gyre_domain::User::new(
+            Id::new("tenant-admin-1"),
+            "ext-tenant-admin",
+            "tenant-admin",
+            1000,
+        );
+        tenant_admin.roles = vec![gyre_domain::UserRole::Admin];
+        state.users.create(&tenant_admin).await.unwrap();
+
+        notify_security_finding(
+            &state,
+            &ws,
+            "Critical",
+            "SQL injection in query builder",
+            "handlers.rs:47 uses string interpolation",
+            Some("mr-42".to_string()),
+            Some("repo-1".to_string()),
+        )
+        .await;
+
+        // Routing row: Workspace Owner + tenant Admin.
+        for user in ["owner-1", "tenant-admin-1"] {
+            let notifs = state
+                .notifications
+                .list_for_user(&Id::new(user), Some(&ws), None, None, None, 50, 0)
+                .await
+                .unwrap();
+            assert_eq!(
+                notifs.len(),
+                1,
+                "{user} (Owner / tenant Admin) must receive the security finding"
+            );
+            assert_eq!(notifs[0].notification_type, NotificationType::SecurityFinding);
+            assert_eq!(notifs[0].title, "[Critical] SQL injection in query builder");
+            assert_eq!(notifs[0].entity_ref.as_deref(), Some("mr-42"));
+            assert_eq!(notifs[0].repo_id.as_deref(), Some("repo-1"));
+        }
+        // Non-privileged members must not be notified.
+        for user in ["admin-1", "dev-1"] {
+            let notifs = state
+                .notifications
+                .list_for_user(&Id::new(user), Some(&ws), None, None, None, 50, 0)
+                .await
+                .unwrap();
+            assert!(
+                notifs.is_empty(),
+                "{user} must not receive the security finding"
+            );
+        }
     }
 }
