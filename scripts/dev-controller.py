@@ -122,7 +122,7 @@ def db_open():
         db.execute("ALTER TABLE attempts ADD COLUMN ready_observed INTEGER NOT NULL DEFAULT 0")
     for column, definition in (("host_pid", "INTEGER"), ("bundle_sha", "TEXT"),
                                ("generation", "TEXT"), ("phase", "TEXT"), ("reason", "TEXT"),
-                               ("host_started", "INTEGER")):
+                               ("host_started", "INTEGER"), ("delivery_generation", "TEXT")):
         if column not in {row[1] for row in db.execute("PRAGMA table_info(attempts)")}:
             db.execute(f"ALTER TABLE attempts ADD COLUMN {column} {definition}")
     for column, definition in (("inventory_at", "INTEGER NOT NULL DEFAULT 0"), ("inventory_error", "TEXT")):
@@ -419,6 +419,34 @@ def task_progress(ref, name):
     return field(body, "progress") if body else ""
 
 
+def generation_at(ref, name):
+    """Read the task's contract from an immutable tree, including task edits."""
+    body = git('show', f'{ref}:specs/tasks/{name}.md')
+    paths = git('ls-tree', '-r', '--name-only', ref, 'specs/system', 'specs/development').splitlines()
+    specs = {path: git('show', f'{ref}:{path}') for path in paths if path.endswith('.md')}
+    goal = run('git', 'show', f'{ref}:specs/GOAL.md', check=False).stdout
+    return contract.generation(body, specs, goal)
+
+
+def record_delivery(db, name, ref):
+    db.commit()
+    generation = generation_at(ref, name)
+    db.execute("""UPDATE tasks SET state='merged',generation=?,observed_generation=?,
+                  condition=NULL,retry_at=0 WHERE name=?""", (generation, generation, name))
+
+
+def matching_delivery_tree(verified, main):
+    if run('git', 'merge-base', '--is-ancestor', verified, main, check=False).returncode:
+        return False
+    if verified == main:
+        return True
+    # GitHub adds a merge commit above our verified head. Examine the first
+    # mainline commit that introduced it, rather than a later moving main tip.
+    introduced = git('rev-list', '--reverse', '--ancestry-path', '--first-parent', f'{verified}..{main}').splitlines()
+    return bool(introduced and git('rev-parse', f'{introduced[0]}^{{tree}}') ==
+                git('rev-parse', f'{verified}^{{tree}}'))
+
+
 def sync(db):
     db.commit()
     source()
@@ -440,16 +468,26 @@ def sync(db):
         seed = ref_sha(branch)
         candidate = seed if seed and task_progress(seed, name) == "complete" and run(
             "git", "merge-base", "--is-ancestor", seed, main_sha, check=False).returncode != 0 else None
-        observations.append((name, body, seed, candidate))
+        delivered = None
+        proof = db.execute("""SELECT id,merge_sha,delivery_generation FROM attempts
+                              WHERE task=? AND kind='check' AND state='done'
+                              AND delivery_generation IS NOT NULL ORDER BY rowid DESC LIMIT 1""", (name,)).fetchone()
+        if proof and field(body, 'progress') == 'complete' and proof['merge_sha']:
+            current_generation = contract.generation(body, spec_bodies, goal)
+            if (proof['delivery_generation'] == current_generation and
+                    host_gate_marker_valid(STATE / 'attempts' / proof['id'], proof['merge_sha']) and
+                    matching_delivery_tree(proof['merge_sha'], main_sha)):
+                delivered = current_generation
+        observations.append((name, body, seed, candidate, delivered))
     # Lazy Git blob downloads and subprocess reads can take seconds. Observe
     # them before opening the SQLite write transaction so cockpit controls
     # remain writable, and bind all desired definitions to one main snapshot.
     upgrade_baseline_generations(db, goal)
-    for name, body, seed, candidate in observations:
+    for name, body, seed, candidate, delivered in observations:
         progress = field(body, "progress")
         old = db.execute("SELECT * FROM tasks WHERE name=?", (name,)).fetchone()
         generation = contract.generation(body, spec_bodies, goal)
-        changed = bool(old and old["generation"] and generation != old["generation"])
+        changed = bool(old and old["generation"] and generation != old["generation"] and not delivered)
         if progress == "complete":
             state = "merged"
         elif old and old["state"] in ("running", "checking", "promoting", "candidate", "published", "blocked", "failed", "deferred"):
@@ -476,13 +514,15 @@ def sync(db):
                                "reproduce relevant acceptance behavior, and obtain independent review.\n")
             state = old["state"] if old["state"] in ("running", "checking") else "ready"
             candidate, seed = None, old["candidate"] or old["seed"] or main_sha
-        elif old and old["generation"] and old["observed_generation"] and old["observed_generation"] != generation and progress == "complete":
+        elif not delivered and old and old["generation"] and old["observed_generation"] and old["observed_generation"] != generation and progress == "complete":
             state, candidate = old["state"], old["candidate"]
         db.execute("""INSERT INTO tasks(name,progress,deps,state,seed,candidate) VALUES(?,?,?,?,?,?)
           ON CONFLICT(name) DO UPDATE SET progress=excluded.progress,deps=excluded.deps,
           state=excluded.state,seed=excluded.seed,candidate=excluded.candidate""",
                    (name, progress, json.dumps(deps(body)), state, seed, candidate))
         db.execute("UPDATE tasks SET generation=? WHERE name=?", (generation, name))
+        if delivered:
+            db.execute("UPDATE tasks SET state='merged',observed_generation=?,condition=NULL,retry_at=0 WHERE name=?", (delivered, name))
         if candidate and (not old or old["candidate"] != candidate or not old["candidate_at"]):
             db.execute("UPDATE tasks SET candidate_at=? WHERE name=?", (int(time.time()), name))
         if changed:
@@ -859,7 +899,7 @@ def promote(db):
         source()
         main = ref_sha("origin/main")
         if main == check["merge_sha"]:
-            db.execute("UPDATE tasks SET state='merged',observed_generation=generation WHERE name=?", (task["name"],))
+            record_delivery(db, task['name'], main)
             event(db, task["name"], f"merged {main}")
             continue
         if main != check["base"]:
@@ -940,6 +980,11 @@ def promote(db):
         pr = ensure_pull_request(db, task, check, merge_sha)
         if not reconcile_pr_checks(db, task, check, merge_sha, pr):
             continue
+        # Persist the reviewed contract before the external merge. A lost
+        # response can then be recovered from upstream ancestry and host proof.
+        db.execute('UPDATE attempts SET delivery_generation=? WHERE id=?',
+                   (generation_at(merge_sha, task['name']), check['id']))
+        db.commit()
         if PUBLICATION_MODE == "pr":
             db.execute("UPDATE tasks SET state='published',condition='PullRequestChecksPassed',retry_at=? WHERE name=?",
                        (int(time.time()) + 30, task['name']))
@@ -956,7 +1001,7 @@ def promote(db):
             if run('git', 'merge-base', '--is-ancestor', landed, 'origin/main', check=False).returncode:
                 defer_promotion(db, task, 'MergeNotObservedUpstream')
                 continue
-            db.execute("UPDATE tasks SET state='merged',observed_generation=generation,condition=NULL,retry_at=0 WHERE name=?", (task['name'],))
+            record_delivery(db, task['name'], landed)
             event(db, task['name'], f'merged {landed}')
         else:
             defer_promotion(db, task, 'GitHubMergePending')
