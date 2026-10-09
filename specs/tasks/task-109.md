@@ -2,7 +2,7 @@
 title: "Externalize spec lifecycle configuration"
 spec_ref: "spec-lifecycle.md §Configuration"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "spec-lifecycle.md §Configuration"
 commits: ["8cf379a075e2ecb069fc3084f0edbcd298a7400b", "219b976d5634ab1a393c2a18b88d8b108eaf00d1", "8f512ea3ce235e80fd0e751b4ed625ce22ccaa16", "be0b113d055d0a2e690b1cb47c5fde53420bfb00", "8fce2a130fb6b2d75d840ab4445cf411186512db", "e74159d30c0ea5f639597e3c9e366335ebce2e28"]
