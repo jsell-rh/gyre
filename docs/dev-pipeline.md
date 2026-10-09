@@ -106,3 +106,8 @@ logs are kept separate from baseline failures; bounded logs and screenshot
 artifacts are staged inside the repair sandbox. Pending checks and merge
 confirmation are expected observations, polled every 30 seconds without
 accumulating infrastructure failure backoff.
+
+Completing a repair clears its active finding but retains the original evidence
+as review context. The independent reviewer receives the failure source identity,
+bounded logs, and artifacts inside its own sandbox; it can verify the repair
+without trusting the implementer's explanation or losing the original failure.

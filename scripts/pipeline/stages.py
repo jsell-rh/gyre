@@ -20,8 +20,9 @@ def prompt(execution, task):
                execution.command('python3', str(ROOT / 'scripts/dev-context.py'), 'task', str(task_path)).stdout)
     findings = [finding['detail'] for finding in execution.store.findings(task['name'])
                 if not finding['resolved_by'] and finding['generation'] == task['generation']]
-    if task['data'].get('repair') and task['data']['repair'] not in findings:
-        findings.append(task['data']['repair'])
+    context = task['data'].get('repair') or (task['data'].get('review_context') if role == 'review' else None)
+    if context and context not in findings:
+        findings.append(context)
     findings = findings[-6:]
     allowance = 18000 // max(1, len(findings))
     findings = [finding | {'log_tail': finding['log_tail'][-allowance:]}
@@ -91,6 +92,7 @@ def implement(execution, task):
     updates = {'candidate': result['head'], 'candidate_base': result.get('base', execution.claim['input']['base']),
                'branch': result['branch'], 'task_override': result['task_body'],
                'review': None, 'verified': None,
+               'review_context': repair if complete else None,
                'repair': None if complete else {'category': 'implementation',
                                                 'source': result['head'], 'checkpoint': True,
                                                 'id': execution.claim['id'],

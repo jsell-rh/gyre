@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 from pipeline.store import Store
 from pipeline.execution import Execution
-from pipeline.stages import cleanup, implement
+from pipeline.stages import cleanup, implement, prompt
 
 spec = importlib.util.spec_from_file_location('pipeline_cli', Path(__file__).with_name('dev-pipeline.py'))
 cli = importlib.util.module_from_spec(spec)
@@ -102,6 +102,27 @@ class CrashTest(unittest.TestCase):
         self.assertEqual(result['task_body'], body)
         self.assertEqual(updates['repair']['category'], 'contract')
         self.assertIsNone(updates['review'])
+
+    def test_reviewer_receives_original_ci_failure_after_repair_completes(self):
+        body = '---\ntitle: Thing\nspec_ref: behavior.md\ndepends_on: []\nprogress: not-started\n---\n\n## Required behavior\nReject foreign tenants.\n'
+        finding = {'category': 'ci', 'source': 'previous-head', 'detail': 'CI_FOREIGN_TENANT_FAILURE',
+                   'candidate_log': str(self.store.directory / 'ci.log')}
+        self.store.put_task('task-001', 'g', body,
+                            {'dependencies': [], 'candidate_base': 'old-main', 'repair': finding})
+        execution = Execution(self.store, self.claim)
+        execution.claim['input'] = {'base': 'new-main'}
+        receipt = {'task_body': body.replace('not-started', 'ready-for-review'), 'valid': True,
+                   'head': 'fixed', 'base': 'new-main', 'branch': 'private', 'agent_exit': 0}
+        with patch('pipeline.stages.prompt', return_value='assignment'), patch.object(execution, 'cloud_step', return_value=receipt):
+            result, updates, findings = implement(execution, self.store.task('task-001'))
+        self.store.finish(self.work, self.claim['token'], result, updates, findings)
+        self.store.enqueue('review', 'task-001', 'g', {'candidate': 'fixed', 'base': 'new-main'})
+        reviewer = Execution(self.store, self.store.claim('review', 'independent-reviewer'))
+        self.assertIsNone(self.store.task('task-001')['data']['repair'])
+        with patch.object(reviewer, 'command', return_value=subprocess.CompletedProcess([], 0, body, '')):
+            assignment = prompt(reviewer, self.store.task('task-001'))
+        self.assertIn('CI_FOREIGN_TENANT_FAILURE', assignment)
+        self.assertIn('previous-head', assignment)
 
     def test_invalid_review_outcome_is_not_replayed_forever(self):
         prior = self.store.directory / 'attempts' / self.work / '0'

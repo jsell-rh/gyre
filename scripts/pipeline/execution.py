@@ -177,7 +177,8 @@ class Execution:
         bundle.mkdir(exist_ok=True)
         (bundle / 'job.json').write_text(json.dumps(job))
         (bundle / 'prompt.md').write_text(prompt)
-        repair = task['data'].get('repair') or {}
+        repair = task['data'].get('repair') or (
+            task['data'].get('review_context') if claim['stage'] == 'review' else None) or {}
         evidence_log = repair.get('baseline_log') if repair.get('category') == 'baseline' else repair.get('candidate_log')
         if evidence_log:
             source = Path(evidence_log).resolve()

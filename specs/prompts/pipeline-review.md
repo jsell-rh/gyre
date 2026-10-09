@@ -12,6 +12,11 @@ belong to verification. If a focused probe needs a listener, check whether the
 current sandbox permits it. Record concrete checks the verifier must run if an
 actual transport restriction blocks the probe. A restriction is not a code defect.
 Use `npm ci` before frontend probes so repository tools use the locked versions.
+For CI repair, inspect the retained original failure logs and artifacts under
+`/tmp/stage` and compare them with the exact candidate changes. Avoid a cold
+release build merely to inspect screenshots. If a server probe is needed after
+focused Rust tests, use the available debug build dependencies and rebuild the
+current web source; the older committed web bundle cannot prove current UI code.
 
 Do not modify production code, scripts, verifiers, unrelated tasks, or specs.
 Temporary experiments must be restored. Source edits invalidate review.
