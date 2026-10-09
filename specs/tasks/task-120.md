@@ -7,7 +7,7 @@ coverage_sections:
   - "user-management.md §User Entity"
   - "user-management.md §Username vs Display Name"
   - "user-management.md §User Preferences"
-commits: ["f46924dd396f806dcf3a1396ea20a516daac77fc", "550624305f9fc29aae03c9a85cb1307653624ea0", "fa53f8d3320fe7f55dbc29316d77bcad35480003", "697bc17a0ad6067cc4d36222f9c7574144e965d0", "8eba64b93e06bdb11609d4f5931b523efb6f5fbc"]
+commits: ["12bc2b779f9b46510f507ec1efe092ae49f153c8", "a905dd0acd8cd54d7e5bc117b9131feb5b8430b0", "5fb8e5b29e179d29ce8c97251dbe680673af448e", "42370b3ddecb14a9f71f374381dad8d3b50bac7e", "1ae5a95a5479ee2bdc16f219b1eade9f6a718071"]
 review: specs/reviews/task-120.md
 ---
 
