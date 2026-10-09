@@ -2,7 +2,7 @@
 title: "Seed built-in personas at tenant bootstrap"
 spec_ref: "platform-model.md §2 Built-In Personas"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Built-In Personas"
 commits: ["fcb712c51c1f27b597e4a0cb798e63d7f341f6e9", "f16e969ce52622e8f6133deb60550d77dd7ed47e"]
@@ -50,12 +50,32 @@ Built-in personas can be overridden at workspace or repo scope (with human appro
 
 ## Acceptance Criteria
 
-- [ ] Server startup creates 4 built-in personas at the tenant level: `workspace-orchestrator`, `repo-orchestrator`, `accountability`, `security`
-- [ ] All built-in personas have `approval_status: Approved` (pre-approved)
-- [ ] `specs/personas/repo-orchestrator.md` file exists with appropriate persona definition
-- [ ] Seeding is idempotent — restarting the server does not duplicate personas
-- [ ] Content hash is computed from the prompt content via SHA-256
-- [ ] Tests pass
+- [x] Server startup creates 4 built-in personas at the tenant level: `workspace-orchestrator`, `repo-orchestrator`, `accountability`, `security`
+- [x] All built-in personas have `approval_status: Approved` (pre-approved)
+- [x] `specs/personas/repo-orchestrator.md` file exists with appropriate persona definition
+- [x] Seeding is idempotent — restarting the server does not duplicate personas
+- [x] Content hash is computed from the prompt content via SHA-256
+- [x] Tests pass
+
+## Implementation Notes
+
+- Domain: `BUILTIN_PERSONA_DEFS` (crates/gyre-domain/src/workspace.rs) — the four
+  personas in spec-table order, prompts embedded byte-for-byte from
+  `specs/personas/<slug>.md` via `include_str!`; `builtin_personas(tenant_id, now)`
+  returns tenant-scoped, pre-approved `Persona` entities (approved_by "system",
+  SHA-256 content hash over prompt+capabilities).
+- Server: `seed_builtin_personas(state)` (crates/gyre-server/src/lib.rs) runs at
+  startup after meta-spec seeding (main.rs:55), enumerating tenants;
+  `seed_builtin_personas_for_tenant` is the shared idempotent tail, also called
+  from `POST /api/v1/tenants` (tenants.rs:80) and admin seed (admin.rs:447) so
+  every tenant gets the §2 table at creation. Idempotency key is
+  `find_by_slug_and_scope(slug, Tenant(tenant_id))` — existing personas are never
+  overwritten (user customizations survive restarts).
+- Tests: domain (defs cover spec table, pre-approved tenant-scoped, hash
+  recomputation), server (seed four + idempotent, preserve customized, tenant
+  isolation, tenant-create seeds), adapter (SQLite round-trip + idempotent
+  reseed against real rows — added this round; the production storage path was
+  previously covered only by mem-adapter tests). All pass.
 
 ## Agent Instructions
 
