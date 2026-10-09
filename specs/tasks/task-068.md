@@ -3,7 +3,7 @@ title: "Graph Summary & Dry-Run MCP Tools"
 spec_ref: "explorer-implementation.md §9, §22–23"
 depends_on:
   - task-062
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "explorer-implementation.md §9 MCP Tools Available to the Agent"
   - "explorer-implementation.md §22 Graph Summary MCP Tool"
@@ -94,6 +94,54 @@ Response shape:
 - [ ] `graph_query_dryrun` reports unresolved callouts
 - [ ] All 5 MCP tools (`graph_summary`, `graph_query_dryrun`, `graph_nodes`, `graph_edges`, `search`) are callable via MCP protocol
 - [ ] `cargo test --all` passes
+
+## Shipped
+
+All five §9 explorer agent tools (`graph_summary`, `graph_query_dryrun`,
+`graph_nodes`, `graph_edges`, `search`) are callable over the real MCP
+protocol path (JSON-RPC `tools/call` → `build_router` →
+`AuthenticatedAgent` extractor → dispatch in `crates/gyre-server/src/mcp.rs`),
+with the explorer SDK script allowlisting the matching `mcp__gyre__*` names
+and Bearer-token `mcpServers.gyre` config.
+
+- `graph_summary` (`mcp.rs` `handle_graph_summary` →
+  `gyre_domain::view_query_resolver::compute_graph_summary`) returns all six
+  §22 spec fields: `node_counts`, `edge_counts`, `top_types_by_fields`,
+  `top_functions_by_calls`, `modules`, `test_coverage`. `test_coverage` is a
+  real multi-source BFS from `test_node == true` nodes over outgoing `Calls`
+  edges (soft-deleted edges excluded via `build_adjacency`), proven against a
+  real graph store (`mcp_graph_summary_tool_call` asserts
+  test_functions=1, reachable=2, unreachable=1).
+- `graph_query_dryrun` (`handle_graph_query_dryrun` →
+  `view_query_resolver::dry_run`) deserializes a real `ViewQuery`, resolves
+  scope, groups, callouts, and narrative, returns the spec's
+  `{"query": …, "result": {DryRunResult}}` envelope, and generates all three
+  warning classes with tested boundary semantics: empty scope ("Scope matched
+  0 nodes"), >200-node cluttered scope (200 no-warn / 201 warns), >20-node
+  too-broad groups, and unresolved callouts (exact→prefix→substring callout
+  resolution with a precision warning on substring).
+- `search` is a domain-level ranked full-text search (`search_graph_nodes`:
+  name/qualified_name/file_path/spec_path/doc_comment, soft-deleted excluded,
+  char-boundary-safe truncation) shared by both the MCP handler and the
+  inline explorer fallback.
+- Read-only tools are outside the `needs_write` RBAC gate (Agent role not
+  required), matching their handler effects.
+
+Test evidence (2026-10-09, HEAD `39852a29`):
+
+- `cargo test -p gyre-server --lib mcp_graph` → 10 passed, 0 failed
+  (in-process JSON-RPC through the router, including tools/list registration
+  assertions for all five tools via `mcp_tools_list`).
+- `cargo test -p gyre-domain view_query_resolver` → 124 passed, 0 failed
+  (graph summary counts, all dry-run warning classes and boundaries).
+- `cargo test -p gyre-server --lib mcp` → 78 passed, 0 failed.
+- TCP twins (`tests/graph_integration.rs`: `test_mcp_graph_summary`,
+  `test_mcp_graph_query_dryrun`, `test_mcp_graph_nodes`,
+  `test_mcp_graph_edges`, `test_mcp_graph_search`) cannot run in this
+  sandbox: loopback `accept()` is seccomp-blocked (errno 95, recorded in
+  `/tmp/stage/review-evidence/task-068-tcp-twin-probe.txt`; the twin panics
+  with `hyper IncompleteMessage` because `axum::serve` never accepts). Host
+  verification / exact-head GitHub CI must run these five twins.
 
 ## Agent Instructions
 
