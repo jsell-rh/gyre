@@ -63,6 +63,11 @@ or `GYRE_PIPELINE_STATE`. Optional `gateway.env` in that directory must have mod
 gateway and providers with `scripts/dev-gateway.py --inference` before admission.
 Model discovery is not used: the EnMaaS GLM model is pinned explicitly.
 
+The pinned worker image includes Chromium and its system dependencies matching
+Playwright 1.58.2 in the web lockfile. Rebuild the image when that version changes.
+Browser dependencies do not require runtime downloads or system writes. Individual
+probes still need to check the sandbox's actual process and network capabilities.
+
 `seed /absolute/path/task-123.md --candidate SHA --base SHA` retains an existing
 unfinished checkpoint. `--pr URL` associates an existing open PR at that exact
 candidate. Imported progress labels do not grant approval: the replacement
@@ -85,3 +90,9 @@ resolves findings for the approved revision. A moved upstream base requires new
 verification before merge. Publication polls GitHub checks and requests a normal
 protected merge with an exact head match; completion is recorded only after the
 resulting upstream commit and its verified tree are observed.
+
+Candidate CI repair starts from the exact verified PR head. Current candidate
+logs are kept separate from baseline failures; bounded logs and screenshot
+artifacts are staged inside the repair sandbox. Pending checks and merge
+confirmation are expected observations, polled every 30 seconds without
+accumulating infrastructure failure backoff.

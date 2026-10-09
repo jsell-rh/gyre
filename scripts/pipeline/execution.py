@@ -235,7 +235,7 @@ class Execution:
             if not allocated:
                 self.phase('Provisioning', sandbox=sandbox)
                 result = self.os('sandbox', 'create', '--name', sandbox, '--from',
-                                 self.store.setting('image', 'ghcr.io/jsell-rh/gyre-worker@sha256:0c4a04a340e20c91e89f855c5d75d940b8550798441990ca823c7b8ebb8cbcec'),
+                                 self.store.setting('image', 'ghcr.io/jsell-rh/gyre-worker@sha256:a3856204f3b23b3694564ab34fa76d588f2d09ea39060a71967e5ab645c2fa7d'),
                                  '--provider', 'gyre-enmaas', '--provider', 'gyre-github-rw',
                                  '--label', 'gyre.dev/pipeline=' + self.store.setting('owner', 'gyre'),
                                  '--label', 'gyre.dev/work=' + claim['id'],
