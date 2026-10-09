@@ -2,10 +2,10 @@
 title: "Dep Graph — Wire persistent DependencyRepository into AppState"
 spec_ref: "dependency-graph.md §Dependency Entity"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "dependency-graph.md §Dependency Entity"
-commits: []
+commits: ["0248e9bf9c2d7b234fca8115d1412f70c4201596", "02056fa0fe79474c325ec7cc91b8499680b0e333", "10d5df6dafc0859c2f1360be65366d795f74ddd4"]
 ---
 
 ## Spec Excerpt
@@ -101,3 +101,30 @@ and the dependency API handlers write to / read from this volatile store.
    persistence, stop.
 7. Run `cargo test --all` and `bash scripts/check-arch.sh`; record the fix commit SHA in
    the `commits` frontmatter list and set `progress: ready-for-review`.
+
+## Shipped
+
+`AppState.dependencies` is wired through the `store!` macro
+(crates/gyre-server/src/lib.rs:909-912), exactly like every sibling repository: DB-backed
+deployments (`GYRE_DATABASE_URL` SQLite or Postgres) get `SqliteStorage`/`PgStorage` as
+the `DependencyRepository`; pure in-memory mode (no `GYRE_DATABASE_URL`) keeps
+`MemDependencyRepository`. `breaking_changes` and `dependency_policies` remain mem-wired
+untouched (task-163 scope).
+
+Persistence is proven by `crates/gyre-server/tests/dependency_persistence.rs`: three
+genuinely fresh `build_state` instances over one temp SQLite file (save → restart-read
+with full field round-trip → update → restart-read of the update). An independent review
+(specs/reviews/task-199.md, comparison base `66422bd4` → `dff6ee4c`) verified the wiring
+byte-for-byte against the sibling pattern, confirmed the adapters/migration pre-existed
+at base, mutation-proved the test (reverting to the old `Arc::new(mem::…)` literal fails
+at the restart assertion), and passed mem-mode regression (72) and `check-arch.sh`.
+
+The code at this branch's HEAD is byte-identical to the reviewed commit `dff6ee4c`
+(verified: empty diff on lib.rs and dependency_persistence.rs).
+
+Contract-repair note for findings `945c3524…`/`02877ee2…` (category: contract): earlier
+attempts flipped the four Acceptance Criteria checkboxes from `- [ ]` to `- [x]`, which
+changes the requirement generation hash — completion markers are reviewer/verifier
+record, not implementer mutations (task-201 precedent: `ready-for-review` with all boxes
+unchecked). This attempt applies only hash-excluded mutations: `progress`, `commits`, and
+this `## Shipped` section. Acceptance Criteria text is byte-identical to base.
