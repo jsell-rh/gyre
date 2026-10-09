@@ -4,6 +4,7 @@ No Git, model, or gateway calls belong inside these transactions.
 """
 from contextlib import contextmanager
 import json
+import random
 from pathlib import Path
 import sqlite3
 import time
@@ -53,6 +54,7 @@ class Store:
               id INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT, work TEXT,
               kind TEXT NOT NULL, detail TEXT NOT NULL, at REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS work_events ON events(work,kind);
         ''')
         (self.directory / 'pipeline.sqlite3').chmod(0o600)
         self.db.execute('INSERT OR IGNORE INTO settings VALUES(?,?)', ('owner', json.dumps(uuid.uuid4().hex)))
@@ -194,7 +196,7 @@ class Store:
         with self.transaction():
             row = self._current(ident, token)
             failures = row['failures'] + 1
-            delay = min(900, 5 * 2 ** min(failures - 1, 8)) if delay is None else delay
+            delay = min(900, 5 * 2 ** min(failures - 1, 8) * random.uniform(.8, 1.2)) if delay is None else delay
             self.db.execute("UPDATE work SET state='retry',failures=?,retry_at=?,result=?,owner=NULL,expires=NULL,updated=? WHERE id=?",
                             (failures, time.time() + delay, json.dumps(reason), time.time(), ident))
             self.event('retry_scheduled', {'reason': reason, 'delay': delay}, row['task'], ident)

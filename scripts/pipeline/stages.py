@@ -30,6 +30,7 @@ def prompt(execution, task):
                         (ROOT / f'specs/prompts/pipeline-{role}.md').read_text(),
                         'Assigned task:\n' + bounded,
                         'Exact assignment:\n' + json.dumps(execution.claim['input']),
+                        'Previous assignment outcome:\n' + str(execution.claim.get('result') or 'none')[-4000:],
                         'Durable findings:\n' + json.dumps(findings)))
 
 
@@ -44,11 +45,19 @@ def triage(execution, task):
     # Semantic changes require a model; validate its dependency graph rather
     # than trusting its claim that the task is now workable.
     result = execution.cloud_step(task, prompt(execution, task))
-    new = metadata(result['task_body'])
+    try:
+        new = metadata(result['task_body'])
+        if not data.get('metadata_error'):
+            if contract.requirement_parts(task['body'])[1] != contract.requirement_parts(result['task_body'])[1]:
+                raise ValueError('triage changed normative task behavior')
+            if any(data.get(key) and data[key] != new[key] for key in ('title', 'spec_ref')):
+                raise ValueError('triage changed an existing title or spec binding')
+    except ValueError as exc:
+        raise Retry(str(exc), fresh_model=True) from exc
     graph[task['name']] = new.get('dependencies') or []
     error = contract.graph_errors(graph).get(task['name'])
     if not result['valid'] or error or new['dependencies'] is None or not new['title'] or not new['spec_ref']:
-        raise Retry(error or 'triage did not produce valid task metadata')
+        raise Retry(error or 'triage did not produce valid task metadata', fresh_model=True)
     return result, new | {'triaged': task['generation'], 'task_override': result['task_body'], 'metadata_error': None}, []
 
 
@@ -56,9 +65,12 @@ def implement(execution, task):
     result = execution.cloud_step(task, prompt(execution, task))
     # A partial source checkpoint survives inference failures. It is never
     # sent to review as though the agent completed its assignment.
-    progress = metadata(result['task_body'])['progress']
+    progress = safe_metadata(result['task_body'])['progress']
     complete = result['valid'] and progress in ('ready-for-review', 'complete')
-    contract_changed = contract.requirement_parts(task['body']) != contract.requirement_parts(result['task_body'])
+    try:
+        contract_changed = contract.requirement_parts(task['body']) != contract.requirement_parts(result['task_body'])
+    except ValueError:
+        contract_changed = True
     if contract_changed:
         complete = False
         # An implementer cannot approve its own weaker desired requirements.
@@ -105,6 +117,7 @@ def review(execution, task):
     if approved:
         return result, {'review': receipt}, []
     finding = {'category': 'review', 'source': execution.claim['input']['candidate'],
+               'review_checkpoint': result['head'], 'branch': result['branch'],
                'details': result.get('source_edits') or verdict.get('findings') or ['review did not produce an affirmative exact-source verdict'],
                'artifact': receipt['artifact'], 'id': execution.claim['id']}
     return result, {'review': receipt, 'repair': finding}, [finding]
@@ -187,6 +200,11 @@ def verify(execution, task):
                     os.killpg(child.pid, signal.SIGKILL)
                     child.wait()
                     raise Retry('verification timed out; inspect infrastructure') from exc
+                finally:
+                    if child.poll() is None:
+                        import signal
+                        os.killpg(child.pid, signal.SIGKILL)
+                        child.wait(timeout=30)
                 records.append({'command': command, 'exit_code': code})
                 if code:
                     if code in (75, 77, 79, 124, 137):
@@ -232,6 +250,8 @@ def publish(execution, task):
                                    'state,headRefName,headRefOid,mergeCommit', timeout=30).stdout)
         if observation['state'] == 'OPEN' and not data.get('delivery_branch'):
             branch = observation['headRefName']
+        if observation['state'] == 'CLOSED':
+            raise Retry('The associated PR was closed. Await an operator decision before publishing or changing code.')
         if observation['state'] == 'MERGED':
             if observation['headRefOid'] != head:
                 raise RuntimeError('merged PR does not match verified source')
@@ -268,11 +288,14 @@ def publish(execution, task):
         url = execution.command('gh', 'pr', 'create', '--repo', repo, '--head', branch, '--base', 'main',
                                 '--title', f"feat({task['name']}): {data['title']}",
                                 '--body-file', str(description), timeout=60).stdout.strip()
+    body_hash = hashlib.sha256(description.read_bytes()).hexdigest()
+    if data.get('pr_body_hash') != body_hash:
+        execution.command('gh', 'pr', 'edit', url, '--body-file', str(description), timeout=60)
     # Persist the external identity before polling. Discovery replay adopts it.
     with execution.store.transaction():
         execution.store._current(execution.claim['id'], execution.claim['token'])
         current = execution.store.task(task['name'])['data']
-        current.update(pr=url, published_head=head, delivery_branch=branch)
+        current.update(pr=url, published_head=head, delivery_branch=branch, pr_body_hash=body_hash)
         execution.store.db.execute('UPDATE tasks SET data=? WHERE name=?', (json.dumps(current), task['name']))
         execution.store.event('pull_request', {'url': url, 'head': head}, task['name'], execution.claim['id'])
     latest = execution.command('git', 'ls-remote', 'origin', 'refs/heads/main', cwd=path).stdout.split()[0]

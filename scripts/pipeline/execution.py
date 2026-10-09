@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import tarfile
 import threading
@@ -18,7 +19,9 @@ gateway = helper('dev-gateway-job')
 
 
 class Retry(RuntimeError):
-    pass
+    def __init__(self, message, fresh_model=False):
+        super().__init__(message)
+        self.fresh_model = fresh_model
 
 
 class Execution:
@@ -76,7 +79,17 @@ class Execution:
         gateway.login(self.store.directory)
 
     def os(self, *args, **kwargs):
-        return self.command(os.environ.get('OPENSHELL', 'openshell'), '-g', 'gyre-gyre', *args, **kwargs)
+        check = kwargs.pop('check', True)
+        command = (os.environ.get('OPENSHELL', 'openshell'), '-g', 'gyre-gyre', *args)
+        result = self.command(*command, check=False, **kwargs)
+        diagnostic = (result.stderr or '') + (result.stdout or '')
+        if result.returncode and ('cached OIDC token has expired' in diagnostic or
+                                  'OIDC token refresh failed' in diagnostic):
+            self.login()
+            result = self.command(*command, check=False, **kwargs)
+        if check and result.returncode:
+            raise RuntimeError((result.stderr or result.stdout or '')[-4000:])
+        return result
 
     def remote(self, sandbox, *args, **kwargs):
         return self.os('sandbox', 'exec', '-n', sandbox, '--no-login-shell', '--workdir', '/tmp',
@@ -87,6 +100,9 @@ class Execution:
         # A driver can disappear after publication and purge, before the SQL
         # outcome is recorded. Adopt its immutable receipt without new compute.
         for prior in sorted(self.directory.parent.glob('*/outcome.json'), reverse=True):
+            previous_failure = json.loads(claim['result']) if isinstance(claim.get('result'), str) else claim.get('result') or {}
+            if previous_failure.get('fresh_model') and prior.parent != self.directory:
+                continue
             receipt = json.loads(prior.read_text())
             job_path = prior.parent / 'bundle' / 'job.json'
             if not job_path.exists() or not receipt.get('published'):
@@ -107,6 +123,10 @@ class Execution:
         if len(sandbox) > 19:
             raise ValueError('sandbox name exceeds gateway limit')
         limit = self.store.setting('slots', 8)
+        occupied = self.store.db.execute("SELECT count(*) FROM resources WHERE kind='sandbox' AND state<>'absent'").fetchone()[0]
+        if not previous and occupied >= limit:
+            self.phase('WaitingForCapacity', reason='global sandbox capacity is occupied')
+            raise Retry('global sandbox capacity is occupied')
         self.login()
         providers = self.os('provider', 'list', '--names', timeout=30, check=False)
         missing = {'gyre-enmaas', 'gyre-github-rw'} - set(providers.stdout.splitlines())
@@ -136,6 +156,7 @@ class Execution:
                     self.store.db.execute("UPDATE resources SET state='absent' WHERE name=?", (row['name'],))
         if not self.store.reserve(sandbox, claim['id'], claim['token'], 'sandbox', limit,
                                   {'logical_token': logical_token}):
+            self.phase('WaitingForCapacity', reason='global sandbox capacity is occupied')
             raise Retry('global sandbox capacity is occupied')
         branch = f"pipeline/{task['name']}/{claim['id']}-{logical_token}"
         self.branch = branch
@@ -221,16 +242,35 @@ class Execution:
                     process = subprocess.Popen([cli, '-g', 'gyre-gyre', 'sandbox', 'exec', '-n', sandbox,
                                                 '--no-login-shell', '--workdir', '/tmp', '--',
                                                 'python3', '/tmp/stage/pipeline-attach.py', str(offset)],
-                                               stdout=subprocess.PIPE, stderr=log)
+                                               stdout=subprocess.PIPE, stderr=log, start_new_session=True)
+                    attachment_done = threading.Event()
+                    def bound_attachment(proc=process, done=attachment_done):
+                        deadline = time.monotonic() + job['timeout'] + 1800
+                        while not done.wait(1):
+                            if self.cancelled.is_set() or time.monotonic() >= deadline:
+                                if proc.poll() is None:
+                                    try:
+                                        os.killpg(proc.pid, signal.SIGTERM)
+                                        if not done.wait(5) and proc.poll() is None:
+                                            os.killpg(proc.pid, signal.SIGKILL)
+                                    except ProcessLookupError:
+                                        pass
+                                return
+                    monitor = threading.Thread(target=bound_attachment, daemon=True)
+                    monitor.start()
                     # Read by line so the dashboard sees each event immediately.
-                    for line in process.stdout:
-                        marker = re.fullmatch(rb'GYRE_REMOTE_LOG_OFFSET (\d+)\r?\n', line)
-                        if marker:
-                            offset = int(marker[1])
-                            (self.directory / 'remote.offset').write_text(str(offset))
-                        else:
-                            log.write(line)
-                    process.wait()
+                    try:
+                        for line in process.stdout:
+                            marker = re.fullmatch(rb'GYRE_REMOTE_LOG_OFFSET (\d+)\r?\n', line)
+                            if marker:
+                                offset = int(marker[1])
+                                (self.directory / 'remote.offset').write_text(str(offset))
+                            else:
+                                log.write(line)
+                        process.wait(timeout=30)
+                    finally:
+                        attachment_done.set()
+                        monitor.join(timeout=2)
                 outcome = self.remote(sandbox, 'cat', '/tmp/stage/outcome.json', check=False)
                 if outcome.returncode == 0:
                     start = re.search(r'(?m)^\s*(?=\{)', outcome.stdout)

@@ -34,9 +34,13 @@ def snapshot(store):
                       'condition': condition, 'feedback': data.get('repair'),
                       'retry_at': retry['retry_at'] if retry else None, 'attempts': len(related)})
         counts[state] = counts.get(state, 0) + 1
-    for item in work[:300]:
-        ident = f"{item['id']}-{item['token']}"
-        path = store.directory / 'attempts' / item['id'] / str(item['token'])
+    by_id = {item['id']: item for item in work}
+    claims = store.db.execute("SELECT work,at,detail FROM events WHERE kind='claimed' ORDER BY id DESC LIMIT 300").fetchall()
+    for event in claims:
+        item = by_id[event['work']]
+        token = json.loads(event['detail'])['token']
+        ident = f"{item['id']}-{token}"
+        path = store.directory / 'attempts' / item['id'] / str(token)
         phase = {}
         try:
             phase = json.loads((path / 'phase.json').read_text())
@@ -45,8 +49,9 @@ def snapshot(store):
         result = json.loads(item['result']) if item['result'] else {}
         result.pop('task_body', None)
         attempts.append({'id': ident, 'task': item['task'], 'kind': item['stage'],
-                         'state': 'running' if item['state'] == 'claimed' else item['state'],
-                         'started': item['created'], 'phase': phase.get('phase'),
+                         'state': ('fenced' if token != item['token'] else
+                                   'running' if item['state'] == 'claimed' else item['state']),
+                         'started': event['at'], 'phase': phase.get('phase'),
                          'reason': phase.get('reason'), 'detail': json.dumps(result)[:3000]})
     resources = store.db.execute("SELECT state,count(*) FROM resources WHERE kind='sandbox' AND state<>'absent' GROUP BY state").fetchall()
     events = []

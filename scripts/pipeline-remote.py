@@ -12,11 +12,25 @@ STAGE = Path('/tmp/stage')
 
 
 def run(*args, check=True, **kwargs):
+    kwargs.setdefault('timeout', 300)
     return subprocess.run(args, check=check, **kwargs)
 
 
 def git(*args):
-    return subprocess.check_output(['git', *args], text=True).strip()
+    return subprocess.check_output(['git', *args], text=True, timeout=180).strip()
+
+
+def record_outcome(value):
+    temporary = STAGE / 'outcome.json.tmp'
+    temporary.write_text(json.dumps(value))
+    temporary.chmod(0o600)
+    temporary.replace(STAGE / 'outcome.json')
+
+
+def reattach_candidate(branch, checkout):
+    if not git('branch', '--show-current') and git('rev-parse', 'HEAD') == git('rev-parse', branch):
+        if not (checkout / '.git/rebase-merge').exists() and not (checkout / '.git/rebase-apply').exists():
+            run('git', 'symbolic-ref', 'HEAD', 'refs/heads/' + branch)
 
 
 def main():
@@ -53,9 +67,13 @@ def main():
     checkout = Path('/tmp/gyre')
     if not (checkout / '.git').exists():
         for attempt in range(5):
-            result = run('git', 'clone', '--quiet', '--filter=blob:none',
-                         job['repo_url'], str(checkout), check=False)
-            if result.returncode == 0:
+            try:
+                result = run('git', 'clone', '--quiet', '--filter=blob:none',
+                             job['repo_url'], str(checkout), check=False, timeout=180)
+                succeeded = result.returncode == 0
+            except subprocess.TimeoutExpired:
+                succeeded = False
+            if succeeded:
                 break
             # Clone failures do not allocate another sandbox.
             shutil.rmtree(checkout, ignore_errors=True)
@@ -70,6 +88,10 @@ def main():
     if observed:
         raise RuntimeError('claim branch already exists before execution')
     (STAGE / 'push-expected').write_text('')
+    if role == 'implement':
+        # Reconcile the clean seed before installing desired task metadata.
+        # Otherwise a changed dependency or progress field prevents rebase.
+        run('git', 'rebase', job['input']['base'], check=False)
     path = checkout / 'specs/tasks' / (task + '.md')
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(job['body'])
@@ -79,10 +101,6 @@ def main():
     if role in ('review', 'triage'):
         run('python3', str(STAGE / 'dev-review-guard.py'), 'snapshot', str(before), '--task', task)
     prompt = (STAGE / 'prompt.md').read_text()
-    if role == 'implement':
-        # Let the model resolve conflicts, with the rebase state included in
-        # its single assignment. No hidden implementation/review round loop.
-        run('git', 'rebase', job['input']['base'], check=False)
     agent = subprocess.Popen(['omp', '-p', '--model', job['model'], '--no-session',
                               '--mode=json', '--approval-mode', 'yolo'],
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE)
@@ -102,6 +120,9 @@ def main():
             agent.wait()
     stream.wait(timeout=30)
     valid = agent.returncode == 0 and stream.returncode == 0
+    # Returning to the same immutable candidate via detached HEAD is harmless.
+    # Reattach without changing the tree or approving edits.
+    reattach_candidate(branch, checkout)
     if role in ('review', 'triage'):
         guard = run('python3', str(STAGE / 'dev-review-guard.py'), 'check', str(before), check=False)
         valid = valid and guard.returncode == 0
@@ -121,7 +142,7 @@ def main():
             outcome['verdict'] = json.loads(verdict.read_text())
         else:
             outcome['valid'] = False
-    (STAGE / 'outcome.json').write_text(json.dumps(outcome))
+    record_outcome(outcome)
     # This private, claim-specific branch can never overwrite another worker.
     # Lost push responses are resolved by inspecting the exact remote head.
     for attempt in range(5):
@@ -137,7 +158,7 @@ def main():
         if attempt == 4:
             raise RuntimeError('checkpoint publication unavailable; capture recovery before cleanup')
         time.sleep(min(60, 5 * 2 ** attempt))
-    (STAGE / 'outcome.json').write_text(json.dumps(outcome | {'published': True}))
+    record_outcome(outcome | {'published': True})
     (STAGE / 'push-expected').write_text(head)
     return 0
 

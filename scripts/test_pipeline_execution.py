@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 from pipeline.store import Store
 from pipeline.execution import Execution
-from pipeline.stages import cleanup
+from pipeline.stages import cleanup, implement
 
 spec = importlib.util.spec_from_file_location('pipeline_cli', Path(__file__).with_name('dev-pipeline.py'))
 cli = importlib.util.module_from_spec(spec)
@@ -55,6 +55,31 @@ class CrashTest(unittest.TestCase):
         self.assertEqual(result['deleted'], 'pod')
         delete.assert_called_once_with('sandbox', 'delete', 'pod', timeout=180, check=False)
         self.assertEqual(self.store.db.execute("SELECT state FROM resources WHERE name='pod'").fetchone()[0], 'absent')
+
+    def test_implementer_cannot_weaken_its_assigned_contract(self):
+        body = '---\ntitle: Thing\nspec_ref: behavior.md\ndepends_on: []\nprogress: not-started\n---\n\n## Required behavior\nReject foreign tenants.\n'
+        self.store.put_task('task-001', 'g', body, {'dependencies': []})
+        execution = Execution(self.store, self.claim)
+        execution.claim['input'] = {'base': 'base'}
+        execution.log.write_text('agent completed')
+        weakened = body.replace('not-started', 'ready-for-review').replace('Reject foreign tenants.', 'Allow every tenant.')
+        receipt = {'task_body': weakened, 'valid': True, 'head': 'candidate', 'base': 'base', 'branch': 'private', 'agent_exit': 0}
+        with patch('pipeline.stages.prompt', return_value='assignment'), patch.object(execution, 'cloud_step', return_value=receipt):
+            result, updates, _ = implement(execution, self.store.task('task-001'))
+        self.assertEqual(result['task_body'], body)
+        self.assertEqual(updates['repair']['category'], 'contract')
+        self.assertIsNone(updates['review'])
+
+    def test_invalid_review_outcome_is_not_replayed_forever(self):
+        prior = self.store.directory / 'attempts' / self.work / '0'
+        (prior / 'bundle').mkdir(parents=True)
+        (prior / 'bundle/job.json').write_text(json.dumps({'stage': 'review', 'task': 'task-001', 'branch': 'old'}))
+        (prior / 'outcome.json').write_text(json.dumps({'published': True, 'head': 'source', 'valid': False}))
+        claim = {**self.claim, 'stage': 'review'}
+        execution = Execution(self.store, claim)
+        with patch.object(execution, 'login', side_effect=RuntimeError('new model assignment required')):
+            with self.assertRaisesRegex(RuntimeError, 'new model assignment required'):
+                execution.cloud_step(self.store.task('task-001'), '')
 
 
 if __name__ == '__main__':

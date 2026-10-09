@@ -85,6 +85,16 @@ def run_one(store, stage, task=None):
             if not eligible(store, claim):
                 raise StaleClaim('stage preconditions changed during execution')
             body, generation = None, None
+            if stage in ('verify', 'publish') and 'dependencies' in updates:
+                # A prerequisite is desired task metadata, not an ephemeral
+                # field an implementation body can overwrite on completion.
+                import re
+                declaration = 'depends_on: [' + ', '.join(updates['dependencies']) + ']'
+                body, count = re.subn(r'(?m)^depends_on:[^\n]*(?:\n[ \t]+-[^\n]*)*', declaration, item['body'], count=1)
+                if count != 1:
+                    raise ValueError('cannot persist prerequisite without a unique dependency field')
+                generation = generation_for(store, body)
+                updates['triaged'] = None
             if stage in ('triage', 'implement') and result.get('task_body'):
                 body = result['task_body']
                 generation = generation_for(store, body)
@@ -94,6 +104,8 @@ def run_one(store, stage, task=None):
                     item['data'].get('triaged') if generation == item['generation'] else None)
             receipt = {key: value for key, value in result.items() if key != 'task_body'}
             store.finish(claim['id'], claim['token'], receipt, updates, findings, body, generation)
+            phase = 'Merged' if updates.get('delivered') else 'NeedsRevision' if updates.get('repair') else 'Completed'
+            (execution.directory / 'phase.json').write_text(json.dumps({'phase': phase, 'at': time.time()}))
     except StaleClaim:
         # Another owner or a changed contract fenced this worker. Resources
         # remain reserved until cleanup observes their absence.
@@ -122,7 +134,7 @@ def run_one(store, stage, task=None):
                 return True
             store.retry(claim['id'], claim['token'],
                         {'category': 'infrastructure' if isinstance(exc, (Retry, OSError, subprocess.TimeoutExpired)) else 'execution',
-                         'message': str(exc)[-4000:]})
+                         'message': str(exc)[-4000:], 'fresh_model': getattr(exc, 'fresh_model', False)})
         except StaleClaim:
             pass
         except Exception as recovery_error:
@@ -264,6 +276,10 @@ def main():
                 parser.error('interval must be 0–60 seconds')
             serve(store, args.interval, args.task)
         elif args.command == 'seed':
+            import re
+            for value in (args.candidate, args.base):
+                if value is not None and not re.fullmatch(r'[a-f0-9]{40}', value):
+                    parser.error('candidate and base must be full Git commit SHAs')
             body = args.task_file.read_text()
             name = args.task_file.stem
             if not re_task(name):
