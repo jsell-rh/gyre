@@ -2,7 +2,7 @@
 title: "Dep Graph — Wire persistent DependencyRepository into AppState"
 spec_ref: "dependency-graph.md §Dependency Entity"
 depends_on: []
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "dependency-graph.md §Dependency Entity"
 commits: ["0248e9bf9c2d7b234fca8115d1412f70c4201596", "02056fa0fe79474c325ec7cc91b8499680b0e333", "10d5df6dafc0859c2f1360be65366d795f74ddd4"]
@@ -70,24 +70,25 @@ and the dependency API handlers write to / read from this volatile store.
 
 - [x] `AppState.dependencies` is constructed via `store!(dyn DependencyRepository, …)`; no
       remaining `Arc::new(mem::MemDependencyRepository…)` literal in `build_state`.
-      Verified: lib.rs:909-912 uses `store!`; the only remaining mem literal is the
-      `#[cfg(test)]` `test_state_inner` builder (mem.rs:3289), which is intentional
-      pure-in-memory test state.
+      Verified: lib.rs:909-912 uses `store!`; the only remaining mem literal for this repo
+      is the `#[cfg(test)]` `test_state_inner` builder, which is intentional pure-in-memory
+      test state.
 - [x] A new integration/persistence test proves the graph survives a restart:
       `crates/gyre-server/tests/dependency_persistence.rs` — three fresh `build_state`
       instances over the same SQLite file (save → restart-read → update → restart-read),
       asserting find_by_id/list_by_repo/list_dependents/list_all plus the update path
-      (status→Stale, version_pinned). Mutation-probed: with the old
+      (status→Stale, version_pinned). Mutation-probed fresh this attempt: with the old
       `Arc::new(mem::MemDependencyRepository)` literal restored in `build_state`, the test
-      FAILS (`dependency_graph_survives_restart_on_sqlite` … 0 passed; 1 failed); with the
-      `store!` wiring it passes.
+      FAILS (panic at dependency_persistence.rs:70 "edge must survive restart on
+      SQLite-backed state"; 0 passed; 1 failed; exit 101); with the `store!` wiring
+      restored it passes (exit 0).
 - [x] Pure in-memory mode still works: `cargo test -p gyre-server --lib api::dependencies`
       (64 passed) and `--lib dep_staleness` (8 passed) — all use `test_state()` mem state.
-- [x] `bash scripts/check-arch.sh` passes ("Architecture lint passed"). Focused runs on
-      this sandbox: `cargo build -p gyre-server` (SKIP_WEB_BUILD=1) and
-      `cargo test -p gyre-server --test dependency_persistence` pass; full
-      `cargo test --all` deferred to the controller's gates (sandbox cannot run the
-      loopback-listener integration suites).
+- [x] `bash scripts/check-arch.sh` passes ("Architecture lint passed", exit 0). Focused
+      probes on this sandbox all exit 0; full `cargo test --all` is owned by the
+      controller's verification gates (this sandbox's seccomp blocks the loopback-listener
+      integration suites — `accept(): [Errno 95] Operation not supported`, recorded in
+      /tmp/stage/capabilities.json).
 
 ## Agent Instructions
 
@@ -106,20 +107,44 @@ and the dependency API handlers write to / read from this volatile store.
    task-163's breaking-change/policy persistence. Wire the dependency graph, prove
    persistence, stop.
 7. Run `cargo test --all` and `bash scripts/check-arch.sh`; record the fix commit SHA in
-     the `commits` frontmatter list and set `progress: ready-for-review`.
+   the `commits` frontmatter list and set `progress: ready-for-review`.
 
 ## Shipped
 
-- `AppState.dependencies` in `build_state` is now wired through the `store!` macro
-  (lib.rs:909-912): DB-backed deployments (SQLite or Postgres via `GYRE_DATABASE_URL`)
-  get the persistent `DependencyRepository` adapter; pure in-memory mode keeps the mem
-  fallback. Push-time detection, reconciliation, blast-radius, and the dependency REST
-  handlers now read/write durable storage.
-- New restart-persistence integration test `crates/gyre-server/tests/dependency_persistence.rs`:
-  three fresh `build_state` instances over one SQLite file (save → restart-read → update →
-  restart-read) proving find_by_id/list_by_repo/list_dependents/list_all and the upsert
-  update path (status→Stale, version_pinned) survive a restart.
-- Mutation-verified: reverting the wiring to the old mem literal makes the test fail
-  (restart sees an empty store); with `store!` it passes. Mem-mode regression suites
-  (api::dependencies + dep_staleness, 72 tests) and `check-arch.sh` stay green.
-- Scope held: `breaking_changes`/`dependency_policies` persistence untouched (task-163).
+`AppState.dependencies` is wired through the `store!` macro (crates/gyre-server/src/lib.rs:909-912),
+exactly like every sibling repository: DB-backed deployments (`GYRE_DATABASE_URL` SQLite or
+Postgres) now get `SqliteStorage`/`PgStorage` as the `DependencyRepository`, and pure
+in-memory mode still falls back to `MemDependencyRepository`. The cross-repo dependency
+graph — every `DependencyEdge` written by push-time detection, reconciliation, staleness
+jobs, and the dependency API — is now durable across server restarts instead of being
+lost with the process.
+
+Actual behavior and evidence (all re-verified fresh this attempt on the retained source,
+head 03c38d96 which contains the original task-199 commits; logs under
+`/tmp/stage/review-evidence/`):
+
+- Wiring: `store!(dyn DependencyRepository, mem::MemDependencyRepository::default())` at
+  lib.rs:909-912; no `Arc::new(mem::MemDependencyRepository…)` literal remains in
+  `build_state` — after the mutation probe the working tree was restored byte-identical to
+  the committed fix (`git diff` on lib.rs empty).
+- Persistence: `cargo test -p gyre-server --test dependency_persistence` passes — one test,
+  `dependency_graph_survives_restart_on_sqlite`, round-trips an edge through three
+  genuinely fresh `build_state` instances over one SQLite file (write → restart-read →
+  update → restart-read), asserting field-level round-trip, list_by_repo,
+  list_dependents, list_all, and the status/version_pinned update path.
+- Mutation probe (test kills the defect): old `Arc::new(mem::…)` literal temporarily
+  restored in `build_state` → test fails at the restart assertion (exit 101); `store!`
+  wiring restored → passes (exit 0). Logs: task-199-mutation-probe.log,
+  task-199-post-restore-persistence.log.
+- Mem mode: `cargo test -p gyre-server --lib api::dependencies` (64 passed) and
+  `--lib dep_staleness` (8 passed), exit 0.
+- Hexagonal boundary: `bash scripts/check-arch.sh` → "Architecture lint passed", exit 0.
+
+Out of scope, untouched: `breaking_changes` / `dependency_policies` persistence (task-163)
+still use `Mem*` — per this task's contract. The build also ran the committed web/dist
+via build.rs (npm ci + npm run build) successfully during `cargo test` compile.
+
+Full-workspace `cargo test --all` and CI are owned by verification/publication; this
+sandbox's seccomp denies `accept()` (Errno 95, /tmp/stage/capabilities.json), so
+loopback-listener integration suites cannot run here — exact-head GitHub checks remain
+required.
