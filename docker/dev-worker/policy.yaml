@@ -77,12 +77,34 @@ network_policies:
         protocol: rest
         access: read-only
         enforcement: enforce
+        # npm encodes the slash in scoped package metadata paths.
+        allow_encoded_slash: true
     binaries:
       - path: /usr/bin/node
       - path: /usr/local/bin/npm
       - path: /usr/local/bin/omp
       - path: /usr/bin/curl
   # NodeSource/deb would be needed for image build only — not in runtime policy.
+  playwright_browsers:
+    endpoints:
+      - host: cdn.playwright.dev
+        port: 443
+        protocol: rest
+        access: read-only
+        enforcement: enforce
+      - host: playwright.download.prss.microsoft.com
+        port: 443
+        protocol: rest
+        access: read-only
+        enforcement: enforce
+      - host: playwright.azureedge.net
+        port: 443
+        protocol: rest
+        access: read-only
+        enforcement: enforce
+    binaries:
+      - path: /usr/bin/node
+      - path: /usr/bin/curl
   keycloak:
     endpoints:
       - host: keycloak.hyp2.infra.hypershell.app
