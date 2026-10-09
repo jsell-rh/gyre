@@ -146,16 +146,23 @@ pub struct SpecApprovalResponse {
     pub spec_sha: String,
     pub approver_id: String,
     pub signature: Option<String>,
-    pub approved_at: u64,
+    pub approved_at: Option<u64>,
     pub revoked_at: Option<u64>,
     pub revoked_by: Option<String>,
     pub revocation_reason: Option<String>,
+    pub rejected_at: Option<u64>,
+    pub rejected_reason: Option<String>,
+    pub rejected_by: Option<String>,
+    /// Derived from which timestamp column is non-null (never stored).
+    pub status: String,
+    /// True when this entry actively approves the spec SHA.
     pub active: bool,
 }
 
 impl From<SpecApproval> for SpecApprovalResponse {
     fn from(a: SpecApproval) -> Self {
         let active = a.is_active();
+        let status = a.status().to_string();
         Self {
             id: a.id.to_string(),
             spec_path: a.spec_path,
@@ -166,6 +173,10 @@ impl From<SpecApproval> for SpecApprovalResponse {
             revoked_at: a.revoked_at,
             revoked_by: a.revoked_by,
             revocation_reason: a.revocation_reason,
+            rejected_at: a.rejected_at,
+            rejected_reason: a.rejected_reason,
+            rejected_by: a.rejected_by,
+            status,
             active,
         }
     }
@@ -326,7 +337,7 @@ pub async fn list_spec_approvals(
     };
     let mut result: Vec<SpecApprovalResponse> =
         all.into_iter().map(SpecApprovalResponse::from).collect();
-    result.sort_by_key(|a| a.approved_at);
+    result.sort_by_key(|a| a.approved_at.unwrap_or(0));
     Ok(Json(result))
 }
 
@@ -367,6 +378,7 @@ pub async fn verify_spec_ref(state: &AppState, spec_ref: &str) -> Result<(), Str
 
 #[cfg(test)]
 mod tests {
+    use super::verify_spec_ref;
     use crate::mem::test_state;
     use axum::{body::Body, Router};
     use gyre_domain::Repository;
@@ -578,5 +590,182 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json.as_array().unwrap().len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Spec Approval Ledger (agent-gates.md §Spec Approval Ledger)
+    // -----------------------------------------------------------------------
+
+    /// Seed a Pending ledger entry directly through the repository port.
+    async fn seed_ledger_entry(
+        state: &std::sync::Arc<crate::AppState>,
+        id: &str,
+        spec_path: &str,
+        spec_sha: &str,
+    ) -> gyre_common::Id {
+        let approval_id = gyre_common::Id::new(id);
+        state
+            .spec_approvals
+            .create(&gyre_domain::SpecApproval::new(
+                approval_id.clone(),
+                spec_path,
+                spec_sha,
+                "user:test",
+            ))
+            .await
+            .unwrap();
+        approval_id
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approvals_list_returns_full_ledger_data() {
+        let state = test_state();
+        let sha1 = "a".repeat(40);
+        let sha2 = "b".repeat(40);
+        seed_ledger_entry(&state, "apr-1", "system/design.md", &sha1).await;
+        let apr2 = seed_ledger_entry(&state, "apr-2", "system/design.md", &sha2).await;
+
+        // Multiple approvals for the same path (different SHAs) are allowed.
+        let all = state
+            .spec_approvals
+            .list_by_path("system/design.md")
+            .await
+            .unwrap();
+        assert_eq!(
+            all.len(),
+            2,
+            "multiple approvals per path must be supported"
+        );
+
+        // Transition the second entry: Pending → Approved.
+        state
+            .spec_approvals
+            .approve(&apr2, 1700000100)
+            .await
+            .unwrap()
+            .expect("entry exists");
+
+        // GET /api/v1/specs/approvals returns full ledger data with derived status.
+        // Build the router over the SAME state we seeded — a fresh `app()`
+        // would have its own empty ledger.
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/approvals")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+
+        let approved = arr
+            .iter()
+            .find(|a| a["spec_sha"] == sha2.as_str())
+            .expect("approved entry present");
+        assert_eq!(approved["status"], "approved");
+        assert_eq!(approved["approved_at"], 1700000100);
+        assert_eq!(approved["rejected_at"], serde_json::Value::Null);
+        assert_eq!(approved["rejected_reason"], serde_json::Value::Null);
+        assert_eq!(approved["rejected_by"], serde_json::Value::Null);
+
+        let pending = arr
+            .iter()
+            .find(|a| a["spec_sha"] == sha1.as_str())
+            .expect("pending entry present");
+        assert_eq!(pending["status"], "pending");
+        assert_eq!(pending["approved_at"], serde_json::Value::Null);
+        assert!(!pending["active"].as_bool().unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn revoked_approval_no_longer_verifies_spec_ref() {
+        let state = test_state();
+        let sha = "e".repeat(40);
+        let apr = seed_ledger_entry(&state, "apr-3", "system/revoked.md", &sha).await;
+        state
+            .spec_approvals
+            .approve(&apr, 1700000100)
+            .await
+            .unwrap()
+            .expect("entry exists");
+
+        // Before revocation the spec_ref verifies.
+        let spec_ref = format!("system/revoked.md@{sha}");
+        assert!(
+            verify_spec_ref(&state, &spec_ref).await.is_ok(),
+            "active approval must verify"
+        );
+
+        // Approved → Revoked (post-merge withdrawal). Revocation requires a reason.
+        state
+            .spec_approvals
+            .revoke(&apr, "user:admin", "spec withdrawn", 1700000200)
+            .await
+            .unwrap()
+            .expect("entry exists");
+
+        // After revocation the same spec_ref must fail verification (forge
+        // blocks the merge at require_approved_spec).
+        assert!(
+            verify_spec_ref(&state, &spec_ref).await.is_err(),
+            "revoked approval must NOT verify — merge must be blocked"
+        );
+
+        // Mutual exclusivity: approved_at cleared, revoked_at set.
+        let reloaded = state
+            .spec_approvals
+            .find_by_id(&apr)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.approved_at, None);
+        assert_eq!(reloaded.revoked_at, Some(1700000200));
+        assert_eq!(reloaded.revoked_by.as_deref(), Some("user:admin"));
+        assert_eq!(
+            reloaded.revocation_reason.as_deref(),
+            Some("spec withdrawn")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_transition_pending_to_rejected_and_audit() {
+        let state = test_state();
+        let sha = "f".repeat(40);
+        let apr = seed_ledger_entry(&state, "apr-4", "system/rejected.md", &sha).await;
+
+        // Approved entries cannot be rejected (only revoked).
+        state
+            .spec_approvals
+            .approve(&apr, 1700000100)
+            .await
+            .unwrap()
+            .expect("entry exists");
+        assert!(
+            state
+                .spec_approvals
+                .reject(&apr, "user:reviewer", "no", 1700000150)
+                .await
+                .is_err(),
+            "Approved → Rejected must be an invalid transition"
+        );
+
+        // Pending entries reject cleanly and never verify.
+        let apr2 = seed_ledger_entry(&state, "apr-5", "system/rejected2.md", &sha).await;
+        state
+            .spec_approvals
+            .reject(&apr2, "user:reviewer", "not ready", 1700000200)
+            .await
+            .unwrap()
+            .expect("entry exists");
+        let spec_ref = format!("system/rejected2.md@{sha}");
+        assert!(
+            verify_spec_ref(&state, &spec_ref).await.is_err(),
+            "rejected (never approved) entry must not verify"
+        );
     }
 }

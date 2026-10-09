@@ -1414,6 +1414,29 @@ async fn process_spec_lifecycle(
             continue;
         }
 
+        // Resolve the repo's workspace scope once per push. Events are scoped
+        // to the workspace the repo actually belongs to; if the repo cannot be
+        // resolved there is no valid scope to emit under, so skip the events
+        // and log rather than fabricating one (task-097 F3 class). Approval
+        // invalidation is independent of the repo row: it is keyed by spec
+        // path against the on-disk repo, so it still runs below.
+        let ws_id = match state.repos.find_by_id(&gyre_common::Id::new(repo_id)).await {
+            Ok(Some(repo)) => Some(repo.workspace_id),
+            Ok(None) => {
+                warn!(
+                    repo_id,
+                    "spec-lifecycle: repo not found, skipping workspace events"
+                );
+                None
+            }
+            Err(e) => {
+                warn!(
+                    repo_id,
+                    "spec-lifecycle: repo lookup failed: {e}, skipping workspace events"
+                );
+                None
+            }
+        };
         let existing_tasks = state.tasks.list().await.unwrap_or_default();
         let now = crate::api::now_secs();
 
@@ -1422,6 +1445,12 @@ async fn process_spec_lifecycle(
             // deleted, or renamed. An approval is stale once the spec content changes.
             {
                 // For renames, the old path is stale; for M/D, the current path is stale.
+                // Diff paths are git paths ("specs/system/foo.md"); approval rows are
+                // keyed by ledger paths ("system/foo.md" — spec_registry strips the
+                // specs/ prefix). Normalize so revocation actually matches rows.
+                fn ledger_path(p: &str) -> &str {
+                    p.strip_prefix("specs/").unwrap_or(p)
+                }
                 let stale_paths: Vec<&str> = match status_char {
                     'M' | 'D' => vec![path.as_str()],
                     'R' => old_path
@@ -1443,10 +1472,15 @@ async fn process_spec_lifecycle(
                         default_branch
                     );
                     let mut invalidated = 0usize;
-                    for &stale_path in &stale_paths {
+                    for stale_path in &stale_paths {
                         let _ = state
                             .spec_approvals
-                            .revoke_all_for_path(stale_path, "system:spec-lifecycle", &reason, now)
+                            .revoke_all_for_path(
+                                ledger_path(stale_path),
+                                "system:spec-lifecycle",
+                                &reason,
+                                now,
+                            )
                             .await;
                         invalidated += 1;
                     }
@@ -1491,15 +1525,9 @@ async fn process_spec_lifecycle(
                 Err(e) => warn!(title, "spec-lifecycle: failed to create task: {e}"),
                 Ok(()) => {
                     info!(title, "spec-lifecycle: created task for spec change");
-                    // Look up workspace_id from repo for proper scoping.
-                    let ws_id = state
-                        .repos
-                        .find_by_id(&gyre_common::Id::new(repo_id))
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|r| r.workspace_id)
-                        .unwrap_or_else(|| gyre_common::Id::new("default"));
+                    // ws_id resolved once per push above; None when the repo
+                    // row is unresolvable — skip workspace-scoped events
+                    // rather than emitting under a fabricated scope.
                     let change_kind = match status_char {
                         'A' => "added",
                         'M' => "modified",
@@ -1507,27 +1535,29 @@ async fn process_spec_lifecycle(
                         'R' => "renamed",
                         _ => "unknown",
                     };
-                    state
-                        .emit_event(
-                            Some(ws_id.clone()),
-                            gyre_common::message::Destination::Workspace(ws_id.clone()),
-                            gyre_common::message::MessageKind::SpecChanged,
-                            Some(serde_json::json!({
-                                "repo_id": repo_id,
-                                "spec_path": path,
-                                "change_kind": change_kind,
-                                "task_id": task_id.to_string(),
-                            })),
-                        )
-                        .await;
-                    state
-                        .emit_event(
-                            Some(ws_id.clone()),
-                            gyre_common::message::Destination::Workspace(ws_id),
-                            gyre_common::message::MessageKind::TaskCreated,
-                            Some(serde_json::json!({"task_id": task_id.to_string()})),
-                        )
-                        .await;
+                    if let Some(ws_id) = ws_id.as_ref() {
+                        state
+                            .emit_event(
+                                Some(ws_id.clone()),
+                                gyre_common::message::Destination::Workspace(ws_id.clone()),
+                                gyre_common::message::MessageKind::SpecChanged,
+                                Some(serde_json::json!({
+                                    "repo_id": repo_id,
+                                    "spec_path": path,
+                                    "change_kind": change_kind,
+                                    "task_id": task_id.to_string(),
+                                })),
+                            )
+                            .await;
+                        state
+                            .emit_event(
+                                Some(ws_id.clone()),
+                                gyre_common::message::Destination::Workspace(ws_id.clone()),
+                                gyre_common::message::MessageKind::TaskCreated,
+                                Some(serde_json::json!({"task_id": task_id.to_string()})),
+                            )
+                            .await;
+                    }
 
                     // Cross-workspace spec change notification (priority 4):
                     // Find inbound cross-workspace links targeting this spec path
@@ -4498,5 +4528,125 @@ mod tests {
         assert_eq!(explicit.len(), 1, "should have 1 explicit constraint");
         assert_eq!(gate.len(), 1, "should have 1 gate constraint");
         assert_eq!(gate[0].gate_name, "Code Review");
+    }
+
+    /// Spec Approval Ledger regression (agent-gates.md §Spec Approval Ledger):
+    /// a push that modifies a spec file must auto-invalidate active approvals.
+    ///
+    /// Approval rows are keyed by ledger paths ("system/foo.md") while the push
+    /// diff carries git paths ("specs/system/foo.md"); without normalization
+    /// the revocation silently matched nothing and stale approvals stayed
+    /// active (forge then merged against a spec version nobody approved).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_modifying_spec_revokes_ledger_approvals() {
+        let state = test_state();
+
+        // Real repo with two commits: v1 of the spec, then a modification.
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("spec-repo");
+        std::fs::create_dir_all(repo_path.join("specs/system")).unwrap();
+        std::fs::write(
+            repo_path.join("specs/system/payments.md"),
+            "# Payments v1\n",
+        )
+        .unwrap();
+
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@test.com"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["add", "."]);
+        git(&["commit", "-m", "v1"]);
+        let old_sha = git(&["rev-parse", "HEAD"]);
+
+        // Active approval keyed by the LEDGER path (as approve_spec records).
+        let approval = gyre_domain::SpecApproval::new(
+            gyre_common::Id::new("apr-stale"),
+            "system/payments.md",
+            "a".repeat(40),
+            "user:approver",
+        );
+        state.spec_approvals.create(&approval).await.unwrap();
+        state
+            .spec_approvals
+            .approve(&approval.id, 1700000000)
+            .await
+            .unwrap()
+            .expect("entry exists");
+        assert!(state
+            .spec_approvals
+            .find_by_id(&approval.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active());
+
+        // Second commit modifies the spec file on main.
+        std::fs::write(
+            repo_path.join("specs/system/payments.md"),
+            "# Payments v2\n",
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "v2"]);
+        let new_sha = git(&["rev-parse", "HEAD"]);
+
+        // Drive the push-time lifecycle hook (default-branch update).
+        process_spec_lifecycle(
+            &state,
+            "repo-stale",
+            repo_path.to_str().unwrap(),
+            "main",
+            &[RefUpdate {
+                old_sha,
+                new_sha,
+                refname: "refs/heads/main".to_string(),
+            }],
+        )
+        .await;
+
+        // The approval must now be Revoked — the spec content changed.
+        let reloaded = state
+            .spec_approvals
+            .find_by_id(&approval.id)
+            .await
+            .unwrap()
+            .expect("approval row survives invalidation");
+        assert_eq!(
+            reloaded.status(),
+            gyre_domain::spec_approval::ApprovalStatus::Revoked,
+            "push modifying spec must revoke the ledger approval (it was keyed by ledger path, diff by git path)"
+        );
+        assert_eq!(
+            reloaded.approved_at, None,
+            "mutual exclusivity: approved_at cleared"
+        );
+        assert!(reloaded
+            .revocation_reason
+            .as_deref()
+            .unwrap()
+            .contains("modified"));
+
+        // And the revoked approval no longer authorizes merges (forge check).
+        let spec_ref = format!("system/payments.md@{}", "a".repeat(40));
+        assert!(
+            crate::api::gates::verify_spec_ref(&state, &spec_ref)
+                .await
+                .is_err(),
+            "revoked approval must fail verify_spec_ref"
+        );
     }
 }

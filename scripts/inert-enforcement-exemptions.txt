@@ -12,8 +12,8 @@
 # See: specs/reviews/task-077.md F5 (the finding that created this check)
 #
 # --- task-077 revision round owns these (merge-time ABAC audit-only) ---
-crates/gyre-server/src/merge_processor.rs:1457   # evaluate_attestation_abac — result discarded, merge proceeds regardless (review F5 exact site)
-crates/gyre-server/src/merge_processor.rs:1479   # evaluate_attestation_abac — result discarded, merge proceeds regardless (review F5 exact site)
+crates/gyre-server/src/merge_processor.rs:1466   # evaluate_attestation_abac — result discarded, merge proceeds regardless (review F5 exact site)
+crates/gyre-server/src/merge_processor.rs:1488   # evaluate_attestation_abac — result discarded, merge proceeds regardless (review F5 exact site)
 
 # --- task-099 revision round owns these (F2: void validate_persona whose
 # result is discarded; consults state.meta_specs while bootstrap populates

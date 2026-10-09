@@ -1182,7 +1182,16 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
             if let Some(spec_ref) = mr.spec_ref.as_deref() {
                 // Parse "path@sha" — same format used by verify_spec_ref.
                 if let Some((path, sha)) = spec_ref.rsplit_once('@') {
-                    let current = crate::git_refs::resolve_blob_sha(&repo.path, path).await;
+                    // Spec refs carry ledger paths ("system/foo.md"); the file lives
+                    // at "specs/system/foo.md" in the repo. Try the raw path first
+                    // (covers full-git-path refs), then the specs/-prefixed form.
+                    let current = match crate::git_refs::resolve_blob_sha(&repo.path, path).await {
+                        Some(sha) => Some(sha),
+                        None => {
+                            crate::git_refs::resolve_blob_sha(&repo.path, &format!("specs/{path}"))
+                                .await
+                        }
+                    };
                     let is_stale = match &current {
                         // If the file can't be resolved (new/empty repo), treat as non-stale.
                         Some(cur) => cur != sha,
@@ -6002,6 +6011,129 @@ mod tests {
             worktrees,
             vec![repo_path.to_str().unwrap().to_string()],
             "gate worktree should be removed"
+        );
+    }
+
+    /// Spec Approval Ledger regression (agent-gates.md §Forge Enforcement
+    /// Policies): `require_current_spec` must block merges whose spec_ref SHA
+    /// is not the current HEAD blob SHA.
+    ///
+    /// Spec refs carry ledger paths ("system/foo.md") while the file lives at
+    /// "specs/system/foo.md" in the repo; without the specs/-prefix fallback
+    /// the blob SHA never resolved, `is_stale` was always false, and the
+    /// policy silently enforced nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn require_current_spec_blocks_stale_spec_ref() {
+        let state = test_state();
+
+        // Real repo whose HEAD contains the spec file at a known blob SHA.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_path = tmp.path().join("stale-spec-repo");
+        std::fs::create_dir_all(repo_path.join("specs/system")).unwrap();
+        std::fs::write(repo_path.join("specs/system/identity.md"), "# Identity\n").unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@test.com"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["add", "."]);
+        git(&["commit", "-m", "spec v1"]);
+        let head_blob = git(&["rev-parse", "HEAD:specs/system/identity.md"]);
+
+        let repo = Repository::new(
+            Id::new("repo-stale-spec"),
+            Id::new("ws-1"),
+            "stale-spec-repo",
+            repo_path.to_str().unwrap(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        // Enable the blocking policy.
+        state
+            .spec_policies
+            .set_for_repo(
+                repo.id.as_str(),
+                gyre_domain::SpecPolicy {
+                    require_current_spec: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // MR referencing a LEDGER path ("system/identity.md", as spawn.rs
+        // builds from the spec ledger) with a stale SHA.
+        let stale_sha = "e".repeat(40);
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-stale-spec"),
+            repo.id.clone(),
+            "Stale spec MR",
+            "feat/stale",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-1");
+        mr.spec_ref = Some(format!("system/identity.md@{stale_sha}"));
+        state.merge_requests.create(&mr).await.unwrap();
+        let entry = MergeQueueEntry::new(Id::new("entry-stale-spec"), mr.id.clone(), 50, 1000);
+        state.merge_queue.enqueue(&entry).await.unwrap();
+
+        run_once(&state).await.unwrap();
+
+        // The entry must have Failed: HEAD blob is {head_blob}, MR references
+        // the stale SHA. list_queue excludes terminal entries.
+        let queued = state.merge_queue.list_queue().await.unwrap();
+        assert!(
+            queued.iter().all(|e| e.id != entry.id),
+            "stale spec_ref must block the merge (entry Failed), got queued entries: {:?}",
+            queued
+                .iter()
+                .map(|e| (e.id.to_string(), format!("{:?}", e.status)))
+                .collect::<Vec<_>>()
+        );
+
+        // Control: an MR referencing the CURRENT blob SHA must not be failed
+        // by this policy (it proceeds past the spec check).
+        let mut mr2 = gyre_domain::MergeRequest::new(
+            Id::new("mr-current-spec"),
+            repo.id.clone(),
+            "Current spec MR",
+            "feat/current",
+            "main",
+            1001,
+        );
+        mr2.workspace_id = Id::new("ws-1");
+        mr2.spec_ref = Some(format!("system/identity.md@{head_blob}"));
+        state.merge_requests.create(&mr2).await.unwrap();
+        let entry2 = MergeQueueEntry::new(Id::new("entry-current-spec"), mr2.id.clone(), 50, 1001);
+        state.merge_queue.enqueue(&entry2).await.unwrap();
+
+        run_once(&state).await.unwrap();
+
+        let entry2_after = state
+            .merge_queue
+            .find_by_id(&entry2.id)
+            .await
+            .unwrap()
+            .expect("entry survives processing");
+        assert_ne!(
+            entry2_after.status,
+            MergeQueueEntryStatus::Failed,
+            "current spec_ref must not be blocked by require_current_spec (error: {:?})",
+            entry2_after.error_message
         );
     }
 }
