@@ -673,10 +673,16 @@ pub(crate) async fn finish_preview_agent(state: &AppState, agent_id: &str) -> bo
         branch = %agent_ref.branch,
         "preview agent finished"
     );
-    stop_preview_agent_row(state, agent_id).await;
+    // Cleanup before the terminal status flip: the status row is the
+    // observable "this agent is done" signal (status polling, GC, dashboards).
+    // Making it the LAST mutation guarantees that a terminal row implies a
+    // cleaned-up agent — no worktree, no live token, no held budget slot —
+    // instead of a window where the row says Stopped but the cleanup is
+    // still in flight.
     revoke_preview_token(state, agent_id).await;
     remove_preview_worktree(state, &agent_ref).await;
     release_preview_slot(state, &agent_ref).await;
+    stop_preview_agent_row(state, agent_id).await;
     true
 }
 
