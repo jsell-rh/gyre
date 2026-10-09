@@ -2,7 +2,7 @@
 title: "Executable Spec Assertions — gyre:assert parsing and knowledge graph validation"
 spec_ref: "system-explorer.md §9"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §9. Executable Spec Assertions"
 commits: ["6aadd3a0240a9ec0066bb0e730e0e9b16c220ef1", "f09e23603dbc4626523d05d06e34b26d4749b820", "3778c14a06aab7bac9df7bd185d8a81409d39d3b", "483f9b1b3029eb6fd7c7b9139ad27dcdb77bfab8", "68548e19f5ff2060c83ea2357525c9f225f280bc", "b8143187c42389e6c10a593d354ddb27e4664134", "cda15008584c10c66ad0d256483098b48ed4c5c3"]
