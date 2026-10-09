@@ -471,12 +471,7 @@ pub async fn admin_seed(
     // error here leaves repos pointing at a workspace that does not exist.
     let tenant_row = state.tenants.find_by_id(&Id::new(&tenant_id)).await?;
     if tenant_row.is_none() {
-        let tenant = Tenant::new(
-            Id::new(&tenant_id),
-            "Default Tenant",
-            &tenant_id,
-            now,
-        );
+        let tenant = Tenant::new(Id::new(&tenant_id), "Default Tenant", &tenant_id, now);
         state.tenants.create(&tenant).await?;
     }
 
@@ -512,21 +507,21 @@ pub async fn admin_seed(
         Id::new("seed-repo-1"),
         Id::new("default"),
         "gyre-core",
-        &seed_repo_path("gyre-core"),
+        seed_repo_path("gyre-core"),
         now - 3500,
     );
     let repo2 = Repository::new(
         Id::new("seed-repo-2"),
         Id::new("default"),
         "gyre-web",
-        &seed_repo_path("gyre-web"),
+        seed_repo_path("gyre-web"),
         now - 3400,
     );
     let repo3 = Repository::new(
         Id::new("seed-repo-3"),
         Id::new("default"),
         "infra-config",
-        &seed_repo_path("infra-config"),
+        seed_repo_path("infra-config"),
         now - 3300,
     );
     state.repos.create(&repo1).await?;
@@ -1586,7 +1581,10 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/admin/seed")
-                    .header("Authorization", format!("Bearer {}", tenant_admin_jwt("acme-corp")))
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", tenant_admin_jwt("acme-corp")),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
