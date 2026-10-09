@@ -364,6 +364,20 @@ class ControllerGitTest(unittest.TestCase):
         self.assertRegex(observations[0], r'^[0-9a-f]{40}$')
         self.assertEqual(self.db.execute("SELECT count(*) FROM events WHERE message='concurrent control write'").fetchone()[0], 1)
 
+    def test_capacity_recovery_worker_probe_can_use_reserved_slot(self):
+        (self.work / 'specs/tasks/task-002.md').write_text('---\ntitle: probe\nprogress: not-started\ndepends_on: []\ncommits: []\n---\nRequired behavior\n')
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-m', 'probe task')
+        git(self.work, 'push', 'origin', 'main')
+        controller.sync(self.db)
+        self.db.execute("UPDATE tasks SET state='running' WHERE name='task-001'")
+        self.db.execute("INSERT INTO attempts(id,task,kind,state,started) VALUES('active','task-001','worker','running',0)")
+        self.db.execute("UPDATE controller_health SET failures=1,retry_at=1,admission=1,condition='Capacity unavailable'")
+        self.db.commit()
+        with patch.object(controller, 'spawn') as spawn:
+            controller.schedule(self.db, slots=50, max_attempts=3, launch_burst=4)
+        self.assertEqual([call.args[1]['name'] for call in spawn.call_args_list], ['task-002'])
+
     def test_database_initialization_and_idle_promotion_release_writer(self):
         for phase in ('initialized', 'idle promotion'):
             with self.subTest(phase=phase):
