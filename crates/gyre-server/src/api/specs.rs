@@ -92,6 +92,12 @@ pub struct SpecApprovalEventResponse {
     pub approver_type: String,
     pub approver_id: String,
     pub persona: Option<String>,
+    /// Agent attestation level captured from the approving agent's verified
+    /// JWT workload claims (null for humans) — spec-registry.md §9.
+    pub attestation_level: Option<u32>,
+    /// Agent stack fingerprint captured from the approving agent's verified
+    /// JWT `wl_stack_hash` claim (null for humans) — spec-registry.md §5/§9.
+    pub stack_hash: Option<String>,
     pub approved_at: u64,
     pub revoked_at: Option<u64>,
     pub revoked_by: Option<String>,
@@ -109,6 +115,8 @@ impl From<SpecApprovalEvent> for SpecApprovalEventResponse {
             approver_type: e.approver_type,
             approver_id: e.approver_id,
             persona: e.persona,
+            attestation_level: e.attestation_level,
+            stack_hash: e.stack_hash,
             approved_at: e.approved_at,
             revoked_at: e.revoked_at,
             revoked_by: e.revoked_by,
@@ -830,8 +838,12 @@ pub async fn approve_spec(
     Ok((StatusCode::CREATED, Json(event.into())))
 }
 
-/// Resolve the new `approval_status` for a ledger entry after a recorded
-/// approval event (spec-registry.md §9).
+/// Resolve the ledger `approval_status` for a spec from its manifest policy
+/// and recorded approval history (spec-registry.md §9).
+///
+/// Called after any mutation of the approval history (approval recorded,
+/// approval revoked) so the ledger always reflects the §9 resolution over the
+/// current events rather than a hard-coded transition.
 ///
 /// Reads the manifest entry for the spec (via the ledger entry's repo) and
 /// applies the pure `resolve_approval_status` resolver over the full approval
@@ -861,21 +873,30 @@ async fn resolve_new_approval_status(
     }
     .await;
 
-    let Some((manifest_entry, defaults)) = resolved else {
-        tracing::debug!(
-            spec_path,
-            "spec-approval: no manifest entry for spec — falling back to single-approval status"
-        );
-        // Manifest-less fallback: one valid approval for the current SHA
-        // approves the spec (matches the pre-§9 behavior).
-        return ApprovalStatus::Approved;
-    };
-
     let events = state
         .spec_approval_history
         .list_by_path(spec_path)
         .await
         .unwrap_or_default();
+
+    let Some((manifest_entry, defaults)) = resolved else {
+        tracing::debug!(
+            spec_path,
+            "spec-approval: no manifest entry for spec — falling back to single-approval status"
+        );
+        // Manifest-less fallback: any active approval for the current SHA
+        // approves the spec (the pre-§9 behavior). Evaluated over real events
+        // so a revoke that removes the last approval demotes to Pending.
+        let has_valid = events
+            .iter()
+            .any(|e| e.spec_sha == entry.current_sha && e.is_active());
+        return if has_valid {
+            ApprovalStatus::Approved
+        } else {
+            ApprovalStatus::Pending
+        };
+    };
+
     crate::spec_registry::resolve_approval_status(
         &manifest_entry,
         &defaults,
@@ -883,6 +904,7 @@ async fn resolve_new_approval_status(
         &events,
     )
 }
+
 
 // ---------------------------------------------------------------------------
 // POST /api/v1/specs/:path/revoke — revoke an approval
@@ -933,11 +955,18 @@ pub async fn revoke_spec_approval(
                 .revoke_event(&ev.id, now, &auth.agent_id, &req.reason)
                 .await;
 
-            // Reset ledger approval_status to Pending.
+            // Recompute the ledger approval_status via §9 resolution over the
+            // remaining active approvals. Revoking one approval of a
+            // human_and_agent pair that still has the other half must not
+            // demote an otherwise-satisfied entry; revoking the last valid
+            // approval demotes it to Pending.
             if let Some(mut entry) = state.spec_ledger.find_by_path(&spec_path).await? {
-                entry.approval_status = ApprovalStatus::Pending;
-                entry.updated_at = now;
-                let _ = state.spec_ledger.save(&entry).await;
+                let new_status = resolve_new_approval_status(&state, &spec_path, &entry).await;
+                if entry.approval_status != new_status {
+                    entry.approval_status = new_status;
+                    entry.updated_at = now;
+                    let _ = state.spec_ledger.save(&entry).await;
+                }
             }
 
             Ok(Json(serde_json::json!({
