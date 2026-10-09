@@ -7,6 +7,7 @@
   import Button from '../lib/Button.svelte';
   import EmptyState from '../lib/EmptyState.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
+  import AccordionItem from '../lib/AccordionItem.svelte';
   import SpecDiffView from '../lib/SpecDiffView.svelte';
   import { toastError } from '../lib/toast.svelte.js';
 
@@ -376,74 +377,72 @@
             role="listitem"
             data-type={n.notification_type}
           >
-            <!-- Card header: always visible, click to expand/collapse -->
-            <!-- svelte-ignore a11y_click_events_have_key_events -->
-            <div
-              class="card-header"
-              onclick={() => toggleExpand(n.id)}
-              role="button"
-              tabindex="0"
-              aria-expanded={isExpanded}
-              aria-controls="inbox-card-{n.id}"
-              aria-label="{isExpanded ? $t('common.collapse') : $t('common.expand')}: {n.title}"
-              onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleExpand(n.id); } }}
+            <!-- Card header: always visible, click to expand/collapse.
+                 AccordionItem (ui-layout.md §3 Inline Expansion) — the header
+                 is a real <button>; quick-link buttons inside call
+                 stopPropagation so they don't toggle. -->
+            <AccordionItem
+              id={n.id}
+              open={isExpanded}
+              ontoggle={toggleExpand}
+              headerClass="card-header"
+              ariaLabel="{isExpanded ? $t('common.collapse') : $t('common.expand')}: {n.title}"
             >
-              <div class="card-header-left">
-                <span
-                  class="priority-badge"
-                  data-priority={n.priority}
-                  aria-label={$t('decisions.priority_label', { values: { level: n.priority } })}
-                >
-                  P{n.priority}
-                </span>
-                {#if isDismissed}<span class="sr-only">({$t('decisions.dismissed')})</span>{/if}
-                <div class="card-header-text">
-                  <span class="card-title">{n.title}</span>
-                  {#if body.agent_id || body.mr_title || body.agent_name}
-                    <span class="card-subtitle">
-                      {#if body.agent_name}{body.agent_name}
-                      {:else if body.agent_id}{resolveEntityName('agent', body.agent_id)}{/if}
-                      {#if body.mr_title} {$t('decisions.on_mr', { values: { title: body.mr_title } })}{/if}
-                      {#if body.spec_path}
-                        ({$t('decisions.spec_label_short', { values: { name: body.spec_path.split('/').pop()?.replace('.md', '') } })})
-                      {/if}
-                    </span>
-                  {:else if body.spec_path}
-                    <button class="card-subtitle card-subtitle-link" title={body.spec_path} onclick={(e) => { e.stopPropagation(); openDetail({ type: 'spec', id: normalizeSpecPath(body.spec_path), data: { path: normalizeSpecPath(body.spec_path), repo_id: n.repo_id } }); }}>{body.spec_path.split('/').pop()?.replace(/\.md$/, '') ?? body.spec_path}</button>
-                  {:else if body.meta_spec_path}
-                    <span class="card-subtitle" title={body.meta_spec_path}>{body.meta_spec_path.split('/').pop()?.replace(/\.md$/, '') ?? body.meta_spec_path}</span>
-                  {/if}
+              {#snippet header()}
+                <div class="card-header-left">
+                  <span
+                    class="priority-badge"
+                    data-priority={n.priority}
+                    aria-label={$t('decisions.priority_label', { values: { level: n.priority } })}
+                  >
+                    P{n.priority}
+                  </span>
+                  {#if isDismissed}<span class="sr-only">({$t('decisions.dismissed')})</span>{/if}
+                  <div class="card-header-text">
+                    <span class="card-title">{n.title}</span>
+                    {#if body.agent_id || body.mr_title || body.agent_name}
+                      <span class="card-subtitle">
+                        {#if body.agent_name}{body.agent_name}
+                        {:else if body.agent_id}{resolveEntityName('agent', body.agent_id)}{/if}
+                        {#if body.mr_title} {$t('decisions.on_mr', { values: { title: body.mr_title } })}{/if}
+                        {#if body.spec_path}
+                          ({$t('decisions.spec_label_short', { values: { name: body.spec_path.split('/').pop()?.replace('.md', '') } })})
+                        {/if}
+                      </span>
+                    {:else if body.spec_path}
+                      <button class="card-subtitle card-subtitle-link" title={body.spec_path} onclick={(e) => { e.stopPropagation(); openDetail({ type: 'spec', id: normalizeSpecPath(body.spec_path), data: { path: normalizeSpecPath(body.spec_path), repo_id: n.repo_id } }); }}>{body.spec_path.split('/').pop()?.replace(/\.md$/, '') ?? body.spec_path}</button>
+                    {:else if body.meta_spec_path}
+                      <span class="card-subtitle" title={body.meta_spec_path}>{body.meta_spec_path.split('/').pop()?.replace(/\.md$/, '') ?? body.meta_spec_path}</span>
+                    {/if}
+                  </div>
                 </div>
-              </div>
-              <div class="card-header-right">
-                <!-- Quick entity jump buttons (visible without expanding) -->
-                {#if body.spec_path}
-                  <button class="card-quick-link" onclick={(e) => { e.stopPropagation(); openDetail({ type: 'spec', id: normalizeSpecPath(body.spec_path), data: { path: normalizeSpecPath(body.spec_path), repo_id: n.repo_id } }); }} title="View spec: {body.spec_path}">📋</button>
-                {/if}
-                {#if body.mr_id}
-                  <button class="card-quick-link" onclick={(e) => { e.stopPropagation(); openDetail({ type: 'mr', id: body.mr_id, data: { repo_id: n.repo_id } }); }} title="View merge request">🔀</button>
-                {/if}
-                {#if body.agent_id}
-                  <button class="card-quick-link" onclick={(e) => { e.stopPropagation(); openDetail({ type: 'agent', id: body.agent_id, data: { repo_id: n.repo_id } }); }} title="View agent">▶</button>
-                {/if}
-                {#if isResolved}
-                  <Badge value={$t('decisions.status_resolved')} variant="success" />
-                {/if}
-                {#if scope === 'tenant' && n.workspace_id}
-                  <Badge value={workspaceMap[n.workspace_id] ?? entityName('workspace', n.workspace_id)} variant="default" />
-                {/if}
-                <Badge
-                  value={typeLabel(n.notification_type)}
-                  variant={TYPE_VARIANTS[n.notification_type] || 'default'}
-                />
-                <span class="card-age">{relativeTime(n.created_at)}</span>
-                <span class="expand-icon" aria-hidden="true">{isExpanded ? '▲' : '▼'}</span>
-              </div>
-            </div>
-
-            <!-- Expanded body (accordion — only one open at a time) -->
-            {#if isExpanded}
-              <div class="card-body" id="inbox-card-{n.id}">
+                <div class="card-header-right">
+                  <!-- Quick entity jump buttons (visible without expanding) -->
+                  {#if body.spec_path}
+                    <button class="card-quick-link" onclick={(e) => { e.stopPropagation(); openDetail({ type: 'spec', id: normalizeSpecPath(body.spec_path), data: { path: normalizeSpecPath(body.spec_path), repo_id: n.repo_id } }); }} title="View spec: {body.spec_path}">📋</button>
+                  {/if}
+                  {#if body.mr_id}
+                    <button class="card-quick-link" onclick={(e) => { e.stopPropagation(); openDetail({ type: 'mr', id: body.mr_id, data: { repo_id: n.repo_id } }); }} title="View merge request">🔀</button>
+                  {/if}
+                  {#if body.agent_id}
+                    <button class="card-quick-link" onclick={(e) => { e.stopPropagation(); openDetail({ type: 'agent', id: body.agent_id, data: { repo_id: n.repo_id } }); }} title="View agent">▶</button>
+                  {/if}
+                  {#if isResolved}
+                    <Badge value={$t('decisions.status_resolved')} variant="success" />
+                  {/if}
+                  {#if scope === 'tenant' && n.workspace_id}
+                    <Badge value={workspaceMap[n.workspace_id] ?? entityName('workspace', n.workspace_id)} variant="default" />
+                  {/if}
+                  <Badge
+                    value={typeLabel(n.notification_type)}
+                    variant={TYPE_VARIANTS[n.notification_type] || 'default'}
+                  />
+                  <span class="card-age">{relativeTime(n.created_at)}</span>
+                  <span class="expand-icon" aria-hidden="true">{isExpanded ? '▲' : '▼'}</span>
+                </div>
+              {/snippet}
+              {#snippet children()}
+                <div class="card-body" id="inbox-card-{n.id}">
                 {#if body.message}
                   <blockquote class="card-message">"{body.message}"</blockquote>
                 {/if}
@@ -709,8 +708,9 @@
                     {/if}
                   </div>
                 {/if}
-              </div>
-            {/if}
+                </div>
+              {/snippet}
+            </AccordionItem>
           </div>
         {/each}
       </div>
@@ -848,6 +848,8 @@
     opacity: 0.7;
   }
 
+  /* Accordion header button (AccordionItem) carries the card-header look.
+     The component resets UA button styling; this restores it. */
   .card-header {
     display: flex;
     align-items: flex-start;

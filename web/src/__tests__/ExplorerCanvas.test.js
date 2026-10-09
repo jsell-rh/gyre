@@ -1279,6 +1279,27 @@ describe('ExplorerCanvas — ghost overlays', () => {
   const GHOST_CHANGE = { id: 'fn1', name: 'create_user', type: 'function', action: 'change', reason: 'Updated validation', confidence: 'medium' };
   const GHOST_REMOVE = { id: 'fn2', name: 'get_user', type: 'function', action: 'remove', confidence: 'low' };
 
+  // The file-level mock runs rAF synchronously. With ghost overlays the
+  // canvas runs its designed 3-cycle pulse animation (~273 frames); under a
+  // synchronous mock the whole burst executes inside render() as ~50k
+  // mocked canvas calls — 5-8s on a loaded host, tripping the 5s per-test
+  // timeout (load-dependent flake). These tests assert DOM state only
+  // (preview bar, legend chips), which is template-driven, not
+  // canvas-pixel-driven, so mirror a hidden browser tab (rAF suspended):
+  // accept the frame, never invoke it. The component cancels its frame on
+  // destroy, so nothing leaks past the block.
+  let pendingCb = null;
+  beforeEach(() => {
+    pendingCb = null;
+    global.requestAnimationFrame = vi.fn(cb => { pendingCb = cb; return 1; });
+    global.cancelAnimationFrame = vi.fn(() => { pendingCb = null; });
+  });
+  afterEach(() => {
+    // Restore the file-level synchronous mock for any test outside this block.
+    global.requestAnimationFrame = vi.fn(cb => { cb(); return 1; });
+    global.cancelAnimationFrame = vi.fn();
+  });
+
   it('renders preview mode indicator with ghost overlays', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, ghostOverlays: [GHOST_ADD] },
