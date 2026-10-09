@@ -77,11 +77,11 @@ pub struct AnalyticsEvent {
 
 ## Acceptance Criteria
 
-- [ ] AnalyticsEvent struct matches spec schema (all fields present)
-- [ ] All 12 auto-emitted events are recorded at their trigger points
-- [ ] Each event includes all spec-required properties
-- [ ] Query API supports all spec-required filter parameters
-- [ ] Tests pass for each auto-emitted event
+- [x] AnalyticsEvent struct matches spec schema (all fields present)
+- [x] All 12 auto-emitted events are recorded at their trigger points
+- [x] Each event includes all spec-required properties
+- [x] Query API supports all spec-required filter parameters
+- [x] Tests pass for each auto-emitted event
 
 ## Agent Instructions
 
@@ -93,3 +93,62 @@ pub struct AnalyticsEvent {
 - Read `crates/gyre-server/src/api/specs.rs` for spec approval events
 - Read `crates/gyre-server/src/api/search.rs` for search endpoint
 - Do NOT create new endpoints — the query API routes already exist. Only add missing auto-emitted events and verify completeness.
+
+## Implementation Notes
+
+- `AnalyticsEvent` (gyre-domain/src/analytics.rs) carries every spec field:
+  id, event_name, agent_id, user_id, session_id, workspace_id, repo_id,
+  properties, timestamp. Id-valued fields are stored as text
+  (`Option<String>`) — consistent with the pre-existing `agent_id: Option<String>`
+  and the storage layer's TEXT columns; the serde round-trip test pins the shape.
+- All 12 spec auto-emitted events now emit at their real trigger points
+  (see the emit-site table in /tmp/stage/review-evidence/task-146-evidence.md
+  at checkpoint time; canonical sites: tasks.rs:345, mcp.rs:1049,
+  merge_requests.rs:681, merge_processor.rs:757/1534/1821/1862, repos.rs:318,
+  specs.rs:701/936, spawn.rs:1084/1321/1475/1561, orchestrator.rs:141,
+  admin.rs:337, stale_agents.rs:41, gate_executor.rs:130, budget.rs:268,
+  search.rs:82). Multiple trigger paths are covered per event where the
+  spec's "fails or is killed" wording names several paths (agent.failed:
+  fail_agent, admin force-kill, stale-abort; mr.closed: HTTP transition,
+  repo deletion, spec-reject).
+- Query API: `QueryEventsParams` supports event_name, agent_id, user_id,
+  workspace_id, repo_id, since, until, limit (default 100, max 10_000),
+  group_by (event_name/agent_id/workspace_id/day). `event_name` supports
+  the spec's trailing-`*` prefix form (`mr.*`) via LIKE in BOTH the SQLite
+  and Postgres adapters. since/until accept ISO8601 or unix seconds.
+- Contract repairs kept intact from earlier rounds: the pre-existing
+  `mr.created` event (spawn.rs, emitted on agent completion MR creation)
+  and the spec_index `&e.current_sha[..8]` hex-sha slice + its exemption
+  entry were restored to base form; exemption-file diffs vs base are
+  line-number re-pins only (no new entries, no check weakened).
+
+## Shipped
+
+- Event schema: `AnalyticsEvent` has all 9 spec fields; unit test
+  `analytics_event_matches_spec_schema` asserts each field and a serde
+  round-trip (gyre-domain, 3/3 pass).
+- Auto-emitted events: all 12 recorded at real trigger points with all
+  spec-required properties. Per-event tests pass: task.status_changed
+  (old_status/new_status/task_id/assigned_to), mr.merged (mr_id/repo_id/
+  gate_count/queue_wait_secs — both the HTTP transition and queue merge
+  paths), mr.closed (mr_id/repo_id/reason), agent.spawned (agent_id/
+  task_id/compute_target/persona — direct and orchestrator paths),
+  agent.completed (agent_id/task_id/duration_secs), agent.failed
+  (agent_id/task_id/reason — fail, admin force-kill, stale-abort paths),
+  merge_queue.processed (mr_id/outcome/wait_secs), gate.failed
+  (gate_id/gate_type/mr_id/output_snippet), gate.passed (gate_id/
+  gate_type/mr_id/duration_secs), spec.approved (spec_path/approver_type/
+  approval_mode), budget.warning (workspace_id/metric/threshold_pct —
+  plus a not-emitted-below-threshold negative test), search.query
+  (query_length/entity_types/result_count/duration_ms — plus an
+  empty-query negative test).
+- Query API: all spec filter parameters work, including trailing-`*`
+  event-name prefix matching on both storage adapters
+  (`analytics_query_filtered_all_params`, 13/13 adapter tests pass).
+- Evidence: domain 3/3, adapters 13/13, server per-event suites
+  (9 + 6 + merge_processor 50/50 incl. queue-merge analytics, stale-abort,
+  admin kill) all green; full mechanical check suite A/B vs assignment
+  base shows identical failure sets (36 pre-existing both sides, zero
+  regressions — prior round's "expected 35" was a miscount of the same
+  baseline). Sandbox cannot bind a TCP listener (errno 95), so no live
+  HTTP probe; exact-head GitHub CI remains the transport verification.

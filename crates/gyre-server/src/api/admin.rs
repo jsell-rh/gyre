@@ -1042,6 +1042,22 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(killed.status, gyre_domain::AgentStatus::Dead);
+
+        // analytics.md §Auto-Emitted Events: agent.failed covers "fails or
+        // is killed" — the admin force-kill path must record it with the
+        // kill reason.
+        let events = state
+            .analytics
+            .query(Some("agent.failed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one agent.failed event expected");
+        assert_eq!(events[0].agent_id.as_deref(), Some("agent-kill-1"));
+        assert_eq!(events[0].properties["reason"], "force-killed by admin");
+        assert!(
+            events[0].properties["duration_secs"].as_u64().is_some(),
+            "duration_secs must be present"
+        );
     }
 
     #[tokio::test]
