@@ -197,6 +197,8 @@
     }
   }
 
+  // HSI §1325: the client owns the conversation state — track both user and
+  // assistant turns so follow-up requests carry the full conversation.
   let chatHistory = $state([]);
 
   function briefingAskHandler(question) {
@@ -206,6 +208,10 @@
     const trimmedHistory = chatHistory.slice(-20);
     chatHistory = [...chatHistory, { role: 'user', content: question }];
     return api.briefingAsk(workspaceId, { question, history: trimmedHistory });
+  }
+
+  function briefingChatAnswered(answer) {
+    chatHistory = [...chatHistory, { role: 'assistant', content: answer }];
   }
 
   // Reload when scope or workspaceId changes (not just on mount)
@@ -565,6 +571,7 @@
             recipient="this briefing"
             recipientType="llm-qa"
             onmessage={briefingAskHandler}
+            onassistant={briefingChatAnswered}
           />
         </div>
       {/if}
