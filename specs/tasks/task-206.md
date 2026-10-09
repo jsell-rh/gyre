@@ -2,7 +2,7 @@
 title: "Implement meta-spec preview mode: real agent preview runs with branches, diffs, and cleanup"
 spec_ref: "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
 commits: ["2ae25c17198e8c3d45bd7508d70af636bd33fd65", "b40714fa5c5f1f534abdbe13bca219d4f3ec1495", "608fd050412238f29da0706ef7bd52b41a932902", "05a8b4d1118c13a1a9e7ad791f961566373a629a", "930e6b1fefa73cfd1897e14362ed85d5699d861a", "f7d9168dea13760201ae40dfde2b45177a757056", "5955934352a6c3610b87c3727648782755dc11c0"]
@@ -145,3 +145,120 @@ structural-impact tabs, dead styles, and orphaned i18n keys were removed.
 Workspace-scope tests rewritten against the real API mocks (106 pass; the only
 other full-suite failure, `ExplorerCanvas-performance`, pre-exists on HEAD and
 is a timing-sensitive test unrelated to this task).
+
+## Review Findings (2026-10-09, HEAD 30422d2, base 66422bd4)
+
+Verdict: **complete**. Independent inspection of the diff, call sites, and
+wiring; persisted evidence reused only after confirming source unchanged at
+HEAD 30422d2 (tree clean).
+
+### Behavior verified against §5
+
+- **Routes & authz**: `POST/GET/DELETE /api/v1/meta-specs/preview` registered
+  (mod.rs:735-739) with ABAC `RouteResourceMapping` entries
+  (abac_middleware.rs:449-452); old workspace-scoped routes and the hollow
+  structural-impact preview fully removed — clean cutover confirmed by grep
+  (no `workspaces/:id/meta-specs/preview`, no `StructuralImpact`, no
+  `compute_preview_blast_radius` anywhere). Role gate Admin|Developer on all
+  three handlers; POST validates repo existence (404), per-target
+  `check_repo_abac` + tenant containment (403), spec on default branch (400).
+- **Real spawns**: `provision_preview_agent` creates real agent rows (Active,
+  workspace-scoped from the repo record, no task), real `preview/{id}/{slug}`
+  branches pinned to the default-branch tip, real worktrees via
+  `Git2OpsAdapter::create_worktree`, and short-lived JWTs
+  (`state.preview_jwt_ttl_secs`, default 1800s — distinct from
+  `GYRE_AGENT_JWT_TTL`). Provisioning failure rolls back everything created
+  so far; launch failure marks the agent Failed and releases its slot while
+  keeping the run visible. The launch requires a real process handle — a
+  spawn that never started cannot sit "running".
+- **Draft reaches the agent**: env injection (`GYRE_META_SPEC_DRAFT_KIND`,
+  `GYRE_META_SPEC_DRAFT_CONTENT`, `GYRE_TARGET_SPEC_PATH`, `GYRE_PREVIEW_ID`,
+  no `GYRE_TASK_ID`) proven against a dumped process environment, not a
+  field; `agent-runner.mjs` builds the preview prompt from the draft content
+  and instructs reading the target spec and pushing the branch.
+- **Skip-ceremony enforced server-side**: MCP dispatch refuses
+  `gyre_create_task`/`gyre_update_task`/`gyre_create_mr`/
+  `gyre_agent_complete`/`conversation_upload` for preview agents
+  (mcp.rs:2958-2980) — allowedTools withholding is advisory, the server gate
+  is not. Git push path coherent for preview agents: `current_task_id` is
+  None so TASK-008 attestation-chain enforcement and constraint checks are
+  skipped (§5 skip-table), and repo pre-accept gates are opt-in per repo.
+- **Completion semantics**: all three compute-target monitors route through
+  `on_agent_process_exit` → `finish_preview_agent` (spawn.rs:737): Stopped
+  (never Idle), worktree removed, token revoked, budget slot released, branch
+  kept for diffing. Test asserts Stopped-not-Idle through a real process
+  lifecycle.
+- **GET status**: per-agent state derived from real agent rows +
+  `released` flag; diff computed against the pinned `base_sha` once the
+  branch exists (null before). Test drives a real commit+push from the
+  spawned agent script and asserts the patch surfaces.
+- **DELETE**: kills processes (container-aware via `kill_process_handle`),
+  stops rows, removes worktrees, deletes branches, revokes tokens, releases
+  slots, drops both kv namespaces; 404 on unknown id; second DELETE 404.
+- **GC**: `meta_spec_preview_gc` registered (jobs.rs:508-524, default 1h) and
+  spawned in main.rs:74; TTL default 24h via `GYRE_META_SPEC_PREVIEW_TTL_HOURS`;
+  saturating age computation (clock-skew safe); orphan pass reclaims agent
+  records whose run is gone (token/branch/slot). TTL boundary tested
+  (at/past deleted, just-under retained).
+- **Budget**: workspace budget by default (check_spawn_budget +
+  increment/decrement), separate `GYRE_PREVIEW_BUDGET_MAX_CONCURRENT` cap with
+  429 on overflow; slot release is single-shot via the `released` flag.
+- **UI repair**: dead references gone (grep clean), generation-guarded
+  polling, per-agent tabs, diff rendering, Clean Up → DELETE; all used i18n
+  keys present in en.json.
+- **Exemption changes are shrinkages, not gate weakening**: two route-registry
+  exemptions removed with the routes; the fabricated-scope-default and
+  lossy-secret-conversion entries for spawn.rs were fixed in code
+  (skip-and-warn on unresolvable tenant / non-UTF-8 secret) and their frozen
+  counts lowered accordingly; relative-path line numbers re-anchored only.
+- **Commit attribution**: all 7 task-labeled commits in the review range
+  (5955934, f7d9168, 930e6b1, 05a8b4d, 608fd05, b40714f, 2ae25c1) are in the
+  frontmatter `commits:` list. The repair log's `92093ee` is pre-rebase local
+  numbering; the reworked UI repair landed as `2ae25c1` with equivalent
+  content (verified by reading the commit body).
+
+### Evidence (persisted under /tmp/stage/review-evidence/)
+
+- `task206-rust-tests.md`: `cargo test -p gyre-server --lib meta_spec` — 18
+  passed, exit 0, at HEAD 30422d2 (fresh private target dir, 909s cold).
+- `task206-mcp-spawn-tests.md`: `mcp_preview_agent_denied_ceremony_tools` (1)
+  and the spawn module suite (37) pass at the same HEAD — the
+  `on_agent_process_exit` refactor regressed nothing in normal-agent behavior.
+- `task206-web-tests.md`: `vitest run src/__tests__/MetaSpecs.test.js` — 106
+  passed, exit 0, same HEAD. (Repair log's note: `ExplorerCanvas-performance`
+  failure pre-exists on HEAD, unrelated.)
+- All 19 mechanical invariant scripts pass at HEAD (incl. check-arch,
+  check-abac-route-registry, check-abac-exempt-handlers, exemption-count
+  checks).
+
+### Non-blocking nits (recorded, no repair required)
+
+- Millisecond-wide window where process-exit and a concurrent DELETE/GC can
+  both read `released=false` and double-decrement the budget counter. Impact
+  is saturating (`MAX(0, active_agents-1)` in all three adapters) and
+  accounting-only; no safety decision reads the counter.
+- `preview_agent_status_label` maps `Dead` → "dead" and `Failed` → "failed";
+  the run-level `state` stays "complete" when no agent is running even if
+  some failed — the per-agent statuses carry the failure signal, and the UI
+  renders them per tab.
+
+## Shipped
+
+- Real meta-spec preview runs: `POST /api/v1/meta-specs/preview` spawns one
+  agent per target on `preview/{preview_id}/{slug}` branches (real worktrees,
+  short-lived JWTs, draft injected via env and surfaced as the governing
+  prompt by the agent runner); `202` returns the spec's `{preview_id,
+  agents[]}` shape.
+- Ceremony stripped and enforced server-side: preview agents are denied
+  task/MR/completion/provenance MCP tools, create no tasks/MRs/provenance/
+  refs writes, and land Stopped (never Idle) with token revoked and budget
+  slot released when their process exits — the pushed branch is the entire
+  deliverable.
+- Full cleanup lifecycle: `GET` status with real per-agent state + produced
+  diffs; `DELETE /api/v1/meta-specs/preview/{id}` tears down processes,
+  worktrees, branches and records; background `meta_spec_preview_gc` expires
+  runs past the configurable TTL (default 24h) and reclaims orphans.
+- Workspace preview UI wired to the real contract: spec-ledger target
+  selection, bounded 2s status polling with per-agent tabs and diff
+  rendering, Clean Up calling DELETE; config knobs documented in
+  server-config.md and routes in api-reference.md.
