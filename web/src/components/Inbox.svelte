@@ -201,12 +201,36 @@
     return path ? path.replace(/^specs\//, '') : path;
   }
 
-  async function handleApproveSpec(n) {
+  // Resolve the spec path for a notification: from the structured body first,
+  // then from the "Spec pending approval: <path>" title format emitted by the
+  // server (legacy notifications created before the body was populated).
+  function resolveSpecPath(n) {
     const body = getBody(n);
-    if (!body.spec_path || !body.spec_sha) return;
+    return body.spec_path ?? (n.title?.match(/:\s*(.+\.md)\s*$/)?.[1] ?? null);
+  }
+
+  // Resolve the spec SHA to approve: from the body, else from the spec ledger
+  // (GET /specs/:path returns current_sha). The SHA is the blob SHA of the
+  // spec content the human is approving.
+  async function resolveSpecSha(n, specPath) {
+    const body = getBody(n);
+    if (body.spec_sha) return body.spec_sha;
+    try {
+      const spec = await api.getSpec(normalizeSpecPath(specPath));
+      return spec?.current_sha ?? spec?.sha ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function handleApproveSpec(n) {
+    const specPath = resolveSpecPath(n);
+    if (!specPath) return;
     actionStates = { ...actionStates, [n.id]: { loading: true, action: 'approve' } };
     try {
-      await api.approveSpec(normalizeSpecPath(body.spec_path), body.spec_sha);
+      const sha = await resolveSpecSha(n, specPath);
+      if (!sha) throw new Error($t('decisions.missing_spec_sha'));
+      await api.approveSpec(normalizeSpecPath(specPath), sha);
       api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
       notifications = notifications.map(item =>
         item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
@@ -224,11 +248,11 @@
   }
 
   async function handleRejectSpec(n) {
-    const body = getBody(n);
-    if (!body.spec_path) return;
+    const specPath = resolveSpecPath(n);
+    if (!specPath) return;
     actionStates = { ...actionStates, [n.id]: { loading: true, action: 'reject' } };
     try {
-      await api.revokeSpec(normalizeSpecPath(body.spec_path), 'Rejected from inbox');
+      await api.revokeSpec(normalizeSpecPath(specPath), 'Rejected from inbox');
       api.resolveNotification(n.id).catch(() => toastError($t('decisions.dismiss_failed')));
       notifications = notifications.map(item =>
         item.id === n.id ? { ...item, resolved_at: new Date().toISOString() } : item
@@ -244,6 +268,7 @@
       };
     }
   }
+
 
   async function handleRetry(n) {
     const body = getBody(n);
@@ -273,10 +298,9 @@
   }
 
   function handleViewSpec(n) {
-    const body = getBody(n);
-    const specPath = body.spec_path || n.entity_ref;
+    const specPath = resolveSpecPath(n) ?? (getBody(n).spec_path ? null : n.entity_ref);
     if (specPath) {
-      openDetail({ type: 'spec', id: specPath, data: n });
+      openDetail({ type: 'spec', id: normalizeSpecPath(specPath), data: n });
     }
   }
 

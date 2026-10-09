@@ -508,6 +508,7 @@
     "pausing_work": "Pausing work\u2026",
     "accepted": "Accepted",
     "approval_failed": "Approval failed",
+    "missing_spec_sha": "Cannot approve: no SHA found for this spec version",
     "rejection_failed": "Rejection failed",
     "re_queued": "Re-queued",
     "retry_failed": "Retry failed",

@@ -64,7 +64,7 @@ const dismissedNotif = makeNotification({
 vi.mock('../lib/api.js', () => ({
   api: {
     myNotifications: vi.fn().mockResolvedValue([]),
-    approveSpec: vi.fn().mockResolvedValue({}),
+    getSpec: vi.fn().mockResolvedValue({ path: 'system/api-conventions.md', current_sha: 'fetchedsha000000000000000000000000000000' }),
     revokeSpec: vi.fn().mockResolvedValue({}),
     enqueue: vi.fn().mockResolvedValue({}),
     markNotificationRead: vi.fn().mockResolvedValue({}),
@@ -93,7 +93,7 @@ describe('Inbox', () => {
     api.approveSpec.mockResolvedValue({});
     api.revokeSpec.mockResolvedValue({});
     api.enqueue.mockResolvedValue({});
-    api.markNotificationRead.mockResolvedValue({});
+    api.getSpec.mockResolvedValue({ path: 'system/api-conventions.md', current_sha: 'fetchedsha000000000000000000000000000000' });
   });
 
   it('renders without throwing', () => {
@@ -266,6 +266,48 @@ describe('Inbox', () => {
 
   it('calls revokeSpec when Reject is clicked', async () => {
     api.myNotifications.mockResolvedValue([specApprovalNotif]);
+    const { findByRole, findByText } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Spec pending approval/ });
+    await fireEvent.click(header);
+    const rejectBtn = await findByText('Reject');
+    await fireEvent.click(rejectBtn);
+    expect(api.revokeSpec).toHaveBeenCalledWith(
+      'system/api-conventions.md',
+      'Rejected from inbox',
+    );
+  });
+
+  // Legacy shape: notifications created before the server populated the body
+  // (body = null, spec path only in the title). Approve must still work by
+  // parsing the title and fetching the SHA from the spec ledger.
+  const legacySpecApprovalNotif = makeNotification({
+    id: 'notif-legacy-approval',
+    notification_type: 'spec_approval',
+    priority: 2,
+    title: 'Spec pending approval: system/api-conventions.md',
+    body: null,
+    entity_ref: 'mr-uuid-legacy',
+  });
+
+  it('approves a legacy body-less spec_approval notification by fetching the SHA', async () => {
+    api.myNotifications.mockResolvedValue([legacySpecApprovalNotif]);
+    const { findByRole, findByText } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Spec pending approval/ });
+    await fireEvent.click(header);
+    const approveBtn = await findByText('Approve');
+    await fireEvent.click(approveBtn);
+    expect(api.getSpec).toHaveBeenCalledWith('system/api-conventions.md');
+    expect(api.approveSpec).toHaveBeenCalledWith(
+      'system/api-conventions.md',
+      'fetchedsha000000000000000000000000000000',
+    );
+    await waitFor(() => {
+      expect(document.body.textContent).toContain('Approved');
+    });
+  });
+
+  it('rejects a legacy body-less spec_approval notification by parsing the title', async () => {
+    api.myNotifications.mockResolvedValue([legacySpecApprovalNotif]);
     const { findByRole, findByText } = render(Inbox);
     const header = await findByRole('button', { name: /Expand: Spec pending approval/ });
     await fireEvent.click(header);

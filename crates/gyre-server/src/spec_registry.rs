@@ -849,7 +849,7 @@ pub(crate) async fn read_git_file(
 }
 
 /// Get the blob SHA for a file at a given commit using `git rev-parse <sha>:<path>`.
-async fn get_blob_sha(
+pub(crate) async fn get_blob_sha(
     git_bin: &str,
     repo_path: &str,
     sha: &str,

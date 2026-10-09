@@ -677,23 +677,80 @@ pub async fn save_spec(
         _ => "unknown".to_string(),
     };
 
-    // Priority-2 "Spec pending approval" notification (HSI §2 + §8).
-    // user_id is "system" — real per-user fan-out requires workspace membership
-    // which is outside this task's scope.
-    let notif_id = new_id();
-    let mut notif = Notification::new(
-        notif_id,
-        repo.workspace_id.clone(),
-        Id::new("system"),
-        NotificationType::SpecPendingApproval,
-        format!("Spec pending approval: {}", req.spec_path),
-        &tenant_id,
-        now as i64,
-    );
-    notif.entity_ref = Some(mr_id.to_string());
-    // Non-fatal — MR is created even if notification fails.
-    if let Err(e) = state.notifications.create(&notif).await {
-        tracing::warn!(mr_id = %mr_id, "Failed to create spec-pending-approval notification: {e}");
+    // Priority-2 "Spec pending approval" notification (HSI §2 + §8 P2).
+    //
+    // Fan out to every workspace Admin/Developer/Owner member — these are the
+    // roles allowed to approve (reject_spec allows Admin/Developer). When the
+    // workspace has no eligible members, fall back to "system" so the global
+    // admin token's Inbox still shows the pending approval.
+    //
+    // The body carries everything the Inbox inline actions need:
+    //   spec_path — for GET /specs/:path and the reject endpoint
+    //   spec_sha  — the git blob SHA of the spec content on the MR branch
+    //               (the version the human is approving; matches the ledger's
+    //               current_sha semantics from sync_spec_ledger)
+    //   mr_id / branch / repo_id — for the MR quick links
+    let blob_sha = {
+        let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+        crate::spec_registry::get_blob_sha(
+            &git_bin,
+            &repo.path,
+            &branch_name,
+            &req.spec_path,
+        )
+        .await
+        .unwrap_or_default()
+    };
+    let notif_body = serde_json::json!({
+        "spec_path": req.spec_path,
+        "spec_sha": blob_sha,
+        "mr_id": mr_id.to_string(),
+        "mr_title": mr.title.clone(),
+        "branch": branch_name.clone(),
+        "repo_id": repo.id.to_string(),
+    })
+    .to_string();
+
+    let members = state
+        .workspace_memberships
+        .list_by_workspace(&repo.workspace_id)
+        .await
+        .unwrap_or_default();
+    let mut recipients: Vec<Id> = members
+        .iter()
+        .filter(|m| {
+            use gyre_domain::WorkspaceRole;
+            matches!(
+                m.role,
+                WorkspaceRole::Admin | WorkspaceRole::Developer | WorkspaceRole::Owner
+            )
+        })
+        .map(|m| m.user_id.clone())
+        .collect();
+    if recipients.is_empty() {
+        // No eligible members — deliver to the system account so the
+        // global-admin Inbox still surfaces the pending approval.
+        recipients.push(Id::new("system"));
+    }
+
+    for uid in recipients {
+        let notif_id = new_id();
+        let mut notif = Notification::new(
+            notif_id,
+            repo.workspace_id.clone(),
+            uid.clone(),
+            NotificationType::SpecPendingApproval,
+            format!("Spec pending approval: {}", req.spec_path),
+            &tenant_id,
+            now as i64,
+        );
+        notif.body = Some(notif_body.clone());
+        notif.entity_ref = Some(mr_id.to_string());
+        notif.repo_id = Some(repo.id.to_string());
+        // Non-fatal — MR is created even if notification fails.
+        if let Err(e) = state.notifications.create(&notif).await {
+            tracing::warn!(mr_id = %mr_id, user_id = %uid, "Failed to create spec-pending-approval notification: {e}");
+        }
     }
 
     Ok((
