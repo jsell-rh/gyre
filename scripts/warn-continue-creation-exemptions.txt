@@ -12,4 +12,4 @@
 # See: specs/reviews/task-077.md F6 (the finding that created this check)
 #
 # --- unowned; fix opportunistically when touching these files ---
-crates/gyre-server/src/abac_middleware.rs:728  # if let Err = state.policies.create in seed_builtin_policies — idempotent startup seeding, non-fatal by design
+crates/gyre-server/src/abac_middleware.rs:730  # if let Err = state.policies.create in seed_builtin_policies — idempotent startup seeding, non-fatal by design (re-anchored 728→730 after domain_builtin_policies splice shifted the site)
