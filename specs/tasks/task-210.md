@@ -2,7 +2,7 @@
 title: "Repair verified failure on main cd1c5f044e49"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 commits: ["14e30b9e9e28ff209d91b4e69e04e9335c970315", "f7d9ae7541f207eca50fe113f6966765e1801ae9", "bd77a46ad37fe9fe19d1c2ad9860eeab2f2dee70", "dc2d65dce1345916ce3a853149aeee90107d3f27", "28d321684ae3f39f97ded5cc7ce377fa83fd5419"]
 ---
 
@@ -1151,3 +1151,17 @@ diff).
 
 None within sandbox scope. Full Playwright E2E, full vitest, and full Rust
 suites remain the controller's host/GitHub gates on the exact merge SHA.
+
+## Review
+
+### Review changed source code
+
+- scripts/check-task-commit-attribution.sh
+- specs/tasks/task-072.md
+- specs/tasks/task-077.md
+- specs/tasks/task-087.md
+- specs/tasks/task-092.md
+- specs/tasks/task-106.md
+- specs/tasks/task-107.md
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
