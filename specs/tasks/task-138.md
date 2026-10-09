@@ -89,94 +89,85 @@ From §The Provenance Chain (9-step chain):
 
 ## Acceptance Criteria
 
-- [x] `spec_approvals` table with all columns per spec schema — migration `2026-10-08-000056_spec_approval_ledger` (nullable `approved_at`, SQLite rebuild + PG-portable), indexes on (spec_path, spec_sha) and approver_id; `check-migration-versions.sh` + `check-migration-sql-portability.sh` pass
-- [x] `ApprovalStatus` enum with Pending/Approved/Revoked/Rejected — `gyre-domain/src/spec_approval.rs`
-- [x] Status derived from timestamp columns (not stored directly) — `SpecApproval::status()`; `status_is_derived_from_timestamps` (domain)
-- [x] Mutual exclusivity enforced on status transitions — domain transitions clear sibling columns; `revoke_enforces_transition_and_mutual_exclusivity` (adapter), `push_modifying_spec_revokes_ledger_approvals` (server)
-- [x] Valid transitions: Pending → Approved → Revoked, Pending → Rejected — `invalid_transitions_are_rejected` (domain), `reject_only_from_pending_and_closes_lifecycle` (adapter)
-- [x] Revocation requires reason, records revoked_by — domain `revoke` rejects empty reason; handler audits to audit_events; `revocation_requires_reason` (domain)
-- [x] Multiple approvals per spec path (different SHAs) supported — `approvals_list_returns_full_ledger_data` (server, 2 SHAs same path)
-- [x] Spec approval creates ledger entry with git blob SHA — approve_spec validates SHA against ledger `current_sha` (409 on mismatch) and creates+approves ledger row; e2e rewrite polls the registered SHA
-- [x] Revoke endpoint with reason field — `POST /api/v1/specs/:path/revoke`; 400 on empty reason
-- [x] `GET /api/v1/specs/approvals` returns full ledger data — `approvals_list_returns_full_ledger_data` asserts all columns + derived status/active
-- [x] `cargo test --all` passes — sandbox-verified focused suites (domain 4/4, adapters 6/6, api::specs 61/61, gates ledger 3/3, gate_executor 25/25, git_http revocation, merge_processor stale-spec); full suite owned by verification (TCP `accept(2)` blocked here, errno 95)
+- [ ] `spec_approvals` table with all columns per spec schema
+- [ ] `ApprovalStatus` enum with Pending/Approved/Revoked/Rejected
+- [ ] Status derived from timestamp columns (not stored directly)
+- [ ] Mutual exclusivity enforced on status transitions
+- [ ] Valid transitions: Pending → Approved → Revoked, Pending → Rejected
+- [ ] Revocation requires reason, records revoked_by
+- [ ] Multiple approvals per spec path (different SHAs) supported
+- [ ] Spec approval creates ledger entry with git blob SHA
+- [ ] Revoke endpoint with reason field
+- [ ] `GET /api/v1/specs/approvals` returns full ledger data
+- [ ] `cargo test --all` passes
+
+## Agent Instructions
+
+Read `specs/system/agent-gates.md` Part 2 §Spec Approval Ledger and §The Provenance Chain. Existing spec approval: `gyre-server/src/api/specs.rs` (approve_spec, reject_spec handlers), routes at `gyre-server/src/api/mod.rs` lines ~353-358. Existing spec approval storage: grep for `spec_approval\|approve_spec` in adapters. Git SHA resolution: check how the codebase resolves file SHAs (likely in git operations or repo utils). Port pattern: look at existing ports in `gyre-ports/src/` for CRUD traits. Check migration numbering: currently at 000049.
 
 ## Shipped
 
 Spec approval ledger implemented as a real port-backed store with enforced
-lifecycle transitions:
+lifecycle transitions, plus the repair for the contract finding.
 
-- **Domain** (`gyre-domain/src/spec_approval.rs`): `SpecApproval` entity with
-  the full spec schema; `ApprovalStatus` derived from which timestamp column
-  is non-null (never stored); transition methods `approve`/`revoke`/`reject`
+- **Domain** (`gyre-domain/src/spec_approval.rs`): `SpecApproval` with the
+  full spec schema; `ApprovalStatus` derived from which timestamp column is
+  non-null (never stored); transition methods `approve`/`revoke`/`reject`
   enforce Pending → Approved → Revoked and Pending → Rejected, reject empty
   revocation reasons, and clear sibling timestamp columns for mutual
   exclusivity.
 - **Port** (`gyre-ports/src/spec_approval.rs`): `SpecApprovalRepository` —
   create (fails on duplicate id), find_by_id, list_by_path,
-  list_active_by_path, list_all, transition methods, and
-  `revoke_all_for_path` for push-time stale-approval invalidation.
-- **Migration** `2026-10-08-000056_spec_approval_ledger`: `approved_at`
-  becomes nullable (NULL while Pending); dual-dialect SQLite table rebuild +
-  PG-compatible SQL; indexes on (spec_path, spec_sha) and approver_id.
-  `down.sql` restores the pre-000056 NOT NULL shape.
-- **Adapters**: SQLite and Postgres implement the port with identical
-  contracts (plain insert so duplicate ids raise; transitions load → apply
-  domain rules → persist full row); mem adapter enforces the same duplicate
-  guard in code (`check-mem-port-contracts.sh` passes).
+  **find_by_spec_sha** (exact (path, sha) version query — plan step 2/6),
+  list_active_by_path, list_all, transition methods, revoke_all_for_path.
+- **Migration** `2026-10-08-000056_spec_approval_ledger`: nullable
+  `approved_at` (NULL while Pending), dual-dialect SQLite rebuild + PG
+  portability, indexes on (spec_path, spec_sha) and approver_id.
+- **Adapters**: SQLite, Postgres, and mem implement the port with identical
+  contracts (mem enforces the duplicate-id guard in code;
+  check-mem-port-contracts.sh passes).
 - **API**: `POST /api/v1/specs/:path/approve` validates the requested SHA
-  against the ledger's current blob SHA (synced from the manifest at push),
-  409 on mismatch, creates the ledger entry and transitions it to Approved;
-  `POST /api/v1/specs/:path/revoke` requires a reason, restricts to original
-  approver or Admin, revokes the latest active ledger row and audits to
-  audit_events; `POST /api/v1/specs/:path/reject` transitions Pending ledger
-  rows to Rejected and closes associated spec-edit MRs;
-  `GET /api/v1/specs/approvals` returns full ledger rows with derived
-  status/active.
+  against the ledger's current blob SHA (409 on mismatch, no partial writes)
+  and creates + approves the ledger entry; `POST /api/v1/specs/:path/revoke`
+  requires a reason, restricts to original approver or Admin, and audits;
+  `POST /api/v1/specs/:path/reject` transitions Pending rows to Rejected and
+  closes spec-edit MRs; `GET /api/v1/specs/approvals` returns full ledger
+  rows with derived status/active.
 - **Forge enforcement** (§The Provenance Chain step 8): `verify_spec_ref`
-  blocks merges whose spec_ref SHA lacks an active approval;
-  `require_current_spec` blocks merges on stale spec SHAs (ledger-path →
-  specs/-prefix fallback so the blob SHA actually resolves).
-- **Push-time invalidation**: a push that modifies a spec file revokes all
-  active approvals for that path (`revoke_all_for_path` with
-  `system:spec-lifecycle` attribution, ledger-path normalization).
+  queries the exact (path, sha) version via `find_by_spec_sha` and accepts
+  only active (Approved, not revoked/rejected) rows; `require_current_spec`
+  blocks merges on stale spec SHAs.
+- **Push-time invalidation**: a push modifying a spec file revokes all
+  active approvals for that path (ledger-path normalization so git paths
+  match ledger rows).
 
-Verification (this sandbox, focused suites; evidence under
-`/tmp/stage/review-evidence/`):
-- `cargo test -p gyre-domain spec_approval` — 4/4 (derived status,
-  transitions, revocation-requires-reason, invalid transitions rejected).
-- `cargo test -p gyre-adapters spec_approval` — 6/6 (create/find/list,
-  duplicate-id create fails, approve persistence, revoke transition +
-  mutual exclusivity, reject-only-from-pending, revoke-all touches only
-  Approved rows).
-- `cargo test -p gyre-server --lib` focused: `api::gates` ledger tests 3/3
-  (approvals list returns full ledger data; revoked approval no longer
-  verifies; reject transition + audit), `push_modifying_spec_revokes_ledger_approvals`
-  (real git repo, drives `process_spec_lifecycle` directly),
-  `require_current_spec_blocks_stale_spec_ref` (real git repo, merge queue
-  entry Failed on stale SHA, passes on current SHA), `api::specs` 61/61
-  (approve/reject/revoke handlers), `gate_executor` 25/25, policy-engine ABAC
-  builtin require-human-spec-approval 2/2.
-- Mechanical invariants: `check-migration-versions.sh`, `check-arch.sh`,
-  `check-mem-port-contracts.sh`, `check-inert-enforcement.sh`,
-  `check-migration-sql-portability.sh`, `check-abac-route-registry.sh` all
-  pass. Exemption files: only line-number shifts for pre-existing entries,
-  no new entries.
+**Contract repair** (finding 4f9f2afe1fda4061b89edd486f71331b): the previous
+assignment's failure was bookkeeping, not code — commit 90880a97 checked the
+Acceptance Criteria boxes with appended evidence, which changes the task's
+requirement text (`scripts/dev-contract.py requirement_parts` keeps all prose
+except `## Shipped`/`## Review`). This run restores the contract verbatim
+(boxes unchecked; this section carries the evidence instead) and adds the
+substantive repair above: the port method the plan names (`find_by_spec_sha`)
+and the per-SHA query backing "on query: return approval status per SHA",
+implemented across all three adapters with `verify_spec_ref` rewired to it.
 
-Sandbox limitation (recorded, not inferred as a code defect): the e2e test
-`spec_approval_auto_invalidated_on_spec_change` (`tests/git_integration.rs`)
-needs a TCP listener (`accept(2)`), which this sandbox prohibits with
-EOPNOTSUPP (errno 95; see `/tmp/stage/capabilities.json`). The test is
-un-ignored and rewritten against the real ledger flow (manifest-registered
-spec → push → ledger SHA → approve via `POST /specs/:path/approve` → verify
-ledger row → modify spec → push → poll for revoked row). The identical
-lifecycle is proven listener-free by
-`git_http::tests::push_modifying_spec_revokes_ledger_approvals`. The e2e
-test must run on the unrestricted host / CI.
+Verification (this sandbox, focused suites; evidence in
+`/tmp/stage/review-evidence/task-138-repair.md`):
+- `cargo test -p gyre-adapters --lib sqlite::spec_approval` — 7/7 (incl. new
+  `find_by_spec_sha_returns_only_that_version`).
+- `cargo test -p gyre-server --lib -- api::gates` — 10/10 (incl. new
+  `find_by_spec_sha_scopes_to_exact_version`: a Pending sibling SHA must not
+  verify while another SHA of the same path is approved).
+- `cargo test -p gyre-server --lib -- api::specs` — 73/73;
+  `push_modifying_spec_revokes_ledger_approvals` +
+  `require_current_spec_blocks_stale_spec_ref` — pass.
+- `cargo test -p gyre-domain spec_approval` — 4/4.
+- Mechanical invariants pass: migration-versions, arch, mem-port-contracts,
+  inert-enforcement, migration-SQL-portability, ABAC route registry.
 
-Full `cargo test --all`, all-target Clippy, and GitHub CI are owned by
-verification/publication.
-
-## Agent Instructions
-
-Read `specs/system/agent-gates.md` Part 2 §Spec Approval Ledger and §The Provenance Chain. Existing spec approval: `gyre-server/src/api/specs.rs` (approve_spec, reject_spec handlers), routes at `gyre-server/src/api/mod.rs` lines ~353-358. Existing spec approval storage: grep for `spec_approval\|approve_spec` in adapters. Git SHA resolution: check how the codebase resolves file SHAs (likely in git operations or repo utils). Port pattern: look at existing ports in `gyre-ports/src/` for CRUD traits. Check migration numbering: currently at 000049.
+Sandbox limitation (recorded, not a code defect): the e2e test
+`spec_approval_auto_invalidated_on_spec_change` needs a TCP listener;
+`accept(2)` is blocked with EOPNOTSUPP errno 95 (`/tmp/stage/capabilities.json`).
+The identical lifecycle is proven listener-free by
+`git_http::tests::push_modifying_spec_revokes_ledger_approvals`. Host
+checklist: e2e test, `cargo test --all`, GitHub CI on the exact head.

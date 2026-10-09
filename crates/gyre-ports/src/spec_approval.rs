@@ -12,9 +12,14 @@ pub trait SpecApprovalRepository: Send + Sync {
     async fn create(&self, approval: &SpecApproval) -> Result<()>;
     async fn find_by_id(&self, id: &Id) -> Result<Option<SpecApproval>>;
     async fn list_by_path(&self, spec_path: &str) -> Result<Vec<SpecApproval>>;
+    /// Ledger entries for one exact spec version ((spec_path, spec_sha)),
+    /// newest first. Backs "on query: return approval status per SHA" and
+    /// the forge's per-SHA approval check (agent-gates.md §The Provenance
+    /// Chain step 8); uses the (spec_path, spec_sha) index.
+    async fn find_by_spec_sha(&self, spec_path: &str, spec_sha: &str) -> Result<Vec<SpecApproval>>;
+    async fn list_all(&self) -> Result<Vec<SpecApproval>>;
     /// Active approvals for a path: approved and not revoked/rejected.
     async fn list_active_by_path(&self, spec_path: &str) -> Result<Vec<SpecApproval>>;
-    async fn list_all(&self) -> Result<Vec<SpecApproval>>;
 
     /// Transition an entry to Approved (Pending → Approved).
     /// Returns Ok(None) when the entry does not exist, Err on invalid transition.

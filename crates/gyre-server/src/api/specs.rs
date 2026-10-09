@@ -1115,7 +1115,9 @@ pub async fn reject_spec(
             let tenant_id = match state.workspaces.find_by_id(&ws_id).await {
                 Ok(Some(ws)) => ws.tenant_id.to_string(),
                 Ok(None) => {
-                    tracing::warn!("reject_spec: workspace {ws_id} not found, skipping member notifications");
+                    tracing::warn!(
+                        "reject_spec: workspace {ws_id} not found, skipping member notifications"
+                    );
                     return Ok(Json(entry.into()));
                 }
                 Err(e) => {

@@ -188,6 +188,26 @@ impl SpecApprovalRepository for PgStorage {
         .await?
     }
 
+    async fn find_by_spec_sha(&self, spec_path: &str, spec_sha: &str) -> Result<Vec<SpecApproval>> {
+        let pool = Arc::clone(&self.pool);
+        let path = spec_path.to_string();
+        let sha = spec_sha.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Vec<SpecApproval>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = spec_approvals::table
+                .filter(spec_approvals::spec_path.eq(&path))
+                .filter(spec_approvals::spec_sha.eq(&sha))
+                .order(spec_approvals::id.desc())
+                .load::<SpecApprovalRow>(&mut *conn)
+                .context("find spec approvals by sha")?;
+            Ok(rows
+                .into_iter()
+                .map(SpecApprovalRow::into_approval)
+                .collect())
+        })
+        .await?
+    }
+
     async fn list_active_by_path(&self, spec_path: &str) -> Result<Vec<SpecApproval>> {
         let pool = Arc::clone(&self.pool);
         let path = spec_path.to_string();

@@ -356,12 +356,17 @@ pub async fn verify_spec_ref(state: &AppState, spec_ref: &str) -> Result<(), Str
         ));
     }
 
-    let active = state
+    // Approval status per SHA (agent-gates.md §Spec Approval Ledger): query
+    // the exact (spec_path, spec_sha) version — the forge's step-8 check —
+    // rather than loading every approval for the path. An entry is active
+    // only when it is Approved (approved_at set) and not since revoked or
+    // rejected; Pending/Revoked/Rejected rows never authorize a merge.
+    let for_sha = state
         .spec_approvals
-        .list_active_by_path(path)
+        .find_by_spec_sha(path, sha)
         .await
         .unwrap_or_default();
-    let has_active_approval = active.iter().any(|a| a.spec_sha == sha);
+    let has_active_approval = for_sha.iter().any(|a| a.is_active());
 
     if has_active_approval {
         Ok(())
@@ -766,6 +771,78 @@ mod tests {
         assert!(
             verify_spec_ref(&state, &spec_ref).await.is_err(),
             "rejected (never approved) entry must not verify"
+        );
+    }
+
+    /// Approval status is queried per SHA (task plan step 6: "on query:
+    /// return approval status per SHA"). The exact-(path, sha) lookup must
+    /// return only that version's rows: an approval for a different SHA of
+    /// the same path must never satisfy a merge check for this SHA, and
+    /// verify_spec_ref must deny while the version is Pending.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn find_by_spec_sha_scopes_to_exact_version() {
+        let state = test_state();
+        let sha1 = "1".repeat(40);
+        let sha2 = "2".repeat(40);
+        seed_ledger_entry(&state, "apr-6", "system/versioned.md", &sha1).await;
+        let apr2 = seed_ledger_entry(&state, "apr-7", "system/versioned.md", &sha2).await;
+
+        // Approve only sha2.
+        state
+            .spec_approvals
+            .approve(&apr2, 1700000100)
+            .await
+            .unwrap()
+            .expect("entry exists");
+
+        // Per-SHA query returns only that version's rows.
+        let for_sha1 = state
+            .spec_approvals
+            .find_by_spec_sha("system/versioned.md", &sha1)
+            .await
+            .unwrap();
+        assert_eq!(for_sha1.len(), 1);
+        assert_eq!(for_sha1[0].spec_sha, sha1);
+        assert_eq!(
+            for_sha1[0].status(),
+            gyre_domain::spec_approval::ApprovalStatus::Pending
+        );
+
+        let for_sha2 = state
+            .spec_approvals
+            .find_by_spec_sha("system/versioned.md", &sha2)
+            .await
+            .unwrap();
+        assert_eq!(for_sha2.len(), 1);
+        assert_eq!(for_sha2[0].spec_sha, sha2);
+        assert_eq!(
+            for_sha2[0].status(),
+            gyre_domain::spec_approval::ApprovalStatus::Approved
+        );
+
+        // Unknown SHA for the same path: no rows, no accidental path-wide match.
+        let for_missing = state
+            .spec_approvals
+            .find_by_spec_sha("system/versioned.md", &"3".repeat(40))
+            .await
+            .unwrap();
+        assert!(
+            for_missing.is_empty(),
+            "per-SHA lookup must not return other versions' rows"
+        );
+
+        // Forge check (step 8): sha2 verifies, sha1 (same path, Pending) must
+        // not — approving one version never approves its siblings.
+        assert!(
+            verify_spec_ref(&state, &format!("system/versioned.md@{sha2}"))
+                .await
+                .is_ok()
+        );
+        assert!(
+            verify_spec_ref(&state, &format!("system/versioned.md@{sha1}"))
+                .await
+                .is_err(),
+            "Pending version must not verify even though a sibling SHA is approved"
         );
     }
 }

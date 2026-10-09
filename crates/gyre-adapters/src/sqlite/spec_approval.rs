@@ -187,6 +187,26 @@ impl SpecApprovalRepository for SqliteStorage {
         .await?
     }
 
+    async fn find_by_spec_sha(&self, spec_path: &str, spec_sha: &str) -> Result<Vec<SpecApproval>> {
+        let pool = Arc::clone(&self.pool);
+        let path = spec_path.to_string();
+        let sha = spec_sha.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Vec<SpecApproval>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let rows = spec_approvals::table
+                .filter(spec_approvals::spec_path.eq(&path))
+                .filter(spec_approvals::spec_sha.eq(&sha))
+                .order(spec_approvals::id.desc())
+                .load::<SpecApprovalRow>(&mut *conn)
+                .context("find spec approvals by sha")?;
+            Ok(rows
+                .into_iter()
+                .map(SpecApprovalRow::into_approval)
+                .collect())
+        })
+        .await?
+    }
+
     async fn list_active_by_path(&self, spec_path: &str) -> Result<Vec<SpecApproval>> {
         let pool = Arc::clone(&self.pool);
         let path = spec_path.to_string();
@@ -325,10 +345,64 @@ mod tests {
         let found = found.unwrap();
         assert_eq!(found.spec_path, "system/design.md");
         assert_eq!(found.spec_sha, sha('a'));
-        assert_eq!(found.status(), gyre_domain::spec_approval::ApprovalStatus::Pending);
+        assert_eq!(
+            found.status(),
+            gyre_domain::spec_approval::ApprovalStatus::Pending
+        );
 
         let missing = storage.find_by_id(&Id::new("nope")).await.unwrap();
         assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    async fn find_by_spec_sha_returns_only_that_version() {
+        let (_tmp, storage) = tmp_storage();
+        storage
+            .create(&SpecApproval::new(
+                Id::new("apr-1"),
+                "system/design.md",
+                sha('a'),
+                "user:alice",
+            ))
+            .await
+            .unwrap();
+        storage
+            .create(&SpecApproval::new(
+                Id::new("apr-2"),
+                "system/design.md",
+                sha('b'),
+                "user:bob",
+            ))
+            .await
+            .unwrap();
+        storage
+            .approve(&Id::new("apr-2"), 1700000100)
+            .await
+            .unwrap();
+
+        let rows = storage
+            .find_by_spec_sha("system/design.md", &sha('b'))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, Id::new("apr-2"));
+        assert_eq!(
+            rows[0].status(),
+            gyre_domain::spec_approval::ApprovalStatus::Approved
+        );
+
+        let other = storage
+            .find_by_spec_sha("system/design.md", &sha('a'))
+            .await
+            .unwrap();
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].id, Id::new("apr-1"));
+
+        let missing = storage
+            .find_by_spec_sha("system/design.md", &sha('c'))
+            .await
+            .unwrap();
+        assert!(missing.is_empty());
     }
 
     #[tokio::test]
@@ -348,7 +422,10 @@ mod tests {
         let res = storage.approve(&id, 1700000100).await.unwrap();
         assert_eq!(res, Some(()), "existing entry transitions");
 
-        let active = storage.list_active_by_path("system/design.md").await.unwrap();
+        let active = storage
+            .list_active_by_path("system/design.md")
+            .await
+            .unwrap();
         assert_eq!(active.len(), 1);
         assert!(active[0].is_active());
         assert_eq!(active[0].approved_at, Some(1700000100));
@@ -382,21 +459,31 @@ mod tests {
             .unwrap();
 
         let reloaded = storage.find_by_id(&id).await.unwrap().unwrap();
-        assert_eq!(reloaded.status(), gyre_domain::spec_approval::ApprovalStatus::Revoked);
-        assert_eq!(reloaded.approved_at, None, "mutual exclusivity: approved_at cleared");
+        assert_eq!(
+            reloaded.status(),
+            gyre_domain::spec_approval::ApprovalStatus::Revoked
+        );
+        assert_eq!(
+            reloaded.approved_at, None,
+            "mutual exclusivity: approved_at cleared"
+        );
         assert_eq!(reloaded.revoked_at, Some(1700000200));
         assert_eq!(reloaded.revoked_by.as_deref(), Some("user:admin"));
-        assert_eq!(reloaded.revocation_reason.as_deref(), Some("spec withdrawn"));
+        assert_eq!(
+            reloaded.revocation_reason.as_deref(),
+            Some("spec withdrawn")
+        );
         assert!(!reloaded.is_active());
 
         // Already revoked — a second revoke is an invalid transition.
-        let again = storage
-            .revoke(&id, "user:admin", "again", 1700000300)
-            .await;
+        let again = storage.revoke(&id, "user:admin", "again", 1700000300).await;
         assert!(again.is_err(), "Revoked → Revoked must be rejected");
 
         // No longer in the active list.
-        let active = storage.list_active_by_path("system/design.md").await.unwrap();
+        let active = storage
+            .list_active_by_path("system/design.md")
+            .await
+            .unwrap();
         assert!(active.is_empty());
     }
 
@@ -420,7 +507,10 @@ mod tests {
             .unwrap()
             .unwrap();
         let reloaded = storage.find_by_id(&id).await.unwrap().unwrap();
-        assert_eq!(reloaded.status(), gyre_domain::spec_approval::ApprovalStatus::Rejected);
+        assert_eq!(
+            reloaded.status(),
+            gyre_domain::spec_approval::ApprovalStatus::Rejected
+        );
         assert_eq!(reloaded.rejected_by.as_deref(), Some("user:reviewer"));
         assert!(!reloaded.is_active());
 
@@ -466,16 +556,29 @@ mod tests {
                 .await
                 .unwrap();
         }
-        storage.approve(&approved, 1700000100).await.unwrap().unwrap();
+        storage
+            .approve(&approved, 1700000100)
+            .await
+            .unwrap()
+            .unwrap();
         storage
             .reject(&rejected, "user:reviewer", "no", 1700000100)
             .await
             .unwrap()
             .unwrap();
-        storage.approve(&other_path, 1700000100).await.unwrap().unwrap();
+        storage
+            .approve(&other_path, 1700000100)
+            .await
+            .unwrap()
+            .unwrap();
 
         let count = storage
-            .revoke_all_for_path("system/design.md", "system:spec-lifecycle", "spec modified", 1700000200)
+            .revoke_all_for_path(
+                "system/design.md",
+                "system:spec-lifecycle",
+                "spec modified",
+                1700000200,
+            )
             .await
             .unwrap();
         assert_eq!(count, 1, "only the Approved row for the path is revoked");
@@ -508,7 +611,12 @@ mod tests {
     #[tokio::test]
     async fn create_duplicate_id_fails() {
         let (_tmp, storage) = tmp_storage();
-        let a = SpecApproval::new(Id::new("apr-dup"), "system/design.md", sha('a'), "user:alice");
+        let a = SpecApproval::new(
+            Id::new("apr-dup"),
+            "system/design.md",
+            sha('a'),
+            "user:alice",
+        );
         storage.create(&a).await.unwrap();
         // Same id must not silently replace the first row (port contract:
         // create fails if an entry with the same id already exists).

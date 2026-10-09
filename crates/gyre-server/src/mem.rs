@@ -2524,6 +2524,22 @@ impl gyre_ports::SpecApprovalRepository for MemSpecApprovalRepository {
         out.reverse(); // insertion order: newest first, mirroring SQL id-desc
         Ok(out)
     }
+    async fn find_by_spec_sha(
+        &self,
+        spec_path: &str,
+        spec_sha: &str,
+    ) -> Result<Vec<gyre_domain::SpecApproval>> {
+        let mut out: Vec<_> = self
+            .store
+            .lock()
+            .await
+            .values()
+            .filter(|a| a.spec_path == spec_path && a.spec_sha == spec_sha)
+            .cloned()
+            .collect();
+        out.reverse(); // insertion order: newest first, mirroring SQL id-desc
+        Ok(out)
+    }
     async fn list_active_by_path(&self, spec_path: &str) -> Result<Vec<gyre_domain::SpecApproval>> {
         let mut out: Vec<_> = self
             .store

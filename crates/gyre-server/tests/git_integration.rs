@@ -1510,7 +1510,11 @@ async fn spec_approval_auto_invalidated_on_spec_change() {
         .as_str()
         .expect("ledger entry carries a blob SHA")
         .to_string();
-    assert_eq!(spec_sha.len(), 40, "blob SHA must be 40 hex chars: {spec_sha}");
+    assert_eq!(
+        spec_sha.len(),
+        40,
+        "blob SHA must be 40 hex chars: {spec_sha}"
+    );
 
     // Step 2: approve the spec version through the ledger-backed route
     // (POST /api/v1/specs/:path/approve). The path is the LEDGER path
@@ -1625,7 +1629,8 @@ async fn spec_approval_auto_invalidated_on_spec_change() {
         }
     }
 
-    let our_approval = revoked_row.expect("approval should be revoked after spec file was modified in a push");
+    let our_approval =
+        revoked_row.expect("approval should be revoked after spec file was modified in a push");
     assert!(
         !our_approval["revoked_at"].is_null(),
         "approval should be revoked after spec file was modified in a push: {our_approval}"
