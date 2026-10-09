@@ -2,7 +2,7 @@
 title: "HSI Conflict Prevention — Concurrent Spec Editing Warning"
 spec_ref: "human-system-interface.md §7 Conflict Prevention"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 review: specs/reviews/task-092.md
 coverage_sections:
   - "human-system-interface.md §7 Conflict Prevention"
@@ -99,3 +99,38 @@ Read `specs/system/human-system-interface.md` §7 "Conflict Prevention" for the 
 - package-lock.json
 
 Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
+
+### Repair (this round)
+
+The review-blocker is repaired on this branch and verified against the current
+tree (post-rebase HEAD `eddc4f8`):
+
+- The stray npm-generated root lockfile stub is deleted from the tree and from
+  the index (`git ls-files` finds no root `package-lock.json`; worktree has
+  none). It was an npm artifact written by tooling invoked from the repo root
+  (no root `package.json`), swept into a task-labeled wip commit by
+  `git add -A` — not a source edit.
+- The anchored `/package-lock.json` rule in `.gitignore` prevents the wip sweep
+  from ever re-capturing the stub while leaving `web/`,
+  `scripts/`, and `docker/gyre-agent/` lockfiles tracked.
+- `scripts/check-sandbox-sweep-artifacts.sh` (wired into `.pre-commit-config.yaml`
+  and `.github/workflows/ci.yml`) fails if a root lockfile is ever tracked, the
+  ignore rule is unanchored, or an unignored root stub exists. Currently: OK.
+
+Focused checks run at this HEAD (sandbox has no loopback TCP and heavy host
+load; socket-level WS tests and full suites are left to the controller):
+
+- `cargo test -p gyre-server --lib specs_assist` — 21/21 ok (optimistic
+  concurrency 409 + diff, SpecConflict notifications for both editors).
+- `cargo test -p gyre-server --lib -- broadcast_presence_departure_reaches
+  evict_stale_presence_removes` — 2/2 ok (socket-free departure-rebroadcast and
+  idle-sweeper tests, the F4 core primitives).
+- `npx vitest run --no-file-parallelism` on the six task suites (presence,
+  ConcurrentEditBanner, Inbox, SpecConflictDialog, ws, EditorSplit) — 105/105
+  ok (F1/F2/F3 frontend coverage).
+- `bash scripts/check-sandbox-sweep-artifacts.sh` — OK; `scripts/check-arch.sh`
+  — pass.
+
+No product behavior changed in this round; the R4 fixes (F3 heartbeat, F4
+departure rebroadcast, eviction stop) and R3 fixes (F1, F2) are unchanged and
+re-verified above.
