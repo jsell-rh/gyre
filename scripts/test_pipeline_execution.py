@@ -44,6 +44,21 @@ class CrashTest(unittest.TestCase):
         self.assertEqual(json.loads((execution.directory / 'outcome.json').read_text())['head'], 'source')
         self.assertEqual(self.store.db.execute('SELECT count(*) FROM resources').fetchone()[0], 0)
 
+    def test_terminal_readiness_does_not_hold_dead_compute(self):
+        from pipeline.execution import Retry
+        execution = Execution(self.store, self.claim)
+        with patch('pipeline.execution.gateway.inventory', return_value=[{'name': 'pod', 'phase': 'Error'}]), patch.object(execution.cancelled, 'wait', side_effect=AssertionError('terminal pods must not wait')):
+            with self.assertRaisesRegex(Retry, 'terminal infrastructure phase Error'):
+                execution.wait_ready('pod')
+        self.assertEqual(json.loads((execution.directory / 'phase.json').read_text())['phase'], 'InfrastructureFailed')
+
+    def test_pending_readiness_keeps_its_pod_and_backs_off(self):
+        execution = Execution(self.store, self.claim)
+        inventory = [[{'name': 'pod', 'phase': phase}] for phase in ('Pending', 'Provisioning', 'Ready')]
+        with patch('pipeline.execution.gateway.inventory', side_effect=inventory), patch.object(execution.cancelled, 'wait', return_value=False) as wait:
+            execution.wait_ready('pod')
+        self.assertEqual([call.args[0] for call in wait.call_args_list], [5, 10])
+
     def test_failed_capture_still_purges_expensive_compute(self):
         self.store.reserve('pod', self.work, self.claim['token'], 'sandbox', 1)
         self.store.finish(self.work, self.claim['token'], {})
