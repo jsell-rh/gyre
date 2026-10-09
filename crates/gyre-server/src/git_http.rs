@@ -263,6 +263,21 @@ pub async fn git_receive_pack(
         )
             .into_response();
     }
+    // repo-lifecycle.md §4 Archive step 5: archived repos are read-only —
+    // reject the push before the packfile is processed.
+    if resolved.is_archived() {
+        warn!(
+            agent_id = %auth.agent_id,
+            workspace_slug = %workspace_slug,
+            repo_name = %repo_name,
+            "git-receive-pack 403: repository is archived"
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            "push rejected: repository is archived".to_string(),
+        )
+            .into_response();
+    }
     let repo_id = resolved.id.to_string();
     let repo_workspace_id = resolved.workspace_id.clone();
     let repo_path = resolved.path;
@@ -667,6 +682,7 @@ pub async fn git_receive_pack(
         process_spec_lifecycle(
             &state_clone,
             &repo_id_clone,
+            &push_workspace_id,
             &repo_path_clone,
             &default_branch_clone,
             &ref_updates,
@@ -1361,6 +1377,7 @@ pub fn parse_spec_changes(diff_output: &str) -> Vec<(char, String, Option<String
 async fn process_spec_lifecycle(
     state: &Arc<AppState>,
     repo_id: &str,
+    workspace_id: &gyre_common::Id,
     repo_path: &str,
     default_branch: &str,
     ref_updates: &[RefUpdate],
@@ -1491,15 +1508,10 @@ async fn process_spec_lifecycle(
                 Err(e) => warn!(title, "spec-lifecycle: failed to create task: {e}"),
                 Ok(()) => {
                     info!(title, "spec-lifecycle: created task for spec change");
-                    // Look up workspace_id from repo for proper scoping.
-                    let ws_id = state
-                        .repos
-                        .find_by_id(&gyre_common::Id::new(repo_id))
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|r| r.workspace_id)
-                        .unwrap_or_else(|| gyre_common::Id::new("default"));
+                    // Workspace scope comes from the authorized repo
+                    // resolution at push admission — no store re-lookup and
+                    // no fabricated "default" fallback (task-097 F3 class).
+                    let ws_id = workspace_id.clone();
                     let change_kind = match status_char {
                         'A' => "added",
                         'M' => "modified",
@@ -3568,6 +3580,42 @@ mod tests {
         assert_eq!(
             resp.headers().get("content-type").unwrap(),
             "application/x-git-receive-pack-advertisement"
+        );
+    }
+
+    #[tokio::test]
+    async fn receive_pack_archived_repo_returns_403() {
+        let (app, state, _tmp, ws_slug, repo_name, _path) = git_app_with_repo().await;
+
+        // Archive the repo (repo-lifecycle.md §4 step 5).
+        let mut repo = state
+            .repos
+            .find_by_id(&Id::new("repo-1"))
+            .await
+            .unwrap()
+            .expect("repo exists");
+        repo.archive();
+        state.repos.update(&repo).await.unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", auth_header())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("archived"),
+            "rejection must explain the repo is archived, got: {text}"
         );
     }
 

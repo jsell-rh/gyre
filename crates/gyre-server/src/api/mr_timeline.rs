@@ -497,17 +497,18 @@ mod tests {
 
         // Insert a gate and a result.
         let gate = QualityGate {
-          id: Id::new("gate-1"),
-          repo_id: Id::new(&repo_id),
-          name: "cargo-test".to_string(),
-          gate_type: GateType::TestCommand,
-          command: Some("cargo test".to_string()),
-          required_approvals: None,
-          persona: None,
-          required: true,
-          gate_phase: Default::default(),
-          timeout_secs: None,
-          created_at: 1000,
+            id: Id::new("gate-1"),
+            repo_id: Id::new(&repo_id),
+            name: "cargo-test".to_string(),
+            gate_type: GateType::TestCommand,
+            command: Some("cargo test".to_string()),
+            required_approvals: None,
+            persona: None,
+            required: true,
+            gate_phase: Default::default(),
+            timeout_secs: None,
+            created_at: 1000,
+            position: 0,
         };
         state.quality_gates.save(&gate).await.unwrap();
 
@@ -677,17 +678,18 @@ mod tests {
 
         // Gate result with timestamp between the two commits.
         let gate = QualityGate {
-          id: Id::new("gate-sort"),
-          repo_id: Id::new(&repo_id),
-          name: "sort-gate".to_string(),
-          gate_type: GateType::TestCommand,
-          command: None,
-          required_approvals: None,
-          persona: None,
-          required: true,
-          gate_phase: Default::default(),
-          timeout_secs: None,
-          created_at: 1000,
+            id: Id::new("gate-sort"),
+            repo_id: Id::new(&repo_id),
+            name: "sort-gate".to_string(),
+            gate_type: GateType::TestCommand,
+            command: None,
+            required_approvals: None,
+            persona: None,
+            required: true,
+            gate_phase: Default::default(),
+            timeout_secs: None,
+            created_at: 1000,
+            position: 0,
         };
         state.quality_gates.save(&gate).await.unwrap();
         let gate_result = GateResult {
