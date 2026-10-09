@@ -2,12 +2,12 @@
 title: "Platform Model Orchestrator Lifecycle Protocol"
 spec_ref: "platform-model.md §3 Two-Level Orchestration"
 depends_on: []
-progress: complete
+progress: needs-revision
 coverage_sections:
   - "platform-model.md §3 Two-Level Orchestration"
   - "platform-model.md §3 Workspace Orchestrator"
   - "platform-model.md §3 Repo Orchestrator"
-commits: ["7ac4f681c778598d67d690ce5a398d12823ec42a"]
+commits: ["22038bf0b61387ba64d87e584e19b930d5fd76d9", "d2f3765dc9be6aaf8ef418a1193e8f6b644e73a5", "2ae69e973fce1e3a316205af1f238c3a457bd458"]
 review: specs/reviews/task-093.md
 ---
 
