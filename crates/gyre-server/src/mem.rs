@@ -3200,7 +3200,13 @@ pub fn test_state_with_storage(
     storage: Arc<dyn gyre_ports::storage::StoragePort>,
 ) -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, Some(storage), None)
+    test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        Some(storage),
+        None,
+    )
 }
 
 /// Build a test AppState with a custom `SecretRepository` — used to exercise
@@ -3211,7 +3217,13 @@ pub fn test_state_with_secrets(
     secrets: Arc<dyn gyre_ports::SecretRepository>,
 ) -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, Some(secrets))
+    test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        None,
+        Some(secrets),
+    )
 }
 
 /// Build a test AppState whose workspace repo fails every `apply_trust_transition`,
@@ -4270,7 +4282,13 @@ mod secret_contract_tests {
     use gyre_common::{Secret, SecretScope, SecretType};
     use gyre_ports::SecretRepository as _;
 
-    fn sample_secret(id: &str, name: &str, scope: SecretScope, scope_id: &str, tenant: &str) -> Secret {
+    fn sample_secret(
+        id: &str,
+        name: &str,
+        scope: SecretScope,
+        scope_id: &str,
+        tenant: &str,
+    ) -> Secret {
         Secret {
             id: Id::new(id),
             name: name.to_string(),
@@ -4288,7 +4306,13 @@ mod secret_contract_tests {
     #[tokio::test]
     async fn create_rejects_duplicate_id_same_tenant() {
         let repo = MemSecretRepository::default();
-        let s = sample_secret("sec-1", "ALPHA", SecretScope::Tenant, "tenant-a", "tenant-a");
+        let s = sample_secret(
+            "sec-1",
+            "ALPHA",
+            SecretScope::Tenant,
+            "tenant-a",
+            "tenant-a",
+        );
         repo.create(&s, b"v1").await.unwrap();
 
         // Same id, different name/scope — still a duplicate (SQLite PK).
@@ -4306,14 +4330,29 @@ mod secret_contract_tests {
         // Same (scope, scope_id, name) via a fresh id — the UNIQUE the port doc names.
         let dup = sample_secret("sec-2", "ALPHA", SecretScope::Repo, "repo-1", "tenant-a");
         let err = repo.create(&dup, b"v2").await;
-        assert!(err.is_err(), "duplicate (scope, scope_id, name) in same tenant must be rejected");
+        assert!(
+            err.is_err(),
+            "duplicate (scope, scope_id, name) in same tenant must be rejected"
+        );
     }
 
     #[tokio::test]
     async fn create_allows_same_name_different_tenant() {
         let repo = MemSecretRepository::default();
-        let a = sample_secret("sec-1", "ALPHA", SecretScope::Tenant, "tenant-a", "tenant-a");
-        let b = sample_secret("sec-2", "ALPHA", SecretScope::Tenant, "tenant-b", "tenant-b");
+        let a = sample_secret(
+            "sec-1",
+            "ALPHA",
+            SecretScope::Tenant,
+            "tenant-a",
+            "tenant-a",
+        );
+        let b = sample_secret(
+            "sec-2",
+            "ALPHA",
+            SecretScope::Tenant,
+            "tenant-b",
+            "tenant-b",
+        );
         repo.create(&a, b"v1").await.unwrap();
         repo.create(&b, b"v2").await.unwrap();
 

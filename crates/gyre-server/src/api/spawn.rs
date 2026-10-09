@@ -2942,12 +2942,7 @@ mod tests {
     use gyre_common::{Secret, SecretScope, SecretType};
     use std::sync::Arc;
 
-    fn test_secret(
-        name: &str,
-        scope: SecretScope,
-        scope_id: &str,
-        tenant_id: &str,
-    ) -> Secret {
+    fn test_secret(name: &str, scope: SecretScope, scope_id: &str, tenant_id: &str) -> Secret {
         let id = uuid::Uuid::new_v4().to_string();
         Secret {
             id: gyre_common::Id::new(&id),
@@ -2990,9 +2985,7 @@ mod tests {
         dump_path: &str,
     ) -> (Router, String) {
         let script_path = format!("{dump_path}.sh");
-        let script = format!(
-            "#!/bin/sh\nenv | grep '^GYRE_CRED_' | sort > {dump_path}\nexit 0\n"
-        );
+        let script = format!("#!/bin/sh\nenv | grep '^GYRE_CRED_' | sort > {dump_path}\nexit 0\n");
         std::fs::write(&script_path, script).expect("writing env-dump script");
         #[cfg(unix)]
         {
@@ -3069,16 +3062,47 @@ mod tests {
         let (app, ws_id) = create_workspace(app, "secrets-ws").await;
         let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
         let (app, task_id) = create_task(app, "Secrets delivery task").await;
-        let (app, ct_id) =
-            create_env_dump_compute_target(app, "env-dump-all", &dump_path).await;
+        let (app, ct_id) = create_env_dump_compute_target(app, "env-dump-all", &dump_path).await;
 
         // The test caller is Admin on tenant "default"; the workspace's
         // tenant derives from the caller, so all scopes live in "default".
         let tenant = "default";
-        seed_secret(&state, "TENANT_VAR", SecretScope::Tenant, tenant, tenant, b"tenant-value").await;
-        seed_secret(&state, "WORKSPACE_VAR", SecretScope::Workspace, &ws_id, tenant, b"workspace-value").await;
-        seed_secret(&state, "REPO_VAR", SecretScope::Repo, &repo_id, tenant, b"repo-value").await;
-        seed_secret(&state, "TASK_VAR", SecretScope::Task, &task_id, tenant, b"task-value").await;
+        seed_secret(
+            &state,
+            "TENANT_VAR",
+            SecretScope::Tenant,
+            tenant,
+            tenant,
+            b"tenant-value",
+        )
+        .await;
+        seed_secret(
+            &state,
+            "WORKSPACE_VAR",
+            SecretScope::Workspace,
+            &ws_id,
+            tenant,
+            b"workspace-value",
+        )
+        .await;
+        seed_secret(
+            &state,
+            "REPO_VAR",
+            SecretScope::Repo,
+            &repo_id,
+            tenant,
+            b"repo-value",
+        )
+        .await;
+        seed_secret(
+            &state,
+            "TASK_VAR",
+            SecretScope::Task,
+            &task_id,
+            tenant,
+            b"task-value",
+        )
+        .await;
 
         create_worktree_dir(&state, &ws_id, "wt-repo", "feat/secrets");
         let (_, json) = do_spawn_with_target(app, &repo_id, &task_id, "feat/secrets", &ct_id).await;
@@ -3119,12 +3143,27 @@ mod tests {
             create_env_dump_compute_target(app, "env-dump-nearest", &dump_path).await;
 
         let tenant = "default";
-        seed_secret(&state, "SHARED", SecretScope::Tenant, tenant, tenant, b"from-tenant").await;
-        seed_secret(&state, "SHARED", SecretScope::Repo, &repo_id, tenant, b"from-repo").await;
+        seed_secret(
+            &state,
+            "SHARED",
+            SecretScope::Tenant,
+            tenant,
+            tenant,
+            b"from-tenant",
+        )
+        .await;
+        seed_secret(
+            &state,
+            "SHARED",
+            SecretScope::Repo,
+            &repo_id,
+            tenant,
+            b"from-repo",
+        )
+        .await;
 
         create_worktree_dir(&state, &ws_id, "wt-repo", "feat/nearest");
-        let (_, json) =
-            do_spawn_with_target(app, &repo_id, &task_id, "feat/nearest", &ct_id).await;
+        let (_, json) = do_spawn_with_target(app, &repo_id, &task_id, "feat/nearest", &ct_id).await;
         assert_eq!(json["agent"]["status"], "active");
 
         let dump = wait_for_dump(&dump_path)
@@ -3154,12 +3193,19 @@ mod tests {
 
         let (app, repo_id) = create_repo_in_workspace(app, "ws-ghost").await;
         let (app, task_id) = create_task(app, "Ghost workspace task").await;
-        let (app, ct_id) =
-            create_env_dump_compute_target(app, "env-dump-ghost", &dump_path).await;
+        let (app, ct_id) = create_env_dump_compute_target(app, "env-dump-ghost", &dump_path).await;
 
         // The previously-fabricated tenant identity — this is exactly the
         // secret the old code would have delivered.
-        seed_secret(&state, "LEAK", SecretScope::Tenant, "default", "default", b"leaked").await;
+        seed_secret(
+            &state,
+            "LEAK",
+            SecretScope::Tenant,
+            "default",
+            "default",
+            b"leaked",
+        )
+        .await;
 
         create_worktree_dir(&state, "ws-ghost", "wt-repo", "feat/ghost");
         let (_, json) = do_spawn_with_target(app, &repo_id, &task_id, "feat/ghost", &ct_id).await;
@@ -3194,12 +3240,27 @@ mod tests {
         let (app, ws_id) = create_workspace(app, "secrets-ws-binary").await;
         let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
         let (app, task_id) = create_task(app, "Binary secret task").await;
-        let (app, ct_id) =
-            create_env_dump_compute_target(app, "env-dump-binary", &dump_path).await;
+        let (app, ct_id) = create_env_dump_compute_target(app, "env-dump-binary", &dump_path).await;
 
         let tenant = "default";
-        seed_secret(&state, "BINARY_SECRET", SecretScope::Tenant, tenant, tenant, b"\xff\xfe\x00binary").await;
-        seed_secret(&state, "TEXT_SECRET", SecretScope::Tenant, tenant, tenant, b"text-value").await;
+        seed_secret(
+            &state,
+            "BINARY_SECRET",
+            SecretScope::Tenant,
+            tenant,
+            tenant,
+            b"\xff\xfe\x00binary",
+        )
+        .await;
+        seed_secret(
+            &state,
+            "TEXT_SECRET",
+            SecretScope::Tenant,
+            tenant,
+            tenant,
+            b"text-value",
+        )
+        .await;
 
         create_worktree_dir(&state, &ws_id, "wt-repo", "feat/binary");
         let (_, json) = do_spawn_with_target(app, &repo_id, &task_id, "feat/binary", &ct_id).await;
@@ -3279,8 +3340,7 @@ mod tests {
         let (app, ws_id) = create_workspace(app, "secrets-ws-fail").await;
         let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
         let (app, task_id) = create_task(app, "Failing secrets task").await;
-        let (app, ct_id) =
-            create_env_dump_compute_target(app, "env-dump-fail", &dump_path).await;
+        let (app, ct_id) = create_env_dump_compute_target(app, "env-dump-fail", &dump_path).await;
 
         create_worktree_dir(&state, &ws_id, "wt-repo", "feat/failing");
         let (_, json) = do_spawn_with_target(app, &repo_id, &task_id, "feat/failing", &ct_id).await;
@@ -3295,9 +3355,9 @@ mod tests {
         // GYRE_CRED_PROXY is platform-injected (not a secret); assert no
         // secret-sourced env var was delivered.
         assert!(
-            !dump
-                .lines()
-                .any(|l| l.starts_with("GYRE_CRED_") && l != "GYRE_CRED_PROXY=http://127.0.0.1:8765"),
+            !dump.lines().any(
+                |l| l.starts_with("GYRE_CRED_") && l != "GYRE_CRED_PROXY=http://127.0.0.1:8765"
+            ),
             "no secret-sourced GYRE_CRED_* may be delivered when resolution fails:\n{dump}"
         );
     }
