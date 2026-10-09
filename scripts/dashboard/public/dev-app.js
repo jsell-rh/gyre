@@ -228,11 +228,11 @@ function renderOverview() {
     deferred.length ? deferred.slice(0, 12).map((task) => taskButton(task, infrastructureQueueReason(task)))
       : e("p", { class: "muted", text: "No stage is waiting for a retry." }));
   nodes.overview.replaceChildren(coverageBar, metrics, errorText || s.error ? e("div", { class: "dev-error", text: errorText || s.error }) : "",
+    published.length ? e("section", { class: "dev-panel" }, e("h2", { text: `Pull requests under reconciliation · ${published.length}` }),
+      published.map((task) => e("div", {}, taskButton(task, task.condition || "Waiting for GitHub checks"), prLinks(task)))) : null,
     e("div", { class: "dev-overview-grid" }, e("div", {}, control, live, waiting), attention),
     blocked.length ? e("section", { class: "dev-panel" }, e("h2", { text: `Blocked delivery · ${blocked.length}` }),
       blocked.map((task) => taskButton(task, task.condition || "Waiting for prerequisite repair"))) : null,
-    published.length ? e("section", { class: "dev-panel" }, e("h2", { text: `Pull requests under reconciliation · ${published.length}` }),
-      published.map((task) => e("div", {}, taskButton(task, task.condition || "Waiting for GitHub checks"), prLinks(task)))) : null,
     e("section", { class: "dev-panel" }, e("h2", { text: `Waiting candidates · ${candidate.length}` }),
       candidate.length ? candidate.slice(0, 10).map((task) => taskButton(task, `candidate ${task.candidate?.slice(0, 12) || ""}`))
         : e("p", { class: "muted", text: "No candidate waiting for verification." })));
