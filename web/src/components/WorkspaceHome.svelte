@@ -548,6 +548,8 @@
   let wsBreakingChanges = $state([]);
   let depGraphOpen = $state(false);
   let depGraphScope = $state('workspace');
+  let depGraphNodes = $state([]);
+  let depGraphEdges = $state([]);
   async function loadDepHealth() {
     if (!workspace?.id) return;
     const gen = ++wsLoadGen;
