@@ -144,7 +144,7 @@ impl SearchPort for PgStorage {
                 "SELECT s.entity_type,
                         s.entity_id,
                         s.title,
-                        ts_rank(s.tsv, q) AS rank,
+                        ts_rank(s.tsv, q)::float8 AS rank,
                         ts_headline('english', s.body, q,
                                     'StartSel=**,StopSel=**,MaxFragments=1,MinWords=5,MaxWords=12') AS snip,
                         s.metadata::text AS metadata
