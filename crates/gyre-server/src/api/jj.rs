@@ -321,6 +321,8 @@ mod tests {
     use axum::{body::Body, Router};
     use http::{Request, StatusCode};
     use tower::ServiceExt;
+    use std::sync::Arc;
+    use crate::commit_signatures;
 
     fn app() -> Router {
         crate::build_router(test_state())
@@ -509,6 +511,217 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── Signing mode handler coverage (task-107) ─────────────────────────────
+    //
+    // These exercise the jj_squash HANDLER wiring, not the sigstore module
+    // (whose signing/verification phases have their own suite in
+    // sigstore.rs over an upstream-contract mock stack):
+    // - fulcio mode drives the real production transport (state.http_client)
+    //   against a guaranteed-unreachable stack, then falls back to local
+    //   signing — the handler's own fallback guarantee.
+    // - attribution (F2) is threaded from the caller's validated JWT claims
+    //   into the stored record with DISTINCT values, so a regression to
+    //   placeholder literals fails the assertion.
+    // - the fallback record verifies through the verification endpoint's
+    //   real Ed25519 path (GET .../signature/verification).
+
+    /// fulcio mode + unreachable Fulcio: the handler must fall back to local
+    /// signing (squash never fails because of the external signing stack),
+    /// carrying the caller's JWT attribution (task-107 F2) and verifying
+    /// through the verification endpoint afterwards.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn jj_squash_fulcio_unreachable_falls_back_to_local() {
+        let mut state = crate::mem::test_state();
+        // Configure fulcio mode pointing at a host that can never be
+        // connected to: `fulcio.invalid` is the RFC 6761 reserved TLD that
+        // must never resolve (CI: DNS lookup fails immediately); in this
+        // sandbox it resolves to a sinkhole IP that refuses connections
+        // (verified: connect refused in single-digit ms). Either way the
+        // production transport's tokio::time::timeout and error path are
+        // exercised for real — the fallback must hold for unreachable
+        // stacks, not just malformed responses.
+        //
+        // Arc::get_mut: test_state() returns a fresh Arc with refcount 1
+        // (its internal clones were dropped), so the state can be
+        // reconfigured before the router takes a clone.
+        let state_mut = Arc::get_mut(&mut state).expect("sole owner");
+        state_mut.signing_config = crate::commit_signatures::SigningConfig {
+            mode: commit_signatures::SigningMode::Fulcio,
+            fulcio_url: "https://fulcio.invalid".to_string(),
+            rekor_url: "https://rekor.invalid".to_string(),
+        };
+        let app = crate::build_router(state.clone());
+        let (app, repo_id) = create_project_and_repo(app).await;
+
+        // Mint and register a real agent JWT with DISTINCT attribution
+        // values, so the assertions would catch the old placeholder-literal
+        // bug (`task_id: "task-107"`, `spawned_by: "system"` — F2).
+        let jwt = state
+            .agent_signing_key
+            .mint("agent-fallback", "task-77", "user-fallback", &state.base_url, 3600)
+            .expect("mint JWT");
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-fallback", jwt.clone())
+            .await
+            .unwrap();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/jj/squash"))
+                    .header("Authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sig_json = body_json(resp).await;
+        // The fallback record is local-mode Ed25519 (not fulcio).
+        assert_eq!(
+            sig_json["sigstore_mode"].as_str().unwrap(),
+            "local",
+            "unreachable Fulcio must fall back to local signing"
+        );
+        assert_eq!(sig_json["algorithm"].as_str().unwrap(), "EdDSA");
+        assert!(!sig_json["signature"].as_str().unwrap().is_empty());
+        // F2: attribution threaded from the caller's validated claims.
+        assert_eq!(sig_json["signer_id"].as_str().unwrap(), "agent-fallback");
+        assert_eq!(sig_json["task_id"].as_str().unwrap(), "task-77");
+        assert_eq!(sig_json["spawned_by"].as_str().unwrap(), "user-fallback");
+        let sha = sig_json["commit_sha"].as_str().unwrap().to_string();
+
+        // The fallback record is persisted and retrievable repo-scoped.
+        let sig_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/repos/{repo_id}/commits/{sha}/signature"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sig_resp.status(), StatusCode::OK);
+
+        // The verification endpoint verifies the local fallback record
+        // against the forge Ed25519 key — the real check, not a 200-only
+        // probe (task-107 plan item 3, local branch).
+        let ver_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/repos/{repo_id}/commits/{sha}/signature/verification"
+                    ))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ver_resp.status(), StatusCode::OK);
+        let ver_json = body_json(ver_resp).await;
+        assert_eq!(ver_json["valid"].as_bool().unwrap(), true);
+        assert_eq!(ver_json["signature_valid"].as_bool().unwrap(), true);
+        assert_eq!(ver_json["signer_id"].as_str().unwrap(), "agent-fallback");
+        assert_eq!(ver_json["task_id"].as_str().unwrap(), "task-77");
+        assert_eq!(ver_json["spawned_by"].as_str().unwrap(), "user-fallback");
+    }
+
+    /// fulcio mode with a non-JWT bearer (dev token): there is no agent JWT
+    /// to present to Fulcio, so keyless signing cannot proceed and the
+    /// handler must still fall back to local signing without failing the
+    /// squash (empty bearer → sub extraction fails → fallback).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn jj_squash_fulcio_without_jwt_falls_back_to_local() {
+        let mut state = crate::mem::test_state();
+        let state_mut = Arc::get_mut(&mut state).expect("sole owner");
+        state_mut.signing_config = crate::commit_signatures::SigningConfig {
+            mode: commit_signatures::SigningMode::Fulcio,
+            fulcio_url: "https://fulcio.invalid".to_string(),
+            rekor_url: "https://rekor.invalid".to_string(),
+        };
+        let app = crate::build_router(state.clone());
+        let (app, repo_id) = create_project_and_repo(app).await;
+
+        // Global dev token: agent_id "system", no JWT claims, no bearer JWT
+        // usable by Fulcio.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/jj/squash"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sig_json = body_json(resp).await;
+        assert_eq!(
+            sig_json["sigstore_mode"].as_str().unwrap(),
+            "local",
+            "keyless signing without a presentable JWT must fall back to local"
+        );
+        // Attribution for non-JWT callers: resolved agent id, empty (not
+        // fabricated) task/user fields (F2).
+        assert_eq!(sig_json["signer_id"].as_str().unwrap(), "system");
+        assert_eq!(sig_json["task_id"].as_str().unwrap(), "");
+        assert_eq!(sig_json["spawned_by"].as_str().unwrap(), "");
+    }
+
+    /// `none` mode: squash succeeds with an empty unsigned record and no
+    /// record is persisted (the verification endpoint 404s).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn jj_squash_none_mode_skips_signing() {
+        let mut state = crate::mem::test_state();
+        let state_mut = Arc::get_mut(&mut state).expect("sole owner");
+        state_mut.signing_config = crate::commit_signatures::SigningConfig {
+            mode: commit_signatures::SigningMode::None,
+            fulcio_url: "https://fulcio.invalid".to_string(),
+            rekor_url: "https://rekor.invalid".to_string(),
+        };
+        let app = crate::build_router(state.clone());
+        let (app, repo_id) = create_project_and_repo(app).await;
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/jj/squash"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sig_json = body_json(resp).await;
+        assert_eq!(sig_json["signature"].as_str().unwrap(), "");
+        assert_eq!(sig_json["sigstore_mode"].as_str().unwrap(), "local");
+        let sha = sig_json["commit_sha"].as_str().unwrap().to_string();
+
+        // No record persisted: signature lookup 404s.
+        let sig_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/repos/{repo_id}/commits/{sha}/signature"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sig_resp.status(), StatusCode::NOT_FOUND);
     }
 
     /// jj undo returns 204.
