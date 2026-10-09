@@ -426,24 +426,44 @@ pub(crate) async fn spawn_agent_core(
         state.agent_jwt_ttl_secs
     };
 
-    // Pre-mint a JWT without workload claims so it can be injected into the
-    // container environment at spawn time.  After spawn we create the workload
-    // attestation record (stored in state.workload_attestations) which is
-    // queryable via GET /api/v1/agents/{id}/workload.
+    // Pre-mint a JWT carrying the worker's repo scope so `subject.repo_scope`
+    // (§Attributes, source "Agent OIDC claim") is real on every request the
+    // agent makes. Workload claims are attached later via the workload
+    // attestation record (state.workload_attestations, queryable via
+    // GET /api/v1/agents/{id}/workload).
     let token = state
         .agent_signing_key
-        .mint(
+        .mint_scoped(
             &agent.id.to_string(),
             &req.task_id,
             &auth.agent_id,
             &state.base_url,
             jwt_ttl,
+            &repo.workspace_id.to_string(),
+            &req.repo_id,
+            // No persona input exists on the spawn request; workers run
+            // persona-less until a persona assignment mechanism exists.
+            None,
+            // identity-security.md attestation levels: 1=raw subprocess,
+            // 2=CLI-managed, 3=Gyre-managed container with attestation.
+            resolved_ct_entity
+                .as_ref()
+                .map(|ct| match ct.target_type {
+                    ComputeTargetType::Container => 3,
+                    ComputeTargetType::Ssh => 2,
+                    // No target (None) is a plain local subprocess: level 1.
+                    // Kubernetes falls back to 1 until the runtime reports
+                    // workload attestations for pods (tracked by task-129).
+                    ComputeTargetType::Kubernetes => 1,
+                }),
         )
         .unwrap_or_else(|e| {
             tracing::error!("JWT pre-mint failed, falling back to UUID token: {e}");
             uuid::Uuid::new_v4().to_string()
         });
-    // Store now so the container can authenticate immediately upon start.
+    // Register the token so the spawned agent can authenticate immediately
+    // upon start (auth.rs path 2: agent_tokens lookup; a JWT missing from
+    // this map is treated as revoked — 401 before any handler runs).
     let _ = state
         .kv_store
         .kv_set("agent_tokens", &agent.id.to_string(), token.clone())
@@ -1059,9 +1079,9 @@ pub(crate) async fn spawn_agent_core(
             .await;
     }
 
-    // Token was pre-minted above and already stored in agent_tokens.
-    // Workload attestation claims are stored in state.workload_attestations
-    // and queryable via GET /api/v1/agents/{id}/workload.
+    // Token was minted and registered in agent_tokens at mint time above;
+    // workload attestation claims live in state.workload_attestations
+    // (queryable via GET /api/v1/agents/{id}/workload), not in the JWT.
 
     // Phase 3 (TASK-008, §7.4): Create workload KeyBinding and DerivedInput
     // from the parent task's attestation chain, then inject into the agent's

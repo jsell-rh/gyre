@@ -22,7 +22,7 @@ pub struct AttributeContext {
     attrs: HashMap<String, AttrValue>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum AttrValue {
     Single(String),
     List(Vec<String>),
@@ -59,10 +59,23 @@ impl AttributeContext {
     }
 
     /// Merge JWT claims into the context under the `subject.` namespace.
+    ///
+    /// Insert-only: a key already present in the context keeps its existing
+    /// value. The middleware sets auth-extractor identity facts
+    /// (`subject.type`, `subject.id`, `subject.global_role`) before merging
+    /// claims, and a raw claim must not override them — `subject.global_role`
+    /// is sourced from the User entity by the extractor (§Attributes), and
+    /// `subject.id`/`subject.type` are the authenticated identity. Claims
+    /// sourced by the spec from "Auth context / OIDC" (e.g.
+    /// `subject.tenant_id`) still flow through when the extractor set
+    /// nothing.
     pub fn merge_jwt_claims(&mut self, claims: &serde_json::Value) {
         if let Some(obj) = claims.as_object() {
             for (key, val) in obj {
                 let full_key = format!("subject.{key}");
+                if self.attrs.contains_key(&full_key) {
+                    continue;
+                }
                 match val {
                     serde_json::Value::String(s) => {
                         self.set(full_key, s.clone());
@@ -90,6 +103,70 @@ impl AttributeContext {
 }
 
 // ---------------------------------------------------------------------------
+// Dynamic references
+// ---------------------------------------------------------------------------
+
+/// Resolve dynamic references in a condition value (§Conditions).
+///
+/// A value starting with `$` (e.g. `"$resource.repo_id"`) is replaced at
+/// evaluation time by the current value of the referenced attribute in the
+/// context; list values resolve element-wise. Returns `None` when a reference
+/// does not resolve: the condition cannot be established and must evaluate to
+/// false. No value is fabricated for a missing attribute — an Allow with an
+/// unresolvable reference must not grant (fail closed), mirroring the
+/// `resolve_ref` discipline on git refs.
+fn resolve_condition_value(
+    value: &ConditionValue,
+    ctx: &AttributeContext,
+) -> Option<ConditionValue> {
+    match value {
+        ConditionValue::String(s) => {
+            if s.starts_with('$') {
+                resolve_dynamic_value(s, ctx)
+            } else {
+                Some(value.clone())
+            }
+        }
+        ConditionValue::StringList(list) => {
+            let mut resolved = Vec::with_capacity(list.len());
+            for s in list {
+                if s.starts_with('$') {
+                    resolved.push(resolve_dynamic_scalar(s, ctx)?);
+                } else {
+                    resolved.push(s.clone());
+                }
+            }
+            Some(ConditionValue::StringList(resolved))
+        }
+        other => Some(other.clone()),
+    }
+}
+
+/// Resolve a `$path` reference to a full condition value, preserving the
+/// referenced attribute's type (string, list, number, bool).
+fn resolve_dynamic_value(s: &str, ctx: &AttributeContext) -> Option<ConditionValue> {
+    let key = s.strip_prefix('$')?;
+    match ctx.get(key)? {
+        AttrValue::Single(v) => Some(ConditionValue::String(v.clone())),
+        AttrValue::List(v) => Some(ConditionValue::StringList(v.clone())),
+        AttrValue::Number(n) => Some(ConditionValue::Number(*n)),
+        AttrValue::Bool(b) => Some(ConditionValue::Bool(*b)),
+    }
+}
+
+/// Resolve a `$path` reference in scalar (string) position.
+fn resolve_dynamic_scalar(s: &str, ctx: &AttributeContext) -> Option<String> {
+    let key = s.strip_prefix('$')?;
+    match ctx.get(key)? {
+        AttrValue::Single(v) => Some(v.clone()),
+        AttrValue::Number(n) => Some(n.to_string()),
+        AttrValue::Bool(b) => Some(b.to_string()),
+        // List-valued attribute referenced in scalar position.
+        AttrValue::List(_) => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Condition evaluation
 // ---------------------------------------------------------------------------
 
@@ -101,7 +178,12 @@ fn eval_condition(cond: &Condition, ctx: &AttributeContext) -> bool {
             let Some(attr_val) = ctx.get(&cond.attribute) else {
                 return false;
             };
-            match (&cond.operator, attr_val, &cond.value) {
+            // Dynamic references resolve against the same context; an
+            // unresolvable reference fails the condition.
+            let Some(value) = resolve_condition_value(&cond.value, ctx) else {
+                return false;
+            };
+            match (&cond.operator, attr_val, &value) {
                 (ConditionOp::Equals, AttrValue::Single(s), ConditionValue::String(expected)) => {
                     s == expected
                 }
@@ -171,14 +253,22 @@ pub struct EvalResult {
 // Evaluation engine
 // ---------------------------------------------------------------------------
 
-/// Sort key for a policy: higher priority first, then scope specificity.
-fn policy_sort_key(p: &Policy) -> (u32, u8) {
+/// Sort key for a policy: higher priority first, then scope specificity
+/// (repo > workspace > tenant), then Deny before Allow — "deny takes
+/// precedence over allow within the same priority" (§Policy Language) and
+/// "Deny overrides Allow at the same priority and scope" (§Policy Composition
+/// rule 3).
+fn policy_sort_key(p: &Policy) -> (u32, u8, u8) {
     let scope_rank = match p.scope {
         PolicyScope::Repo => 2,
         PolicyScope::Workspace => 1,
         PolicyScope::Tenant => 0,
     };
-    (p.priority, scope_rank)
+    let deny_rank = match p.effect {
+        PolicyEffect::Deny => 1,
+        PolicyEffect::Allow => 0,
+    };
+    (p.priority, scope_rank, deny_rank)
 }
 
 /// Evaluate the given list of `policies` against `ctx` for `action` on `resource_type`.
@@ -198,6 +288,23 @@ pub fn evaluate(
 ) -> EvalResult {
     let t0 = std::time::Instant::now();
 
+    // Action, resource.type, and env.time are evaluation inputs (§Attributes)
+    // owned by this function: inject them so conditions can reference them
+    // uniformly regardless of caller. `env.time` is only set when absent so a
+    // dry-run caller can pin a specific evaluation time. The context is small
+    // (a few dozen entries built per request); the clone is not on any hot
+    // loop.
+    let mut ctx = ctx.clone();
+    ctx.set("action", action);
+    ctx.set("resource.type", resource_type);
+    if !ctx.has("env.time") {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        ctx.set_number("env.time", now as i64);
+    }
+
     // Filter to enabled policies that apply to this action/resource_type.
     policies.retain(|p| p.enabled && p.applies_to(action, resource_type));
 
@@ -208,7 +315,7 @@ pub fn evaluate(
     for policy in &policies {
         if policy.immutable
             && policy.effect == PolicyEffect::Deny
-            && eval_policy_conditions(policy, ctx)
+            && eval_policy_conditions(policy, &ctx)
         {
             let ms = t0.elapsed().as_secs_f64() * 1000.0;
             return EvalResult {
@@ -233,7 +340,7 @@ pub fn evaluate(
     });
 
     for policy in &remaining {
-        if eval_policy_conditions(policy, ctx) {
+        if eval_policy_conditions(policy, &ctx) {
             let ms = t0.elapsed().as_secs_f64() * 1000.0;
             return EvalResult {
                 effect: policy.effect.clone(),
@@ -372,6 +479,23 @@ mod tests {
     }
 
     #[test]
+    fn deny_overrides_allow_at_same_priority_and_scope() {
+        // §Policy Language: "First match wins (deny takes precedence over
+        // allow within the same priority)" / §Policy Composition rule 3.
+        // Equal priority, equal scope: the Deny must be evaluated first even
+        // when the Allow appears earlier in the list.
+        let ctx = AttributeContext::default();
+        let allow = allow_policy(100, vec![]);
+        let deny = deny_policy(100, vec![]);
+        // Both helpers mint id "p-100"; give the deny a distinct id.
+        let mut deny = deny;
+        deny.id = Id::new("p-100-deny");
+        let result = evaluate(vec![allow, deny], &ctx, "write", "task");
+        assert_eq!(result.effect, PolicyEffect::Deny);
+        assert_eq!(result.matched_policy.as_deref(), Some("p-100-deny"));
+    }
+
+    #[test]
     fn higher_priority_deny_beats_lower_priority_allow() {
         let ctx = AttributeContext::default();
         let low_allow = allow_policy(5, vec![]);
@@ -471,6 +595,75 @@ mod tests {
         assert!(ctx.has("subject.workspace_role"));
         assert!(ctx.has("subject.groups"));
         assert!(ctx.has("subject.attestation_level"));
+    }
+
+    #[test]
+    fn merge_jwt_claims_never_overrides_existing_attributes() {
+        // The middleware sets auth-extractor identity facts before merging
+        // raw JWT claims. A claim sharing an attribute's name (e.g. a
+        // Keycloak `global_role` claim) must NOT override the extractor-
+        // resolved value — `subject.global_role` is sourced from the User
+        // entity (§Attributes), not from arbitrary claims. Before the
+        // insert-only fix this test fails: HashMap::insert let the claim
+        // overwrite the resolved "ReadOnly" with "Admin", so the
+        // readonly Allow no longer matched and the request fell to
+        // default deny.
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.global_role", "ReadOnly");
+        ctx.set("subject.type", "user");
+        let claims = serde_json::json!({
+            "global_role": "Admin",
+            "type": "agent",
+            "tenant_id": "tenant-a"
+        });
+        ctx.merge_jwt_claims(&claims);
+
+        // Direct attribute assertions: extractor facts stand, unclaimed
+        // spec attributes still merge.
+        assert_eq!(
+            ctx.get("subject.global_role"),
+            Some(&AttrValue::Single("ReadOnly".to_string()))
+        );
+        assert_eq!(
+            ctx.get("subject.type"),
+            Some(&AttrValue::Single("user".to_string()))
+        );
+        assert_eq!(
+            ctx.get("subject.tenant_id"),
+            Some(&AttrValue::Single("tenant-a".to_string()))
+        );
+
+        // Behavioral assertion: an Allow keyed on the extractor value must
+        // match. If the claim overwrote global_role to "Admin", the Allow
+        // would not match and default deny would flip the decision.
+        let allow_readonly = Policy {
+            id: Id::new("allow-readonly"),
+            name: "readonly-allow".to_string(),
+            description: String::new(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 900,
+            effect: PolicyEffect::Allow,
+            conditions: vec![Condition {
+                attribute: "subject.global_role".to_string(),
+                operator: ConditionOp::Equals,
+                value: ConditionValue::String("ReadOnly".to_string()),
+            }],
+            actions: vec!["read".to_string()],
+            resource_types: vec!["*".to_string()],
+            enabled: true,
+            built_in: false,
+            immutable: false,
+            created_by: "test".to_string(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        let result = evaluate(vec![allow_readonly], &ctx, "read", "repo");
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Allow,
+            "claim-injected global_role must not override the extractor-resolved value"
+        );
     }
 
     // --- Immutable Deny policy tests (HSI §2) ---------------------------------
@@ -648,6 +841,125 @@ mod tests {
         p.resource_types = vec!["attestation".to_string()];
 
         let result = evaluate(vec![p], &ctx, "push", "attestation");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+    }
+
+    // --- Dynamic references (§Conditions) -----------------------------------
+
+    #[test]
+    fn dynamic_reference_resolves_resource_attr_at_eval_time() {
+        // "$resource.repo_id" in a condition value is replaced by the
+        // resource attribute at evaluation time. Used for e.g. "subject's
+        // repo scope must contain the repo they act on".
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.id", "agent-7");
+        ctx.set_list(
+            "subject.repo_scope",
+            vec!["repo:alpha".to_string(), "repo:beta".to_string()],
+        );
+        ctx.set("resource.repo_id", "repo:beta");
+
+        let cond = Condition {
+            attribute: "subject.repo_scope".to_string(),
+            operator: ConditionOp::Contains,
+            value: ConditionValue::String("$resource.repo_id".to_string()),
+        };
+        let result = evaluate(vec![allow_policy(10, vec![cond.clone()])], &ctx, "read", "repo");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+
+        // Same policy, different resource: the reference resolves to the
+        // resource in the evaluated context, not a baked-in value.
+        ctx.set("resource.repo_id", "repo:gamma");
+        let result = evaluate(vec![allow_policy(10, vec![cond])], &ctx, "read", "repo");
+        assert_eq!(result.effect, PolicyEffect::Deny);
+    }
+
+    #[test]
+    fn dynamic_reference_subject_attr_resolves_at_eval_time() {
+        // "$subject.tenant_id" as a condition value compares the resource's
+        // tenant against the subject's tenant.
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.tenant_id", "tenant-a");
+        ctx.set("resource.tenant_id", "tenant-a");
+
+        let cond = Condition {
+            attribute: "resource.tenant_id".to_string(),
+            operator: ConditionOp::Equals,
+            value: ConditionValue::String("$subject.tenant_id".to_string()),
+        };
+        let result = evaluate(vec![allow_policy(10, vec![cond.clone()])], &ctx, "read", "repo");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+
+        // Cross-tenant resource: reference resolves to tenant-a, mismatch denies.
+        ctx.set("resource.tenant_id", "tenant-b");
+        let result = evaluate(vec![allow_policy(10, vec![cond])], &ctx, "read", "repo");
+        assert_eq!(result.effect, PolicyEffect::Deny);
+    }
+
+    #[test]
+    fn dynamic_reference_unresolvable_fails_closed() {
+        // No resource.repo_id in the context: the reference does not resolve
+        // and the Allow condition cannot be established — must NOT grant.
+        let mut ctx = AttributeContext::default();
+        ctx.set_list("subject.repo_scope", vec!["repo:alpha".to_string()]);
+
+        let cond = Condition {
+            attribute: "subject.repo_scope".to_string(),
+            operator: ConditionOp::Contains,
+            value: ConditionValue::String("$resource.repo_id".to_string()),
+        };
+        let result = evaluate(vec![allow_policy(10, vec![cond])], &ctx, "read", "repo");
+        assert_eq!(result.effect, PolicyEffect::Deny);
+    }
+
+    #[test]
+    fn dynamic_reference_number_and_list_resolution() {
+        // A numeric reference preserves type: subject.chain_depth > $resource.min_depth.
+        let mut ctx = AttributeContext::default();
+        ctx.set_number("subject.chain_depth", 7);
+        ctx.set_number("resource.min_depth", 5);
+
+        let cond = Condition {
+            attribute: "subject.chain_depth".to_string(),
+            operator: ConditionOp::GreaterThan,
+            value: ConditionValue::String("$resource.min_depth".to_string()),
+        };
+        let result = evaluate(vec![allow_policy(10, vec![cond])], &ctx, "push", "attestation");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+
+        // A list-valued reference in scalar (StringList element) position
+        // does not resolve — no scalar is fabricated from a list. The
+        // Allow condition cannot be established and must fail closed.
+        let mut ctx2 = AttributeContext::default();
+        ctx2.set("subject.workspace_role", "Developer");
+        ctx2.set_list(
+            "resource.allowed_roles",
+            vec!["Owner".to_string(), "Developer".to_string()],
+        );
+        let cond2 = Condition {
+            attribute: "subject.workspace_role".to_string(),
+            operator: ConditionOp::In,
+            value: ConditionValue::StringList(vec!["$resource.allowed_roles".to_string()]),
+        };
+        let result2 = evaluate(vec![allow_policy(10, vec![cond2])], &ctx2, "push", "repo");
+        assert_eq!(result2.effect, PolicyEffect::Deny);
+    }
+
+    #[test]
+    fn dynamic_reference_scalar_number_coerces_for_string_compare() {
+        // A numeric reference used in scalar string position coerces to its
+        // string form (resolve_dynamic_scalar), matching the String-typed
+        // JSON claim convention.
+        let mut ctx = AttributeContext::default();
+        ctx.set("resource.owner_id", "user-42");
+        ctx.set("subject.id", "user-42");
+
+        let cond = Condition {
+            attribute: "resource.owner_id".to_string(),
+            operator: ConditionOp::Equals,
+            value: ConditionValue::String("$subject.id".to_string()),
+        };
+        let result = evaluate(vec![allow_policy(10, vec![cond])], &ctx, "delete", "repo");
         assert_eq!(result.effect, PolicyEffect::Allow);
     }
 }

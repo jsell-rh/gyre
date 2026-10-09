@@ -1805,6 +1805,18 @@ async fn merge_queue_paused(state: &AppState, repo_id: &Id) -> bool {
     }
 }
 
+/// Merge-queue ("forge") health for a repo, as consumed by the ABAC
+/// environment attribute `env.main_health` (abac-policy-engine.md §Attributes).
+/// `"red"` when the queue is paused (merge pipeline halted), `"green"` when
+/// merges may proceed.
+pub(crate) async fn queue_health(state: &AppState, repo_id: &str) -> &'static str {
+    if merge_queue_paused(state, &gyre_common::Id::new(repo_id)).await {
+        "red"
+    } else {
+        "green"
+    }
+}
+
 /// Pause the merge queue for this repo (no more merges until main is green).
 /// Persists the pause state and emits a `MergeQueuePaused` event so the
 /// Workspace Orchestrator can reprioritize work (platform-model.md §6).
