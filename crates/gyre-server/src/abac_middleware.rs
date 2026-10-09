@@ -472,6 +472,12 @@ impl ResourceResolver {
                 RouteResourceMapping::exempt("/api/v1/users/me/notifications"),
                 RouteResourceMapping::exempt("/api/v1/notifications/:id/dismiss"),
                 RouteResourceMapping::exempt("/api/v1/notifications/:id/resolve"),
+                // Session management uses per-handler auth
+                // (user-management.md §Session Management) — handlers scope
+                // session reads/revocations to the calling user.
+                RouteResourceMapping::exempt("/api/v1/users/me/sessions"),
+                RouteResourceMapping::exempt("/api/v1/users/me/sessions/revoke-all"),
+                RouteResourceMapping::exempt("/api/v1/users/me/sessions/:id"),
                 // ── SCIM (separate auth token, exempt from ABAC) ───────────
                 RouteResourceMapping::exempt("/scim/v2/Users"),
                 RouteResourceMapping::exempt("/scim/v2/Users/:id"),
