@@ -16,6 +16,7 @@ pub mod audit;
 pub mod authorization_provenance;
 pub mod budget;
 pub mod compute_target;
+pub mod commit_signature;
 pub mod container_audit;
 pub mod conversation;
 pub mod dependency;
