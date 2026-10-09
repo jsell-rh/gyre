@@ -2,7 +2,7 @@
 title: "View Specification Grammar — TypeScript types and server-side validation"
 spec_ref: "ui-layout.md §4"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "ui-layout.md §4. View Specification Grammar"
   - "ui-layout.md §Structure"
@@ -66,3 +66,11 @@ LLM Constraints: LLM can only produce view specs within this grammar, read-only 
 ## Agent Instructions
 
 Read `ui-layout.md` §4 thoroughly — it contains extensive detail on each layer, the flow layout particle rendering, composability rules, and LLM constraints. The TypeScript types must match the JSON schema examples in the spec exactly. The server validation must reject the same invalid cases both server-side and client-side (belt and suspenders). Check existing graph types in `web/src/lib/types/` and `crates/gyre-common/src/` for naming conventions.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-common/examples/probe_parse.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
