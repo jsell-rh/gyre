@@ -21,6 +21,21 @@ def git(*args):
     return subprocess.check_output(['git', *args], text=True, timeout=180).strip()
 
 
+def checkout_seed(branch, seed):
+    for attempt in range(5):
+        try:
+            options = ['--refetch', '--no-filter'] if attempt else []
+            run('git', 'fetch', '--quiet', *options, 'origin', 'main', seed)
+            run('git', 'checkout', '-b', branch, seed)
+            return
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            if attempt == 4:
+                raise
+            # Materialize the seed on retry instead of repeating an implicit
+            # promisor fetch during checkout. Reuse this sandbox throughout.
+            time.sleep(min(60, 5 * 2 ** attempt))
+
+
 def record_outcome(value):
     temporary = STAGE / 'outcome.json.tmp'
     temporary.write_text(json.dumps(value))
@@ -111,8 +126,7 @@ def main():
             time.sleep(min(60, 5 * 2 ** attempt))
     os.chdir(checkout)
     seed = job['input'].get('candidate') or job['input']['base']
-    run('git', 'fetch', '--quiet', 'origin', 'main', seed)
-    run('git', 'checkout', '-b', branch, seed)
+    checkout_seed(branch, seed)
     observed = git('ls-remote', '--heads', 'origin', branch).split()
     if observed:
         raise RuntimeError('claim branch already exists before execution')
