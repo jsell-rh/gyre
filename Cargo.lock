@@ -1083,6 +1083,7 @@ dependencies = [
  "opentelemetry-proto",
  "opentelemetry_sdk",
  "parking_lot",
+ "pem",
  "prometheus",
  "rcgen",
  "reqwest",

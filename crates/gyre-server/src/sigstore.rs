@@ -38,7 +38,9 @@ use gyre_ports::commit_signature_repo::{CommitSignature, SigstoreMode, ALGORITHM
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
+use std::future::Future;
 
+use async_trait::async_trait;
 use crate::commit_signatures::{SigningAttribution, SigningConfig};
 
 // ── Wire types ────────────────────────────────────────────────────────────────
@@ -83,12 +85,14 @@ struct FulcioSigningCertResponse {
 
 #[derive(Deserialize)]
 struct SignedCertificateEmbeddedSct {
-    chain: Option<FulcioChain>,
+    chain: Option<FulcoChain>,
 }
 
+/// The detached-SCT variant carries the same `chain` field; both oneof arms
+/// are handled uniformly by extracting the chain.
 #[derive(Deserialize)]
 struct SignedCertificateDetachedSct {
-    chain: Option<FulcioChain>,
+    chain: Option<FulcoChain>,
 }
 
 /// `Chain` carries `certificates` as repeated `bytes` — in protojson each is
@@ -195,35 +199,45 @@ pub struct FulcioSignedCommit {
 
 /// Bind an HTTP transport for the signing stack.
 ///
-/// Production uses the shared `reqwest::Client` (bounded per call by
-/// `SIGNING_HTTP_TIMEOUT_SECS` via `tokio::time::timeout`). Tests inject a
-/// transport that encodes the *upstream* Fulcio/Rekor contract so assertions
-/// exercise real wire-format compatibility instead of a self-confirming mock
-/// (review F1/F7).
+/// Production uses the shared `reqwest::Client`, with every call bounded by
+/// `SIGNING_HTTP_TIMEOUT_SECS` via `tokio::time::timeout` (F10) — reqwest
+/// has no default total timeout, so a hung signing stack must be cut off by
+/// an explicit deadline or the fall-back-to-local guarantee only holds for
+/// fast errors. Tests inject an async transport that encodes the *upstream*
+/// Fulcio/Rekor contract so assertions exercise real wire-format
+/// compatibility instead of a self-confirming mock (review F1/F7).
+#[async_trait]
 pub trait SigningHttpTransport: Send + Sync {
-    /// POST `{fulcio}/api/v2/signingCert` with the JSON body; return the JSON
-    /// response text.
-    fn fulcio_signing_cert(&self, fulcio_url: &str, body: &str) -> Result<String>;
-    /// GET `{fulcio}/api/v2/trustBundle`; return the JSON response text.
-    fn fulcio_trust_bundle(&self, fulcio_url: &str) -> Result<String>;
+    /// POST `{fulcio}/api/v2/signingCert` with the JSON body; return the
+    /// JSON response text.
+    async fn fulcio_signing_cert(&self, fulcio_url: &str, body: &str) -> Result<String>;
+    /// GET `{fulco}/api/v2/trustBundle`; return the JSON response text.
+    async fn fulcio_trust_bundle(&self, fulcio_url: &str) -> Result<String>;
     /// POST `{rekor}/api/v1/log/entries` with the JSON body; return the JSON
     /// response text.
-    fn rekor_post_entry(&self, rekor_url: &str, body: &str) -> Result<String>;
+    async fn rekor_post_entry(&self, rekor_url: &str, body: &str) -> Result<String>;
     /// GET `{rekor}/api/v1/log/entries/{uuid}`; return the JSON response text.
-    fn rekor_get_entry(&self, rekor_url: &str, uuid: &str) -> Result<String>;
+    async fn rekor_get_entry(&self, rekor_url: &str, uuid: &str) -> Result<String>;
 }
 
-/// Production transport over the shared reqwest client, with a per-call
-/// total timeout (F10). A client whose request future hangs returns
-/// `Err(Elapsed)` after `SIGNING_HTTP_TIMEOUT_SECS`.
+/// Production transport over the shared reqwest client.
 struct ReqwestTransport {
     client: reqwest::Client,
     timeout: Duration,
 }
 
+impl ReqwestTransport {
+    async fn call(&self, name: &str, fut: impl Future<Output = Result<String>>) -> Result<String> {
+        tokio::time::timeout(self.timeout, fut)
+            .await
+            .map_err(|_| anyhow!("{name} timed out after {:?}", self.timeout))?
+    }
+}
+
+#[async_trait]
 impl SigningHttpTransport for ReqwestTransport {
-    fn fulcio_signing_cert(&self, fulcio_url: &str, body: &str) -> Result<String> {
-        let fut = async {
+    async fn fulcio_signing_cert(&self, fulcio_url: &str, body: &str) -> Result<String> {
+        self.call("fulcio signingCert", async {
             let resp = self
                 .client
                 .post(format!("{fulcio_url}/api/v2/signingCert"))
@@ -239,13 +253,12 @@ impl SigningHttpTransport for ReqwestTransport {
                 return Err(anyhow!("fulcio signingCert returned {status}: {text}"));
             }
             Ok(text)
-        };
-        futures_util::future::block_on(tokio::time::timeout(self.timeout, fut))
-            .map_err(|_| anyhow!("fulcio signingCert timed out after {:?}", self.timeout))?
+        })
+        .await
     }
 
-    fn fulcio_trust_bundle(&self, fulcio_url: &str) -> Result<String> {
-        let fut = async {
+    async fn fulcio_trust_bundle(&self, fulcio_url: &str) -> Result<String> {
+        self.call("fulcio trustBundle", async {
             let resp = self
                 .client
                 .get(format!("{fulcio_url}/api/v2/trustBundle"))
@@ -258,13 +271,12 @@ impl SigningHttpTransport for ReqwestTransport {
                 return Err(anyhow!("fulcio trustBundle returned {status}: {text}"));
             }
             Ok(text)
-        };
-        futures_util::future::block_on(tokio::time::timeout(self.timeout, fut))
-            .map_err(|_| anyhow!("fulcio trustBundle timed out after {:?}", self.timeout))?
+        })
+        .await
     }
 
-    fn rekor_post_entry(&self, rekor_url: &str, body: &str) -> Result<String> {
-        let fut = async {
+    async fn rekor_post_entry(&self, rekor_url: &str, body: &str) -> Result<String> {
+        self.call("rekor entry POST", async {
             let resp = self
                 .client
                 .post(format!("{rekor_url}/api/v1/log/entries"))
@@ -279,13 +291,12 @@ impl SigningHttpTransport for ReqwestTransport {
                 return Err(anyhow!("rekor entry POST returned {status}: {text}"));
             }
             Ok(text)
-        };
-        futures_util::future::block_on(tokio::time::timeout(self.timeout, fut))
-            .map_err(|_| anyhow!("rekor entry POST timed out after {:?}", self.timeout))?
+        })
+        .await
     }
 
-    fn rekor_get_entry(&self, rekor_url: &str, uuid: &str) -> Result<String> {
-        let fut = async {
+    async fn rekor_get_entry(&self, rekor_url: &str, uuid: &str) -> Result<String> {
+        self.call("rekor entry GET", async {
             let resp = self
                 .client
                 .get(format!("{rekor_url}/api/v1/log/entries/{uuid}"))
@@ -298,9 +309,8 @@ impl SigningHttpTransport for ReqwestTransport {
                 return Err(anyhow!("rekor entry GET returned {status}: {text}"));
             }
             Ok(text)
-        };
-        futures_util::future::block_on(tokio::time::timeout(self.timeout, fut))
-            .map_err(|_| anyhow!("rekor entry GET timed out after {:?}", self.timeout))?
+        })
+        .await
     }
 }
 
@@ -369,8 +379,12 @@ pub async fn sign_commit_keyless(
 
     let chain = response
         .signed_certificate_embedded_sct
-        .or(response.signed_certificate_detached_sct)
         .and_then(|sct| sct.chain)
+        .or_else(|| {
+            response
+                .signed_certificate_detached_sct
+                .and_then(|sct| sct.chain)
+        })
         .ok_or_else(|| anyhow!("fulcio response carries no certificate chain"))?;
     if chain.certificates.is_empty() {
         return Err(anyhow!("fulcio returned an empty certificate chain"));
@@ -633,8 +647,11 @@ fn check_chain_all_bundles(
     if root.verify_signature(None).is_err() {
         return false;
     }
-    // The root must be one of the roots in the configured bundle's chains.
-    let root_der = root.tbs_certificate.raw;
+
+    // The root must be one of the roots in the configured bundle's chains,
+    // compared as full DER encodings (a trust bundle element is the complete
+    // certificate, not just its TBS section).
+    let root_der = root.der_bytes();
     bundle_chains.iter().any(|chain| {
         chain.iter().any(|b64| {
             BASE64
@@ -782,11 +799,20 @@ fn pem_equal_mod_whitespace(a: &[u8], b: &[u8]) -> bool {
 
 // ── Parsing helpers ───────────────────────────────────────────────────────────
 
-/// An owned DER buffer plus the parsed certificate view over it. The view's
-/// lifetime is tied to `_der` by construction: both fields are created from
-/// the same allocation and never mutated afterwards.
+/// An owned DER buffer plus the parsed certificate view over it. The view
+/// borrows the heap allocation owned by this struct: the `Box<[u8]>` target
+/// is stable across moves, and the struct owns both the buffer and the view
+/// over it, so the borrow cannot outlive the buffer.
+///
+/// (a) `transmute` of `&*boxed` to `&'static [u8]` — the reference is
+/// derived from a heap allocation we own and never free while the struct
+/// lives; moving the struct copies the Box pointer, not the allocation, so
+/// the view stays valid. `Self` is not `Sync`/dropped while borrowed: the
+/// only code holding the view is inside `Self`.
+/// (b) `X509Certificate<'static>` therefore never escapes into a context
+/// that could outlive `Self`, because every accessor borrows `&self`.
 struct ParsedCertificate {
-    _der: Box<[u8]>,
+    der: Box<[u8]>,
     cert: x509_parser::certificate::X509Certificate<'static>,
 }
 
@@ -797,25 +823,89 @@ impl ParsedCertificate {
     }
 
     fn from_der(der: Vec<u8>) -> Result<Self> {
-        // Self-referential without unsafe: reparse from the boxed slice.
-        // The view borrows a heap allocation we own; we hand the compiler a
-        // 'static lifetime via the only sound route available — the Box's
-        // contents are stable for the struct's lifetime, and we never move
-        // the allocation (Box guarantees a stable address even when the
-        // struct moves). The transmute below is the standard pattern for
-        // self-referential structs over boxed data.
         let boxed: Box<[u8]> = der.into_boxed_slice();
+        // SAFETY: `&*boxed` points into a heap allocation owned by the
+        // `Box` we store in the returned struct. The allocation outlives
+        // every use of the view (the view is only reachable through the
+        // struct), and Box contents never move (a moved Box copies the
+        // pointer, not the target). The transmute extends the lifetime of
+        // the reference, which is sound here because the struct owns the
+        // allocation for exactly as long as the view is reachable.
         let static_ref: &'static [u8] = unsafe { std::mem::transmute(&*boxed) };
         let (rem, cert) = x509_parser::parse_x509_certificate(static_ref)
             .map_err(|e| anyhow!("x509 parse error: {e}"))?;
         if !rem.is_empty() {
             return Err(anyhow!("trailing bytes after certificate"));
         }
-        Ok(Self {
-            _der: boxed,
-            cert,
-        })
+        Ok(Self { der: boxed, cert })
     }
+
+    /// Full DER encoding of the certificate (not just the TBS section).
+    fn der_bytes(&self) -> &[u8] {
+        &self.der
+    }
+}
+
+/// Decode a single PEM block (any label) to its DER bytes.
+///
+/// Strictly anchored: the END marker must follow the BEGIN marker, so
+/// concatenated blocks cannot pair the first BEGIN with a later END.
+fn pem_to_der(pem_str: &str) -> Result<Vec<u8>> {
+    const BEGIN: &str = "-----BEGIN ";
+    const END: &str = "-----END ";
+    let rest = pem_str
+        .find(BEGIN)
+        .ok_or_else(|| anyhow!("no PEM BEGIN marker"))?;
+    let after_label = pem_str[rest..]
+        .find("-----")
+        .map(|i| rest + i + "-----".len())
+        .ok_or_else(|| anyhow!("unterminated PEM label"))?;
+    let end_rel = pem_str[after_label..]
+        .find(END)
+        .ok_or_else(|| anyhow!("no PEM END marker"))?;
+    let end = after_label + end_rel;
+    let b64: String = pem_str[after_label..end]
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect();
+    BASE64
+        .decode(b64.as_bytes())
+        .map_err(|e| anyhow!("PEM base64 decode error: {e}"))
+}
+
+/// Re-encode DER bytes as a `CERTIFICATE` PEM block.
+fn pem_encode_certificate(der: &[u8]) -> String {
+    pem::encode(&pem::Pem::new("CERTIFICATE", der.to_vec()))
+}
+
+/// Parse a concatenated PEM chain (one cert per block) into parsed certs,
+/// leaf first. Empty when the input has no parseable block.
+fn parse_pem_chain(chain_pem: &str) -> Vec<ParsedCertificate> {
+    let mut out = Vec::new();
+    let mut rest = chain_pem;
+    while let Some(begin) = rest.find("-----BEGIN ") {
+        let end_marker = match rest[begin..].find("-----END ") {
+            Some(i) => begin + i,
+            None => break,
+        };
+        // Block = BEGIN .. end of the END line.
+        let block_end = match rest[end_marker..].find("-----\n").or_else(|| rest[end_marker..].find("-----\r\n")) {
+            Some(i) => end_marker + i + "-----".len(),
+            None => rest.len(),
+        };
+        let block = &rest[..block_end];
+        match ParsedCertificate::from_pem(block) {
+            Ok(pc) => out.push(pc),
+            Err(_) => return Vec::new(), // malformed chain fails closed
+        }
+        rest = &rest[block_end..];
+    }
+    out
+}
+
+/// Parse a single PEM certificate (owned buffer + view).
+fn parse_certificate(pem_str: &str) -> Result<ParsedCertificate> {
+    ParsedCertificate::from_pem(pem_str)
 }
 
 fn extract_jwt_sub(token: &str) -> Result<String> {

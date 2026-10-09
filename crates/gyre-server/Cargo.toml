@@ -47,6 +47,7 @@ subtle = { workspace = true }
 ring = { workspace = true }
 x509-parser = { version = "0.16", features = ["verify"] }
 rcgen = { version = "0.13" }
+pem = "3.0"
 base64 = "0.22"
 zstd = { workspace = true }
 tempfile = "3"

@@ -313,6 +313,10 @@ pub struct AuthenticatedAgent {
     /// - JWT auth (Keycloak or agent JWT): populated with the full claims object.
     /// - Global token or API key: `None` — ABAC checks are bypassed for these.
     pub jwt_claims: Option<serde_json::Value>,
+    /// The raw bearer token presented by the caller, when auth came from the
+    /// Authorization header. Needed at signing boundaries (task-107): the
+    /// Fulcio flow presents the caller's own validated JWT to the CA.
+    pub bearer_token: Option<String>,
     /// True when auth was performed via the deprecated `?token=` query parameter.
     /// Used by WebSocket handlers to send a deprecation warning to the client.
     pub deprecated_token_auth: bool,
@@ -499,6 +503,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                  to avoid token leakage in logs and browser history."
             );
         }
+        let bearer_token = header_token.map(|t| t.to_string());
         let token = header_token
             .or(query_token)
             .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Missing Bearer token").into_response())?;
@@ -511,6 +516,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 roles: vec![UserRole::Admin],
                 tenant_id: "default".to_string(),
                 jwt_claims: None, // Admin bypass — no ABAC evaluation.
+                bearer_token,
                 deprecated_token_auth,
             });
         }
@@ -549,6 +555,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     roles: vec![UserRole::Agent],
                     tenant_id: "default".to_string(),
                     jwt_claims,
+                    bearer_token,
                     deprecated_token_auth,
                 });
             }
@@ -582,6 +589,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     roles: user.roles,
                     tenant_id: "default".to_string(),
                     jwt_claims: None, // API key — no ABAC evaluation.
+                    bearer_token,
                     deprecated_token_auth,
                 });
             }
@@ -591,6 +599,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
         if let Some(jwt_cfg) = &state.jwt_config {
             if let Ok(mut auth) = validate_jwt(token, jwt_cfg, state).await {
                 auth.deprecated_token_auth = deprecated_token_auth;
+                auth.bearer_token = bearer_token.clone();
                 return Ok(auth);
             }
         }
@@ -599,6 +608,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
         if token.starts_with("ey") {
             if let Some(mut auth) = validate_federated_jwt(token, state).await {
                 auth.deprecated_token_auth = deprecated_token_auth;
+                auth.bearer_token = bearer_token.clone();
                 return Ok(auth);
             }
         }
@@ -623,6 +633,7 @@ pub async fn authenticate_token(
             roles: vec![UserRole::Admin],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: Some(token.to_string()),
             deprecated_token_auth: false,
         });
     }
@@ -653,6 +664,7 @@ pub async fn authenticate_token(
                 roles: vec![UserRole::Agent],
                 tenant_id: "default".to_string(),
                 jwt_claims,
+                bearer_token: Some(token.to_string()),
                 deprecated_token_auth: false,
             });
         }
@@ -677,6 +689,7 @@ pub async fn authenticate_token(
                 roles: user.roles,
                 tenant_id: "default".to_string(),
                 jwt_claims: None,
+                bearer_token: Some(token.to_string()),
                 deprecated_token_auth: false,
             });
         }
@@ -790,6 +803,7 @@ async fn validate_jwt(
         roles: user.roles,
         tenant_id,
         jwt_claims: raw_claims,
+        bearer_token: Some(token.to_string()),
         deprecated_token_auth: false,
     })
 }
@@ -1000,6 +1014,7 @@ async fn validate_federated_jwt(token: &str, state: &Arc<AppState>) -> Option<Au
         roles: vec![UserRole::Agent],
         tenant_id: "default".to_string(),
         jwt_claims: fed_claims_json,
+        bearer_token: Some(token.to_string()),
         deprecated_token_auth: false,
     })
 }

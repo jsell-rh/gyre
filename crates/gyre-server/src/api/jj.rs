@@ -114,7 +114,16 @@ pub async fn jj_new(
 /// POST /api/v1/repos/:id/jj/squash
 ///
 /// Squashes the working copy into its parent change and signs the resulting
-/// commit SHA with the forge's Ed25519 key (M13.8 Sigstore local signing).
+/// commit SHA. Signing mode comes from `GYRE_SIGNING_MODE`:
+/// - `fulcio`: keyless Sigstore signing — Fulcio certificate issued against
+///   the caller's OIDC JWT, commit signed with the ephemeral key, signature
+///   recorded in Rekor (task-107).
+/// - `none`: no signature record.
+/// - `local` (default): forge Ed25519 key (M13.8).
+///
+/// Any failure in the external Fulcio/Rekor stack falls back to local
+/// signing with a warning — squash itself never fails because of the
+/// external signing stack.
 pub async fn jj_squash(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
@@ -130,33 +139,98 @@ pub async fn jj_squash(
         .await
         .map_err(ApiError::Internal)?;
 
-    // Sign the resulting commit SHA with the forge's Ed25519 key.
-    let record = commit_signatures::sign_commit(
-        &commit_sha,
-        "forge",
-        &state.agent_signing_key,
-        state.sigstore_mode.clone(),
-    );
+    let config = &state.signing_config;
+    if config.mode == commit_signatures::SigningMode::None {
+        // `none` mode: skip signing entirely — no record is produced. The
+        // response reports the commit with an empty signature so callers can
+        // distinguish "unsigned" from "signed" without a second lookup.
+        return Ok(Json(CommitSignature {
+            repo_id: repo_id.clone(),
+            commit_sha,
+            signer_id: auth.agent_id.clone(),
+            task_id: String::new(),
+            spawned_by: String::new(),
+            algorithm: String::new(),
+            signature: String::new(),
+            signing_key_id: String::new(),
+            signed_at: 0,
+            sigstore_mode: gyre_ports::SigstoreMode::Local,
+            oidc_subject: String::new(),
+            oidc_issuer: String::new(),
+            certificate_pem: None,
+            certificate_chain_pem: None,
+            rekor_entry_id: None,
+        }));
+    }
+
+    // Attribution comes from the caller's validated JWT claims — never
+    // placeholder literals (task-107 F2). Non-JWT callers (dev token, API
+    // key) fall back to the resolved agent id with empty task/user fields.
+    let attribution = commit_signatures::SigningAttribution::from_auth(&auth);
+
+    let record = if config.mode == commit_signatures::SigningMode::Fulcio {
+        // Keyless: present the caller's JWT to Fulcio. The token was
+        // validated at authentication time; Fulcio re-validates the OIDC
+        // identity itself before issuing.
+        let jwt = auth.bearer_token.clone().unwrap_or_default();
+        let transport = crate::sigstore::production_transport(state.http_client.clone());
+        match crate::sigstore::sign_commit_keyless(
+            &repo_id,
+            &commit_sha,
+            &attribution,
+            &jwt,
+            config,
+            transport.as_ref(),
+        )
+        .await
+        {
+            Ok(signed) => {
+                let record = signed.record;
+                tracing::info!(
+                    commit_sha = %commit_sha,
+                    rekor_entry_id = ?record.rekor_entry_id,
+                    "jj squash: commit signed via Fulcio keyless (task-107)"
+                );
+                record
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "jj squash: Fulcio keyless signing failed; falling back to local signing"
+                );
+                commit_signatures::sign_commit_local(
+                    &repo_id,
+                    &commit_sha,
+                    &attribution,
+                    &state.agent_signing_key,
+                    &state.base_url,
+                )
+            }
+        }
+    } else {
+        commit_signatures::sign_commit_local(
+            &repo_id,
+            &commit_sha,
+            &attribution,
+            &state.agent_signing_key,
+            &state.base_url,
+        )
+    };
 
     state
         .commit_signatures
-        .lock()
+        .save(&record)
         .await
-        .insert(commit_sha.clone(), record.clone());
-
-    tracing::info!(
-        commit_sha = %commit_sha,
-        signing_key_id = %record.signing_key_id,
-        mode = ?record.sigstore_mode,
-        "jj squash: commit signed (M13.8)"
-    );
+        .map_err(ApiError::Internal)?;
 
     Ok(Json(record))
 }
 
 /// GET /api/v1/repos/:id/commits/:sha/signature
 ///
-/// Return the Sigstore commit signature for a specific commit SHA, if one exists.
+/// Return the stored commit signature for `(repo_id, sha)`. Lookup is scoped
+/// by repo: a record created for repo A is not retrievable through repo B's
+/// path.
 pub async fn get_commit_signature(
     State(state): State<Arc<AppState>>,
     Path((repo_id, sha)): Path<(String, String)>,
@@ -164,10 +238,11 @@ pub async fn get_commit_signature(
     // Verify the repo exists.
     let _ = repo_path(&state, &repo_id).await?;
 
-    let store = state.commit_signatures.lock().await;
-    store
-        .get(&sha)
-        .cloned()
+    state
+        .commit_signatures
+        .find(&repo_id, &sha)
+        .await
+        .map_err(ApiError::Internal)?
         .map(Json)
         .ok_or_else(|| ApiError::NotFound(format!("no signature found for commit {sha}")))
 }
