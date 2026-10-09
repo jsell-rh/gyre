@@ -2,10 +2,10 @@
 title: "Implement graph narrative generation (template-based + LLM-synthesized)"
 spec_ref: "realized-model.md §6"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "realized-model.md §6 Narrative Generation"
-commits: ["95f1a147e04b1e0ff8b380aa37a9c5556c39af01", "f88e55b70b980e2f9823a51315097d3e8a8b6334"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -68,27 +68,13 @@ From `realized-model.md` §6 — Narrative Generation:
 
 ## Acceptance Criteria
 
-- [x] `generate_template_narrative()` produces human-readable summaries from ArchitecturalDelta
-- [x] Template narratives include spec governance ("Governed by spec: X") when `governed_by` edges exist
-- [x] Template narratives include agent attribution ("Produced by agent Y under persona Z") when provenance exists
-- [x] Timeline endpoint includes `narrative` field in each delta response
-- [x] LLM narrative function exists and falls back to template on failure
-- [x] Briefing endpoint uses narratives for architectural change summaries
-- [x] Tests cover addition, removal, modification, and empty delta cases
-
-## Shipped
-
-Template narrative generator grounded in the live knowledge graph (`crates/gyre-domain/src/narrative.rs`): `NarrativeGrounding::from_graph` indexes Contains parent modules, Implements traits, FieldOf fields, GovernedBy spec edges and node `spec_path` columns (soft-deleted nodes/edges excluded); `generate_template_narrative` renders per-node additions with module/trait/field enumeration (spec's example shape), removals, modifications with old→new field changes (char-boundary-safe truncation), edge relationship counts, "Governed by spec: X" (grounding ∪ commit `spec_ref`, `@sha` stripped), and "Produced by agent Y under persona Z", with >3 additions grouped per module+type, legacy count-only `delta_json` support, and empty/malformed-delta → empty narrative.
-
-`narrative` field on every timeline and diff delta response (`crates/gyre-server/src/api/graph.rs`): grounding loaded once per request via real `graph_store` queries, per-delta provenance via real `agents.find_by_id` + `agent_personas` kv lookup. The old "stubbed for now" comment is gone.
-
-LLM-synthesized briefing architecture narrative (`llm_architecture_narrative`): real prompt-template + model-config infrastructure, grounded facts JSON injected into the prompt with anti-hallucination instructions, 10s `tokio::time::timeout`; falls back to concatenated template narratives on unconfigured LLM, port error, timeout, or empty completion. `assemble_briefing` feeds template narratives into the architectural change section and the LLM narrative into the briefing `summary`.
-
-Tests: 11 domain unit tests (addition, removal, modification, grouping, spec governance, agent attribution, empty delta, char-boundary truncation, legacy formats) + 3 server tests through the real router (timeline narrative, briefing LLM path, briefing template fallback).
-
-Gate repair (follow-up `e69fa0fe`): the pre-existing template-substitution gate's const-span heuristic attributed the next const's `/// Variables:` doc block to this const, producing 7 false positives on pristine main (pre-commit-only; CI never ran it) — fixed by stripping comment lines from the span, with planted-bug probes proving the fixed gate still catches both true-positive classes.
-
-Resume (cutover-task-152, merged as `b1969768` with base `4b9d61c4`): the retained source `2d854a17` survived the merge with zero diff on every narrative-touched file (`git diff 2d854a17 HEAD -- crates/gyre-domain crates/gyre-server/src/api crates/gyre-common` = admin.rs only, unrelated). Re-verified at merged HEAD: `cargo build -p gyre-domain` clean; `cargo test -p gyre-domain --lib narrative` 11 passed / 0 failed; `cargo test -p gyre-server --lib -- narrative briefing` (see review evidence); check-template-substitution, check-arch, check-byte-slice-truncation, check-task-commit-attribution all exit 0 at the restored commits list. Review history: two prior complete verdicts (rounds 1 and 2 in `specs/reviews/task-152.md`) remain accurate for this tree.
+- [ ] `generate_template_narrative()` produces human-readable summaries from ArchitecturalDelta
+- [ ] Template narratives include spec governance ("Governed by spec: X") when `governed_by` edges exist
+- [ ] Template narratives include agent attribution ("Produced by agent Y under persona Z") when provenance exists
+- [ ] Timeline endpoint includes `narrative` field in each delta response
+- [ ] LLM narrative function exists and falls back to template on failure
+- [ ] Briefing endpoint uses narratives for architectural change summaries
+- [ ] Tests cover addition, removal, modification, and empty delta cases
 
 ## Agent Instructions
 
