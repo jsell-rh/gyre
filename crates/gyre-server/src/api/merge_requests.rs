@@ -698,9 +698,10 @@ pub async fn list_comments(
     ))
 }
 
-#[instrument(skip(state, req), fields(mr_id = %id, reviewer = %req.reviewer_agent_id, decision = %req.decision))]
+#[instrument(skip(state, auth, req), fields(mr_id = %id, reviewer = %req.reviewer_agent_id, decision = %req.decision))]
 pub async fn submit_review(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Path(id): Path<String>,
     Json(req): Json<SubmitReviewRequest>,
 ) -> Result<(StatusCode, Json<ReviewResponse>), ApiError> {
@@ -711,8 +712,21 @@ pub async fn submit_review(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
 
+    // Reviewer identity binding (task-134): a caller authenticated with a
+    // scoped JWT (`review:submit`) must submit under its own token subject.
+    // Without this, a gate agent could forge reviews under any reviewer id.
+    let reviewer_agent_id = if let Some(scope) = auth.jwt_claims.as_ref().and_then(|c| c.get("scope")).and_then(|s| s.as_str()) {
+        if scope.contains("review:submit") {
+            auth.agent_id.clone()
+        } else {
+            req.reviewer_agent_id
+        }
+    } else {
+        req.reviewer_agent_id
+    };
+
     let decision = parse_review_decision(&req.decision)?;
-    let mut review = Review::new(new_id(), mr_id, req.reviewer_agent_id, decision, now_secs());
+    let mut review = Review::new(new_id(), mr_id, reviewer_agent_id, decision, now_secs());
     review.body = req.body;
 
     state.reviews.submit_review(&review).await?;
