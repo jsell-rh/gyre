@@ -13,8 +13,9 @@
 # --- task-106 revision round owns these (repos_root / repo.path) ---
 # --- unowned; fix opportunistically when touching these files ---
 crates/gyre-adapters/src/sqlite/conversation.rs:191   # GYRE_CONVERSATIONS_PATH default "./conversations" — relative at rest
-crates/gyre-server/src/api/spawn.rs:597   # comment quoting the "./repos/" default in prose — not a path value; canonicalize call lives at :598-600
+crates/gyre-server/src/api/spawn.rs:604   # comment quoting the "./repos/" default in prose — not a path value; canonicalize call lives at :598-600
 crates/gyre-server/src/snapshot.rs:9                  # DEFAULT_SNAPSHOT_PATH "./snapshots" — relative at rest
+
 
 # --- task-099 revision round owns this (F6: starter kit written to a
 # relative "./<repo-name>" when --repo-path is omitted — dynamic

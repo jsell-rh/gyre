@@ -366,6 +366,9 @@ pub async fn admin_reassign_agent(
     let now = now_secs();
     for mut task in tasks {
         task.assigned_to = Some(target.id.clone());
+        // §2.4 replay prevention: reassignment bumps the deployment generation,
+        // invalidating SignedInputs pinned to the previous generation.
+        task.generation = task.generation.saturating_add(1);
         task.updated_at = now;
         state.tasks.update(&task).await?;
     }
