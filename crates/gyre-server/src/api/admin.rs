@@ -316,7 +316,7 @@ pub async fn admin_kill_agent(
             "description": format!("Agent {} force-killed by admin", agent.name),
             "timestamp": now,
         })),
-    );
+    ).await;
 
     // M23: Emit container_crashed audit event if this agent had a container.
     if let Ok(Some(rec)) = state.container_audits.find_by_agent_id(&id).await {
@@ -378,7 +378,7 @@ pub async fn admin_reassign_agent(
             "agent_id": agent.id.to_string(),
             "description": format!("Agent {} tasks reassigned to {}", agent.name, target.name),
         })),
-    );
+    ).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -689,7 +689,7 @@ pub async fn admin_seed(
                 "description": description,
                 "timestamp": timestamp,
             })),
-        );
+        ).await;
     }
 
     Ok(Json(SeedResponse {
@@ -929,7 +929,7 @@ mod tests {
                 "description": "Test event",
                 "timestamp": 1000u64,
             })),
-        );
+        ).await;
 
         let app = api_router().with_state(state);
         let resp = app
@@ -961,7 +961,7 @@ mod tests {
                 "description": "From agent-x",
                 "timestamp": 1000u64,
             })),
-        );
+        ).await;
         state.emit_telemetry(
             gyre_common::Id::new("default"),
             gyre_common::message::MessageKind::StateChanged,
@@ -972,7 +972,7 @@ mod tests {
                 "description": "From agent-y",
                 "timestamp": 2000u64,
             })),
-        );
+        ).await;
 
         let app = api_router().with_state(state);
         let resp = app

@@ -101,6 +101,9 @@ pub struct CreateUserResponse {
 pub struct CreateUserUser {
     pub id: String,
     pub username: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub tenant_id: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -131,6 +134,9 @@ pub struct SpawnOrchestratorAgent {
     #[serde(default)]
     #[allow(dead_code)]
     pub restart_on_failure: Option<bool>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub persona_id: Option<String>,
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1046,10 +1052,11 @@ impl GyreClient {
         Ok(personas.into_iter().find(|p| p.slug == slug))
     }
 
-    /// POST /api/v1/users - create the admin user; response contains the
-    /// API key exactly once.
-    pub async fn create_user(&self, username: &str) -> Result<CreateUserResponse> {
-        let body = serde_json::json!({ "username": username });
+    /// POST /api/v1/users - create the admin user bound to a tenant; the
+    /// response contains the API key exactly once. `tenant_id` is REQUIRED
+    /// by the server (task-099 F1: the user is scoped at creation).
+    pub async fn create_user(&self, username: &str, tenant_id: &str) -> Result<CreateUserResponse> {
+        let body = serde_json::json!({ "username": username, "tenant_id": tenant_id });
         let resp = self
             .client
             .post(format!("{}/api/v1/users", self.base_url))

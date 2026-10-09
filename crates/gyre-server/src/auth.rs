@@ -298,6 +298,22 @@ pub(crate) fn hash_api_key(key: &str) -> String {
     result.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Tenant scope for server-originated principals: the global token, spawned
+/// agent tokens, and federated agents.
+///
+/// This is the DOCUMENTED contract, not a fabricated fallback:
+/// - hierarchy-enforcement.md §1 "Bootstrap Behavior": on first startup the
+///   server provisions a default tenant, and legacy `tenant_id DEFAULT
+///   'default'` columns reference it.
+/// - message-bus.md "Origin and tenant resolution from auth context": the
+///   global `GYRE_AUTH_TOKEN` resolves as the default (bootstrap) tenant.
+/// Callers that can resolve a real scope from stored state (e.g. API-key
+/// users via `user.tenant_id`, workspaces via `ws.tenant_id`) MUST do so
+/// and must fail closed when it is absent.
+pub(crate) fn system_principal_tenant() -> String {
+    "default".to_string()
+}
+
 /// Resolved principal injected by the auth extractor.
 #[derive(Clone)]
 pub struct AuthenticatedAgent {
@@ -306,8 +322,11 @@ pub struct AuthenticatedAgent {
     pub user_id: Option<Id>,
     pub roles: Vec<UserRole>,
     /// Tenant scope for this request.
-    /// - JWT auth: extracted from `tenant_id` claim (defaults to "default").
-    /// - All other auth methods: always "default".
+    /// - JWT auth: extracted from the validated `tenant_id` claim.
+    /// - API-key auth: the user's stored tenant binding (fail-closed when
+    ///   the user has none — task-099 F1).
+    /// - Global token, agent tokens, federated JWTs: the server-originated
+    ///   default tenant (`system_principal_tenant`).
     pub tenant_id: String,
     /// Raw JWT claims for ABAC evaluation (G6).
     /// - JWT auth (Keycloak or agent JWT): populated with the full claims object.
@@ -509,7 +528,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 agent_id: "system".to_string(),
                 user_id: None,
                 roles: vec![UserRole::Admin],
-                tenant_id: "default".to_string(),
+                tenant_id: system_principal_tenant(),
                 jwt_claims: None, // Admin bypass — no ABAC evaluation.
                 deprecated_token_auth,
             });
@@ -547,7 +566,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     agent_id,
                     user_id: None,
                     roles: vec![UserRole::Agent],
-                    tenant_id: "default".to_string(),
+                    tenant_id: system_principal_tenant(),
                     jwt_claims,
                     deprecated_token_auth,
                 });
@@ -576,11 +595,30 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
         // 3. API keys -- look up by SHA-256 hash of the raw token.
         if let Ok(Some(user_id)) = state.api_keys.find_user_id(&hash_api_key(token)).await {
             if let Ok(Some(user)) = state.users.find_by_id(&user_id).await {
+                // F1: the tenant scope comes from the user's stored binding.
+                // Fail closed when it is absent: fabricating a tenant here
+                // made API-key admins global superusers across tenants.
+                let tenant_id = match user.tenant_id.clone() {
+                    Some(t) => t.to_string(),
+                    None => {
+                        tracing::warn!(
+                            user_id = %user.id,
+                            username = %user.username,
+                            "API-key auth for user without tenant binding; rejecting. \
+                             Re-provision the user via POST /api/v1/users with tenant_id."
+                        );
+                        return Err((
+                            StatusCode::FORBIDDEN,
+                            "user has no tenant binding; re-provision via POST /api/v1/users",
+                        )
+                            .into_response());
+                    }
+                };
                 return Ok(AuthenticatedAgent {
                     agent_id: user.display_name.clone(),
                     user_id: Some(user.id),
                     roles: user.roles,
-                    tenant_id: "default".to_string(),
+                    tenant_id,
                     jwt_claims: None, // API key — no ABAC evaluation.
                     deprecated_token_auth,
                 });
@@ -621,7 +659,7 @@ pub async fn authenticate_token(
             agent_id: "system".to_string(),
             user_id: None,
             roles: vec![UserRole::Admin],
-            tenant_id: "default".to_string(),
+            tenant_id: system_principal_tenant(),
             jwt_claims: None,
             deprecated_token_auth: false,
         });
@@ -651,7 +689,7 @@ pub async fn authenticate_token(
                 agent_id,
                 user_id: None,
                 roles: vec![UserRole::Agent],
-                tenant_id: "default".to_string(),
+                tenant_id: system_principal_tenant(),
                 jwt_claims,
                 deprecated_token_auth: false,
             });
@@ -671,11 +709,24 @@ pub async fn authenticate_token(
     // 3. API keys.
     if let Ok(Some(user_id)) = state.api_keys.find_user_id(&hash_api_key(token)).await {
         if let Ok(Some(user)) = state.users.find_by_id(&user_id).await {
+            // F1: fail closed when the user has no tenant binding (see the
+            // extractor's API-key path for the rationale).
+            let tenant_id = match user.tenant_id.clone() {
+                Some(t) => t.to_string(),
+                None => {
+                    tracing::warn!(
+                        user_id = %user.id,
+                        username = %user.username,
+                        "API-key auth for user without tenant binding; rejecting"
+                    );
+                    return Err("user has no tenant binding; re-provision via POST /api/v1/users");
+                }
+            };
             return Ok(AuthenticatedAgent {
                 agent_id: user.display_name.clone(),
                 user_id: Some(user.id),
                 roles: user.roles,
-                tenant_id: "default".to_string(),
+                tenant_id,
                 jwt_claims: None,
                 deprecated_token_auth: false,
             });
@@ -773,13 +824,15 @@ async fn validate_jwt(
     let tenant_id = claims.tenant_id.as_deref().unwrap_or("default").to_string();
     validate_tenant_id(&tenant_id, &roles).map_err(|e| format!("invalid tenant_id in JWT: {e}"))?;
 
-    // Find or auto-create user.
+    // Find or auto-create user. The validated tenant claim binds the user
+    // at creation (F1): an OIDC user must not exist as tenant-less.
     let user = find_or_create_user(
         state,
         &claims.sub,
         &username,
         claims.email.as_deref(),
         &roles,
+        &tenant_id,
     )
     .await
     .map_err(|e| format!("user resolution: {e}"))?;
@@ -800,6 +853,7 @@ async fn find_or_create_user(
     name: &str,
     email: Option<&str>,
     roles: &[UserRole],
+    tenant_id: &str,
 ) -> anyhow::Result<User> {
     if let Some(existing) = state.users.find_by_external_id(external_id).await? {
         return Ok(existing);
@@ -816,6 +870,9 @@ async fn find_or_create_user(
     if !roles.is_empty() {
         user.roles = roles.to_vec();
     }
+    // F1: bind the user to the validated tenant claim so later API-key or
+    // JWT auth for this user resolves a real scope.
+    user.tenant_id = Some(Id::new(tenant_id));
 
     state.users.create(&user).await?;
     Ok(user)
@@ -998,7 +1055,7 @@ async fn validate_federated_jwt(token: &str, state: &Arc<AppState>) -> Option<Au
         agent_id: format!("{remote_host}/{}", claims.sub),
         user_id: None,
         roles: vec![UserRole::Agent],
-        tenant_id: "default".to_string(),
+        tenant_id: system_principal_tenant(),
         jwt_claims: fed_claims_json,
         deprecated_token_auth: false,
     })

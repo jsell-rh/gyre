@@ -33,6 +33,7 @@ struct UserRow {
     display_name: Option<String>,
     timezone: Option<String>,
     locale: Option<String>,
+    tenant_id: Option<String>,
 }
 
 impl From<UserRow> for User {
@@ -55,6 +56,7 @@ impl From<UserRow> for User {
         if let Some(loc) = r.locale {
             u.locale = loc;
         }
+        u.tenant_id = r.tenant_id.map(Id::new);
         u
     }
 }
@@ -72,6 +74,7 @@ struct UserRecord<'a> {
     display_name: Option<&'a str>,
     timezone: Option<&'a str>,
     locale: Option<&'a str>,
+    tenant_id: Option<&'a str>,
 }
 
 #[derive(Insertable)]
@@ -102,6 +105,7 @@ impl UserRepository for PgStorage {
                 display_name: Some(u.display_name.as_str()),
                 timezone: Some(u.timezone.as_str()),
                 locale: Some(u.locale.as_str()),
+                tenant_id: u.tenant_id.as_ref().map(|id| id.as_str()),
             };
             diesel::insert_into(users::table)
                 .values(&record)
@@ -171,6 +175,7 @@ impl UserRepository for PgStorage {
                     users::display_name.eq(Some(u.display_name.as_str())),
                     users::timezone.eq(Some(u.timezone.as_str())),
                     users::locale.eq(Some(u.locale.as_str())),
+                    users::tenant_id.eq(u.tenant_id.as_ref().map(|id| id.as_str())),
                 ))
                 .execute(&mut *conn)
                 .context("update user")?;

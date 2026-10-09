@@ -39,6 +39,8 @@ diesel::table! {
         orchestrator_type -> Text,
         repo_id -> Nullable<Text>,
         restart_on_failure -> Bool,
+        // TASK-099 F2: persona attached to this agent (orchestrators).
+        persona_id -> Nullable<Text>,
     }
 }
 
@@ -180,6 +182,9 @@ diesel::table! {
         display_name -> Nullable<Text>,
         timezone -> Nullable<Text>,
         locale -> Nullable<Text>,
+        // TASK-099 F1: tenant binding; nullable for legacy OIDC users
+        // (the auth extractor fail-closes on unbound users).
+        tenant_id -> Nullable<Text>,
     }
 }
 

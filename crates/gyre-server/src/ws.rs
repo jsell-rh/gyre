@@ -321,7 +321,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                             "description": description,
                                             "timestamp": timestamp,
                                         })),
-                                    );
+                                    ).await;
                                 }
                                 WsMessage::ActivityQuery { since, limit } => {
                                     // Query TelemetryBuffer scoped to subscribed workspaces.

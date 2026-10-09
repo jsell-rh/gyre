@@ -63,6 +63,10 @@ pub struct UserProfileResponse {
     pub preferences: serde_json::Value,
     pub created_at: u64,
     pub updated_at: u64,
+    /// Tenant binding (platform-model.md §1: every user belongs to exactly
+    /// one tenant). None for legacy users provisioned before the binding
+    /// existed (F1); those fail closed at the auth extractor.
+    pub tenant_id: Option<String>,
 }
 
 impl From<User> for UserProfileResponse {
@@ -80,6 +84,7 @@ impl From<User> for UserProfileResponse {
             preferences: prefs,
             created_at: u.created_at,
             updated_at: u.updated_at,
+            tenant_id: u.tenant_id.map(|t| t.to_string()),
         }
     }
 }
@@ -111,6 +116,7 @@ pub async fn get_me(
         preferences: serde_json::json!({}),
         created_at: 0,
         updated_at: 0,
+        tenant_id: None,
     };
     Ok(Json(profile))
 }
@@ -714,6 +720,10 @@ pub async fn create_token(
 #[derive(Deserialize)]
 pub struct CreateUserRequest {
     pub username: String,
+    /// Tenant this user belongs to (platform-model.md §1). REQUIRED: the
+    /// user is scoped at creation; a user without a tenant would force the
+    /// auth extractor to fabricate a scope (task-099 F1).
+    pub tenant_id: String,
     /// Role names (UserRole variants). Defaults to ["Admin"] when omitted.
     pub roles: Option<Vec<String>>,
 }
@@ -789,6 +799,20 @@ pub async fn create_user(
         )));
     }
 
+    // F1: the user must be bound to a real tenant at creation. Load the
+    // tenant so a typo'd or foreign id is rejected here, not silently
+    // stored as an unscoped user.
+    let tenant = state
+        .tenants
+        .find_by_id(&Id::new(&req.tenant_id))
+        .await?
+        .ok_or_else(|| {
+            ApiError::InvalidInput(format!(
+                "tenant '{}' does not exist; create it before provisioning users",
+                req.tenant_id
+            ))
+        })?;
+
     let now = now_secs();
     let mut user = User::new(new_id(), external_id, username, now);
     user.roles = roles;
@@ -797,6 +821,7 @@ pub async fn create_user(
     } else {
         gyre_domain::GlobalRole::Member
     };
+    user.tenant_id = Some(tenant.id);
     state.users.create(&user).await?;
 
     // Mint an API key registered in the auth-resolving store. Raw key is
@@ -1180,9 +1205,17 @@ mod tests {
         assert_eq!(notifs[0]["notification_type"], "ConflictingInterpretations");
     }
 
+    /// Seed a tenant so create_user's tenant validation can resolve it
+    /// (task-099 F1: the user is bound to a real tenant at creation).
+    async fn seed_tenant(state: &std::sync::Arc<crate::AppState>) {
+        let tenant = gyre_domain::Tenant::new(gyre_common::Id::new("t-1"), "Acme", "acme", 0);
+        state.tenants.create(&tenant).await.unwrap();
+    }
+
     #[tokio::test]
     async fn admin_creates_user_with_authenticating_api_key() {
         let state = test_state();
+        seed_tenant(&state).await;
         let app = crate::api::api_router().with_state(state.clone());
 
         let resp = app
@@ -1192,7 +1225,7 @@ mod tests {
                     .uri("/api/v1/users")
                     .header("Authorization", "Bearer test-token")
                     .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"username":"jsell"}"#))
+                    .body(Body::from(r#"{"username":"jsell","tenant_id":"t-1"}"#))
                     .unwrap(),
             )
             .await
@@ -1201,6 +1234,8 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["user"]["username"], "jsell");
         assert_eq!(json["user"]["global_role"], "TenantAdmin");
+        // F1: the user is bound to the requested tenant on the wire.
+        assert_eq!(json["user"]["tenant_id"], "t-1");
         let user_id = json["user"]["id"].as_str().unwrap().to_string();
         assert!(!user_id.is_empty());
 
@@ -1218,9 +1253,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_key_authenticates_through_full_router_with_tenant_binding() {
+        // F7: exercise the minted key through the REAL auth extractor (full
+        // router, Authorization: Bearer <raw key>), not just the store.
+        // Asserts the request authenticates as the new user AND carries the
+        // user's tenant binding (F1) — no fabricated "default" scope.
+        let state = test_state();
+        seed_tenant(&state).await;
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Create the user + key via the API (Admin via global token).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/users")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"username":"jsell","tenant_id":"t-1"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let raw_key = json["api_key"]["key"].as_str().unwrap().to_string();
+        let user_id = json["user"]["id"].as_str().unwrap().to_string();
+
+        // Now authenticate with the raw key through the full router.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/users/me")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "raw key must authenticate");
+        let me = body_json(resp).await;
+        assert_eq!(me["id"], user_id.as_str());
+        assert_eq!(me["username"], "jsell");
+        // The profile carries the tenant binding minted at creation.
+        assert_eq!(me["tenant_id"], "t-1");
+    }
+
+    #[tokio::test]
+    async fn create_user_rejects_unknown_tenant() {
+        // F1: a user cannot be provisioned against a tenant that does not
+        // exist — that would store an unscoped user.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/users")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        r#"{"username":"orphan","tenant_id":"no-such-tenant"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn create_user_rejects_duplicate_external_id() {
         let state = test_state();
-        let body = r#"{"username":"dup"}"#;
+        seed_tenant(&state).await;
+        let body = r#"{"username":"dup","tenant_id":"t-1"}"#;
         for i in 0..2 {
             let resp = crate::api::api_router()
                 .with_state(state.clone())
@@ -1256,7 +1366,9 @@ mod tests {
                     .uri("/api/v1/users")
                     .header("Authorization", "Bearer test-token")
                     .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"username":"x","roles":["Superuser"]}"#))
+                    .body(
+                    Body::from(r#"{"username":"x","tenant_id":"t-1","roles":["Superuser"]}"#),
+                )
                     .unwrap(),
             )
             .await

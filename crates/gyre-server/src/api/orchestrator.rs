@@ -16,8 +16,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use gyre_common::Id;
 use gyre_domain::AnalyticsEvent;
-use gyre_domain::{AgentStatus, MetaSpecApprovalStatus, MetaSpecKind, OrchestratorType};
-use gyre_ports::MetaSpecFilter;
+use gyre_domain::{AgentStatus, OrchestratorType};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -51,22 +50,62 @@ fn is_live(a: &gyre_domain::Agent) -> bool {
     )
 }
 
-/// Soft persona validation (§3.1): warn and continue when the seeded persona
-/// meta-spec is missing or unapproved - never block the spawn path on it.
-async fn validate_persona(state: &AppState, name: &str) {
-    let filter = MetaSpecFilter {
-        kind: Some(MetaSpecKind::Persona),
-        ..Default::default()
-    };
-    if let Ok(personas) = state.meta_specs.list(&filter).await {
-        match personas.iter().find(|p| p.name == name) {
-            None => tracing::warn!(persona = name, "persona meta-spec not found"),
-            Some(p) if !matches!(p.approval_status, MetaSpecApprovalStatus::Approved) => {
-                tracing::warn!(persona = name, "persona meta-spec not approved")
+/// Resolve the persona an orchestrator spawn must attach (platform-model.md
+/// §3: "spawn repo orchestrator agent with repo-orchestrator persona").
+///
+/// Consults `state.personas` (the store `gyre bootstrap` step 5 populates),
+/// NOT `state.meta_specs`. Resolution is nearest-scope-wins (§2):
+/// Repo > Workspace > Tenant. Fail-closed: a persona that does not resolve,
+/// or resolves but is not Approved, rejects the spawn — an orchestrator
+/// running without its persona is an unstyled coordination agent, which is
+/// exactly what the spec forbids.
+async fn resolve_orchestrator_persona(
+    state: &AppState,
+    slug: &str,
+    workspace_id: &Id,
+    repo_id: Option<&Id>,
+) -> Result<gyre_domain::Persona, ApiError> {
+    use gyre_domain::{PersonaApprovalStatus, PersonaScope};
+
+    // Tenant scope id comes from the workspace record (the hierarchy root
+    // of this spawn) — never fabricated from a literal.
+    let tenant_id = state
+        .workspaces
+        .find_by_id(workspace_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {workspace_id} not found")))?
+        .tenant_id;
+
+    let mut scopes: Vec<PersonaScope> = Vec::new();
+    if let Some(rid) = repo_id {
+        scopes.push(PersonaScope::Repo(rid.clone()));
+    }
+    scopes.push(PersonaScope::Workspace(workspace_id.clone()));
+    scopes.push(PersonaScope::Tenant(tenant_id));
+
+    for scope in &scopes {
+        if let Some(persona) = state
+            .personas
+            .find_by_slug_and_scope(slug, scope)
+            .await
+            .map_err(ApiError::Internal)?
+        {
+            if persona.approval_status != PersonaApprovalStatus::Approved {
+                return Err(ApiError::Conflict(format!(
+                    "persona '{slug}' resolves in scope {:?} but is {:?}; \
+                     approve it before spawning its orchestrator",
+                    scope, persona.approval_status
+                )));
             }
-            _ => {}
+            return Ok(persona);
         }
     }
+
+    Err(ApiError::NotFound(format!(
+        "persona '{slug}' not found in scope chain (repo/workspace/tenant); \
+         register and approve it first (gyre bootstrap step 5 does this)"
+    )))
 }
 
 /// Common tail: persist agent, mint scoped JWT, register it, bootstrap the
@@ -81,6 +120,7 @@ async fn spawn_orchestrator(
     name: String,
     parent_id: Option<String>,
     auth_agent_id: &str,
+    persona_id: Id,
 ) -> Result<(gyre_domain::Agent, String), ApiError> {
     let now = now_secs();
 
@@ -98,6 +138,8 @@ async fn spawn_orchestrator(
     agent.repo_id = repo_id.cloned();
     agent.orchestrator_type = orchestrator_type.clone();
     agent.restart_on_failure = true;
+    // F2: persona binding persisted on the agent row (§3 step 8).
+    agent.persona_id = Some(persona_id);
     // Exactly-one-live semantics (§3.2): orchestrators abort on heartbeat
     // timeout so the stale detector restarts a replacement and (repo tier)
     // escalates the death to the workspace orchestrator.
@@ -184,7 +226,13 @@ pub(crate) async fn spawn_workspace_orchestrator_core(
         .await
         .map_err(ApiError::TooManyRequests)?;
 
-    validate_persona(state, "workspace-orchestrator").await;
+    let persona = resolve_orchestrator_persona(
+        state,
+        "workspace-orchestrator",
+        &ws_id,
+        None,
+    )
+    .await?;
 
     let name = req
         .name
@@ -197,6 +245,7 @@ pub(crate) async fn spawn_workspace_orchestrator_core(
         name,
         req.parent_id,
         auth_agent_id,
+        persona.id,
     )
     .await
 }
@@ -280,7 +329,7 @@ pub(crate) async fn spawn_repo_orchestrator_core(
         .await
         .map_err(ApiError::TooManyRequests)?;
 
-    validate_persona(state, "repo-orchestrator").await;
+    let persona = resolve_orchestrator_persona(state, "repo-orchestrator", &ws_id, Some(&rid)).await?;
 
     let name = req
         .name
@@ -293,6 +342,7 @@ pub(crate) async fn spawn_repo_orchestrator_core(
         name,
         req.parent_id,
         auth_agent_id,
+        persona.id,
     )
     .await
 }
@@ -336,7 +386,9 @@ mod tests {
         }
     }
 
-    /// Seed ws-1 with tenant t1 plus two repos r-1, r-2.
+    /// Seed ws-1 with tenant t1 plus two repos r-1, r-2, and the two
+    /// orchestrator personas pre-approved at tenant scope (bootstrap step 5
+    /// registers exactly these; F2 makes spawn require them).
     async fn seed(state: &crate::AppState) {
         let ws = gyre_domain::Workspace::new(Id::new("ws-1"), Id::new("t1"), "Ws", "ws", 0);
         state.workspaces.create(&ws).await.unwrap(); // non-atomic-create:ok — test seed, in-memory test state
@@ -349,6 +401,18 @@ mod tests {
                 0,
             );
             state.repos.create(&repo).await.unwrap(); // non-atomic-create:ok — test seed, in-memory test state
+        }
+        for slug in ["workspace-orchestrator", "repo-orchestrator"] {
+            let mut persona = gyre_domain::Persona::new(
+                Id::new(format!("{slug}-persona")),
+                slug,
+                slug,
+                gyre_domain::PersonaScope::Tenant(Id::new("t1")),
+                "test orchestrator persona",
+                0,
+            );
+            persona.approval_status = gyre_domain::PersonaApprovalStatus::Approved;
+            state.personas.create(&persona).await.unwrap(); // non-atomic-create:ok — test seed, in-memory test state
         }
     }
 
@@ -382,6 +446,11 @@ mod tests {
         assert!(agent.restart_on_failure);
         assert_eq!(agent.status, AgentStatus::Active);
         assert_eq!(agent.spawned_by.as_deref(), Some("user-1"));
+        // F2: persona resolved and attached (workspace-orchestrator persona).
+        assert_eq!(
+            agent.persona_id.as_ref().map(|p| p.to_string()),
+            Some("workspace-orchestrator-persona".to_string())
+        );
 
         // Scoped JWT: workspace tier carries workspace_id, no repo_id (§3.1).
         let claims = state
@@ -437,6 +506,11 @@ mod tests {
                 .unwrap();
         assert_eq!(agent.orchestrator_type, OrchestratorType::RepoOrchestrator);
         assert_eq!(agent.repo_id, Some(Id::new("r-1")));
+        // F2: persona resolved and attached (repo-orchestrator persona).
+        assert_eq!(
+            agent.persona_id.as_ref().map(|p| p.to_string()),
+            Some("repo-orchestrator-persona".to_string())
+        );
 
         // Scoped JWT: repo tier carries workspace_id + repo_id (§3.1).
         let claims = state

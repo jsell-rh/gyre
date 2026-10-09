@@ -473,6 +473,39 @@ fn sign_bus_message(key: &auth::AgentSigningKey, msg: &Message) -> (String, Stri
 }
 
 impl AppState {
+    /// Resolve the tenant scope for a server-originated message about a
+    /// workspace: the workspace record's tenant. Skips the emission and
+    /// logs when the workspace cannot be resolved (same contract as
+    /// `emit_reconciliation_completed`): a message carrying a fabricated
+    /// tenant re-targets delivery to whatever scope the id happens to
+    /// collide with.
+    async fn message_tenant_id(&self, workspace_id: Option<&Id>) -> Option<Id> {
+        match workspace_id {
+            Some(wid) => match self.workspaces.find_by_id(wid).await {
+                Ok(Some(ws)) => Some(ws.tenant_id),
+                Ok(None) => {
+                    tracing::warn!(
+                        workspace_id = %wid,
+                        "emit: workspace not found; skipping message (cannot resolve tenant scope)"
+                    );
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        workspace_id = %wid,
+                        error = %e,
+                        "emit: failed to resolve workspace tenant; skipping message"
+                    );
+                    None
+                }
+            },
+            // Broadcast messages have no workspace; server-originated
+            // broadcasts carry the documented default-tenant scope
+            // (message-bus.md auth-context table).
+            None => Some(Id::new(auth::system_principal_tenant())),
+        }
+    }
+
     /// Emit an Event-tier server-originated message: sign, persist, broadcast to WS clients,
     /// and dispatch to consumers. Best-effort: logs errors, never panics.
     pub async fn emit_event(
@@ -489,9 +522,15 @@ impl AppState {
             .as_millis() as u64;
         let id = Id::new(uuid::Uuid::new_v4().to_string());
 
+        // F1: tenant scope resolved from the workspace record, never a
+        // fabricated literal (skip-and-log on unresolvable).
+        let Some(tenant_id) = self.message_tenant_id(workspace_id.as_ref()).await else {
+            return;
+        };
+
         let mut msg = Message {
             id,
-            tenant_id: Id::new("default"),
+            tenant_id,
             from: MessageOrigin::Server,
             workspace_id,
             to,
@@ -521,7 +560,7 @@ impl AppState {
 
     /// Emit a Telemetry-tier message: push to TelemetryBuffer and broadcast to WS clients.
     /// Unsigned and not persisted.
-    pub fn emit_telemetry(
+    pub async fn emit_telemetry(
         &self,
         workspace_id: Id,
         kind: MessageKind,
@@ -533,9 +572,15 @@ impl AppState {
             .unwrap_or_default()
             .as_millis() as u64;
         let id = Id::new(uuid::Uuid::new_v4().to_string());
+
+        // F1: tenant scope resolved from the workspace record.
+        let Some(tenant_id) = self.message_tenant_id(Some(&workspace_id)).await else {
+            return;
+        };
+
         let msg = Message {
             id,
-            tenant_id: Id::new("default"),
+            tenant_id,
             from: MessageOrigin::Server,
             workspace_id: Some(workspace_id.clone()),
             to: Destination::Workspace(workspace_id),

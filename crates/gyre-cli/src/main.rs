@@ -1605,7 +1605,10 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
     let mut client_api = api;
     if !args.dev {
         let username = args.admin_user.as_deref().unwrap_or("admin");
-        match client_api.create_user(username).await {
+        // F1: bind the admin user to the tenant created in step 1 — the
+        // server rejects an unbound user, and the auth extractor fail-closes
+        // on one at API-key auth time.
+        match client_api.create_user(username, &summary.tenant_id).await {
             Ok(created) => {
                 summary.admin_username = Some(created.user.username.clone());
                 summary.api_key = Some(created.api_key.key.clone());

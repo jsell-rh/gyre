@@ -129,6 +129,10 @@ pub struct Agent {
     /// Defaults to true for orchestrators (exactly-one-live semantics).
     #[serde(default)]
     pub restart_on_failure: bool,
+    /// Persona attached at spawn time (platform-model.md §3: orchestrators
+    /// run with their tier's persona). Workers may carry one too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona_id: Option<Id>,
 }
 
 impl Agent {
@@ -150,6 +154,7 @@ impl Agent {
             orchestrator_type: OrchestratorType::default(),
             repo_id: None,
             restart_on_failure: false,
+            persona_id: None,
         }
     }
 

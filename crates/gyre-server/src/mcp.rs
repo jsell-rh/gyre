@@ -1407,7 +1407,7 @@ async fn handle_agent_complete(state: &AppState, args: &Value) -> Value {
                     "status": "idle",
                     "reason": format!("Agent {} completed task", agent.name),
                 })),
-            );
+            ).await;
 
             match state.agents.update(&agent).await {
                 Ok(()) => tool_result(format!("Agent {agent_id} marked complete")),
@@ -4959,6 +4959,19 @@ mod tests {
             );
             state.repos.create(&repo).await.unwrap();
         }
+        // F2: orchestrator spawn requires an approved repo-orchestrator
+        // persona in the scope chain (tenant scope here, as bootstrap
+        // step 5 registers it).
+        let mut persona = gyre_domain::Persona::new(
+            gyre_common::Id::new("repo-orchestrator-persona"),
+            "repo-orchestrator",
+            "repo-orchestrator",
+            gyre_domain::PersonaScope::Tenant(gyre_common::Id::new("t1")),
+            "test orchestrator persona",
+            0,
+        );
+        persona.approval_status = gyre_domain::PersonaApprovalStatus::Approved;
+        state.personas.create(&persona).await.unwrap();
         state
     }
 

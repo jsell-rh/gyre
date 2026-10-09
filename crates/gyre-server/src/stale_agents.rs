@@ -80,7 +80,7 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                         "status": "dead",
                         "reason": format!("Agent {} aborted (no heartbeat, abort behavior)", agent.name),
                     })),
-                );
+                ).await;
 
                 // Notify the spawning user that the agent was abandoned (HSI §2).
                 if let Some(ref spawned_by) = agent.spawned_by {
@@ -124,7 +124,7 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                         "status": "stopped",
                         "reason": format!("Agent {} stopped (no heartbeat, pause behavior)", agent.name),
                     })),
-                );
+                ).await;
             }
 
             DisconnectedBehavior::ContinueOffline => {
@@ -157,6 +157,9 @@ async fn restart_orchestrator(state: &AppState, dead: &gyre_domain::Agent, now: 
     replacement.repo_id = dead.repo_id.clone();
     replacement.orchestrator_type = dead.orchestrator_type.clone();
     replacement.restart_on_failure = true;
+    // F2: keep the persona binding across restarts — the replacement must
+    // run with the same persona as the orchestrator it replaces.
+    replacement.persona_id = dead.persona_id.clone();
     if let Err(e) = replacement.transition_status(AgentStatus::Active) {
         warn!("restart: failed to activate replacement: {e}");
         return;

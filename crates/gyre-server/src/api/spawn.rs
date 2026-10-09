@@ -76,6 +76,9 @@ pub struct OrchestratorAgentResponse {
     pub repo_id: Option<String>,
     /// Whether stale-agent auto-restart will respawn this orchestrator.
     pub restart_on_failure: bool,
+    /// Persona attached at spawn time (task-099 F2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persona_id: Option<String>,
 }
 
 /// Build the orchestrator response view of a domain agent (task-093).
@@ -93,6 +96,7 @@ pub(crate) fn orchestrator_response(a: Agent) -> OrchestratorAgentResponse {
         orchestrator_type: a.orchestrator_type.to_string(),
         repo_id: a.repo_id.as_ref().map(|id| id.to_string()),
         restart_on_failure: a.restart_on_failure,
+        persona_id: a.persona_id.as_ref().map(|id| id.to_string()),
     }
 }
 
