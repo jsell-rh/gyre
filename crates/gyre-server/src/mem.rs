@@ -3365,6 +3365,7 @@ fn test_state_inner(
         llm: Some(Arc::new(gyre_adapters::MockLlmPortFactory::echo())),
         user_notification_prefs: Arc::new(MemUserNotificationPreferenceRepository::default()),
         user_tokens: Arc::new(MemUserTokenRepository::default()),
+        sessions: Arc::new(MemSessionRepository::default()),
         judgment_ledger: Arc::new(MemJudgmentLedgerRepository),
         secrets: Arc::new(MemSecretRepository::default()),
         ws_tickets: crate::auth::WsTicketStore::new(),
@@ -3996,6 +3997,109 @@ impl gyre_ports::UserTokenRepository for MemUserTokenRepository {
         let mut guard = self.tokens.write().await;
         guard.retain(|t| !(t.id == *id && t.user_id == *user_id));
         Ok(())
+    }
+}
+
+// ─── MemSessionRepository ────────────────────────────────────────────────────
+
+#[derive(Default)]
+pub struct MemSessionRepository {
+    sessions: Arc<tokio::sync::RwLock<Vec<gyre_domain::UserSession>>>,
+}
+
+#[async_trait]
+impl gyre_ports::SessionRepository for MemSessionRepository {
+    async fn create(&self, session: &gyre_domain::UserSession) -> Result<()> {
+        let mut guard = self.sessions.write().await;
+        if guard.iter().any(|s| s.id == session.id) {
+            anyhow::bail!("session {} already exists", session.id);
+        }
+        guard.push(session.clone());
+        Ok(())
+    }
+
+    async fn list_for_user(&self, user_id: &Id) -> Result<Vec<gyre_domain::UserSession>> {
+        let guard = self.sessions.read().await;
+        Ok(guard
+            .iter()
+            .filter(|s| &s.user_id == user_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn find_by_id(&self, id: &Id) -> Result<Option<gyre_domain::UserSession>> {
+        Ok(self
+            .sessions
+            .read()
+            .await
+            .iter()
+            .find(|s| &s.id == id)
+            .cloned())
+    }
+
+    async fn find_by_token_hash(&self, token_hash: &str) -> Result<Option<gyre_domain::UserSession>> {
+        Ok(self
+            .sessions
+            .read()
+            .await
+            .iter()
+            .find(|s| s.token_hash == token_hash)
+            .cloned())
+    }
+
+    async fn find_by_credential_and_device(
+        &self,
+        user_id: &Id,
+        credential_hash: &str,
+        ip_address: &str,
+        user_agent: &str,
+    ) -> Result<Option<gyre_domain::UserSession>> {
+        Ok(self
+            .sessions
+            .read()
+            .await
+            .iter()
+            .find(|s| {
+                &s.user_id == user_id
+                    && s.token_hash == credential_hash
+                    && s.ip_address == ip_address
+                    && s.user_agent == user_agent
+            })
+            .cloned())
+    }
+
+    async fn touch(&self, id: &Id, last_active_at: u64) -> Result<()> {
+        let mut guard = self.sessions.write().await;
+        if let Some(s) = guard.iter_mut().find(|s| &s.id == id) {
+            s.last_active_at = last_active_at;
+        }
+        Ok(())
+    }
+
+    async fn revoke(&self, id: &Id, user_id: &Id) -> Result<()> {
+        let mut guard = self.sessions.write().await;
+        if let Some(s) = guard
+            .iter_mut()
+            .find(|s| s.id == *id && s.user_id == *user_id)
+        {
+            s.revoked = true;
+        }
+        Ok(())
+    }
+
+    async fn revoke_all_for_user(&self, user_id: &Id) -> Result<()> {
+        let mut guard = self.sessions.write().await;
+        for s in guard.iter_mut().filter(|s| &s.user_id == user_id) {
+            s.revoked = true;
+        }
+        Ok(())
+    }
+
+    async fn delete_expired_before(&self, cutoff: u64) -> Result<u64> {
+        let mut guard = self.sessions.write().await;
+        let before = guard.len();
+        guard.retain(|s| s.expires_at >= cutoff);
+        Ok((before - guard.len()) as u64)
     }
 }
 

@@ -115,6 +115,8 @@ pub use team::Team;
 pub use tenant::Tenant;
 pub use typescript_extractor::TypeScriptExtractor;
 pub use user::{GlobalRole, Theme, User, UserPreferences, UserRole};
-pub use user_profile::{JudgmentEntry, JudgmentType, UserNotificationPreference, UserToken};
+pub use user_profile::{
+    JudgmentEntry, JudgmentType, UserNotificationPreference, UserSession, UserToken,
+};
 pub use workspace::{Persona, PersonaApprovalStatus, PersonaScope, TrustLevel, Workspace};
 pub use workspace_membership::{WorkspaceMembership, WorkspaceRole};
