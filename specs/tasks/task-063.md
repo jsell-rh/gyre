@@ -3,7 +3,7 @@ title: "View Query Grammar — Scope Resolution, Emphasis & Rendering Primitives
 spec_ref: "view-query-grammar.md §4–9"
 depends_on:
   - task-062
-progress: ready-for-review
+progress: complete
 review: "specs/reviews/task-063.md"
 coverage_sections:
   - "view-query-grammar.md §4 2. Scope — What Subgraph to Show"

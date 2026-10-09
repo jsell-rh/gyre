@@ -203,3 +203,57 @@ over as implementer work this round:
 No production source was changed this round (source was already correct per R2); the
 deliverables are the implementer-owned coverage rows, the task-file record, and the
 fresh dist. Requests a fresh independent review.
+
+## Round 4 (fresh independent review — implementer-owned coverage rows + dist)
+
+Comparison base `66422bd4`, HEAD `656c1281`. This round's mandate: the R3 deliverables
+(coverage rows 4–9, fresh dist, task-file record) are now implementer work and can be
+independently approved. The rebase rewrote commit SHAs only —
+`git diff ea203dd 656c1281 -- web/src web/dist specs/` is zero bytes, so the R2-verified
+source fixes (F1 dead field, F2 all-scope, F3 tests) are unchanged in substance; the
+new frontmatter SHAs (`ff416a1f`/`ac5f41f6`/`7f5f8278`/`3c8b331e`) all resolve and
+`check-task-commit-attribution.sh` passes OK.
+
+Independently verified this round (all evidence under
+`/tmp/stage/review-evidence/task-063-r4/`):
+
+- **Coverage rows 4–9**: every line citation spot-checked against the current tree and
+  correct — scope branches ExplorerCanvas.svelte:1940 (all), 1942+ (focus/test_gaps/
+  filter/concept/diff); dim :2117-2119 with tree-group inheritance :2094-2104; heat
+  :2127-2177 + heatColor; tiered :2179-2186; highlight color+label :3274-3287; badges
+  :3290-3321; edge restriction :3575-3578; zoom :4769-4801 (level clamp, current no-op,
+  fit bbox ×0.8, lastZoomedQuery guard); annotation :4992-5009; interactive bindings
+  :71-87 ($selected) and :4160-4171 ($clicked). The rows' one flagged divergence
+  (JS both-refs-required vs Rust single-ref) is correctly annotated as
+  unreachable-in-practice given the validator (:162-166) rejects empty refs. Rows are
+  accurate against the tree they cite; no hollow `implemented` claims.
+- **Dist freshness**: bundle `index-DJOFnUtw.js` contains `created_sha`,
+  `last_modified_sha`, `type==="all"`, the `^~(\d+)$` epoch regex, and zero
+  occurrences of `last_commit_sha`; no source changes landed after the dist commit
+  (`git log 3e1829c..HEAD -- web/src web/dist` is empty). Dist matches source.
+- **Client diff semantics vs Rust resolver** (`view_query_resolver.rs:722-818`):
+  line-by-line comparison confirms a faithful port — temporal `~epoch` half-open
+  `(from, to]` on created/modified; SHA mode ≥7-char target-prefix guard, to-match on
+  either sha, from-exclusion only when BOTH shas match from. The Rust
+  `starts_with(target) || == target` is redundant under `startsWith`; the JS omits it —
+  identical truth table.
+- **All four mutations independently reproduced in an isolated worktree** (own
+  node_modules, source restored clean after each): all-branch deletion → all-scope
+  count test fails; dead-field reversion (to_commit dropped) → component diff-count
+  test AND "renders diff scope query" fail; label color substitution → color assertion
+  fails; hlLabel guard deletion → negative label test fails (draws `undefined`). Each
+  mutation is killed by exactly the test designed for it. The R3 claim of
+  mutation-verified regression coverage is genuine.
+- **Suite**: full file green in the main tree — 139/139 three consecutive runs.
+  Intermittent ghost-overlay test timeouts (pre-existing tests untouched by this diff)
+  appeared twice under load and pass in isolation (`-t "ghost"` 4/4 in both trees);
+  characterized as sandbox-load flakes, not regressions. All 10 of this task's tests
+  pass in every run.
+- **Shipped section**: present in the task file, matches the reviewed code (label
+  rendering, real-field diff port, all-scope result set, mutation-verified tests,
+  implementer-owned coverage rows, fresh dist).
+
+No new findings. F1/F2/F3 remain repaired (verified R2, unchanged by rebase), the
+coverage rows are implementer-authored and accurate, and the committed dist matches
+the fixed source. The task meets spec §4–9 on every verifiable surface.
+Setting `progress: complete`.
