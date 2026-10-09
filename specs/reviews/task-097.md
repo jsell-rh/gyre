@@ -73,3 +73,40 @@ Verdict: **complete**.
 - SOPS-vs-AES-256-GCM wording noted in the round-1 scope note stands: mechanism differs from the spec's letter, satisfies "encrypted at rest" in substance; left for task-098/100 or a spec amendment if desired.
 
 — Reviewer, 2026-10-07
+
+## Round 3 (independent review of the absorbed reviewer edits)
+
+Comparison base `66422bd` (current main at round start) → HEAD `c1cb9c8`. Working tree clean at HEAD (no uncommitted repairs). All 13 frontmatter SHAs verified as ancestors of HEAD; `check-task-commit-attribution.sh` OK.
+
+### Round-3-specific claims, independently checked
+
+- **Absorbed `spawn.rs` edits (commit `86c11e3`):** the injection block at `spawn.rs:647-698` matches the reviewed round-2 semantics exactly — tenant resolved from the workspace record, `None` arm warns and skips all scoped resolution, fallible `String::from_utf8` with skip-and-warn naming `secret_name` (never the value). No new behavior smuggled in with the absorb.
+- **Exemption line shift 3547→3558:** verified line 3558 of `mem.rs` is the `payloads` read in `get_span_payload`; `check-unwritten-store-fields.sh` OK. The shift is the mechanical consequence of the round-2 `mem.rs` test relocation (the old in-place `secret_contract_tests` module deleted, a larger one appended at file end).
+- **`.done` marker:** present, no diff vs base (no unrelated main file deleted by the branch diff).
+- **Exemption deltas vs base are pure drain-downs:** `fabricated-scope-defaults` 8→6 (both task-owned lines removed, header count comment updated), `lossy-secret-conversion` 1→0, `mem-port-contracts` 1→0. No exemption file grew; no frozen count raised; no check weakened.
+- **`sqlite/secret.rs` base diff is F5-only:** the two `tracing::warn!` blocks on the persisted-auto-key and fresh-auto-generation paths in `load_encryption_key`, stating the obfuscation downgrade and the `GYRE_SECRET_ENCRYPTION_KEY` remediation. Nothing else.
+
+### Fresh verification (all on HEAD `c1cb9c8`, private `CARGO_TARGET_DIR=/tmp/gyre-t097-target`, `SKIP_WEB_BUILD=1`)
+
+- `python3 scripts/check-rustfmt-diff.py 66422bd` → changed lines clean (4 Rust files) — the exact gate that rejected candidate `e189359c`; the rustfmt repair holds.
+- `python3 scripts/check-clippy-diff.py 66422bd` → changed lines clean (4 Rust files, 1145 existing warnings outside changes).
+- All 21 `scripts/check-*.sh` mechanical gates (arch, migration-versions, mem-port-contracts, fabricated-scope-defaults, lossy-secret-conversion, unwritten-store-fields, in-memory-state-stores, task-commit-attribution, abac-exempt-handlers, forwarded-header-trust, byte-slice-truncation, relative-path-defaults, fail-open-ref-resolution, dead-message-kinds, mcp-write-tools, abac-route-registry, scope-literal-defaults, inert-enforcement, migration-sql-portability, forged-scope-fields, unbounded-external-http) → **all OK**.
+- `cargo test -p gyre-common --lib secret` → 5 passed. `cargo test -p gyre-adapters --lib sqlite::secret` → 17 passed. `cargo test -p gyre-server --lib mem::secret_contract_tests` → 4 passed. `cargo test -p gyre-server --lib api::spawn::tests` → **34 passed**, all five F2 secret-delivery tests present and passing by name.
+
+### Mutation probes (test-inflation check — do the F2/F1 tests kill the original bugs?)
+
+Run in the main working tree with source restored after each run (private target dir; logs and mutant sources under `/tmp/stage/review-evidence/`):
+
+- **F3 mutant** (reintroduced `"default"` tenant fabrication on the `None` arm): `spawn_unresolvable_workspace_skips_secret_resolution` **FAILED** (exit 101) — the test delivers `GYRE_CRED_LEAK=leaked` under the mutant, so the leak scenario is genuinely pinned.
+- **F4 mutant** (`String::from_utf8_lossy` corruption instead of skip): `spawn_non_utf8_secret_skipped_others_delivered` **FAILED** (exit 101).
+- **F1 mutant** (mem duplicate guard deleted, unconditional push): `create_rejects_duplicate_id_same_tenant` and `create_rejects_duplicate_scope_and_name_same_tenant` **FAILED** (exit 101); the two "allows" tests still pass — the guard is exactly what the contract tests pin.
+
+All mutants restored byte-identical (`git diff --quiet` clean after each).
+
+### Verdict
+
+The task meets the spec section as scoped (Principle, Architecture, Secret Scoping, Secret Types, Storage Backend). The reviewer-preserved edits were absorbed without semantic change, the rustfmt rejection cause is repaired, exemption files only shrank, every frontmatter commit resolves, and the focused suites plus mutation probes confirm the behavior is real and regression-pinned. Residual observations from round 2 (warn-and-continue availability posture; SOPS-vs-AES-256-GCM wording) remain non-blocking and recorded for task-098/100.
+
+**progress: complete**
+
+— Reviewer, 2026-10-09
