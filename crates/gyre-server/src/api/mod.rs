@@ -79,9 +79,10 @@ use std::sync::Arc;
 use users::{
     create_team, create_token, create_user, delete_team, delete_token, dismiss_notification,
     get_judgments, get_me, get_my_agents, get_my_mrs, get_my_notifications, get_my_tasks,
-    get_notification_count, get_notification_preferences, invite_member, list_members, list_teams,
-    list_tokens, remove_member, resolve_notification, update_me, update_member_role,
-    update_notification_preferences, update_team,
+    get_notification_count, get_notification_preferences, invite_member, list_members, list_my_sessions,
+    list_user_sessions, list_teams, list_tokens, remove_member, resolve_notification,
+    revoke_all_my_sessions, revoke_all_user_sessions, revoke_my_session, revoke_user_session,
+    update_me, update_member_role, update_notification_preferences, update_team,
 };
 
 use crate::AppState;
@@ -804,6 +805,29 @@ pub fn api_router() -> Router<Arc<AppState>> {
             get(list_tokens).post(create_token),
         )
         .route("/api/v1/users/me/tokens/:id", delete(delete_token))
+        // Session Management (user-management.md §Session Management) —
+        // per-handler auth (scoped to caller), ABAC-exempt
+        .route("/api/v1/users/me/sessions", get(list_my_sessions))
+        .route(
+            "/api/v1/users/me/sessions/revoke-all",
+            post(revoke_all_my_sessions),
+        )
+        .route("/api/v1/users/me/sessions/:id", delete(revoke_my_session))
+        // TenantAdmin session management (user-management.md §Session
+        // Management — "TenantAdmins can view and revoke any user's
+        // sessions") — per-handler auth (Admin role), ABAC-exempt
+        .route(
+            "/api/v1/users/:user_id/sessions",
+            get(list_user_sessions),
+        )
+        .route(
+            "/api/v1/users/:user_id/sessions/revoke-all",
+            post(revoke_all_user_sessions),
+        )
+        .route(
+            "/api/v1/users/:user_id/sessions/:id",
+            delete(revoke_user_session),
+        )
         // Notification Preferences (HSI §12) — per-handler auth, ABAC-exempt
         .route(
             "/api/v1/users/me/notification-preferences",
