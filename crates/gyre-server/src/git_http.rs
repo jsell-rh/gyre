@@ -754,11 +754,10 @@ pub async fn git_receive_pack(
             });
             // §9 spec-assertion notifications are scoped by the repo's
             // workspace — every push type notifies, not just agent pushes.
-            let notification_scope =
-                Some(crate::graph_extraction::PushNotificationScope {
-                    workspace_id: repo_workspace_id_str.clone(),
-                    tenant_id: push_tenant_id.clone(),
-                });
+            let notification_scope = Some(crate::graph_extraction::PushNotificationScope {
+                workspace_id: repo_workspace_id_str.clone(),
+                tenant_id: push_tenant_id.clone(),
+            });
             crate::graph_extraction::extract_and_store_graph(
                 &repo_path_clone,
                 &repo_id_clone,
@@ -1501,14 +1500,26 @@ async fn process_spec_lifecycle(
                 Ok(()) => {
                     info!(title, "spec-lifecycle: created task for spec change");
                     // Look up workspace_id from repo for proper scoping.
-                    let ws_id = state
-                        .repos
-                        .find_by_id(&gyre_common::Id::new(repo_id))
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|r| r.workspace_id)
-                        .unwrap_or_else(|| gyre_common::Id::new("default"));
+                    // A lookup failure means the scope cannot be determined —
+                    // skip the workspace-scoped emission rather than
+                    // fabricating a "default" identity (task-097 F3 class).
+                    let ws_id = match state.repos.find_by_id(&gyre_common::Id::new(repo_id)).await {
+                        Ok(Some(repo)) => repo.workspace_id,
+                        Ok(None) => {
+                            warn!(
+                                repo_id,
+                                "spec-lifecycle: repo not found; skipping task events"
+                            );
+                            continue;
+                        }
+                        Err(e) => {
+                            warn!(
+                                repo_id,
+                                "spec-lifecycle: failed to resolve repo workspace: {e}"
+                            );
+                            continue;
+                        }
+                    };
                     let change_kind = match status_char {
                         'A' => "added",
                         'M' => "modified",

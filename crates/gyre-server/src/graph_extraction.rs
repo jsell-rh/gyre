@@ -1001,8 +1001,8 @@ async fn check_spec_assertions_on_push(
         // Duplicate suppression: if the stored set for this spec was already
         // produced by this exact commit (mirror-sync cycles re-extract
         // unchanged SHAs every interval), do not notify again.
-        let already_recorded_for_commit = !prior_results.is_empty()
-            && prior_results.iter().all(|r| r.commit_sha == commit_sha);
+        let already_recorded_for_commit =
+            !prior_results.is_empty() && prior_results.iter().all(|r| r.commit_sha == commit_sha);
         if already_recorded_for_commit {
             specs_already_notified.insert(spec_path);
         }
@@ -1416,8 +1416,8 @@ mod tests {
     #[tokio::test]
     async fn push_check_persists_assertion_results_via_repo() {
         use crate::mem::MemSpecAssertionResultRepository;
-        use gyre_ports::SpecAssertionResultRepository as _;
         use gyre_common::graph::{SpecConfidence, Visibility};
+        use gyre_ports::SpecAssertionResultRepository as _;
 
         // A repo snapshot with a spec carrying two assertions: one that passes
         // against the graph below, one that fails.
@@ -1460,10 +1460,7 @@ mod tests {
             spec_approved_at: None,
             milestone_completed_at: None,
         };
-        let nodes = vec![
-            mk_node("nd", "gyre-domain"),
-            mk_node("na", "gyre-adapters"),
-        ];
+        let nodes = vec![mk_node("nd", "gyre-domain"), mk_node("na", "gyre-adapters")];
 
         let results_repo = MemSpecAssertionResultRepository::default();
         check_spec_assertions_on_push(
@@ -1488,11 +1485,17 @@ mod tests {
         assert_eq!(stored.len(), 2, "both assertions must be persisted");
         assert_eq!(stored[0].line, 3);
         assert_eq!(stored[0].assertion_type, "no_dependency");
-        assert!(stored[0].passed, "no edge from gyre-domain to gyre-adapters exists");
+        assert!(
+            stored[0].passed,
+            "no edge from gyre-domain to gyre-adapters exists"
+        );
         assert_eq!(stored[0].commit_sha, "deadbeef");
         assert_eq!(stored[1].line, 5);
         assert_eq!(stored[1].assertion_type, "implements");
-        assert!(!stored[1].passed, "SearchService node is absent from the graph");
+        assert!(
+            !stored[1].passed,
+            "SearchService node is absent from the graph"
+        );
 
         // A second push replaces the stored set for the same spec (no stale
         // rows from the first check linger).
@@ -1529,7 +1532,10 @@ mod tests {
 
     #[tokio::test]
     async fn push_check_creates_priority9_notifications_for_failed_assertions() {
-        use crate::mem::{MemNotificationRepository, MemSpecAssertionResultRepository, MemWorkspaceMembershipRepository};
+        use crate::mem::{
+            MemNotificationRepository, MemSpecAssertionResultRepository,
+            MemWorkspaceMembershipRepository,
+        };
         use gyre_common::NotificationType;
         use gyre_domain::{WorkspaceMembership, WorkspaceRole};
 
@@ -1615,8 +1621,7 @@ mod tests {
         assert_eq!(n.notification_type, NotificationType::SpecAssertionFailure);
         assert_eq!(n.priority, 9);
         assert_eq!(n.repo_id.as_deref(), Some("repo-assert-notif"));
-        let body: serde_json::Value =
-            serde_json::from_str(n.body.as_deref().unwrap()).unwrap();
+        let body: serde_json::Value = serde_json::from_str(n.body.as_deref().unwrap()).unwrap();
         assert_eq!(body["failures"][0]["spec_path"], "system/architecture.md");
         assert_eq!(body["repo_id"], "repo-assert-notif");
         // §9: the notification links to the failing spec so the Inbox
