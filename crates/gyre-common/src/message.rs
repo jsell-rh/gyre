@@ -459,6 +459,27 @@ impl TelemetryBuffer {
     }
 }
 
+impl TelemetryBuffer {
+    /// Hard-evict every message with `created_at < cutoff_ms` (epoch
+    /// milliseconds), across all workspaces. Drops a workspace's buffer
+    /// entirely when nothing remains in it. Returns messages evicted.
+    ///
+    /// Retention enforcement for the activity_events data type
+    /// (business-continuity.md §5): the buffer is count-bounded, not
+    /// age-bounded, so the nightly retention job drives this with the
+    /// policy cutoff.
+    pub fn purge_older_than(&self, cutoff_ms: u64) -> usize {
+        let mut purged = 0usize;
+        self.buffers.retain(|_, buf| {
+            let before = buf.len();
+            buf.retain(|m| m.created_at >= cutoff_ms);
+            purged += before - buf.len();
+            !buf.is_empty()
+        });
+        purged
+    }
+}
+
 impl Default for TelemetryBuffer {
     fn default() -> Self {
         Self::new(10_000, 100)
@@ -866,6 +887,45 @@ mod tests {
         // ws_b and ws_c should still be present
         assert_eq!(buf.list_since(&ws_b, 0, 100).len(), 2);
         assert_eq!(buf.list_since(&ws_c, 0, 100).len(), 1);
+    }
+
+    #[test]
+    fn telemetry_buffer_purge_older_than_both_directions() {
+        let buf = TelemetryBuffer::new(1000, 100);
+        let ws_a = Id::new("ws-a");
+        let ws_b = Id::new("ws-b");
+
+        for (ws, id, ts) in [
+            (&ws_a, "a-old", 100u64),
+            (&ws_a, "a-new", 900),
+            (&ws_b, "b-old", 200), // entire ws-b becomes empty after purge
+            (&ws_b, "b-older", 50),
+        ] {
+            let mut msg = make_telemetry(Some(ws.clone()));
+            msg.id = Id::new(id);
+            msg.created_at = ts;
+            buf.push(msg);
+        }
+
+        let purged = buf.purge_older_than(500);
+        assert_eq!(purged, 3, "a-old, b-old, b-older evicted");
+
+        // Both directions: old gone, new kept.
+        let remaining = buf.list_all_since(0, 100);
+        let ids: Vec<String> = remaining.iter().map(|m| m.id.as_str().to_string()).collect();
+        assert_eq!(ids, vec!["a-new".to_string()]);
+        // The emptied ws-b buffer is dropped entirely.
+        assert_eq!(buf.list_since(&ws_b, 0, 100).len(), 0);
+
+        // Idempotent: a second purge at the same cutoff deletes nothing new.
+        assert_eq!(buf.purge_older_than(500), 0);
+        // Cutoff is exclusive (created_at >= cutoff kept).
+        let mut edge = make_telemetry(Some(ws_a.clone()));
+        edge.id = Id::new("edge");
+        edge.created_at = 500;
+        buf.push(edge);
+        assert_eq!(buf.purge_older_than(500), 0);
+        assert_eq!(buf.list_since(&ws_a, 0, 100).len(), 2);
     }
 
     #[test]
