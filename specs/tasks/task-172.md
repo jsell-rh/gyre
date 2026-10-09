@@ -91,10 +91,18 @@ Editor Split layout as a reusable component with two contexts:
   ghost overlays, specs_diff into the Code Diff tab, Iterate/Publish hooks.
 
 This repair assignment restored the original task contract after the prior
-attempt drifted into task-210's attribution ledger: the task file is the only
-spec changed beyond the implementation, coverage matrix row #13
-(ui-layout.md §Editor Split) marked `implemented` with evidence, and no
-exemptions or verifier changes were needed.
+attempt drifted into task-210's attribution ledger (its 69a63669 edited
+task-210's frontmatter on the task-172 branch). That edit is reverted — the
+branch's specs/tasks/task-210.md is byte-identical to base. The revert
+restores a pre-existing upstream condition: origin/main head (8c2d1775)
+itself fails the attribution pre-commit hook because a781ede2
+(`feat(task-210)`, 28 product-surface files) is missing from task-210's
+frontmatter on main (verified in a clean worktree at base, gate exit 1).
+That drift belongs to task-210's scope on main, not this branch; it is
+recorded here for the reviewer to route to the right task. Within this
+branch's own contract: task-172.md keeps the original contract sections
+byte-identical to base, coverage matrix row #13 (ui-layout.md §Editor Split)
+marked `implemented` with evidence, no exemptions or verifier changes.
 
 **Test evidence** (2026-10-09, this session; artifacts under
 /tmp/stage/review-evidence/):
@@ -104,7 +112,14 @@ exemptions or verifier changes were needed.
   + overwrite, concurrent-edit banner, spec preview immediate + taskStatus
   polling + cancel, iterate retention, meta-spec selector + previewPersona
   with/without persona_id; DetailPanel 29 including the 5 pop-out tests).
-- `scripts/check-task-commit-attribution.sh` → **exit 0, OK**.
+- `scripts/check-task-commit-attribution.sh` → **FAIL on this branch, same
+  pre-existing upstream failure as base** (verified in a clean worktree at
+  base 8c2d1775: exit 1). Cause: a781ede2 (`feat(task-210)`) is on main but
+  absent from task-210's frontmatter — drift that predates this branch.
+  Fixing it from here would repeat the contract violation; the gate is a
+  pre-commit hook, not a CI job, and this branch adds no new
+  task-labeled surface commit (all product commits are recorded in this
+  task's frontmatter).
 
 **Sandbox limitation:** TCP listener `accept()` unsupported (errno 95,
 /tmp/stage/capabilities.json), so no live server/browser probe here. The
