@@ -49,6 +49,40 @@ print(json.dumps(c['id'] if c else None))
         self.store.finish(ident, second['token'], {'candidate': 'right'}, {'candidate': 'right'})
         self.assertEqual(self.store.tasks()[0]['data']['candidate'], 'right')
 
+    def test_many_active_claims_share_a_small_compute_budget(self):
+        # Claim ownership and compute admission are separate. All assignments
+        # can be concurrent even when only three sandboxes can be allocated.
+        expected = set()
+        for index in range(50):
+            name = f'task-{index + 2:03d}'
+            self.store.put_task(name, 'g', 'requirements', {})
+            expected.add(self.store.enqueue('implement', name, 'g', {}))
+        command = [sys.executable, '-c', '''
+import json,sys
+from pipeline.store import Store
+s=Store(sys.argv[1]); c=s.claim('implement',sys.argv[2],concurrency=50)
+admitted=s.reserve('pod-'+c['id'],c['id'],c['token'],'sandbox',3)
+print(json.dumps({'work':c['id'],'admitted':admitted}))
+''', self.temp.name]
+        processes = [subprocess.Popen(command + [str(index)], cwd=Path(__file__).parent,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                     for index in range(50)]
+        try:
+            results = []
+            for process in processes:
+                stdout, stderr = process.communicate(timeout=30)
+                self.assertEqual(process.returncode, 0, stderr)
+                results.append(json.loads(stdout))
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
+        self.assertEqual({result['work'] for result in results}, expected)
+        self.assertEqual(sum(result['admitted'] for result in results), 3)
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM work WHERE state='claimed'").fetchone()[0], 50)
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM resources WHERE state='intent'").fetchone()[0], 3)
+
     def test_requirement_change_fences_inflight_result(self):
         ident = self.work()
         claim = self.store.claim('implement', 'worker')
