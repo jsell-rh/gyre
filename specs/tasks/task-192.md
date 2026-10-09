@@ -2,10 +2,10 @@
 title: "Add gyre budget CLI: show and set at repo/workspace/tenant scope"
 spec_ref: "platform-model.md §CLI"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "platform-model.md §CLI"
-commits: ["4d16c6c5b2ded0f53c67e528f4ecf5299fd714ca", "6f4d1366b84193c972c2e7c13a1a42059da2806a", "a5a82183d3e67df0aac25f30e2ba16c5709081f2"]
+commits: ["4d16c6c5b2ded0f53c67e528f4ecf5299fd714ca", "6f4d1366b84193c972c2e7c13a1a42059da2806a", "a5a82183d3e67df0aac25f30e2ba16c5709081f2", "87fae32e02d6d4bdeca2070de71e5bec2eb7d458"]
 ---
 
 ## Spec Excerpt
@@ -64,3 +64,21 @@ The `SetBudgetRequest` shape (`crates/gyre-server/src/api/budget.rs:63-69`) acce
 - Match the existing CLI output/formatting and error-handling style (see the `Deps`/`Trace` handlers).
 - Confirm `SetBudgetRequest`/`BudgetResponse`/`TenantBudgetSummary` field names in `crates/gyre-server/src/api/budget.rs` before serializing.
 - Run only the touched crates' tests plus `scripts/check-arch.sh`; do not run the full workspace suite or formatters.
+
+## Shipped
+
+`gyre budget show|set` is implemented end-to-end in `crates/gyre-cli` against the three real server routes (`GET/PUT /api/v1/workspaces/:id/budget`, `GET /api/v1/budget/summary` — mod.rs:610-613). Recovered checkpoint commits (a5a8218, 6f4d136, 4d16c6c) supplied the base implementation; this assignment audited every acceptance criterion, fixed one real display defect, and re-verified all gates.
+
+**Behavior:**
+- `show` (no flags) resolves the current repo's owning workspace via the same `infer_repo_from_git_remote` + `resolve_workspace_slug` pair `deps`/`explore` use, then prints limits + live usage (tokens/cost/agents, used vs limit, % util). `--workspace-name <SLUG>` targets a named workspace; `--workspace` selects the same repo→workspace resolution explicitly. `--tenant` prints the tenant summary: tenant rows + per-workspace table + totals. `--tenant` combined with `--workspace/--workspace-name` is rejected.
+- `set` accepts `--llm-tokens/--llm-cost/--max-agents/--max-agent-lifetime-secs` (+ scope flags); the server PUT is a full config replace, so the client fetches the current config and sends it merged with the overrides — unset limits keep their values. `--tenant` on `set` bails with an explicit message (no tenant set endpoint exists). Errors surface the server body verbatim: `{"error": "only Admin role may update workspace budget limits"}` (403), cascade `workspace max_tokens_per_day (…) exceeds tenant limit (…)` (400).
+- Help text (command + subcommands, verified via the built binary) states repo scope maps to the owning workspace budget; no repo-keyed budget store is fabricated. `docs/cli.md` documents the commands.
+
+**Defect fixed this round:** `budget_util` rendered `100%+` for a `Some(0.0)` limit at zero usage — a workspace provisioned with a zero limit on an unused day printed full utilization. Now `0%` at zero usage, `100%+` for any usage. Boundary test `budget_util_zero_limit_and_boundary` added and mutation-checked (pre-fix logic fails it: `left: "100%+", right: "0%"`).
+
+**Test evidence** (saved under `/tmp/stage/review-evidence/task192-*.txt`):
+- `cargo test -p gyre-cli --bin gyre` → 107 passed, 0 failed (13 budget tests: 5 client route/body tests asserting exact method+URL+auth+serialized merged PUT body, server-shape parsing tests, verbatim 403/400 error-surfacing test, 6 CLI parse tests, 1 boundary test).
+- `bash scripts/check-arch.sh` → passed.
+- `cargo run -p gyre-cli -- budget --help` / `show --help` / `set --help` → exit 0, help text confirmed (evidence file `task192-budget-help.txt`).
+- `tests/ws_integration.rs::test_auth_and_ping_roundtrip` fails in this sandbox with `Os { code: 95, kind: Unsupported }` at the TCP listener bind — matches the recorded `capabilities.json` restriction (`tcp_listener_probe.supported=false`, errno 95). Infrastructure limitation, not a code defect; requires host/CI verification.
+- Live end-to-end HTTP against a running server could not be exercised here (sandbox cannot bind listeners); the client-level tests assert the exact request wire format (method, URL, auth header, JSON body) which the routes in `api/mod.rs:610-613` accept, and error paths are exercised with real `reqwest::Response` objects carrying the server's exact wire shape.
