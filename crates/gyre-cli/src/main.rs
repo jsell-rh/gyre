@@ -980,24 +980,12 @@ async fn main() -> Result<()> {
             let token = cfg.require_token()?;
             let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
 
-            // Fold the filter flags into the query string using the server's
-            // query language (facet:value tokens, search.md §Query Language).
-            // The flags are sugar: `--type spec` == `type:spec` in the query.
-            let mut q = query.clone().unwrap_or_default();
-            for facet in [
-                r#type.as_deref().map(|v| ("type", v)),
-                status.as_deref().map(|v| ("status", v)),
-                since.as_deref().map(|v| ("since", v)),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                let v = facet.1.trim();
-                if !v.is_empty() {
-                    q = format!("{q} {}:{}", facet.0, v);
-                }
-            }
-            let q = q.trim().to_string();
+            let q = build_search_query(
+                query.as_deref(),
+                r#type.as_deref(),
+                status.as_deref(),
+                since.as_deref(),
+            );
 
             // Autocomplete: the dedicated /search/suggest endpoint
             // (search.md §API) is not implemented yet; fall back to a regular
@@ -2297,6 +2285,33 @@ fn print_search_results(results: &client::SearchResponse) {
     }
 }
 
+/// Fold the search filter flags into the query string using the server's
+/// query language (facet:value tokens, search.md §Query Language).
+/// The flags are sugar: `--type spec` == `type:spec` in the query.
+/// Empty/whitespace-only flag values are ignored.
+fn build_search_query(
+    query: Option<&str>,
+    entity_type: Option<&str>,
+    status: Option<&str>,
+    since: Option<&str>,
+) -> String {
+    let mut q = query.unwrap_or_default().trim().to_string();
+    for facet in [
+        entity_type.map(|v| ("type", v)),
+        status.map(|v| ("status", v)),
+        since.map(|v| ("since", v)),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let v = facet.1.trim();
+        if !v.is_empty() {
+            q = format!("{q} {}:{}", facet.0, v);
+        }
+    }
+    q.trim().to_string()
+}
+
 /// Render autocomplete suggestions: one line per title that starts with the
 /// prefix, in `type  title  id` form.
 fn print_search_suggestions(results: &client::SearchResponse) {
@@ -3083,6 +3098,121 @@ mod tests {
         } else {
             panic!("Expected Explore");
         }
+    }
+
+    // ── Search command tests ────────────────────────────────────────────────
+
+    #[test]
+    fn cli_search_parses() {
+        let args = Cli::try_parse_from(["gyre", "search", "identity security"]);
+        assert!(args.is_ok());
+        if let Commands::Search {
+            query,
+            r#type,
+            status,
+            workspace,
+            since,
+            suggest,
+            limit,
+        } = args.unwrap().command
+        {
+            assert_eq!(query.as_deref(), Some("identity security"));
+            assert!(r#type.is_none());
+            assert!(status.is_none());
+            assert!(workspace.is_none());
+            assert!(since.is_none());
+            assert!(suggest.is_none());
+            assert_eq!(limit, 20);
+        } else {
+            panic!("Expected Search");
+        }
+    }
+
+    #[test]
+    fn cli_search_faceted_parses() {
+        let args = Cli::try_parse_from([
+            "gyre",
+            "search",
+            "--type",
+            "spec",
+            "--status",
+            "approved",
+            "--workspace",
+            "platform-team",
+            "--since",
+            "7d",
+            "--limit",
+            "5",
+            "ABAC",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Search {
+            query,
+            r#type,
+            status,
+            workspace,
+            since,
+            suggest,
+            limit,
+        } = args.unwrap().command
+        {
+            assert_eq!(query.as_deref(), Some("ABAC"));
+            assert_eq!(r#type.as_deref(), Some("spec"));
+            assert_eq!(status.as_deref(), Some("approved"));
+            assert_eq!(workspace.as_deref(), Some("platform-team"));
+            assert_eq!(since.as_deref(), Some("7d"));
+            assert!(suggest.is_none());
+            assert_eq!(limit, 5);
+        } else {
+            panic!("Expected Search");
+        }
+    }
+
+    #[test]
+    fn cli_search_suggest_parses() {
+        let args = Cli::try_parse_from(["gyre", "search", "--suggest", "iden"]);
+        assert!(args.is_ok());
+        if let Commands::Search {
+            query,
+            suggest,
+            ..
+        } = args.unwrap().command
+        {
+            assert!(query.is_none());
+            assert_eq!(suggest.as_deref(), Some("iden"));
+        } else {
+            panic!("Expected Search");
+        }
+    }
+
+    #[test]
+    fn build_search_query_folds_facets() {
+        let q = build_search_query(Some("merge queue"), Some("spec"), None, None);
+        assert_eq!(q, "merge queue type:spec");
+    }
+
+    #[test]
+    fn build_search_query_all_facets() {
+        let q = build_search_query(Some("ABAC"), Some("spec"), Some("approved"), Some("7d"));
+        assert_eq!(q, "ABAC type:spec status:approved since:7d");
+    }
+
+    #[test]
+    fn build_search_query_ignores_empty_facets() {
+        let q = build_search_query(Some("auth"), Some("  "), Some(""), None);
+        assert_eq!(q, "auth");
+    }
+
+    #[test]
+    fn build_search_query_no_query_no_facets() {
+        let q = build_search_query(None, None, None, None);
+        assert_eq!(q, "");
+    }
+
+    #[test]
+    fn build_search_query_facets_only() {
+        let q = build_search_query(None, Some("spec"), None, None);
+        assert_eq!(q, "type:spec");
     }
 
     // ── Trace command tests ─────────────────────────────────────────────────

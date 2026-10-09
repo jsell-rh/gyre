@@ -138,6 +138,7 @@ pub struct SpawnOrchestratorAgent {
 /// One search result row. `facets` mirrors the server's result facets
 /// (status, priority, repo_id, ...).
 #[derive(Deserialize, Debug, Clone)]
+#[allow(dead_code)]
 pub struct SearchResult {
     pub entity_type: String,
     pub entity_id: String,
