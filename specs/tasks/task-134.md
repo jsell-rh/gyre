@@ -6,7 +6,7 @@ progress: not-started
 coverage_sections:
   - "agent-gates.md §Gate Types (Extended)"
   - "agent-gates.md §AgentReview Gate"
-commits: ["54313372420f46e60ae8f8f8b08843121eadafb1", "e8776e56429d5708ea205ff6f507ff3288300676", "113ee030f074f2529818d4119e7d88d39d905433"]
+commits: ["beea645f2777ed729c85c8753e4b904bf23ce3bf", "54313372420f46e60ae8f8f8b08843121eadafb1", "e8776e56429d5708ea205ff6f507ff3288300676", "113ee030f074f2529818d4119e7d88d39d905433"]
 ---
 
 ## Spec Excerpt
