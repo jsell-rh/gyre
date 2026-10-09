@@ -1004,6 +1004,124 @@ mod tests {
             .expect("SpecPendingApproval notification must be created");
         assert_eq!(spec_notif.priority, 2);
         assert_eq!(spec_notif.entity_ref.as_deref(), Some(mr_id));
+        // HSI §8 P2: the body must carry the structured fields the Inbox
+        // inline actions consume (approve SHA, MR diff fetch, quick links).
+        let body: serde_json::Value =
+            serde_json::from_str(spec_notif.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["spec_path"], "specs/system/vision.md");
+        assert_eq!(body["mr_id"], mr_id);
+        assert_eq!(body["repo_id"], repo_id);
+        assert!(
+            body["spec_sha"].is_string(),
+            "spec_sha must be present (possibly empty when git is unavailable in tests)"
+        );
+        // No workspace members in the test state — the system fallback
+        // recipient keeps the approval visible in the global-admin Inbox.
+        assert_eq!(spec_notif.user_id, Id::new("system"));
+    }
+
+    #[tokio::test]
+    async fn save_spec_fans_out_approval_notification_to_eligible_members() {
+        use gyre_domain::{Repository, WorkspaceMembership, WorkspaceRole};
+
+        let state = test_state();
+        // Repo record only — the notification fan-out runs after the MR is
+        // persisted but before any git-dependent assertion; git writes go
+        // through NoopGitOps so the branch/blob lookups are inert.
+        let ws_id = Id::new("ws-fanout");
+        let repo = Repository::new(
+            Id::new("repo-fanout"),
+            ws_id.clone(),
+            "fanout",
+            "/tmp/gyre-nonexistent-fanout-repo",
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+        // Two eligible members (Admin, Developer) and one ineligible (Viewer).
+        for (uid, role) in [
+            ("user-admin", WorkspaceRole::Admin),
+            ("user-dev", WorkspaceRole::Developer),
+            ("user-viewer", WorkspaceRole::Viewer),
+        ] {
+            state
+                .workspace_memberships
+                .create(&WorkspaceMembership::new(
+                    Id::new(&format!("membership-{uid}")),
+                    Id::new(uid),
+                    ws_id.clone(),
+                    role,
+                    Id::new("inviter"),
+                    0,
+                ))
+                .await
+                .unwrap();
+        }
+
+        let caller = AuthenticatedAgent {
+            agent_id: "user-admin".to_string(),
+            user_id: Some(Id::new("user-admin")),
+            roles: vec![],
+            tenant_id: "default".to_string(),
+            jwt_claims: None,
+            deprecated_token_auth: false,
+        };
+        let req = SpecSaveRequest {
+            spec_path: "specs/system/fanout.md".to_string(),
+            content: "# Fanout\n".to_string(),
+            message: "edit".to_string(),
+            base_sha: None,
+            overwrite: false,
+        };
+        let resp = save_spec(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("repo-fanout".to_string()),
+            caller,
+            Json(req),
+        )
+        .await
+        .expect("save_spec should succeed");
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Eligible members each get exactly one notification; the Viewer
+        // gets none; the system fallback is not used when members exist.
+        for uid in ["user-admin", "user-dev"] {
+            let notifs = state
+                .notifications
+                .list_for_user(&Id::new(uid), Some(&ws_id), None, None, None, 100, 0)
+                .await
+                .unwrap();
+            let approvals: Vec<_> = notifs
+                .iter()
+                .filter(|n| n.notification_type == NotificationType::SpecPendingApproval)
+                .collect();
+            assert_eq!(
+                approvals.len(),
+                1,
+                "user {uid} must get exactly one SpecPendingApproval notification"
+            );
+            let body: serde_json::Value =
+                serde_json::from_str(approvals[0].body.as_deref().unwrap()).unwrap();
+            assert_eq!(body["spec_path"], "specs/system/fanout.md");
+            assert_eq!(body["repo_id"], "repo-fanout");
+        }
+        let viewer_notifs = state
+            .notifications
+            .list_for_user(&Id::new("user-viewer"), Some(&ws_id), None, None, None, 100, 0)
+            .await
+            .unwrap();
+        assert!(
+            viewer_notifs.is_empty(),
+            "Viewer must not receive approval notifications"
+        );
+        let system_notifs = state
+            .notifications
+            .list_for_user(&Id::new("system"), Some(&ws_id), None, None, None, 100, 0)
+            .await
+            .unwrap();
+        assert!(
+            system_notifs.is_empty(),
+            "system fallback must not be used when eligible members exist"
+        );
     }
 
     #[tokio::test]
