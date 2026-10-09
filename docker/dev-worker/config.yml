@@ -1,0 +1,7 @@
+defaultProvider: enmaas-glm-5-3
+defaultModel: rits/zai-org/glm-5-3
+defaultThinkingLevel: medium
+modelRoles:
+  default: enmaas-glm-5-3/rits/zai-org/glm-5-3:medium
+compaction:
+  enabled: true

@@ -1,0 +1,31 @@
+id: gyre-github-custom
+display_name: GitHub (Gyre read/write)
+description: GitHub API and Git clone, fetch, and push for development sandboxes
+category: source_control
+inference_capable: false
+credentials:
+  - name: api_token
+    description: GitHub token
+    env_vars: [GITHUB_TOKEN, GH_TOKEN]
+    required: true
+    auth_style: bearer
+    header_name: Authorization
+discovery:
+  credentials: [api_token]
+endpoints:
+  - host: api.github.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+  - host: github.com
+    port: 443
+    protocol: rest
+    enforcement: enforce
+    rules:
+      - allow: {method: GET, path: "**"}
+      - allow: {method: HEAD, path: "**"}
+      - allow: {method: OPTIONS, path: "**"}
+      - allow: {method: POST, path: "/**/git-upload-pack"}
+      - allow: {method: POST, path: "/**/git-receive-pack"}
+binaries: [/usr/bin/curl, /usr/bin/gh, /usr/local/bin/gh, /usr/bin/git, /usr/local/bin/git]

@@ -21,6 +21,7 @@ class MergeMessageTest(unittest.TestCase):
             git(root, "init", "-q")
             git(root, "config", "user.name", "Test")
             git(root, "config", "user.email", "test@example.com")
+            git(root, "config", "commit.gpgsign", "false")
             hooks = root / "empty-hooks"
             hooks.mkdir()
             git(root, "config", "core.hooksPath", str(hooks))
