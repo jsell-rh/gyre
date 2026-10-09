@@ -5,7 +5,7 @@ depends_on: []
 progress: not-started
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["b8dce1cd868d4c1a7848fd2e66a41231f514b56f", "c7bfa5f40ad0aaae3b99874ff620c541e2be2b69", "2a933722a42e114cc7bb24f90c80f9d6b78e095c", "b32105dbefe65111fd1c3aed29c617d5675b66d0"]
+commits: ["4b7fb60302aa73880569fee172449c983450b858", "82221f803be8d53b971f50b98495d29c5f40d6a7", "c35966d3aa9e32079d2b0b0901d925d431df22bb", "f1ab65cc745cb779190765091cb1bb87bf42b002"]
 ---
 
 ## Spec Excerpt
