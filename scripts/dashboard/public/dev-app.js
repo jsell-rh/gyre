@@ -119,7 +119,7 @@ function renderHealth() {
     e("span", { class: "sep", text: "|" }),
     e("span", { text: `${s.running ?? 0} running / ${gate.effective_slots ?? value} admitted / ${value} desired` }),
     e("span", { class: "sep", text: "|" }),
-    e("span", { text: `${s.eligible ?? 0} eligible · ${s.counts?.deferred ?? 0} queued · ${s.counts?.failed ?? 0} failed · ${s.counts?.merged ?? 0} upstream complete · ${s.confirmed_merges ?? 0} shipped by controller` }),
+    e("span", { text: `${s.eligible ?? 0} dependency-eligible · ${s.counts?.deferred ?? 0} queued · ${s.counts?.failed ?? 0} failed · ${s.counts?.merged ?? 0} upstream complete · ${s.confirmed_merges ?? 0} shipped by controller` }),
     e("span", { class: "health-spacer" }),
     e("span", { class: "stepper" },
       e("span", { text: "sandboxes " }),
@@ -187,7 +187,7 @@ function renderOverview() {
   const blocked = tasks.filter((t) => t.state === "blocked");
   const published = tasks.filter((t) => t.state === "published");
   const cards = [
-    ["Eligible", s.eligible ?? 0], ["Running", s.running ?? 0],
+    ["Dependency-eligible", s.eligible ?? 0], ["Running", s.running ?? 0],
     ["Candidates", candidate.length + (s.counts?.checking || 0)],
     ["Infra queue", deferred.length], ["Failed", failed.length], ["Shipped by controller", s.confirmed_merges || 0],
     ["Sandboxes charged", s.resources?.used ?? s.running ?? 0], ["Deletion pending", s.resources?.deletion_pending || 0],

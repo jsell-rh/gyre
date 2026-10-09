@@ -6,6 +6,10 @@ enforced, scoped, durable, and wired through the real entry point. Look for
 tests that could pass without the behavior. Run focused probes where they can
 settle a material doubt. The controller separately runs deterministic gates
 on the eventual integration commit.
+Use the supplied current review comparison base. Commit attribution is refreshed
+and checked mechanically; reconstruct historical rebases only when a concrete
+behavioral finding requires it. Evaluate current behavior and focused regression
+evidence rather than repeating unchanged, previously supported findings.
 OpenShell disallows loopback listeners. Use supplied exact-SHA logs for failures
 that require a running server or browser; the host and GitHub run those gates.
 Do not install browsers or repeat full suites here to reproduce those failures.

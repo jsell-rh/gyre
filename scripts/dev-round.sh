@@ -13,11 +13,15 @@ run_prompt() {
   local role=$1
   local session_dir="/tmp/stage/omp-sessions/$role"
   local session_file compact_note=''
+  local review_base=''
   local -a resume=()
   local -a model=(--model "${GYRE_DEV_MODEL:-enmaas-glm-5-3/rits/zai-org/glm-5-3}")
   if [ "$role" = implementation ]; then
     model=(--model "${GYRE_DEV_IMPLEMENTATION_MODEL:-${GYRE_DEV_MODEL:-enmaas-glm-5-3/rits/zai-org/glm-5-3}}")
   fi
+  case "$role" in
+    review|audit-review) review_base=$(git merge-base origin/main HEAD) ;;
+  esac
   mkdir -p "$session_dir"
   session_file=$(find "$session_dir" -maxdepth 1 -name '*.jsonl' -print | sort | tail -n 1)
   if [ -n "$session_file" ]; then
@@ -59,7 +63,12 @@ PY
     fi
     case "$role" in
       implementation) printf '%s\n' 'Make the next concrete production edit, then run a focused check. If blocked, record the specific blocker in the task file.' ;;
-      review|audit-review) printf '%s\n' 'Review the remaining concrete findings independently. Write the verdict and task status when supported by evidence; do not restart implementation or broad exploration.' ;;
+      review|audit-review)
+        printf '%s\n' 'Review the remaining concrete findings independently. Write the verdict and task status when supported by evidence; do not restart implementation or broad exploration.'
+        printf '\n## Current review scope\n\nComparison base: %s\nCurrent HEAD: %s\n' "$review_base" "$(git rev-parse HEAD)"
+        printf '%s\n' "Inspect git diff $review_base for the task changes, including uncommitted repairs. A failed-main Base in the task or an older checkpoint in the handoff is diagnostic provenance, not the review comparison base. Changes inherited from main are outside this task diff."
+        git diff --stat "$review_base"
+        ;;
     esac
     printf '\n## Assigned task\n\n'
     cat "$file"
