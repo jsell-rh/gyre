@@ -135,7 +135,8 @@ def run_one(store, stage, task=None):
                               'review': None, 'verified': None}, [finding])
                 return True
             store.retry(claim['id'], claim['token'],
-                        {'category': 'infrastructure' if isinstance(exc, (Retry, OSError, subprocess.TimeoutExpired)) else 'execution',
+                        {'category': stage if getattr(exc, 'fresh_model', False) else
+                                     'infrastructure' if isinstance(exc, (Retry, OSError, subprocess.TimeoutExpired)) else 'execution',
                          'message': str(exc)[-4000:], 'fresh_model': getattr(exc, 'fresh_model', False)})
         except StaleClaim:
             pass

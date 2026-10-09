@@ -346,8 +346,9 @@ def publish(execution, task):
     if observation['status'] in ('candidate_failed', 'baseline_failed', 'closed'):
         finding = observation | {'id': execution.claim['id'], 'category': 'ci', 'source': head}
         if observation.get('log'):
-            finding['log_tail'] = Path(observation['log']).read_text()[-16000:]
-        return observation, {'repair': finding}, [finding]
+            finding['log_tail'] = Path(observation.get('candidate_log', observation['log'])).read_text()[-16000:]
+        return observation, {'repair': finding, 'candidate': head,
+                             'candidate_base': verified['base'], 'review': None, 'verified': None}, [finding]
     if observation['status'] != 'passed':
         raise Retry('GitHub merge gate: ' + observation['status'])
     permit = 'merge-' + execution.claim['id']

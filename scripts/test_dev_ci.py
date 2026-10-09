@@ -70,6 +70,20 @@ class GitHubChecksTest(unittest.TestCase):
         self.assertEqual(self.observe(), {'status': 'infrastructure', 'runs': [10]})
         self.assertEqual(len(self.calls), 1)
 
+    def test_repair_evidence_separates_current_candidate_from_old_baseline(self):
+        self.pr['statusCheckRollup'] = [self.check('FAILURE')]
+        self.baseline = [{'head_sha': self.base, 'workflow_id': 5, 'status': 'completed',
+                          'conclusion': 'failure', 'id': 9, 'run_number': 1}]
+        self.logs = {'10': 'tests/e2e/explorer.spec.js:5:3 › current visual defect\n',
+                     '9': 'obsolete navigation failure\n' * 4000}
+        observation = self.observe()
+        self.assertEqual(observation['status'], 'candidate_failed')
+        current = Path(observation['candidate_log']).read_text()[-16000:]
+        self.assertIn('current visual defect', current)
+        self.assertNotIn('obsolete navigation failure', current)
+        self.assertIn('obsolete navigation failure', Path(observation['baseline_log']).read_text())
+        self.assertEqual(observation['runs'], [10])
+
 
 if __name__ == '__main__':
     unittest.main()

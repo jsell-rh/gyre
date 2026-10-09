@@ -189,7 +189,7 @@ function renderOverview() {
   const cards = [
     ["Dependency-eligible", s.eligible ?? 0], ["Running", s.running ?? 0],
     ["Candidates", candidate.length + (s.counts?.checking || 0)],
-    ["Infra queue", deferred.length], ["Failed", failed.length], ["Shipped by controller", s.confirmed_merges || 0],
+    ["Retry queue", deferred.length], ["Failed", failed.length], ["Shipped by controller", s.confirmed_merges || 0],
     ["Sandboxes charged", s.resources?.used ?? s.running ?? 0], ["Deletion pending", s.resources?.deletion_pending || 0],
   ];
   const coverage = s.coverage || {};
@@ -224,9 +224,9 @@ function renderOverview() {
     failed.length ? failed.slice(0, 12).map((task) => e("div", { class: "dev-attention-row" }, taskButton(task, latestAttempt(task.name)?.detail || ""),
       e("button", { class: "dev-action", onclick: () => retry(task.name), text: "Retry" })))
       : e("p", { class: "muted", text: "No failed tasks." }));
-  const waiting = e("section", { class: "dev-panel" }, e("h2", { text: `Infrastructure retry queue · ${deferred.length}` }),
+  const waiting = e("section", { class: "dev-panel" }, e("h2", { text: `Stage retry queue · ${deferred.length}` }),
     deferred.length ? deferred.slice(0, 12).map((task) => taskButton(task, infrastructureQueueReason(task)))
-      : e("p", { class: "muted", text: "No task is queued after an infrastructure failure." }));
+      : e("p", { class: "muted", text: "No stage is waiting for a retry." }));
   nodes.overview.replaceChildren(coverageBar, metrics, errorText || s.error ? e("div", { class: "dev-error", text: errorText || s.error }) : "",
     e("div", { class: "dev-overview-grid" }, e("div", {}, control, live, waiting), attention),
     blocked.length ? e("section", { class: "dev-panel" }, e("h2", { text: `Blocked delivery · ${blocked.length}` }),

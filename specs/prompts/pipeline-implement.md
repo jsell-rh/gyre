@@ -4,11 +4,16 @@ Implement the assigned task in production code. Read its referenced specs and
 relevant development docs. The task contract and durable findings are the input;
 do not reproduce old diagnostic ledgers in the task or prompt.
 
-Resolve an active rebase first. Repair concrete review, verification, or CI
+Resolve an active merge or rebase first. Repair concrete review, verification, or CI
 findings. Preserve useful source checkpoints. Run focused tests that distinguish
 correct behavior from a real defect. Save expensive probe commands, source SHAs,
 exit codes, and output under /tmp/stage/review-evidence so they can be retained.
 Do not weaken verifiers, add exemptions, inflate tests, or claim fake completion.
+
+For CI repair, use the current PR head and run IDs in the durable finding.
+Historical task review notes and upstream baseline logs are context, not the
+current failing test list. Inspect current failure artifacts before changing
+visual snapshots; preserve the specified UI and existing assertion strength.
 
 Full workspace suites, architecture checks, all-target Clippy, and GitHub CI are
 owned by verification and publication. Use the smallest relevant probe here.

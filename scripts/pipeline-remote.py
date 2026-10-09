@@ -90,8 +90,10 @@ def main():
     (STAGE / 'push-expected').write_text('')
     if role == 'implement':
         # Reconcile the clean seed before installing desired task metadata.
-        # Otherwise a changed dependency or progress field prevents rebase.
-        run('git', 'rebase', job['input']['base'], check=False)
+        # Merge the final checkpoint tree. Replaying its historical partial
+        # commits can resurrect old failures and conflict with later repairs.
+        if run('git', 'merge-base', '--is-ancestor', job['input']['base'], 'HEAD', check=False).returncode:
+            run('git', 'merge', '--no-edit', job['input']['base'], check=False)
     path = checkout / 'specs/tasks' / (task + '.md')
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(job['body'])
