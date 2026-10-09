@@ -71,62 +71,6 @@ pub async fn notify_rich(
     }
 }
 
-/// Notify the spawning user that a gate failed on their MR.
-///
-/// Priority 3 (GateFailure) — created synchronously by the gate evaluation handler per HSI §2.
-pub async fn notify_gate_failure(
-    state: &AppState,
-    author_agent_id: &Id,
-    workspace_id: &Id,
-    mr_id: &str,
-    gate_name: &str,
-    tenant_id: &str,
-) {
-    let spawned_by = state
-        .agents
-        .find_by_id(author_agent_id)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|a| a.spawned_by);
-
-    let user_id = if let Some(ref sb) = spawned_by {
-        Id::new(sb.clone())
-    } else {
-        author_agent_id.clone()
-    };
-
-    // Resolve MR title for human-friendly notification
-    let mr_label = state
-        .merge_requests
-        .find_by_id(&Id::new(mr_id))
-        .await
-        .ok()
-        .flatten()
-        .map(|mr| format!("'{}'", mr.title))
-        .unwrap_or_else(|| mr_id[..8.min(mr_id.len())].to_string());
-
-    let body_json = serde_json::json!({
-        "gate_name": gate_name,
-        "mr_id": mr_id,
-        "agent_id": author_agent_id.as_str(),
-    })
-    .to_string();
-
-    notify_rich(
-        state,
-        workspace_id.clone(),
-        user_id,
-        NotificationType::GateFailure,
-        format!("Gate '{gate_name}' failed on MR {mr_label}"),
-        tenant_id,
-        Some(body_json),
-        Some(mr_id.to_string()),
-        None,
-    )
-    .await;
-}
-
 /// Notify the spawning user that their MR was merged.
 pub async fn notify_mr_merged(
     state: &AppState,
