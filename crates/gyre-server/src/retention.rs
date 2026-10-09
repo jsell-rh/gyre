@@ -30,7 +30,7 @@ use gyre_ports::KvJsonStore;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::AppState;
 
@@ -139,8 +139,10 @@ pub fn default_policies() -> Vec<RetentionPolicy> {
 /// Retention policy store, optionally backed by a KV store.
 ///
 /// `new()` seeds the spec defaults in memory; `init()` loads previously
-/// persisted policies from the KV store (or persists defaults on first boot).
-/// `update`/`set_policy` persist best-effort so admin edits survive restart.
+/// persisted policies from the KV store (or persists defaults on first
+/// boot). `update` durably persists before returning — the admin PUT acks
+/// only after the write is visible in the KV store. `set_policy` persists
+/// best-effort.
 #[derive(Clone)]
 pub struct RetentionStore {
     policies: Arc<RwLock<Vec<RetentionPolicy>>>,
@@ -158,44 +160,77 @@ impl RetentionStore {
 
     /// Load policies from the KV store, or persist the spec defaults on
     /// first boot. Called once from main after `build_state`.
+    ///
+    /// Failure semantics:
+    /// - absent key (first boot) → seed defaults into the KV store;
+    /// - corrupt or empty blob → warn and self-heal (run on defaults and
+    ///   rewrite the blob — a corrupt blob never becomes valid on its own);
+    /// - KV read failure → run on defaults for this boot WITHOUT touching
+    ///   the stored blob: its content is unknown, and overwriting it with
+    ///   defaults could destroy the admin's configured policies over a
+    ///   transient read failure. The next boot re-reads the real blob.
     pub async fn init(&self, kv: Arc<dyn KvJsonStore>) {
+        let mut write_blob = true;
         match kv.kv_get(KV_NAMESPACE, KV_KEY).await {
-            Ok(Some(json)) => {
-                if let Ok(policies) = serde_json::from_str::<Vec<RetentionPolicy>>(&json) {
-                    if !policies.is_empty() {
-                        *self.policies.write() = policies;
-                    }
+            Ok(None) => {} // first boot — seed defaults below
+            Ok(Some(json)) => match serde_json::from_str::<Vec<RetentionPolicy>>(&json) {
+                Ok(policies) if !policies.is_empty() => {
+                    *self.policies.write() = policies;
+                    write_blob = false;
                 }
+                Ok(_) => warn!(
+                    namespace = KV_NAMESPACE,
+                    "retention policy blob is empty; resetting to spec defaults"
+                ),
+                Err(e) => warn!(
+                    error = %e,
+                    namespace = KV_NAMESPACE,
+                    "retention policy blob is corrupt; resetting to spec defaults"
+                ),
+            },
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "failed to read persisted retention policies; running on defaults \
+                     without overwriting the stored blob"
+                );
+                write_blob = false;
             }
-            _ => {}
         }
         *self.kv.write() = kv;
-        // First boot or empty/corrupt blob: persist whatever we now hold
-        // (loaded policies or defaults).
-        self.persist().await;
+        if write_blob {
+            if let Err(e) = self.persist().await {
+                warn!(error = %e, "failed to seed retention policies");
+            }
+        }
     }
 
-    async fn persist(&self) {
-        let json = match serde_json::to_string(&*self.policies.read()) {
-            Ok(json) => json,
-            Err(_) => return, // RetentionPolicy is plain data; cannot fail
-        };
+    async fn persist(&self) -> anyhow::Result<()> {
+        let json = serde_json::to_string(&*self.policies.read())
+            .expect("RetentionPolicy is plain serializable data");
         let kv = Arc::clone(&self.kv.read());
-        if let Err(e) = kv.kv_set(KV_NAMESPACE, KV_KEY, json).await {
-            tracing::warn!(error = %e, "failed to persist retention policies");
-        }
+        kv.kv_set(KV_NAMESPACE, KV_KEY, json).await
     }
 
     pub fn list(&self) -> Vec<RetentionPolicy> {
         self.policies.read().clone()
     }
 
-    /// Replace all policies. The admin PUT handler calls
-    /// [`validate_policies`] before this — the store itself does not
-    /// re-validate, so any other caller must too.
-    pub fn update(&self, new_policies: Vec<RetentionPolicy>) {
+    /// Replace all policies and durably persist them before returning.
+    /// The admin PUT handler calls [`validate_policies`] before this —
+    /// the store itself does not re-validate, so any other caller must
+    /// too. Returns the KV write error (if any) so the handler can fail
+    /// the request instead of acking a change that was never persisted.
+    pub async fn update(&self, new_policies: Vec<RetentionPolicy>) -> anyhow::Result<()> {
         *self.policies.write() = new_policies;
-        self.persist_best_effort();
+        if let Err(e) = self.persist().await {
+            // In-memory state changed but the durable copy did not. Keep
+            // the in-memory change (the running server uses it) and report
+            // the failure — the next boot falls back to the last persisted
+            // value, which is the last PUT that did ack.
+            anyhow::bail!(e);
+        }
+        Ok(())
     }
 
     pub fn set_policy(&self, data_type: &str, max_age_days: u64) {
@@ -214,11 +249,11 @@ impl RetentionStore {
         self.persist_best_effort();
     }
 
-    /// Fire-and-forget persistence for the sync mutation paths.
-    /// `update`/`set_policy` keep their sync signatures (admin handlers);
-    /// the KV write is spawned onto the current runtime, if any. Outside a
-    /// runtime (plain unit tests) the write is skipped — the in-memory
-    /// policies stay authoritative for the process lifetime anyway.
+    /// Fire-and-forget persistence for the sync mutation path
+    /// (`set_policy`). The KV write is spawned onto the current runtime, if
+    /// any. Outside a runtime (plain unit tests) the write is skipped — the
+    /// in-memory policies stay authoritative for the process lifetime
+    /// anyway.
     fn persist_best_effort(&self) {
         if tokio::runtime::Handle::try_current().is_err() {
             return;
@@ -593,12 +628,12 @@ mod tests {
         assert_eq!(SnapshotTiers::spec_default().keep_4w, 4);
     }
 
-    #[test]
-    fn update_policies() {
+    #[tokio::test]
+    async fn update_policies() {
         let store = RetentionStore::new();
         let mut policies = default_policies();
         policies[0].max_age_days = 10;
-        store.update(policies);
+        store.update(policies).await.unwrap();
         assert_eq!(store.list()[0].max_age_days, 10);
     }
 
@@ -636,6 +671,170 @@ mod tests {
             .find(|p| p.data_type == "audit_events")
             .unwrap();
         assert_eq!(p.max_age_days, 42);
+    }
+
+    /// KV store whose reads fail and whose writes are recorded. Used to
+    /// prove `init` never overwrites a stored blob it could not read
+    /// (writes issued against it are observable and must be none).
+    #[derive(Default)]
+    struct FailingReadKv {
+        writes: parking_lot::Mutex<Vec<(String, String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl KvJsonStore for FailingReadKv {
+        async fn kv_set(&self, ns: &str, key: &str, value: String) -> Result<()> {
+            self.writes.lock().push((ns.to_string(), key.to_string(), value));
+            Ok(())
+        }
+        async fn kv_get(&self, _ns: &str, _key: &str) -> Result<Option<String>> {
+            anyhow::bail!("storage unavailable")
+        }
+        async fn kv_remove(&self, _ns: &str, _key: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn kv_list(&self, _ns: &str) -> Result<Vec<(String, String)>> {
+            Ok(vec![])
+        }
+        async fn kv_clear(&self, _ns: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// KV store that records writes, for proving durable-PUT semantics.
+    #[derive(Default)]
+    struct RecordingKv {
+        writes: parking_lot::Mutex<Vec<(String, String, String)>>,
+    }
+    #[async_trait::async_trait]
+    impl KvJsonStore for RecordingKv {
+        async fn kv_set(&self, ns: &str, key: &str, value: String) -> Result<()> {
+            self.writes.lock().push((ns.to_string(), key.to_string(), value));
+            Ok(())
+        }
+        async fn kv_get(&self, _ns: &str, _key: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+        async fn kv_remove(&self, _ns: &str, _key: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn kv_list(&self, _ns: &str) -> Result<Vec<(String, String)>> {
+            Ok(vec![])
+        }
+        async fn kv_clear(&self, _ns: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn update_persists_before_returning() {
+        // The old fire-and-forget bug this kills: PUT acked 204, then a
+        // crash in the spawned persist task silently lost the change.
+        // `update` must complete the KV write before returning Ok.
+        let kv = Arc::new(RecordingKv::default());
+        let store = RetentionStore::new();
+        store.init(Arc::clone(&kv) as Arc<dyn KvJsonStore>).await;
+
+        let mut policies = default_policies();
+        for p in &mut policies {
+            if p.data_type == "audit_events" {
+                p.max_age_days = 123;
+            }
+        }
+        store.update(policies).await.unwrap();
+
+        // The write is visible immediately after update returns — no
+        // sleep, no spawned-task race.
+        let writes = kv.writes.lock();
+        let last = writes.last().expect("update must have written the KV blob");
+        let persisted: Vec<RetentionPolicy> = serde_json::from_str(&last.2).unwrap();
+        assert_eq!(
+            persisted
+                .iter()
+                .find(|p| p.data_type == "audit_events")
+                .unwrap()
+                .max_age_days,
+            123
+        );
+    }
+
+    #[tokio::test]
+    async fn init_corrupt_blob_warns_and_self_heals() {
+        // A corrupt blob must not silently reset: it warns, runs on
+        // defaults, and rewrites the blob (a corrupt blob never becomes
+        // valid on its own).
+        let kv: Arc<dyn KvJsonStore> = Arc::new(crate::mem::MemKvStore::default());
+        kv.kv_set(KV_NAMESPACE, KV_KEY, "not valid json{{".to_string())
+            .await
+            .unwrap();
+
+        let store = RetentionStore::new();
+        store.init(Arc::clone(&kv)).await;
+
+        // Running on defaults...
+        assert_eq!(store.list(), default_policies());
+        // ...and the blob was rewritten to a valid payload.
+        let json = kv.kv_get(KV_NAMESPACE, KV_KEY).await.unwrap().unwrap();
+        let healed: Vec<RetentionPolicy> = serde_json::from_str(&json).unwrap();
+        assert_eq!(healed, default_policies());
+    }
+
+    #[tokio::test]
+    async fn init_read_failure_does_not_overwrite_stored_blob() {
+        // The old destructive bug this kills: when kv_get failed (e.g.
+        // transient storage outage), init fell through to persisting the
+        // DEFAULTS over the stored blob — destroying the admin's
+        // configured policies over a read failure. On read failure the
+        // stored blob must be left untouched.
+        //
+        // Two assertions prove it:
+        // 1. init against the failing store issues NO write (the write
+        //    would have carried the defaults over the unknown blob);
+        // 2. the real blob, seeded readable elsewhere, still loads in a
+        //    fresh store afterwards.
+        let failing = Arc::new(FailingReadKv::default());
+
+        // A configured policy set, seeded into a readable store — this is
+        // the blob that must survive.
+        let readable: Arc<dyn KvJsonStore> = Arc::new(crate::mem::MemKvStore::default());
+        let mut policies = default_policies();
+        for p in &mut policies {
+            if p.data_type == "audit_events" {
+                p.max_age_days = 777;
+            }
+        }
+        readable
+            .kv_set(KV_NAMESPACE, KV_KEY, serde_json::to_string(&policies).unwrap())
+            .await
+            .unwrap();
+
+        // Boot a store against a KV whose reads fail: it runs on defaults
+        // and must not write anything back.
+        let store = RetentionStore::new();
+        store
+            .init(Arc::clone(&failing) as Arc<dyn KvJsonStore>)
+            .await;
+        assert_eq!(store.list(), default_policies(), "runs on defaults");
+        assert!(
+            failing.writes.lock().is_empty(),
+            "init must not write when the KV read failed — the stored blob's \
+             content is unknown and overwriting it could destroy configured \
+             policies"
+        );
+
+        // The readable blob is intact: a fresh store still loads 777.
+        let store2 = RetentionStore::new();
+        store2.init(readable).await;
+        assert_eq!(
+            store2
+                .list()
+                .iter()
+                .find(|p| p.data_type == "audit_events")
+                .unwrap()
+                .max_age_days,
+            777,
+            "the persisted blob must survive an init that could not read it"
+        );
     }
 
     fn audit_event(id: &str, ts: u64) -> AuditEvent {
@@ -1179,7 +1378,7 @@ mod tests {
                 p.max_age_days = 10;
             }
         }
-        state.retention_store.update(policies);
+        state.retention_store.update(policies).await.unwrap();
 
         let ws = Id::new("ws-cfg");
         let t_ms = now() * 1000;

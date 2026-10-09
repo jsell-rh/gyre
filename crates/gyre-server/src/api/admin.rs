@@ -209,13 +209,15 @@ pub async fn admin_list_retention(
 ///
 /// The body must be a complete, valid policy list: all 7 spec data types
 /// (`validate_policies`); an omitted type would silently disable
-/// enforcement for it.
+/// enforcement for it. The store persists durably before the 204 is
+/// returned — a KV write failure fails the request instead of acking a
+/// change that would be silently lost on restart.
 pub async fn admin_update_retention(
     State(state): State<Arc<AppState>>,
     Json(policies): Json<Vec<RetentionPolicy>>,
 ) -> Result<StatusCode, ApiError> {
     validate_policies(&policies).map_err(ApiError::BadRequest)?;
-    state.retention_store.update(policies);
+    state.retention_store.update(policies).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
