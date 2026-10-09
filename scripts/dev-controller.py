@@ -385,13 +385,17 @@ def recover_prior_quality_failures(db):
 
 def source():
     try:
-        if not SOURCE.exists():
-            url = git("remote", "get-url", "origin", cwd=ROOT)
-            git("clone", "--quiet", "--filter=blob:none", "--single-branch", "--branch", "main",
-                "--no-checkout", url, str(SOURCE), cwd=ROOT, timeout=90)
-        git("fetch", "--quiet", "--filter=blob:none", "origin", "+refs/heads/main:refs/remotes/origin/main",
-            "+refs/heads/worker/task-*:refs/remotes/origin/worker/task-*",
-            "+refs/heads/devloop/task-*:refs/remotes/origin/devloop/task-*", timeout=90)
+        # Dashboard retry/sync commands share this cache with the controller.
+        # Git's individual ref locks cannot serialize two whole fetches.
+        with (STATE / 'source.lock').open('a+') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if not SOURCE.exists():
+                url = git("remote", "get-url", "origin", cwd=ROOT)
+                git("clone", "--quiet", "--filter=blob:none", "--single-branch", "--branch", "main",
+                    "--no-checkout", url, str(SOURCE), cwd=ROOT, timeout=90)
+            git("fetch", "--quiet", "--filter=blob:none", "origin", "+refs/heads/main:refs/remotes/origin/main",
+                "+refs/heads/worker/task-*:refs/remotes/origin/worker/task-*",
+                "+refs/heads/devloop/task-*:refs/remotes/origin/devloop/task-*", timeout=90)
     except (RuntimeError, subprocess.TimeoutExpired) as exc:
         raise SourceUnavailable(f"source refresh failed: {exc}") from exc
 

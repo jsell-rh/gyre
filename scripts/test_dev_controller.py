@@ -364,6 +364,27 @@ class ControllerGitTest(unittest.TestCase):
         self.assertRegex(observations[0], r'^[0-9a-f]{40}$')
         self.assertEqual(self.db.execute("SELECT count(*) FROM events WHERE message='concurrent control write'").fetchone()[0], 1)
 
+    def test_shared_source_refresh_waits_for_other_process_lock(self):
+        script = Path(__file__).with_name('dev-controller.py').resolve()
+        code = ('import importlib.util; '
+                f's=importlib.util.spec_from_file_location("controller", {str(script)!r}); '
+                'm=importlib.util.module_from_spec(s); s.loader.exec_module(m); '
+                'print("starting", flush=True); m.source(); print("finished", flush=True)')
+        with (controller.STATE / 'source.lock').open('a+') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            child = subprocess.Popen([sys.executable, '-c', code], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     text=True, env={**os.environ, 'GYRE_DEV_ROOT': str(self.work),
+                                                    'GYRE_DEV_STATE': str(controller.STATE)})
+            self.addCleanup(lambda: child.kill() if child.poll() is None else None)
+            self.assertEqual(child.stdout.readline().strip(), 'starting')
+            with self.assertRaises(subprocess.TimeoutExpired):
+                child.wait(timeout=.1)
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        output, errors = child.communicate(timeout=10)
+        self.assertEqual(child.returncode, 0, errors)
+        self.assertIn('finished', output)
+        self.assertTrue((controller.SOURCE / '.git').exists())
+
     def test_main_repair_blocks_integration_but_allows_independent_workers(self):
         sha = self.candidate()
         controller.sync(self.db)
