@@ -208,11 +208,26 @@ pub async fn delete_worktree(
     State(state): State<Arc<AppState>>,
     Path((repo_id, wt_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    state
+    let repo = state
         .repos
         .find_by_id(&Id::new(&repo_id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
+
+    // jj workspace teardown before deleting the record (source-control.md §4).
+    if let Ok(wts) = state.worktrees.find_by_repo(&repo.id).await {
+        if let Some(wt) = wts.iter().find(|wt| wt.id.as_str() == wt_id) {
+            let agent_id = wt.agent_id.to_string();
+            crate::api::spawn::cleanup_jj_workspace(
+                &state,
+                &agent_id,
+                &repo.path,
+                &wt.path,
+                &format!("agent-{agent_id}"),
+            )
+            .await;
+        }
+    }
 
     state.worktrees.delete(&Id::new(&wt_id)).await?;
     Ok(StatusCode::NO_CONTENT)
