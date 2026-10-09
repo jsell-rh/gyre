@@ -286,11 +286,9 @@ pub async fn spec_index(State(state): State<Arc<AppState>>) -> axum::response::R
         md.push_str("| Spec | Status | SHA |\n");
         md.push_str("|------|--------|-----|\n");
         for e in entries {
-            let short_sha = if e.current_sha.len() >= 8 {
-                &e.current_sha[..8]
-            } else {
-                &e.current_sha
-            };
+            // char-boundary-safe truncation: `get(..8)` returns None when the
+            // index falls inside a multibyte character (task-095 F4 flaw class).
+            let short_sha = e.current_sha.get(..8).unwrap_or(&e.current_sha);
             md.push_str(&format!(
                 "| [{title}](specs/{path}) | {status} | `{sha}` |\n",
                 title = e.title,
@@ -2381,7 +2379,7 @@ specs:
             assert!(out.status.success());
             shas.insert(
                 spec.to_string(),
-                String::from_utf8(out.stdout).trim().to_string(),
+                String::from_utf8(out.stdout).unwrap().trim().to_string(),
             );
         }
         (dir, shas)
@@ -2551,6 +2549,33 @@ specs:
             .approval_status
     }
 
+    /// Seed a real human user `jsell` (Admin) with an API key registered in
+    /// the auth-resolving store, so a human approval flows through the real
+    /// API-key auth path and resolves to `user:jsell` — matching the
+    /// manifest's `human_approvers` list. Returns the raw API key.
+    async fn register_e2e_human(state: &crate::AppState) -> String {
+        let mut user = gyre_domain::User::new(
+            gyre_common::Id::new("user-jsell"),
+            "local:jsell",
+            "jsell",
+            0,
+        );
+        user.roles = vec![gyre_domain::UserRole::Admin];
+        state.users.create(&user).await.unwrap();
+
+        let raw_key = format!("gyre_{}", uuid::Uuid::new_v4().simple());
+        state
+            .api_keys
+            .create(
+                &crate::auth::hash_api_key(&raw_key),
+                &user.id,
+                "e2e-approval",
+            )
+            .await
+            .unwrap();
+        raw_key
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn human_and_agent_requires_both_approvals_e2e() {
         let state = test_state();
@@ -2563,14 +2588,17 @@ specs:
         let spec = "system/both.md";
         let sha = &shas[spec];
 
+        let human_key = register_e2e_human(&state).await;
+
         // Agent approval alone → still Pending (would be Approved if the
         // resolver were reverted to "any valid approval").
         let resp = approve_via_api(&app, &agent_jwt, spec, sha, Some("accountability")).await;
         assert_eq!(resp.status(), StatusCode::CREATED);
         assert_eq!(ledger_status(&state, spec).await, ApprovalStatus::Pending);
 
-        // Human approval completes the pair → Approved.
-        let resp = approve_via_api(&app, "test-token", spec, sha, None).await;
+        // Human approval from a real user in human_approvers completes the
+        // pair → Approved.
+        let resp = approve_via_api(&app, &human_key, spec, sha, None).await;
         assert_eq!(resp.status(), StatusCode::CREATED);
         assert_eq!(ledger_status(&state, spec).await, ApprovalStatus::Approved);
     }
