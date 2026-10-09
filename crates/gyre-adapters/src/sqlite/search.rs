@@ -152,18 +152,19 @@ impl SearchPort for SqliteStorage {
 
     async fn search(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
         let pool = Arc::clone(&self.pool);
-        Ok(tokio::task::spawn_blocking(move || -> Result<Vec<SearchResult>> {
-            let mut conn = pool.get().context("get db connection")?;
-            let match_expr = build_match_expr(&query.query);
-            if match_expr.is_empty() {
-                return Ok(vec![]);
-            }
-            // entity_type / workspace_id filters are WHERE clauses evaluated by
-            // the index query itself (§Access Scoping: not post-filtered).
-            // bm25 ordering: best (most negative) first. snippet() wraps matches
-            // in ** markers per spec §Response Format.
-            let rows = diesel::sql_query(format!(
-                "SELECT entity_type,
+        Ok(
+            tokio::task::spawn_blocking(move || -> Result<Vec<SearchResult>> {
+                let mut conn = pool.get().context("get db connection")?;
+                let match_expr = build_match_expr(&query.query);
+                if match_expr.is_empty() {
+                    return Ok(vec![]);
+                }
+                // entity_type / workspace_id filters are WHERE clauses evaluated by
+                // the index query itself (§Access Scoping: not post-filtered).
+                // bm25 ordering: best (most negative) first. snippet() wraps matches
+                // in ** markers per spec §Response Format.
+                let rows = diesel::sql_query(format!(
+                    "SELECT entity_type,
                         entity_id,
                         title,
                         bm25(search_index) AS rank,
@@ -175,32 +176,33 @@ impl SearchPort for SqliteStorage {
                    AND (?3 IS NULL OR workspace_id = ?3)
                  ORDER BY rank
                  LIMIT ?4"
-            ))
-            .bind::<Text, _>(&match_expr)
-            .bind::<Nullable<Text>, _>(query.entity_type)
-            .bind::<Nullable<Text>, _>(query.workspace_id)
-            .bind::<BigInt, _>(query.limit as i64)
-            .load::<FtsRow>(&mut conn)?;
+                ))
+                .bind::<Text, _>(&match_expr)
+                .bind::<Nullable<Text>, _>(query.entity_type)
+                .bind::<Nullable<Text>, _>(query.workspace_id)
+                .bind::<BigInt, _>(query.limit as i64)
+                .load::<FtsRow>(&mut conn)?;
 
-            Ok(rows
-                .into_iter()
-                .map(|r| {
-                    // bm25 is <= 0, more negative = better. Invert and squash to
-                    // (0,1] so higher score = more relevant, per spec Response Format.
-                    let inverted = -r.rank;
-                    let facets = serde_json::from_str(&r.metadata).unwrap_or_default();
-                    SearchResult {
-                        entity_type: r.entity_type,
-                        entity_id: r.entity_id,
-                        title: r.title,
-                        snippet: r.snip,
-                        score: inverted / (inverted + 1.0),
-                        facets,
-                    }
-                })
-                .collect())
-        })
-        .await??)
+                Ok(rows
+                    .into_iter()
+                    .map(|r| {
+                        // bm25 is <= 0, more negative = better. Invert and squash to
+                        // (0,1] so higher score = more relevant, per spec Response Format.
+                        let inverted = -r.rank;
+                        let facets = serde_json::from_str(&r.metadata).unwrap_or_default();
+                        SearchResult {
+                            entity_type: r.entity_type,
+                            entity_id: r.entity_id,
+                            title: r.title,
+                            snippet: r.snip,
+                            score: inverted / (inverted + 1.0),
+                            facets,
+                        }
+                    })
+                    .collect())
+            })
+            .await??,
+        )
     }
 
     async fn delete(&self, entity_type: &str, entity_id: &str) -> Result<()> {
@@ -209,12 +211,10 @@ impl SearchPort for SqliteStorage {
         let eid = entity_id.to_string();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
-            diesel::sql_query(
-                "DELETE FROM search_index WHERE entity_type = ?1 AND entity_id = ?2",
-            )
-            .bind::<Text, _>(&et)
-            .bind::<Text, _>(&eid)
-            .execute(&mut *conn)?;
+            diesel::sql_query("DELETE FROM search_index WHERE entity_type = ?1 AND entity_id = ?2")
+                .bind::<Text, _>(&et)
+                .bind::<Text, _>(&eid)
+                .execute(&mut *conn)?;
             Ok(())
         })
         .await??;
@@ -373,8 +373,14 @@ mod tests {
             results[0].snippet
         );
         // Facets survive the metadata JSON round-trip.
-        assert_eq!(results[0].facets.get("status").map(String::as_str), Some("in_progress"));
-        assert_eq!(results[0].facets.get("priority").map(String::as_str), Some("high"));
+        assert_eq!(
+            results[0].facets.get("status").map(String::as_str),
+            Some("in_progress")
+        );
+        assert_eq!(
+            results[0].facets.get("priority").map(String::as_str),
+            Some("high")
+        );
         assert!(results[1].facets.is_empty());
     }
 
@@ -550,8 +556,14 @@ mod tests {
     #[tokio::test]
     async fn reindex_all_clears_and_reports_count() {
         let (_f, storage) = tmp_storage();
-        storage.index(doc("task", "t1", "a", "termone text")).await.unwrap();
-        storage.index(doc("task", "t2", "b", "termone text")).await.unwrap();
+        storage
+            .index(doc("task", "t1", "a", "termone text"))
+            .await
+            .unwrap();
+        storage
+            .index(doc("task", "t2", "b", "termone text"))
+            .await
+            .unwrap();
         assert_eq!(storage.reindex_all().await.unwrap(), 2);
         let after = storage
             .search(SearchQuery {

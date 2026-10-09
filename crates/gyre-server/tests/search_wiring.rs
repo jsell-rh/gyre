@@ -55,7 +55,12 @@ fn doc(entity_type: &str, entity_id: &str, title: &str, body: &str) -> SearchDoc
     }
 }
 
-async fn call(app: &axum::Router, method: &str, uri: &str, body: Option<String>) -> axum::response::Response {
+async fn call(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Option<String>,
+) -> axum::response::Response {
     app.clone()
         .oneshot(
             Request::builder()
@@ -133,11 +138,17 @@ async fn sqlite_url_wires_fts5_search_port() {
         ),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "task create through real API failed");
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "task create through real API failed"
+    );
 
     let resp = call(&app, "GET", "/api/v1/search?q=quokkas", None).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let results = body["results"].as_array().unwrap();
     // "quokkas" porter-stems to "quokka" and matches the indexed doc.
