@@ -36,6 +36,16 @@ worktrees/
 
 # Pre-commit cache
 .pre-commit-cache/
+# Stray root package-lock.json: some review/verifier tooling invokes npm from
+# the repo root (no package.json there), and npm writes an empty lockfile stub.
+# The wip sweep (`scripts/dev-remote.sh` "preserve sandbox attempt") commits
+# any untracked file it finds, which turned this generated artifact into a
+# task-labeled source change and got two integrations rejected ("review cannot
+# approve its own source edits"). Ignore it so the sweep never captures it.
+# Anchored to the repo root: /package-lock.json does NOT match
+# web/package-lock.json or any other tracked subdirectory lockfile.
+
+/package-lock.json
 
 # SQLite databases (development)
 *.db
