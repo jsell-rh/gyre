@@ -2,7 +2,7 @@
 title: "Manifest-driven Concept Views for the knowledge graph"
 spec_ref: "realized-model.md §4 Concept Views"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "realized-model.md §4. Concept Views"
 commits: ["623ba4e48af1adc8719587d28bbdc49d6238b6da", "ce4a5fc7ba808235008dc132599e67523dbdaa22", "035d920c2c512b67fabd258ec2d7a7ffe6f82728", "b1f8787126375d98b3cb4fe8f5307e79d403ef3e"]
