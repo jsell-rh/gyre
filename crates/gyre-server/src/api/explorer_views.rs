@@ -1249,11 +1249,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn PROBE_create_view_rejects_viewquery_smuggled_nested_side_by_side() {
-        // PROBE: a payload carrying BOTH a valid ViewQuery `scope` AND an
-        // invalid nested side-by-side. parse_and_validate tries ViewQuery
-        // first and ignores unknown ViewSpec fields — does the nesting
-        // rule get bypassed?
+    async fn create_view_rejects_hybrid_viewquery_viewspec_payload() {
+        // A payload carrying BOTH a valid ViewQuery `scope` AND ViewSpec
+        // fields (`left`/`right`). The two grammars have disjoint top-level
+        // field sets; serde ignores unknown fields, so a "try ViewQuery
+        // first" parse order would let this hybrid ride the ViewQuery branch
+        // and smuggle an unvalidated nested side-by-side into storage
+        // (the exact 201-instead-of-400 bypass found in review).
         let app = app();
         let body = Body::from(
             r#"{
@@ -1270,7 +1272,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/workspaces/ws-probe/explorer-views")
+                    .uri("/api/v1/workspaces/ws-hybrid/explorer-views")
                     .header("Authorization", auth())
                     .header("Content-Type", "application/json")
                     .body(body)
@@ -1278,7 +1280,6 @@ mod tests {
             )
             .await
             .unwrap();
-        eprintln!("PROBE status: {}", resp.status());
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

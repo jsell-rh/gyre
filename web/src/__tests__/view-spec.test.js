@@ -193,4 +193,16 @@ describe('ViewSpec grammar — rejection cases', () => {
     expect(result.valid).toBe(false);
     expect(result.errors.join()).toMatch(/own data layer/);
   });
+
+  it("rejects orphan 'left'/'right' on a non-side-by-side layout", () => {
+    // `left`/`right` are meaningful only for 'side-by-side'; on any other
+    // layout they smuggle nested content no renderer consumes (mirror of
+    // the Rust validate_view_spec rule).
+    const result = validateViewSpec({
+      ...SIDE_BY_SIDE_EXAMPLE,
+      layout: 'list',
+    });
+    expect(result.valid).toBe(false);
+    expect(result.errors.join()).toMatch(/only allowed with layout 'side-by-side'/);
+  });
 });

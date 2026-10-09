@@ -187,6 +187,11 @@ export function validateViewSpec(spec) {
     }
     if (layout === 'side-by-side') {
       validateSideBySide(spec, errors);
+    } else if (spec.left !== undefined || spec.right !== undefined) {
+      // `left`/`right` are meaningful only for 'side-by-side'. On any other
+      // layout they are smuggled content no renderer consumes — mirror of
+      // the Rust validate_view_spec rule.
+      errors.push("'left'/'right' sub-views are only allowed with layout 'side-by-side'");
     }
   }
 
