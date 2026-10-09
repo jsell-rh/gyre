@@ -91,7 +91,10 @@ Implemented in `f88e55b7` (recovered into this branch by checkpoint `f4e08ad0`),
 `95f1a14` (byte-slice annotation on an index-typed `Vec::truncate`) and this round's `1c4a7bb4`
 (restore main's committed `web/dist` — the recovered checkpoint carried an unreviewed shared-build-lane
 dist rebuild; `web/src` is byte-identical to base, so the rebuild was pollution, removed per the task-210
-round-12 convention that task branches never ship dist rebuilds).
+round-12 convention that task branches never ship dist rebuilds). The attribution-repair commit at
+branch head (`process(task-152): record task-210 commit a781ede2 ...`) records task-210's
+`a781ede2` in its own frontmatter to clear attribution drift inherited from the base (same repair the
+task-063/task-160 continuation rounds made when the identical base drift hit their gates).
 
 - **Template generator** (`crates/gyre-domain/src/narrative.rs`): `NarrativeGrounding::from_graph` indexes
   the live graph (Contains parent, Implements traits, FieldOf fields, node `spec_path`/`spec_paths` +
@@ -140,9 +143,11 @@ and output under `/tmp/stage/review-evidence/`):
 - `cargo test -p gyre-server --lib -- narrative briefing` → **20 passed, 0 failed** (includes the 3
   task tests).
 
-Known pre-existing, out of scope for this task: `check-task-commit-attribution.sh` fails on main's own
-base (commit `a781ede2` "feat(task-210)" landed on main without task-210 frontmatter attribution —
-drift inherited from the base commit `8c2d1775`, not introduced by this branch; the fix that records it,
-`63d66b46`, exists only on an unrelated task-116 branch, not on main). Also `web/dist` committed on main
+Known pre-existing, repaired this round: `check-task-commit-attribution.sh` failed on the base itself
+(commit `a781ede2` "feat(task-210)" landed on main 2026-10-09 without task-210 frontmatter attribution —
+drift inherited from base `8c2d1775`, not introduced by this branch; the fix that records it, `63d66b46`,
+exists only on an unrelated task-116 branch, not on main). Repaired in the attribution-repair commit at branch head by recording the full
+SHA in `specs/tasks/task-210.md` `commits:` — the task-063/task-160 precedent; no exemption entries
+added, gate now passes. Still out of scope: `web/dist` committed on main
 is stale relative to `web/src` (missing `briefing-since` markup, still containing `sidebar-badge` markup
 deleted 2026-03-28) — a main-side dist regeneration is a separate task, not this branch's to ship.
