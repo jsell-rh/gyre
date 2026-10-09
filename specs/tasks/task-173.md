@@ -9,7 +9,7 @@ coverage_sections:
   - "ui-layout.md §Drill-Down (Entity Detail)"
   - "ui-layout.md §Inline Expansion (Inbox/Briefing)"
   - "ui-layout.md §Contextual Chat"
-commits: []
+commits: ["99e99039f01c69ef3b7c19f712aeb8de3f83c864", "e25dd52404f06f48b170c4b9cabd9817b036e7f2"]
 ---
 
 ## Spec Excerpt

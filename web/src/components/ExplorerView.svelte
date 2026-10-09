@@ -740,10 +740,15 @@
   }
 
   function selectRepo(repo) {
-    // In workspace-scope mode, selecting a repo loads its graph in this view
+    // In workspace-scope mode, selecting a repo loads its graph in this view.
+    // Scope drill per ui-layout.md §3: URL updates via pushState (no reload),
+    // so the drilled state is deep-linkable and Back returns to the repo list.
     selectedRepoId = repo.id;
     showingRepoGraph = true;
     clearConceptSearch();
+    const url = new URL(window.location.href);
+    url.searchParams.set('repo', repo.name ?? repo.id);
+    window.history.pushState(window.history.state, '', url.toString());
     loadGraph(repo.id);
   }
 
@@ -752,6 +757,12 @@
     selectedRepoId = '';
     graph = null;
     graphError = null;
+    // Pop the drill URL entry pushed by selectRepo (Back from drilled state)
+    const url = new URL(window.location.href);
+    if (url.searchParams.has('repo')) {
+      url.searchParams.delete('repo');
+      window.history.pushState(window.history.state, '', url.toString());
+    }
   }
 
   async function loadRepos() {
@@ -2764,6 +2775,8 @@
   }
   .toolchain-warning-dismiss:hover { opacity: 1; background: rgba(245, 158, 11, 0.2); }
 
+  /* Slide-in per ui-layout.md §3 Drill-Down: 200ms ease-out from the right.
+     Width 0→target animates the slide; min-width animates in lockstep. */
   .explorer-detail-area {
     width: 320px;
     min-width: 280px;
@@ -2772,6 +2785,7 @@
     display: flex;
     flex-direction: column;
     border-left: 1px solid var(--color-border);
+    transition: width 200ms ease-out, min-width 200ms ease-out;
   }
 
   .explorer-chat-area {
@@ -2816,6 +2830,7 @@
   }
 
   /* ── Spec Editor slide-out panel ───────────────────────────────── */
+  /* Slide-in per ui-layout.md §3 Drill-Down: 200ms ease-out from the right. */
   .spec-editor-panel {
     width: 420px;
     min-width: 320px;
@@ -2825,6 +2840,7 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    transition: width 200ms ease-out, min-width 200ms ease-out;
   }
 
   .spec-editor-header {

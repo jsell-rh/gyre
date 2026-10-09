@@ -5339,7 +5339,7 @@
     flex-direction: column;
     background: var(--color-surface);
     border-left: 1px solid var(--color-border);
-    transition: width var(--transition-normal) ease-out, min-width var(--transition-normal) ease-out;
+    transition: width 200ms ease-out, min-width 200ms ease-out;
     flex-shrink: 0;
   }
 
