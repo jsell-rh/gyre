@@ -2,7 +2,7 @@
 title: "HSI Trust Gradient — Trust Levels, Enforcement & Mechanical Implementation"
 spec_ref: "human-system-interface.md §9–13"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 review: specs/reviews/task-077.md
 coverage_sections:
   - "human-system-interface.md §9 2. Trust Gradient"
@@ -130,6 +130,43 @@ SHAs twice. Root cause: `scripts/dev-remote.sh` rebuilt the field from
 `origin/main..HEAD` only — R1 SHAs merged to main fall outside that range, and
 `check-task-commit-attribution.sh` scans ALL history. Fixed by unioning existing
 frontmatter entries with the branch-range list (verified idempotent).
+
+## R5 Revision Notes (2026-10-09, completes the interrupted F6 caller migration)
+
+The prior round's sandbox attempt (d8c62c4) made `seed_builtin_policies`
+fallible — fail-closed, so an unpersisted immutable Deny
+(`builtin:require-human-spec-approval`) aborts startup instead of warn-and-
+continue (F6 class) — but ended before migrating the remaining callers.
+`cargo check --all-targets` showed 21 unused-Result warnings: 9 unit tests in
+`src/api/` (audit, budget ×2, meta_specs ×2, release, spec_policy,
+stack_attest, tenants) and 12 integration-test bootstrap sites (api,
+auth ×2, conversation, e2e_ralph_loop, explorer_ws, git, graph ×3,
+m18_oidc). Each is one `let _ =` away from re-introducing the exact
+fail-open the fix targets.
+
+**Repair (830c7af):** all 21 callers now propagate — `.await.expect("seed
+built-in policies")` in integration harnesses, `.block_on(...).expect(...)`
+in unit tests; `main.rs` already used `?`. `cargo check -p gyre-server
+--all-targets` is warning-free. Focused probes: `abac_middleware::tests`
+10/10 (incl. `builtin_policy_seeding_fails_closed_on_store_error`),
+`merge_processor::tests` supervised/guided trust-gate 6/6, the nine
+migrated api unit tests 9/9. `check-warn-continue-creation.sh` passes with
+an empty exemption list; `check-silent-result-discard.sh` diff vs baseline
+shows only a pre-existing line shift (abac_middleware.rs record_decision
+audit-log site, untouched). The verifier-preserved
+`warn-continue-creation-exemptions.txt` re-anchor edit (728→730) was for the
+then-unfixed site; the site is now genuinely fail-closed, so per the file's
+own contract the entry is deleted rather than re-anchored — this is the
+in-scope repair the review requested, not an exemption-file growth.
+
+**merge_processor.rs handoff:** the prior round's botched edit (header
+replaced by seed lines) was already repaired before d8c62c4 landed; at HEAD
+all six trust-gate tests have intact `#[tokio::test]` headers + seed calls
+and pass.
+
+Integration suites that bind loopback listeners are left to the controller
+(sandbox disallows loopback listeners); compile coverage via
+`cargo check --all-targets`.
 
 ## Agent Instructions
 
