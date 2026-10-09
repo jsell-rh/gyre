@@ -280,11 +280,9 @@ pub async fn spec_index(State(state): State<Arc<AppState>>) -> axum::response::R
         md.push_str("| Spec | Status | SHA |\n");
         md.push_str("|------|--------|-----|\n");
         for e in entries {
-            let short_sha = if e.current_sha.len() >= 8 {
-                &e.current_sha[..8]
-            } else {
-                &e.current_sha
-            };
+            // Char-boundary-safe short sha (task-095 F4 class): a non-ASCII
+            // sha would panic on a fixed byte index.
+            let short_sha: String = e.current_sha.chars().take(8).collect();
             md.push_str(&format!(
                 "| [{title}](specs/{path}) | {status} | `{sha}` |\n",
                 title = e.title,
