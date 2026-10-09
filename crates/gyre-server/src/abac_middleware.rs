@@ -806,6 +806,10 @@ pub async fn abac_middleware(
 
     let req = Request::from_parts(parts, body);
 
+    // Resolve action (needed by the scoped-token allow-list below and by
+    // policy evaluation).
+    let action = action_override.unwrap_or_else(|| method_to_action(&method));
+
     // System token bypasses ABAC entirely.
     if auth.agent_id == "system" {
         return next.run(req).await;
@@ -880,8 +884,6 @@ pub async fn abac_middleware(
         ctx.merge_jwt_claims(claims);
     }
 
-    // Resolve action.
-    let action = action_override.unwrap_or_else(|| method_to_action(&method));
 
     // Load policies and evaluate.
     // Policies are loaded from the shared store on EVERY request — there is
