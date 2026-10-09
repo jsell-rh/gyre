@@ -18,8 +18,11 @@ lint suites to the controller; run focused probes that work in this sandbox.
 
 If an existing review reports defects, address each concrete finding. Record
 integration and full-suite failures from the supplied repair handoff as
-concrete findings too. Reproduce them before editing; compare with current
-main if they appear unrelated. Preserve the spec and verification gates.
+concrete findings too. Reproduce where the sandbox supports the probe; supplied
+exact-SHA logs establish failures that require host or GitHub execution.
+Once current code and a failing assertion identify the defect, make the repair;
+trace historical commits only when the task requires provenance. Compare with
+current main for unrelated failures. Preserve the spec and verification gates.
 Do not silence failures by deleting tests, weakening checks, growing
 exemption files, or marking unfinished requirements complete. When implementation
 is ready for an independent review, set `progress: ready-for-review`; never set
