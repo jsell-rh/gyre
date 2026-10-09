@@ -13,7 +13,15 @@ coverage_sections:
   - "lsp-call-graph.md §6 Extraction Pipeline"
   - "lsp-call-graph.md §10 Implementation Phases (Phase 1)"
   - "lsp-call-graph.md §11 Prerequisites"
-commits: ["9cf2a5a67a0926fa4bef3032c8a20e134453a672", "e707d31b2999d835052ae3d8e19a1687949e65a7", "ea7ba523536e314551c0da3ee3612e0dbb01deb0", "1777385e90664f0c0470d38f62a326a9d62dd6ad", "756f4b356aa5b9cb93be22b6b7691a2859fa75ba", "286927ae62802f7a8b0a7fbd795f10ae0c72b2c7", "bd85151d2d8e5fdd8e74e3347f9f1c107ac3e006", "17c81d5a4d8fe8dc93387ba2c8360187a8028737"]
+commits:
+  - 17c81d5a4d8fe8dc93387ba2c8360187a8028737
+  - 286927ae62802f7a8b0a7fbd795f10ae0c72b2c7
+  - 756f4b356aa5b9cb93be22b6b7691a2859fa75ba
+  - bd85151d2d8e5fdd8e74e3347f9f1c107ac3e006
+  - 1777385e90664f0c0470d38f62a326a9d62dd6ad
+  - e707d31b2999d835052ae3d8e19a1687949e65a7
+  - ea7ba523536e314551c0da3ee3612e0dbb01deb0
+  - 9cf2a5a67a0926fa4bef3032c8a20e134453a672
 ---
 
 ## Spec Excerpt
@@ -63,21 +71,21 @@ The current extractors emit `Contains`, `Implements`, and basic `Calls` edges vi
 
 Read `specs/system/lsp-call-graph.md` for full context. The Go binary already exists at `scripts/go-callgraph/` — do NOT rewrite it; integrate it. Follow the hexagonal architecture: port trait in `gyre-ports`, adapter in `gyre-adapters`, orchestration in `gyre-domain`. The `gyre-domain` crate MUST NOT import `gyre-adapters`. Check `crates/gyre-ports/src/lib.rs` for existing port patterns and `crates/gyre-domain/src/` for extraction pipeline code. The graph store is accessed via `GraphPort` — grep for existing usage patterns.
 
-## Round R3 Notes (implementation, 2026-10-06)
-
-- R2 findings F6/F7/F8 are fixed by product code on this branch: Pass 1 qnames built from Go's import-path rule (`go_extractor.rs`); one ambiguity policy — hint-corroborated `select`, no ordering picks (`call_graph_resolve.rs`); `Calls` sweep exemption, content-derived edge ids, and Pass 2 self-reconciliation (`graph_extraction.rs`). Verified green at this HEAD: `cargo test -p gyre-domain go_extractor` 13/13, domain `call_graph_resolve` 16/16, `cargo test -p gyre-adapters call_graph` 2/2, `cargo test -p gyre-server --lib graph_extraction` 22/22 — including every R3 regression (`sync_go_repo_persists_calls_edges_in_graph_store`, `pass2_edge_ids_stable_across_runs`, `sweep_preserves_calls_edges_owned_by_pass2`, `pass2_reconciles_stale_calls_edges`, `pass2_reconcile_skipped_when_toolchain_unavailable`, `pass2_reconcile_removes_legacy_duplicate_id_rows`, `resolve_go_prefix_similar_package_is_not_guessed`). `check-task-commit-attribution.sh`, `check-arch.sh`, `check-mem-port-contracts.sh`, `check-inert-enforcement.sh`, `check-relative-path-defaults.sh` all pass; `rustfmt --check` clean on every branch-touched file (repo-wide `cargo fmt --check` drift is pre-existing main baseline in files this branch never touches).
-- HTTP-bound in-process-server verification CANNOT run in this worker sandbox: loopback TCP data transfer is reset by the sandbox after accept for any process — demonstrated with a pure Python HTTP server/client pair (v4, v6, and raw socket, zero gyre code involved) getting `ConnectionResetError`. All 35 `graph_integration` and all 21 `auth_integration` tests consequently fail on the harness's first request (`reqwest IncompleteMessage`) irrespective of this branch, which touches neither binary nor the router (last change: d7940e8, already on main). Full deterministic gates must run on the integrated commit in an environment with working loopback; the pipeline's own storage-level integration is covered by the 22 lib tests above.
-- `17c81d5a` (task-072 surface style fix that landed on `main`) MUST stay in the `commits:` list: `check-task-commit-attribution.sh` scans full history, while the controller's `process: record task-072 branch commits` recorder regenerates the list from `main..HEAD` only — it dropped this SHA in 64ef557 and re-triggered the gate violation. If the recorder rewrites this frontmatter again, re-add `17c81d5a4d8fe8dc93387ba2c8360187a8028737`.
-
-## Round R4 Notes (resume repair, 2026-10-09)
-
-- Resume condition: the pipeline cutover reset this task to `needs-revision` with a five-SHA `commits:` list that does not resolve in current history — `a8d036f4` now names an unrelated task-091 commit (history rewrite collision) and `ac3a99bf`/`2b34ae1f`/`144aa70c`/`547b5496` exist nowhere in this repository (pre-cutover legacy SHAs). The retained source itself was intact: `git diff 7e71ac9d HEAD -- crates/` shows the only product change is `api/admin.rs`, which came in via the upstream merge (task-210 surface, not task-072).
-- Repair: frontmatter restored to the eight resolvable full SHAs of the real task-072 work; R3 notes + Shipped restored after the cutover stripped them (they carry the durable sandbox findings and the recorder-drop warning).
-- Inherited upstream gate failure repaired in the same round: main commit `a781ede2` (`feat(task-210)`, landed on main after task-210's last `process: record task-210 branch commits`) is missing from `specs/tasks/task-210.md` `commits:`, so `check-task-commit-attribution.sh` fails on main and on this branch after the merge — same recorder class as R3-F9. Fixed by recording `a781ede2` in task-210.md.
-
 ## Shipped
 
-- Two-pass call-graph pipeline: Pass 1 (tree-sitter) persists nodes and syntax edges immediately; Pass 2 (`do_extract()` step 7) runs the type-checker extraction behind the `CallGraphExtractor` port in a fire-and-forget `tokio::spawn`, persisting complete `Calls` edges via `GraphPort` — the push response is never blocked.
-- Go extraction: `SubprocessCallGraphExtractor` (gyre-adapters) shells out to `scripts/go-callgraph/go-callgraph` with a 60s timeout and graceful degradation to empty output on missing toolchain/timeout/parse failure; Pass 1 qnames follow Go's import-path rule (module + directory) matching the binary's `Pkg.Path()`-based names, so cross-package calls between directories whose package clause ≠ directory name resolve.
-- One resolution policy in `gyre-domain/call_graph_resolve.rs`: exact qualified-name match, else suffix match corroborated by exactly-one package-hint hit (boundary-aware, so `svc1` never claims `svc10` or vendored prefix-similar paths); anything ambiguous is dropped rather than guessed.
-- Stable Pass 2 edge lifecycle: content-derived edge ids (SHA-256 over repo/source/target) upsert in place preserving `first_seen_at`; Pass 1's stale sweep exempts `Calls`; Pass 2 reconciles its own edges (stale pairs and legacy duplicate-id rows) but never wipes call data when the toolchain is unavailable.
+Two-pass call-graph pipeline (Pass 1 syntax + Pass 2 semantic `Calls` edges via the `CallGraphExtractor` port) with the Go CHA extractor integrated; review rounds R1-R3 findings fixed and verified (`specs/reviews/task-072.md`, R3 verdict "complete").
+
+This repair round (contract finding `1383a11bd50042bf87d3e40baf97803f`):
+- Restored the assigned task contract verbatim (the prior candidate had appended `## Round R3/R4 Notes` diagnostic sections, which `requirement_parts` treats as contract prose) and re-attributed `commits:` to the eight real task-072 product-surface commits; the previously listed SHAs resolved to unrelated or nonexistent commits.
+- `17c81d5a` sits on main (predates this branch), so the `dev-attribution.py` recorder (`origin/main..HEAD`) drops it; it is listed here because the attribution gate matches full history.
+- Closed the §11 (Prerequisites) gap for Go: the server runtime image now ships the Go toolchain (`golang:1.24-bookworm-slim`, glibc-matched to the `debian:bookworm-slim` runtime) plus the committed `go-callgraph` binary at `/usr/local/bin/gyre-go-callgraph`, wired via `ENV GO_CALLGRAPH_BIN` (`Dockerfile` runtime stage). The binary's `packages.Load` shells out to `go list`, so the toolchain is a runtime requirement, not just a build one. Rust/Python/TS toolchains remain tasks 073-075 scope.
+- Added the adapter happy-path test `env_override_binary_output_is_parsed_into_edges` (GO_CALLGRAPH_BIN stub -> parsed `CallEdge`); previously only degradation paths were covered. Tests reading `GO_CALLGRAPH_BIN` share an `ENV_LOCK`.
+- Documented `GO_CALLGRAPH_BIN` in `docs/server-config.md` (search order, container default, bare-metal Go >= 1.22 requirement, graceful degradation).
+- Reverted the branch's `web/dist` rebuild to the main bundle and restored the `.done` marker, eliminating spurious diff vs the assigned base `8c2d1775`.
+
+Evidence at final head (sandbox-verified; probes under `/tmp/stage/review-evidence/`):
+- `cargo test -p gyre-domain call_graph_resolve`: 16/16 ok. `go_extractor`: 13/13 ok.
+- `cargo test -p gyre-adapters call_graph`: 3/3 ok (incl. the new happy-path test).
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib graph_extraction`: 22/22 ok (Pass 2 pipeline, reconcile, dedup, sweep, integration).
+- `bash scripts/check-arch.sh` green; `bash scripts/check-task-commit-attribution.sh` green; abac-route-registry, dead-message-kinds, migration-versions gates green; rustfmt clean on all touched files (pre-existing `git2_ops.rs` drift at the base is out of scope and unchanged).
+- Sandbox limits (recorded, not code defects): no Docker daemon (Dockerfile verified statically; CI does not build it), no Go toolchain here (R3's manual two-package-fixture binary run stands as end-to-end evidence), no loopback TCP (HTTP-bound `graph_integration`/`auth_integration` cannot run).

@@ -218,9 +218,55 @@ fn which_on_path(name: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    /// Serializes tests that read or write `GO_CALLGRAPH_BIN`: `set_var`
+    /// mutates process-global state, so binary discovery must not race
+    /// across tests that exercise the Go path.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn env_override_binary_output_is_parsed_into_edges() {
+        // Happy path: a GO_CALLGRAPH_BIN stub emitting the documented JSON
+        // shape must surface as parsed CallEdges. Exercises discovery step 1
+        // plus the stdout -> Vec<CallEdge> path, which the degradation
+        // tests never reach.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::TempDir::new().unwrap();
+        let stub = dir.path().join("go-callgraph-stub");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\nprintf '[{\"from\":\"pkg.Caller\",\"to\":\"pkg.Callee\"}]'\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // The stub receives the repo path as its only argument; it ignores
+        // it, so an empty temp dir is a sufficient fixture.
+        let repo = tempfile::TempDir::new().unwrap();
+        std::env::set_var("GO_CALLGRAPH_BIN", &stub);
+        let extractor = SubprocessCallGraphExtractor::new();
+        let edges = extractor
+            .extract_call_edges(repo.path(), Language::Go)
+            .await
+            .expect("stub run must succeed");
+        std::env::remove_var("GO_CALLGRAPH_BIN");
+
+        assert_eq!(
+            edges,
+            vec![CallEdge {
+                from: "pkg.Caller".to_string(),
+                to: "pkg.Callee".to_string()
+            }]
+        );
+    }
+
     #[tokio::test]
     async fn unknown_repo_returns_empty_for_go() {
-        // No go.mod, and (in CI) no binary — must degrade to empty, never error.
+        // No go.mod, and (in CI) no binary -- must degrade to empty, never
+        // error. Also proves GO_CALLGRAPH_BIN removal restored the default
+        // discovery path (temp dirs hold no binary).
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::TempDir::new().unwrap();
         let extractor = SubprocessCallGraphExtractor::new();
         let edges = extractor
