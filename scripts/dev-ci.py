@@ -25,14 +25,14 @@ def observe(run, url, head, base, directory):
         conclusion = check.get('conclusion') or check.get('state')
         if status in ('QUEUED', 'IN_PROGRESS', 'PENDING', 'EXPECTED', 'WAITING', 'REQUESTED'):
             pending.append(check)
-        elif conclusion in ('CANCELLED', 'TIMED_OUT', 'STALE'):
+        elif conclusion in ('CANCELLED', 'TIMED_OUT', 'STALE', 'ERROR'):
             infrastructure.append(check)
         elif conclusion not in ('SUCCESS', 'NEUTRAL', 'SKIPPED'):
             failed.append(check)
     if pending or not checks:
         return {'status': 'pending'}
     if infrastructure and not failed:
-        ids = sorted({run_id(check) for check in infrastructure})
+        ids = sorted({run_id(check) for check in infrastructure}, key=str)
         return {'status': 'infrastructure', 'runs': ids}
     if not failed:
         # Includes required reviews/rules and late required checks. Never use an
@@ -51,7 +51,9 @@ def observe(run, url, head, base, directory):
         metadata = json.loads(run('gh', 'run', 'view', str(ident), '--repo', repo,
                                   '--json', 'workflowDatabaseId,name', timeout=30).stdout)
         candidate_log = run('gh', 'run', 'view', str(ident), '--repo', repo, '--log-failed', timeout=60).stdout
-        evidence.append(f'## {metadata["name"]}: run {ident}\n\n{candidate_log[-65536:]}')
+        (directory / f'github-run-{ident}.log').write_text(candidate_log)
+        allowance = max(1024, 60000 // (2 * len(failed)))
+        evidence.append(f'## {metadata["name"]}: run {ident}\n\n{candidate_log[-allowance:]}')
         matching = [item for item in baseline_runs if item['head_sha'] == base and
                     item['workflow_id'] == metadata['workflowDatabaseId'] and item['status'] == 'completed']
         latest = max(matching, key=lambda item: item['run_number'], default=None)
@@ -62,7 +64,8 @@ def observe(run, url, head, base, directory):
         signature = failure_signature(candidate_log)
         if not signature or signature != failure_signature(baseline_log):
             baseline_only = False
-        evidence.append(f'## Exact upstream base {base}: run {latest["id"]}\n\n{baseline_log[-65536:]}')
+        (directory / f'github-run-{latest["id"]}.log').write_text(baseline_log)
+        evidence.append(f'## Exact upstream base {base}: run {latest["id"]}\n\n{baseline_log[-allowance:]}')
     log = directory / 'github-checks.log'
     log.write_text('\n\n'.join(evidence))
     return {'status': 'baseline_failed' if baseline_only else 'candidate_failed',

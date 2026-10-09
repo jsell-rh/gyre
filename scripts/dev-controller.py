@@ -952,7 +952,9 @@ def reconcile_pr_checks(db, task, check, merge_sha, pr):
                     db.execute("UPDATE tasks SET state='failed',condition='GitHubInfrastructureRetryLimit' WHERE name=?", (task['name'],))
                     break
                 retries[key] = retries.get(key, 0) + 1
-                retry_path.write_text(json.dumps(retries))
+                temporary = retry_path.with_suffix('.tmp')
+                temporary.write_text(json.dumps(retries))
+                temporary.replace(retry_path)
                 run('gh', 'run', 'rerun', str(ident), '--repo', pr['url'].split('/pull/')[0].replace('https://github.com/', ''), '--failed', timeout=30)
             else:
                 defer_promotion(db, task, 'GitHubInfrastructureBackoff')
@@ -1406,6 +1408,9 @@ def status_snapshot(db):
                     (task["state"] == "ready" and (task['feedback'] or task["progress"] in ("not-started", "in-progress", "ready-for-review", "needs-revision")))) and
                    not (task['condition'] or '').startswith('InvalidDependencies:') and
                    set(task["deps"]) <= merged for task in tasks)
+    blocked_bases = {task['blocked_base'] for task in tasks if task['state'] == 'blocked'}
+    prerequisite_repairs = [task['name'] for task in tasks if (task['origin_key'] or '').startswith('baseline:') and
+                           task['state'] != 'merged' and task['origin_key'].split(':')[1] in blocked_bases]
     counts = {}
     for task in tasks:
         counts[task["state"]] = counts.get(task["state"], 0) + 1
@@ -1417,6 +1422,8 @@ def status_snapshot(db):
     dispatch = json.loads(dispatch_path.read_text()) if dispatch_path.exists() else {}
     if not alive(dispatch.get('pid')):
         dispatch = {}
+    dispatch['prerequisite_repairs'] = prerequisite_repairs
+    dispatch['candidate_limit'] = max(1, int(os.environ.get('GYRE_DEV_MAX_CANDIDATES', '8')))
     started = db.execute("SELECT min(started) FROM attempts").fetchone()[0]
     hours = max(1 / 60, (time.time() - started) / 3600) if started else 0
     check_counts = dict(db.execute("SELECT state,count(*) FROM attempts WHERE kind='check' GROUP BY state"))
