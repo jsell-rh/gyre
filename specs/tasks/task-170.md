@@ -12,7 +12,7 @@ coverage_sections:
   - "ui-layout.md §Encoding Layer"
   - "ui-layout.md §Extensibility"
   - "ui-layout.md §LLM Constraints"
-commits: ["26f089954b6434ee148a7cd79af1b8617dbdc873", "a5c94ee386fb5a0836a182beae8adac4e7bb1f57", "07cfc52a41e9a7dda59d5f3f80c86db96f66beeb", "fd267566027b80af262088a65b0cde29727f2222", "997792d8cc1210cefa2be69e46688aceee44f1e1", "8090499a8aacf10f4c904273b015c98c1f3e4aa3"]
+commits: ["b69e01002b21ef5d2b7fa446067aca61e3890d0b", "088316309803e92cd7cf96cac53239431c059185", "95801f2b4ebbe93543bfe7d31fce386ce665be42", "49614e41c1b313f0c981d93013dcf6ddbc26c636", "9aa19ef9c94c075ed9d6fd154b037855542ca27b", "3c41b41997c20414f1167d4e8da6746b6e55a875"]
 ---
 
 ## Spec Excerpt
