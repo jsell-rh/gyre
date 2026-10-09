@@ -146,6 +146,7 @@ async fn record_rebase_audit(
     state: &AppState,
     repo: &gyre_domain::Repository,
     agent: &RebaseTarget,
+    target_branch: &str,
     outcome: &str,
     rebased_count: usize,
     files: &[String],
@@ -168,7 +169,7 @@ async fn record_rebase_audit(
             "rebased_count": rebased_count,
             "conflicted_files": files,
             "new_base_sha": new_base_sha,
-            "target_branch": repo.default_branch,
+            "target_branch": target_branch,
             "worktree": agent.worktree_path,
         }),
         None,
@@ -253,10 +254,15 @@ async fn run_rebase(
 ) -> bool {
     // -b @ rebases the branch containing the working copy — the whole
     // in-flight stack ("the agent's in-progress work", source-control.md
-    // §4). Conflicts are state, not errors (jj's conflict-as-state model).
+    // §4). Destination is the branch that just MOVED (`target_branch`),
+    // not the repo's default branch: MRs can target non-default branches
+    // (create_mr performs no default-branch validation), and rebasing an
+    // agent onto a branch their MR does not target splices their work
+    // into an unrelated line of history. Conflicts are state, not errors
+    // (jj's conflict-as-state model).
     let outcome = state
         .jj_ops
-        .jj_rebase(&agent.worktree_path, "@", &repo.default_branch)
+        .jj_rebase(&agent.worktree_path, "@", target_branch)
         .await;
 
     match outcome {
@@ -272,8 +278,17 @@ async fn run_rebase(
                 warn!(agent_id = %agent.agent_id, error = %e, "failed to persist rebase backoff");
             }
 
-            record_rebase_audit(state, repo, agent, "success", rebased_count, &[], new_base_sha)
-                .await;
+            record_rebase_audit(
+                state,
+                repo,
+                agent,
+                target_branch,
+                "success",
+                rebased_count,
+                &[],
+                new_base_sha,
+            )
+            .await;
 
             // Notify the agent: baseline moved, here is the new base.
             state
@@ -302,8 +317,17 @@ async fn run_rebase(
                 warn!(agent_id = %agent.agent_id, error = %e, "failed to persist rebase backoff");
             }
 
-            record_rebase_audit(state, repo, agent, "conflict", rebased_count, &files, new_base_sha)
-                .await;
+            record_rebase_audit(
+                state,
+                repo,
+                agent,
+                target_branch,
+                "conflict",
+                rebased_count,
+                &files,
+                new_base_sha,
+            )
+            .await;
 
             // Conflict-as-state (plan item 3): surface the conflict on the
             // MR and via SpeculativeConflict + Escalation events. The agent
@@ -354,7 +378,8 @@ async fn run_rebase(
             // Infrastructure failure: do NOT consume a pending deferral
             // (R2 F8) and do NOT write the backoff (R2 F4 — a failed
             // rebase must not consume the window).
-            record_rebase_failure(state, repo, agent, &e.to_string(), new_base_sha).await;
+            record_rebase_failure(state, repo, agent, target_branch, &e.to_string(), new_base_sha)
+                .await;
             false
         }
     }
@@ -383,6 +408,7 @@ async fn record_rebase_failure(
     state: &AppState,
     repo: &gyre_domain::Repository,
     agent: &RebaseTarget,
+    target_branch: &str,
     error: &str,
     new_base_sha: &str,
 ) {
@@ -402,7 +428,7 @@ async fn record_rebase_failure(
             "outcome": "error",
             "error": error,
             "new_base_sha": new_base_sha,
-            "target_branch": repo.default_branch,
+            "target_branch": target_branch,
             "worktree": agent.worktree_path,
         }),
         None,
@@ -6616,11 +6642,11 @@ mod tests {
 
     /// The core §4 contract: a merge landing on the target branch rebases
     /// every OTHER in-flight agent on that branch (the merged author is
-    /// excluded), onto the repo's default branch, in the agent's recorded
+    /// excluded), onto the branch that MOVED, in the agent's recorded
     /// worktree.
     #[tokio::test]
     async fn merge_triggers_rebase_of_inflight_agents() {
-        let (state, jj, repo, _inflight_mr) = setup_rebase_fixture().await;
+        let (state, jj, _repo, _inflight_mr) = setup_rebase_fixture().await;
 
         let mut rx = state.message_broadcast_tx.subscribe();
         enqueue_mr(&state, "mr-merged", 100, 1000).await;
@@ -6640,7 +6666,7 @@ mod tests {
         assert_eq!(calls.len(), 1, "exactly one rebase call, got {calls:?}");
         assert_eq!(calls[0].0, worktree_path_of(&state, "agent-inflight").await);
         assert_eq!(calls[0].1, "@");
-        assert_eq!(calls[0].2, repo.default_branch);
+        assert_eq!(calls[0].2, "main");
 
         // The in-flight agent was notified of the baseline movement.
         let mut saw_baseline_moved = false;
@@ -6660,6 +6686,53 @@ mod tests {
         assert!(
             saw_baseline_moved,
             "in-flight agent must receive baseline_moved"
+        );
+    }
+
+    /// §4 destination pin: the rebase targets the branch that MOVED, not
+    /// the repo's default branch. MRs can target non-default branches
+    /// (create_mr performs no default-branch validation); rebasing an
+    /// agent onto the default branch when their MR targets `develop`
+    /// splices their work into an unrelated line of history. Fails on the
+    /// pre-fix behavior (destination hardcoded to `repo.default_branch`).
+    #[tokio::test]
+    async fn rebase_destination_is_moved_target_branch_not_default() {
+        let (state, jj, repo, _inflight_mr) = setup_rebase_fixture().await;
+
+        // Point BOTH MRs at a non-default target branch.
+        let non_default = "develop";
+        assert_ne!(
+            repo.default_branch, non_default,
+            "fixture must use a non-default target to pin the destination"
+        );
+        for mr_id in ["mr-merged", "mr-inflight"] {
+            let mut mr = state
+                .merge_requests
+                .find_by_id(&Id::new(mr_id))
+                .await
+                .unwrap()
+                .unwrap();
+            mr.target_branch = non_default.to_string();
+            state.merge_requests.update(&mr).await.unwrap();
+        }
+
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+
+        let merged = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-merged"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(merged.status, MrStatus::Merged);
+
+        let calls = jj.rebase_calls.lock().clone();
+        assert_eq!(calls.len(), 1, "exactly one rebase call, got {calls:?}");
+        assert_eq!(
+            calls[0].2, non_default,
+            "rebase must target the moved branch ({non_default}), not the default ({})",
+            repo.default_branch
         );
     }
 

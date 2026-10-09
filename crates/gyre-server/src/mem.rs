@@ -423,6 +423,7 @@ pub struct ConfigurableJjOps {
         parking_lot::Mutex<Option<Result<gyre_ports::JjRebaseOutcome, String>>>,
     pub workspace_forget_calls: parking_lot::Mutex<Vec<String>>,
     pub workspace_add_calls: parking_lot::Mutex<Vec<String>>,
+    /// `"{main_checkout_path}:{git_repo_path}"` per call.
     pub main_checkout_init_calls: parking_lot::Mutex<Vec<String>>,
     pub git_export_calls: parking_lot::Mutex<Vec<String>>,
 }
@@ -489,11 +490,11 @@ impl JjOpsPort for ConfigurableJjOps {
     async fn jj_main_checkout_init(
         &self,
         main_checkout_path: &str,
-        _git_repo_path: &str,
+        git_repo_path: &str,
     ) -> Result<()> {
         self.main_checkout_init_calls
             .lock()
-            .push(main_checkout_path.to_string());
+            .push(format!("{main_checkout_path}:{git_repo_path}"));
         Ok(())
     }
 

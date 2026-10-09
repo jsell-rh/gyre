@@ -513,20 +513,40 @@ pub(crate) async fn spawn_agent_core(
     }
 
     // Compute provisioning paths (source-control.md §4 layout):
-    //   {repo.path}/jj-main      — the repo's shared jj main checkout
+    //   {repo_root}/jj-main      — the repo's shared jj main checkout
     //                              (standalone, backed by the bare git repo)
-    //   {repo.path}/workspaces/{agent_id} — this agent's jj workspace
+    //   {repo_root}/workspaces/{agent_id} — this agent's jj workspace
     //                              (working copy on the spawn branch)
-    //   {repo.path}/worktrees/{branch_slug} — plain-git worktree fallback
+    //   {repo_root}/worktrees/{branch_slug} — plain-git worktree fallback
     // jj 0.39.0 refuses colocated repos inside git worktrees, so agent jj
     // working copies are separate workspaces of the shared checkout.
-    // `repo.path` is absolute at rest (repos_root is canonicalized at
-    // server start) — jj resolves child-process paths against the command
-    // cwd, not the server cwd (review F6).
+    //
+    // F6: `repo.path` is absolute at rest (repos_root is canonicalized at
+    // server start), but rows persisted BEFORE that fix may still be
+    // relative. jj resolves every PATH ARGUMENT (`--git-repo`, the
+    // workspace path) against the command's cwd — the checkout dir, not
+    // the server's — so a legacy relative row silently breaks provisioning
+    // exactly like a relative root does. Absolutize against the server cwd
+    // once, here, before any jj/git child call consumes the path. When the
+    // dir exists, canonicalize (resolves symlinks and `..` segments);
+    // otherwise anchor the raw path at the cwd.
+    let repo_root = {
+        let p = std::path::Path::new(&repo.path);
+        if p.is_absolute() {
+            repo.path.clone()
+        } else if let Ok(canon) = std::fs::canonicalize(p) {
+            canon.to_string_lossy().into_owned()
+        } else {
+            match std::env::current_dir() {
+                Ok(cwd) => cwd.join(p).to_string_lossy().into_owned(),
+                Err(_) => repo.path.clone(),
+            }
+        }
+    };
     let branch_slug = req.branch.replace('/', "-");
-    let worktree_path = format!("{}/worktrees/{}", repo.path, branch_slug);
-    let jj_main_checkout_path = format!("{}/jj-main", repo.path);
-    let jj_workspace_path = format!("{}/workspaces/{}", repo.path, agent.id);
+    let worktree_path = format!("{}/worktrees/{}", repo_root, branch_slug);
+    let jj_main_checkout_path = format!("{}/jj-main", repo_root);
+    let jj_workspace_path = format!("{}/workspaces/{}", repo_root, agent.id);
     let jj_workspace_name = format!("agent-{}", agent.id);
 
     // HSI §4: Interrogation agents are read-only — they have no worktree.
@@ -543,7 +563,7 @@ pub(crate) async fn spawn_agent_core(
         let mut change_id: Option<String> = None;
         let jj_provisioned = match state
             .jj_ops
-            .jj_main_checkout_init(&jj_main_checkout_path, &repo.path)
+            .jj_main_checkout_init(&jj_main_checkout_path, &repo_root)
             .await
         {
             Ok(()) => {
@@ -615,7 +635,7 @@ pub(crate) async fn spawn_agent_core(
         if !jj_provisioned {
             if let Err(e) = state
                 .git_ops
-                .create_worktree(&repo.path, &worktree_path, &req.branch)
+                .create_worktree(&repo_root, &worktree_path, &req.branch)
                 .await
             {
                 let msg = e.to_string();
@@ -631,11 +651,11 @@ pub(crate) async fn spawn_agent_core(
         }
 
         // Write custom ref namespaces (best-effort)
-        if let Some(sha) = git_refs::resolve_ref(&repo.path, "HEAD").await {
+        if let Some(sha) = git_refs::resolve_ref(&repo_root, "HEAD").await {
             let agent_ref = format!("refs/agents/{}/head", agent.id);
             let task_ref = format!("refs/tasks/{}", task.id);
-            git_refs::write_ref(&repo.path, &agent_ref, &sha).await;
-            git_refs::write_ref(&repo.path, &task_ref, &sha).await;
+            git_refs::write_ref(&repo_root, &agent_ref, &sha).await;
+            git_refs::write_ref(&repo_root, &task_ref, &sha).await;
         }
 
         // Record worktree in DB linked to agent and task. The recorded
@@ -1959,7 +1979,7 @@ async fn create_derived_input_for_agent(
 
 #[cfg(test)]
 mod tests {
-    use crate::mem::test_state;
+    use crate::mem::test_state_with_jj_ops;
     use axum::{body::Body, Router};
     use http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -2071,6 +2091,88 @@ mod tests {
         assert!(
             json.get("jj_change_id").is_some(),
             "spawn response must include jj_change_id field: {json}"
+        );
+    }
+
+    /// F6 pin (legacy rows): a `repo.path` persisted BEFORE repos_root
+    /// was made absolute-at-rest can still be relative in the store. jj
+    /// resolves every PATH ARGUMENT (`--git-repo`, the workspace path)
+    /// against the command's cwd — the checkout dir — so a relative path
+    /// breaks provisioning exactly like the relative root did. The spawn
+    /// path must absolutize `repo.path` before handing it (or paths
+    /// derived from it) to any jj/git child. This test drives
+    /// `spawn_agent_core` directly (the HTTP layer persists
+    /// server-computed absolute paths; only the DB can hold a legacy
+    /// relative row).
+    #[tokio::test]
+    async fn spawn_absolutizes_legacy_relative_repo_path_for_jj_children() {
+        let jj = std::sync::Arc::new(crate::mem::ConfigurableJjOps::default());
+        let state = test_state_with_jj_ops(jj.clone());
+
+        // A repo row with a LEGACY relative path, as persisted before the
+        // F6 fix (repos_root defaulted to "./repos").
+        let mut repo = gyre_domain::Repository::new(
+            Id::new("repo-f6-legacy"),
+            Id::new("ws-1"),
+            "legacy-repo",
+            "repos/ws-1/legacy-repo.git",
+            1000,
+        );
+        repo.default_branch = "main".to_string();
+        state.repos.create(&repo).await.unwrap();
+
+        let mut task =
+            gyre_domain::Task::new(Id::new("task-f6"), "legacy path task", 1000);
+        task.task_type = Some(gyre_domain::TaskType::Implementation);
+        task.workspace_id = Id::new("ws-1");
+        state.tasks.create(&task).await.unwrap();
+        let auth = crate::auth::AuthenticatedAgent {
+            agent_id: "spawner".to_string(),
+            user_id: None,
+            roles: vec![],
+            tenant_id: "default".to_string(),
+            jwt_claims: None,
+            deprecated_token_auth: false,
+        };
+        let req = crate::api::spawn::SpawnAgentRequest {
+            name: "f6-worker".to_string(),
+            repo_id: "repo-f6-legacy".to_string(),
+            task_id: "task-f6".to_string(),
+            branch: "feat/f6".to_string(),
+            parent_id: None,
+            compute_target_id: None,
+            disconnected_behavior: None,
+            loop_config: None,
+            agent_type: None,
+            conversation_sha: None,
+        };
+        let _resp = spawn_agent_core(&state, req, &auth).await.expect("spawn must succeed");
+
+        // Every path handed to the jj children is absolute: the shared
+        // checkout init records "{checkout}:{git_repo_path}" and the
+        // workspace add records "{name}:{workspace_path}".
+        let init_calls = jj.main_checkout_init_calls.lock().clone();
+        assert_eq!(init_calls.len(), 1, "one checkout init, got {init_calls:?}");
+        let (checkout, git_repo) = init_calls[0].split_once(':').expect("checkout:git");
+        assert!(
+            std::path::Path::new(checkout).is_absolute(),
+            "jj-main checkout path must be absolute, got {checkout:?}"
+        );
+        assert!(
+            std::path::Path::new(git_repo).is_absolute(),
+            "--git-repo argument must be absolute, got {git_repo:?}"
+        );
+        assert!(
+            git_repo.ends_with("repos/ws-1/legacy-repo.git"),
+            "absolutized path must preserve the repo layout, got {git_repo:?}"
+        );
+
+        let add_calls = jj.workspace_add_calls.lock().clone();
+        assert_eq!(add_calls.len(), 1, "one workspace add, got {add_calls:?}");
+        let (_, ws_path) = add_calls[0].split_once(':').expect("name:workspace_path");
+        assert!(
+            std::path::Path::new(ws_path).is_absolute(),
+            "workspace path argument must be absolute, got {ws_path:?}"
         );
     }
 
