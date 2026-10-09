@@ -3,7 +3,7 @@ title: "View Query Grammar — Scope Resolution, Emphasis & Rendering Primitives
 spec_ref: "view-query-grammar.md §4–9"
 depends_on:
   - task-062
-progress: needs-revision
+progress: ready-for-review
 review: "specs/reviews/task-063.md"
 coverage_sections:
   - "view-query-grammar.md §4 2. Scope — What Subgraph to Show"
@@ -98,12 +98,42 @@ All three R1 findings addressed:
 - **F2** (`all` scope inert): fixed in `dce939e` — `queryMatchedWithDepth` now has an `all` branch returning every node at depth 0, so `dim_unmatched`, edge restriction, `zoom: "fit"`, `{{count}}`/`{{group_count}}`, `highlight.matched`, and `tiered_colors` all operate for `all`-scope queries. Component-level test added in `a07b912` kills deletion of the branch.
 - **F3** (vacuous/tautological tests): fixed in `a07b912` — positive label test captures `fillStyle` at each `fillText` call and asserts `#ef4444`; negative test uses the flat fixture (matched leaf drawn, asserted) so deleting the `hlLabel` guard draws `'undefined'` and fails. All four mutations (guard deletion, `all`-branch deletion, dead-field reversion, color substitution) verified to fail their tests.
 
+## Revision status (R2 fix round — coverage-row takeover)
+
+The R2 review verdict approved the F1/F2/F3 repairs but was itself the author of the
+coverage-row flips in `specs/coverage/system/view-query-grammar.md`, so the integration
+was rejected on self-approval grounds. This round takes those rows over as implementer
+work:
+
+- Every behavior claim in the rows re-verified against the current tree; line
+  citations refreshed — three had drifted from the review's diff base: `heat
+  :2090-2138` (actual :2127-2177), `badges :3252-3267` (actual :3290-3321),
+  annotation `:4992-4997` (actual :4992-5009). Rows re-stamped
+  `[2026-10-09 task-063, R3 re-verified]`.
+- All-branch mutation probe re-run this round: deleting the `all` branch fails its
+  targeted test (file restored clean after the probe).
+- `web/dist` regenerated from the fixed source and committed: the shipped bundle now
+  carries the F1/F2 client fixes (`created_sha` diff logic with temporal `~epoch`
+  half-open ranges and the ≥7-char SHA-prefix guard; `type==="all"` result-set
+  branch); `last_commit_sha` appears nowhere in the bundle. Previously HEAD's
+  committed dist was the pre-fix bundle — defused by the integration gate's rebuild
+  (`dev-check.sh:83-86`), but stale at rest; the task's first product commit
+  (`d22f50f`) carried a dist rebuild, so committing one is in-convention.
+- Focused checks this round: `npx vitest run src/__tests__/ExplorerCanvas.test.js`
+  → 139/139; `cargo test -p gyre-domain --lib view_query_resolver::tests::test_scope`
+  → 11/11 (gcc linker override; workspace mold/clang absent — environmental).
+
 ## Shipped
 
 - `highlight.matched.label` renders on matched nodes in the configured matched color (LOD-gated below the node box), completing the §5 emphasis primitive set alongside dim, tiered_colors, heat, and badges.
 - Client-side `diff` scope reads the real `GraphNodeResponse` commit fields (`created_sha`/`last_modified_sha`/`created_at`/`last_modified_at`) and ports the Rust resolver's semantics: `~epoch` temporal half-open ranges, ≥7-char SHA-prefix matching on `to_commit`, from-commit exclusion.
 - Client-side `all` scope produces a full-graph result set, so `dim_unmatched`, edge restriction to result-set connections, `zoom: "fit"`, `{{count}}`/`{{group_count}}`, `highlight.matched`, and `tiered_colors` all operate for `all`-scope queries.
 - Component-level behavioral tests for the label rendering (fillStyle captured at draw time), `all`-scope count resolution, and diff-scope resolution against real field names — all four identified mutations verified to fail their targeted tests.
+- Coverage rows 4-9 rewritten with current-tree citations and re-stamped
+  `[2026-10-09 task-063, R3 re-verified]` — implementer-owned (the R2 review's own
+  row edits triggered the self-approval rejection; see review file Round 3 note).
+- `web/dist` regenerated from the fixed source: the shipped bundle carries the
+  F1/F2 client fixes; `last_commit_sha` appears nowhere in it.
 
 ## Agent Instructions
 
