@@ -50,6 +50,10 @@
   let sinceLabel = $state('');
   let workspaceMap = $state({});
 
+  // Stale-response guard (ui-navigation.md §4): a load started for one
+  // scope/workspace must not overwrite state after scope/workspace changed.
+  let loadGen = 0;
+
   function sinceEpochForRange(range) {
     const now = Math.floor(Date.now() / 1000);
     switch (range) {
@@ -86,8 +90,8 @@
       !data.metrics
     );
   }
-
   async function load() {
+    const gen = ++loadGen;
     loading = true;
     error = null;
 
@@ -97,6 +101,7 @@
     try {
       if (scope === 'workspace' && workspaceId) {
         const raw = await api.getWorkspaceBriefing(workspaceId, since);
+        if (gen !== loadGen) return; // scope changed while loading
         briefing = isEmpty(raw) ? { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null } : raw;
       } else if (scope === 'repo') {
         // HSI §1.5 repo-scope Briefing row: same endpoint narrowed by
@@ -104,17 +109,20 @@
         // repo id means the repo is unresolved: no fetch, empty state.
         if (workspaceId && repoId) {
           const raw = await api.getWorkspaceBriefing(workspaceId, since, repoId);
+          if (gen !== loadGen) return;
           briefing = isEmpty(raw) ? { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null } : raw;
         } else {
           briefing = { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null };
         }
       } else if (scope === 'tenant') {
         const workspaces = await api.workspaces();
+        if (gen !== loadGen) return;
         const wsList = workspaces || [];
         workspaceMap = Object.fromEntries(wsList.map(w => [w.id, w.name ?? w.id]));
         const results = await Promise.allSettled(
           wsList.map(w => api.getWorkspaceBriefing(w.id, since).then(b => ({ ...b, _wsId: w.id })))
         );
+        if (gen !== loadGen) return;
         const merged = {
           completed: [],
           in_progress: [],
@@ -153,6 +161,7 @@
         briefing = { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null };
       }
     } catch (e) {
+      if (gen !== loadGen) return;
       if (e.message && e.message.includes('404')) {
         // 404: no briefing data yet — show empty state
         briefing = { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null };
@@ -163,7 +172,7 @@
         if (e.message) error = e.message;
       }
     } finally {
-      loading = false;
+      if (gen === loadGen) loading = false;
     }
   }
 

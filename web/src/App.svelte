@@ -374,6 +374,9 @@
   async function goToEntityDetail(entityType, entityId, data) {
     if (!currentWorkspace) return;
     const d = data ?? {};
+    // Capture the mode before the switch below (used in history state for
+    // back-nav semantics: entity opened from workspace home returns there).
+    const prevMode = mode;
     const parentTab = entityType === 'mr' ? 'mrs' : entityType === 'task' ? 'tasks' : entityType === 'agent' ? 'agents' : 'specs';
 
     // Resolve the entity's repo so its owning workspace can be determined.
@@ -1709,6 +1712,7 @@
               repo={currentRepo}
               activeTab={repoTab}
               onTabChange={(tab) => goToRepoTab(tab)}
+              onArchSubTabChange={(sub) => { repoArchSubTab = sub; }}
               workspaceBudget={workspaceBudget}
             />
           {/if}

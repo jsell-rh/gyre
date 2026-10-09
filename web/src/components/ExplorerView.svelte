@@ -17,7 +17,7 @@
 
   // scope: { type: 'tenant' | 'workspace' | 'repo', workspaceId?, repoId? }
   // Defaults to tenant scope for backwards compatibility with old App.svelte.
-  let { scope = { type: 'tenant' }, onSelectWorkspace = null, workspaceName = null } = $props();
+  let { scope = { type: 'tenant' }, onSelectWorkspace = null, workspaceName = null, onArchSubTabChange = undefined } = $props();
 
   let scopeType = $derived(scope?.type ?? 'tenant');
 
@@ -737,6 +737,7 @@
     const initialSubTab = params.get('subTab');
     if (initialSubTab === 'briefing' || initialSubTab === 'graph') {
       archSubTab = initialSubTab;
+      onArchSubTabChange?.(initialSubTab);
       // Clean up the URL params after reading
       const url = new URL(window.location.href);
       url.searchParams.delete('subTab');
@@ -1167,7 +1168,7 @@
               class:active={archSubTab === 'graph'}
               role="tab"
               aria-selected={archSubTab === 'graph'}
-              onclick={() => { archSubTab = 'graph'; }}
+              onclick={() => { archSubTab = 'graph'; onArchSubTabChange?.('graph'); }}
               data-testid="arch-subtab-graph"
             >{$t('explorer_view.sub_tabs.graph')}</button>
             <button
@@ -1175,7 +1176,7 @@
               class:active={archSubTab === 'briefing'}
               role="tab"
               aria-selected={archSubTab === 'briefing'}
-              onclick={() => { archSubTab = 'briefing'; }}
+              onclick={() => { archSubTab = 'briefing'; onArchSubTabChange?.('briefing'); }}
               data-testid="arch-subtab-briefing"
             >{$t('explorer_view.sub_tabs.briefing')}</button>
           </div>

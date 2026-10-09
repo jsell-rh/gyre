@@ -25,8 +25,9 @@
   let expandedId = $state(null);
   let showDismissed = $state(false);
   let filterType = $state('all');
-  let actionStates = $state({});
-  let workspaceMap = $state({});
+  // Stale-response guard (ui-navigation.md §4): a load started for one
+  // scope/workspace must not overwrite state after the scope changed.
+  let loadGen = 0;
 
   // Entity name resolution uses shared singleton cache
   function resolveEntityName(type, id) {
@@ -80,6 +81,7 @@
   }
 
   async function loadNotifications(isBackground = false) {
+    const gen = ++loadGen;
     try {
       if (!isBackground) loading = true;
       error = null;
@@ -89,6 +91,7 @@
       const params = {};
       if (scope !== 'tenant' && workspaceId) params.workspace_id = workspaceId;
       let raw = await api.myNotifications(params);
+      if (gen !== loadGen) return; // scope changed while loading
       let data = Array.isArray(raw) ? raw : (raw?.notifications ?? []);
       // Normalize PascalCase notification types from the server to snake_case
       const typeNormMap = {
@@ -118,14 +121,14 @@
       if (scope === 'repo' && repoId) {
         data = data.filter(n => n.repo_id === repoId);
       }
-
       // Sort by priority ascending (1 = highest)
       notifications = data.sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999));
     } catch (e) {
+      if (gen !== loadGen) return;
       error = e.message || $t('decisions.load_failed');
       notifications = [];
     } finally {
-      if (!isBackground) loading = false;
+      if (gen === loadGen && !isBackground) loading = false;
     }
   }
 
