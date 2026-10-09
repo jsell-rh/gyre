@@ -2,7 +2,7 @@
 title: "View Specification Grammar — TypeScript types and server-side validation"
 spec_ref: "ui-layout.md §4"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "ui-layout.md §4. View Specification Grammar"
   - "ui-layout.md §Structure"
@@ -12,7 +12,7 @@ coverage_sections:
   - "ui-layout.md §Encoding Layer"
   - "ui-layout.md §Extensibility"
   - "ui-layout.md §LLM Constraints"
-commits: ["c76fa1fd697ad44ae0fc08e22b70e5768e5b5026", "b69e01002b21ef5d2b7fa446067aca61e3890d0b", "088316309803e92cd7cf96cac53239431c059185", "95801f2b4ebbe93543bfe7d31fce386ce665be42", "49614e41c1b313f0c981d93013dcf6ddbc26c636", "9aa19ef9c94c075ed9d6fd154b037855542ca27b", "3c41b41997c20414f1167d4e8da6746b6e55a875"]
+commits: ["c76fa1fd697ad44ae0fc08e22b70e5768e5b5026", "b69e01002b21ef5d2b7fa446067aca61e3890d0b", "088316309803e92cd7cf96cac53239431c059185", "95801f2b4ebbe93543bfe7d31fce386ce665be42", "49614e41c1b313f0c981d93013dcf6ddbc26c636", "9aa19ef9c94c075ed9d6fd154b037855542ca27b", "3c41b41997c20414f1167d4e8da6746b6e55a875", "5cf54bce2a1b6a63a1d5c67a3a2d518b52e91c1e"]
 ---
 
 ## Spec Excerpt
@@ -54,15 +54,31 @@ LLM Constraints: LLM can only produce view specs within this grammar, read-only 
 
 ## Acceptance Criteria
 
-- [ ] `ViewSpec` TypeScript type defined with all four layers
-- [ ] Server-side Rust struct with serde + validation
-- [ ] Nesting depth limit enforced (side-by-side sub-views cannot contain side-by-side)
-- [ ] `flow` layout requires `trace_source` in data layer (400 if missing)
-- [ ] `spec_path` filter requires `repo_id` (400 if missing)
-- [ ] `repo_id` validated against workspace membership
-- [ ] Layout registry pattern implemented in frontend
-- [ ] Tests pass for validation edge cases
+- [x] `ViewSpec` TypeScript type defined with all four layers
+- [x] Server-side Rust struct with serde + validation
+- [x] Nesting depth limit enforced (side-by-side sub-views cannot contain side-by-side)
+- [x] `flow` layout requires `trace_source` in data layer (400 if missing)
+- [x] `spec_path` filter requires `repo_id` (400 if missing)
+- [x] `repo_id` validated against workspace membership
+- [x] Layout registry pattern implemented in frontend
+- [x] Tests pass for validation edge cases
 
 ## Agent Instructions
 
 Read `ui-layout.md` §4 thoroughly — it contains extensive detail on each layer, the flow layout particle rendering, composability rules, and LLM constraints. The TypeScript types must match the JSON schema examples in the spec exactly. The server validation must reject the same invalid cases both server-side and client-side (belt and suspenders). Check existing graph types in `web/src/lib/types/` and `crates/gyre-common/src/` for naming conventions.
+
+## Shipped
+
+**Grammar types + validation (both sides):**
+- `web/src/lib/types/view-spec.ts` — `ViewSpec`/`DataLayer`/`LayoutType`/`EncodingLayer`/`HighlightLayer`/`SubViewSpec` typedefs matching ui-layout.md §4 JSON examples exactly (kebab-case layout names), `validateViewSpec` client-side mirror (name required, known layout, flow⇒trace_source, spec_path⇒repo_id, side-by-side requires left+right, max nesting depth 1, sub-view field whitelist, no field inheritance, orphan left/right rejected), `isViewSpec` guard. `ViewEvent` interface ships in `web/src/lib/viewEvents.js` (§10) with tests.
+- `crates/gyre-common/src/view_spec.rs` — serde structs (`#[serde(rename_all = "kebab-case")]` enum, `deny_unknown_fields` on `SubViewSpec` enforcing the data/layout/encoding-only rule at parse time) + `validate_view_spec` with the same rules, incl. per-sub-view validation.
+- `crates/gyre-server/src/api/explorer_views.rs` — `parse_and_validate` on POST/PUT `/workspaces/:id/explorer-views` (400 on any invalid case; ViewQuery/ViewSpec hybrid payloads rejected so neither grammar can smuggle unvalidated fields) and on the LLM output of `/generate` before the SSE `complete` event (invalid ⇒ `{view_spec: null, explanation, fallback list view}` per §2, never a 500 or raw forward). `validate_repo_ownership` checks `repo_id` at the top level AND inside each side-by-side sub-view against workspace membership (400/foreign-repo fallback). Routes + ABAC `RouteResourceMapping` entries present.
+
+**Repair in this assignment (5cf54bce):** `registerLayout` did not extend the accepted layout-name set, so a spec using a newly registered layout failed `validateViewSpec` ("unknown layout") — the extensibility mechanism broke its own contract (§4 Extensibility; both files' docs already claimed the sync existed). Fixed: `LAYOUT_TYPES` is a mutable exported array, `registerLayoutName` adds names idempotently (existing names rejected — grammar closed for modification), `registerLayout` extends both in lockstep. Regression test added (registered layout validates; duplicate registration doesn't corrupt the set).
+
+**Test evidence** (recorded in `/tmp/stage/review-evidence/task-170-test-summary.txt`):
+- `cargo test -p gyre-common --lib view_spec` — 13 passed, 0 failed (both §4 spec examples parse+validate; every rejection case).
+- `cargo test -p gyre-server --lib api::explorer_views` — 16 passed, 0 failed (400 on flow-without-trace_source, nested side-by-side, spec_path-without-repo_id, foreign repo_id incl. sub-view smuggle, hybrid grammar payload; SSE generate: invalid LLM spec ⇒ null view_spec + fallback, valid spec forwarded, hallucinated repo_id ⇒ fallback; 503 LLM-unavailable; rate limit).
+- `vitest --pool=threads` (forks pool cannot start in this sandbox — worker IPC timeout, infra limitation, not a code defect): view-spec 17, MoldableViewListView 1, MoldableViewNodeTypeFilter 5, viewEvents 8, layout-engines 11 — 42 passed, 0 failed.
+
+**Scope note:** the live Explorer render surface is the single-canvas ExplorerView/ExplorerCanvas per `explorer-implementation.md` (draft; task-065+) with the ViewQuery grammar (`view-query-grammar.md`, task-062+) superseding this grammar for rendering. This task delivers the §4 ViewSpec grammar layer (types, both-side validation, layout registry, 400 enforcement) it was scoped for; the registry-dispatched MoldableView surface is exercised through its test suite, and `parse_and_validate` deliberately accepts both grammars on storage endpoints with hybrid payloads rejected.
