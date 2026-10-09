@@ -129,6 +129,18 @@ Focused probes (all this branch, `npm ci` locked versions; logs in
   `briefing_repo_filter_completed_agents_by_agent_binding`);
   `... --lib briefing` → **19 passed** (covers every `assemble_briefing`
   call site incl. the MCP delegation).
+- Fresh review round (candidate 831b9f00 + repair commits 4e5fd9fe/93f229be):
+  all probes re-run and passing — frontend suite **1545 passed / 0 failed**
+  (41 pre-existing skips), `api::graph::tests` **23 passed**, `--lib briefing`
+  **19 passed**; logs in `/tmp/stage/review-evidence/task-083-focused-probes.txt`.
+  Repair during this round: `check-forged-scope-fields.sh` flagged the
+  `briefing_ask` `req.repo_id` read (new on this branch). The read is already
+  containment-validated (repo lookup 404 / workspace mismatch 403 against the
+  ABAC-scoped path workspace); the script's guard regex only recognizes
+  auth-derived comparisons, so the validated line now carries the script's
+  designed inline `forged-scope-fields:ok` marker — no verifier change, no
+  exemption-file entry, no handler logic change. Post-fix: check passes,
+  server builds, graph tests green.
 - Host verification items: Playwright e2e (default-tab, back/forward,
   visual snapshots) needs a TCP listener on :2222; this sandbox's `accept()`
   fails with errno 95 (see `/tmp/stage/capabilities.json`). Static review
