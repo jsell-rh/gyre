@@ -1085,9 +1085,24 @@ pub async fn reject_spec(
 
     // Agent-runtime §1: Create priority-2 "Spec rejected" notification for
     // workspace Admin/Developer members.
-    if let Some(ref ws_id) = entry.workspace_id {
+    if let Some(ws_id) = &entry.workspace_id {
         let ws_id = gyre_common::Id::new(ws_id.as_str());
         if let Ok(members) = state.workspace_memberships.list_by_workspace(&ws_id).await {
+            // The notification's tenant scope must be the workspace's real
+            // tenant. If the workspace can't be resolved there is no valid
+            // tenant scope — skip and log rather than fabricating one
+            // (task-097 F3 class).
+            let tenant_id = match state.workspaces.find_by_id(&ws_id).await {
+                Ok(Some(ws)) => ws.tenant_id.to_string(),
+                Ok(None) => {
+                    tracing::warn!("reject_spec: workspace {ws_id} not found, skipping member notifications");
+                    return Ok(Json(entry.into()));
+                }
+                Err(e) => {
+                    tracing::warn!("reject_spec: workspace {ws_id} lookup failed: {e}, skipping member notifications");
+                    return Ok(Json(entry.into()));
+                }
+            };
             for member in &members {
                 if matches!(
                     member.role,
@@ -1095,14 +1110,13 @@ pub async fn reject_spec(
                         | gyre_domain::WorkspaceRole::Developer
                         | gyre_domain::WorkspaceRole::Owner
                 ) {
-                    let tenant_id = entry.repo_id.as_deref().unwrap_or("default");
                     crate::notifications::notify(
                         state.as_ref(),
                         ws_id.clone(),
                         member.user_id.clone(),
                         gyre_common::NotificationType::SpecRejected,
                         format!("Spec '{}' rejected: {}", spec_path, req.reason),
-                        tenant_id,
+                        tenant_id.clone(),
                     )
                     .await;
                 }
