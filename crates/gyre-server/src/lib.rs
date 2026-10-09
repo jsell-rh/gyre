@@ -354,7 +354,8 @@ pub struct AppState {
     pub message_dispatch_tx: tokio::sync::mpsc::Sender<gyre_common::message::Message>,
     /// Receiver half of the dispatch channel. `None` once the consumer task
     /// took ownership — exactly one dispatcher may drain the bus.
-    message_dispatch_rx: tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<gyre_common::message::Message>>>,
+    message_dispatch_rx:
+        Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<gyre_common::message::Message>>>>,
     /// Max unacked Directed messages per agent before 429. Configurable via GYRE_AGENT_INBOX_MAX.
     pub agent_inbox_max: u64,
     /// Per-user, per-workspace last-seen tracking (HSI §1).
@@ -1062,7 +1063,7 @@ pub fn build_state(
         ),
         messages: Arc::new(mem::MemMessageRepository::default()),
         message_dispatch_tx: message_dispatch_tx.clone(),
-        message_dispatch_rx: tokio::sync::Mutex::new(Some(message_dispatch_rx)),
+        message_dispatch_rx: std::sync::Arc::new(tokio::sync::Mutex::new(Some(message_dispatch_rx))),
         agent_inbox_max: std::env::var("GYRE_AGENT_INBOX_MAX")
             .ok()
             .and_then(|v| v.parse().ok())
