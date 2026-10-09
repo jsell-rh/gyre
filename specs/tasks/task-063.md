@@ -3,7 +3,7 @@ title: "View Query Grammar — Scope Resolution, Emphasis & Rendering Primitives
 spec_ref: "view-query-grammar.md §4–9"
 depends_on:
   - task-062
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "view-query-grammar.md §4 2. Scope — What Subgraph to Show"
   - "view-query-grammar.md §5 3. Emphasis — How to Color It"
@@ -96,3 +96,46 @@ Read `specs/system/view-query-grammar.md` §4–9. Then audit existing implement
 - `web/src/lib/view-query-validator.js` — validation logic
 
 The scope resolver is the core deliverable. It takes a `Scope` enum variant + the graph (nodes, edges) and returns a `HashSet<Id>` of matched nodes. This must handle computed references via the resolver from task-062. The frontend rendering likely already works — verify and fix gaps.
+
+## Shipped
+
+Recovered-interrupted-assignment continuation. The implementation itself was complete and
+independently reviewed through four rounds (`specs/reviews/task-063.md` R1–R4; R4 set
+`progress: complete` on the F1/F2/F3 repairs). This round re-verified the recovered tree and
+re-ran the focused gates on it:
+
+- **Scope resolution, all 6 types**: Rust resolver `crates/gyre-domain/src/view_query_resolver.rs`
+  (Diff :722–818; scope unit tests incl. 3 Diff tests) — `cargo test -p gyre-domain --lib
+  view_query_resolver` → **116 passed, 0 failed** (gcc linker override; workspace mold/clang
+  absent — environmental). Client resolution `web/src/lib/ExplorerCanvas.svelte:1940–2076`
+  covers all/focus/filter/test_gaps/concept/diff, reads the real `GraphNodeResponse` fields
+  (`created_sha`/`last_modified_sha`/`created_at`/`last_modified_at`) and mirrors server Diff
+  semantics (`~epoch` half-open temporal, ≥7-char SHA prefix, from-exclusion).
+- **Emphasis/edges/zoom/annotation/interactive bindings**: verified present in the working
+  tree at the R4-cited lines; `web/src/lib/ExplorerCanvas.svelte` and
+  `web/src/__tests__/ExplorerCanvas.test.js` are byte-identical to the R4-verified commit
+  `656c1281` (`git diff 656c1281..HEAD -- <files>` is empty; the web/src delta since then is
+  other tasks' no-sidebar/WorkspaceHome work, which does not touch these files).
+- **Mutation probe re-run on this tree**: deleting the `all`-scope branch fails its targeted
+  test ("all scope: {{count}} resolves to total node count"); source restored clean after
+  the probe (evidence: `/tmp/stage/review-evidence/task-063-r5/`).
+- **Focused suites**: ExplorerCanvas.test.js → **139 passed, 0 failed**. Full `npm test`:
+  1533 passed, 8 failed, 41 skipped — all 8 failures reproduce **worse or equal on the clean
+  base commit `8c2d1775`** (ghost-overlay timeouts 2 vs 1; ExplorerCanvas-performance
+  timeouts 10 vs 5, in an isolated worktree with locked deps), i.e. pre-existing
+  sandbox-load flakes in files this task never touched, not regressions.
+- **Dist freshness**: committed `web/dist/assets/index-DJOFnUtw.js` carries `type==="all"`,
+  `created_sha`, the `~epoch` regex, and zero `last_commit_sha`; identical to the candidate
+  checkpoint; no source change post-dates the dist.
+- **Attribution repair (this round's only source-tree change)**: `a781ede2`
+  (`feat(task-210): Repair verified failure on main cd1c5f044e49`, product surface:
+  `crates/gyre-server/src/api/admin.rs`, `web/src/*`, landed via base merge) was missing
+  from `specs/tasks/task-210.md` `commits:` frontmatter, failing
+  `scripts/check-task-commit-attribution.sh` on main itself. Recorded the full SHA in
+  task-210's frontmatter — the script's prescribed repair, mirroring the identical recording
+  already shipped on sibling pipeline branches (e.g. `f4fae4e2`, task-095). No exemption
+  entries were added; check now passes on this tree.
+
+No task-063 production code required changes this round — the recovered candidate was
+already the R4-approved implementation; the deliverables are the re-verification evidence
+above and the attribution-gate repair.
