@@ -471,12 +471,7 @@ pub async fn admin_seed(
     // error here leaves repos pointing at a workspace that does not exist.
     let tenant_row = state.tenants.find_by_id(&Id::new(&tenant_id)).await?;
     if tenant_row.is_none() {
-        let tenant = Tenant::new(
-            Id::new(&tenant_id),
-            "Default Tenant",
-            &tenant_id,
-            now,
-        );
+        let tenant = Tenant::new(Id::new(&tenant_id), "Default Tenant", &tenant_id, now);
         state.tenants.create(&tenant).await?;
     }
 
@@ -1586,7 +1581,10 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/v1/admin/seed")
-                    .header("Authorization", format!("Bearer {}", tenant_admin_jwt("acme-corp")))
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", tenant_admin_jwt("acme-corp")),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
