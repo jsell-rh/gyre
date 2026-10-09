@@ -65,10 +65,22 @@ class CrashTest(unittest.TestCase):
         ident = self.store.enqueue('cleanup', 'task-001', 'g', {'resource': 'pod'})
         claim = self.store.claim('cleanup', 'cleaner')
         execution = Execution(self.store, claim)
-        item = {'name': 'pod', 'labels': {'gyre.dev/pipeline': self.store.setting('owner')}}
+        item = {'name': 'pod', 'phase': 'Ready', 'labels': {'gyre.dev/pipeline': self.store.setting('owner')}}
         with patch.object(execution, 'login'), patch('pipeline.stages.gateway.inventory', side_effect=[[item], [], []]), patch.object(execution, 'remote', side_effect=subprocess.TimeoutExpired('capture', 30)), patch.object(execution, 'os', return_value=subprocess.CompletedProcess([], 0, '', '')) as delete:
             result, _, _ = cleanup(execution, self.store.task('task-001'))
         self.assertEqual(result['deleted'], 'pod')
+        delete.assert_called_once_with('sandbox', 'delete', 'pod', timeout=180, check=False)
+        self.assertEqual(self.store.db.execute("SELECT state FROM resources WHERE name='pod'").fetchone()[0], 'absent')
+
+    def test_unstarted_error_is_purged_without_unreachable_capture(self):
+        self.store.reserve('pod', self.work, self.claim['token'], 'sandbox', 1)
+        self.store.finish(self.work, self.claim['token'], {})
+        self.store.enqueue('cleanup', 'task-001', 'g', {'resource': 'pod'})
+        execution = Execution(self.store, self.store.claim('cleanup', 'cleaner'))
+        item = {'name': 'pod', 'phase': 'Error', 'labels': {'gyre.dev/pipeline': self.store.setting('owner')}}
+        with patch.object(execution, 'login'), patch('pipeline.stages.gateway.inventory', side_effect=[[item], [], []]), patch.object(execution, 'remote', side_effect=AssertionError('no source was staged')) as remote, patch.object(execution, 'os', return_value=subprocess.CompletedProcess([], 0, '', '')) as delete:
+            cleanup(execution, self.store.task('task-001'))
+        remote.assert_not_called()
         delete.assert_called_once_with('sandbox', 'delete', 'pod', timeout=180, check=False)
         self.assertEqual(self.store.db.execute("SELECT state FROM resources WHERE name='pod'").fetchone()[0], 'absent')
 
