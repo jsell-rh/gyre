@@ -30,7 +30,7 @@ pub struct SpawnOrchestratorResponse {
     pub token: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct SpawnOrchestratorRequest {
     /// Free-form display name; defaults to a per-scope name.
     #[serde(default)]

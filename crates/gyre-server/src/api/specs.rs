@@ -687,6 +687,17 @@ pub async fn approve_spec(
                 }
                 None => gyre_common::message::Destination::Broadcast,
             };
+            let payload = serde_json::json!({
+                "repo_id": entry.repo_id,
+                "spec_path": spec_path,
+                "spec_sha": req.sha,
+                "approved_by": event.approver_id,
+                "approval_id": event.id,
+                // workspace_id is consumed by the server-side signal chain
+                // (not part of the spec'd bus payload — the bus destination
+                // already carries it) to scope the orchestrator registry.
+                "workspace_id": entry.workspace_id,
+            });
             state
                 .emit_event(
                     entry
@@ -695,15 +706,18 @@ pub async fn approve_spec(
                         .map(|ws| gyre_common::Id::new(ws.as_str())),
                     dest,
                     gyre_common::message::MessageKind::SpecApproved,
-                    Some(serde_json::json!({
-                        "repo_id": entry.repo_id,
-                        "spec_path": spec_path,
-                        "spec_sha": req.sha,
-                        "approved_by": event.approver_id,
-                        "approval_id": event.id,
-                    })),
+                    Some(payload.clone()),
                 )
                 .await;
+
+            // Task-115 (agent-runtime.md §1 Phases 1–3): intercept the
+            // workspace-destined SpecApproved signal server-side and route
+            // it through the orchestrator registry — ensure exactly one
+            // active workspace orchestrator, deliver the message to its
+            // inbox, and run its cross-repo delegation processing. Internal
+            // server mechanism, not a message bus feature (the bus message
+            // above is unaffected).
+            crate::signal_chain::on_spec_approved(&state, &payload).await;
         }
     }
 
