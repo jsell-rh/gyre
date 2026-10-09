@@ -2259,7 +2259,9 @@ fn fmt_budget_limit(v: Option<u64>) -> String {
 fn budget_util(used: f64, limit: Option<f64>) -> String {
     match limit {
         Some(m) if m > 0.0 => format!("{:.0}%", used / m * 100.0),
-        Some(_) => "100%+".to_string(),
+        // A zero limit permits nothing: any usage is over; none is 0%.
+        Some(_) if used > 0.0 => "100%+".to_string(),
+        Some(_) => "0%".to_string(),
         None => "-".to_string(),
     }
 }
@@ -3802,6 +3804,19 @@ mod tests {
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains(r#"a\"b.md"#));
         assert!(output.contains(r#"Test \"quotes\""#));
+    }
+
+    #[test]
+    fn budget_util_zero_limit_and_boundary() {
+        // Zero limit: any usage is over, zero usage is 0% (not 100%+).
+        assert_eq!(budget_util(5.0, Some(0.0)), "100%+");
+        assert_eq!(budget_util(0.0, Some(0.0)), "0%");
+        // Exact boundary and normal cases.
+        assert_eq!(budget_util(50.0, Some(100.0)), "50%");
+        assert_eq!(budget_util(100.0, Some(100.0)), "100%");
+        assert_eq!(budget_util(120.0, Some(100.0)), "120%");
+        // Unset limit renders as "-".
+        assert_eq!(budget_util(5.0, None), "-");
     }
 
     // ── Budget command tests ─────────────────────────────────────────────
