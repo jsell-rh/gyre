@@ -972,14 +972,19 @@ pub(crate) async fn spawn_agent_core(
                     }
                 }
             }
-            _ => {
-                // Default: local process spawn.
-                let local = gyre_adapters::compute::LocalTarget;
-                match gyre_ports::ComputeTarget::spawn_process(&local, &spawn_config).await {
+            Some(cfg) if cfg.target_type == "kubernetes" => {
+                // agent-runtime.md §3: Kubernetes backend — create a Pod
+                // with the agent image. kill_process deletes the Pod;
+                // is_alive checks the Pod phase.
+                let k8s = gyre_adapters::compute::kubernetes::kubernetes_target_from_config(
+                    &cfg.config,
+                );
+
+                match gyre_ports::ComputeTarget::spawn_process(&k8s, &spawn_config).await {
                     Ok(handle) => {
                         spawned_pid = handle.pid;
-                        spawned_container_id = None;
-                        spawned_container_image = None;
+                        spawned_container_id = Some(handle.id.clone());
+                        spawned_container_image = Some(k8s.image.clone());
                         let agent_id_str = agent.id.to_string();
                         state
                             .process_registry
@@ -987,17 +992,15 @@ pub(crate) async fn spawn_agent_core(
                             .await
                             .insert(agent_id_str.clone(), handle.clone());
 
-                        // Background monitor: watch for process exit and update agent status.
+                        // Background monitor: watch the Pod phase; a
+                        // Succeeded/Failed/Deleted pod marks the agent Idle.
                         let state_mon = std::sync::Arc::clone(state);
                         tokio::spawn(async move {
                             loop {
-                                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                                let alive = gyre_ports::ComputeTarget::is_alive(
-                                    &gyre_adapters::compute::LocalTarget,
-                                    &handle,
-                                )
-                                .await
-                                .unwrap_or(false);
+                                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                                let alive = gyre_ports::ComputeTarget::is_alive(&k8s, &handle)
+                                    .await
+                                    .unwrap_or(false);
                                 if !alive {
                                     state_mon
                                         .process_registry
@@ -1021,7 +1024,136 @@ pub(crate) async fn spawn_agent_core(
                         spawned_pid = None;
                         spawned_container_id = None;
                         spawned_container_image = None;
-                        tracing::warn!(agent_id = %agent.id, "process spawn failed (best-effort): {e}");
+                        tracing::warn!(
+                            agent_id = %agent.id,
+                            "kubernetes pod spawn failed (best-effort): {e}"
+                        );
+                    }
+                }
+            }
+            _ => {
+                // agent-runtime.md §3 fallback chain, final link: local
+                // container auto-detection (Docker or Podman). Only when no
+                // container runtime is available do we spawn a bare local
+                // process — the e2e flow relies on this (GYRE_AGENT_COMMAND).
+                let auto_container =
+                    gyre_adapters::compute::container::Runtime::detect().await.ok();
+                match auto_container {
+                    Some(runtime) => {
+                        let image = std::env::var("GYRE_AGENT_IMAGE")
+                            .unwrap_or_else(|_| "gyre-agent:latest".to_string());
+                        let ct = gyre_adapters::compute::ContainerTarget::new(image.clone())
+                            .with_runtime(runtime);
+                        match gyre_ports::ComputeTarget::spawn_process(&ct, &spawn_config).await {
+                            Ok(handle) => {
+                                spawned_pid = handle.pid;
+                                spawned_container_id = Some(handle.id.clone());
+                                spawned_container_image = Some(image.clone());
+                                let agent_id_str = agent.id.to_string();
+                                state
+                                    .process_registry
+                                    .lock()
+                                    .await
+                                    .insert(agent_id_str.clone(), handle.clone());
+
+                                // Background monitor: watch for container exit.
+                                let state_mon = std::sync::Arc::clone(state);
+                                tokio::spawn(async move {
+                                    loop {
+                                        tokio::time::sleep(tokio::time::Duration::from_secs(5))
+                                            .await;
+                                        let alive =
+                                            gyre_ports::ComputeTarget::is_alive(&ct, &handle)
+                                                .await
+                                                .unwrap_or(false);
+                                        if !alive {
+                                            state_mon
+                                                .process_registry
+                                                .lock()
+                                                .await
+                                                .remove(&agent_id_str);
+                                            container_audit::capture_exit_audit(
+                                                state_mon.container_audits.as_ref(),
+                                                &agent_id_str,
+                                            )
+                                            .await;
+                                            if let Ok(Some(mut a)) = state_mon
+                                                .agents
+                                                .find_by_id(&Id::new(&agent_id_str))
+                                                .await
+                                            {
+                                                if a.status == AgentStatus::Active {
+                                                    let _ = a.transition_status(AgentStatus::Idle);
+                                                    let _ = state_mon.agents.update(&a).await;
+                                                }
+                                            }
+                                            break;
+                                        }
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                spawned_pid = None;
+                                spawned_container_id = None;
+                                spawned_container_image = None;
+                                tracing::warn!(
+                                    agent_id = %agent.id,
+                                    "auto-detected container spawn failed (best-effort): {e}"
+                                );
+                            }
+                        }
+                    }
+                    None => {
+                        // No container runtime — bare local process (e2e /
+                        // dev environments with GYRE_AGENT_COMMAND).
+                        let local = gyre_adapters::compute::LocalTarget;
+                        match gyre_ports::ComputeTarget::spawn_process(&local, &spawn_config).await {
+                            Ok(handle) => {
+                                spawned_pid = handle.pid;
+                                spawned_container_id = None;
+                                spawned_container_image = None;
+                                let agent_id_str = agent.id.to_string();
+                                state
+                                    .process_registry
+                                    .lock()
+                                    .await
+                                    .insert(agent_id_str.clone(), handle.clone());
+                                let state_mon = std::sync::Arc::clone(state);
+                                tokio::spawn(async move {
+                                    loop {
+                                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                                        let alive = gyre_ports::ComputeTarget::is_alive(
+                                            &gyre_adapters::compute::LocalTarget,
+                                            &handle,
+                                        )
+                                        .await
+                                        .unwrap_or(false);
+                                        if !alive {
+                                            state_mon
+                                                .process_registry
+                                                .lock()
+                                                .await
+                                                .remove(&agent_id_str);
+                                            if let Ok(Some(mut a)) =
+                                                state_mon.agents.find_by_id(&Id::new(&agent_id_str)).await
+                                            {
+                                                if a.status == AgentStatus::Active {
+                                                    let _ = a.transition_status(AgentStatus::Idle);
+                                                    let _ = state_mon.agents.update(&a).await;
+                                                }
+                                            }
+                                            break;
+                                        }
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                spawned_pid = None;
+                                spawned_container_id = None;
+                                spawned_container_image = None;
+                                tracing::warn!(agent_id = %agent.id, "process spawn failed (best-effort): {e}");
+                            }
+                        }
                     }
                 }
             }
