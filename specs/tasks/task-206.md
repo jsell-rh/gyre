@@ -2,7 +2,7 @@
 title: "Implement meta-spec preview mode: real agent preview runs with branches, diffs, and cleanup"
 spec_ref: "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
 commits: ["c7176fc27f3a23298e9cf7ca7b2b17bf0f668dd0", "2ae25c17198e8c3d45bd7508d70af636bd33fd65", "b40714fa5c5f1f534abdbe13bca219d4f3ec1495", "608fd050412238f29da0706ef7bd52b41a932902", "05a8b4d1118c13a1a9e7ad791f961566373a629a", "930e6b1fefa73cfd1897e14362ed85d5699d861a", "f7d9168dea13760201ae40dfde2b45177a757056", "5955934352a6c3610b87c3727648782755dc11c0"]
@@ -270,3 +270,42 @@ HEAD 30422d2 (tree clean).
 - specs/coverage/system/meta-spec-reconciliation.md
 
 Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
+
+## Repair Log (2026-10-09, round 2)
+
+Rejected-integration finding addressed: the prior review had flipped the
+coverage row itself, and review cannot approve its own edits. The row-9
+`implemented` note and audit header now live as implementation-owned edits
+carried by this task's commits, re-written at HEAD 8a13fa1 rather than
+copied from the review's version:
+
+- Coverage row 9 + audit header re-issued as implementation-owned, with all
+  line anchors re-verified against the current tree. The c7176fc
+  teardown-order fix (+3 lines at meta_specs.rs:676) had shifted four row-9
+  anchors; they are re-anchored (env injection :1216-1220 → :1217-1223,
+  status label :898-925 → :901-928, preview_diff :929-959 → :930-962,
+  Stopped-never-Idle :1348-1355 → :1351-1358). All other cited anchors
+  (mod.rs:735-740, abac_middleware.rs:449-454, mcp.rs:2962-2982,
+  spawn.rs:736, meta_specs.rs:420-571/:648, jobs.rs:508-524, main.rs:72-76)
+  re-confirmed accurate at HEAD.
+- Also preserved from the interrupted round (commit c7176fc, verified sound
+  this round): teardown-before-ledger-flip ordering in finish_preview_agent
+  (terminal-in-ledger ⇒ worktree removed, token revoked, slot released),
+  the warn-continue exemption re-anchor (abac_middleware.rs:728 → :734,
+  stale after task-206's route-mapping insertions; check passes), and the
+  MetaSpecs test hardening (dead `if (acceptBtn)` guard replaced with a
+  loud `toBeTruthy()` failure).
+
+Verification this round (all at HEAD 8a13fa1, tree clean):
+
+- `cargo test -p gyre-server --lib meta_spec` — 18 passed, 0 failed
+  (proves the Rust rebuild with the reorder compiles and behaves).
+- `vitest run src/__tests__/MetaSpecs.test.js` — 106 passed, 0 failed.
+- `bash scripts/check-warn-continue-creation.sh` — OK (re-anchored
+  exemption resolves). check-arch, check-abac-route-registry, and the rest
+  of the AGENTS.md-enforced invariant set pass. Remaining script failures
+  are pre-existing and unrelated: exit-2 mawk-vs-gawk environmental class
+  (fails identically on baseline 66422bd4, per prior round), and exit-1
+  findings exclusively in files untouched by task-206 (verified
+  PipelineOverview.svelte, repos.rs:449, graph.rs:1205, and the
+  spawn.rs let-_-discard sites all exist in baseline 66422bd4).
