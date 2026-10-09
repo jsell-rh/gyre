@@ -145,9 +145,16 @@
 
   // ── Stale-response guard (ui-navigation.md §4: "a delayed response from
   //    the old scope must not overwrite the new scope's content") ─────────
-  // Each workspace load bumps the generation; loaders capture it before the
-  // first await and discard results when a newer load started meanwhile.
+  // The workspace-change effect bumps the generation once; each loader
+  // captures that value and discards results when a newer scope started.
   let wsLoadGen = 0;
+  /** Bump the generation once per workspace change (§4 stale-response
+   *  guard). Loaders capture the current value and discard results when it
+   *  advanced — concurrent loaders of the same scope must not invalidate
+   *  each other, so only the workspace-change effect bumps it. */
+  function nextLoadGen() {
+    return ++wsLoadGen;
+  }
 
   /** True when the workspace changed while this load was in flight. */
   function stale(gen) {
@@ -173,7 +180,7 @@
 
   async function loadArchGraph() {
     if (!workspace?.id) return;
-    const gen = ++wsLoadGen;
+    const gen = wsLoadGen;
     archLoading = true;
     archError = null;
     try {
@@ -204,7 +211,7 @@
 
   async function loadRules() {
     if (!workspace?.id) return;
-    const gen = ++wsLoadGen;
+    const gen = wsLoadGen;
     rulesLoading = true;
     rulesError = null;
     try {
@@ -258,7 +265,7 @@
   // ── Repos: load ────────────────────────────────────────────────────────
   async function loadRepos() {
     if (!workspace?.id) return;
-    const gen = ++wsLoadGen;
+    const gen = wsLoadGen;
     reposLoading = true;
     reposError = null;
     try {
@@ -275,7 +282,10 @@
       if (!stale(gen)) reposLoading = false;
     }
   }
+  // ── Repo lookup map (id → repo) ────────────────────────────────────────
+  let repoMap = $state({});
   let budgetLoading = $state(true);
+
   let budgetData = $state(null); // { config, usage }
   let costData = $state(null);   // cost summary
 
@@ -351,7 +361,7 @@
 
   async function loadDecisions() {
     if (!workspace?.id) return;
-    const gen = ++wsLoadGen;
+    const gen = wsLoadGen;
     decisionsLoading = true;
     decisionsError = null;
     try {
@@ -375,7 +385,7 @@
   // ── Specs: load ────────────────────────────────────────────────────────
   async function loadSpecs() {
     if (!workspace?.id) return;
-    const gen = ++wsLoadGen;
+    const gen = wsLoadGen;
     specsLoading = true;
     specsError = null;
     try {
@@ -410,7 +420,7 @@
   // ── Tasks: load ────────────────────────────────────────────────────────
   async function loadTasks() {
     if (!workspace?.id) return;
-    const gen = ++wsLoadGen;
+    const gen = wsLoadGen;
     tasksLoading = true;
     try {
       const data = await api.tasks({ workspaceId: workspace.id });
@@ -427,7 +437,7 @@
   // ── MRs: load ─────────────────────────────────────────────────────────
   async function loadMrs() {
     if (!workspace?.id) return;
-    const gen = ++wsLoadGen;
+    const gen = wsLoadGen;
     mrsLoading = true;
     try {
       const data = await api.mergeRequests({ workspace_id: workspace.id });
@@ -490,7 +500,7 @@
   // ── Agents: load ──────────────────────────────────────────────────────
   async function loadAgents() {
     if (!workspace?.id) return;
-    const gen = ++wsLoadGen;
+    const gen = wsLoadGen;
     agentsLoading = true;
     try {
       const data = await api.agents({ workspaceId: workspace.id });
@@ -522,7 +532,7 @@
   // ── Budget/Cost: load ──────────────────────────────────────────────────
   async function loadBudget() {
     if (!workspace?.id) return;
-    const gen = ++wsLoadGen;
+    const gen = wsLoadGen;
     budgetLoading = true;
     try {
       const [budget, costs] = await Promise.all([
@@ -552,7 +562,7 @@
   let depGraphEdges = $state([]);
   async function loadDepHealth() {
     if (!workspace?.id) return;
-    const gen = ++wsLoadGen;
+    const gen = wsLoadGen;
     depHealthLoading = true;
     try {
       const [graphData, staleEdges, breakingList] = await Promise.all([
@@ -891,7 +901,7 @@
   let mergeQueueView = $state('list');
 
   async function loadMergeQueue() {
-    const gen = ++wsLoadGen;
+    const gen = wsLoadGen;
     mergeQueueLoading = true;
     try {
       const [all, graph] = await Promise.all([
@@ -952,7 +962,7 @@
   let activityEvents = $state([]);
 
   async function loadActivity() {
-    const gen = ++wsLoadGen;
+    const gen = wsLoadGen;
     activityLoading = true;
     try {
       const data = await api.activity(30);
@@ -1209,6 +1219,9 @@
   // ── Load all data when workspace changes ───────────────────────────────
   $effect(() => {
     void workspace?.id;
+    // One generation bump for the whole scope change: all loaders of this
+    // scope share it, and loads from the previous workspace are discarded.
+    nextLoadGen();
     loadDecisions();
     loadRepos();
     loadSpecs();

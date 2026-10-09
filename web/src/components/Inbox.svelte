@@ -25,6 +25,8 @@
   let expandedId = $state(null);
   let showDismissed = $state(false);
   let filterType = $state('all');
+  let actionStates = $state({});
+  let workspaceMap = $state({});
   // Stale-response guard (ui-navigation.md §4): a load started for one
   // scope/workspace must not overwrite state after the scope changed.
   let loadGen = 0;
