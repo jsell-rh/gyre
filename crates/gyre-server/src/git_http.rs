@@ -4526,7 +4526,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let repo_path = tmp.path().join("spec-repo");
         std::fs::create_dir_all(repo_path.join("specs/system")).unwrap();
-        std::fs::write(repo_path.join("specs/system/payments.md"), "# Payments v1\n").unwrap();
+        std::fs::write(
+            repo_path.join("specs/system/payments.md"),
+            "# Payments v1\n",
+        )
+        .unwrap();
 
         let git = |args: &[&str]| {
             let out = std::process::Command::new("git")
@@ -4563,18 +4567,20 @@ mod tests {
             .await
             .unwrap()
             .expect("entry exists");
-        assert!(
-            state
-                .spec_approvals
-                .find_by_id(&approval.id)
-                .await
-                .unwrap()
-                .unwrap()
-                .is_active()
-        );
+        assert!(state
+            .spec_approvals
+            .find_by_id(&approval.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active());
 
         // Second commit modifies the spec file on main.
-        std::fs::write(repo_path.join("specs/system/payments.md"), "# Payments v2\n").unwrap();
+        std::fs::write(
+            repo_path.join("specs/system/payments.md"),
+            "# Payments v2\n",
+        )
+        .unwrap();
         git(&["add", "."]);
         git(&["commit", "-m", "v2"]);
         let new_sha = git(&["rev-parse", "HEAD"]);
@@ -4605,13 +4611,22 @@ mod tests {
             gyre_domain::spec_approval::ApprovalStatus::Revoked,
             "push modifying spec must revoke the ledger approval (it was keyed by ledger path, diff by git path)"
         );
-        assert_eq!(reloaded.approved_at, None, "mutual exclusivity: approved_at cleared");
-        assert!(reloaded.revocation_reason.as_deref().unwrap().contains("modified"));
+        assert_eq!(
+            reloaded.approved_at, None,
+            "mutual exclusivity: approved_at cleared"
+        );
+        assert!(reloaded
+            .revocation_reason
+            .as_deref()
+            .unwrap()
+            .contains("modified"));
 
         // And the revoked approval no longer authorizes merges (forge check).
         let spec_ref = format!("system/payments.md@{}", "a".repeat(40));
         assert!(
-            crate::api::gates::verify_spec_ref(&state, &spec_ref).await.is_err(),
+            crate::api::gates::verify_spec_ref(&state, &spec_ref)
+                .await
+                .is_err(),
             "revoked approval must fail verify_spec_ref"
         );
     }
