@@ -1109,13 +1109,13 @@ mod tests {
             },
             "principles": [], "standards": [], "process": []
         });
-        let put = |app: Router| {
+        let put = |app: Router, ws: Id| {
             let body = put_body.to_string();
             async move {
                 app.oneshot(
                     Request::builder()
                         .method("PUT")
-                        .uri(format!("/api/v1/workspaces/{}/meta-spec-set", ws_id.as_str()))
+                        .uri(format!("/api/v1/workspaces/{}/meta-spec-set", ws.as_str()))
                         .header("authorization", "Bearer test-token")
                         .header("content-type", "application/json")
                         .body(Body::from(body))
@@ -1126,7 +1126,7 @@ mod tests {
             }
         };
 
-        let r1 = put(app.clone()).await;
+        let r1 = put(app.clone(), ws_id.clone()).await;
         assert_eq!(r1.status(), StatusCode::OK);
         let sha1 = crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws_id).await;
         assert!(!sha1.is_empty());
@@ -1134,7 +1134,7 @@ mod tests {
         // Identical re-PUT: same entries (deliberately supplied in the same
         // JSON object order; key order in the REQUEST must not matter
         // either, since deserialization into BTreeMap canonicalizes).
-        let r2 = put(app.clone()).await;
+        let r2 = put(app.clone(), ws_id.clone()).await;
         assert_eq!(r2.status(), StatusCode::OK);
         let sha2 = crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws_id).await;
         assert_eq!(sha1, sha2, "identical re-PUT must not change the set SHA");
