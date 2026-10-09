@@ -825,7 +825,7 @@ mod tests {
             NotificationRepository::create(&s, &n).await.unwrap();
         }
         let all =
-            NotificationRepository::list_for_user(&s, &u.id, None, None, None, &[], 50, 0)
+            NotificationRepository::list_for_user(&s, &u.id, None, None, None, None, &[], 50, 0)
                 .await
                 .unwrap();
         assert_eq!(all.len(), 3);
@@ -838,6 +838,7 @@ mod tests {
         let filtered = NotificationRepository::list_for_user(
             &s,
             &u.id,
+            None,
             None,
             None,
             None,
