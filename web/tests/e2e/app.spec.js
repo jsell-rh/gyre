@@ -14,12 +14,12 @@
  *              /profile                      → user profile
  */
 
-import { test, expect } from './fixtures/seeded.js';
+import { test, expect, SEED_WORKSPACE_SLUG, SEED_REPO_NAME } from './fixtures/seeded.js';
 
-// Seed workspace slug — matches the seed fixture data.
-// The seed endpoint creates a workspace with this slug; adjust if fixture changes.
-const SEED_SLUG = 'default';
-const SEED_REPO = 'sample-repo'; // first repo in seeded workspace; adjust if fixture changes
+// Real fixture identities from the server's admin_seed (admin.rs):
+// workspace slug "default", first repo "gyre-core".
+const SEED_SLUG = SEED_WORKSPACE_SLUG;
+const SEED_REPO = SEED_REPO_NAME;
 
 // ---------------------------------------------------------------------------
 // App shell structure
@@ -175,13 +175,20 @@ test.describe('Workspace home', () => {
     const reposSection = page.locator('[data-testid="section-repos"]');
     await expect(reposSection).toBeVisible({ timeout: 5000 });
 
-    // Repo rows or empty state must be visible
+    // Repo cards or empty state must be visible. The production markup is
+    // RepoCard.svelte ([data-testid="repo-card"]); a seeded workspace has
+    // three, so also assert real content — the card names the repo — rather
+    // than accepting a bare container.
     const reposContent = reposSection
-      .locator('[data-testid="repo-row"]')
+      .locator('[data-testid="repo-card"]')
       .or(reposSection.locator('[data-testid="repos-empty"]'))
       .or(reposSection.locator('.skeleton-row'))
       .first();
     await expect(reposContent).toBeVisible({ timeout: 8000 });
+    const cards = reposSection.locator('[data-testid="repo-card"]');
+    if (await cards.count()) {
+      await expect(cards.first().locator('.repo-card-name')).toHaveText(/\S/, { timeout: 3000 });
+    }
   });
 
   test('briefing_section_renders', async ({ page }) => {

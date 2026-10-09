@@ -2,15 +2,15 @@
 
 The Svelte SPA at `GET /*` is served from `web/dist/`. Access at `http://localhost:3000`.
 
-> **Nav rework (PRs #589-#599):** The UI was restructured from a sidebar-driven 6-view model to a **two-mode** model — Workspace Home (dashboard) and Repo Mode (horizontal tabs). See `specs/system/ui-navigation.md` for that spec. **task-082 later reinstated the permanent 6-item sidebar** (Inbox, Briefing, Explorer, Specs, Meta-specs, Admin) per `specs/system/human-system-interface.md` §1.3 — the sidebar is now always visible alongside the two content modes; the sidebar stays fixed across scopes while the content area adapts.
+> **Nav rework (PRs #589-#599):** The UI was restructured from a sidebar-driven 6-view model to a **two-mode** model — Workspace Home (dashboard) and Repo Mode (horizontal tabs). See `specs/system/ui-navigation.md` for that spec. The permanent sidebar described by `human-system-interface.md` §1.3 is **not shipped** — the canonical navigation is `specs/system/ui-navigation.md` (Principle 5: no persistent sidebar). On narrow viewports a hamburger toggles a drawer that links to the workspace-home sections.
 
 ---
 
 ## Application Shell
 
-### Sidebar (permanent — task-082, HSI §1.3)
+### Shell Layout (no persistent sidebar)
 
-Fixed-width left sidebar, always visible, always these six items in this order: **Inbox, Briefing, Explorer, Specs, Meta-specs, Admin**. The sidebar never changes with scope (tenant/workspace/repo) — the content area adapts instead. The active item is highlighted; clicking an item navigates to that section while preserving the current scope. The footer shows the server version indicator and a collapse toggle (icon-only mode on narrow viewports; `Sidebar.svelte` in `web/src/lib/`). `⌘1`–`⌘6` jump to the six items.
+There is **no persistent sidebar** (`specs/system/ui-navigation.md` Principle 5). The shell is: Top Bar + content area + Status Bar. Navigation is via the top bar (workspace selector, search, decisions badge), the workspace-home sections, and the repo-mode horizontal tabs. On narrow viewports, the hamburger (`[≡]`) opens a drawer linking to the workspace-home sections.
 
 ### Top Bar (always visible)
 
@@ -39,14 +39,14 @@ WebSocket connection indicator, trust level, budget usage progress bar, presence
 ### Keyboard Shortcuts
 
 `?` opens the keyboard shortcuts modal. Key bindings:
-- `⌘K` — global search
+- `⌘K` (or `/`) — global search / command palette
+- `Esc` — close detail panel, modal, or dropdown; in repo mode with nothing open, return to workspace home
 - `g` then `h` — go to workspace home
-- `g` then `r` — go to repos list
-- `g` then `5` — open settings (in repo mode)
-- `i` — focus decisions/inbox
-- `b` — open briefing
-- `⌘1`–`⌘6` — jump to the six sidebar items
-- Arrow keys — navigate list items; `Enter` — open selected
+- `g` then `s` — go to workspace settings
+- `g` then `a` — go to Agent Rules management
+- `g` then `1`–`8` — repo-mode tabs: `g 1` Specs, `g 2` Architecture, `g 3` Decisions, `g 4` Code, `g 5` Tasks, `g 6` MRs, `g 7` Agents, `g 8` Settings (repo mode only; no-op at workspace home)
+
+All single-letter and `g`-sequence shortcuts are suppressed while typing in a text input. `g`-sequences expire 500ms after the `g` keypress.
 
 ---
 
@@ -99,7 +99,7 @@ Gear icon (⚙) in the workspace header opens a full-page settings view with tab
 Clicking a repo from Workspace Home enters Repo Mode. The top bar shows `[←] Workspace / Repo` with horizontal tabs below:
 
 ```
-[ Specs ][ Architecture ][ Decisions ][ Code ][ ⚙ ]
+[ Specs ][ Tasks ][ MRs ][ Agents ][ Architecture ][ Dependencies ][ Decisions ][ Code ][ ⚙ ]
 ```
 
 ### Specs Tab
@@ -141,7 +141,7 @@ Clicking a repo from Workspace Home enters Repo Mode. The top bar shows `[←] W
 
 | Component | Role |
 |---|---|
-| `Sidebar.svelte` | Permanent 6-item navigation sidebar (HSI §1.3, task-082) |
+| `App.svelte` | Application shell — top bar, two-mode routing, mobile drawer, keyboard shortcuts (no persistent sidebar) |
 | `WorkspaceHome.svelte` | Workspace home dashboard — 5 section cards |
 | `RepoMode.svelte` | Repo mode shell — horizontal tab routing |
 | `ExplorerCanvas.svelte` | Unified architecture canvas — semantic zoom treemap, lens toggle (structural/evaluative/observable), filter presets, view query rendering, minimap (replaces the former Graph/Flow tabs) |
