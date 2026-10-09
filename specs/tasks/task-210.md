@@ -1065,3 +1065,11 @@ to a warning by the gate's `-W clippy::all` and is not a changed-line finding.
 - `WorkspaceHome` Agent Rules loads are generation-guarded: a delayed response (success or failure) from a superseded workspace can no longer overwrite the current workspace's rules; a failed lookup surfaces as an error with Retry, never an empty successful rule set.
 - MetaSpec `updated_at` is parsed as UNIX seconds (matching domain `u64` / `now_secs()` writes) via `toEpochSec`; the recency note reports only what the data proves ("N meta-specs updated in the last 7 days").
 - The E2E seeded fixture fails fast with the real cause on seed or workspace-visibility errors, uses the real fixture identities (workspace `default`, repo `gyre-core`), and asserts the actual `repo-card` production markup; `docs/ui.md` documents the shipped no-sidebar shell (canonical ui-navigation) with the real tabs and g-key bindings.
+
+## Review
+
+### Root finding: shared Cargo artifacts (2026-10-09)
+
+An independent two-checkout Rust fixture reproduces stale test reuse: a good implementation returns true, a mutant returns false, and the unchanged test asserts true. With one CARGO_TARGET_DIR: good exits 0, mutant ALSO exits 0 and Cargo replays the good source warning without compiling. With an isolated target: the same mutant exits 101. This is actual command evidence, not a claim that the tenant test is flaky.
+
+Your isolated probe worktree and assigned checkout inherit /tmp/gyre-target. Results from that shared target are not reliable evidence of the current tree. Give the probe its own target directory, or cargo clean each workspace package before a serialized check. Avoid running both checkouts concurrently against the shared target. Do not alter the production tenant enforcement or weaken its assertions based on a stale test binary. Independently verify the current code after invalidating workspace artifacts, then write your supported verdict. Root is repairing the controller host gate to clean workspace packages while retaining third-party caches.
