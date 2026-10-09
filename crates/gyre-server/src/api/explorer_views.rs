@@ -825,9 +825,27 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    /// App + state with a registered workspace in the system caller's
+    /// tenant (`default`) so grounding's workspace lookup resolves.
+    async fn app_with_workspace(ws: &str) -> axum::Router {
+        let state = crate::mem::test_state();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new(ws),
+                gyre_common::Id::new("default"),
+                ws,
+                ws,
+                0,
+            ))
+            .await
+            .unwrap();
+        crate::build_router(state)
+    }
+
     #[tokio::test]
     async fn generate_explorer_view_streams_sse() {
-        let app = app();
+        let app = app_with_workspace("ws-4").await;
         let resp = app
             .oneshot(
                 Request::builder()
@@ -951,7 +969,7 @@ mod tests {
             .workspaces
             .create(&gyre_domain::Workspace::new(
                 gyre_common::Id::new(&ws_id),
-                gyre_common::Id::new("tenant-1"),
+                gyre_common::Id::new("default"),
                 "gen-ws",
                 "gen-ws",
                 0,
@@ -1101,7 +1119,7 @@ mod tests {
             .workspaces
             .create(&gyre_domain::Workspace::new(
                 other_ws.clone(),
-                gyre_common::Id::new("tenant-1"),
+                gyre_common::Id::new("default"),
                 "other-ws",
                 "other-ws",
                 0,
@@ -1137,7 +1155,7 @@ mod tests {
 
     #[tokio::test]
     async fn generate_explorer_view_rate_limited_after_10_requests() {
-        let app = app();
+        let app = app_with_workspace("ws-rl").await;
         let generate_body = r#"{"question":"What uses the database?"}"#;
 
         // First 10 requests must succeed (SSE 200).
