@@ -654,8 +654,8 @@ mod tests {
 
         // Create three gates; the second is explicitly positioned first.
         for (name, gate_type, command, position) in [
-            ("lint", "lint_command", "cargo clippy", None),
-            ("unit-tests", "test_command", "cargo test", Some(1)),
+            ("lint", "lint_command", Some("cargo clippy"), None),
+            ("unit-tests", "test_command", Some("cargo test"), Some(1)),
             ("review", "agent_review", None, None),
         ] {
             let mut body = serde_json::json!({
@@ -684,7 +684,7 @@ mod tests {
             assert_eq!(resp.status(), StatusCode::CREATED, "gate {name} created");
         }
 
-        let resp = app
+        let resp = app.clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/repos/repo-1/gates")
@@ -714,7 +714,7 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
-        let resp = app
+        let resp = app.clone()
             .oneshot(
                 Request::builder()
                     .method("PUT")
