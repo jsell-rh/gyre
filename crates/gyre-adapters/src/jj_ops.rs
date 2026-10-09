@@ -156,18 +156,24 @@ impl JjOpsPort for JjOpsAdapter {
     }
 
     async fn jj_squash(&self, repo_path: &str) -> Result<String> {
-        self.run_jj(repo_path, &["squash"]).await?;
-        // After squash the parent becomes the working copy — get its commit SHA.
+        // -u (use-destination-message): the parent change keeps its
+        // description and jj never opens an editor. A bare `jj squash`
+        // combines the two descriptions via $JJ_EDITOR (jj defaults to
+        // vi) — in a headless server process the editor hangs or fails.
+        self.run_jj(repo_path, &["squash", "-u"]).await?;
+        // The squashed work now lives in the parent change; the working
+        // copy moves to a new empty change on top of it. The resulting
+        // commit is @- — `log --limit 1` would return the new empty @.
         let sha = self
             .run_jj(
                 repo_path,
                 &[
                     "log",
+                    "-r",
+                    "@-",
                     "--no-graph",
                     "--color",
                     "never",
-                    "--limit",
-                    "1",
                     "-T",
                     "commit_id",
                 ],
@@ -176,14 +182,11 @@ impl JjOpsPort for JjOpsAdapter {
         Ok(sha.trim().to_string())
     }
 
-    async fn jj_bookmark_create(&self, repo_path: &str, name: &str, change_id: &str) -> Result<()> {
-        self.run_jj(repo_path, &["bookmark", "create", name, "-r", change_id])
-            .await?;
-        Ok(())
-    }
-
     async fn jj_undo(&self, repo_path: &str) -> Result<()> {
-        self.run_jj(repo_path, &["op", "undo"]).await?;
+        // Top-level `jj undo` (jj ≥ 0.21): "Undo the last operation".
+        // `jj op undo` is NOT a subcommand of `jj operation` in jj 0.39.0
+        // — it exits 2 with "unrecognized subcommand 'undo'".
+        self.run_jj(repo_path, &["undo"]).await?;
         Ok(())
     }
 
