@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is NOT"
-commits: ["98fd096e3972e7a6d1df78b700b63ea1dee15fe5"]
+commits: ["98fd096e3972e7a6d1df78b700b63ea1dee15fe5", "ad1121c5093cd2f1f2b3824ed88352ac4e181fd9"]
 ---
 
 ## Spec Excerpt
@@ -125,3 +125,13 @@ Assignment: resume retained source (candidate `74a1529`, review-round-2 verdict 
   - Base-inherited failure `a781ede2` (task-210) missing from task-210.md frontmatter on the `8c2d1775` lineage (its recording commits `cb58c9ae`/`afc56d17`/`f4fae4e2` live on unmerged sibling checkpoint branches): appended the sanctioned bookkeeping entry `8d28d65e`. Gate now OK.
 - **All acceptance criteria re-verified at `8d28d65e`:** `my_stuff_endpoints_are_removed` ok via real router (cargo test, SKIP_WEB_BUILD=1); UserProfile.test.js 23/23 including exact-six-tab guard; dead-code grep over `crates/` + `web/src/` → zero; dist grep over `web/dist/assets/*.js` → zero forbidden identifiers, six kept tabs confirmed in bundle; kept `users/me/*` routes + per-handler auth model untouched; ABAC route-registry + exempt-handlers gates OK (89 handlers); attribution gate OK. Evidence: `/tmp/stage/review-evidence/task-208-greps.txt`, `task-208-runtime.txt`.
 - **Sandbox transport restriction (recorded, not inferred as defect):** TCP `accept` blocked (EOPNOTSUPP errno 95, see `/tmp/stage/capabilities.json`) — live HTTP 404 probes against a running server are impossible here; the in-process router test exercises the identical route table. Host verification / GitHub CI must run the live checks.
+
+## Repair Round (2026-10-09, contract finding 0e755408)
+
+Assignment: repair the `contract` finding on retained source `5a8e80ff` — "the implementation changed the assigned requirements."
+
+- **Audit result: the task contract was never changed.** The contract sections (Spec Excerpt, Implementation Plan, Acceptance Criteria, Agent Instructions) of this file are byte-identical to the original decomposition commit `576351f0`; the only differences are frontmatter (`progress`, `commits`) and appended narrative rounds. `git diff 576351f0:specs/tasks/task-208.md HEAD:specs/tasks/task-208.md` confirms this. No normative spec text outside the assigned Part 1 surfaces was edited by the task lineage (`specs/tasks/task-210.md` was a frontmatter-only bookkeeping entry sanctioned by the resume round; the HSI coverage header change was the merge resolution of the upstream conflict).
+- **Root cause of the finding identified.** The cited source commit `5a8e80ff` is itself a bookkeeping regression, not a product change: `dev-attribution.py` (run automatically at pipeline checkpoint) rebuilds `commits:` from a product-surface regex (`crates/|web/src|web/tests`) that excludes `web/dist/`, so its pass dropped the reviewed `ad1121c5` dist-regen entry that review round 2 (F2) recorded via `39304a95` — regressing the frontmatter to the pre-round-2 state. The same automation reset the working-tree task file to the `not-started` template at checkout (`pipeline-remote.py` rewrites the file with the discovery body before the agent runs), which presents as "the task contract changed."
+- **Concrete repair this round:** restored `ad1121c5093cd2f1f2b3824ed88352ac4e181fd9` to `commits:` (third clobber of the same entry; tracked as 82a76097 → 5a8e80ff regression). No product files touched — the review-round-2 tree is the correct reviewed state.
+- **All acceptance criteria re-verified fresh at `5a8e80ff` (before this round's bookkeeping edit):** dead-code grep over `crates/` + `web/src/` → zero; dist grep over `web/dist/assets/*.js` → zero forbidden identifiers, `index.html` references `index-KSqzVjd3.js`; ABAC route-registry + exempt-handlers (89) + attribution gates OK; both coverage matrices have 0 `not-started` rows (fixed-string match). Runtime probes: `my_stuff_endpoints_are_removed` (real router) and UserProfile.test.js re-run this round — see evidence files.
+- **Residual (process-owner, not task-208 product):** the checkpoint automation's `dev-attribution.py` regex and the in-repo `check-task-commit-attribution.sh` gate both treat `web/dist/` as non-product surface, so every future checkpoint pass will re-clobber dist-only entries in `commits:` until the automation is fixed. Recorded here and in the evidence file; repairing the pipeline script is outside this task's product scope.
