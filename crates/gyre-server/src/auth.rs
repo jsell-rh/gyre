@@ -38,11 +38,21 @@ pub(crate) const SESSION_TTL_SECS: u64 = 30 * 24 * 3600;
 /// (task-111 plan §4: throttled to avoid write amplification).
 pub(crate) const SESSION_TOUCH_THROTTLE_SECS: u64 = 60;
 
-/// Record or refresh the session for an API-key-authenticated user.
+/// Record or refresh the session for an API-key-authenticated user, and
+/// decide whether the request may proceed.
+///
+/// Returns `false` when the session for this credential+device has been
+/// revoked — the caller must reject auth (task-111 plan §4: "check session
+/// revocation status in auth middleware (reject revoked sessions)"). A
+/// revoked row is never resurrected or replaced, so revoking a session
+/// signs that device out until the user mints a new credential.
+/// `credential_revoked` covers the complementary case: every session for
+/// the credential revoked ("sign out everywhere", including devices never
+/// seen before).
 ///
 /// One session row per (credential, device): the same key re-presented from
-/// the same IP + User-Agent is the same session (auth path avoids creating a
-/// row per request); a different device is a new session row, so revoking
+/// the same IP + User-Agent is the same session (auth path avoids creating
+/// a row per request); a different device is a new session row, so revoking
 /// one device does not sign out every device (SessionRepository port doc).
 ///
 /// `credential_hash` is the SHA-256 of the raw API key (`hash_api_key`) —
@@ -56,7 +66,7 @@ pub(crate) async fn track_session(
     credential_hash: &str,
     ip_address: &str,
     user_agent: &str,
-) {
+) -> bool {
     let now = now_epoch_secs();
     let existing = state
         .sessions
@@ -65,11 +75,11 @@ pub(crate) async fn track_session(
 
     match existing {
         Ok(Some(session)) => {
-            // Reject revoked sessions at the door: a revoked credential's
-            // device session must not resurrect. (Revoke-all marks every
-            // session revoked; the caller is turned away here.)
+            // A revoked session for this device is a logout gesture for
+            // that device: reject the request instead of touching or
+            // replacing the row.
             if session.revoked {
-                return;
+                return false;
             }
             // Throttled last-active update (at most once per minute).
             if now.saturating_sub(session.last_active_at) >= SESSION_TOUCH_THROTTLE_SECS {
@@ -77,6 +87,7 @@ pub(crate) async fn track_session(
                     tracing::warn!(session_id = %session.id, "session touch failed: {e}");
                 }
             }
+            true
         }
         Ok(None) => {
             // First presentation of this credential from this device:
@@ -93,9 +104,11 @@ pub(crate) async fn track_session(
             if let Err(e) = state.sessions.create(&session).await {
                 tracing::warn!(user_id = %user_id, "session create failed: {e}");
             }
+            true
         }
         Err(e) => {
             tracing::warn!(user_id = %user_id, "session lookup failed: {e}");
+            true
         }
     }
 }
@@ -692,9 +705,11 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 if credential_revoked(state, &user.id, &credential_hash).await {
                     return Err((StatusCode::UNAUTHORIZED, "Session has been revoked").into_response());
                 }
-                // device; throttled last-active updates). The IP is the socket
-                // peer address from the ConnectInfo extension (main.rs serves
-                // with into_make_service_with_connect_info). Forwarded headers
+                // Session tracking (user-management.md §Session Management:
+                // one session row per credential+device; throttled
+                // last-active updates). The IP is the socket peer address
+                // from the ConnectInfo extension (main.rs serves with
+                // into_make_service_with_connect_info). Forwarded headers
                 // are NOT consulted — they are caller-controlled without a
                 // trusted-proxy gate (CWE-348).
                 let ip_address = parts
@@ -708,7 +723,13 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or("")
                     .to_string();
-                track_session(state, &user.id, &credential_hash, &ip_address, &user_agent).await;
+                // A revoked session for this device rejects auth; a new or
+                // still-active session is recorded/refreshed.
+                if !track_session(state, &user.id, &credential_hash, &ip_address, &user_agent)
+                    .await
+                {
+                    return Err((StatusCode::UNAUTHORIZED, "Session has been revoked").into_response());
+                }
                 return Ok(AuthenticatedAgent {
                     agent_id: user.display_name.clone(),
                     user_id: Some(user.id),
@@ -812,7 +833,11 @@ pub async fn authenticate_token(
             if credential_revoked(state, &user.id, &credential_hash).await {
                 return Err("Session has been revoked");
             }
-            track_session(state, &user.id, &credential_hash, "", "").await;
+            // A revoked session for the (credential, empty device) pair
+            // rejects auth — same per-device rule as the HTTP path.
+            if !track_session(state, &user.id, &credential_hash, "", "").await {
+                return Err("Session has been revoked");
+            }
             return Ok(AuthenticatedAgent {
                 agent_id: user.display_name.clone(),
                 user_id: Some(user.id),

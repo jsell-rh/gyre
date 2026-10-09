@@ -1438,7 +1438,11 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri(format!("/api/v1/users/me/sessions/{session_id}"))
+                    // Same User-Agent as the session being revoked: the
+                    // revoke request itself authenticates as the same
+                    // device (it must not mint a phantom second session).
                     .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-cli/1.0")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1464,6 +1468,105 @@ mod tests {
             resp.status(),
             StatusCode::UNAUTHORIZED,
             "revoked session must reject the credential"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoking_one_device_session_does_not_sign_out_other_devices() {
+        let (state, raw_key) = provision_user_with_key().await;
+
+        // Two devices authenticate with the same credential.
+        let app = crate::api::api_router().with_state(state.clone());
+        for ua in ["gyre-cli/1.0", "gyre-web/1.0"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/users/me/sessions")
+                        .header("Authorization", format!("Bearer {raw_key}"))
+                        .header("User-Agent", ua)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // List from the CLI device to find its session id.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-cli/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let sessions = json["sessions"].as_array().unwrap();
+        assert_eq!(sessions.len(), 2, "two devices = two sessions");
+        let cli_session_id = sessions
+            .iter()
+            .find(|s| s["user_agent"].as_str().unwrap() == "gyre-cli/1.0")
+            .map(|s| s["id"].as_str().unwrap().to_string())
+            .expect("CLI session must be listed");
+
+        // Revoke only the CLI device's session — from the web device, so
+        // the revoking request is not the session being revoked.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/users/me/sessions/{cli_session_id}"))
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-web/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // The revoked device is signed out: its next request is rejected.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-cli/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "revoked device session must be rejected in auth middleware"
+        );
+
+        // The other device stays signed in (its session is untouched).
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-web/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "unrevoked sibling device must keep access"
         );
     }
 
