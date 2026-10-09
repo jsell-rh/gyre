@@ -134,6 +134,10 @@ struct RekorHash<'a> {
 #[derive(Serialize)]
 struct RekorSignature<'a> {
     content: &'a str,
+    /// The hashedrekord schema names this field `publicKey` (camelCase);
+    /// serde's snake_case default would emit `public_key`, which Rekor's
+    /// entry validation rejects and `check_rekor_entry` never finds.
+    #[serde(rename = "publicKey")]
     public_key: RekorPublicKey<'a>,
 }
 
@@ -748,11 +752,7 @@ async fn check_rekor_entry(
     // "spec": {"data": {"hash": {...}}, "signature": {"content", "publicKey": {"content"}}}}
     let spec = match body.get("spec").and_then(|s| s.as_object()) {
         Some(s) => s,
-        None => {
-            #[cfg(test)]
-            eprintln!("DEBUG rekor: no spec in body: {body}");
-            return false;
-        }
+        None => return false,
     };
 
     // Digest must match this commit.
@@ -765,15 +765,6 @@ async fn check_rekor_entry(
         .map(|v| v == digest)
         .unwrap_or(false);
     if !hash_matches {
-        #[cfg(test)]
-        eprintln!(
-            "DEBUG rekor: hash mismatch: entry={:?} record={}",
-            spec.get("data")
-                .and_then(|d| d.get("hash"))
-                .and_then(|h| h.get("value"))
-                .and_then(|v| v.as_str()),
-            digest
-        );
         return false;
     }
 
@@ -785,12 +776,6 @@ async fn check_rekor_entry(
         .map(|c| c == record.signature)
         .unwrap_or(false);
     if !sig_matches {
-        #[cfg(test)]
-        eprintln!(
-            "DEBUG rekor: sig mismatch: entry={:?} record={}",
-            spec.get("signature").and_then(|s| s.get("content")).and_then(|c| c.as_str()),
-            record.signature
-        );
         return false;
     }
 
@@ -811,10 +796,6 @@ async fn check_rekor_entry(
                 || pem_equal_mod_whitespace(&pem_bytes, leaf_pem.as_bytes())
         })
         .unwrap_or(false);
-    if !key_matches {
-        #[cfg(test)]
-        eprintln!("DEBUG rekor: key mismatch");
-    }
     key_matches
 }
 
@@ -1039,14 +1020,14 @@ mod tests {
     //   matching has real data to compare against).
     //
     // Failure knobs select which verification phase must fail:
-    // - `tamper_signature`: the record's signature is corrupted after
-    //   signing (phase a).
     // - `untrusted_ca`: the leaf is issued by a CA that is NOT in the served
     //   trust bundle (phase b).
     // - `wrong_subject`: the leaf's SAN is a different identity than the JWT
     //   sub (phase c).
     // - `drop_rekor_entry`: the Rekor GET returns 404 (phase d).
     // - `expired_leaf`: the leaf's validity window is in the past (phase b).
+    // (Phase (a)'s negative is driven by the test corrupting the record's
+    // signature after signing — the mock needs no knob for it.)
 
     /// A CA certificate + key the mock Fulcio issues leaves under.
     struct MockCa {
@@ -1103,7 +1084,6 @@ mod tests {
     }
     #[derive(Default)]
     struct MockKnobs {
-        tamper_signature: bool,
         untrusted_ca: bool,
         wrong_subject: bool,
         drop_rekor_entry: bool,
@@ -1386,8 +1366,10 @@ mod tests {
         }
     }
 
-    /// Phase (a) negative: a tampered signature must fail signature_valid
-    /// while the other phases still pass.
+    /// Phase (a) negative: a tampered signature must fail signature_valid.
+    /// Under F4 content-match semantics the Rekor entry holds the original
+    /// signature, so the tampered record also fails to match its entry (d) —
+    /// the tampering is detected, not merely unverifiable.
     #[tokio::test]
     async fn verification_fails_on_tampered_signature() {
         let stack = MockSigningStack::new();
@@ -1401,12 +1383,14 @@ mod tests {
         let result = verify_signature_fulcio(&record, &test_config(), &stack, test_now()).await;
         assert!(!result.valid);
         assert!(!result.signature_valid, "tampered signature must fail (a)");
-        // The certificate, subject, and Rekor entry are untouched.
+        // The certificate and subject are untouched.
         assert!(result.certificate_chain_valid);
         assert!(result.subject_matches);
-        assert!(result.rekor_entry_exists);
+        assert!(
+            !result.rekor_entry_exists,
+            "a tampered signature must not match its Rekor entry (F4)"
+        );
     }
-
     /// Phase (b) negative: a leaf issued by a CA absent from the trust
     /// bundle must fail certificate_chain_valid.
     #[tokio::test]
