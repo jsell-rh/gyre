@@ -57,6 +57,7 @@
     SuggestedSpecLink: 'default',
     TaskCreated: 'info',
     BudgetWarning: 'warning',
+    SecurityFinding: 'danger',
   };
 
   // Human-readable type labels — derived from i18n
@@ -103,6 +104,7 @@
         PersonaApprovalRequested: 'persona_approval_requested',
         MergeQueuePaused: 'merge_queue_paused',
         BudgetExhausted: 'budget_exhausted',
+        SecurityFinding: 'security_finding',
       };
       data = data.map(n => ({
         ...n,

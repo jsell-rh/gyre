@@ -130,7 +130,12 @@
       "budget_warning": "Budget",
       "trust_suggestion": "Trust",
       "spec_assertion_failure": "Assertion Fail",
-      "suggested_link": "Suggested Link"
+      "suggested_link": "Suggested Link",
+      "persona_approval_requested": "Persona Approval",
+      "merge_queue_paused": "Queue Paused",
+      "budget_exhausted": "Budget Out",
+      "security_finding": "Security",
+      "mr_reverted": "MR Reverted"
     },
     "go_to_repo_decisions": "Go to {name} decisions",
     "scope_tenant": "Tenant",
@@ -522,7 +527,12 @@
       "budget_warning": "Budget",
       "trust_suggestion": "Trust",
       "spec_assertion_failure": "Assertion Fail",
-      "suggested_link": "Suggested Link"
+      "suggested_link": "Suggested Link",
+      "persona_approval_requested": "Persona Approval",
+      "merge_queue_paused": "Queue Paused",
+      "budget_exhausted": "Budget Out",
+      "security_finding": "Security",
+      "mr_reverted": "MR Reverted"
     },
     "status_resolved": "Resolved",
     "gate_label": "Gate: {name}",
@@ -1335,7 +1345,12 @@
       "budget_warning": "Budget",
       "trust_suggestion": "Trust",
       "spec_assertion_failure": "Assertion Fail",
-      "suggested_link": "Suggested Link"
+      "suggested_link": "Suggested Link",
+      "persona_approval_requested": "Persona Approval",
+      "merge_queue_paused": "Queue Paused",
+      "budget_exhausted": "Budget Out",
+      "security_finding": "Security",
+      "mr_reverted": "MR Reverted"
     },
     "error_load_decisions": "Failed to load decisions",
     "error_load_workspaces": "Failed to load workspaces",
