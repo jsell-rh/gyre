@@ -34,6 +34,7 @@ pub mod push_gate;
 pub mod quality_gate;
 pub mod repository;
 pub mod review;
+pub mod search;
 pub mod secret;
 pub mod spawn_log;
 pub mod spec_approval;
@@ -83,6 +84,10 @@ impl PgStorage {
             let mut conn = pool.get()?;
             conn.run_pending_migrations(MIGRATIONS)
                 .map_err(|e| anyhow::anyhow!("Diesel PG migration failed: {e}"))?;
+            // PostgreSQL-only tsvector search index (search.md §Search Index).
+            // Dialect-specific DDL must not go in the shared diesel migrations
+            // dir — that dir is embedded and runs on SQLite too.
+            search::ensure_search_table(&mut conn)?;
         }
 
         Ok(Self {

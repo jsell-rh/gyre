@@ -2,12 +2,12 @@
 title: "Implement persistent full-text search backend (SQLite FTS5 + Postgres tsvector)"
 spec_ref: "search.md §Search Index"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "search.md §Search Index"
   - "search.md §Technology"
   - "search.md §Index Schema"
-commits: []
+commits: ["a970c75633d707e30e04fb8b6b6d176c9feeda32", "88c715dae50edc514db3beef6f57034c25416f52", "f154a73cae223f5f1ff5d315d52ca66830ec4fdd", "4b2a7b0730aed3a341aff3fd59ac70e4f31dd9d9", "06149be2c21de14e8a3c310cbe9dc6251e49bdfd", "a550da3739d298561cde9eaace74ae7d6fdd0097", "88ab2a656b4477456b83c1788ff22b6e2d91b2ec", "e4cf94f49c2222cda5030e4bd52270c7e721a068", "4319f2bb63eb94de4fc819ebdeaeb9ca6d30e4e8", "0c980dda5cfdd9cebe56cdabe4c1a0db74da56e0"]
 ---
 
 ## Spec Excerpt
@@ -75,3 +75,70 @@ Search is backed ONLY by `MemSearchAdapter` (in-memory `Vec` substring matcher, 
 - Follow the hexagonal boundary: FTS SQL lives ONLY in `gyre-adapters`; `gyre-domain` stays infra-free.
 - Do NOT run project-wide formatters/linters mid-task; run `cargo test --all` and `check-arch.sh` once at the end.
 - On completion set `progress: ready-for-review` and record commit SHAs.
+
+## Shipped
+
+Persistent full-text search backend, both storage engines, wired through the
+`store!` backend-selection macro. Port surface (`gyre_ports::search`) unchanged.
+
+**SQLite FTS5** (`crates/gyre-adapters/src/sqlite/search.rs`):
+- `search_index` FTS5 virtual table with the exact specced schema —
+  `entity_type, entity_id, tenant_id/workspace_id/repo_id UNINDEXED, title,
+  body, metadata, tokenize='porter unicode61'` — created on the SQLite-only
+  init path in `new_for_tenant` (deliberately NOT in the shared diesel
+  `migrations/` dir, which also runs on PG).
+- `index()`: transactional delete-then-insert upsert keyed on
+  `(entity_type, entity_id)`; facets serialized as JSON into `metadata`;
+  `tenant_id` derived from the real `workspaces` row (empty string when
+  unknown — never a fabricated scope).
+- `search()`: FTS5 `MATCH` with every query token quoted into a literal phrase
+  (AND-of-terms default; hostile input cannot become MATCH syntax), ranked by
+  `bm25(search_index)` inverted to (0,1], snippet via
+  `snippet(search_index, body, '**', '**', '…', 32)`, `entity_type`/
+  `workspace_id` filters as WHERE clauses on the UNINDEXED columns, metadata
+  JSON deserialized back to facets.
+- `delete()` removes the row; `reindex_all()` clears the FTS table and returns
+  the number dropped (the rebuild-from-domain half is task-202's coordinator —
+  not faked here).
+
+**Postgres tsvector** (`crates/gyre-adapters/src/postgres/search.rs`):
+`search_index` table with a STORED generated `tsv` column
+(`to_tsvector('english', title || ' ' || body)`) and GIN index on the
+PG-only init path; `websearch_to_tsquery` matching (implicit AND),
+`ts_rank` scoring, `ts_headline` snippets with `**` markers, same
+filter/limit/upsert semantics. Zero external search dependencies.
+
+**Wiring** (`crates/gyre-server/src/lib.rs:994`): `search:` is now
+`store!(dyn SearchPort, MemSearchAdapter::new())` — PgStorage → SqliteStorage
+→ mem fallback, identical to every other repository. Existing index callsites
+(tasks.rs, merge_requests.rs, agents.rs) are unchanged and now exercise the
+durable backend under `GYRE_DATABASE_URL=sqlite://…`.
+
+**Test evidence** (full log: `/tmp/stage/review-evidence/task-201-verification.txt`):
+- `cargo test -p gyre-adapters --lib sqlite::search` — 8 passed. Includes
+  schema assertion against `sqlite_master` (exact columns + tokenizer), porter
+  stemming (`running` matches `runs` — fails under any substring/LIKE
+  fallback), AND-of-terms, facet round-trip, `**` snippet markers, bm25 score
+  ordering, filter clauses, upsert/delete, and durability across reopen.
+- `cargo test -p gyre-server --test search_wiring` — 1 passed. Proves
+  `build_state` under `GYRE_DATABASE_URL=sqlite://<file>` wires `state.search`
+  to the FTS5 adapter (stemming + markers + durability kill conditions) and
+  that the real POST /api/v1/tasks → GET /api/v1/search flow returns stemmed
+  matches with snippet markers, positive score, and facet round-trip. Uses
+  `tower::ServiceExt::oneshot` so it stays valid where loopback TCP is
+  unavailable.
+- `cargo test -p gyre-adapters --lib` (full) — 352 passed, 0 failed.
+- `bash scripts/check-arch.sh` — pass; all other mechanical invariant scripts
+  pass except `check-task-commit-attribution.sh`, whose failure is pre-existing
+  on base 8c2d1775 (task-210 drift `a781ede2`, fix on an unmerged task-190
+  branch) — verified identical on the pristine base via a separate worktree.
+
+**Host-verification note (sandbox transport restriction):** this sandbox
+cannot `accept()` on TCP (errno 95, see capabilities.json), so the listener-
+binding `api_integration` suite cannot run here. Required on a listener-capable
+host / GitHub CI: `cargo test --all` and
+`cargo test -p gyre-server --test api_integration`.
+
+Commits: this work is the interrupted-assignment recovery of the task-201
+branch; implementation commits are the `wip(task-201)` / checkpoint SHAs
+already recorded in this file's `commits:` frontmatter (head `708b9a2e`).

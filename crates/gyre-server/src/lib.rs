@@ -991,7 +991,7 @@ pub fn build_state(
             dyn BudgetUsageRepository,
             mem::MemBudgetUsageRepository::default()
         ),
-        search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
+        search: store!(dyn gyre_ports::SearchPort, gyre_adapters::MemSearchAdapter::new()),
         tenants: store!(
             dyn gyre_ports::TenantRepository,
             mem::MemTenantRepository::default()

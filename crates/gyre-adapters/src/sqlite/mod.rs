@@ -37,6 +37,7 @@ pub mod quality_gate;
 pub mod repository;
 pub mod review;
 pub mod saved_view;
+pub mod search;
 pub mod secret;
 pub mod spawn_log;
 pub mod spec_approval;
@@ -123,6 +124,10 @@ impl SqliteStorage {
             let mut conn = pool.get()?;
             conn.run_pending_migrations(MIGRATIONS)
                 .map_err(|e| anyhow::anyhow!("Diesel migration failed: {e}"))?;
+            // SQLite-only FTS5 search index (search.md §Index Schema). Dialect-
+            // specific DDL must not go in the shared diesel migrations dir — that
+            // dir is embedded and runs on PostgreSQL too, where fts5 breaks it.
+            search::ensure_fts_table(&mut conn)?;
         }
 
         Ok(Self {
