@@ -1785,10 +1785,7 @@ impl MemPolicyRepository {
 #[async_trait]
 impl gyre_ports::PolicyRepository for MemPolicyRepository {
     async fn create(&self, policy: &gyre_domain::Policy) -> Result<()> {
-        if self
-            .fail_creates
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
+        if self.fail_creates.load(std::sync::atomic::Ordering::SeqCst) {
             anyhow::bail!("simulated policy store failure");
         }
         self.policies
