@@ -6,7 +6,7 @@ progress: ready-for-review
 review: specs/reviews/task-087.md
 coverage_sections:
   - "human-system-interface.md §3 Test-Time Trace Capture"
-commits: ["ad46b81a29b5d3422dba71f49613e7a871d1bc4a", "4e924d3d83f0b039dabe04be2f240a9739f65367", "a86adf7b367ec58d33bb9ba3b67aea6305cf304b", "1b1093685b7705944cbe7f23f19b373b88c0fa79", "cae49b753e0780a1ce2e54469901f1870b3b109e", "7d7277ed159cdccfadfc5c253a649bb6e942a6e6", "43f71da574d18ada69b7bb6a39cb16db982eb2ab", "998a3518a94e63fa3527145f82890f906a300587"]
+commits: ["c0f11d35249efe88939afb13ef908f38faeefff0", "e1066d1a017b4252f7a3acd7519855687b9b1eb7", "a13244784399d5418d1b0f14cd8f4f05246e9207", "da73a5a3b7098ac13ca9cc34813fb248f3fc2bad", "c4cdda7489ccc00ddd4572e1168b36bd22b703e7", "d6174739015dfcace4677dc15d40a976cd9c0af0", "7efa20c2be8ac304e1d2c381e6734c6f265a89cb", "998a3518a94e63fa3527145f82890f906a300587"]
 ---
 
 ## Spec Excerpt
