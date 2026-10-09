@@ -474,6 +474,9 @@ def cleanup(execution, task):
     item = next((item for item in inventory if item['name'] == resource), None)
     if item and item['labels'].get('gyre.dev/pipeline') != execution.store.setting('owner'):
         raise ValueError('cleanup resource belongs to another actor')
+    if item is None and record['state'] == 'deleting':
+        # Source recovery can retry independently after compute is gone.
+        execution.store.resource_state(resource, 'absent')
     updates = {}
     owned = record
     old_work = execution.store.db.execute('SELECT * FROM work WHERE id=?', (owned['work'],)).fetchone()
@@ -516,10 +519,22 @@ if p.exists():
             and not task['data'].get('delivered')):
         old_input = json.loads(old_work['input'])
         if task['data'].get('candidate') == old_input.get('candidate'):
-            from .recovery import restore
+            from .recovery import restore, unchanged_bootstrap
             # Cleanup has the task claim, so another implementation cannot
             # race this recovery. The Git lease separately fences pushes.
-            repository = checkout(execution, json.loads(receipt.read_text())['base'])
+            captured_base = json.loads(receipt.read_text())['base']
+            repository = checkout(execution, captured_base)
+            tree = execution.command('git', 'rev-parse', 'HEAD^{tree}', cwd=repository).stdout.strip()
+            # A clone can retain an older main while fetching the assignment's
+            # newer base. Only ignore an empty capture on that known ancestry.
+            empty = unchanged_bootstrap(old_directory, captured_base, tree)
+            ancestor = (empty and old_input.get('base') and execution.command(
+                'git', 'merge-base', '--is-ancestor', captured_base, old_input['base'],
+                cwd=repository, check=False).returncode == 0)
+            if ancestor:
+                execution.store.event('empty_bootstrap_capture', {'resource': resource, 'base': captured_base}, task['name'])
+                execution.store.resource_state(resource, 'absent')
+                return {'deleted': resource, 'unchanged_bootstrap': True}, {}, []
             outcome = restore(old_directory, repository,
                               f"pipeline/{old_work['task']}/{old_work['id']}-{json.loads(owned['data']).get('logical_token', owned['token'])}")
             body = execution.command('git', 'show', outcome['head'] + ':specs/tasks/' + task['name'] + '.md', cwd=repository).stdout
