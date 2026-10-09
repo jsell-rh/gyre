@@ -3527,6 +3527,24 @@ mod secret_contract_tests {
 
 // ── In-memory TraceRepository ────────────────────────────────────────────────
 
+/// Mirror of `sqlite/trace.rs` / `postgres/trace.rs` `MAX_SUMMARY_BYTES`:
+/// stored (column-side) span summaries are capped at 4KB. The full values
+/// live in the payload rows (mirroring the SQLite blob columns).
+const MAX_SUMMARY_BYTES: usize = 4096;
+
+/// Mirror of the adapters' `truncate_summary`: cap at 4KB on a char boundary
+/// (same clamped-`end` idiom as `sqlite/trace.rs:122-133`).
+fn truncate_summary(s: &str) -> String {
+    if s.len() <= MAX_SUMMARY_BYTES {
+        return s.to_string();
+    }
+    let mut end = MAX_SUMMARY_BYTES;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
 #[derive(Default)]
 pub struct MemTraceRepository {
     store: Arc<Mutex<HashMap<String, gyre_common::GateTrace>>>,
@@ -3543,8 +3561,52 @@ impl gyre_ports::TraceRepository for MemTraceRepository {
         // Replace any existing trace for same MR (capped at most recent).
         // A fresh capture is non-permanent (SQLite inserts permanent=0).
         self.permanent.lock().await.remove(trace.mr_id.as_str());
+        // Drop the replaced trace's payload rows too (SQLite deletes them
+        // via the PK replace in the same transaction).
+        let replaced_gate_run_ids: Vec<String> = guard
+            .values()
+            .filter(|v| v.mr_id == trace.mr_id)
+            .map(|v| v.gate_run_id.as_str().to_string())
+            .collect();
         guard.retain(|_, v| v.mr_id != trace.mr_id);
-        guard.insert(trace.mr_id.as_str().to_string(), trace.clone());
+        {
+            let mut payloads = self.payloads.lock().await;
+            for grid in replaced_gate_run_ids {
+                payloads.retain(|(g, _), _| g != &grid);
+            }
+            // Mirror sqlite/trace.rs build_payload_blob: a payload row exists
+            // whenever either summary side is Some (SQLite builds a blob from
+            // Some("") too), carries the RAW (untruncated) summaries, and an
+            // empty side decodes back to None. A span with neither side
+            // captured stores no payload row (SQLite blob is None → 404).
+            for span in &trace.spans {
+                if span.input_summary.is_none() && span.output_summary.is_none() {
+                    continue;
+                }
+                let payload_side = |s: &Option<String>| {
+                    s.as_deref()
+                        .filter(|v| !v.is_empty())
+                        .map(|v| v.as_bytes().to_vec())
+                };
+                payloads.insert(
+                    (trace.gate_run_id.as_str().to_string(), span.span_id.clone()),
+                    gyre_ports::trace::SpanPayload {
+                        input: payload_side(&span.input_summary),
+                        output: payload_side(&span.output_summary),
+                    },
+                );
+            }
+        }
+        // SQLite stores the truncated summary in the columns (full value only
+        // in the payload blob). Without mirroring here, in-memory mode would
+        // return >4KB summaries from GET /merge-requests/:id/trace while the
+        // SQL adapters return 4KB.
+        let mut stored = trace.clone();
+        for span in &mut stored.spans {
+            span.input_summary = span.input_summary.as_deref().map(truncate_summary);
+            span.output_summary = span.output_summary.as_deref().map(truncate_summary);
+        }
+        guard.insert(trace.mr_id.as_str().to_string(), stored);
         Ok(())
     }
 
@@ -3575,11 +3637,186 @@ impl gyre_ports::TraceRepository for MemTraceRepository {
 
     async fn delete_by_mr(&self, mr_id: &Id) -> Result<()> {
         // Promoted traces are permanent (SQLite: `permanent=1` rows survive).
+        let mut store = self.store.lock().await;
         if self.permanent.lock().await.contains(mr_id.as_str()) {
             return Ok(());
         }
-        self.store.lock().await.remove(mr_id.as_str());
+        // Drop the trace's payload rows with it (SQLite: ON DELETE CASCADE).
+        if let Some(trace) = store.remove(mr_id.as_str()) {
+            let gate_run_id = trace.gate_run_id.as_str().to_string();
+            self.payloads
+                .lock()
+                .await
+                .retain(|(g, _), _| g != &gate_run_id);
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod trace_contract_tests {
+    use super::*;
+    use gyre_ports::TraceRepository;
+
+    fn span(span_id: &str, input: Option<&str>, output: Option<&str>) -> gyre_common::TraceSpan {
+        gyre_common::TraceSpan {
+            span_id: span_id.to_string(),
+            parent_span_id: None,
+            operation_name: "op".to_string(),
+            service_name: "svc".to_string(),
+            kind: gyre_common::SpanKind::Server,
+            start_time: 1,
+            duration_us: 2,
+            attributes: Default::default(),
+            input_summary: input.map(|s| s.to_string()),
+            output_summary: output.map(|s| s.to_string()),
+            status: gyre_common::SpanStatus::Ok,
+            graph_node_id: None,
+        }
+    }
+
+    fn trace(mr: &str, gate_run: &str, spans: Vec<gyre_common::TraceSpan>) -> gyre_common::GateTrace {
+        gyre_common::GateTrace {
+            id: Id::new(format!("{mr}-trace")),
+            mr_id: Id::new(mr),
+            gate_run_id: Id::new(gate_run),
+            commit_sha: "0".repeat(40),
+            spans,
+            captured_at: 1,
+        }
+    }
+
+    /// Mirrors sqlite's `promote_to_attestation_preserves_trace`: the mem
+    /// adapter must enforce the same lifecycle contract (spec §3a storage
+    /// lifecycle) — promoted traces survive `delete_by_mr`, non-promoted
+    /// traces and their payload rows are removed.
+    #[tokio::test]
+    async fn promoted_trace_survives_delete_by_mr() {
+        let repo = MemTraceRepository::default();
+        TraceRepository::store(
+            &repo,
+            &trace("mr-plain", "gr-1", vec![span("s1", Some("in"), None)]),
+        )
+        .await
+        .unwrap();
+        TraceRepository::delete_by_mr(&repo, &Id::new("mr-plain"))
+            .await
+            .unwrap();
+        assert!(TraceRepository::get_by_mr(&repo, &Id::new("mr-plain"))
+            .await
+            .unwrap()
+            .is_none());
+        assert!(TraceRepository::get_span_payload(&repo, &Id::new("gr-1"), "s1")
+            .await
+            .unwrap()
+            .is_none());
+
+        TraceRepository::store(
+            &repo,
+            &trace(
+                "mr-promoted",
+                "gr-2",
+                vec![span("s2", Some("in"), Some("out"))],
+            ),
+        )
+        .await
+        .unwrap();
+        TraceRepository::promote_to_attestation(&repo, &Id::new("mr-promoted"))
+            .await
+            .unwrap();
+        TraceRepository::delete_by_mr(&repo, &Id::new("mr-promoted"))
+            .await
+            .unwrap();
+        assert!(TraceRepository::get_by_mr(&repo, &Id::new("mr-promoted"))
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    /// F2 regression: `store()` must populate the payload rows (pre-fix the
+    /// mem `payloads` map was never written, so every payload lookup was
+    /// None). Also pins the SQLite-mirrored keying/cascade semantics: a span
+    /// with neither summary side captured stores no payload row, and a
+    /// replacement gate run drops the old run's payload rows.
+    #[tokio::test]
+    async fn store_populates_payloads_and_replacement_cascades() {
+        let repo = MemTraceRepository::default();
+        TraceRepository::store(
+            &repo,
+            &trace(
+                "mr-1",
+                "gr-old",
+                vec![
+                    span("s-old", Some("payload-in"), Some("payload-out")),
+                    span("s-nopayload", None, None),
+                ],
+            ),
+        )
+        .await
+        .unwrap();
+        let p = TraceRepository::get_span_payload(&repo, &Id::new("gr-old"), "s-old")
+            .await
+            .unwrap()
+            .expect("store() must create a payload row for a span with summaries");
+        assert_eq!(p.input, Some(b"payload-in".to_vec()));
+        assert_eq!(p.output, Some(b"payload-out".to_vec()));
+        assert!(
+            TraceRepository::get_span_payload(&repo, &Id::new("gr-old"), "s-nopayload")
+                .await
+                .unwrap()
+                .is_none(),
+            "span with neither summary side captured must store no payload row"
+        );
+
+        // Replacement gate run for the same MR (SQLite: PK replace in the
+        // same transaction) — old run's payload rows must not linger.
+        TraceRepository::store(
+            &repo,
+            &trace("mr-1", "gr-new", vec![span("s-new", Some("new-in"), None)]),
+        )
+        .await
+        .unwrap();
+        assert!(
+            TraceRepository::get_span_payload(&repo, &Id::new("gr-old"), "s-old")
+                .await
+                .unwrap()
+                .is_none(),
+            "replaced trace's payload rows must be dropped"
+        );
+        let p = TraceRepository::get_span_payload(&repo, &Id::new("gr-new"), "s-new")
+            .await
+            .unwrap()
+            .expect("replacement trace payload");
+        assert_eq!(p.input, Some(b"new-in".to_vec()));
+        assert_eq!(p.output, None);
+    }
+
+    /// The stored (trace-side) summaries must be capped at 4KB like the SQL
+    /// adapters' columns, while the payload rows keep the full value.
+    /// Pre-fix, mem stored raw summaries and only the adapters truncated.
+    #[tokio::test]
+    async fn store_truncates_stored_summaries_but_keeps_full_payload() {
+        let repo = MemTraceRepository::default();
+        let big = "x".repeat(5000);
+        TraceRepository::store(
+            &repo,
+            &trace("mr-t", "gr-t", vec![span("s-t", Some(&big), Some(&big))]),
+        )
+        .await
+        .unwrap();
+        let got = TraceRepository::get_by_mr(&repo, &Id::new("mr-t"))
+            .await
+            .unwrap()
+            .expect("trace stored");
+        let s = &got.spans[0];
+        assert_eq!(s.input_summary.as_deref().map(str::len), Some(MAX_SUMMARY_BYTES));
+        assert_eq!(s.output_summary.as_deref().map(str::len), Some(MAX_SUMMARY_BYTES));
+        let p = TraceRepository::get_span_payload(&repo, &Id::new("gr-t"), "s-t")
+            .await
+            .unwrap()
+            .expect("payload row exists");
+        assert_eq!(p.input.as_deref().map(<[u8]>::len), Some(5000));
+        assert_eq!(p.output.as_deref().map(<[u8]>::len), Some(5000));
     }
 }
 
