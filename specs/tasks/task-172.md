@@ -163,6 +163,24 @@ frontmatter, and the working-tree reset that transiently dropped 471563d7
 was restored from HEAD. Evidence:
 /tmp/stage/review-evidence/task-172-verification-round3.md.
 
+**Round-4 re-verification (2026-10-09, fresh sandbox):** inherited HEAD
+9438b0dc (merge of base f38abb7e, which ships task-211's repair of the
+attribution drift recorded above — `a781ede2` is now recorded in task-210's
+frontmatter on main). Re-verified from scratch with no source changes
+needed: `npm ci` (169 locked packages) → EditorSplit + DetailPanel suites
+**66/66 passed**; `npx vite build` reproduced the committed dist bundles
+byte-exactly; all 50 `editor_split.*` keys used by the component are
+defined in en.json, zero missing, zero dead. **Attribution gate now passes
+at this branch head: `scripts/check-task-commit-attribution.sh` exit 0**
+(rounds 1–3 recorded this same gate failing on the then-unrepaired upstream
+`a781ede2 task-210` drift; the merged task-211 repair closes it, and this
+branch's frontmatter is unchanged by it). Contract re-verified: task-172.md
+normative sections byte-identical to base 8c2d1775 (only progress/commits/
+checkboxes/Shipped differ); task-210.md and task-211.md carry only the
+merged main-side repair, untouched by this branch. Evidence:
+/tmp/stage/review-evidence/task-172-verification-round4.md.
+]
+
 ## Agent Instructions
 
 Read `ui-layout.md` §2 "Editor Split" and §9 "Meta-specs Preview Loop Layout" for the full interaction design including all three states. Check the existing `MetaSpecs.svelte` component — it may already have partial editor functionality. The EditorSplit is used by BOTH spec editing and meta-spec editing; build it as a reusable component. The meta-spec preview loop layout (§9) shows the exact wireframes for States 1-3.
