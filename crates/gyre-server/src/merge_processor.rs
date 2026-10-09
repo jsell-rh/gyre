@@ -39,8 +39,8 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
 
 // ── Automatic jj rebase on target branch movement (source-control.md §4) ──
 
-use gyre_domain::{AgentStatus, AuditEventType, AuditOutcome, JjRebaseOutcome};
-use gyre_ports::JjOpsPort;
+use gyre_domain::{AgentStatus, AuditEventType, AuditOutcome};
+use gyre_ports::JjRebaseOutcome;
 
 /// KV namespace for the per-agent rebase backoff window. Key = agent id,
 /// value = epoch seconds of the last *completed* rebase (Success or
@@ -1445,6 +1445,9 @@ async fn rollback_atomic_group(
                 "group": group_name,
                 "failing_mr_id": failing_mr_id.to_string(),
                 "failure_reason": failure_reason,
+                "member_count": all_group_entries.len(),
+                "rolled_back_count": merged_entries.len(),
+                "member_mr_ids": all_group_entries.iter().map(|e| e.merge_request_id.to_string()).collect::<Vec<_>>(),
             })),
         )
         .await;
@@ -6533,5 +6536,477 @@ mod tests {
             vec![repo_path.to_str().unwrap().to_string()],
             "gate worktree should be removed"
         );
+    }
+
+    // ── TASK-106: automatic jj rebase on target branch movement ────────
+    // (source-control.md §4)
+
+    use crate::mem::test_state_with_jj_ops;
+    use gyre_domain::AgentWorktree;
+    use gyre_ports::JjRebaseOutcome;
+    use std::sync::Arc;
+
+    /// Shared fixture: one repo, one merged MR (author agent `merged`), and
+    /// one in-flight MR (author agent `inflight`) targeting the same
+    /// branch. `inflight`'s worktree dir is a real tempdir so the
+    /// path-exists safeguard passes. Returns (state, jj double, repo,
+    /// inflight MR).
+    async fn setup_rebase_fixture()
+    -> (
+        Arc<AppState>,
+        Arc<crate::mem::ConfigurableJjOps>,
+        Repository,
+        gyre_domain::MergeRequest,
+    ) {
+        let jj = Arc::new(crate::mem::ConfigurableJjOps::default());
+        let state = test_state_with_jj_ops(jj.clone());
+        let repo = create_repo_in_workspace(&state, "rebase-repo", "ws-1").await;
+
+        // Landed agent + MR (merged by the processor in these tests).
+        let mut merged_agent =
+            gyre_domain::Agent::new(Id::new("agent-merged"), "merged", 1000);
+        merged_agent.workspace_id = Id::new("ws-1");
+        state.agents.create(&merged_agent).await.unwrap();
+        let mut merged_mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-merged"),
+            repo.id.clone(),
+            "merged work",
+            "feat/merged",
+            "main",
+            1000,
+        );
+        merged_mr.workspace_id = Id::new("ws-1");
+        merged_mr.author_agent_id = Some(Id::new("agent-merged"));
+        state.merge_requests.create(&merged_mr).await.unwrap();
+
+        // In-flight agent + MR: Active, real worktree dir on disk.
+        let mut inflight =
+            gyre_domain::Agent::new(Id::new("agent-inflight"), "inflight", 1000);
+        inflight.workspace_id = Id::new("ws-1");
+        inflight.status = AgentStatus::Active;
+        state.agents.create(&inflight).await.unwrap();
+        let mut inflight_mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-inflight"),
+            repo.id.clone(),
+            "in-flight work",
+            "feat/inflight",
+            "main",
+            1000,
+        );
+        inflight_mr.workspace_id = Id::new("ws-1");
+        inflight_mr.author_agent_id = Some(Id::new("agent-inflight"));
+        state.merge_requests.create(&inflight_mr).await.unwrap();
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt = AgentWorktree::new(
+            Id::new("wt-inflight"),
+            Id::new("agent-inflight"),
+            repo.id.clone(),
+            None,
+            "feat/inflight",
+            wt_dir.path().to_str().unwrap(),
+            1000,
+        );
+        state.worktrees.create(&wt).await.unwrap();
+        // Leak the tempdir: the worktree must outlive this function and be
+        // cleaned up by std::process::tempdir semantics at test end.
+        std::mem::forget(wt_dir);
+
+        (state, jj, repo, inflight_mr)
+    }
+
+    /// The core §4 contract: a merge landing on the target branch rebases
+    /// every OTHER in-flight agent on that branch (the merged author is
+    /// excluded), onto the repo's default branch, in the agent's recorded
+    /// worktree.
+    #[tokio::test]
+    async fn merge_triggers_rebase_of_inflight_agents() {
+        let (state, jj, repo, _inflight_mr) = setup_rebase_fixture().await;
+
+        let mut rx = state.message_broadcast_tx.subscribe();
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+
+        // The merged MR landed.
+        let merged = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-merged"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(merged.status, MrStatus::Merged);
+
+        // Exactly one rebase: the in-flight agent, not the merged author.
+        let calls = jj.rebase_calls.lock().clone();
+        assert_eq!(calls.len(), 1, "exactly one rebase call, got {calls:?}");
+        assert_eq!(calls[0].0, worktree_path_of(&state, "agent-inflight").await);
+        assert_eq!(calls[0].1, "@");
+        assert_eq!(calls[0].2, repo.default_branch);
+
+        // The in-flight agent was notified of the baseline movement.
+        let mut saw_baseline_moved = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let gyre_common::message::Destination::Agent(a) = &msg.to {
+                if a.as_str() == "agent-inflight"
+                    && msg.kind.as_str() == "baseline_moved"
+                {
+                    saw_baseline_moved = true;
+                    assert_eq!(
+                        msg.payload.as_ref().unwrap().get("target_branch"),
+                        Some(&serde_json::json!("main"))
+                    );
+                }
+            }
+        }
+        assert!(
+            saw_baseline_moved,
+            "in-flight agent must receive baseline_moved"
+        );
+    }
+
+    /// Conflicts are state, not errors (jj conflict-as-state): the MR is
+    /// flagged, the workspace sees SpeculativeConflict, the agent sees
+    /// Escalation with the conflicting files.
+    #[tokio::test]
+    async fn rebase_conflict_surfaces_as_state() {
+        let (state, jj, _repo, inflight_mr) = setup_rebase_fixture().await;
+        *jj.rebase_outcome.lock() = Some(Ok(JjRebaseOutcome::Conflict {
+            rebased_count: 1,
+            files: vec!["src/lib.rs".to_string()],
+        }));
+
+        let mut rx = state.message_broadcast_tx.subscribe();
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+
+        // MR flagged with conflicts (consumed by the API layer).
+        let updated = state
+            .merge_requests
+            .find_by_id(&inflight_mr.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.has_conflicts, Some(true));
+
+        let mut workspace_saw_conflict = false;
+        let mut agent_saw_escalation = false;
+        while let Ok(msg) = rx.try_recv() {
+            match &msg.to {
+                gyre_common::message::Destination::Workspace(ws)
+                    if ws.as_str() == "ws-1"
+                        && msg.kind
+                            == gyre_common::message::MessageKind::SpeculativeConflict =>
+                {
+                    workspace_saw_conflict = true;
+                    assert_eq!(
+                        msg.payload.as_ref().unwrap().get("conflicting_files"),
+                        Some(&serde_json::json!(["src/lib.rs"]))
+                    );
+                }
+                gyre_common::message::Destination::Agent(a)
+                    if a.as_str() == "agent-inflight"
+                        && msg.kind == gyre_common::message::MessageKind::Escalation =>
+                {
+                    agent_saw_escalation = true;
+                    assert_eq!(
+                        msg.payload.as_ref().unwrap().get("conflicting_files"),
+                        Some(&serde_json::json!(["src/lib.rs"]))
+                    );
+                }
+                _ => {}
+            }
+        }
+        assert!(workspace_saw_conflict, "workspace must see SpeculativeConflict");
+        assert!(agent_saw_escalation, "agent must see Escalation");
+    }
+
+    /// Safeguard (plan item 5): Dead/Completed agents are never rebased —
+    /// their in-progress work no longer exists.
+    #[tokio::test]
+    async fn rebase_skips_dead_agents() {
+        let (state, jj, _repo, _mr) = setup_rebase_fixture().await;
+
+        let mut dead = state
+            .agents
+            .find_by_id(&Id::new("agent-inflight"))
+            .await
+            .unwrap()
+            .unwrap();
+        dead.status = AgentStatus::Dead;
+        state.agents.update(&dead).await.unwrap();
+
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+
+        let calls = jj.rebase_calls.lock();
+        assert!(
+            calls.is_empty(),
+            "dead agent must not be rebased, got {calls:?}"
+        );
+    }
+
+    /// F4: a failed rebase must not consume the backoff window — the next
+    /// movement inside the window still attempts a rebase instead of
+    /// silently deferring forever on a broken workspace.
+    #[tokio::test]
+    async fn rebase_failure_does_not_consume_backoff_window() {
+        let (state, jj, _repo, _mr) = setup_rebase_fixture().await;
+        *jj.rebase_outcome.lock() = Some(Err("workspace missing".to_string()));
+
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+        assert_eq!(jj.rebase_calls.lock().len(), 1);
+
+        // No backoff was persisted for the failed rebase.
+        assert!(
+            state
+                .kv_store
+                .kv_get(JJ_REBASE_BACKOFF_NS, "agent-inflight")
+                .await
+                .unwrap()
+                .is_none(),
+            "failed rebase must not write the backoff window"
+        );
+
+        // Program success and move the target again immediately: the
+        // rebase must be attempted (no window to suppress it).
+        *jj.rebase_outcome.lock() = Some(Ok(JjRebaseOutcome::Success { rebased_count: 1 }));
+        let mut second_mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-merged-2"),
+            state
+                .repos
+                .list()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|r| r.name == "rebase-repo")
+                .unwrap()
+                .id,
+            "second landed work",
+            "feat/merged2",
+            "main",
+            1001,
+        );
+        second_mr.workspace_id = Id::new("ws-1");
+        second_mr.author_agent_id = Some(Id::new("agent-merged"));
+        state.merge_requests.create(&second_mr).await.unwrap();
+        enqueue_mr(&state, "mr-merged-2", 100, 1001).await;
+        process_next(&state).await.unwrap();
+        assert_eq!(
+            jj.rebase_calls.lock().len(),
+            2,
+            "second movement must attempt a rebase — failure consumed no window"
+        );
+    }
+
+    /// Plan item 5 (batch semantics): a movement inside the backoff window
+    /// is deferred via the pending marker, not dropped; once the window
+    /// expires the replay runs it on an idle processor cycle.
+    #[tokio::test]
+    async fn rebase_window_hit_defers_then_replays_after_expiry() {
+        let (state, jj, _repo, _mr) = setup_rebase_fixture().await;
+
+        // First movement: rebase runs, window starts.
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+        assert_eq!(jj.rebase_calls.lock().len(), 1);
+
+        // Simulate a second movement inside the window: record the pending
+        // marker exactly as rebase_one_agent's window-hit path does.
+        let pending = PendingRebase {
+            repo_id: state
+                .repos
+                .list()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|r| r.name == "rebase-repo")
+                .unwrap()
+                .id
+                .to_string(),
+            target_branch: "main".to_string(),
+            new_base_sha: "f".repeat(40),
+        };
+        state
+            .kv_store
+            .kv_set(
+                JJ_REBASE_PENDING_NS,
+                "agent-inflight",
+                serde_json::to_string(&pending).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Idle cycle while still inside the window: replay must NOT run
+        // (kv marker intact).
+        process_next(&state).await.unwrap();
+        assert_eq!(
+            jj.rebase_calls.lock().len(),
+            1,
+            "inside the window the replay must not run"
+        );
+        assert!(
+            state
+                .kv_store
+                .kv_get(JJ_REBASE_PENDING_NS, "agent-inflight")
+                .await
+                .unwrap()
+                .is_some(),
+            "pending marker must survive the in-window idle cycle"
+        );
+
+        // Expire the window: backdate the backoff timestamp.
+        let now = crate::jobs::now_secs();
+        state
+            .kv_store
+            .kv_set(
+                JJ_REBASE_BACKOFF_NS,
+                "agent-inflight",
+                (now - JJ_REBASE_WINDOW_SECS - 1).to_string(),
+            )
+            .await
+            .unwrap();
+        process_next(&state).await.unwrap();
+
+        // The deferred rebase replayed and the marker was consumed.
+        assert_eq!(
+            jj.rebase_calls.lock().len(),
+            2,
+            "expired window must replay the deferred rebase"
+        );
+        assert!(
+            state
+                .kv_store
+                .kv_get(JJ_REBASE_PENDING_NS, "agent-inflight")
+                .await
+                .unwrap()
+                .is_none(),
+            "successful replay must consume the pending marker"
+        );
+    }
+
+    /// F8: an infrastructure failure during REPLAY must keep the pending
+    /// marker — the deferral guarantee holds on every consumer of the
+    /// marker, not just the trigger path.
+    #[tokio::test]
+    async fn replay_failure_keeps_pending_rebase() {
+        let (state, jj, _repo, _mr) = setup_rebase_fixture().await;
+
+        // First movement: rebase runs, window starts.
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+        assert_eq!(jj.rebase_calls.lock().len(), 1);
+
+        // Defer a second movement (in-window), then expire the window.
+        let pending = PendingRebase {
+            repo_id: state
+                .repos
+                .list()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|r| r.name == "rebase-repo")
+                .unwrap()
+                .id
+                .to_string(),
+            target_branch: "main".to_string(),
+            new_base_sha: "e".repeat(40),
+        };
+        state
+            .kv_store
+            .kv_set(
+                JJ_REBASE_PENDING_NS,
+                "agent-inflight",
+                serde_json::to_string(&pending).unwrap(),
+            )
+            .await
+            .unwrap();
+        let now = crate::jobs::now_secs();
+        state
+            .kv_store
+            .kv_set(
+                JJ_REBASE_BACKOFF_NS,
+                "agent-inflight",
+                (now - JJ_REBASE_WINDOW_SECS - 1).to_string(),
+            )
+            .await
+            .unwrap();
+
+        // The replay attempt itself fails (infrastructure error).
+        *jj.rebase_outcome.lock() = Some(Err("jj binary vanished".to_string()));
+        process_next(&state).await.unwrap();
+        assert_eq!(
+            jj.rebase_calls.lock().len(),
+            2,
+            "the replay must have been attempted"
+        );
+        assert!(
+            state
+                .kv_store
+                .kv_get(JJ_REBASE_PENDING_NS, "agent-inflight")
+                .await
+                .unwrap()
+                .is_some(),
+            "a failed replay must keep the pending marker (F8)"
+        );
+
+        // Recovery: the next cycle retries and consumes it on success.
+        *jj.rebase_outcome.lock() = Some(Ok(JjRebaseOutcome::Success { rebased_count: 1 }));
+        process_next(&state).await.unwrap();
+        assert_eq!(jj.rebase_calls.lock().len(), 3);
+        assert!(
+            state
+                .kv_store
+                .kv_get(JJ_REBASE_PENDING_NS, "agent-inflight")
+                .await
+                .unwrap()
+                .is_none(),
+            "successful retry must consume the pending marker"
+        );
+    }
+
+    /// F3: a post-merge gate failure reverts the merge — no agent may be
+    /// rebased onto the base that recovery just undid.
+    #[tokio::test]
+    async fn post_merge_gate_failure_skips_inflight_rebase() {
+        let (state, jj, _repo, _mr) = setup_rebase_fixture().await;
+
+        // Required post-merge gate that always fails.
+        create_post_merge_gate(&state, &repo_id_of(&state).await, "false", true).await;
+
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+
+        let calls = jj.rebase_calls.lock();
+        assert!(
+            calls.is_empty(),
+            "gate failure + revert must skip the rebase, got {calls:?}"
+        );
+    }
+
+    /// Path of the in-flight agent's recorded worktree (helper for call
+    /// assertions).
+    async fn worktree_path_of(state: &AppState, agent_id: &str) -> String {
+        state
+            .worktrees
+            .find_by_agent(&Id::new(agent_id))
+            .await
+            .unwrap()
+            .first()
+            .unwrap()
+            .path
+            .clone()
+    }
+
+    /// Id of the fixture's rebase repo (helper for gate creation).
+    async fn repo_id_of(state: &AppState) -> Id {
+        state
+            .repos
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| r.name == "rebase-repo")
+            .unwrap()
+            .id
     }
 }

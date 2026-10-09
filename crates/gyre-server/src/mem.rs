@@ -416,8 +416,11 @@ impl JjOpsPort for NoopJjOps {
 #[derive(Default)]
 pub struct ConfigurableJjOps {
     pub rebase_calls: parking_lot::Mutex<Vec<(String, String, String)>>,
+    /// Programmed outcome replayed by `jj_rebase`. The failure variant is
+    /// stored as a message (`anyhow::Error` is not `Clone`) and turned
+    /// into an error at replay time.
     pub rebase_outcome:
-        parking_lot::Mutex<Option<Result<gyre_ports::JjRebaseOutcome, anyhow::Error>>>,
+        parking_lot::Mutex<Option<Result<gyre_ports::JjRebaseOutcome, String>>>,
     pub workspace_forget_calls: parking_lot::Mutex<Vec<String>>,
     pub workspace_add_calls: parking_lot::Mutex<Vec<String>>,
     pub main_checkout_init_calls: parking_lot::Mutex<Vec<String>>,
@@ -478,7 +481,7 @@ impl JjOpsPort for ConfigurableJjOps {
         ));
         match self.rebase_outcome.lock().clone() {
             Some(Ok(outcome)) => Ok(outcome),
-            Some(Err(e)) => Err(e),
+            Some(Err(msg)) => Err(anyhow::anyhow!(msg)),
             None => Ok(gyre_ports::JjRebaseOutcome::Success { rebased_count: 0 }),
         }
     }
