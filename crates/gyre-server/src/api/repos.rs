@@ -498,10 +498,9 @@ pub async fn create_mirror_repo(
                 workspace_id: repo.workspace_id.to_string(),
                 tenant_id: ws.tenant_id.to_string(),
             });
-        let divergence_ports = Some(crate::graph_extraction::DivergencePorts {
-            notification_repo: state.notifications.as_ref(),
-            membership_repo: state.workspace_memberships.as_ref(),
-        });
+        // DivergencePorts borrows `&dyn` repo refs, so it must be built inside
+        // the spawned future from an owned state clone ('static requirement).
+        let state_for_extract = Arc::clone(&state);
         tokio::spawn(async move {
             if let Ok(output) = tokio::process::Command::new(&git_bin)
                 .args(["-C", &extract_path, "rev-parse", &default_ref])
@@ -510,6 +509,11 @@ pub async fn create_mirror_repo(
             {
                 if output.status.success() {
                     let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    let divergence_ports =
+                        Some(crate::graph_extraction::DivergencePorts {
+                            notification_repo: state_for_extract.notifications.as_ref(),
+                            membership_repo: state_for_extract.workspace_memberships.as_ref(),
+                        });
                     crate::graph_extraction::extract_and_store_graph(
                         &extract_path,
                         &extract_repo_id,

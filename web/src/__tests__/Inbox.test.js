@@ -359,4 +359,34 @@ describe('Inbox', () => {
     const addCell = container.querySelector('.diff-cell.diff-add.diff-right');
     expect(addCell.textContent).toContain('my local line');
   });
+
+  it('renders spec assertion failure card with View Code / Update Spec actions (system-explorer §9)', async () => {
+    const assertNotif = makeNotification({
+      id: 'notif-assert',
+      notification_type: 'SpecAssertionFailure',
+      priority: 9,
+      title: 'Spec assertion failures: 2 assertion(s) failed',
+      body: JSON.stringify({
+        repo_id: 'repo-1',
+        spec_path: 'system/architecture.md',
+        commit_sha: 'abc123',
+        failures: [
+          { spec_path: 'system/architecture.md', line: 3, explanation: 'Found unwanted DependsOn edge to "gyre-adapters"' },
+        ],
+      }),
+      entity_ref: 'system/architecture.md',
+      repo_id: 'repo-1',
+    });
+    api.myNotifications.mockResolvedValue([assertNotif]);
+    const { findByText, findByRole, container } = render(Inbox);
+    // Card renders with the failure title.
+    expect(await findByText(/Spec assertion failures/)).toBeTruthy();
+    // PascalCase type is normalized so the danger styling + label apply.
+    await waitFor(() => {
+      expect(container.textContent).not.toContain('SpecAssertionFailure');
+    });
+    // Both §9 actions are offered.
+    expect(await findByRole('button', { name: 'View Code' })).toBeTruthy();
+    expect(await findByRole('button', { name: 'Update Spec' })).toBeTruthy();
+  });
 });
