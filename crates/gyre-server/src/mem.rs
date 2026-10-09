@@ -3265,7 +3265,6 @@ pub fn test_state_with_git_ops(git_ops: Arc<dyn gyre_ports::GitOpsPort>) -> Arc<
 /// Shared builder for all in-memory test states. Callers supply the git ops
 /// adapter plus a paired workspace/policy repo (see `shared_workspace_policy_pair`);
 /// `secrets` overrides the default in-memory SecretRepository when given.
-
 #[cfg(test)]
 fn test_state_inner(
     git_ops: Arc<dyn gyre_ports::GitOpsPort>,
