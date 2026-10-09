@@ -769,6 +769,10 @@ async fn merge_atomic_group(
         )
         .with_scope(None, None, Some(&updated_mr.workspace_id), Some(&updated_mr.repository_id));
         let _ = state.analytics.record(&ev).await;
+        // mr.merged analytics event — deferred with the other side effects
+        // so a group rollback (which reverts MR statuses to Open) never
+        // leaves a phantom "merged" event behind.
+        emit_mr_merged(state, updated_mr, now, Some(ge.enqueued_at)).await;
 
         if let Some(ref author_id) = updated_mr.author_agent_id {
             crate::notifications::notify_mr_merged(
@@ -1542,6 +1546,11 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
             .with_scope(None, None, Some(&updated_mr.workspace_id), Some(&updated_mr.repository_id));
             let _ = state.analytics.record(&ev).await;
 
+            // mr.merged analytics event (analytics.md §Auto-Emitted Events)
+            // — the queue is the primary merge path; the HTTP transition
+            // endpoint is the other. Both must record.
+            emit_mr_merged(state, &updated_mr, now, Some(entry.enqueued_at)).await;
+
             // Build and store a signed merge attestation bundle (G5).
             let gate_results_snapshot = state
                 .gate_results
@@ -1820,6 +1829,45 @@ async fn emit_queue_processed_failed(
             "wait_secs": now.saturating_sub(entry.enqueued_at),
             "failure_kind": failure_kind,
             "detail": detail,
+        }),
+        now,
+    )
+    .with_scope(None, None, Some(&mr.workspace_id), Some(&mr.repository_id));
+    let _ = state.analytics.record(&ev).await;
+}
+
+/// Emit an `mr.merged` analytics event (analytics.md §Auto-Emitted Events:
+/// "MR successfully merged"). The merge queue is the primary merge path —
+/// the HTTP transition endpoint in api/merge_requests.rs is the other. Both
+/// must record the event, with the same spec-required properties
+/// (`mr_id`, `repo_id`, `gate_count`, `queue_wait_secs`).
+///
+/// `now` is the merge completion time (unix seconds); `enqueued_at` is the
+/// queue entry's enqueue time, when the MR passed through the queue.
+async fn emit_mr_merged(
+    state: &AppState,
+    mr: &MergeRequest,
+    now: u64,
+    enqueued_at: Option<u64>,
+) {
+    // gate_count: number of gate results recorded for this MR.
+    let gate_count = state
+        .gate_results
+        .list_by_mr_id(mr.id.as_str())
+        .await
+        .map(|rs| rs.len() as u64)
+        .unwrap_or(0);
+    // queue_wait_secs: time from merge-queue enqueue to merge completion.
+    let queue_wait_secs = enqueued_at.map(|t| now.saturating_sub(t));
+    let ev = AnalyticsEvent::new(
+        Id::new(Uuid::new_v4().to_string()),
+        "mr.merged",
+        mr.author_agent_id.as_ref().map(|id| id.to_string()),
+        serde_json::json!({
+            "mr_id": mr.id.to_string(),
+            "repo_id": mr.repository_id.to_string(),
+            "gate_count": gate_count,
+            "queue_wait_secs": queue_wait_secs,
         }),
         now,
     )
@@ -4291,6 +4339,33 @@ mod tests {
             );
         }
 
+        // mr.merged analytics events (analytics.md §Auto-Emitted Events):
+        // each merged member must ALSO record an mr.merged event with the
+        // spec-required properties.
+        let mr_merged_events = state
+            .analytics
+            .query(Some("mr.merged"), None, 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            mr_merged_events.len(),
+            2,
+            "two mr.merged events should be recorded (one per merged member)"
+        );
+        for ev in &mr_merged_events {
+            let payload = &ev.properties;
+            assert!(payload["mr_id"].is_string(), "mr_id required: {payload}");
+            assert!(payload["repo_id"].is_string(), "repo_id required: {payload}");
+            assert!(
+                payload["gate_count"].is_u64(),
+                "gate_count required: {payload}"
+            );
+            assert!(
+                payload["queue_wait_secs"].is_u64(),
+                "queue_wait_secs required: {payload}"
+            );
+        }
+
         // Verify author notifications: each author's human user should receive
         // a merge notification via notify_mr_merged (which resolves spawned_by).
         let notifs_user1 = state
@@ -4336,6 +4411,80 @@ mod tests {
             notifs_user2[0].title.contains("merged"),
             "notification title should mention 'merged'"
         );
+    }
+
+    /// analytics.md §Auto-Emitted Events: a queue-driven single-entry merge
+    /// (the primary merge path) must record `mr.merged` alongside
+    /// `merge_queue.processed`, with the spec-required properties
+    /// (`mr_id`, `repo_id`, `gate_count`, `queue_wait_secs`). Regression:
+    /// previously only the HTTP transition endpoint emitted `mr.merged`,
+    /// so queue merges were invisible to analytics.
+    #[tokio::test]
+    async fn queue_merge_records_mr_merged_analytics_event() {
+        let state = test_state();
+
+        let repo = create_repo_in_workspace(&state, "test-repo", "ws-1").await;
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-solo-merge"),
+            repo.id.clone(),
+            "Solo MR",
+            "feat/solo-merge",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-1");
+        mr.author_agent_id = Some(Id::new("agent-solo"));
+        state.merge_requests.create(&mr).await.unwrap();
+
+        // Enqueue with a known enqueued_at so queue_wait_secs is checkable.
+        let entry = enqueue_mr(&state, "mr-solo-merge", 50, 2000).await;
+
+        // A recorded gate result makes gate_count verifiably 1.
+        let gate_result = gyre_domain::GateResult {
+            id: Id::new("gr-solo"),
+            gate_id: Id::new("gate-solo"),
+            mr_id: Id::new("mr-solo-merge"),
+            status: GateStatus::Passed,
+            output: Some("ok".to_string()),
+            started_at: Some(2000),
+            finished_at: Some(2001),
+        };
+        state.gate_results.save(&gate_result).await.unwrap();
+
+        process_next(&state).await.unwrap();
+
+        let updated = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-solo-merge"))
+            .await
+            .unwrap()
+            .expect("mr should exist");
+        assert_eq!(updated.status, MrStatus::Merged, "mr should be merged");
+
+        let events = state
+            .analytics
+            .query(Some("mr.merged"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "one mr.merged event expected from the queue merge path"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.agent_id.as_deref(), Some("agent-solo"));
+        assert_eq!(ev.properties["mr_id"], "mr-solo-merge");
+        assert_eq!(ev.properties["repo_id"], repo.id.to_string());
+        assert_eq!(ev.properties["gate_count"], 1u64);
+        let wait = ev.properties["queue_wait_secs"].as_u64().expect("queue_wait_secs");
+        assert!(
+            wait >= entry.enqueued_at.saturating_sub(1000),
+            "queue_wait_secs should be measured from enqueued_at (got {wait})"
+        );
+        // Scope fields are set so workspace/repo filters work.
+        assert_eq!(ev.workspace_id.as_deref(), Some("ws-1"));
+        assert_eq!(ev.repo_id.as_deref(), Some(repo.id.as_str()));
     }
 
     /// Test: No interleaving — a non-group MR does not merge between group members.

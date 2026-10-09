@@ -143,7 +143,10 @@ async fn spawn_orchestrator(
         "agent.spawned",
         Some(agent.id.to_string()),
         serde_json::json!({
-            "task_id": agent.id.to_string(),
+            // Orchestrators are not task-bound (the JWT task_id claim is the
+            // orchestrator's own id only for gyre_agent_complete compat) —
+            // the spec's task_id property is null here, not a fabricated id.
+            "task_id": serde_json::Value::Null,
             "compute_target": "local",
             "persona": persona_name,
             "orchestrator_type": orchestrator_type.to_string(),
@@ -608,6 +611,9 @@ mod tests {
         assert_eq!(ev.properties["persona"], "workspace-orchestrator");
         assert_eq!(ev.properties["orchestrator_type"], "workspace_orchestrator");
         assert_eq!(ev.properties["compute_target"], "local");
+        // Orchestrators are not task-bound: task_id must be null, not the
+        // agent's own id (regression: previously fabricated from agent.id).
+        assert!(ev.properties["task_id"].is_null());
         assert_eq!(ev.workspace_id.as_deref(), Some("ws-1"));
     }
 }
