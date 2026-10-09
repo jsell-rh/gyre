@@ -396,6 +396,10 @@ pub struct AppState {
     pub user_notification_prefs: Arc<dyn gyre_ports::UserNotificationPreferenceRepository>,
     /// Per-user API tokens (HSI §12). Hashed at rest; plaintext never stored.
     pub user_tokens: Arc<dyn gyre_ports::UserTokenRepository>,
+    /// Authenticated user sessions (user-management.md §Session Management).
+    /// Created on successful API-key auth, one per (credential, device);
+    /// revocable individually or in bulk ("sign out everywhere").
+    pub sessions: Arc<dyn gyre_ports::SessionRepository>,
     /// Secret repository (platform-model.md §7): scoped credential storage,
     /// encrypted at rest in the adapter. Agent spawn resolves secrets through
     /// this and injects them as GYRE_CRED_* env vars for the cred-proxy sidecar.
@@ -1082,13 +1086,17 @@ pub fn build_state(
             dyn ComputeTargetRepository,
             mem::MemComputeTargetRepository::default()
         ),
+        user_tokens: store!(
+            dyn gyre_ports::UserTokenRepository,
+            mem::MemUserTokenRepository::default()
+        ),
         user_notification_prefs: store!(
             dyn gyre_ports::UserNotificationPreferenceRepository,
             mem::MemUserNotificationPreferenceRepository::default()
         ),
-        user_tokens: store!(
-            dyn gyre_ports::UserTokenRepository,
-            mem::MemUserTokenRepository::default()
+        sessions: store!(
+            dyn gyre_ports::SessionRepository,
+            mem::MemSessionRepository::default()
         ),
         secrets: store!(
             dyn gyre_ports::SecretRepository,
@@ -1357,6 +1365,37 @@ pub fn spawn_budget_daily_reset(state: Arc<AppState>) {
                 .job_registry
                 .record_cycle("spawn_budget_reset", started_at, &result)
                 .await;
+        }
+    });
+}
+
+/// Spawn a background task that deletes long-expired user sessions
+/// (user-management.md §Session Management — task-111 plan §6).
+///
+/// Sessions whose `expires_at` is more than 30 days in the past are deleted;
+/// revocation state only needs to live as long as the session could have
+/// been presented. Revoked-but-unexpired rows are kept for audit until the
+/// retention cutoff passes them too.
+pub fn spawn_session_cleanup(state: Arc<AppState>) {
+    const INTERVAL_SECS: u64 = 24 * 3600; // daily
+    const RETENTION_PAST_EXPIRY_SECS: u64 = 30 * 24 * 3600; // 30 days
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(INTERVAL_SECS)).await;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let cutoff = now.saturating_sub(RETENTION_PAST_EXPIRY_SECS);
+            match state.sessions.delete_expired_before(cutoff).await {
+                Ok(n) if n > 0 => {
+                    tracing::info!(deleted = n, "session retention cleanup removed expired sessions");
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("session retention cleanup failed: {e}");
+                }
+            }
         }
     });
 }

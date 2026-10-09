@@ -26,6 +26,16 @@
 //! PUT    /api/v1/users/me/notification-preferences
 //! GET    /api/v1/users/me/judgments?workspace_id=&type=&since=&limit=&offset=
 //!
+//! Session Management (user-management.md §Session Management):
+//! GET    /api/v1/users/me/sessions
+//! DELETE /api/v1/users/me/sessions/:id
+//! POST   /api/v1/users/me/sessions/revoke-all
+//! TenantAdmin variants (same spec section — "TenantAdmins can view and
+//! revoke any user's sessions"):
+//! GET    /api/v1/users/:user_id/sessions
+//! DELETE /api/v1/users/:user_id/sessions/:id
+//! POST   /api/v1/users/:user_id/sessions/revoke-all
+
 //! All notification endpoints use per-handler auth (not ABAC):
 //! the handler verifies notification.user_id == caller AND notification.tenant_id == caller.tenant_id.
 
@@ -709,6 +719,187 @@ pub async fn create_token(
     ))
 }
 
+// ─── Session Management (user-management.md §Session Management) ────────────
+
+#[derive(Serialize)]
+pub struct UserSessionResponse {
+    pub id: String,
+    /// Device the session presents from: User-Agent header captured at
+    /// session creation (empty for WebSocket-minted sessions, which carry
+    /// no request headers).
+    pub user_agent: String,
+    pub ip_address: String,
+    pub created_at: u64,
+    pub last_active_at: u64,
+    pub expires_at: u64,
+}
+
+impl From<gyre_domain::UserSession> for UserSessionResponse {
+    fn from(s: gyre_domain::UserSession) -> Self {
+        Self {
+            id: s.id.to_string(),
+            user_agent: s.user_agent,
+            ip_address: s.ip_address,
+            created_at: s.created_at,
+            last_active_at: s.last_active_at,
+            expires_at: s.expires_at,
+        }
+    }
+}
+
+/// GET /api/v1/users/me/sessions
+///
+/// Lists the current user's active sessions (non-revoked, non-expired).
+/// The session token hash is never exposed — only device, IP, and activity
+/// timestamps.
+pub async fn list_my_sessions(
+    auth: AuthenticatedAgent,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    let now = now_secs();
+    let sessions = state.sessions.list_for_user(&user_id).await?;
+    let items: Vec<UserSessionResponse> = sessions
+        .into_iter()
+        .filter(|s| s.is_active(now))
+        .map(Into::into)
+        .collect();
+    Ok(Json(serde_json::json!({ "sessions": items })))
+}
+
+/// DELETE /api/v1/users/me/sessions/:id
+///
+/// Revokes one of the current user's sessions. Scoped: revoking another
+/// user's session id is a 404, not a silent success.
+pub async fn revoke_my_session(
+    auth: AuthenticatedAgent,
+    Path(session_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    let sid = Id::new(session_id);
+    // Confirm the session exists AND belongs to the caller before revoking.
+    let session = state
+        .sessions
+        .find_by_id(&sid)
+        .await?
+        .ok_or(ApiError::NotFound("Session not found".to_string()))?;
+    if session.user_id != user_id {
+        return Err(ApiError::NotFound("Session not found".to_string()));
+    }
+    state.sessions.revoke(&sid, &user_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /api/v1/users/me/sessions/revoke-all
+///
+/// "Sign out everywhere": revokes every session for the current user.
+/// The auth middleware rejects API keys whose every session is revoked, so
+/// this signs the credential out too.
+pub async fn revoke_all_my_sessions(
+    auth: AuthenticatedAgent,
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, ApiError> {
+    let user_id = resolve_user_id(&auth);
+    state.sessions.revoke_all_for_user(&user_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// GET /api/v1/users/:user_id/sessions — TenantAdmin views any user's
+/// active sessions (user-management.md §Session Management: "TenantAdmins
+/// can view and revoke any user's sessions").
+///
+/// Per-handler authorization (ABAC-exempt route): the caller must hold the
+/// Admin role (TenantAdmin). The target user must exist — an unknown user
+/// id is a 404, not an empty list, so the endpoint cannot be used to probe
+/// which user ids exist.
+pub async fn list_user_sessions(
+    auth: AuthenticatedAgent,
+    Path(user_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !auth.roles.contains(&UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may view another user's sessions".to_string(),
+        ));
+    }
+    let target_id = Id::new(user_id);
+    state
+        .users
+        .find_by_id(&target_id)
+        .await?
+        .ok_or(ApiError::NotFound("User not found".to_string()))?;
+    let now = now_secs();
+    let sessions = state.sessions.list_for_user(&target_id).await?;
+    let items: Vec<UserSessionResponse> = sessions
+        .into_iter()
+        .filter(|s| s.is_active(now))
+        .map(Into::into)
+        .collect();
+    Ok(Json(serde_json::json!({ "sessions": items })))
+}
+
+/// DELETE /api/v1/users/:user_id/sessions/:id — TenantAdmin revokes one of
+/// any user's sessions (user-management.md §Session Management).
+///
+/// Per-handler authorization (ABAC-exempt route): Admin role required; the
+/// session must exist and belong to the path's user (404 otherwise).
+pub async fn revoke_user_session(
+    auth: AuthenticatedAgent,
+    Path((user_id, session_id)): Path<(String, String)>,
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, ApiError> {
+    if !auth.roles.contains(&UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may revoke another user's sessions".to_string(),
+        ));
+    }
+    let target_id = Id::new(user_id);
+    state
+        .users
+        .find_by_id(&target_id)
+        .await?
+        .ok_or(ApiError::NotFound("User not found".to_string()))?;
+    let sid = Id::new(session_id);
+    // Confirm the session exists AND belongs to the target user before
+    // revoking (a mismatched id is a 404, same as the /me variant).
+    let session = state
+        .sessions
+        .find_by_id(&sid)
+        .await?
+        .ok_or(ApiError::NotFound("Session not found".to_string()))?;
+    if session.user_id != target_id {
+        return Err(ApiError::NotFound("Session not found".to_string()));
+    }
+    state.sessions.revoke(&sid, &target_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /api/v1/users/:user_id/sessions/revoke-all — TenantAdmin signs any
+/// user out everywhere (user-management.md §Session Management).
+///
+/// Per-handler authorization (ABAC-exempt route): Admin role required; the
+/// target user must exist.
+pub async fn revoke_all_user_sessions(
+    auth: AuthenticatedAgent,
+    Path(user_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, ApiError> {
+    if !auth.roles.contains(&UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may revoke another user's sessions".to_string(),
+        ));
+    }
+    let target_id = Id::new(user_id);
+    state
+        .users
+        .find_by_id(&target_id)
+        .await?
+        .ok_or(ApiError::NotFound("User not found".to_string()))?;
+    state.sessions.revoke_all_for_user(&target_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ─── Bootstrap: admin user creation ──────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -1262,5 +1453,660 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ── Session Management (user-management.md §Session Management) ──────
+
+    /// Provision a user with an authenticating API key; returns (state, raw key).
+    async fn provision_user_with_key() -> (std::sync::Arc<crate::AppState>, String) {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/users")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"username":"session-user"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let raw_key = json["api_key"]["key"].as_str().unwrap().to_string();
+        (state, raw_key)
+    }
+
+    #[tokio::test]
+    async fn sessions_endpoint_lists_session_created_by_auth() {
+        let (state, raw_key) = provision_user_with_key().await;
+
+        // Authenticated request through the real extractor — creates the
+        // session row for this credential+device.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-cli/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let sessions = json["sessions"].as_array().unwrap();
+        assert_eq!(
+            sessions.len(),
+            1,
+            "auth must have created exactly one session: {sessions:?}"
+        );
+        assert_eq!(sessions[0]["user_agent"], "gyre-cli/1.0");
+        // The token hash is never exposed.
+        assert!(sessions[0].get("token_hash").is_none());
+    }
+
+    #[tokio::test]
+    async fn revoke_session_then_credential_is_rejected() {
+        let (state, raw_key) = provision_user_with_key().await;
+
+        // Create the session via an authenticated request.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-cli/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let session_id = json["sessions"][0]["id"].as_str().unwrap().to_string();
+
+        // Revoke it.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/users/me/sessions/{session_id}"))
+                    // Same User-Agent as the session being revoked: the
+                    // revoke request itself authenticates as the same
+                    // device (it must not mint a phantom second session).
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-cli/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // The revoked session signs the credential out: auth middleware
+        // must reject the API key whose only session was revoked.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-cli/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "revoked session must reject the credential"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoking_one_device_session_does_not_sign_out_other_devices() {
+        let (state, raw_key) = provision_user_with_key().await;
+
+        // Two devices authenticate with the same credential.
+        let app = crate::api::api_router().with_state(state.clone());
+        for ua in ["gyre-cli/1.0", "gyre-web/1.0"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/users/me/sessions")
+                        .header("Authorization", format!("Bearer {raw_key}"))
+                        .header("User-Agent", ua)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // List from the CLI device to find its session id.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-cli/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let sessions = json["sessions"].as_array().unwrap();
+        assert_eq!(sessions.len(), 2, "two devices = two sessions");
+        let cli_session_id = sessions
+            .iter()
+            .find(|s| s["user_agent"].as_str().unwrap() == "gyre-cli/1.0")
+            .map(|s| s["id"].as_str().unwrap().to_string())
+            .expect("CLI session must be listed");
+
+        // Revoke only the CLI device's session — from the web device, so
+        // the revoking request is not the session being revoked.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/users/me/sessions/{cli_session_id}"))
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-web/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // The revoked device is signed out: its next request is rejected.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-cli/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "revoked device session must be rejected in auth middleware"
+        );
+
+        // The other device stays signed in (its session is untouched).
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-web/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "unrevoked sibling device must keep access"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_all_sessions_signs_out_everywhere() {
+        let (state, raw_key) = provision_user_with_key().await;
+
+        // Create two sessions for the same credential from two devices.
+        let app = crate::api::api_router().with_state(state.clone());
+        for ua in ["gyre-cli/1.0", "gyre-web/1.0"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/users/me/sessions")
+                        .header("Authorization", format!("Bearer {raw_key}"))
+                        .header("User-Agent", ua)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-cli/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["sessions"].as_array().unwrap().len(),
+            2,
+            "two devices = two sessions"
+        );
+
+        // Revoke all.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/users/me/sessions/revoke-all")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // "Sign out everywhere": the credential is rejected afterwards.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-cli/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "revoke-all must sign the credential out everywhere"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_cannot_target_another_users_session() {
+        let (state, victim_key) = provision_user_with_key().await;
+
+        // Victim authenticates → session created.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {victim_key}"))
+                    .header("User-Agent", "victim-agent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let session_id = json["sessions"][0]["id"].as_str().unwrap().to_string();
+
+        // Attacker: a different user provisioned in the SAME state so both
+        // users share one session store (cross-user scoping is the point).
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/users")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"username":"attacker"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let attacker_key = json["api_key"]["key"].as_str().unwrap().to_string();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/users/me/sessions/{session_id}"))
+                    .header("Authorization", format!("Bearer {attacker_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "revoking another user's session id must 404, not silently succeed"
+        );
+
+        // The victim's session is still active.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {victim_key}"))
+                    .header("User-Agent", "victim-agent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["sessions"].as_array().unwrap().len(),
+            1,
+            "victim's session must survive the cross-user revoke attempt"
+        );
+    }
+
+    /// TenantAdmin views and revokes another user's sessions
+    /// (user-management.md §Session Management: "TenantAdmins can view
+    /// and revoke any user's sessions").
+    #[tokio::test]
+    async fn tenant_admin_can_view_and_revoke_another_users_sessions() {
+        let (state, victim_key) = provision_user_with_key().await;
+
+        // Victim authenticates → session created.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {victim_key}"))
+                    .header("User-Agent", "victim-agent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let victim_session_id = json["sessions"][0]["id"].as_str().unwrap().to_string();
+
+        // The victim's user id is needed for the admin path. Create the
+        // user with a known username via the bootstrap endpoint, then find
+        // it in the store.
+        let victim_user_id = state
+            .users
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|u| u.username == "session-user")
+            .map(|u| u.id.to_string())
+            .expect("provisioned victim user must exist");
+
+        // Admin (global test token resolves as Admin) views the victim's
+        // sessions through the admin endpoint.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{victim_user_id}/sessions"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "TenantAdmin must be able to view any user's sessions");
+        let json = body_json(resp).await;
+        let sessions = json["sessions"].as_array().unwrap();
+        assert_eq!(sessions.len(), 1, "victim has exactly one session");
+        assert_eq!(sessions[0]["id"].as_str().unwrap(), victim_session_id);
+
+        // Admin revokes the victim's session.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/users/{victim_user_id}/sessions/{victim_session_id}"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // The victim's device is signed out: next request rejected.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {victim_key}"))
+                    .header("User-Agent", "victim-agent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "admin-revoked session must be rejected in auth middleware"
+        );
+    }
+
+    /// Non-admin callers cannot use the TenantAdmin session endpoints.
+    #[tokio::test]
+    async fn non_admin_cannot_view_or_revoke_another_users_sessions() {
+        let (state, victim_key) = provision_user_with_key().await;
+
+        // Victim authenticates → session created; find the victim's user id.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {victim_key}"))
+                    .header("User-Agent", "victim-agent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let victim_user_id = state
+            .users
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|u| u.username == "session-user")
+            .map(|u| u.id.to_string())
+            .expect("provisioned victim user must exist");
+
+        // Attacker: a non-admin user (roles: ["ReadOnly"]) in the same state.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/users")
+                    .header("Authorization", "Bearer test-token")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"username":"attacker","roles":["ReadOnly"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let attacker_key = json["api_key"]["key"].as_str().unwrap().to_string();
+
+        // View → Forbidden.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/users/{victim_user_id}/sessions"))
+                    .header("Authorization", format!("Bearer {attacker_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "non-admin must not view another user's sessions"
+        );
+
+        // Revoke-all → Forbidden.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/users/{victim_user_id}/sessions/revoke-all"))
+                    .header("Authorization", format!("Bearer {attacker_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "non-admin must not revoke another user's sessions"
+        );
+
+        // The victim's session survives the forbidden attempts.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {victim_key}"))
+                    .header("User-Agent", "victim-agent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// TenantAdmin "sign out everywhere" for another user: revoke-all on
+    /// the admin path signs the victim's credential out.
+    #[tokio::test]
+    async fn tenant_admin_revoke_all_signs_user_out_everywhere() {
+        let (state, victim_key) = provision_user_with_key().await;
+
+        // Victim authenticates from two devices.
+        let app = crate::api::api_router().with_state(state.clone());
+        for ua in ["victim-cli/1.0", "victim-web/1.0"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/users/me/sessions")
+                        .header("Authorization", format!("Bearer {victim_key}"))
+                        .header("User-Agent", ua)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        let victim_user_id = state
+            .users
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|u| u.username == "session-user")
+            .map(|u| u.id.to_string())
+            .expect("provisioned victim user must exist");
+
+        // Admin revokes all of the victim's sessions.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/users/{victim_user_id}/sessions/revoke-all"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // Both devices are signed out (credential fully revoked).
+        for ua in ["victim-cli/1.0", "victim-web/1.0"] {
+            let app = crate::api::api_router().with_state(state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/users/me/sessions")
+                        .header("Authorization", format!("Bearer {victim_key}"))
+                        .header("User-Agent", ua)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "admin revoke-all must sign every device out ({ua})"
+            );
+        }
+    }
+
+    /// The admin session endpoints must not leak user existence: an
+    /// unknown user id is a 404 for admins and a 403 for non-admins.
+    #[tokio::test]
+    async fn admin_session_endpoints_unknown_user_is_404() {
+        let (state, _raw_key) = provision_user_with_key().await;
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/no-such-user/sessions")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "unknown user id must 404, not return an empty session list"
+        );
     }
 }
