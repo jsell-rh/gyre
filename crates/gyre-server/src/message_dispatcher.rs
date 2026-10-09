@@ -10,6 +10,8 @@
 //! bridge onto the message bus. It derives user-facing Inbox notifications from
 //! Event-tier messages:
 //!
+//! - `GateFailure`            → priority-3 `GateFailure` notification for the MR
+//!   author agent's spawning user (HSI §8 p3).
 //! - `BudgetWarning`          → priority-7 `BudgetWarning` notification for the
 //!   workspace's Admin/Developer/Owner members (agent-runtime.md budget table).
 //! - `AgentError`             → priority-5 `AgentEscalation` notification for the
@@ -231,6 +233,78 @@ impl NotificationBridge {
             .as_secs() as i64
     }
 
+    /// GateFailure → priority-3 GateFailure notification for the MR author's
+    /// spawning user (HSI §8 p3). Payload per message-bus.md §Payload Schemas:
+    /// `{mr_id, gate_name, gate_type, status, output, spec_ref, gate_agent_id}`.
+    async fn on_gate_failure(&self, msg: &Message) {
+        let Some(ws_id) = msg.workspace_id.clone() else {
+            return;
+        };
+        let Some(payload) = msg.payload.as_ref() else {
+            return;
+        };
+        let mr_id = payload.get("mr_id").and_then(|v| v.as_str()).unwrap_or("");
+        let gate_name = payload
+            .get("gate_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        let Some(tenant_id) = self.tenant_for_workspace(&ws_id).await else {
+            return;
+        };
+
+        // Resolve the MR's author agent, then its spawning user. If either
+        // lookup fails there is no human to notify — skip rather than notify
+        // a fabricated identity.
+        let author_agent_id = self
+            .state
+            .merge_requests
+            .find_by_id(&Id::new(mr_id.to_string()))
+            .await
+            .ok()
+            .flatten()
+            .and_then(|mr| mr.author_agent_id);
+        let Some(author_agent_id) = author_agent_id else {
+            tracing::debug!(
+                "NotificationBridge: GateFailure for MR {mr_id} with no author agent; skipping"
+            );
+            return;
+        };
+        let spawned_by = self
+            .state
+            .agents
+            .find_by_id(&author_agent_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|a| a.spawned_by);
+        let Some(spawned_by) = spawned_by else {
+            tracing::debug!(
+                "NotificationBridge: GateFailure author agent {author_agent_id} has no spawning \
+                 user; skipping"
+            );
+            return;
+        };
+
+        let body = serde_json::json!({
+            "mr_id": mr_id,
+            "gate_name": gate_name,
+            "agent_id": author_agent_id.as_str(),
+        })
+        .to_string();
+
+        self.create(
+            &ws_id,
+            Id::new(spawned_by),
+            NotificationType::GateFailure,
+            format!("Gate '{gate_name}' failed on MR {mr_id}"),
+            tenant_id,
+            Some(body),
+            Some(mr_id.to_string()),
+        )
+        .await;
+    }
+
     /// BudgetWarning → priority-7 BudgetWarning notification for workspace
     /// Admin/Developer/Owner members (agent-runtime.md budget table: at 80%
     /// usage, "BudgetWarning notification created (Inbox priority 7)").
@@ -385,6 +459,7 @@ impl NotificationBridge {
 impl MessageConsumer for NotificationBridge {
     async fn on_message(&self, message: &Message) {
         match &message.kind {
+            MessageKind::GateFailure => self.on_gate_failure(message).await,
             MessageKind::BudgetWarning => self.on_budget_warning(message).await,
             MessageKind::AgentError => self.on_agent_error(message).await,
             MessageKind::ReconciliationCompleted => self.on_reconciliation_completed(message).await,
@@ -456,6 +531,48 @@ mod tests {
             .list_for_user(&Id::new(user.to_string()), None, None, None, None, 100, 0)
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn notification_bridge_creates_gate_failure_notification() {
+        let state = crate::mem::test_state();
+        seed_workspace(&state, "ws-1", "tenant-1").await;
+        seed_member(&state, "ws-1", "user-1", WorkspaceRole::Admin).await;
+        seed_agent(&state, "agent-1", "ws-1", Some("user-1")).await;
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-1".to_string()),
+            Id::new("repo-1".to_string()),
+            "Feature".to_string(),
+            "feature".to_string(),
+            "main".to_string(),
+            0,
+        );
+        mr.workspace_id = Id::new("ws-1".to_string());
+        mr.author_agent_id = Some(Id::new("agent-1".to_string()));
+        state.merge_requests.create(&mr).await.unwrap();
+
+        let bridge = NotificationBridge::new(state.clone());
+        let msg = test_message(
+            MessageKind::GateFailure,
+            "ws-1",
+            serde_json::json!({
+                "mr_id": "mr-1",
+                "gate_name": "tests",
+                "gate_type": "TestCommand",
+                "status": "Failed",
+                "output": "1 test failed",
+                "gate_agent_id": "gate-agent:1",
+            }),
+        );
+        bridge.on_message(&msg).await;
+
+        let notifs = list_notifications(&state, "user-1").await;
+        assert_eq!(notifs.len(), 1);
+        assert_eq!(notifs[0].notification_type, NotificationType::GateFailure);
+        assert_eq!(notifs[0].priority, 3);
+        assert_eq!(notifs[0].tenant_id, "tenant-1");
+        assert_eq!(notifs[0].entity_ref.as_deref(), Some("mr-1"));
     }
 
     #[tokio::test]

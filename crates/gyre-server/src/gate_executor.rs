@@ -126,22 +126,11 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
             )
             .await;
     }
-    // Notify MR author when gate fails (HSI §2).
-    if status == GateStatus::Failed {
-        if let Ok(Some(mr)) = state.merge_requests.find_by_id(&mr_id).await {
-            if let Some(author_id) = &mr.author_agent_id {
-                crate::notifications::notify_gate_failure(
-                    state.as_ref(),
-                    author_id,
-                    &mr.workspace_id,
-                    &mr_id.to_string(),
-                    &gate.name,
-                    "default",
-                )
-                .await;
-            }
-        }
-    }
+
+    // Gate-failure Inbox notification is created by the notification bridge
+    // (message_dispatcher::NotificationBridge) from the GateFailure event
+    // emitted above — one creation path, not two (HSI §8 p3 amended to route
+    // p3 via MessageConsumer consuming GateFailure events).
 
     // Retry up to 3 times with backoff — concurrent gate writers can
     // contend on the SQLite write lock even with busy_timeout set.
@@ -1745,14 +1734,14 @@ mod tests {
         );
     }
 
-    /// HSI §8 p3: a failed gate creates the priority-3 GateFailure Inbox
-    /// notification for the MR author's spawning user synchronously in the
-    /// gate evaluation handler. The dispatcher (message bus consumer) runs
-    /// concurrently — the assert on `notifs.len() == 1` pins that the
-    /// notification is created exactly once: neither dropped by the sync
-    /// path nor duplicated by a second creation path.
+    /// HSI §8 p3 (amended): a failed gate emits a `GateFailure` event, and
+    /// the notification bridge consumes it to create the p3 Inbox
+    /// notification for the MR author's spawning user. This pins the whole
+    /// rewired chain — if `run_gate` stops emitting the event, or the bridge
+    /// stops consuming it, the spawning user silently loses gate-failure
+    /// notifications.
     #[tokio::test]
-    async fn failed_gate_creates_gate_failure_notification_synchronously() {
+    async fn failed_gate_creates_gate_failure_notification_via_bridge() {
         let state = test_state();
 
         let ws = gyre_domain::Workspace::new(
@@ -1785,9 +1774,7 @@ mod tests {
         mr.author_agent_id = Some(agent.id.clone());
         state.merge_requests.create(&mr).await.unwrap();
 
-        // The real dispatcher + notification bridge drain the bus while the
-        // sync path runs — proving the two paths coexist without duplicating
-        // the p3 notification.
+        // Drain the bus with the real dispatcher + notification bridge.
         crate::message_dispatcher::spawn_message_consumer(state.clone()).await;
 
         // A TestCommand gate whose command fails.
@@ -1795,9 +1782,6 @@ mod tests {
         let result_id = Id::new(Uuid::new_v4().to_string());
         run_gate(state.clone(), result_id, gate, mr.id.clone()).await;
 
-        // The sync path creates the notification before run_gate returns;
-        // poll briefly so a latent duplicate from the dispatcher would be
-        // caught by the len == 1 assert below.
         let mut notifs = Vec::new();
         for _ in 0..100 {
             notifs = state
@@ -1806,21 +1790,11 @@ mod tests {
                 .await
                 .unwrap();
             if !notifs.is_empty() {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                notifs = state
-                    .notifications
-                    .list_for_user(&Id::new("user-gate-notif"), None, None, None, None, 100, 0)
-                    .await
-                    .unwrap();
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert_eq!(
-            notifs.len(),
-            1,
-            "exactly one p3 GateFailure notification — sync path, no bridge duplicate"
-        );
+        assert_eq!(notifs.len(), 1, "bridge must create the p3 notification");
         assert_eq!(
             notifs[0].notification_type,
             gyre_common::NotificationType::GateFailure
