@@ -2,7 +2,7 @@
 title: "View Specification Grammar — TypeScript types and server-side validation"
 spec_ref: "ui-layout.md §4"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "ui-layout.md §4. View Specification Grammar"
   - "ui-layout.md §Structure"
@@ -54,14 +54,71 @@ LLM Constraints: LLM can only produce view specs within this grammar, read-only 
 
 ## Acceptance Criteria
 
-- [ ] `ViewSpec` TypeScript type defined with all four layers
-- [ ] Server-side Rust struct with serde + validation
-- [ ] Nesting depth limit enforced (side-by-side sub-views cannot contain side-by-side)
-- [ ] `flow` layout requires `trace_source` in data layer (400 if missing)
-- [ ] `spec_path` filter requires `repo_id` (400 if missing)
-- [ ] `repo_id` validated against workspace membership
-- [ ] Layout registry pattern implemented in frontend
-- [ ] Tests pass for validation edge cases
+- [x] `ViewSpec` TypeScript type defined with all four layers
+- [x] Server-side Rust struct with serde + validation
+- [x] Nesting depth limit enforced (side-by-side sub-views cannot contain side-by-side)
+- [x] `flow` layout requires `trace_source` in data layer (400 if missing)
+- [x] `spec_path` filter requires `repo_id` (400 if missing)
+- [x] `repo_id` validated against workspace membership
+- [x] Layout registry pattern implemented in frontend
+- [x] Tests pass for validation edge cases
+
+## Shipped
+
+**Recovery round (assignment 8f65304d):** the interrupted-assignment checkpoint
+kept the full implementation but reset this file to `not-started`. All eight
+attributed commits verified ancestors of HEAD; every acceptance criterion
+re-checked against code; all focused suites re-run green on the recovered tree
+(evidence: `/tmp/stage/review-evidence/task-170-recovery-verification.txt`).
+
+**Grammar types + validation, both sides (belt and suspenders):**
+- `web/src/lib/types/view-spec.ts` — `ViewSpec`/`DataLayer`/`LayoutType`/
+  `EncodingLayer`/`HighlightLayer`/`SubViewSpec` typedefs matching ui-layout.md §4
+  JSON examples (kebab-case layout names); `validateViewSpec` client-side mirror
+  (name required, known layout, flow⇒trace_source, spec_path⇒repo_id, side-by-side
+  requires left+right, max nesting depth 1, sub-view field whitelist, no field
+  inheritance, orphan left/right rejected); `isViewSpec` guard. `ViewEvent`
+  interface ships in `web/src/lib/viewEvents.js` (dispatch/subscribe/DOM bridge).
+- `crates/gyre-common/src/view_spec.rs` — serde structs
+  (`#[serde(rename_all = "kebab-case")]` layout enum; `deny_unknown_fields` on
+  `SubViewSpec` enforcing data/layout/encoding-only at parse time) +
+  `validate_view_spec`/`validate_sub_view` with the same rules.
+- `crates/gyre-server/src/api/explorer_views.rs` — `parse_and_validate` on POST/PUT
+  `/workspaces/:id/explorer-views` (400 on every invalid case; ViewQuery/ViewSpec
+  hybrid payloads rejected so neither grammar can smuggle unvalidated fields);
+  LLM-output validation on `/generate` before the SSE `complete` event (invalid ⇒
+  `{view_spec: null, explanation, fallback list view}` per §2); 
+  `validate_repo_ownership` checking `repo_id` at the top level AND inside each
+  side-by-side sub-view against workspace membership. Routes + ABAC
+  `RouteResourceMapping` entries present.
+- `web/src/lib/layoutRegistry.js` — `registerLayout`/`getLayout`/`listLayouts`;
+  `registerLayout` extends the grammar's accepted layout-name set in lockstep
+  (`registerLayoutName`, idempotent, rejects existing names — closed for
+  modification); `MoldableView.svelte` dispatches renderer components through the
+  registry (§4 Extensibility).
+
+**Test evidence (this recovery round's fresh runs):**
+- `cargo test -p gyre-common --lib view_spec` — 13 passed, 0 failed.
+- `cargo test -p gyre-server --lib api::explorer_views` — 16 passed, 0 failed
+  (400 on flow-without-trace_source, nested side-by-side, spec_path-without-repo_id,
+  foreign repo_id incl. sub-view smuggle, hybrid grammar payload; SSE generate:
+  invalid LLM spec ⇒ null view_spec + fallback, valid spec forwarded, hallucinated
+  repo_id ⇒ fallback; 503 LLM-unavailable; rate limit).
+- vitest `--pool=threads` (forks pool cannot start in this sandbox — TCP listener
+  probe unsupported, `accept` errno 95 per `/tmp/stage/capabilities.json`; infra
+  limitation, not a code defect): view-spec 17, viewEvents 9, MoldableViewListView 1,
+  MoldableViewNodeTypeFilter 5 — 32 passed, 0 failed.
+- `scripts/check-task-commit-attribution.sh` — zero task-170 findings; the single
+  a781ede2/task-210 failure is pre-existing at assignment base 8c2d1775.
+
+**Scope note:** the live Explorer render surface is the single-canvas
+ExplorerView/ExplorerCanvas per draft `explorer-implementation.md` (task-065+), with
+the ViewQuery grammar (`view-query-grammar.md`, task-062+) superseding ViewSpec for
+rendering; the registry-dispatched MoldableView surface is exercised through its test
+suite. This task delivers the §4 ViewSpec grammar layer it was scoped for: types,
+both-side validation, layout registry, 400 enforcement. `parse_and_validate` accepts
+both grammars on storage endpoints (the six system default views seed as ViewQuery)
+with hybrid payloads rejected.
 
 ## Agent Instructions
 
