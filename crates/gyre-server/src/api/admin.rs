@@ -288,6 +288,15 @@ pub async fn admin_kill_agent(
     if let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await {
         for wt in worktrees {
             if let Ok(Some(repo)) = state.repos.find_by_id(&wt.repository_id).await {
+                // jj workspace teardown (source-control.md §4).
+                crate::api::spawn::cleanup_jj_workspace(
+                    &state,
+                    &agent.id.to_string(),
+                    &repo.path,
+                    &wt.path,
+                    &format!("agent-{}", agent.id),
+                )
+                .await;
                 let _ = state.git_ops.remove_worktree(&repo.path, &wt.path).await;
             }
             let _ = state.worktrees.delete(&wt.id).await;
@@ -444,25 +453,30 @@ pub async fn admin_seed(
     let _ = state.workspaces.create(&workspace).await;
 
     // ── Repos ─────────────────────────────────────────────────────────────────
+    // Paths derive from `repos_root` (absolute at rest — canonicalized at
+    // server start, review F6) with the same layout repos.rs uses for
+    // user-created repos: `{repos_root}/{workspace}/{name}.git`. A literal
+    // relative path here would break jj/git provisioning for seeded repos
+    // (child processes resolve paths against the command's cwd).
     let repo1 = Repository::new(
         Id::new("seed-repo-1"),
         Id::new("default"),
         "gyre-core",
-        "./repos/default/gyre-core.git",
+        &format!("{}/default/gyre-core.git", state.repos_root),
         now - 3500,
     );
     let repo2 = Repository::new(
         Id::new("seed-repo-2"),
         Id::new("default"),
         "gyre-web",
-        "./repos/default/gyre-web.git",
+        &format!("{}/default/gyre-web.git", state.repos_root),
         now - 3400,
     );
     let repo3 = Repository::new(
         Id::new("seed-repo-3"),
         Id::new("default"),
         "infra-config",
-        "./repos/default/infra-config.git",
+        &format!("{}/default/infra-config.git", state.repos_root),
         now - 3300,
     );
     state.repos.create(&repo1).await?;
