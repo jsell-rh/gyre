@@ -2,10 +2,10 @@
 title: "Fix persona scope resolution to walk the real parent chain"
 spec_ref: "platform-model.md §2 Scope Resolution"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Scope Resolution"
-commits: ["a977a9175d0f3e6c96172156c7983a2d25cb0803", "8cd3f081bd1a53eab155700f7522799943322237", "2d1e74d949a55a5b166a317d19f5faf2478490e3"]
+commits: ["a977a9175d0f3e6c96172156c7983a2d25cb0803", "8cd3f081bd1a53eab155700f7522799943322237", "2d1e74d949a55a5b166a317d19f5faf2478490e3", "b36fad006a4becd3fc4e28d17f37409052a94789"]
 ---
 
 ## Spec Excerpt
@@ -84,3 +84,23 @@ Do not write self-confirming tests: seed personas with distinct `system_prompt`/
 - Confirm the route `GET /api/v1/personas/resolve` registration in `crates/gyre-server/src/api/mod.rs` before relying on the path in tests.
 - Do NOT change the query contract (`scope_kind`, `scope_id`, `slug`); only fix the resolution logic behind it.
 - Skip project-wide lint/format/test suites; run `cargo test -p gyre-server personas` (or the crate's persona tests) to validate.
+
+## Shipped
+
+`resolve_persona` (`crates/gyre-server/src/api/personas.rs`) now walks the real parent chain instead of cloning the queried `scope_id` into every scope variant:
+
+- `scope_kind=Repo` loads the repo via `state.repos.find_by_id` and builds `[Repo(repo_id), Workspace(repo.workspace_id), Tenant(workspace.tenant_id)]` — the workspace id comes from the repo entity, the tenant id from loading that workspace via `state.workspaces.find_by_id`. `scope_kind=Workspace` derives `[Workspace(workspace_id), Tenant(workspace.tenant_id)]` the same way; `scope_kind=Tenant` passes through. Unknown `scope_kind` keeps the `InvalidInput` branch.
+- A repo/workspace id that does not exist is an entity `NotFound` ("repo/workspace '…' not found"), not a persona miss — a bad id is a client error, not a silently skipped scope level.
+- Nearest-wins holds: the scope chain is ordered Repo → Workspace → Tenant and the first `find_by_slug_and_scope` hit wins, so a repo persona shadows a workspace persona shadows a tenant persona with the same slug.
+- Adapter parity verified (plan step 4): both SQL adapters store and query `serde_json::to_string(scope)` on the personas table (`sqlite/workspace.rs:387-480`, `postgres/workspace.rs:387-480`), so handler-constructed `PersonaScope` values match stored rows exactly; the mem adapter compares the enum directly (`mem.rs:1708-1720`). No mismatch to align.
+- Query contract unchanged: `scope_kind`/`scope_id`/`slug`, route registration (`api/mod.rs:766`), and the `PersonaResponse` shape are untouched.
+
+Test evidence (`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib personas` at `b36fad00`, logs in `/tmp/stage/review-evidence/`):
+
+- **8 passed, 0 failed** — 3 pre-existing persona tests plus the 5 new resolve tests: `resolve_repo_scope_falls_back_to_workspace_persona`, `resolve_repo_scope_falls_back_to_tenant_persona`, `resolve_workspace_scope_falls_back_to_tenant_persona`, `resolve_prefers_nearest_scope`, `resolve_unknown_scope_entity_is_not_found`.
+- **Mutation probe (pre-fix regression proof):** the handler's chain construction was temporarily reverted to the pre-fix cloned-`scope_id` logic exactly as the task's Problem section quotes it; the suite failed **4 of 5** resolve tests (both repo→parent fallbacks, workspace→tenant fallback, and the bad-scope-id discrimination — it got the persona-miss 404 instead of the entity-not-found 404). `resolve_prefers_nearest_scope` passing under mutation is expected: exact-scope precedence was never broken; that test guards order-inversion of the fixed chain. Handler restored and tree verified clean afterward.
+- Tests are not self-confirming: `scoped_state()` seeds distinct ids `t1`/`ws1`/`r1`, and each fallback test asserts the resolved body's `id`/`system_prompt`/`scope` is the parent-scope persona, so a regression to exact-scope-only matching fails them.
+
+Repair over the interrupted checkpoint: the recovered implementation (commit `a7e1f558`, functionally identical to reviewed `a977a917`) carried rustfmt violations on changed lines, which fail CI's `check-rustfmt-diff.py HEAD^1` against base `8c2d1775` (lines 307-309 handler Workspace branch, 499-513 test helpers, 656-684 error-message asserts). `b36fad00` applies pure rustfmt reformatting — no logic or test-semantics change — and the gate now passes ("changed lines clean, 1 Rust file checked"). The `web/dist` churn from the first compile's embedded `npm run build` was reverted; task branches do not ship dist rebuilds.
+
+Out of scope / not weakened: `resolve_persona` returns personas regardless of `approval_status` (the cited spec section has no approval requirement; approval semantics are the Persona Lifecycle row) and does not check caller membership in the target tenant/workspace (matches the platform's M34 persona-read model; the cited section says nothing about caller scoping). Both were flagged as conscious decisions by the prior review round and are restated here so they stay visible.
