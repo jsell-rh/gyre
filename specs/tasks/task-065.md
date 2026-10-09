@@ -14,7 +14,7 @@ coverage_sections:
   - "explorer-implementation.md §16 Frontend Components"
   - "explorer-implementation.md §17 ExplorerCanvas (Svelte)"
   - "explorer-implementation.md §25 Phase 1: Canvas + Filters"
-commits: ["13ad231b568e3ef83c504ca311093cd5b2ae23ab", "fab8548ddf24e3ff4727e040d809b46f67aaea9f", "f5e599398f810ce20a7d9146ffae4af72847aa1b", "ffbccbb8953c220316d142ad580f09845dc2071d"]
+commits: ["3566b64a8060ce07d0b987ef3ded683a7ab092d5", "4689d4cc8f36adb5775689dee5fd5d13711135f6", "90159da1475e997efebd6b083382af1d73e68613", "52c93ac3d0abdef4aa680d2d7f005b077ed97482"]
 ---
 
 ## Spec Excerpt
