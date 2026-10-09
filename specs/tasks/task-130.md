@@ -5,7 +5,7 @@ depends_on: []
 progress: not-started
 coverage_sections:
   - "platform-model.md §Token Scoping"
-commits: ["afb4f78097fe5130d49a076d3c891f3cad6df43e"]
+commits: []
 ---
 
 ## Spec Excerpt
