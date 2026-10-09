@@ -8,9 +8,9 @@ production behavior disabled is not proof. Save actual probe command, source,
 exit code, and output under /tmp/stage/review-evidence.
 
 Use the smallest meaningful probe. Full workspace suites and all-target Clippy
-belong to verification. Sandbox loopback listeners are unavailable; tests needing
-them run on the host. Record concrete checks the verifier must run rather than
-misreporting a sandbox transport restriction as a production defect.
+belong to verification. If a focused probe needs a listener, check whether the
+current sandbox permits it. Record concrete checks the verifier must run if an
+actual transport restriction blocks the probe. A restriction is not a code defect.
 
 Do not modify production code, scripts, verifiers, unrelated tasks, or specs.
 Temporary experiments must be restored. Source edits invalidate review.

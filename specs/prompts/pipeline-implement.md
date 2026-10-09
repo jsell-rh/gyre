@@ -17,8 +17,9 @@ visual snapshots; preserve the specified UI and existing assertion strength.
 
 Full workspace suites, architecture checks, all-target Clippy, and GitHub CI are
 owned by verification and publication. Use the smallest relevant probe here.
-Do not repeat full gates inside this assignment. Sandbox loopback listeners are
-unavailable; host verification runs tests needing them.
+Do not repeat full gates inside this assignment. If a focused probe needs a
+listener, first check whether this sandbox permits it. Record any actual transport
+restriction for host verification; do not infer a code defect from that restriction.
 
 When implementation is ready, set the task's progress to `ready-for-review` and
 write a concise `## Shipped` explanation of actual behavior and test evidence.
