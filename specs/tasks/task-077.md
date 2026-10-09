@@ -10,7 +10,7 @@ coverage_sections:
   - "human-system-interface.md §11 Trust Levels"
   - "human-system-interface.md §12 What Each Level Controls"
   - "human-system-interface.md §13 Mechanical Implementation"
-commits: ["1d599ac9", "32edb3f1", "2db3f1ef", "85830fa4", "4cd20f3b", "7d0019ae", "545e986f"]
+commits: ["32edb3f1", "2db3f1ef", "85830fa4", "4cd20f3b", "7d0019ae", "545e986f"]
 ---
 
 ## Spec Excerpt
