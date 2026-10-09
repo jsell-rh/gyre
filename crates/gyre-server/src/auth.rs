@@ -44,6 +44,11 @@ const REMOTE_JWKS_TTL_SECS: u64 = 300;
 // -- Agent JWT signing (Gyre as OIDC provider) --------------------------------
 
 /// Claims embedded in agent JWTs minted by Gyre's built-in OIDC provider.
+///
+/// Hierarchy claims (platform-model.md §1 Token Scoping): every agent token
+/// carries its tenant/workspace scope, an optional repo binding, and a
+/// fine-grained `scope` list (e.g. `["repo:gyre-server:write"]`). The MCP
+/// server validates these on every tool call.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AgentJwtClaims {
     /// Subject — the agent's UUID.
@@ -54,12 +59,17 @@ pub struct AgentJwtClaims {
     pub iat: u64,
     /// Expiry (Unix epoch seconds).
     pub exp: u64,
-    /// Always "agent" for agent tokens.
-    pub scope: String,
+    /// Fine-grained permission scopes, e.g. `["repo:gyre-server:write"]`.
+    /// Workers carry repo write; orchestrators carry read+spawn for their tier.
+    #[serde(default)]
+    pub scope: Vec<String>,
     /// Task assigned to this agent at spawn time.
     pub task_id: String,
     /// Identity that called POST /api/v1/agents/spawn.
     pub spawned_by: String,
+    /// Tenant the agent's workspace belongs to (hierarchy claim, §1).
+    #[serde(default)]
+    pub tenant_id: String,
 
     // -- TASK-093: Orchestrator scope claims (platform-model.md §3) -----------
     /// Workspace the orchestrator governs. Present on orchestrator JWTs only.
@@ -74,6 +84,14 @@ pub struct AgentJwtClaims {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestrator_type: Option<String>,
 
+    // -- §1 Token Scoping: persona + attestation claims ------------------------
+    /// Persona slug the agent was spawned under (e.g. "security").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
+    /// Workload attestation confidence level (0-3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation_level: Option<u32>,
+
     // -- G10: Workload attestation claims -------------------------------------
     /// OS PID of the agent process (workload identity, G10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -84,7 +102,7 @@ pub struct AgentJwtClaims {
     /// Compute target identifier: "local", docker container ID, SSH host (G10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wl_compute_target: Option<String>,
-    /// Stack fingerprint hash at spawn time (G10).
+    /// Stack fingerprint hash at spawn time (G10). The spec's `stack_hash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wl_stack_hash: Option<String>,
     // -- M19.4: Container workload claims -------------------------------------
