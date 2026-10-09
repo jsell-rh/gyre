@@ -1437,9 +1437,10 @@ def schedule(db, slots, max_attempts, only_task=None, launch_burst=8):
                 continue
             # Reserve one admitted slot for integration. With a single slot,
             # implementation and integration take turns instead.
-            # Recovery admits exactly one probe. Reserving that sole new slot
-            # for integration would prevent a worker probe from ever starting.
-            if effective_slots > 1 and not gate['failures'] and workers >= effective_slots - 1:
+            # Recovery and readiness ramp admit one additional probe. Reserve
+            # integration capacity after reaching the desired limit; reserving
+            # the ramp's sole new slot would prevent the next readiness proof.
+            if effective_slots > 1 and effective_slots >= slots and not gate['failures'] and workers >= effective_slots - 1:
                 continue
             attempt_no = task["attempts"] + 1
             branch = f"devloop/{task['name']}/attempt-{attempt_no}"
