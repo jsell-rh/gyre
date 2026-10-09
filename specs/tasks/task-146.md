@@ -77,11 +77,23 @@ pub struct AnalyticsEvent {
 
 ## Acceptance Criteria
 
-- [ ] AnalyticsEvent struct matches spec schema (all fields present)
-- [ ] All 12 auto-emitted events are recorded at their trigger points
-- [ ] Each event includes all spec-required properties
-- [ ] Query API supports all spec-required filter parameters
-- [ ] Tests pass for each auto-emitted event
+- [x] AnalyticsEvent struct matches spec schema (all fields present)
+- [x] All 12 auto-emitted events are recorded at their trigger points
+- [x] Each event includes all spec-required properties
+- [x] Query API supports all spec-required filter parameters
+- [x] Tests pass for each auto-emitted event
+
+## Shipped
+
+All five assigned coverage sections are implemented and verified at head `3d9ab812` (all 7 attributed commits are ancestors).
+
+- **Event Schema** — `gyre-domain::AnalyticsEvent` carries every spec field (`id`, `event_name`, `agent_id`, `user_id`, `session_id`, `workspace_id`, `repo_id`, `properties`, `timestamp`); scope fields set via `with_scope()` at every emit site. SQLite/PG migration `2026-10-08-000056_analytics_scope_columns` adds the columns + indexes; `AnalyticsQueryFilter::query_filtered` enforces them in both adapters (mem adapter matches SQLite semantics — tested).
+- **Auto-Emitted Events** — all 12 events recorded at real trigger points: `task.status_changed` (HTTP + MCP paths), `mr.merged` (queue + HTTP paths, real `gate_count` from gate_results, `queue_wait_secs` from queue entry), `mr.closed` (HTTP close, repo archive, spec-reject), `agent.spawned` (worker + orchestrator with persona), `agent.completed` (completion + MCP), `agent.failed` (fail handler, admin kill, stale-agent abort), `merge_queue.processed` (merged/failed/skipped outcomes), `gate.failed`/`gate.passed` (gate executor, char-boundary-safe `output_snippet` truncation), `spec.approved`, `budget.warning` (80% threshold, tokens/cost/agents metrics), `search.query` (real measured `duration_ms`, deduped `entity_types`). Every event includes all spec-required properties.
+- **Query API / Parameters** — `GET /api/v1/analytics/events` supports `event_name` (exact + trailing-`*` prefix), `agent_id`, `user_id`, `workspace_id`, `repo_id`, `since`/`until` (ISO8601 or unix secs), `limit` (default 100, cap 10000), `group_by` (`event_name`/`agent_id`/`workspace_id`/`day`, invalid field → 400). No new endpoints added. `POST /events`, `GET /count`, `GET /daily` (`?days=30` form) unchanged.
+
+Test evidence (focused probes, exit 0): `gyre-domain --lib analytics` 3 passed (incl. `analytics_event_matches_spec_schema`); `gyre-server --lib -- analytics` 42 passed — one trigger test per event asserting recorded properties; budget/orchestrator/repos/stale-agent/admin event tests 52 passed; `gyre-adapters --lib -- analytics` 13 passed (SQLite record/query/filter/count/daily/retention). Details: `/tmp/stage/review-evidence/task-146-verification.md`.
+
+Note: this sandbox cannot accept TCP listeners (errno 95, `capabilities.json`), so verification is via the in-process router tests above; live HTTP smoke belongs to host/CI verification.
 
 ## Agent Instructions
 
