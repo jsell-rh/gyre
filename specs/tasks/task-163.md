@@ -92,9 +92,10 @@ fallback only in pure in-memory mode):
   `cascade-test-failure` task and notifies the workspace. `create` preserves
   pre-acknowledged records so Block-policy merges stay unblocked.
 
-Behavior verified in this sandbox (evidence:
-`/tmp/stage/review-evidence/focused-probes.log`, see Shipped verification in
-the retained round below for the prior identical run):
+Behavior verified in this sandbox (repair round re-ran all focused probes
+against the upstream-merged base `8c2d1775`; evidence under
+`/tmp/stage/review-evidence/`: `task163-repair-probes.log`,
+`task163-repair-probes-server.log`, `task163-repair-invariants.log`):
 
 - `cargo test -p gyre-adapters --lib sqlite::breaking_change
   sqlite::dependency_policy migrations_create_tables` — adapter CRUD,
