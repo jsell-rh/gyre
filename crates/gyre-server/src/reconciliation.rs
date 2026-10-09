@@ -763,11 +763,10 @@ mod tests {
         let new = make_set("ws", vec![pin("backend-developer", "b2")]);
         assert_eq!(diff_meta_spec_set(&old, &new), vec!["backend-developer".to_string()]);
 
-        // Newly bound entry counts as changed.
+        // Newly bound entry counts as changed; the identical
+        // backend-developer pin (a1 → a1) does not.
         let new = make_set("ws", vec![pin("backend-developer", "a1"), pin("security", "c3")]);
-        let mut diff = diff_meta_spec_set(&old, &new);
-        diff.sort();
-        assert_eq!(diff, vec!["backend-developer".to_string(), "security".to_string()]);
+        assert_eq!(diff_meta_spec_set(&old, &new), vec!["security".to_string()]);
 
         // Removal is not a trigger.
         let new = make_set("ws", vec![]);
@@ -919,7 +918,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn sweep_skips_workspaces_without_set() {
         let state = test_state();
-        let ws = make_workspace(&state, "ws-sweep-3").await;
+        let _ws = make_workspace(&state, "ws-sweep-3").await;
         let repo = make_repo(&state, "repo-s3", "ws-sweep-3").await;
 
         // No set bound; provenance with a non-empty SHA exists but there is
@@ -934,7 +933,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn sweep_ignores_empty_provenance_sha() {
         let state = test_state();
-        let ws = make_workspace(&state, "ws-sweep-4").await;
+        let _ws = make_workspace(&state, "ws-sweep-4").await;
         let repo = make_repo(&state, "repo-s4", "ws-sweep-4").await;
 
         let set = make_set("ws-sweep-4", vec![pin("backend-developer", "a1")]);
