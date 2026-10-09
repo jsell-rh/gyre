@@ -485,6 +485,11 @@ def sync(db):
     db.commit()
     current_main = ref_sha("origin/main")
     for task in db.execute("SELECT * FROM tasks WHERE state='blocked' AND blocked_base IS NOT NULL").fetchall():
+        prerequisite = re.search(r'repair (task-\d+)', task['condition'] or '')
+        if prerequisite:
+            repair = db.execute('SELECT state FROM tasks WHERE name=?', (prerequisite[1],)).fetchone()
+            if repair and repair['state'] != 'merged':
+                continue
         if current_main != task["blocked_base"]:
             db.execute("UPDATE tasks SET state='candidate',blocked_base=NULL,condition=NULL WHERE name=?", (task["name"],))
             event(db, task["name"], "main changed; rechecking previously blocked candidate")
@@ -817,6 +822,12 @@ def promote(db):
             db.execute("UPDATE tasks SET state='ready',candidate=NULL,condition='SpecChanged' WHERE name=?", (task["name"],))
             event(db, task["name"], "checked generation is stale; returning to implementation")
             continue
+        # Observe the already-published head before allocating a fresh checker
+        # just because main moved. CI failures must reach their repair path.
+        if task['pr_url'] and check['merge_sha'] and (task['condition'] or '').startswith(('GitHub', 'PullRequest')):
+            if not reconcile_pr_checks(db, task, check, check['merge_sha'],
+                                       {'url': task['pr_url'], 'number': task['pr_number']}):
+                continue
         source()
         main = ref_sha("origin/main")
         if main == check["merge_sha"]:

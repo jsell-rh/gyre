@@ -51,7 +51,8 @@ test("cockpit reads the durable ledger and controls only its own slot file", asy
   const root = await mkdtemp(join(tmpdir(), "gyre-cockpit-"));
   await mkdir(join(root, "scripts"));
   await mkdir(join(root, "specs", "tasks"), { recursive: true });
-  await copyFile(resolve("scripts/dev-controller.py"), join(root, "scripts", "dev-controller.py"));
+  for (const name of ["dev-controller.py", "dev-contract.py", "dev-coverage.py", "dev-ci.py"])
+    await copyFile(resolve("scripts", name), join(root, "scripts", name));
   await execFileP("python3", [join(root, "scripts", "dev-controller.py"), "status", "--json"], { cwd: root });
   const paths = controllerPaths(root);
   const state = await collectController(paths);
