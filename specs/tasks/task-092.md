@@ -2,7 +2,7 @@
 title: "HSI Conflict Prevention — Concurrent Spec Editing Warning"
 spec_ref: "human-system-interface.md §7 Conflict Prevention"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 review: specs/reviews/task-092.md
 coverage_sections:
   - "human-system-interface.md §7 Conflict Prevention"
@@ -91,3 +91,11 @@ attribution check sees every reachable task-labeled product commit.
 ## Agent Instructions
 
 Read `specs/system/human-system-interface.md` §7 "Conflict Prevention" for the full spec. The UserPresence WsMessage is defined in `gyre-common/src/protocol.rs`. The presence map is managed in `gyre-server/src/ws.rs`. The spec save flow is in `gyre-server/src/api/specs.rs`. For the frontend, look at how specs are edited in the Svelte components. The existing presence infrastructure (session_id, workspace_id, view tracking) provides the foundation — you're extending it with entity-level granularity.
+
+## Review
+
+### Review changed source code
+
+- package-lock.json
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
