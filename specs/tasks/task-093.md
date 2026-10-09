@@ -2,7 +2,7 @@
 title: "Platform Model Orchestrator Lifecycle Protocol"
 spec_ref: "platform-model.md §3 Two-Level Orchestration"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 coverage_sections:
   - "platform-model.md §3 Two-Level Orchestration"
   - "platform-model.md §3 Workspace Orchestrator"
@@ -80,6 +80,19 @@ One per repo. Manages the Ralph loop for its repo. Uses the `repo-orchestrator` 
 - [x] Stale orchestrator auto-restart works
 - [x] Workspace orchestrator can spawn repo orchestrators via MCP
 - [x] `cargo test --all` passes
+
+## Shipped
+
+- Two-level orchestrator lifecycle: `OrchestratorType` on agents, one-live-per-scope spawn endpoints (REST + MCP, 409 on conflict) minting workspace- or repo-scoped JWTs, with per-repo ABAC plus tenant containment on both REST paths and both routes registered in the ABAC resolver.
+- Auto-restart and escalation on every terminal path (stale-detector abort, fail, stop) via shared `handle_orchestrator_death`: budget-symmetric replacement that inherits the full lifecycle config (`disconnected_behavior`, `restart_on_failure`) and repo-tier deaths escalate to the live workspace orchestrator with an informational payload naming the replacement.
+- MCP tool suite with tier gates: `gyre_spawn_repo_orchestrator`/`gyre_list_repo_orchestrators`/`gyre_cross_repo_task` (workspace tier) and `gyre_decompose_spec`/`gyre_spawn_worker` (repo tier), all delegating to shared `_core` fns; `gyre_message_send` restored to the write-role gate.
+- Verified by 16 orchestrator + 9 message-send handler + 6 MCP orchestrator-tier tests (cross-tenant Forbidden paths, budget exhaustion, second-death restart chain, escalation payload, tier denials) plus the ABAC registry, MCP write-tool, exempt-handler, inert-enforcement, and arch mechanical checks.
+
+## Integration Repair (attempt 35e4850835de47f4)
+
+Round 3 (2026-10-09, specs/reviews/task-093.md): integration candidate was rejected on the rustfmt changed-lines gate only; the formatting repair was verified tree-identical-in-behavior to the round-2-approved revision and complete. No product changes were required this round.
+
+This assignment (resume after sandbox checkpoint): product surface re-verified tree-identical to reviewed revision `7db5ee23` (`git diff --stat 7db5ee23 HEAD -- 'crates/**'` shows only unrelated admin.rs changes); the round-2 revision content reached this branch via ancestor `c83dc841` (devloop twin `7ac4f681` is not an ancestor of HEAD). All focused probes re-run green on HEAD `eccbaeea` — 16/16 `api::orchestrator`, 9/9 `mcp::tests::mcp_message_send`, 6/6 MCP orchestrator-tier tools — plus the five mechanical checks (ABAC route registry, MCP write-tools, exempt-handlers, inert-enforcement, arch), all exit 0. Evidence: `/tmp/stage/review-evidence/task-093-mechanical-checks.txt`, `/tmp/stage/review-evidence/task-093-focused-tests.txt`. No server-level HTTP probe was run: this sandbox's TCP listener probe is unsupported (capabilities.json errno 95), so listener-dependent verification is deferred to host/CI.
 
 ## Agent Instructions
 
