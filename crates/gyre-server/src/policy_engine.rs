@@ -240,14 +240,22 @@ pub struct EvalResult {
 // Evaluation engine
 // ---------------------------------------------------------------------------
 
-/// Sort key for a policy: higher priority first, then scope specificity.
-fn policy_sort_key(p: &Policy) -> (u32, u8) {
+/// Sort key for a policy: higher priority first, then scope specificity
+/// (repo > workspace > tenant), then Deny before Allow — "deny takes
+/// precedence over allow within the same priority" (§Policy Language) and
+/// "Deny overrides Allow at the same priority and scope" (§Policy Composition
+/// rule 3).
+fn policy_sort_key(p: &Policy) -> (u32, u8, u8) {
     let scope_rank = match p.scope {
         PolicyScope::Repo => 2,
         PolicyScope::Workspace => 1,
         PolicyScope::Tenant => 0,
     };
-    (p.priority, scope_rank)
+    let deny_rank = match p.effect {
+        PolicyEffect::Deny => 1,
+        PolicyEffect::Allow => 0,
+    };
+    (p.priority, scope_rank, deny_rank)
 }
 
 /// Evaluate the given list of `policies` against `ctx` for `action` on `resource_type`.
@@ -455,6 +463,23 @@ mod tests {
         let result = evaluate(vec![allow_policy(10, vec![cond])], &ctx, "push", "repo");
         // Condition doesn't match; no policy matches; default deny.
         assert_eq!(result.effect, PolicyEffect::Deny);
+    }
+
+    #[test]
+    fn deny_overrides_allow_at_same_priority_and_scope() {
+        // §Policy Language: "First match wins (deny takes precedence over
+        // allow within the same priority)" / §Policy Composition rule 3.
+        // Equal priority, equal scope: the Deny must be evaluated first even
+        // when the Allow appears earlier in the list.
+        let ctx = AttributeContext::default();
+        let allow = allow_policy(100, vec![]);
+        let deny = deny_policy(100, vec![]);
+        // Both helpers mint id "p-100"; give the deny a distinct id.
+        let mut deny = deny;
+        deny.id = Id::new("p-100-deny");
+        let result = evaluate(vec![allow, deny], &ctx, "write", "task");
+        assert_eq!(result.effect, PolicyEffect::Deny);
+        assert_eq!(result.matched_policy.as_deref(), Some("p-100-deny"));
     }
 
     #[test]

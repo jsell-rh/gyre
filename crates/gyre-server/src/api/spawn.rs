@@ -430,24 +430,26 @@ pub(crate) async fn spawn_agent_core(
     // container environment at spawn time.  After spawn we create the workload
     // attestation record (stored in state.workload_attestations) which is
     // queryable via GET /api/v1/agents/{id}/workload.
+    // Pre-mint a JWT carrying the worker's repo scope so `subject.repo_scope`
+    // (§Attributes, source "Agent OIDC claim") is real on every request the
+    // agent makes. Workload claims are attached later via the workload
+    // attestation record (state.workload_attestations, queryable via
+    // GET /api/v1/agents/{id}/workload).
     let token = state
         .agent_signing_key
-        .mint(
+        .mint_scoped(
             &agent.id.to_string(),
             &req.task_id,
             &auth.agent_id,
             &state.base_url,
             jwt_ttl,
+            &repo.workspace_id.to_string(),
+            &req.repo_id,
         )
         .unwrap_or_else(|e| {
             tracing::error!("JWT pre-mint failed, falling back to UUID token: {e}");
             uuid::Uuid::new_v4().to_string()
         });
-    // Store now so the container can authenticate immediately upon start.
-    let _ = state
-        .kv_store
-        .kv_set("agent_tokens", &agent.id.to_string(), token.clone())
-        .await;
 
     // HSI §4: For interrogation agents — create scoped ABAC policies and store
     // the conversation context for the conversation://context MCP resource.

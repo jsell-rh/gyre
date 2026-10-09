@@ -844,6 +844,51 @@ pub fn init_resolver() {
 // Middleware function
 // ---------------------------------------------------------------------------
 
+/// Map agent-JWT claim names onto the spec-named `subject.*` attributes
+/// (§Attributes) where they differ.
+///
+/// - `wl_stack_hash` (G10 workload claim) → `subject.stack_hash`
+/// - `repo_id` (spawn scope) → `subject.repo_scope`
+/// - `attestation_level` (numeric claim) → `subject.attestation_level` (number)
+///
+/// Only sets an attribute when the claim is present and non-empty; a missing
+/// claim leaves the attribute unset so conditions on it fail closed. Never
+/// overwrites an attribute already present in the context.
+fn normalize_agent_jwt_attributes(ctx: &mut AttributeContext, claims: &serde_json::Value) {
+    let obj = match claims.as_object() {
+        Some(o) => o,
+        None => return,
+    };
+    if let Some(hash) = obj.get("wl_stack_hash").and_then(|v| v.as_str()) {
+        if !hash.is_empty() {
+            ctx.set("subject.stack_hash", hash);
+        }
+    }
+    if let Some(repo) = obj.get("repo_id").and_then(|v| v.as_str()) {
+        if !repo.is_empty() {
+            ctx.set("subject.repo_scope", repo);
+        }
+    }
+    if let Some(level) = obj.get("attestation_level").and_then(|v| v.as_i64()) {
+        ctx.set_number("subject.attestation_level", level);
+    }
+}
+
+/// Remaining tokens in a workspace's daily budget (§Attributes:
+/// `env.budget_remaining`, source "Budget system").
+///
+/// `None` when no per-day token cap is configured — the budget system imposes
+/// no bound, so no value is fabricated (a policy conditioning on the
+/// attribute fails closed instead of matching an invented number).
+fn budget_tokens_remaining(
+    config: Option<&gyre_domain::BudgetConfig>,
+    usage: Option<&gyre_domain::BudgetUsage>,
+) -> Option<i64> {
+    let max = config?.max_tokens_per_day?;
+    let used = usage.map(|u| u.tokens_used_today).unwrap_or(0);
+    Some(max.saturating_sub(used) as i64)
+}
+
 /// ABAC middleware — evaluates access policy for every authenticated API request.
 ///
 /// Must be applied AFTER `require_auth_middleware` and BEFORE route handlers.
@@ -904,7 +949,17 @@ pub async fn abac_middleware(
 
     let global_role = auth.roles.first().map(|r| r.as_str()).unwrap_or("ReadOnly");
     ctx.set("subject.global_role", global_role);
-    ctx.set("subject.tenant_id", &auth.tenant_id);
+    // OIDC-claim-sourced subject attributes (§Attributes: persona, stack_hash,
+    // attestation_level, repo_scope — source "Agent OIDC claim"). Raw claims
+    // merge first; spec-named normalization maps the agent-JWT `wl_stack_hash`
+    // claim onto the spec's `stack_hash` attribute name. Claims never override
+    // the auth-extractor identity facts already set above (merge_jwt_claims
+    // inserts; identity keys already present keep the extractor value).
+    if let Some(claims) = &auth.jwt_claims {
+        ctx.merge_jwt_claims(claims);
+        normalize_agent_jwt_attributes(&mut ctx, claims);
+    }
+
     // Resource identity attributes from the request path (§Attributes:
     // resource.id / resource.workspace_id / resource.repo_id, source
     // "Request path"). Runs BEFORE membership extraction: the membership
@@ -981,6 +1036,37 @@ pub async fn abac_middleware(
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
     {
         ctx.set("env.ip", peer.0.ip().to_string());
+    }
+
+    // Environment attributes (§Attributes): `env.budget_remaining` — tokens
+    // remaining in the addressed workspace's daily budget. Computed from the
+    // real budget system (BudgetUsageRepository + BudgetConfig); absent when
+    // the path names no workspace or no budget is configured (conditions on
+    // it then fail closed). `env.time` is injected by the evaluation engine.
+    if let Some(ws_id) = ctx.get("resource.workspace_id").and_then(|v| match v {
+        AttrValue::Single(s) => Some(s.clone()),
+        _ => None,
+    }) {
+        let key = format!("workspace:{ws_id}");
+        let config = state.budget_configs.get_config(&key).await.ok().flatten();
+        let usage = state.budget_usages.get_usage(&key).await.ok().flatten();
+        if let Some(remaining) = budget_tokens_remaining(config.as_ref(), usage.as_ref()) {
+            ctx.set_number("env.budget_remaining", remaining);
+        }
+    }
+
+    // Environment attributes (§Attributes): `env.main_health` — merge-queue
+    // (forge) state for the addressed repo, from the real pause state read by
+    // the merge processor and GET /repos/:id/status. Absent when the path
+    // names no repo.
+    if let Some(repo_id) = ctx.get("resource.repo_id").and_then(|v| match v {
+        AttrValue::Single(s) => Some(s.clone()),
+        _ => None,
+    }) {
+        ctx.set(
+            "env.main_health",
+            crate::merge_processor::queue_health(&state, &repo_id).await,
+        );
     }
 
     // Resolve action.
@@ -1632,6 +1718,424 @@ pub mod tests {
             resp.status(),
             StatusCode::OK,
             "env.ip must be extracted from ConnectInfo and allow the pinned peer"
+        );
+    }
+
+    /// Agent-JWT claims must reach live policy evaluation (§Attributes:
+    /// persona, stack_hash, attestation_level, repo_scope — source "Agent
+    /// OIDC claim"). Mints a real agent JWT via the signing key, registers it
+    /// in agent_tokens (the auth path the middleware exercises), and asserts
+    /// a Deny keyed on the claim's normalized attribute fires.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_jwt_claims_reach_live_evaluation() {
+        use axum::routing::get;
+
+        let state = crate::mem::test_state();
+        tokio::task::block_in_place(|| {
+            let h = tokio::runtime::Handle::current();
+            h.block_on(seed_builtin_policies(&state));
+        });
+
+        // Mint a worker JWT scoped to repo-7 with a stack hash claim.
+        let token = state
+            .agent_signing_key
+            .mint_scoped(
+                "agent-claims-1",
+                "task-1",
+                "spawner",
+                &state.base_url,
+                3600,
+                "ws-claims",
+                "repo-7",
+            )
+            .unwrap();
+        // Register it so the auth extractor resolves the agent identity.
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-claims-1", token.clone())
+            .await
+            .unwrap();
+
+        // Deny read on spec resources for agents whose repo scope is repo-7.
+        // subject.repo_scope only exists when the middleware normalizes the
+        // JWT's repo_id claim — without it the condition fails closed and the
+        // Agent-role Allow (priority 700) grants the request.
+        state
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-agent-repo-scope-deny"),
+                name: "agent-repo-7-no-spec-read".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 810,
+                effect: PolicyEffect::Deny,
+                conditions: vec![
+                    Condition {
+                        attribute: "subject.type".to_string(),
+                        operator: ConditionOp::Equals,
+                        value: ConditionValue::String("agent".to_string()),
+                    },
+                    Condition {
+                        attribute: "subject.repo_scope".to_string(),
+                        operator: ConditionOp::Equals,
+                        value: ConditionValue::String("repo-7".to_string()),
+                    },
+                ],
+                actions: vec!["read".to_string()],
+                resource_types: vec!["spec".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: "system".to_string(),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/specs", get(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "subject.repo_scope from the agent JWT must reach live evaluation and deny"
+        );
+    }
+
+    /// The `wl_stack_hash` agent-JWT claim must be normalized onto the
+    /// spec-named `subject.stack_hash` attribute (§Attributes).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_jwt_wl_stack_hash_normalized() {
+        use axum::routing::get;
+
+        let state = crate::mem::test_state();
+        tokio::task::block_in_place(|| {
+            let h = tokio::runtime::Handle::current();
+            h.block_on(seed_builtin_policies(&state));
+        });
+
+        // Mint with workload claims directly.
+        let token = state
+            .agent_signing_key
+            .mint_with_workload(
+                "agent-claims-2",
+                "task-2",
+                "spawner",
+                &state.base_url,
+                3600,
+                Some(4242),
+                Some("host-1".to_string()),
+                Some("local".to_string()),
+                Some("sha256:stack-abc".to_string()),
+                None,
+                None,
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-claims-2", token.clone())
+            .await
+            .unwrap();
+
+        // Allow spec reads only for agents with this exact stack hash.
+        // Default deny (priority 1) denies when subject.stack_hash is absent.
+        state
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-stack-hash-allow"),
+                name: "stack-hash-allow".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 720,
+                effect: PolicyEffect::Allow,
+                conditions: vec![Condition {
+                    attribute: "subject.stack_hash".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("sha256:stack-abc".to_string()),
+                }],
+                actions: vec!["read".to_string()],
+                resource_types: vec!["spec".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: "system".to_string(),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/specs", get(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "subject.stack_hash (normalized from wl_stack_hash) must allow the pinned stack"
+        );
+    }
+
+    /// `env.budget_remaining` must be extracted from the real budget system
+    /// (BudgetConfig + BudgetUsage) for the addressed workspace. A policy
+    /// keyed on it must match; with no budget configured the attribute must
+    /// stay absent (fail closed).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn env_budget_remaining_from_real_budget_system() {
+        use axum::routing::post;
+        use gyre_domain::BudgetConfig;
+
+        let (state, _user_id) = setup_membership_state().await;
+
+        // Configure a real budget for ws-1: 1000 tokens/day, 400 used.
+        state
+            .budget_configs
+            .set_config(
+                &crate::api::budget::workspace_key("ws-1"),
+                &BudgetConfig {
+                    max_tokens_per_day: Some(1000),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .budget_usages
+            .set_usage(&crate::api::budget::workspace_key("ws-1"), &gyre_domain::BudgetUsage {
+                entity_type: "workspace".to_string(),
+                entity_id: gyre_common::Id::new("ws-1"),
+                tokens_used_today: 400,
+                cost_today: 0.0,
+                active_agents: 0,
+                period_start: 0,
+            })
+            .await
+            .unwrap();
+
+        // Deny task writes when fewer than 500 tokens remain (1000 - 400 = 600
+        // → no match, Developer allow at 800 grants). Below the threshold the
+        // Deny (810) outranks the Developer allow and must flip to 403.
+        state
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-budget-deny"),
+                name: "budget-remaining-deny".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 810,
+                effect: PolicyEffect::Deny,
+                conditions: vec![Condition {
+                    attribute: "env.budget_remaining".to_string(),
+                    operator: ConditionOp::LessThan,
+                    value: ConditionValue::Number(500),
+                }],
+                actions: vec!["write".to_string()],
+                resource_types: vec!["task".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: "system".to_string(),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/workspaces/:workspace_id/tasks", post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state.clone());
+
+        let token = member_jwt();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-1/tasks")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "env.budget_remaining (1000-400=600, not < 500) must not trip the deny"
+        );
+
+        // Burn the budget down to 950 used → 50 remaining < 500 → deny.
+        state
+            .budget_usages
+            .set_usage(&crate::api::budget::workspace_key("ws-1"), &gyre_domain::BudgetUsage {
+                entity_type: "workspace".to_string(),
+                entity_id: gyre_common::Id::new("ws-1"),
+                tokens_used_today: 950,
+                cost_today: 0.0,
+                active_agents: 0,
+                period_start: 0,
+            })
+            .await
+            .unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-1/tasks")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "env.budget_remaining (50 < 500) must flip the decision to deny"
+        );
+    }
+
+    /// `env.main_health` must be extracted from the real merge-queue pause
+    /// state for the addressed repo: `"red"` when the queue is paused,
+    /// `"green"` otherwise (§Attributes, source "Forge state").
+    #[tokio::test(flavor = "multi_thread")]
+    async fn env_main_health_from_real_forge_state() {
+        use axum::routing::{get, post};
+
+        let (state, _user_id) = setup_membership_state().await;
+
+        // Deny repo writes while the merge queue is paused (env.main_health
+        // == "red"). At 810 it outranks the Developer write allow (800);
+        // while the queue runs (green) the Deny does not match and the
+        // Developer allow grants the write.
+        state
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-main-health-deny"),
+                name: "main-health-red-deny".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 810,
+                effect: PolicyEffect::Deny,
+                conditions: vec![Condition {
+                    attribute: "env.main_health".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("red".to_string()),
+                }],
+                actions: vec!["write".to_string()],
+                resource_types: vec!["repo".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: "system".to_string(),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/repos/:id", post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state.clone());
+
+        let token = member_jwt();
+        let req = |method: &str, uri: &str| {
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("Authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        // No pause state recorded → queue green → Developer allow grants.
+        let resp = app
+            .clone()
+            .oneshot(req("POST", "/api/v1/repos/repo-health"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "env.main_health must read 'green' for an unpaused merge queue (deny not tripped)"
+        );
+
+        // Pause the queue for this repo via the real pause path → red → deny.
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-health"),
+            gyre_common::Id::new("ws-1"),
+            "repo-health".to_string(),
+            "/tmp/repo-health".to_string(),
+            0,
+        );
+        crate::merge_processor::pause_merge_queue(&state, &repo, "test pause").await;
+
+        let resp = app
+            .oneshot(req("POST", "/api/v1/repos/repo-health"))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "env.main_health must read 'red' for a paused merge queue and deny"
         );
     }
 }
