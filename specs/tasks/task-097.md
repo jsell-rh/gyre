@@ -2,7 +2,7 @@
 title: "Platform Model Secrets Domain Types + Port"
 spec_ref: "platform-model.md §7 Secrets Delivery"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "platform-model.md §7 Secrets Delivery"
   - "platform-model.md §7 Principle"
@@ -135,3 +135,12 @@ Verification on the repaired tree (all against merge-base `8cde8130`, current ma
 - `check-arch.sh`, `check-migration-versions.sh`, `check-mem-port-contracts.sh`, `check-fabricated-scope-defaults.sh`, `check-lossy-secret-conversion.sh`, `check-task-commit-attribution.sh` → all OK.
 
 No exemption files grew; no checks weakened; no test deletions.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/api/spawn.rs
+- scripts/unwritten-store-fields-exemptions.txt
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
