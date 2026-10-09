@@ -27,7 +27,7 @@ class InterruptedBaselineTest(unittest.TestCase):
             git('add', '.'); git('commit', '-qm', 'initial')
             base = git('rev-parse', 'HEAD')
             git('update-ref', 'refs/remotes/origin/main', base)
-            branch = 'devloop/task-001/attempt-1'
+            branch = 'pipeline/task-001/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-1'
             git('checkout', '-qb', branch)
             (repo / 'production.txt').write_text('hidden production repair\n')
             binary = b'\x00\xffhidden binary asset\x00'
@@ -75,7 +75,7 @@ class InterruptedBaselineTest(unittest.TestCase):
             (root / 'production.rs').write_text('foreign changes\n')
             git('stash', 'push', '-qm', 'foreign')
             foreign = git('rev-parse', 'stash')
-            branch = 'devloop/task-001/attempt-1'
+            branch = 'pipeline/task-001/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-1'
             git('checkout', '-qb', branch)
             (root / 'production.rs').write_text('real production repair\n')
             git('stash', 'push', '-qm', 'baseline probe')
@@ -92,6 +92,6 @@ class InterruptedBaselineTest(unittest.TestCase):
     def test_wrong_branch_is_not_silently_published_as_task_work(self):
         with tempfile.TemporaryDirectory() as directory:
             result = subprocess.run(['git', 'init', '-q', '-b', 'main', directory], check=True)
-            result = subprocess.run(['python3', str(Path(checkpoint.__file__).resolve()), 'devloop/task-001/attempt-1'], cwd=directory, capture_output=True, text=True)
+            result = subprocess.run(['python3', str(Path(checkpoint.__file__).resolve()), 'pipeline/task-001/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-1'], cwd=directory, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('assigned branch', result.stderr)

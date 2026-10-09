@@ -23,7 +23,7 @@ class RecoveryReceiptTest(unittest.TestCase):
             git('commit', '-qm', 'base')
             base = git('rev-parse', 'HEAD')
             git('update-ref', 'refs/remotes/origin/main', base)
-            git('checkout', '-qb', 'devloop/task-001/attempt-1')
+            git('checkout', '-qb', 'pipeline/task-001/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-1')
             (repo / 'feature.txt').write_text('after\n')
             published = root / 'published'
             published.write_text(base + '\n')
@@ -44,7 +44,7 @@ raise SystemExit(subprocess.call(['bash', '-c', command], cwd=os.environ['RECOVE
             self.assertEqual(receipt['base'], base)
             self.assertEqual(receipt['head'], base)
             self.assertEqual(receipt['tree'], git('write-tree'))
-            self.assertEqual(receipt['branch'], 'devloop/task-001/attempt-1')
+            self.assertEqual(receipt['branch'], 'pipeline/task-001/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-1')
             self.assertTrue(receipt['published_known'])
             self.assertEqual(receipt['published_head'], base)
             self.assertEqual(receipt['patch_sha256'], hashlib.sha256(patch.read_bytes()).hexdigest())
