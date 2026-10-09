@@ -15,7 +15,6 @@
   import Modal from './lib/Modal.svelte';
   import PresenceAvatars from './lib/PresenceAvatars.svelte';
   import DetailPanel from './lib/DetailPanel.svelte';
-  import Sidebar from './lib/Sidebar.svelte';
   import { onMount, setContext, tick } from 'svelte';
   import { setAuthToken, api } from './lib/api.js';
   import { toast as showToast } from './lib/toast.svelte.js';
@@ -82,17 +81,6 @@
   let wsDropdownEl = $state(null);
 
   let mobileDrawerOpen = $state(false);
-  let sidebarCollapsed = $state(false);
-
-  // Restore sidebar collapsed state from localStorage
-  try {
-    sidebarCollapsed = localStorage.getItem('gyre_sidebar_collapsed') === 'true';
-  } catch { /* private browsing */ }
-
-  function toggleSidebar() {
-    sidebarCollapsed = !sidebarCollapsed;
-    try { localStorage.setItem('gyre_sidebar_collapsed', String(sidebarCollapsed)); } catch { /* private browsing */ }
-  }
   let createWsModalOpen = $state(false);
   let createWsForm = $state({ name: '', description: '' });
   let createWsSaving = $state(false);
@@ -625,18 +613,6 @@
       return;
     }
 
-    // ⌘1-6: sidebar navigation (HSI §1.8)
-    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
-      const sidebarMap = { '1': 'inbox', '2': 'briefing', '3': 'explorer', '4': 'specs', '5': 'meta-specs', '6': 'admin' };
-      const item = sidebarMap[e.key];
-      if (item) {
-        e.preventDefault();
-        gKeyPending = false;
-        handleSidebarNavigate(item);
-        return;
-      }
-    }
-
     // Esc: close overlay / panel / return to workspace home
     if (e.key === 'Escape') {
       if (shortcutsOpen) { shortcutsOpen = false; gKeyPending = false; return; }
@@ -651,6 +627,7 @@
       gKeyPending = false;
       return;
     }
+
 
     // /: focus search (suppressed in text inputs and when already open)
     if (e.key === '/' && !inInput && !searchOpen) {
@@ -694,35 +671,35 @@
             e.preventDefault();
             goToAgentRules();
             return;
-          case '1': // g 1 → Specs tab (repo mode only)
+          case '1': // g 1 → Specs tab (repo mode only, no-op at workspace home)
             e.preventDefault();
             if (mode === 'repo') goToRepoTab('specs');
             return;
-          case '2': // g 2 → Tasks tab (repo mode only)
-            e.preventDefault();
-            if (mode === 'repo') goToRepoTab('tasks');
-            return;
-          case '3': // g 3 → MRs tab (repo mode only)
-            e.preventDefault();
-            if (mode === 'repo') goToRepoTab('mrs');
-            return;
-          case '4': // g 4 → Agents tab (repo mode only)
-            e.preventDefault();
-            if (mode === 'repo') goToRepoTab('agents');
-            return;
-          case '5': // g 5 → Architecture tab (repo mode only)
+          case '2': // g 2 → Architecture tab (repo mode only)
             e.preventDefault();
             if (mode === 'repo') goToRepoTab('architecture');
             return;
-          case '6': // g 6 → Decisions tab (repo mode only)
+          case '3': // g 3 → Decisions tab (repo mode only)
             e.preventDefault();
             if (mode === 'repo') goToRepoTab('decisions');
             return;
-          case '7': // g 7 → Code tab (repo mode only)
+          case '4': // g 4 → Code tab (repo mode only)
             e.preventDefault();
             if (mode === 'repo') goToRepoTab('code');
             return;
-          case '8': // g 8 → Settings tab (repo mode only)
+          case '5': // g 5 → Tasks tab (repo mode only — additive superset)
+            e.preventDefault();
+            if (mode === 'repo') goToRepoTab('tasks');
+            return;
+          case '6': // g 6 → MRs tab (repo mode only — additive superset)
+            e.preventDefault();
+            if (mode === 'repo') goToRepoTab('mrs');
+            return;
+          case '7': // g 7 → Agents tab (repo mode only — additive superset)
+            e.preventDefault();
+            if (mode === 'repo') goToRepoTab('agents');
+            return;
+          case '8': // g 8 → Settings tab (repo mode only — additive superset)
             e.preventDefault();
             if (mode === 'repo') goToRepoTab('settings');
             return;
@@ -796,115 +773,103 @@
 
   let trustLevel = $derived(currentWorkspace?.trust_level ?? null);
 
-  // ── Sidebar active item (HSI §1.3) ──────────────────────────────────
-  // Maps current mode to the sidebar item that should be highlighted.
-  // The sidebar items are fixed — only the active indicator changes.
-  let activeSidebarItem = $derived.by(() => {
-    if (mode === 'workspace_home') return workspaceActiveSection; // Tracks Inbox/Briefing/Explorer/Specs section clicks
-    if (mode === 'agent_rules') return 'meta-specs';
-    if (mode === 'workspace_settings') return 'admin';
+  // ── Active navigation section (ui-navigation.md §8 Mobile) ───────────
+  // No persistent sidebar (Principle 5): the only navigation that highlights
+  // is the mobile drawer's section links. Maps current mode to the
+  // workspace-home section (or sub-page) the user is on.
+  let activeSection = $derived.by(() => {
+    if (mode === 'workspace_home') return workspaceActiveSection;
+    if (mode === 'agent_rules') return 'agent-rules';
+    if (mode === 'workspace_settings') return 'settings';
     if (mode === 'cross_workspace') {
-      if (crossWorkspaceTab === 'settings') return 'admin';
-      if (crossWorkspaceTab === 'agent-rules') return 'meta-specs';
-      // Dashboard (/all): Inbox/Briefing/Specs are scroll sections of the
-      // cross-workspace page; Explorer is the workspace cards grid (HSI §1.3
-      // tenant-scope table, ui-navigation.md §10).
+      if (crossWorkspaceTab === 'settings') return 'settings';
+      if (crossWorkspaceTab === 'agent-rules') return 'agent-rules';
       return tenantActiveSection;
     }
     if (mode === 'repo') {
-      // Map every repo tab (REPO_TABS: specs, tasks, mrs, agents, architecture,
-      // dependencies, decisions, code, settings) to a sidebar item (HSI §1.3).
-      if (repoTab === 'specs' || repoTab === 'tasks') return 'specs'; // Specs column covers specs + implementation progress
-      // Code tab (branches, commits, MRs, merge queue) and the C4 graph are part of the Explorer per HSI §1.3
-      if (repoTab === 'architecture' || repoTab === 'dependencies' || repoTab === 'code' || repoTab === 'mrs' || repoTab === 'agents') return 'explorer';
-      if (repoTab === 'decisions') return 'inbox';
-      if (repoTab === 'settings') return 'admin';
-      return 'specs'; // exhaustive-state:ok — all REPO_TABS enumerated above; defensive fallback
+      // Repo mode: tabs are in-page; the drawer highlights the repo tab's
+      // home section so the user sees where the tab lives on workspace home.
+      if (repoTab === 'specs' || repoTab === 'tasks') return 'specs';
+      if (repoTab === 'architecture' || repoTab === 'dependencies' || repoTab === 'code' || repoTab === 'mrs' || repoTab === 'agents') return 'repos';
+      if (repoTab === 'decisions') return 'decisions';
+      if (repoTab === 'settings') return 'settings';
+      return 'repos';
     }
-    if (mode === 'profile') return 'admin';
-    return 'inbox';
+    return 'decisions';
   });
 
-  /** Navigate via sidebar item, preserving current scope (HSI §1.3). */
-  function handleSidebarNavigate(itemId) {
+  /** Scroll to a workspace-home section, navigating home first if needed.
+   *  ui-navigation.md §8 Mobile: drawer links navigate to scroll anchors on
+   *  the workspace home page. At tenant scope the same sections exist on the
+   *  cross-workspace dashboard (§10) — never escape to workspace scope. */
+  function scrollWorkspaceSection(sectionId) {
+    tick().then(() => document.querySelector(`[data-testid="section-${sectionId}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  }
+
+  function handleSectionNavigate(sectionId) {
     if (mode === 'repo' && currentRepo) {
-      // In repo mode: sidebar items switch to a repo tab
-      switch (itemId) {
-        case 'inbox':      goToRepoTab('decisions'); return;
-        case 'specs':      goToRepoTab('specs'); return;
-        case 'explorer':   goToRepoTab('architecture'); return;
-        case 'admin':      goToRepoTab('settings'); return;
+      // In repo mode the section anchors map to repo tabs where one exists.
+      switch (sectionId) {
+        case 'decisions': goToRepoTab('decisions'); return;
+        case 'specs':     goToRepoTab('specs'); return;
+        case 'repos':     goToRepoTab('architecture'); return;
         case 'briefing':
-          // No repo-scoped briefing tab — go to workspace home and highlight Briefing.
+          // No repo-scoped briefing tab — go to workspace home Briefing section.
           goToWorkspaceHome(currentWorkspace);
           workspaceActiveSection = 'briefing';
-          tick().then(() => document.querySelector('[data-testid="section-briefing"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+          scrollWorkspaceSection('briefing');
           return;
-        case 'meta-specs': goToAgentRules(); return;
+        case 'agent-rules': goToAgentRules(); return;
+        case 'settings':   goToRepoTab('settings'); return;
       }
     } else if (mode === 'cross_workspace') {
-      // At tenant scope (/all and its sub-pages): navigate within the
-      // cross-workspace view — preserve tenant scope (HSI §1.3 tenant-scope
-      // table, ui-navigation.md §10). Never fall through to workspace scope.
-      switch (itemId) {
-        case 'inbox':
+      // Tenant scope: sections of the cross-workspace dashboard (§10).
+      switch (sectionId) {
+        case 'decisions':
         case 'briefing':
         case 'specs':
-          // Scroll sections of the cross-workspace dashboard (Inbox = the
-          // Decisions queue across workspaces).
+        case 'repos':
           goToCrossWorkspace();
-          tenantActiveSection = itemId;
-          tick().then(() => document.querySelector(`[data-testid="section-${itemId === 'inbox' ? 'decisions' : itemId}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+          tenantActiveSection = sectionId;
+          scrollWorkspaceSection(sectionId);
           return;
-        case 'explorer':
-          // The workspace cards grid is the Explorer content at tenant scope.
-          goToCrossWorkspace();
-          return;
-        case 'meta-specs':
-          // Tenant meta-spec catalog.
+        case 'agent-rules':
           goToTenantAgentRules();
           return;
-        case 'admin':
-          // Tenant settings are admin-only (ui-navigation.md §10) — no-op for
-          // non-admins rather than escaping to workspace scope.
+        case 'settings':
+          // Tenant settings are admin-only (§10) — no-op for non-admins
+          // rather than escaping to workspace scope.
           if (userIsAdmin) goToTenantSettings();
           return;
       }
     } else {
-      // At workspace scope: navigate to the appropriate view
-      switch (itemId) {
-        case 'inbox':
+      // Workspace scope: navigate to the section on the workspace home.
+      switch (sectionId) {
+        case 'decisions':
           goToWorkspaceHome(currentWorkspace);
-          tick().then(() => document.querySelector('[data-testid="section-decisions"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+          scrollWorkspaceSection('decisions');
           return;
         case 'briefing':
           goToWorkspaceHome(currentWorkspace);
           workspaceActiveSection = 'briefing';
-          tick().then(() => document.querySelector('[data-testid="section-briefing"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+          scrollWorkspaceSection('briefing');
           return;
-        case 'explorer':
-          if (!currentWorkspace) { goToCrossWorkspace(); return; }
-          goToWorkspaceHome(currentWorkspace);
-          workspaceActiveSection = 'explorer';
-          // Signal WorkspaceHome to expand its Architecture section so the
-          // scroll target has visible content (HSI §1.3 Explorer target).
-          archExpandSignal += 1;
-          tick().then(() => document.querySelector('[data-testid="section-architecture"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
-          return;
+        case 'repos':
         case 'specs':
           goToWorkspaceHome(currentWorkspace);
-          workspaceActiveSection = 'specs';
-          tick().then(() => document.querySelector('[data-testid="section-specs"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+          workspaceActiveSection = sectionId;
+          scrollWorkspaceSection(sectionId);
           return;
-        case 'meta-specs':
+        case 'agent-rules':
           goToAgentRules();
           return;
-        case 'admin':
+        case 'settings':
           goToWorkspaceSettings();
           return;
       }
     }
   }
+
 
   // ── Page title ────────────────────────────────────────────────────────
   $effect(() => {
@@ -1197,17 +1162,9 @@
 
 {#if !$isLoading}
 <div class="app">
-  <!-- Sidebar: permanent 6-item navigation (HSI §1.3) -->
-  <Sidebar
-    activeItem={activeSidebarItem}
-    collapsed={sidebarCollapsed}
-    onNavigate={handleSidebarNavigate}
-    onToggleCollapse={toggleSidebar}
-    {decisionsCount}
-    {serverVersion}
-  />
-
-  <!-- Main column: topbar + content + status bar -->
+  <!-- No persistent sidebar (ui-navigation.md Principle 5): the shell is
+      topbar + content + status bar; navigation is workspace-home sections
+      and repo-mode tabs. Mobile drawer (§8) links to home sections. -->
   <div class="main">
 
     <!-- ── Topbar (always visible) ──────────────────────────────────── -->
@@ -1603,18 +1560,17 @@
         </div>
         <ul class="drawer-links" role="list">
           {#each [
-            { id: 'inbox', label: 'Inbox' },
+            { id: 'decisions', label: 'Decisions' },
+            { id: 'repos', label: 'Repos' },
             { id: 'briefing', label: 'Briefing' },
-            { id: 'explorer', label: 'Explorer' },
             { id: 'specs', label: 'Specs' },
-            { id: 'meta-specs', label: 'Meta-specs' },
-            { id: 'admin', label: 'Admin' },
+            { id: 'agent-rules', label: 'Agent Rules' },
           ] as item (item.id)}
             <li>
               <button
                 class="drawer-link"
-                class:active={activeSidebarItem === item.id}
-                onclick={() => { mobileDrawerOpen = false; handleSidebarNavigate(item.id); }}
+                class:active={activeSection === item.id}
+                onclick={() => { mobileDrawerOpen = false; handleSectionNavigate(item.id); }}
                 data-testid={`drawer-item-${item.id}`}
               >{item.label}</button>
             </li>
@@ -1815,22 +1771,16 @@
       <div class="shortcuts-body">
         <dl class="shortcuts-list">
           <div class="shortcut-row"><dt><kbd>⌘K</kbd></dt><dd>{$t('shortcuts.global_search')}</dd></div>
-          <div class="shortcut-row"><dt><kbd>⌘1</kbd></dt><dd>Inbox</dd></div>
-          <div class="shortcut-row"><dt><kbd>⌘2</kbd></dt><dd>Briefing</dd></div>
-          <div class="shortcut-row"><dt><kbd>⌘3</kbd></dt><dd>Explorer</dd></div>
-          <div class="shortcut-row"><dt><kbd>⌘4</kbd></dt><dd>Specs</dd></div>
-          <div class="shortcut-row"><dt><kbd>⌘5</kbd></dt><dd>Meta-specs</dd></div>
-          <div class="shortcut-row"><dt><kbd>⌘6</kbd></dt><dd>Admin</dd></div>
           <div class="shortcut-row"><dt><kbd>g h</kbd></dt><dd>{$t('shortcuts.workspace_home')}</dd></div>
           <div class="shortcut-row"><dt><kbd>g s</kbd></dt><dd>{$t('shortcuts.workspace_settings')}</dd></div>
           <div class="shortcut-row"><dt><kbd>g a</kbd></dt><dd>{$t('shortcuts.agent_rules')}</dd></div>
           <div class="shortcut-row"><dt><kbd>g 1</kbd></dt><dd>{$t('shortcuts.specs_tab')}</dd></div>
-          <div class="shortcut-row"><dt><kbd>g 2</kbd></dt><dd>{$t('shortcuts.tasks_tab')}</dd></div>
-          <div class="shortcut-row"><dt><kbd>g 3</kbd></dt><dd>{$t('shortcuts.mrs_tab')}</dd></div>
-          <div class="shortcut-row"><dt><kbd>g 4</kbd></dt><dd>{$t('shortcuts.agents_tab')}</dd></div>
-          <div class="shortcut-row"><dt><kbd>g 5</kbd></dt><dd>{$t('shortcuts.architecture_tab')}</dd></div>
-          <div class="shortcut-row"><dt><kbd>g 6</kbd></dt><dd>{$t('shortcuts.decisions_tab')}</dd></div>
-          <div class="shortcut-row"><dt><kbd>g 7</kbd></dt><dd>{$t('shortcuts.code_tab')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 2</kbd></dt><dd>{$t('shortcuts.architecture_tab')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 3</kbd></dt><dd>{$t('shortcuts.decisions_tab')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 4</kbd></dt><dd>{$t('shortcuts.code_tab')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 5</kbd></dt><dd>{$t('shortcuts.tasks_tab')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 6</kbd></dt><dd>{$t('shortcuts.mrs_tab')}</dd></div>
+          <div class="shortcut-row"><dt><kbd>g 7</kbd></dt><dd>{$t('shortcuts.agents_tab')}</dd></div>
           <div class="shortcut-row"><dt><kbd>g 8</kbd></dt><dd>{$t('shortcuts.settings_tab')}</dd></div>
           <div class="shortcut-row"><dt><kbd>Esc</kbd></dt><dd>{$t('shortcuts.close_panel')}</dd></div>
           <div class="shortcut-row"><dt><kbd>/</kbd></dt><dd>{$t('shortcuts.focus_search')}</dd></div>
