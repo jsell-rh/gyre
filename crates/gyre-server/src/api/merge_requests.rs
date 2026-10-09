@@ -1350,6 +1350,145 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
+    /// HSI §12 Judgment Ledger: a human approving an MR with a FAILED gate
+    /// result must write a `gate_override` audit event per failed gate,
+    /// carrying mr_id/gate_id/from/to — the event the judgment ledger
+    /// aggregates. An agent-token approval (no user identity) must NOT.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn human_approval_on_failed_gate_writes_gate_override_event() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use gyre_domain::GateResult;
+        use gyre_ports::AuditQueryFilter;
+
+        let state = make_test_state_with_jwt();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Override test").await;
+
+        // Seed one FAILED and one PASSED gate result for the MR.
+        let failed = GateResult {
+            id: Id::new("gr-fail-1"),
+            gate_id: Id::new("gate-1"),
+            mr_id: Id::new(&mr_id),
+            status: gyre_common::GateStatus::Failed,
+            output: Some("exit 1".into()),
+            started_at: Some(1000),
+            finished_at: Some(1010),
+        };
+        let passed = GateResult {
+            id: Id::new("gr-pass-1"),
+            gate_id: Id::new("gate-2"),
+            mr_id: Id::new(&mr_id),
+            status: gyre_common::GateStatus::Passed,
+            output: None,
+            started_at: Some(1000),
+            finished_at: Some(1005),
+        };
+        state.gate_results.save(&failed).await.unwrap();
+        state.gate_results.save(&passed).await.unwrap();
+
+        // An agent-token approval (user_id None) — must not write an event.
+        let agent_body = serde_json::json!({
+            "reviewer_agent_id": "agent-1",
+            "decision": "approved"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&agent_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let events0 = state
+            .audit
+            .query(&AuditQueryFilter {
+                event_type: Some("gate_override".to_string()),
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            events0.is_empty(),
+            "agent-token approval must not write gate_override: {events0:?}"
+        );
+
+        // A human (OIDC JWT) approves — one gate_override per failed gate.
+        let jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "judg-sub-2",
+                "preferred_username": "judge-2",
+                "realm_access": { "roles": ["admin"] }
+            }),
+            3600,
+        );
+        let human_body = serde_json::json!({
+            "reviewer_agent_id": "judge-2",
+            "decision": "approved"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::from(serde_json::to_vec(&human_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let events = state
+            .audit
+            .query(&AuditQueryFilter {
+                event_type: Some("gate_override".to_string()),
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one event per FAILED gate, not per gate: {events:?}");
+        let ev = &events[0];
+        let acting_user = state
+            .users
+            .find_by_external_id("judg-sub-2")
+            .await
+            .unwrap()
+            .expect("JWT auth must provision the acting user");
+        assert_eq!(ev.user_id.as_deref().map(Id::as_str), Some(acting_user.id.as_str()));
+        assert_eq!(ev.detail["mr_id"], mr_id);
+        assert_eq!(ev.detail["gate_id"], "gate-1");
+        assert_eq!(ev.detail["from_status"], "failed");
+        assert_eq!(ev.detail["to_status"], "overridden");
+
+        // The judgment ledger surfaces it as a gate entry via /users/me/judgments.
+        let ledger = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/judgments?type=gate")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ledger.status(), StatusCode::OK);
+        let ledger_json = body_json(ledger).await;
+        let items = ledger_json["judgments"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "ledger must surface the override: {items:?}");
+        assert_eq!(items[0]["judgment_type"], "gate");
+        assert_eq!(items[0]["entity_ref"], mr_id);
+    }
+
     // ── Attestation tests ────────────────────────────────────────────────────
 
     #[tokio::test]

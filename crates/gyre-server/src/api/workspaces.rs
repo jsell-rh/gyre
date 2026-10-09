@@ -965,4 +965,112 @@ mod tests {
             "Guided preset must not seed trust: policies"
         );
     }
+
+    /// HSI §12 Judgment Ledger: a successful trust transition via
+    /// PUT /workspaces/:id must write a `trust_change` audit event attributed
+    /// to the acting user, carrying from/to and workspace_id — the event the
+    /// judgment ledger aggregates. A no-change PUT must NOT write one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn trust_transition_writes_trust_change_audit_event() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use gyre_ports::AuditQueryFilter;
+
+        let state = make_test_state_with_jwt();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Create a Guided workspace as the admin static token.
+        let body = serde_json::json!({ "tenant_id": "t1", "name": "W", "slug": "w", "trust_level": "Guided" });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let ws_id = body_json(create_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // A human (OIDC JWT, admin role) performs the transition.
+        let jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "judg-sub-1",
+                "preferred_username": "judge-1",
+                "realm_access": { "roles": ["admin"] }
+            }),
+            3600,
+        );
+
+        let update = serde_json::json!({ "trust_level": "Supervised" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The trust_change event exists, attributed to the acting human user.
+        // (AuditQueryFilter::default() has limit 0 — set it explicitly.)
+        let events = state
+            .audit
+            .query(&AuditQueryFilter {
+                event_type: Some("trust_change".to_string()),
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let ev = &events[0];
+        let acting_user = state
+            .users
+            .find_by_external_id("judg-sub-1")
+            .await
+            .unwrap()
+            .expect("JWT auth must provision the acting user");
+        assert_eq!(ev.user_id.as_deref().map(Id::as_str), Some(acting_user.id.as_str()));
+        assert_eq!(ev.workspace_id.as_deref().map(Id::as_str), Some(ws_id.as_str()));
+        assert_eq!(ev.detail["from"], "Guided");
+        assert_eq!(ev.detail["to"], "Supervised");
+
+        // Same-value PUT: no transition, no second event.
+        let same = serde_json::json!({ "trust_level": "Supervised" });
+        let resp2 = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::from(serde_json::to_vec(&same).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let events2 = state
+            .audit
+            .query(&AuditQueryFilter {
+                event_type: Some("trust_change".to_string()),
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(events2.len(), 1, "no-change PUT must not write trust_change: {events2:?}");
+    }
 }
