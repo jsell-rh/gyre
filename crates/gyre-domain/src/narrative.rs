@@ -147,8 +147,11 @@ impl NarrativeGrounding {
 ///
 /// The extractor stores `nodes_added`/`nodes_removed`/`nodes_modified` either
 /// as detail arrays (current format) or as bare counts (legacy/compact
-/// format). `None` detail with `Some(count)` means count-only.
-#[derive(Debug, Default)]
+/// format). `None` detail with `Some(count)` means count-only. Edge fields
+/// follow the same evolution: `edges_added`/`edges_removed` are detail arrays
+/// (`{edge_type, source, target}` qualified names) when agent context was
+/// present at extraction time, bare counts otherwise.
+#[derive(Default)]
 struct DeltaFacts {
     added: Vec<AddedFact>,
     removed: Vec<String>,
@@ -156,8 +159,10 @@ struct DeltaFacts {
     added_count_only: Option<u64>,
     removed_count_only: Option<u64>,
     modified_count_only: Option<u64>,
-    edges_added: u64,
-    edges_removed: u64,
+    edges_added: Vec<EdgeFact>,
+    edges_removed: Vec<EdgeFact>,
+    edges_added_count_only: Option<u64>,
+    edges_removed_count_only: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -165,6 +170,15 @@ struct AddedFact {
     name: String,
     node_type: String,
     qualified_name: String,
+}
+
+/// Compact edge detail (`DeltaEdgeEntry` in `delta_json`): type plus endpoint
+/// qualified names, rendered by the §6 edge template.
+#[derive(Debug)]
+struct EdgeFact {
+    edge_type: String,
+    source: String,
+    target: String,
 }
 
 #[derive(Debug)]
@@ -254,15 +268,34 @@ fn parse_delta_facts(delta_json: &str) -> DeltaFacts {
         f.modified_count_only = Some(n);
     }
 
-    f.edges_added = root
-        .get("edges_added")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    f.edges_removed = root
-        .get("edges_removed")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    f.edges_added = parse_edges(root.get("edges_added"), &mut f.edges_added_count_only);
+    f.edges_removed = parse_edges(root.get("edges_removed"), &mut f.edges_removed_count_only);
     f
+}
+
+/// Parse one `edges_*` field: detail array (current format, agent context)
+/// or bare count (legacy/compact format).
+fn parse_edges(
+    value: Option<&serde_json::Value>,
+    count_only: &mut Option<u64>,
+) -> Vec<EdgeFact> {
+    match value {
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|e| {
+                Some(EdgeFact {
+                    edge_type: e.get("edge_type")?.as_str()?.to_string(),
+                    source: e.get("source")?.as_str()?.to_string(),
+                    target: e.get("target")?.as_str()?.to_string(),
+                })
+            })
+            .collect(),
+        Some(serde_json::Value::Number(n)) => {
+            *count_only = n.as_u64();
+            Vec::new()
+        }
+        _ => Vec::new(),
+    }
 }
 
 fn name_of(qualified_name: &str) -> &str {
@@ -397,11 +430,41 @@ fn facts_json(
     if let Some(n) = f.modified_count_only {
         root.insert("nodes_modified_count".into(), n.into());
     }
-    if f.edges_added > 0 {
-        root.insert("edges_added".into(), f.edges_added.into());
+    if !f.edges_added.is_empty() {
+        let edges: Vec<serde_json::Value> = f
+            .edges_added
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "edge_type": e.edge_type,
+                    "source": e.source,
+                    "target": e.target,
+                })
+            })
+            .collect();
+        root.insert("edges_added".into(), edges.into());
+    } else if let Some(n) = f.edges_added_count_only {
+        if n > 0 {
+            root.insert("edges_added".into(), n.into());
+        }
     }
-    if f.edges_removed > 0 {
-        root.insert("edges_removed".into(), f.edges_removed.into());
+    if !f.edges_removed.is_empty() {
+        let edges: Vec<serde_json::Value> = f
+            .edges_removed
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "edge_type": e.edge_type,
+                    "source": e.source,
+                    "target": e.target,
+                })
+            })
+            .collect();
+        root.insert("edges_removed".into(), edges.into());
+    } else if let Some(n) = f.edges_removed_count_only {
+        if n > 0 {
+            root.insert("edges_removed".into(), n.into());
+        }
     }
     serde_json::Value::Object(root)
 }
@@ -532,19 +595,61 @@ pub fn generate_template_narrative(
     }
 
     // ── Relationships ────────────────────────────────────────────────────
-    if f.edges_added > 0 {
-        sentences.push(format!(
-            "{} new relationship{} established.",
-            f.edges_added,
-            if f.edges_added == 1 { "" } else { "s" }
-        ));
+    // Per-edge template (plan contract, realized-model.md §6):
+    //   "New {edge_type} relationship: `{source}` → `{target}`."
+    // Grouped counts above GROUP_THRESHOLD keep large diffs readable.
+    if !f.edges_added.is_empty() {
+        if f.edges_added.len() <= GROUP_THRESHOLD {
+            for e in &f.edges_added {
+                sentences.push(format!(
+                    "New {} relationship: `{}` → `{}`.",
+                    e.edge_type, e.source, e.target
+                ));
+            }
+        } else {
+            // Group by edge type (BTreeMap: deterministic type order).
+            let mut by_type: BTreeMap<&str, usize> = BTreeMap::new();
+            for e in &f.edges_added {
+                *by_type.entry(e.edge_type.as_str()).or_insert(0) += 1;
+            }
+            let parts: Vec<String> = by_type.iter().map(|(t, n)| format!("{n} {t}")).collect();
+            sentences.push(format!(
+                "{} new relationships established ({}).",
+                f.edges_added.len(),
+                parts.join(", ")
+            ));
+        }
+    } else if let Some(n) = f.edges_added_count_only {
+        if n > 0 {
+            sentences.push(format!(
+                "{} new relationship{} established.",
+                n,
+                if n == 1 { "" } else { "s" }
+            ));
+        }
     }
-    if f.edges_removed > 0 {
-        sentences.push(format!(
-            "{} relationship{} removed.",
-            f.edges_removed,
-            if f.edges_removed == 1 { "" } else { "s" }
-        ));
+    if !f.edges_removed.is_empty() {
+        if f.edges_removed.len() <= GROUP_THRESHOLD {
+            for e in &f.edges_removed {
+                sentences.push(format!(
+                    "{} relationship removed: `{}` → `{}`.",
+                    e.edge_type, e.source, e.target
+                ));
+            }
+        } else {
+            sentences.push(format!(
+                "{} relationships removed.",
+                f.edges_removed.len()
+            ));
+        }
+    } else if let Some(n) = f.edges_removed_count_only {
+        if n > 0 {
+            sentences.push(format!(
+                "{} relationship{} removed.",
+                n,
+                if n == 1 { "" } else { "s" }
+            ));
+        }
     }
 
     // ── Commit-level grounding ───────────────────────────────────────────
@@ -829,6 +934,61 @@ mod tests {
         assert_eq!(facts["nodes_added"][0]["implements"][0], "FullTextPort");
         assert_eq!(facts["nodes_added"][0]["specs"][0], "specs/system/search.md");
         assert_eq!(facts["nodes_added"][0]["fields"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn edge_detail_renders_plan_template() {
+        // The plan's normative edge template (realized-model.md §6):
+        // "New {edge_type} relationship: `{source}` → `{target}`."
+        let g = NarrativeGrounding::default();
+        let d = delta(
+            r#"{"edges_added":[{"edge_type":"implements","source":"gyre_domain::search::VectorIndex","target":"gyre_domain::search::FullTextPort"}],"edges_removed":[{"edge_type":"calls","source":"gyre_domain::search::FtsIndex","target":"gyre_domain::search::Tokenizer"}]}"#,
+        );
+        let n = generate_template_narrative(&d, &g, None);
+        assert!(
+            n.contains("New implements relationship: `gyre_domain::search::VectorIndex` → `gyre_domain::search::FullTextPort`."),
+            "{n}"
+        );
+        assert!(
+            n.contains("calls relationship removed: `gyre_domain::search::FtsIndex` → `gyre_domain::search::Tokenizer`."),
+            "{n}"
+        );
+    }
+
+    #[test]
+    fn edge_details_group_above_threshold() {
+        let g = NarrativeGrounding::default();
+        let d = delta(
+            r#"{"edges_added":[{"edge_type":"contains","source":"a::M","target":"a::M::X"},{"edge_type":"contains","source":"a::M","target":"a::M::Y"},{"edge_type":"implements","source":"a::X","target":"a::T"},{"edge_type":"implements","source":"a::Y","target":"a::T"}]}"#,
+        );
+        let n = generate_template_narrative(&d, &g, None);
+        assert!(n.contains("4 new relationships established (2 contains, 2 implements)."), "{n}");
+        assert!(!n.contains("New contains relationship"), "{n}");
+    }
+
+    #[test]
+    fn edge_detail_entries_with_missing_fields_skipped() {
+        let g = NarrativeGrounding::default();
+        let d = delta(
+            r#"{"edges_added":[{"edge_type":"implements","source":"a::X"},{"edge_type":"calls","source":"a::P","target":"a::Q"},{"target":"a::Z"}]}"#,
+        );
+        let n = generate_template_narrative(&d, &g, None);
+        assert!(n.contains("New calls relationship: `a::P` → `a::Q`."), "{n}");
+    }
+
+    #[test]
+    fn facts_json_carries_edge_details() {
+        let g = NarrativeGrounding::default();
+        let d = delta(
+            r#"{"edges_added":[{"edge_type":"implements","source":"gyre_domain::search::VectorIndex","target":"gyre_domain::search::FullTextPort"}]}"#,
+        );
+        let facts = build_narrative_facts(&d, &g, None);
+        assert_eq!(facts["edges_added"][0]["edge_type"], "implements");
+        assert_eq!(
+            facts["edges_added"][0]["source"],
+            "gyre_domain::search::VectorIndex"
+        );
+        assert_eq!(facts["edges_added"][0]["target"], "gyre_domain::search::FullTextPort");
     }
 
     #[test]

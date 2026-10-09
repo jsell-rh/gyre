@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "realized-model.md §6 Narrative Generation"
-commits: ["95f1a147e04b1e0ff8b380aa37a9c5556c39af01", "f88e55b70b980e2f9823a51315097d3e8a8b6334"]
+commits: ["95f1a147e04b1e0ff8b380aa37a9c5556c39af01", "f88e55b70b980e2f9823a51315097d3e8a8b6334", "cb4d2fbc3bdeb64d8b4964b63f2465a49cce71d6"]
 ---
 
 ## Spec Excerpt
@@ -137,15 +137,37 @@ progress and evidence live in frontmatter and this operational section.
   by planted-bug probes. `check-task-commit-attribution.sh` drift inherited from the base (main's
   `a781ede2`, feat(task-210), unattributed at base time) is recorded in `specs/tasks/task-210.md`
   `commits:` by commit `04ce9194` — task-063/task-160 precedent; no exemption entries added.
+- **Edge-detail template** (this round's substantive repair): the assigned plan's normative edge
+  template `"New {edge_type} relationship: \`{source}\` → \`{target}\`."` was unrenderable from the
+  shipped `delta_json`, which recorded `edges_added`/`edges_removed` as bare counts. The extractor
+  now records `DeltaEdgeEntry { edge_type, source, target }` arrays (endpoint qualified names
+  resolved from the merged node state — new edges against final nodes, removed edges against the
+  pre-extraction state since their endpoints are soft-deleted by the pass; unknown endpoints omit
+  the entry rather than guess a name) when agent context is present, keeping bare counts in the
+  compact no-agent branch. `generate_template_narrative` renders the per-edge template at/below
+  `GROUP_THRESHOLD` (3), groups by edge type above it ("4 new relationships established (2
+  contains, 2 implements)."), and keeps the legacy count sentence for count-only `delta_json`
+  (old records render unchanged). `build_narrative_facts` carries the edge arrays to the LLM
+  prompt. Backward compatible: `parse_delta_facts` accepts both array and count forms.
+  Tests: 4 domain tests (plan-template rendering for added+removed edges, grouping above
+  threshold, malformed-entry skipping, facts-JSON edge details) + 2 extraction tests
+  (`edge_entry` qualified-name resolution and unknown-endpoint skipping) + 1 compact-delta test.
 
 Test evidence this round (exact commands and output under `/tmp/stage/review-evidence/`,
 `CARGO_HOME=/tmp/cargo-home`, `CARGO_TARGET_DIR=/tmp/gyre-target`):
 
-- `cargo test -p gyre-domain --lib narrative` → **11 passed, 0 failed**
-  (`domain-narrative-r3.log`).
-- `cargo test -p gyre-server --lib -- narrative briefing` → **20 passed, 0 failed** (8m17s warm
-  build; includes the 3 task tests driving the real router and the LLM echo/fallback paths)
-  (`server-narrative-briefing-r3.log`).
+- `cargo test -p gyre-domain --lib narrative` → **15 passed, 0 failed** (11 prior + 4 new
+  edge-detail tests) (`domain-narrative-r3b.log`).
+- `cargo test -p gyre-domain --lib` → **378 passed, 0 failed** (full lib).
+- `cargo test -p gyre-common --lib` → **94 passed, 0 failed** (full lib, `DeltaEdgeEntry`).
+- `cargo test -p gyre-server --lib -- narrative briefing` → **20 passed, 0 failed**
+  (`server-narrative-briefing-r3.log`; includes the 3 task tests driving the real router and the
+  LLM echo/fallback paths).
+- `cargo test -p gyre-server --lib graph_extraction` → **19 passed, 0 failed** (17 prior + 2 new
+  `edge_entry` tests) (`server-extraction-r3b.log`).
+- Mechanical gates: 21/21 PASS including arch, template-substitution, byte-slice-truncation,
+  task-commit-attribution, migration-versions, dead-message-kinds, unbounded-external-http,
+  inert-enforcement, lossy-secret-conversion (`gates-r3-edge-template.log`).
 
 Transport restriction recorded: this sandbox cannot accept TCP listeners (errno 95,
 `/tmp/stage/capabilities.json`), so no live HTTP probe of the timeline/briefing endpoints was run;

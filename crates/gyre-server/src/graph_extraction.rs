@@ -9,9 +9,11 @@
 //! divergence check compares the recorded delta against recent deltas from other
 //! agents targeting the same spec.  Conflicting interpretations generate priority-5
 //! inbox notifications for all Admin and Developer workspace members.
-
 use gyre_common::{
-    graph::{ArchitecturalDelta, DeltaNodeEntry, EdgeType, FieldChange, GraphEdge, GraphNode},
+    graph::{
+        ArchitecturalDelta, DeltaEdgeEntry, DeltaNodeEntry, EdgeType, FieldChange, GraphEdge,
+        GraphNode,
+    },
     Id, Notification, NotificationType,
 };
 use gyre_domain::{
@@ -275,6 +277,21 @@ async fn do_extract(
         new_edge_map.insert(key, edge);
     }
 
+    // Edge delta detail for narrative rendering (realized-model.md §6 edge
+    // template): qualified names resolved from the merged node state — new
+    // edges against the final node map, removed edges against the old one
+    // (their endpoints are soft-deleted after this pass).
+    let qn_by_id: HashMap<&str, &str> = final_nodes
+        .iter()
+        .map(|n| (n.id.as_str(), n.qualified_name.as_str()))
+        .collect();
+    let old_qn_by_id: HashMap<&str, &str> = old_node_map
+        .values()
+        .map(|n| (n.id.as_str(), n.qualified_name.as_str()))
+        .collect();
+    let mut delta_edges_added: Vec<DeltaEdgeEntry> = Vec::new();
+    let mut delta_edges_removed: Vec<DeltaEdgeEntry> = Vec::new();
+
     let mut edges_added_count: usize = 0;
     let mut edges_removed_count: usize = 0;
 
@@ -289,12 +306,17 @@ async fn do_extract(
             edge.first_seen_at = now;
             graph_store.create_edge(edge.clone()).await?;
             edges_added_count += 1;
+            if let Some(e) = edge_entry(edge, &qn_by_id) {
+                delta_edges_added.push(e);
+            }
         }
     }
     for (key, edge) in &old_edge_map {
         if !new_edge_map.contains_key(key) {
             graph_store.delete_edge(&edge.id).await?;
-            edges_removed_count += 1;
+            if let Some(e) = edge_entry(edge, &old_qn_by_id) {
+                delta_edges_removed.push(e);
+            }
         }
     }
 
@@ -310,8 +332,8 @@ async fn do_extract(
             "nodes_added": delta_nodes_added,
             "nodes_removed": delta_nodes_removed,
             "nodes_modified": delta_nodes_modified,
-            "edges_added": edges_added_count,
-            "edges_removed": edges_removed_count,
+            "edges_added": delta_edges_added,
+            "edges_removed": delta_edges_removed,
         })
         .to_string();
         (
@@ -621,6 +643,28 @@ fn edge_type_key(et: &EdgeType) -> &'static str {
         EdgeType::GovernedBy => "governed_by",
         EdgeType::ProducedBy => "produced_by",
     }
+}
+
+/// Build a compact edge detail entry for `delta_json` (narrative rendering).
+///
+/// Endpoint qualified names are resolved against the map of live node IDs;
+/// `None` when either endpoint is unknown (the narrative omits the edge
+/// rather than inventing a name). Added edges resolve against the final
+/// node state; removed edges against the pre-extraction state, because
+/// their endpoints are soft-deleted by this pass.
+fn edge_entry<'a>(
+    edge: &GraphEdge,
+    qn_by_id: &HashMap<&'a str, &'a str>,
+) -> Option<DeltaEdgeEntry> {
+    let (source, target) = (
+        qn_by_id.get(edge.source_id.as_str())?,
+        qn_by_id.get(edge.target_id.as_str())?,
+    );
+    Some(DeltaEdgeEntry {
+        edge_type: edge_type_key(&edge.edge_type).to_string(),
+        source: (*source).to_string(),
+        target: (*target).to_string(),
+    })
 }
 
 /// Compute field-level differences between an old and new version of the same node.
@@ -1032,6 +1076,47 @@ mod tests {
             node_type: node_type.to_string(),
             qualified_name: qname.to_string(),
         }
+    }
+
+
+    #[test]
+    fn edge_entry_resolves_qualified_names() {
+        let qn_by_id: HashMap<&str, &str> = [("n-1", "crate::Foo"), ("n-2", "crate::Bar")]
+            .into_iter()
+            .collect();
+        let e = GraphEdge {
+            id: Id::new("e-1"),
+            repo_id: Id::new("repo-1"),
+            source_id: Id::new("n-1"),
+            target_id: Id::new("n-2"),
+            edge_type: EdgeType::Implements,
+            metadata: None,
+            first_seen_at: 100,
+            last_seen_at: 100,
+            deleted_at: None,
+        };
+        let entry = edge_entry(&e, &qn_by_id).expect("both endpoints known");
+        assert_eq!(entry.edge_type, "implements");
+        assert_eq!(entry.source, "crate::Foo");
+        assert_eq!(entry.target, "crate::Bar");
+    }
+
+    #[test]
+    fn edge_entry_skips_unknown_endpoints() {
+        // Grounding contract: unknown endpoints are omitted, never guessed.
+        let qn_by_id: HashMap<&str, &str> = [("n-1", "crate::Foo")].into_iter().collect();
+        let e = GraphEdge {
+            id: Id::new("e-1"),
+            repo_id: Id::new("repo-1"),
+            source_id: Id::new("n-1"),
+            target_id: Id::new("n-ghost"),
+            edge_type: EdgeType::Calls,
+            metadata: None,
+            first_seen_at: 100,
+            last_seen_at: 100,
+            deleted_at: None,
+        };
+        assert!(edge_entry(&e, &qn_by_id).is_none());
     }
 
     #[test]

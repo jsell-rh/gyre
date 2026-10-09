@@ -152,6 +152,18 @@ pub struct DeltaNodeEntry {
     pub qualified_name: String,
 }
 
+/// Compact edge identity used inside `delta_json` for narrative rendering.
+///
+/// Stored instead of the full `GraphEdge` (which references node IDs) so
+/// delta records stay small and remain readable without a graph lookup.
+/// `source`/`target` are node qualified names.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DeltaEdgeEntry {
+    pub edge_type: String,
+    pub source: String,
+    pub target: String,
+}
+
 /// A recorded architectural change associated with a commit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchitecturalDelta {
@@ -169,12 +181,15 @@ pub struct ArchitecturalDelta {
     ///   "nodes_extracted": 5,
     ///   "edges_extracted": 3,
     ///   "nodes_added": [{"name":"Foo","node_type":"type","qualified_name":"crate::Foo"}],
-    ///   "nodes_modified": []
+    ///   "nodes_removed": ["crate::Bar"],
+    ///   "nodes_modified": [{"qualified_name":"crate::Baz","field_changes":[...]}],
+    ///   "edges_added": [{"edge_type":"implements","source":"crate::Foo","target":"crate::Trait"}],
+    ///   "edges_removed": []
     /// }
     /// ```
     /// Schema (no agent context — compact):
     /// ```json
-    /// {"nodes_extracted": 5, "edges_extracted": 3}
+    /// {"nodes_extracted": 5, "edges_extracted": 3, "edges_added": 2, "edges_removed": 0}
     /// ```
     pub delta_json: String,
 }
