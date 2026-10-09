@@ -5,7 +5,7 @@ depends_on: []
 progress: not-started
 coverage_sections:
   - "hierarchy-enforcement.md §5"
-commits: ["fda33685d415d97afde7c52830addb533ddb765a"]
+commits: ["a5f43d426920d4fd61defcf8aec505cf6fc8d95f"]
 ---
 
 ## Spec Excerpt
