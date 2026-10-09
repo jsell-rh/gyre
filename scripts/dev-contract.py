@@ -5,14 +5,20 @@ import json
 import re
 
 
-def generation(body, specs, goal=""):
+def generation(body, specs, goal="", *, include_baseline_diagnostics=False):
     parts = body.split("---", 2)
     if len(parts) != 3:
         raise ValueError("task has no YAML frontmatter")
     blocks = re.split(r"^(?=[a-z_][\w-]*:)", parts[1], flags=re.M)
     front = "\n".join(block.strip() for block in blocks
                       if block.split(":", 1)[0] in ("title", "spec_ref", "depends_on", "coverage_sections"))
-    prose = re.sub(r"^## (?:Shipped|Implementation Notes|Implementation Log|Review)\s*\n.*?(?=^## |\Z)",
+    operational = ['Shipped', 'Implementation Notes', 'Implementation Log', 'Review']
+    # Generated prerequisite logs are observations, not desired requirements.
+    # Keep the base/fingerprint and Required behavior in the contract.
+    if not include_baseline_diagnostics and re.search(
+            r'^title:\s*"Repair verified failure on main [0-9a-f]{12}"$', front, re.M):
+        operational.append('Baseline failure')
+    prose = re.sub(r"^## (?:" + '|'.join(operational) + r")\s*\n.*?(?=^## |\Z)",
                    "", parts[2], flags=re.M | re.S)
     refs = set(re.findall(r"[\w-]+\.md", front))
     requirements = {path: text for path, text in specs.items() if path.rsplit("/", 1)[-1] in refs}

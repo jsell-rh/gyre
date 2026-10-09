@@ -178,7 +178,8 @@ class ControllerGitTest(unittest.TestCase):
     def test_baseline_failure_creates_one_scoped_task_without_spending_feature_repairs(self):
         controller.sync(self.db)
         base = git(self.work, 'rev-parse', 'main')
-        log = controller.STATE / 'baseline.log'; log.write_text('existing main defect\n')
+        log = controller.STATE / 'baseline.log'
+        log.write_text(('unrelated build output ' * 20 + '  \n') * 1000 + 'Error: existing main defect  \n')
         classified = {'base': base, 'environment': 'environment', 'baseline_log': str(log)}
         name = controller.propose_baseline_repair(self.db, {'base': base}, classified)
         self.db.commit()
@@ -186,7 +187,44 @@ class ControllerGitTest(unittest.TestCase):
         self.assertEqual(controller.propose_baseline_repair(self.db, {'base': base}, classified), name)
         self.assertEqual(self.db.execute('SELECT repairs FROM tasks WHERE name="task-001"').fetchone()[0], 0)
         proposed = self.db.execute('SELECT * FROM tasks WHERE name=?', (name,)).fetchone()
-        self.assertIn('existing main defect', Path(proposed['definition_path']).read_text())
+        body = Path(proposed['definition_path']).read_text()
+        self.assertIn('existing main defect', body)
+        self.assertLess(len(body), 10000)
+        self.assertNotIn('unrelated build output', body)
+        path = self.work / f'specs/tasks/{name}.md'
+        path.write_text(body)
+        git(self.work, 'add', str(path))
+        # The former raw log copied trailing whitespace into generated code
+        # and made every real integration fail its actual Git whitespace gate.
+        subprocess.run(['git', 'diff', '--cached', '--check'], cwd=self.work, check=True)
+
+    def test_baseline_diagnostics_migrate_without_reopening_reviewed_code(self):
+        controller.sync(self.db)
+        base = git(self.work, 'rev-parse', 'main')
+        log = controller.STATE / 'baseline.log'; log.write_text('Error: main defect  \n')
+        name = controller.propose_baseline_repair(self.db, {'base': base},
+            {'base': base, 'environment': 'environment', 'baseline_log': str(log)})
+        task = self.db.execute('SELECT * FROM tasks WHERE name=?', (name,)).fetchone()
+        body = Path(task['definition_path']).read_text()
+        old = controller.contract.generation(body, {}, '', include_baseline_diagnostics=True)
+        new = controller.contract.generation(body, {}, '')
+        self.assertNotEqual(old, new)
+        self.db.execute("UPDATE tasks SET generation=?,candidate_generation=?,candidate=?,state='checking' WHERE name=?",
+                        (old, old, base, name))
+        self.db.execute("INSERT INTO attempts(id,task,kind,state,started,generation) VALUES('diagnostic-migration',?,'check','running',1,?)",
+                        (name, old))
+        controller.upgrade_baseline_generations(self.db, '')
+        self.assertEqual(tuple(self.db.execute('SELECT generation,candidate_generation,candidate,state FROM tasks WHERE name=?', (name,)).fetchone()),
+                         (new, new, base, 'checking'))
+        self.assertEqual(self.db.execute("SELECT generation FROM attempts WHERE id='diagnostic-migration'").fetchone()[0], new)
+        self.assertEqual(controller.contract.generation(body.replace('Error: main defect', 'Different diagnostic output'), {}, ''), new)
+        changed = body.replace('Reproduce and repair', 'Investigate without repairing')
+        self.assertNotEqual(controller.contract.generation(changed, {}, ''), new)
+        # A real desired-state edit must not be silently relabeled by migration.
+        Path(task['definition_path']).write_text(changed)
+        self.db.execute('UPDATE tasks SET generation=? WHERE name=?', (old, name))
+        controller.upgrade_baseline_generations(self.db, '')
+        self.assertEqual(self.db.execute('SELECT generation FROM tasks WHERE name=?', (name,)).fetchone()[0], old)
 
     def test_cloud_baseline_failure_blocks_candidate_and_proposes_prerequisite(self):
         sha = self.candidate(); controller.sync(self.db)

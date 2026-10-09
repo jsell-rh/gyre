@@ -420,6 +420,7 @@ def sync(db):
     spec_paths = git("ls-tree", "-r", "--name-only", "origin/main", "specs/system", "specs/development").splitlines()
     spec_bodies = {path: git("show", f"origin/main:{path}") for path in spec_paths if path.endswith(".md")}
     goal = run("git", "show", "origin/main:specs/GOAL.md", check=False).stdout
+    upgrade_baseline_generations(db, goal)
     for path in paths:
         match = TASK_RE.match(path)
         if not match:
@@ -1161,6 +1162,33 @@ def stale_audit(task):
     return assigned['code_generation'] != coverage.code_generation(git, 'origin/main')
 
 
+def upgrade_baseline_generations(db, goal):
+    for task in db.execute("SELECT * FROM tasks WHERE origin_key LIKE 'baseline:%'").fetchall():
+        if not task['definition_path'] or not Path(task['definition_path']).is_file():
+            continue
+        body = Path(task['definition_path']).read_text()
+        old = contract.generation(body, {}, goal, include_baseline_diagnostics=True)
+        new = contract.generation(body, {}, goal)
+        # Only migrate the known diagnostic-only hash change, never an actual
+        # requirement edit or a changed GOAL. Retain the candidate and leases.
+        if old == new or task['generation'] != old:
+            continue
+        for column in ('generation', 'candidate_generation', 'observed_generation'):
+            db.execute(f'UPDATE tasks SET {column}=? WHERE name=? AND {column}=?', (new, task['name'], old))
+        db.execute("UPDATE attempts SET generation=? WHERE task=? AND generation=? AND state IN ('running','launching')",
+                   (new, task['name'], old))
+        event(db, task['name'], f'operational baseline diagnostics excluded from requirement hash: {old} -> {new}')
+
+
+def baseline_failure_summary(log):
+    lines = [line.rstrip() for line in log.splitlines()]
+    failures = ci.failure_signature('\n'.join(lines))
+    errors = list(dict.fromkeys(line.strip() for line in lines
+                               if re.search(r'(?:Error:|error\[|error:|FAIL\b|FAILED\b)', line)))
+    text = '\n'.join(failures + errors) if failures or errors else '\n'.join(lines[-60:])
+    return text[:8192].rstrip()
+
+
 def propose_baseline_repair(db, check, classification):
     key = classification["base"] + ":" + classification["environment"]
     existing = db.execute("SELECT name FROM tasks WHERE origin_key=?", ("baseline:" + key,)).fetchone()
@@ -1170,7 +1198,7 @@ def propose_baseline_repair(db, check, classification):
     directory = STATE / "proposed"
     directory.mkdir(parents=True, exist_ok=True)
     definition = directory / f"{name}.md"
-    log = Path(classification["baseline_log"]).read_text(errors="replace")[-65536:]
+    log = baseline_failure_summary(Path(classification["baseline_log"]).read_text(errors="replace"))
     body = (f'---\ntitle: "Repair verified failure on main {check["base"][:12]}"\n'
             'spec_ref: "GOAL.md — real implementations and meaningful verification"\n'
             'depends_on: []\nprogress: needs-revision\ncommits: []\n---\n\n'
@@ -1180,6 +1208,7 @@ def propose_baseline_repair(db, check, classification):
             'or claim an environmental outage is a production fix. Run the failing probe and obtain '
             'independent review; integration reruns cloud gates and the full suites.\n\n'
             f'Base: `{check["base"]}`\nEnvironment fingerprint: `{classification["environment"]}`\n\n'
+            'The full diagnostic log is retained in the controller attempt artifacts.\n\n'
             f'## Baseline failure\n\n```text\n{log}\n```\n')
     definition.write_text(body)
     generation = contract.generation(body, {}, run("git", "show", "origin/main:specs/GOAL.md", check=False).stdout)
