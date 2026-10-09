@@ -2955,6 +2955,33 @@ pub async fn mcp_handler(
                 ));
             }
 
+            // Preview agents (meta-spec reconciliation §5) run with all
+            // ceremony stripped: no task ledger, no MR, no merge queue, no
+            // provenance. The runner withholds these tools client-side, but
+            // allowedTools is advisory — the server must not execute
+            // task/MR/complete mutations for a preview agent. The branch push
+            // is the entire deliverable; the run ends when the process exits.
+            if is_agent_jwt(&auth)
+                && matches!(
+                    tool_name,
+                    "gyre_create_task"
+                        | "gyre_update_task"
+                        | "gyre_create_mr"
+                        | "gyre_agent_complete"
+                        | "conversation_upload"
+                )
+                && crate::api::meta_specs::is_preview_agent(&state, &auth.agent_id).await
+            {
+                return Json(JsonRpcResponse::err(
+                    id,
+                    PERMISSION_DENIED,
+                    format!(
+                        "PERMISSION_DENIED: preview agent {auth_agent_id} may not call {tool_name} — preview runs skip task/MR/provenance ceremony",
+                        auth_agent_id = auth.agent_id
+                    ),
+                ));
+            }
+
             // Repo-scope validation (TASK-216): an agent JWT is scoped to the
             // repo it was spawned against. Enforce that the JWT cannot act on
             // other repos. Global/API-key/Keycloak callers bypass this check.
@@ -5067,6 +5094,120 @@ mod tests {
         assert!(json["result"]["isError"].as_bool().unwrap());
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("workspace-orchestrator"), "got: {text}");
+    }
+
+    // ── preview agents are denied ceremony tools (meta-spec §5) ───────────────
+
+    /// Register a preview agent (agent row + `preview_agents` discriminator +
+    /// scoped JWT in `agent_tokens`) and return (agent_id, token). Mirrors the
+    /// server-side provisioning in `api::meta_specs` without spawning a
+    /// process — the MCP guard keys off the kv record, not the process.
+    async fn register_preview_agent(state: &std::sync::Arc<crate::AppState>) -> (String, String) {
+        let agent_id = "preview-agent-1".to_string();
+        let mut agent =
+            gyre_domain::Agent::new(gyre_common::Id::new(&agent_id), "preview", 0);
+        agent.workspace_id = gyre_common::Id::new("ws-1");
+        agent
+            .transition_status(gyre_domain::AgentStatus::Active)
+            .unwrap();
+        state.agents.create(&agent).await.unwrap();
+
+        // The discriminator the dispatch guard (and process-exit path) reads.
+        state
+            .kv_store
+            .kv_set(
+                "preview_agents",
+                &agent_id,
+                serde_json::to_string(&serde_json::json!({
+                    "preview_id": "preview-test",
+                    "agent_id": agent_id,
+                    "repo_id": "r-1",
+                    "workspace_id": "ws-1",
+                    "spec_path": "specs/system/search.md",
+                    "branch": "preview/preview-test/search",
+                    "base_sha": "0000000000000000000000000000000000000000",
+                    "worktree_path": "/nonexistent",
+                    "released": false
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let token = state
+            .agent_signing_key
+            .mint(&agent_id, "preview-test", "system", &state.base_url, 300)
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", &agent_id, token.clone())
+            .await
+            .unwrap();
+        (agent_id, token)
+    }
+
+    #[tokio::test]
+    async fn mcp_preview_agent_denied_ceremony_tools() {
+        let state = orch_state().await;
+        let (agent_id, token) = register_preview_agent(&state).await;
+        let app = crate::build_router(state.clone());
+
+        // Ceremony tools: each must be refused for a preview agent, even
+        // though the runner's allowedTools list is advisory (client-side).
+        let ceremony_tools = [
+            ("gyre_create_task", json!({ "name": "sneaky task" })),
+            (
+                "gyre_update_task",
+                json!({ "task_id": "t-1", "status": "in_progress" }),
+            ),
+            (
+                "gyre_create_mr",
+                json!({ "repo_id": "r-1", "source_branch": "b", "title": "t" }),
+            ),
+            (
+                "gyre_agent_complete",
+                json!({ "agent_id": agent_id }),
+            ),
+            ("conversation_upload", json!({ "data": "" })),
+        ];
+        for (tool, args) in ceremony_tools {
+            let (_status, json) = mcp_post_with_token(
+                app.clone(),
+                tool_call(tool, args),
+                &token,
+            )
+            .await;
+            // The guard refuses before dispatch, so the error surfaces as a
+            // JSON-RPC error object, not as a tool result.
+            let text = json["error"]["message"]
+                .as_str()
+                .or(json["result"]["content"][0]["text"].as_str())
+                .unwrap_or_default();
+            assert!(
+                text.contains("PERMISSION_DENIED") && text.contains("preview agent"),
+                "{tool} must be denied for a preview agent; got: {text}"
+            );
+        }
+        // A normal (non-preview) agent with the same token shape is NOT
+        // denied: the guard is keyed off preview membership, not role.
+        state
+            .kv_store
+            .kv_remove("preview_agents", &agent_id)
+            .await
+            .unwrap();
+        let (_status, json) = mcp_post_with_token(
+            app,
+            tool_call("gyre_agent_heartbeat", json!({ "agent_id": agent_id })),
+            &token,
+        )
+        .await;
+        let text = json["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            !text.contains("preview agent"),
+            "non-preview agent must not trip the preview guard; got: {text}"
+        );
     }
 
     #[tokio::test]

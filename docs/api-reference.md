@@ -199,8 +199,9 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/workspaces/{id}/meta-spec-set` | Get workspace's bound meta-spec collection — `{workspace_id, personas: {role: {path, sha}}, principles: [{path, sha}], standards: [{path, sha}], process: [{path, sha}]}`; returns empty set if none configured (M32) |
 | `PUT` | `/api/v1/workspaces/{id}/meta-spec-set` | Set workspace meta-spec bindings: same structure as GET response; **Admin only**; 404 if workspace not found (M32) |
 | `GET` | `/api/v1/meta-specs/{path}/blast-radius` | Affected workspaces and repos if this meta-spec changes — `{spec_path, affected_workspaces: [{id}], affected_repos: [{id, workspace_id, reason}]}`; path is URL-encoded (M32) |
-| `POST` | `/api/v1/workspaces/{id}/meta-specs/preview` | Trigger async preview of a meta-spec change — returns `{preview_id}`; runs reconciliation in background (M32, HSI §1) |
-| `GET` | `/api/v1/workspaces/{id}/meta-specs/preview/{preview_id}` | Poll preview status — `{status: pending\|running\|complete\|failed, result?: {affected_agents, drift_count, sample_diffs}}` (M32, HSI §1) |
+| `POST` | `/api/v1/meta-specs/preview` | Start a meta-spec preview run — body: `{draft: {kind, content}, targets: [{repo_id, spec_path}]}`; `202` returns `{preview_id, agents: [{agent_id, repo_id, spec_path, branch}]}`. Caller must hold the `Admin` or `Developer` platform role, and every `targets[].repo_id` is checked against the repo's ABAC policy **and** the caller's tenant/workspace containment. Errors: `400` empty `targets` / unknown draft `kind` shape, `403` missing role or ABAC/tenant-scope mismatch, `404` unknown `repo_id`, `429` preview budget exhausted. Draft content is never committed. See [Meta-Spec Preview Mode](#meta-spec-preview-mode) (meta-spec-reconciliation §5) |
+| `GET` | `/api/v1/meta-specs/preview/{preview_id}` | Poll a preview run — `{preview_id, created_at, ttl_seconds, state: running\|complete, agents: [{agent_id, repo_id, spec_path, branch, status, diff}]}`; per-agent `status`: `running\|complete\|failed\|stopped\|dead\|unknown`; `diff` is `null` until the preview branch exists. `404` unknown `preview_id`. See [Meta-Spec Preview Mode](#meta-spec-preview-mode) |
+| `DELETE` | `/api/v1/meta-specs/preview/{preview_id}` | Tear down a preview run — kills its agents, force-removes their worktrees, deletes every `preview/{preview_id}/*` branch, revokes their tokens; `204` on success, `404` unknown `preview_id` (meta-spec-reconciliation §5) |
 | `POST/GET` | `/api/v1/meta-specs-registry` | Create / list DB-backed meta-spec registry entries — `{id, name, kind, path, content, version, status: draft\|approved\|deprecated}`; separate from `specs/manifest.yaml`-backed spec ledger (agent-runtime spec) |
 | `GET/PUT/DELETE` | `/api/v1/meta-specs-registry/{id}` | Read / update / delete a meta-spec registry entry (**Admin only** for PUT/DELETE) |
 | `GET` | `/api/v1/meta-specs-registry/{id}/versions` | List all versions of a meta-spec registry entry |
@@ -290,6 +291,82 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `PUT` | `/api/v1/network/peers/{id}` | Update peer endpoint (roaming): `{endpoint: "host:port"}` — JWT caller must own the peer (agent_id match); updates `last_seen` (M26.2) |
 | `DELETE` | `/api/v1/network/peers/{id}` | Remove a peer from the mesh |
 | `GET` | `/api/v1/network/derp-map` | Get DERP relay map for WireGuard coordination |
+
+### Meta-Spec Preview Mode
+
+Preview mode runs a **draft** meta-spec through real agents against real specs in real repos, on throwaway branches. Same agent, same spec, same repo — none of the ceremony. Spec: [meta-spec-reconciliation.md §5](../specs/system/meta-spec-reconciliation.md).
+
+**Auth / role:** the caller must hold the `Admin` or `Developer` platform role. In addition, every `targets[].repo_id` is evaluated against that repo's ABAC policy **and** against the caller's tenant/workspace containment; a repo outside the caller's scope returns `403`, an unknown `repo_id` returns `404`.
+
+**Request** (`POST /api/v1/meta-specs/preview`):
+```json
+{
+  "draft": {
+    "kind": "meta:persona",              // draft meta-spec kind; unknown shape -> 400
+    "content": "<full draft text -- never committed anywhere>"
+  },
+  "targets": [                            // empty -> 400; every target runs in parallel
+    { "repo_id": "<repo-uuid>", "spec_path": "specs/system/search.md" },
+    { "repo_id": "<repo-uuid>", "spec_path": "specs/system/identity.md" }
+  ]
+}
+```
+
+`202 Accepted` — one agent per target:
+```json
+{
+  "preview_id": "<uuid>",
+  "agents": [
+    { "agent_id": "<uuid>", "repo_id": "<repo-uuid>", "spec_path": "specs/system/search.md",   "branch": "preview/<preview_id>/search" },
+    { "agent_id": "<uuid>", "repo_id": "<repo-uuid>", "spec_path": "specs/system/identity.md", "branch": "preview/<preview_id>/identity" }
+  ]
+}
+```
+
+Errors: `400` empty `targets` / unknown draft `kind` shape · `403` caller lacks `Admin`|`Developer` role, or fails repo ABAC policy / tenant-workspace containment · `404` unknown `repo_id` · `429` preview budget exhausted (`GYRE_PREVIEW_BUDGET_MAX_CONCURRENT`, see [server-config.md](server-config.md)).
+
+**Status** (`GET /api/v1/meta-specs/preview/{preview_id}` -> `200`; `404` unknown `preview_id`):
+```json
+{
+  "preview_id": "<uuid>",
+  "created_at": 1765000000,              // unix seconds
+  "ttl_seconds": 86400,                  // preview TTL
+  "state": "running",                    // "running" | "complete" -- "complete" when no agent is still running
+  "agents": [
+    {
+      "agent_id": "<uuid>",
+      "repo_id": "<repo-uuid>",
+      "spec_path": "specs/system/search.md",
+      "branch": "preview/<preview_id>/search",
+      "status": "complete",              // "running" | "complete" | "failed" | "stopped" | "dead" | "unknown"
+      "diff": {                          // gyre_domain::DiffResult; null while the branch does not exist yet
+        "files_changed": 2,
+        "insertions": 140,
+        "deletions": 12,
+        "patches": [
+          { "path": "src/search.rs", "status": "Modified", "patch": "<unified diff text, or null>" }
+        ]
+      }
+    }
+  ]
+}
+```
+
+**Cleanup** (`DELETE /api/v1/meta-specs/preview/{preview_id}` -> `204 No Content`; `404` unknown `preview_id`): kills every agent in the run, force-removes their worktrees, deletes all `preview/{preview_id}/*` branches, and revokes their tokens. Branches are also garbage-collected automatically once the TTL expires — no refs, no provenance, no audit trail.
+
+**What preview mode skips** (vs. the normal Ralph loop):
+
+| Ralph Loop Step | Preview Mode |
+|---|---|
+| Spec approval check | Skipped — the spec is already approved; we're testing the meta-spec |
+| Quality gates | Skipped — this is a draft, not production |
+| MR creation | Skipped — no MR overhead |
+| Merge queue | Skipped — nothing to merge |
+| Provenance recording | Skipped — draft meta-spec has no SHA yet |
+| Budget accounting | Separate preview budget (configurable, defaults to workspace budget) |
+| Token revocation | Normal — preview agent tokens are short-lived |
+
+Preview agents are killed on completion (no idle state), and their `preview/{preview_id}/*` branches are auto-deleted after the TTL (`GYRE_META_SPEC_PREVIEW_TTL_HOURS`).
 
 ---
 

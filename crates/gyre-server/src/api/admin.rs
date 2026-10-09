@@ -276,10 +276,7 @@ pub async fn admin_kill_agent(
 
     // Kill the actual process if it is running.
     if let Some(handle) = state.process_registry.lock().await.remove(&id) {
-        if let Err(e) =
-            gyre_ports::ComputeTarget::kill_process(&gyre_adapters::compute::LocalTarget, &handle)
-                .await
-        {
+        if let Err(e) = super::spawn::kill_process_handle(&handle).await {
             tracing::warn!(agent_id = %id, "kill_process failed: {e}");
         }
     }

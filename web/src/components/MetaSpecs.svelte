@@ -353,13 +353,24 @@
   let targetSpecs       = $state([]);
   let selectedSpecPaths = $state([]);
 
-  let previewId        = null;
-  let previewProgress  = $state([]);
-  let previewInterval  = null;
+  // Preview state is server-owned: this mirrors the agents POST /meta-specs/preview
+  // spawned and the diffs their preview/<id>/<slug> branches produced.
+  let previewId       = $state(null);
+  /** @type {{agent_id: string|null, repo_id: string|null, spec_path: string, branch: string|null, status: string, diff: object|null}[]} */
+  let previewAgents   = $state([]);
+  let previewAgentTab = $state(0);
+  let previewError    = $state(null);
+  // Set when we stop polling before the server reports completion (bounded timeout or
+  // repeated poll failures): agents are still running, so the panel shows live status.
+  let previewStalled  = $state(false);
+  let clearing        = $state(false);
+  let previewInterval = null;
+  let previewRun      = 0; // generation counter — invalidates in-flight POST/polls after a reset
 
-  let impactTab        = $state('architecture');
-  let previewApiResult = $state(null);
-  let isSimulatedPreview = $state(false);
+  const PREVIEW_POLL_MS = 2000;
+  const PREVIEW_POLL_TIMEOUT_MS = 600000; // preview agents take minutes, not hours
+  const PREVIEW_POLL_MAX_ERRORS = 3;
+  const AGENT_STATUSES = ['running', 'complete', 'failed', 'stopped', 'dead', 'unknown'];
 
   let wsSuggestions     = $state([]);
   let wsNextSuggId      = 0;
@@ -378,8 +389,11 @@
         selectedMsId = wsMetaSpecs[0].id;
         selectedMsContent = wsMetaSpecs[0].prompt || '';
       }
+      // Preview targets need repo_id — the POST body carries { repo_id, spec_path }.
+      // Ledger entries without a repo can never be spawned against, so they are
+      // filtered out here rather than 400-ing the whole run at submit time.
       targetSpecs = Array.isArray(sp)
-        ? sp.filter(s => !s.kind || !s.kind.startsWith('meta:'))
+        ? sp.filter(s => !s.kind || !s.kind.startsWith('meta:')).filter(s => s.repo_id)
         : [];
     } catch (e) {
       wsError = e.message;
@@ -409,77 +423,182 @@
 
   const canPreview = $derived.by(() => selectedSpecPaths.length > 0 && previewState === 'editing');
 
-  async function startPreview() {
-    // Clear any lingering interval from a prior preview run
+  // Preview run generation: every reset invalidates in-flight POST/poll promises so
+  // a stale response can never write state belonging to a previous run.
+  function resetPreviewState() {
+    previewRun += 1;
     stopPreview();
+    previewId = null;
+    previewAgents = [];
+    previewAgentTab = 0;
+    previewError = null;
+    previewStalled = false;
+  }
+
+  async function startPreview() {
+    resetPreviewState();
     previewState = 'running';
-    previewProgress = selectedSpecPaths.map(path => ({ path, status: 'running' }));
-    previewApiResult = null;
-    isSimulatedPreview = false;
 
-    let usedPreviewId = null;
+    const ms = wsMetaSpecs.find(m => m.id === selectedMsId);
+    const draft = {
+      kind: ms?.kind || 'meta:persona',
+      content: selectedMsContent,
+    };
+    const targets = targetSpecs
+      .filter(s => selectedSpecPaths.includes(s.path))
+      .map(s => ({ repo_id: s.repo_id, spec_path: s.path }));
+
+    const run = previewRun;
     try {
-      const res = await api.previewPersona(workspaceId, {
-        persona_id: selectedMsId,
-        content: selectedMsContent,
-        spec_paths: selectedSpecPaths,
-      });
-      usedPreviewId = res?.preview_id ?? null;
-      if (res && !usedPreviewId) previewApiResult = res;
-    } catch { toastInfo($t('meta_specs.toast.preview_unavailable')); }
-
-    if (usedPreviewId) {
-      previewId = usedPreviewId;
-      pollPreview();
-    } else {
-      isSimulatedPreview = true;
-      simulatePreview();
+      const res = await api.previewMetaSpec({ draft, targets });
+      if (run !== previewRun) return; // superseded by a reset
+      previewId = res?.preview_id ?? null;
+      if (!previewId || !Array.isArray(res.agents)) {
+        previewError = $t('meta_specs.workspace.preview_malformed');
+        previewState = 'complete';
+        return;
+      }
+      previewAgents = res.agents.map(a => ({
+        agent_id: a.agent_id ?? null,
+        repo_id: a.repo_id ?? null,
+        spec_path: a.spec_path,
+        branch: a.branch ?? null,
+        status: 'running',
+        diff: null,
+      }));
+      pollPreview(run);
+    } catch (e) {
+      if (run !== previewRun) return;
+      previewError = e?.message ?? String(e);
+      toastError($t('meta_specs.workspace.preview_failed', { values: { error: previewError } }));
+      previewState = 'editing';
     }
   }
 
-  function pollPreview() {
+  function pollPreview(run) {
     let elapsed = 0;
+    let errors = 0;
     previewInterval = setInterval(async () => {
-      elapsed += 1500;
-      try {
-        const status = await api.previewPersonaStatus(workspaceId, previewId);
-        previewProgress = status.specs ?? previewProgress;
-        if (status.state === 'complete') {
-          previewApiResult = status;
-          isSimulatedPreview = false;
-          stopPreview();
-          previewState = 'complete';
-        }
-      } catch {
-        clearInterval(previewInterval);
-        isSimulatedPreview = true;
-        simulatePreview();
+      if (run !== previewRun) { stopPreview(); return; }
+      elapsed += PREVIEW_POLL_MS;
+      if (elapsed >= PREVIEW_POLL_TIMEOUT_MS) {
+        // Bounded wait: stop polling but keep the panel live — the agents are
+        // still running server-side and will land on the preview branches.
+        previewStalled = true;
+        stopPreview();
+        return;
       }
-      if (elapsed > 30000) { stopPreview(); previewState = 'complete'; }
-    }, 1500);
-  }
-
-  function simulatePreview() {
-    let i = 0;
-    previewInterval = setInterval(() => {
-      if (i < previewProgress.length) {
-        previewProgress = previewProgress.map((p, idx) =>
-          idx === i ? { ...p, status: 'complete' } : p
-        );
-        i++;
-      } else {
+      let status;
+      try {
+        status = await api.previewMetaSpecStatus(previewId);
+      } catch {
+        errors += 1;
+        if (errors >= PREVIEW_POLL_MAX_ERRORS) {
+          previewStalled = true;
+          stopPreview();
+        }
+        return;
+      }
+      if (run !== previewRun) { stopPreview(); return; }
+      errors = 0;
+      previewAgents = Array.isArray(status?.agents)
+        ? status.agents.map(a => ({
+            agent_id: a.agent_id ?? null,
+            repo_id: a.repo_id ?? null,
+            spec_path: a.spec_path,
+            branch: a.branch ?? null,
+            status: AGENT_STATUSES.includes(a.status) ? a.status : 'unknown',
+            diff: a.diff ?? null,
+          }))
+        : previewAgents;
+      if (status?.state === 'complete') {
         stopPreview();
         previewState = 'complete';
       }
-    }, 1200);
+    }, PREVIEW_POLL_MS);
   }
 
   function stopPreview() {
     if (previewInterval) { clearInterval(previewInterval); previewInterval = null; }
   }
 
-  function cancelPreview() { stopPreview(); previewState = 'editing'; previewProgress = []; }
-  function iterate()       { stopPreview(); previewState = 'editing'; previewProgress = []; }
+  function agentStatusIs(a, ...statuses) { return statuses.includes(a.status); }
+
+  const previewDone = $derived.by(() =>
+    previewAgents.filter(a => agentStatusIs(a, 'complete', 'stopped')).length
+  );
+
+  function statusLabel(a) {
+    if (a.status === 'running')  return $t('meta_specs.workspace.agent_implementing');
+    if (a.status === 'complete') return $t('meta_specs.workspace.status_complete');
+    if (a.status === 'failed')   return $t('meta_specs.workspace.status_failed');
+    if (a.status === 'stopped')  return $t('meta_specs.workspace.status_stopped');
+    if (a.status === 'dead')     return $t('meta_specs.workspace.status_dead');
+    return $t('meta_specs.workspace.status_unknown');
+  }
+
+  function statusIcon(a) {
+    if (a.status === 'complete' || a.status === 'stopped') return '✓';
+    if (a.status === 'running') return '◐';
+    return '✗';
+  }
+
+  function statusClass(a) {
+    if (a.status === 'complete' || a.status === 'stopped') return 'ok';
+    if (a.status === 'running') return 'run';
+    return 'err';
+  }
+
+  function specSlug(path) {
+    const base = (path || '').split('/').pop() || 'spec';
+    return base.replace(/\.[^.]+$/, '') || 'spec';
+  }
+
+  function agentPatchLines(a) {
+    const patches = Array.isArray(a?.diff?.patches) ? a.diff.patches : [];
+    const lines = [];
+    for (const p of patches) {
+      if (typeof p?.patch === 'string' && p.patch.length > 0) lines.push(...p.patch.split('\n'));
+    }
+    return lines;
+  }
+
+  function agentDiffStats(a) {
+    const d = a?.diff;
+    if (!d || typeof d.files_changed !== 'number') return null;
+    return d;
+  }
+
+  function selectedAgent() { return previewAgents[previewAgentTab] ?? null; }
+
+  function onAgentTabKeydown(e) {
+    if (previewAgents.length < 2) return;
+    if (e.key === 'ArrowRight') { e.preventDefault(); previewAgentTab = (previewAgentTab + 1) % previewAgents.length; }
+    if (e.key === 'ArrowLeft')  { e.preventDefault(); previewAgentTab = (previewAgentTab - 1 + previewAgents.length) % previewAgents.length; }
+  }
+
+  function cancelPreview() {
+    // Esc/Cancel stops waiting but leaves the server-side run alone — the GC
+    // sweep owns teardown. Returning to editing invalidates the poll.
+    resetPreviewState();
+    previewState = 'editing';
+  }
+
+  function iterate() { resetPreviewState(); previewState = 'editing'; }
+
+  async function clearPreviewRun() {
+    if (!previewId || clearing) return;
+    clearing = true;
+    try {
+      await api.deleteMetaSpecPreview(previewId);
+      toastSuccess($t('meta_specs.toast.preview_cleared'));
+      iterate();
+    } catch (e) {
+      toastError($t('meta_specs.toast.preview_clear_failed', { values: { error: e?.message ?? 'unknown error' } }));
+    } finally {
+      clearing = false;
+    }
+  }
 
   async function publish() {
     if (!selectedMsId || !workspaceId) return;
@@ -515,7 +634,7 @@
     selectedMsContent = selectedMsContent + '\n\n' + s.content;
     wsSuggestions = wsSuggestions.filter(x => x.id !== s.id);
   }
-  function wsDismissSuggestion(id) { wsSuggestions = wsSuggestions.filter(s => s.id !== id); }
+  function wsDismissSuggestion(id) { wsSuggestions = wsSuggestions.filter(x => x.id !== id); }
   function wsEditSuggestion(s) {
     selectedMsContent = selectedMsContent + '\n\n' + s.content;
     wsSuggestions = wsSuggestions.filter(x => x.id !== s.id);
@@ -663,87 +782,80 @@
           {:else if previewState === 'running'}
             <div class="preview-progress" data-testid="preview-running" aria-live="polite">
               <div class="progress-header" role="status">{$t('meta_specs.workspace.preview_running')}</div>
+              {#if previewError}
+                <div class="preview-error" role="alert">{previewError}</div>
+              {/if}
               <div class="progress-list">
-                {#each previewProgress as item (item.path)}
+                {#each previewAgents as a (a.spec_path)}
                   <div class="progress-item">
-                    <span class="progress-icon" aria-hidden="true">{item.status === 'complete' ? '✓' : '◐'}</span>
-                    <span class="progress-path">{item.path}</span>
-                    <span class="progress-status">{item.status === 'complete' ? $t('meta_specs.workspace.status_complete') : $t('meta_specs.workspace.agent_implementing')}</span>
+                    <span class="progress-icon {statusClass(a)}" aria-hidden="true">{statusIcon(a)}</span>
+                    <span class="progress-path">{a.spec_path}</span>
+                    <span class="progress-status">{statusLabel(a)}</span>
                   </div>
                 {/each}
               </div>
-              <div class="progress-summary">{$t('meta_specs.workspace.progress_label', { values: { done: previewProgress.filter(p => p.status === 'complete').length, total: previewProgress.length } })}</div>
+              <div class="progress-summary">{$t('meta_specs.workspace.progress_label', { values: { done: previewDone, total: previewAgents.length } })}</div>
+              {#if previewStalled}
+                <div class="progress-stalled" role="status">{$t('meta_specs.workspace.preview_stalled')}</div>
+              {/if}
               <Button variant="secondary" onclick={cancelPreview}>{$t('meta_specs.workspace.cancel_preview')} <kbd>Esc</kbd></Button>
             </div>
 
           {:else}
             <div class="impact-panel" data-testid="preview-complete">
-              {#if isSimulatedPreview}
-                <div class="sim-banner" role="status">{$t('meta_specs.workspace.sim_banner')}</div>
+              {#if previewError}
+                <div class="preview-error" role="alert">{previewError}</div>
               {/if}
-              <div class="impact-tabs" role="tablist" aria-label={$t('meta_specs.workspace.impact_view_aria')} tabindex="0"
-                onkeydown={(e) => {
-                  const tabs = ['architecture', 'code-diff'];
-                  const ids = ['impact-tab-arch', 'impact-tab-diff'];
-                  const idx = tabs.indexOf(impactTab);
-                  if (e.key === 'ArrowRight') { e.preventDefault(); const ni = (idx + 1) % 2; impactTab = tabs[ni]; document.getElementById(ids[ni])?.focus(); }
-                  if (e.key === 'ArrowLeft')  { e.preventDefault(); const ni = (idx - 1 + 2) % 2; impactTab = tabs[ni]; document.getElementById(ids[ni])?.focus(); }
-                }}
-              >
-                <button class="impact-tab" role="tab" id="impact-tab-arch" aria-controls="impact-panel-arch" aria-selected={impactTab === 'architecture'} class:active={impactTab === 'architecture'} tabindex={impactTab === 'architecture' ? 0 : -1} onclick={() => impactTab = 'architecture'}>{$t('meta_specs.workspace.architecture')}</button>
-                <button class="impact-tab" role="tab" id="impact-tab-diff" aria-controls="impact-panel-diff" aria-selected={impactTab === 'code-diff'} class:active={impactTab === 'code-diff'} tabindex={impactTab === 'code-diff' ? 0 : -1} onclick={() => impactTab = 'code-diff'}>{$t('meta_specs.workspace.code_diff')}</button>
-              </div>
-              {#if isSimulatedPreview}
-                <div class="impact-content impact-unavailable" role="tabpanel" id={impactTab === 'architecture' ? 'impact-panel-arch' : 'impact-panel-diff'} aria-labelledby={impactTab === 'architecture' ? 'impact-tab-arch' : 'impact-tab-diff'}>
-                  <span class="impact-unavailable-label">{$t('meta_specs.workspace.preview_unavailable_label')}</span>
-                  {#if impactTab === 'architecture'}
-                    <div class="arch-diff">
-                      <div class="arch-line add">+ ErrorHandler module (payment-domain)</div>
-                      <div class="arch-line mod">~ ChargeService: +3 error result returns</div>
-                      <div class="arch-line ctx">= 45 types unchanged</div>
-                    </div>
-                  {:else}
+              {#if previewStalled}
+                <div class="progress-stalled" role="status">{$t('meta_specs.workspace.preview_stalled')}</div>
+              {/if}
+              {#if previewAgents.length > 1}
+                <div class="impact-tabs" role="tablist" aria-label={$t('meta_specs.workspace.impact_view_aria')} tabindex="0" onkeydown={onAgentTabKeydown}>
+                  {#each previewAgents as a, i (a.spec_path)}
+                    <button
+                      class="impact-tab"
+                      role="tab"
+                      id="preview-agent-tab-{i}"
+                      aria-controls="preview-agent-panel-{i}"
+                      aria-selected={previewAgentTab === i}
+                      class:active={previewAgentTab === i}
+                      tabindex={previewAgentTab === i ? 0 : -1}
+                      onclick={() => previewAgentTab = i}
+                    >{specSlug(a.spec_path)}</button>
+                  {/each}
+                </div>
+              {/if}
+              {#if selectedAgent()}
+                {@const a = selectedAgent()}
+                <div class="impact-content" role="tabpanel" id="preview-agent-panel-{previewAgentTab}" aria-labelledby="preview-agent-tab-{previewAgentTab}">
+                  <div class="agent-summary">
+                    <span class="mono">{a.spec_path}</span>
+                    <span class="progress-status">{statusLabel(a)}</span>
+                    {#if a.branch}
+                      <span class="mono text-muted">{a.branch}</span>
+                    {/if}
+                    {#if agentDiffStats(a)}
+                      <span class="text-muted">+{agentDiffStats(a).insertions ?? 0} / -{agentDiffStats(a).deletions ?? 0} · {agentDiffStats(a).files_changed ?? 0} {$t('meta_specs.workspace.diff_files')}</span>
+                    {/if}
+                  </div>
+                  {#if agentPatchLines(a).length}
                     <div class="code-diff">
-                      {#each previewProgress as item (item.path)}
-                        <div class="code-diff-file">
-                          <div class="code-diff-path">{item.path}</div>
-                          <pre class="code-diff-body">--- original
-+++ modified
-@@ meta-spec applied @@</pre>
-                        </div>
+                      {#each agentPatchLines(a) as line}
+                        <div class="code-diff-line {line.startsWith('+') ? 'add' : line.startsWith('-') ? 'remove' : 'ctx'}">{line}</div>
                       {/each}
                     </div>
-                  {/if}
-                </div>
-              {:else if impactTab === 'architecture'}
-                <div class="impact-content arch-diff" role="tabpanel" id="impact-panel-arch" aria-labelledby="impact-tab-arch">
-                  {#if previewApiResult?.architecture_diff?.length}
-                    {#each previewApiResult.architecture_diff as line}
-                      <div class="arch-line" class:add={line.startsWith('+')} class:mod={line.startsWith('~')} class:ctx={line.startsWith('=')}>{line}</div>
-                    {/each}
+                  {:else if agentStatusIs(a, 'complete', 'stopped')}
+                    <span class="impact-empty">{$t('meta_specs.workspace.no_diff_available')}</span>
+                  {:else if agentStatusIs(a, 'failed', 'dead', 'unknown')}
+                    <span class="impact-empty">{$t('meta_specs.workspace.agent_failed')}</span>
                   {:else}
-                    <span class="impact-empty">{$t('meta_specs.workspace.no_arch_changes')}</span>
-                  {/if}
-                </div>
-              {:else}
-                <div class="impact-content code-diff" role="tabpanel" id="impact-panel-diff" aria-labelledby="impact-tab-diff">
-                  {#if previewApiResult?.specs_diff?.length}
-                    {#each previewApiResult.specs_diff as item (item.path)}
-                      <div class="code-diff-file">
-                        <div class="code-diff-path">{item.path}</div>
-                        <pre class="code-diff-body">{item.diff}</pre>
-                      </div>
-                    {/each}
-                  {:else}
-                    {#each previewProgress as item (item.path)}
-                      <div class="code-diff-file">
-                        <div class="code-diff-path">{item.path}</div>
-                        <pre class="code-diff-body">{$t('meta_specs.workspace.no_diff_available')}</pre>
-                      </div>
-                    {/each}
+                    <span class="impact-empty">{$t('meta_specs.workspace.agent_still_running')}</span>
                   {/if}
                 </div>
               {/if}
+              <div class="impact-actions">
+                <Button variant="secondary" onclick={clearPreviewRun} disabled={clearing || !previewId}>{$t('meta_specs.workspace.clear_preview')}</Button>
+              </div>
             </div>
           {/if}
         </div>
@@ -1573,19 +1685,19 @@
   .impact-tab { padding: 0.5rem 1rem; background: none; border: none; border-bottom: 2px solid transparent; color: var(--color-text-muted); cursor: pointer; font-size: var(--text-sm); transition: color var(--transition-fast); font-family: var(--font-body); }
   .impact-tab.active { color: var(--color-text); border-bottom-color: var(--color-link, var(--color-focus)); }
   .impact-content { padding: var(--space-4); font-size: var(--text-sm); }
-  .arch-diff { display: flex; flex-direction: column; gap: var(--space-1); }
-  .arch-line { padding: var(--space-1); border-radius: var(--radius-sm); font-family: var(--font-mono); }
-  .arch-line.add { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 10%, transparent); }
-  .arch-line.mod { color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 10%, transparent); }
-  .arch-line.ctx { color: var(--color-text-muted); }
-  .code-diff { display: flex; flex-direction: column; gap: var(--space-3); }
-  .code-diff-file { border: 1px solid var(--color-border); border-radius: var(--radius-sm); overflow: hidden; }
-  .code-diff-path { padding: var(--space-1) var(--space-2); background: var(--color-surface-elevated); font-family: var(--font-mono); font-size: var(--text-xs); color: var(--color-text-muted); border-bottom: 1px solid var(--color-border); }
-  .code-diff-body { margin: 0; padding: var(--space-2) var(--space-3); font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.5; }
-  .impact-unavailable { display: flex; flex-direction: column; gap: var(--space-3); }
-  .impact-unavailable-label { font-size: var(--text-xs); color: var(--color-text-muted); font-style: italic; }
+  .code-diff { display: flex; flex-direction: column; gap: 0; overflow-x: auto; max-height: 480px; overflow-y: auto; }
+  .code-diff-line { font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.5; white-space: pre; padding: 0 var(--space-2); }
+  .code-diff-line.add { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 10%, transparent); }
+  .code-diff-line.remove { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 10%, transparent); }
+  .code-diff-line.ctx { color: var(--color-text-muted); }
+  .agent-summary { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; padding-bottom: var(--space-3); border-bottom: 1px solid var(--color-border); margin-bottom: var(--space-3); font-size: var(--text-sm); }
+  .impact-actions { display: flex; gap: var(--space-2); justify-content: flex-end; padding: var(--space-3) var(--space-4); border-top: 1px solid var(--color-border); background: var(--color-surface-elevated); }
   .impact-empty { font-size: var(--text-sm); color: var(--color-text-muted); }
-  .sim-banner { background: color-mix(in srgb, var(--color-warning) 12%, transparent); border: 1px solid color-mix(in srgb, var(--color-warning) 30%, transparent); border-radius: var(--radius); padding: var(--space-2) var(--space-3); font-size: var(--text-sm); margin: var(--space-3) var(--space-3) 0; }
+  .preview-error { color: var(--color-danger); font-size: var(--text-sm); padding: var(--space-2) var(--space-3); border: 1px solid color-mix(in srgb, var(--color-danger) 30%, transparent); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
+  .progress-stalled { font-size: var(--text-xs); color: var(--color-warning); padding: var(--space-2); border: 1px solid color-mix(in srgb, var(--color-warning) 30%, transparent); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--color-warning) 8%, transparent); }
+  .progress-icon.ok { color: var(--color-success); }
+  .progress-icon.run { color: var(--color-warning); }
+  .progress-icon.err { color: var(--color-danger); }
 
   /* ── Delete confirm ── */
   .delete-confirm-text { font-size: var(--text-sm); color: var(--color-text); margin: 0 0 var(--space-4); }

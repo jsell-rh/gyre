@@ -221,6 +221,16 @@ pub struct AppState {
     pub agent_signing_key: Arc<auth::AgentSigningKey>,
     /// Agent JWT TTL in seconds. Configurable via GYRE_AGENT_JWT_TTL (default: 300, M27.5).
     pub agent_jwt_ttl_secs: u64,
+    /// Lifetime of a meta-spec preview run before the GC sweep tears it down.
+    /// Configurable via GYRE_META_SPEC_PREVIEW_TTL_HOURS (default: 24 h).
+    pub preview_ttl_secs: u64,
+    /// TTL of the short-lived agent JWTs minted for preview agents.
+    /// Configurable via GYRE_PREVIEW_JWT_TTL_SECS (default: 1800 s).
+    pub preview_jwt_ttl_secs: u64,
+    /// Max concurrent preview agents. Configurable via
+    /// GYRE_PREVIEW_BUDGET_MAX_CONCURRENT; `None` = the workspace's own
+    /// budget governs preview runs (meta-spec-reconciliation §5).
+    pub preview_budget_max_concurrent: Option<u64>,
     /// User repository for JWT/SSO user management.
     pub users: Arc<dyn UserRepository>,
     /// API key repository: key -> user_id.
@@ -882,6 +892,10 @@ pub fn build_state(
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(300),
+        // Meta-spec preview mode (meta-spec-reconciliation.md §5).
+        preview_ttl_secs: api::meta_specs::preview_ttl_secs_from_env(),
+        preview_jwt_ttl_secs: api::meta_specs::preview_jwt_ttl_secs_from_env(),
+        preview_budget_max_concurrent: api::meta_specs::preview_budget_max_concurrent_from_env(),
         users: store!(dyn UserRepository, mem::MemUserRepository::default()),
         api_keys: store!(dyn ApiKeyRepository, mem::MemApiKeyRepository::default()),
         jwt_config,

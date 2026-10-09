@@ -60,6 +60,4 @@
 /api/v1/workspaces/:id/llm/config/:function
 /api/v1/workspaces/:id/llm/prompts
 /api/v1/workspaces/:id/llm/prompts/:function
-/api/v1/workspaces/:id/meta-specs/preview
-/api/v1/workspaces/:id/meta-specs/preview/:preview_id
 /api/v1/workspaces/:id/orchestrator/spawn
