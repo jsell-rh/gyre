@@ -1503,43 +1503,53 @@ async fn process_spec_lifecycle(
                 Err(e) => warn!(title, "spec-lifecycle: failed to create task: {e}"),
                 Ok(()) => {
                     info!(title, "spec-lifecycle: created task for spec change");
-                    // Look up workspace_id from repo for proper scoping.
-                    let ws_id = state
+                    // Look up workspace_id from repo for proper scoping. A
+                    // missing repo means the scope cannot be determined —
+                    // skip the workspace-scoped event emission and log
+                    // rather than fabricating a "default" workspace (see
+                    // scripts/check-fabricated-scope-defaults.sh).
+                    if let Some(ws_id) = state
                         .repos
                         .find_by_id(&gyre_common::Id::new(repo_id))
                         .await
                         .ok()
                         .flatten()
                         .map(|r| r.workspace_id)
-                        .unwrap_or_else(|| gyre_common::Id::new("default"));
-                    let change_kind = match status_char {
-                        'A' => "added",
-                        'M' => "modified",
-                        'D' => "deleted",
-                        'R' => "renamed",
-                        _ => "unknown",
-                    };
-                    state
-                        .emit_event(
-                            Some(ws_id.clone()),
-                            gyre_common::message::Destination::Workspace(ws_id.clone()),
-                            gyre_common::message::MessageKind::SpecChanged,
-                            Some(serde_json::json!({
-                                "repo_id": repo_id,
-                                "spec_path": path,
-                                "change_kind": change_kind,
-                                "task_id": task_id.to_string(),
-                            })),
-                        )
-                        .await;
-                    state
-                        .emit_event(
-                            Some(ws_id.clone()),
-                            gyre_common::message::Destination::Workspace(ws_id),
-                            gyre_common::message::MessageKind::TaskCreated,
-                            Some(serde_json::json!({"task_id": task_id.to_string()})),
-                        )
-                        .await;
+                    {
+                        let change_kind = match status_char {
+                            'A' => "added",
+                            'M' => "modified",
+                            'D' => "deleted",
+                            'R' => "renamed",
+                            _ => "unknown",
+                        };
+                        state
+                            .emit_event(
+                                Some(ws_id.clone()),
+                                gyre_common::message::Destination::Workspace(ws_id.clone()),
+                                gyre_common::message::MessageKind::SpecChanged,
+                                Some(serde_json::json!({
+                                    "repo_id": repo_id,
+                                    "spec_path": path,
+                                    "change_kind": change_kind,
+                                    "task_id": task_id.to_string(),
+                                })),
+                            )
+                            .await;
+                        state
+                            .emit_event(
+                                Some(ws_id.clone()),
+                                gyre_common::message::Destination::Workspace(ws_id),
+                                gyre_common::message::MessageKind::TaskCreated,
+                                Some(serde_json::json!({"task_id": task_id.to_string()})),
+                            )
+                            .await;
+                    } else {
+                        warn!(
+                            repo_id,
+                            "spec-lifecycle: cannot resolve workspace for repo — skipping event emission"
+                        );
+                    }
 
                     // Cross-workspace spec change notification (priority 4):
                     // Find inbound cross-workspace links targeting this spec path

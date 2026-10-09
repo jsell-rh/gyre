@@ -5403,8 +5403,17 @@ mod tests {
     /// human), MR, queue entry, and a passing pre-merge gate result so the
     /// MR is mergeable.
     async fn setup_recovery_mr(state: &AppState) -> (Repository, gyre_domain::MergeRequest) {
+        // Seed the workspace record: the MR-reverted notification resolves
+        // the tenant from it (never fabricating a "default" tenant).
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-1"),
+            Id::new("tenant-recov"),
+            "ws-1",
+            "ws-1",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
         let repo = create_repo_in_workspace(state, "recovery-repo", "ws-1").await;
-
         let mut agent = gyre_domain::Agent::new(Id::new("agent-recov"), "agent-recov", 1000);
         agent.spawned_by = Some("user-recov".to_string());
         agent.workspace_id = Id::new("ws-1");

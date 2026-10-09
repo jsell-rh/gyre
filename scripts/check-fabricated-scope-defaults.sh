@@ -32,7 +32,7 @@
 # Exemptions are legacy debt in
 # scripts/fabricated-scope-defaults-exemptions.txt (path:line form,
 # frozen count). Fix a flagged site by skipping/logging; never add entries.
-FROZEN_EXEMPTION_COUNT=7
+FROZEN_EXEMPTION_COUNT=6
 #
 # Run by pre-commit and CI.
 

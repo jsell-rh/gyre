@@ -195,6 +195,21 @@ pub async fn notify_mr_reverted(
     mr_id: &str,
     reason: &str,
 ) {
+    // Resolve the tenant from the workspace record — never fabricate a
+    // "default" scope identity on lookup failure (see
+    // scripts/check-fabricated-scope-defaults.sh).
+    let tenant_id = match state.workspaces.find_by_id(workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        _ => {
+            tracing::warn!(
+                mr_id,
+                workspace_id = %workspace_id,
+                "notify_mr_reverted: cannot resolve tenant for workspace — skipping notifications"
+            );
+            return;
+        }
+    };
+
     let spawned_by = state
         .agents
         .find_by_id(author_agent_id)
@@ -216,7 +231,7 @@ pub async fn notify_mr_reverted(
         .ok()
         .flatten()
         .map(|mr| format!("'{}'", mr.title))
-        .unwrap_or_else(|| mr_id[..8.min(mr_id.len())].to_string());
+        .unwrap_or_else(|| mr_id.chars().take(8).collect());
 
     let body_json = serde_json::json!({
         "mr_id": mr_id,
@@ -231,7 +246,7 @@ pub async fn notify_mr_reverted(
         user_id.clone(),
         NotificationType::MrReverted,
         format!("MR {mr_label} was reverted: {reason}"),
-        "default",
+        tenant_id.clone(),
         Some(body_json.clone()),
         Some(mr_id.to_string()),
         None,
@@ -258,7 +273,7 @@ pub async fn notify_mr_reverted(
             member.user_id.clone(),
             NotificationType::MrReverted,
             format!("MR {mr_label} was reverted: {reason}"),
-            "default",
+            tenant_id.clone(),
             Some(body_json.clone()),
             Some(mr_id.to_string()),
             None,
