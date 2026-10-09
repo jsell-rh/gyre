@@ -3227,7 +3227,7 @@ mod tests {
         assert!(names.contains(&"gyre_list_mrs"));
         assert!(names.contains(&"gyre_record_activity"));
         assert!(names.contains(&"gyre_agent_heartbeat"));
-        assert!(names.contains(&"gyre_agent_complete"));
+        assert!(names.contains(&"gyre_search"));
         // §9 explorer agent tools — all five must be exposed over MCP.
         assert!(names.contains(&"graph_summary"));
         assert!(names.contains(&"graph_query_dryrun"));
