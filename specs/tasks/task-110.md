@@ -8,7 +8,7 @@ coverage_sections:
   - "user-management.md §Workspace Invitation Flow"
   - "user-management.md §Invitation Expiry"
   - "user-management.md §Tenant Invitations"
-commits: ["727a7b49e589fc16dde026ec084739166c8923b8", "030354c64674fb570e4dd85cb5acf9a3ac8b93a5", "145f499b11993781082524a95e1119b054854c31", "ba97de27786a8a2758e29ff282597f55c2755c9b", "4345788f601038d4cbcca896ae1e4c4cf3cf3c72", "9a8e75c1ab97d4c4d8c711ad85f4448116c55eac"]
+commits: ["030354c64674fb570e4dd85cb5acf9a3ac8b93a5", "145f499b11993781082524a95e1119b054854c31", "ba97de27786a8a2758e29ff282597f55c2755c9b", "4345788f601038d4cbcca896ae1e4c4cf3cf3c72", "9a8e75c1ab97d4c4d8c711ad85f4448116c55eac", "5320a545aaa72b039d63aee37369e2bfa9c61c09"]
 ---
 
 ## Spec Excerpt
@@ -83,98 +83,116 @@ pub enum InvitationStatus { Pending, Accepted, Declined, Expired, Revoked }
 
 ## Acceptance Criteria
 
-- [x] `TenantInvitation` and `WorkspaceInvitation` domain entities in gyre-domain
-- [x] Port traits for both invitation types
-- [x] SQLite adapter with migrations (check current migration number)
-- [x] All 5 tenant invitation API endpoints functional
-- [x] Workspace invitation lifecycle (invite → pending → accept/decline/expire)
-- [x] Token generation uses cryptographically random bytes, stored as SHA-256 hash
-- [x] Invitation expiry background job marks expired invitations
-- [x] Bulk invite endpoint accepts array of invitations
-- [x] Routes registered in `api/mod.rs` with ABAC mappings
-- [x] `cargo test --all` passes
+- [ ] `TenantInvitation` and `WorkspaceInvitation` domain entities in gyre-domain
+- [ ] Port traits for both invitation types
+- [ ] SQLite adapter with migrations (check current migration number)
+- [ ] All 5 tenant invitation API endpoints functional
+- [ ] Workspace invitation lifecycle (invite → pending → accept/decline/expire)
+- [ ] Token generation uses cryptographically random bytes, stored as SHA-256 hash
+- [ ] Invitation expiry background job marks expired invitations
+- [ ] Bulk invite endpoint accepts array of invitations
+- [ ] Routes registered in `api/mod.rs` with ABAC mappings
+- [ ] `cargo test --all` passes
 
 ## Agent Instructions
 
 Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §Invitation Expiry for full requirements. The existing workspace member endpoints are in `gyre-server/src/api/workspaces.rs` (or grep for `POST /api/v1/workspaces`). User creation is in `gyre-domain/src/user.rs`. Auth handling is in `gyre-server/src/auth.rs`. Route registration is in `gyre-server/src/api/mod.rs`. ABAC route mappings are in `gyre-server/src/abac_middleware.rs`. Check migration numbering with `ls crates/gyre-adapters/src/sqlite/migrations/ | tail -5`.
-
 ## Shipped
 
-Recovered interrupted assignment at branch head 095186ca (all five task
-commits present, working tree clean) and finished the documentation gap.
+**Contract-repair round (repair finding 0ab8eb07).** The prior candidate
+(31df7d24) had edited the assigned contract region — the 10 acceptance
+criteria checkboxes were ticked `[ ]` → `[x]` and a non-assigned commit
+(727a7b49) was prepended to `commits:`. Per the assigned contract those
+edits are not sanctioned (the criteria belong to the reviewer's verdict,
+and 727a7b49 is a pipeline checkpoint, not task work), so this round
+restored the contract region byte-for-byte to the assigned body and set
+only the lifecycle fields an implementer may set: `progress` and the
+`commits:` attribution (the five assigned implementation commits plus the
+task-labeled docs commit 5320a545). No code changes were needed and none
+were made — the lineage already carries the full implementation below.
 
-**Implementation (commits 9a8e75c1, 4345788f, ba97de27, 145f499b, 030354c6):**
+Shipped behavior (branch lineage, verified this round by reading every
+file listed; test evidence at the end):
 
-- Domain (`gyre-domain/src/invitation.rs`): `TenantInvitation`,
-  `WorkspaceInvitation`, `InvitationStatus` (Pending/Accepted/Declined/
-  Expired/Revoked), `InvitationPolicy` with the spec defaults
-  (7/7-day expiry, 50 max pending, re-invite allowed).
-- Ports (`gyre-ports/src/invitation.rs`): `TenantInvitationRepository` +
-  `WorkspaceInvitationRepository` with the duplicate-pending contract
-  documented and enforced by every adapter (SQLite, Postgres, mem —
-  `check-mem-port-contracts.sh` passes).
-- Adapters: shared migration `2026-10-08-000056_invitations` (portable SQL,
-  runs on SQLite and Postgres; `check-migration-sql-portability.sh` OK),
-  diesel schema rows, SQLite + Postgres repository impls with real queries;
-  token_hash has a unique index.
-- API (`gyre-server/src/api/invitations.rs`): all 5 spec'd tenant routes
-  (invite, bulk invite with per-entry partial success, list with status
-  filter, revoke, magic-link accept) plus tenant decline, workspace
-  invite/list/revoke, and token-based workspace accept/decline. Tokens are
-  32 bytes from the system CSPRNG (ring), hex-encoded, stored only as
-  SHA-256; acceptance is single-use; expired tokens transition to Expired
-  on touch. Accept creates the local-mode user with tenant+email-namespaced
+- **Domain** (`gyre-domain/src/invitation.rs`): `TenantInvitation`,
+  `WorkspaceInvitation`, `InvitationStatus`
+  (Pending/Accepted/Declined/Expired/Revoked), `InvitationPolicy` with
+  the spec defaults (7/7-day expiry, 50 max pending, re-invite allowed).
+  Field-for-field match with the user-management.md §Tenant-Level User
+  Onboarding struct.
+- **Ports** (`gyre-ports/src/invitation.rs`):
+  `TenantInvitationRepository` (create/find_by_id/find_by_token_hash/
+  list_by_tenant/list_by_status/update_status/delete) and
+  `WorkspaceInvitationRepository` (same surface keyed by workspace/user).
+  The duplicate-pending contract is documented on the trait and enforced
+  by every adapter.
+- **Adapters**: shared migration `2026-10-08-000056_invitations` creating
+  `tenant_invitations` and `workspace_invitations` (portable SQL running
+  on both SQLite and PostgreSQL; unique index on token_hash; JSON TEXT
+  columns for workspace ids/roles), diesel `schema.rs` rows, and real
+  query implementations in `sqlite/invitation.rs` and
+  `postgres/invitation.rs`; the server's mem adapter
+  (`mem.rs`) implements both traits with the same contract guards.
+- **API** (`gyre-server/src/api/invitations.rs`, 11 routes): the five
+  spec'd tenant endpoints — POST /api/v1/tenant/invite (single),
+  POST /api/v1/tenant/invite/bulk (per-entry partial success with
+  created/errors split), GET /api/v1/tenant/invitations?status= (filter),
+  DELETE /api/v1/tenant/invitations/{id} (revoke → Revoked, row kept),
+  POST /api/v1/invite/{token}/accept (magic-link) — plus
+  POST /api/v1/invite/{token}/decline, workspace
+  POST/GET/DELETE invite/invitations, and token-based workspace
+  accept/decline. Tokens are 32 bytes from the system CSPRNG (ring),
+  hex-encoded, persisted only as SHA-256; acceptance is single-use;
+  touching an expired pending invitation persists Expired immediately.
+  Accept creates the local-mode user with a tenant+email-namespaced
   external_id (same email can exist in different tenants), carries the
-  invited global role, and activates pre-assigned memberships guarded by
-  tenant containment. Workspace invite enforces Owner/Admin-or-TenantAdmin,
-  same-tenant invitee, `max_pending_invitations` cap (429), duplicate
-  pending (409), and sends the in-app notification. Magic-link routes are
-  registered outside `require_auth_middleware` (token is the auth factor)
-  in `lib.rs`; management routes are registered in `api/mod.rs` with ABAC
-  `RouteResourceMapping`s plus per-handler role enforcement
-  (`require_tenant_admin`) because the dev/system token resolves as Admin
-  and must pass.
-- Background job: `spawn_invitation_expiry` (main.rs) runs
-  `run_expiry_once` every hour (env override
-  `GYRE_INVITE_EXPIRY_INTERVAL_SECS`), first cycle at startup, marking
-  Pending invitations past `expires_at` as Expired without deleting rows.
+  invited GlobalRole, and activates pre-assigned memberships guarded by
+  tenant containment (cross-tenant workspace ids are skipped with a
+  warning, never silently granted). Workspace invite enforces
+  Owner/Admin-or-TenantAdmin, requires a same-tenant invitee, enforces
+  `max_pending_invitations` (429) and duplicate-pending (409), and sends
+  the in-app notification.
+- **Routing/authorization**: management routes registered in
+  `api/mod.rs` with `RouteResourceMapping` ABAC entries in
+  `abac_middleware.rs` plus per-handler enforcement
+  (`require_tenant_admin`, workspace-role checks, tenant containment) —
+  the magic-link routes are registered in `lib.rs` outside
+  `require_auth_middleware` because the invitee has no credentials yet
+  (the 256-bit token is the auth factor), with bearer-identity matching
+  when an identity IS presented.
+- **Background job**: `spawn_invitation_expiry` (main.rs) runs
+  `run_expiry_once` hourly (`GYRE_INVITE_EXPIRY_INTERVAL_SECS` override,
+  first cycle at startup) marking Pending invitations past `expires_at`
+  as Expired without deleting rows.
+- **Documentation** (5320a545): the invitation routes were added to
+  `docs/api-reference.md` and the expiry-job env var to
+  `docs/server-config.md`.
 
-**Documentation (commit 5320a545):** the 11 invitation routes were missing
-from `docs/api-reference.md` and the expiry-job env var from
-`docs/server-config.md` — both added.
+Test evidence:
 
-**Test evidence (this session, head 095186ca + 5320a545):**
-
-- `cargo test -p gyre-server --lib api::invitations` — 9 passed, 0 failed.
-  Covers: create→list→duplicate-409→accept→re-use-409 lifecycle, revoke
-  blocking accept, expiry (accept path marks Expired + job marks the
-  untouched seed), bulk partial success (2 created / 2 errors), non-admin
-  403, workspace full lifecycle (invite→duplicate 409→accept→membership
-  active with role→re-use 409), decline leaving no membership, email
-  validation, CSPRNG token shape + SHA-256 known-answer test.
-- `cargo test -p gyre-adapters invitation` — 2 passed (real temp-file
-  SQLite through migration 000056: full row roundtrip both kinds).
-- `cargo test -p gyre-domain invitation` — 4 passed (policy defaults,
-  status roundtrip, expiry only-when-pending for both kinds).
-- Build: `cargo build -p gyre-server -p gyre-adapters -p gyre-domain
-  -p gyre-ports` exit 0.
-- Mechanical checks at head: abac-route-registry, migration-versions,
-  migration-sql-portability, mem-port-contracts, arch,
-  abac-exempt-handlers (89 handlers), in-memory-state-stores,
-  inert-enforcement, scope-literal-defaults, byte-slice-truncation,
-  lossy-secret-conversion, fail-open-ref-resolution,
-  forwarded-header-trust — all OK (probe log:
-  /tmp/stage/review-evidence/invitations-probe.md).
-
-**Transport restriction:** this sandbox cannot bind a TCP listener
-(accept() errno 95, see /tmp/stage/capabilities.json), so no live
-`cargo run` HTTP smoke test was performed here. The Router::oneshot tests
-exercise the full handler chain in-process; host/CI verification should
-run the server and hit POST /api/v1/tenant/invite → POST
-/api/v1/invite/{token}/accept → workspace invite/accept per the recorded
-steps in the probe log.
-
-**Coverage matrix:** sections 5 (Tenant-Level User Onboarding), 6
-(Workspace Invitation Flow), 7 (Invitation Expiry), and 25 (Tenant
-Invitations) in `specs/coverage/system/user-management.md` are backed by
-the code above and ready for the reviewer to mark implemented.
+- Prior rounds at this lineage (recorded before the contract repair):
+  `cargo test -p gyre-server --lib api::invitations` 9 passed / 0 failed
+  (full lifecycle, revoke-blocks-accept, expiry on accept + job marks
+  untouched seeds, bulk partial success, non-admin 403, workspace
+  lifecycle with role + single-use, decline leaves no membership, email
+  validation, CSPRNG token shape + SHA-256 known answer);
+  `cargo test -p gyre-adapters invitation` 2 passed (real temp-file
+  SQLite through migration 000056); mechanical checks (abac-route-registry,
+  migration-versions, migration-sql-portability, mem-port-contracts,
+  arch, abac-exempt-handlers, in-memory-state-stores, inert-enforcement,
+  scope-literal-defaults, byte-slice-truncation, lossy-secret-conversion,
+  fail-open-ref-resolution, forwarded-header-trust) all OK.
+- This round, at this exact head (evidence files under
+  /tmp/stage/review-evidence/, log: task-110-contract-repair.md):
+  `cargo test -p gyre-server --lib api::invitations` 9 passed / 0 failed
+  (task-110-server-invitations.txt), `cargo test -p gyre-adapters
+  invitation` 2 passed / 0 failed (task-110-adapters-invitation.txt),
+  `cargo test --offline -p gyre-domain --lib invitation` 4 passed /
+  0 failed (task-110-domain-invitation.txt). The initial cargo runs
+  failed because index.crates.io was briefly unreachable (transient
+  sandbox network); retries succeeded and the recorded results above are
+  from the completed runs. No TCP listener is bindable in this sandbox
+  (accept() errno 95, /tmp/stage/capabilities.json), so the live-server
+  HTTP smoke (invite → accept → re-use 409 → revoke-blocks-accept →
+  bulk → list, exact curl steps recorded in the evidence log) remains
+  for host verification / CI at the PR head.
