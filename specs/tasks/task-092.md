@@ -6,7 +6,7 @@ progress: ready-for-review
 review: specs/reviews/task-092.md
 coverage_sections:
   - "human-system-interface.md §7 Conflict Prevention"
-commits: ["a979787d4bc9954c358468e8aa0640cf8e2a046d", "e76e1e75df74042195bb69c2acec1f520efec4c9", "355219c787a6660fada308140cbfd8fa0527e2fa", "d6acdf325904db4a067a52c892d6ef3dfdf4c245", "0b0c7a2bf54f2c9ec3214d340af13249eb6aeefa", "eee00dbaaac1978e4e2c6e513e7e7c17c92770d5", "1ac154183d15bf3b14b8f16046683d9181940b72"]
+commits: ["a4c3e59e1fc37e7b7dae6155afd9184807d05ee8", "2766274ecc181201ed7f260666734261b29dfb4f", "4c12beeed39ab2f1e8c0e1a13946ec79fe25d3ec", "b7d38b296453170a3a388ea8bf034e1a53874450", "1fce7994689d8c437f0bdc82c8f9cf1adf16f32f", "eee00dbaaac1978e4e2c6e513e7e7c17c92770d5", "1ac154183d15bf3b14b8f16046683d9181940b72"]
 ---
 
 ## Spec Excerpt
