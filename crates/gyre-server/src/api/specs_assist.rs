@@ -1655,6 +1655,7 @@ mod tests {
             roles: vec![],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
         };
         let req = SpecSaveRequest {

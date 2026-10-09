@@ -3372,6 +3372,7 @@ mod tests {
                 "scope": "agent",
                 "task_id": "task-1"
             })),
+            bearer_token: None,
             deprecated_token_auth: false,
         };
         assert!(is_agent_jwt(&auth_with_agent_scope));
@@ -3383,6 +3384,7 @@ mod tests {
             roles: vec![UserRole::Admin],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
         };
         assert!(!is_agent_jwt(&auth_global));
@@ -3397,6 +3399,7 @@ mod tests {
                 "sub": "user-abc",
                 "realm_access": {"roles": ["developer"]}
             })),
+            bearer_token: None,
             deprecated_token_auth: false,
         };
         assert!(!is_agent_jwt(&auth_keycloak));

@@ -729,6 +729,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     key_bindings,
     chain_attestations,
     secrets,
+    commit_signatures,
 );
 
 diesel::table! {
@@ -973,6 +974,27 @@ diesel::table! {
         created_at -> BigInt,
         expires_at -> Nullable<BigInt>,
         last_rotated_at -> Nullable<BigInt>,
+        tenant_id -> Text,
+    }
+}
+
+diesel::table! {
+    commit_signatures (repo_id, commit_sha) {
+        repo_id -> Text,
+        commit_sha -> Text,
+        signer_id -> Text,
+        task_id -> Text,
+        spawned_by -> Text,
+        algorithm -> Text,
+        signature -> Text,
+        signing_key_id -> Text,
+        signed_at -> BigInt,
+        sigstore_mode -> Text,
+        oidc_subject -> Text,
+        oidc_issuer -> Text,
+        certificate_pem -> Nullable<Text>,
+        certificate_chain_pem -> Nullable<Text>,
+        rekor_entry_id -> Nullable<Text>,
         tenant_id -> Text,
     }
 }

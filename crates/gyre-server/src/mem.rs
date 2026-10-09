@@ -3308,9 +3308,9 @@ fn test_state_inner(
         key_bindings: Arc::new(MemKeyBindingRepository::default()),
         trust_anchors: Arc::new(MemTrustAnchorRepository::default()),
         trusted_issuers: vec![],
+        commit_signatures: Arc::new(MemCommitSignatureRepository::default()),
+        signing_config: crate::commit_signatures::SigningConfig::default(),
         remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        commit_signatures: Arc::new(Mutex::new(HashMap::new())),
-        sigstore_mode: crate::commit_signatures::SigstoreMode::Local,
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
         container_audits: Arc::new(MemContainerAuditRepository::default()),
         spec_ledger: Arc::new(MemSpecLedgerRepository::default()),
@@ -4272,5 +4272,47 @@ impl gyre_ports::TrustAnchorRepository for MemTrustAnchorRepository {
             .await
             .retain(|(tid, a)| !(tid == tenant_id && a.id == anchor_id));
         Ok(())
+    }
+}
+
+// ── In-memory CommitSignatureRepository (identity-security.md §Layer 3) ──────
+
+/// In-memory `CommitSignatureRepository` for pure-mem mode and tests.
+/// Mirrors the SQLite adapter's `(repo_id, commit_sha)` keying.
+#[derive(Default)]
+pub struct MemCommitSignatureRepository {
+    store: Arc<Mutex<Vec<gyre_ports::commit_signature_repo::CommitSignature>>>,
+}
+
+#[async_trait]
+impl gyre_ports::commit_signature_repo::CommitSignatureRepository
+    for MemCommitSignatureRepository
+{
+    async fn save(
+        &self,
+        record: &gyre_ports::commit_signature_repo::CommitSignature,
+    ) -> Result<()> {
+        let mut store = self.store.lock().await;
+        match store.iter_mut().find(|r| {
+            r.repo_id == record.repo_id && r.commit_sha == record.commit_sha
+        }) {
+            Some(existing) => *existing = record.clone(),
+            None => store.push(record.clone()),
+        }
+        Ok(())
+    }
+
+    async fn find(
+        &self,
+        repo_id: &str,
+        commit_sha: &str,
+    ) -> Result<Option<gyre_ports::commit_signature_repo::CommitSignature>> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .iter()
+            .find(|r| r.repo_id == repo_id && r.commit_sha == commit_sha)
+            .cloned())
     }
 }

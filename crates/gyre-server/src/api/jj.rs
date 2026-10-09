@@ -114,7 +114,16 @@ pub async fn jj_new(
 /// POST /api/v1/repos/:id/jj/squash
 ///
 /// Squashes the working copy into its parent change and signs the resulting
-/// commit SHA with the forge's Ed25519 key (M13.8 Sigstore local signing).
+/// commit SHA. Signing mode comes from `GYRE_SIGNING_MODE`:
+/// - `fulcio`: keyless Sigstore signing — Fulcio certificate issued against
+///   the caller's OIDC JWT, commit signed with the ephemeral key, signature
+///   recorded in Rekor (task-107).
+/// - `none`: no signature record.
+/// - `local` (default): forge Ed25519 key (M13.8).
+///
+/// Any failure in the external Fulcio/Rekor stack falls back to local
+/// signing with a warning — squash itself never fails because of the
+/// external signing stack.
 pub async fn jj_squash(
     State(state): State<Arc<AppState>>,
     Path(repo_id): Path<String>,
@@ -130,46 +139,143 @@ pub async fn jj_squash(
         .await
         .map_err(ApiError::Internal)?;
 
-    // Sign the resulting commit SHA with the forge's Ed25519 key.
-    let record = commit_signatures::sign_commit(
-        &commit_sha,
-        "forge",
-        &state.agent_signing_key,
-        state.sigstore_mode.clone(),
-    );
+    let config = &state.signing_config;
+    if config.mode == commit_signatures::SigningMode::None {
+        // `none` mode: skip signing entirely — no record is produced. The
+        // response reports the commit with an empty signature so callers can
+        // distinguish "unsigned" from "signed" without a second lookup.
+        return Ok(Json(CommitSignature {
+            repo_id: repo_id.clone(),
+            commit_sha,
+            signer_id: auth.agent_id.clone(),
+            task_id: String::new(),
+            spawned_by: String::new(),
+            algorithm: String::new(),
+            signature: String::new(),
+            signing_key_id: String::new(),
+            signed_at: 0,
+            sigstore_mode: gyre_ports::SigstoreMode::Local,
+            oidc_subject: String::new(),
+            oidc_issuer: String::new(),
+            certificate_pem: None,
+            certificate_chain_pem: None,
+            rekor_entry_id: None,
+        }));
+    }
+
+    // Attribution comes from the caller's validated JWT claims — never
+    // placeholder literals (task-107 F2). Non-JWT callers (dev token, API
+    // key) fall back to the resolved agent id with empty task/user fields.
+    let attribution = commit_signatures::SigningAttribution::from_auth(&auth);
+
+    let record = if config.mode == commit_signatures::SigningMode::Fulcio {
+        // Keyless: present the caller's JWT to Fulcio. The token was
+        // validated at authentication time; Fulcio re-validates the OIDC
+        // identity itself before issuing.
+        let jwt = auth.bearer_token.clone().unwrap_or_default();
+        let transport = crate::sigstore::production_transport(state.http_client.clone());
+        match crate::sigstore::sign_commit_keyless(
+            &repo_id,
+            &commit_sha,
+            &attribution,
+            &jwt,
+            config,
+            transport.as_ref(),
+        )
+        .await
+        {
+            Ok(signed) => {
+                let record = signed.record;
+                tracing::info!(
+                    commit_sha = %commit_sha,
+                    rekor_entry_id = ?record.rekor_entry_id,
+                    "jj squash: commit signed via Fulcio keyless (task-107)"
+                );
+                record
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "jj squash: Fulcio keyless signing failed; falling back to local signing"
+                );
+                commit_signatures::sign_commit_local(
+                    &repo_id,
+                    &commit_sha,
+                    &attribution,
+                    &state.agent_signing_key,
+                    &state.base_url,
+                )
+            }
+        }
+    } else {
+        commit_signatures::sign_commit_local(
+            &repo_id,
+            &commit_sha,
+            &attribution,
+            &state.agent_signing_key,
+            &state.base_url,
+        )
+    };
 
     state
         .commit_signatures
-        .lock()
+        .save(&record)
         .await
-        .insert(commit_sha.clone(), record.clone());
-
-    tracing::info!(
-        commit_sha = %commit_sha,
-        signing_key_id = %record.signing_key_id,
-        mode = ?record.sigstore_mode,
-        "jj squash: commit signed (M13.8)"
-    );
+        .map_err(ApiError::Internal)?;
 
     Ok(Json(record))
 }
 
 /// GET /api/v1/repos/:id/commits/:sha/signature
 ///
-/// Return the Sigstore commit signature for a specific commit SHA, if one exists.
+/// Return the stored commit signature for `(repo_id, sha)`. Lookup is scoped
+/// by repo: a record created for repo A is not retrievable through repo B's
+/// path.
 pub async fn get_commit_signature(
     State(state): State<Arc<AppState>>,
     Path((repo_id, sha)): Path<(String, String)>,
 ) -> Result<Json<CommitSignature>, ApiError> {
-    // Verify the repo exists.
-    let _ = repo_path(&state, &repo_id).await?;
+    // Verify the repo exists (errors propagate).
+    repo_path(&state, &repo_id).await?;
 
-    let store = state.commit_signatures.lock().await;
-    store
-        .get(&sha)
-        .cloned()
+    state
+        .commit_signatures
+        .find(&repo_id, &sha)
+        .await
+        .map_err(ApiError::Internal)?
         .map(Json)
         .ok_or_else(|| ApiError::NotFound(format!("no signature found for commit {sha}")))
+}
+
+/// GET /api/v1/repos/:id/commits/:sha/signature/verification
+///
+/// Verify the stored commit signature for `(repo_id, sha)` against the
+/// server's configured trust anchors (task-107 plan item 3):
+/// - fulcio records: (a) ECDSA signature over the commit SHA against the
+///   leaf certificate, (b) certificate chain rooted in the CONFIGURED
+///   Fulcio trust bundle within its validity window (F3/F5/F11), (c) leaf
+///   SAN/CN matches the recorded OIDC subject, (d) a Rekor entry whose
+///   hashedrekord body carries this commit's digest, signature, and
+///   certificate (F4).
+/// - local records: real Ed25519 verification of the signature over the
+///   commit SHA against the forge signing key.
+///
+/// ABAC: resource_type = repo, action = read (registered in
+/// abac_middleware.rs — F8).
+pub async fn get_commit_signature_verification(
+    State(state): State<Arc<AppState>>,
+    Path((repo_id, sha)): Path<(String, String)>,
+) -> Result<Json<crate::sigstore::SignatureVerificationResult>, ApiError> {
+    // Verify the repo exists (errors propagate).
+    repo_path(&state, &repo_id).await?;
+
+    match crate::sigstore::verify_state_commit_signature(&state, &repo_id, &sha).await {
+        Ok(Some(result)) => Ok(Json(result)),
+        Ok(None) => Err(ApiError::NotFound(format!(
+            "no signature found for commit {sha}"
+        ))),
+        Err(e) => Err(ApiError::Internal(e)),
+    }
 }
 
 /// POST /api/v1/repos/:id/jj/undo
@@ -211,9 +317,11 @@ pub async fn jj_bookmark(
 
 #[cfg(test)]
 mod tests {
+    use crate::commit_signatures;
     use crate::mem::test_state;
     use axum::{body::Body, Router};
     use http::{Request, StatusCode};
+    use std::sync::Arc;
     use tower::ServiceExt;
 
     fn app() -> Router {
@@ -403,6 +511,230 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── Signing mode handler coverage (task-107) ─────────────────────────────
+    //
+    // These exercise the jj_squash HANDLER wiring, not the sigstore module
+    // (whose signing/verification phases have their own suite in
+    // sigstore.rs over an upstream-contract mock stack):
+    // - fulcio mode drives the real production transport (state.http_client)
+    //   against a guaranteed-unreachable stack, then falls back to local
+    //   signing — the handler's own fallback guarantee.
+    // - attribution (F2) is threaded from the caller's validated JWT claims
+    //   into the stored record with DISTINCT values, so a regression to
+    //   placeholder literals fails the assertion.
+    // - the fallback record verifies through the verification endpoint's
+    //   real Ed25519 path (GET .../signature/verification).
+
+    /// fulcio mode + unreachable Fulcio: the handler must fall back to local
+    /// signing (squash never fails because of the external signing stack),
+    /// carrying the caller's JWT attribution (task-107 F2) and verifying
+    /// through the verification endpoint afterwards.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn jj_squash_fulcio_unreachable_falls_back_to_local() {
+        let mut state = crate::mem::test_state();
+        // Configure fulcio mode pointing at a host that can never be
+        // connected to: `fulcio.invalid` is the RFC 6761 reserved TLD that
+        // must never resolve (CI: DNS lookup fails immediately); in this
+        // sandbox it resolves to a sinkhole IP that refuses connections
+        // (verified: connect refused in single-digit ms). Either way the
+        // production transport's tokio::time::timeout and error path are
+        // exercised for real — the fallback must hold for unreachable
+        // stacks, not just malformed responses.
+        //
+        // Arc::get_mut: test_state() returns a fresh Arc with refcount 1
+        // (its internal clones were dropped), so the state can be
+        // reconfigured before the router takes a clone.
+        let state_mut = Arc::get_mut(&mut state).expect("sole owner");
+        state_mut.signing_config = crate::commit_signatures::SigningConfig {
+            mode: commit_signatures::SigningMode::Fulcio,
+            fulcio_url: "https://fulcio.invalid".to_string(),
+            rekor_url: "https://rekor.invalid".to_string(),
+        };
+        let app = crate::build_router(state.clone());
+
+        // Production seeds the built-in ABAC policies at startup; the agent
+        // JWT below carries UserRole::Agent and is allowed by
+        // `builtin-agent-scoped-access` (write on any resource type). The
+        // bare test state has an empty policy store, which would 403 the
+        // request before the signing path under test is ever reached.
+        crate::abac_middleware::seed_builtin_policies(&state).await;
+
+        let (app, repo_id) = create_project_and_repo(app).await;
+
+        // Mint and register a real agent JWT with DISTINCT attribution
+        // values, so the assertions would catch the old placeholder-literal
+        // bug (`task_id: "task-107"`, `spawned_by: "system"` — F2).
+        let jwt = state
+            .agent_signing_key
+            .mint(
+                "agent-fallback",
+                "task-77",
+                "user-fallback",
+                &state.base_url,
+                3600,
+            )
+            .expect("mint JWT");
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-fallback", jwt.clone())
+            .await
+            .unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/jj/squash"))
+                    .header("Authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sig_json = body_json(resp).await;
+        // The fallback record is local-mode Ed25519 (not fulcio).
+        assert_eq!(
+            sig_json["sigstore_mode"].as_str().unwrap(),
+            "local",
+            "unreachable Fulcio must fall back to local signing"
+        );
+        assert_eq!(sig_json["algorithm"].as_str().unwrap(), "EdDSA");
+        assert!(!sig_json["signature"].as_str().unwrap().is_empty());
+        // F2: attribution threaded from the caller's validated claims.
+        assert_eq!(sig_json["signer_id"].as_str().unwrap(), "agent-fallback");
+        assert_eq!(sig_json["task_id"].as_str().unwrap(), "task-77");
+        assert_eq!(sig_json["spawned_by"].as_str().unwrap(), "user-fallback");
+        let sha = sig_json["commit_sha"].as_str().unwrap().to_string();
+
+        // The fallback record is persisted and retrievable repo-scoped.
+        let sig_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/repos/{repo_id}/commits/{sha}/signature"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sig_resp.status(), StatusCode::OK);
+
+        // The verification endpoint verifies the local fallback record
+        // against the forge Ed25519 key — the real check, not a 200-only
+        // probe (task-107 plan item 3, local branch).
+        let ver_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/repos/{repo_id}/commits/{sha}/signature/verification"
+                    ))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ver_resp.status(), StatusCode::OK);
+        let ver_json = body_json(ver_resp).await;
+        assert_eq!(ver_json["valid"].as_bool().unwrap(), true);
+        assert_eq!(ver_json["signature_valid"].as_bool().unwrap(), true);
+        assert_eq!(ver_json["signer_id"].as_str().unwrap(), "agent-fallback");
+        assert_eq!(ver_json["task_id"].as_str().unwrap(), "task-77");
+        assert_eq!(ver_json["spawned_by"].as_str().unwrap(), "user-fallback");
+    }
+
+    /// fulcio mode with a non-JWT bearer (dev token): there is no agent JWT
+    /// to present to Fulcio, so keyless signing cannot proceed and the
+    /// handler must still fall back to local signing without failing the
+    /// squash (empty bearer → sub extraction fails → fallback).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn jj_squash_fulcio_without_jwt_falls_back_to_local() {
+        let mut state = crate::mem::test_state();
+        let state_mut = Arc::get_mut(&mut state).expect("sole owner");
+        state_mut.signing_config = crate::commit_signatures::SigningConfig {
+            mode: commit_signatures::SigningMode::Fulcio,
+            fulcio_url: "https://fulcio.invalid".to_string(),
+            rekor_url: "https://rekor.invalid".to_string(),
+        };
+        let app = crate::build_router(state.clone());
+        let (app, repo_id) = create_project_and_repo(app).await;
+
+        // Global dev token: agent_id "system", no JWT claims, no bearer JWT
+        // usable by Fulcio.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/jj/squash"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sig_json = body_json(resp).await;
+        assert_eq!(
+            sig_json["sigstore_mode"].as_str().unwrap(),
+            "local",
+            "keyless signing without a presentable JWT must fall back to local"
+        );
+        // Attribution for non-JWT callers: resolved agent id, empty (not
+        // fabricated) task/user fields (F2).
+        assert_eq!(sig_json["signer_id"].as_str().unwrap(), "system");
+        assert_eq!(sig_json["task_id"].as_str().unwrap(), "");
+        assert_eq!(sig_json["spawned_by"].as_str().unwrap(), "");
+    }
+
+    /// `none` mode: squash succeeds with an empty unsigned record and no
+    /// record is persisted (the verification endpoint 404s).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn jj_squash_none_mode_skips_signing() {
+        let mut state = crate::mem::test_state();
+        let state_mut = Arc::get_mut(&mut state).expect("sole owner");
+        state_mut.signing_config = crate::commit_signatures::SigningConfig {
+            mode: commit_signatures::SigningMode::None,
+            fulcio_url: "https://fulcio.invalid".to_string(),
+            rekor_url: "https://rekor.invalid".to_string(),
+        };
+        let app = crate::build_router(state.clone());
+        let (app, repo_id) = create_project_and_repo(app).await;
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/jj/squash"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sig_json = body_json(resp).await;
+        assert_eq!(sig_json["signature"].as_str().unwrap(), "");
+        assert_eq!(sig_json["sigstore_mode"].as_str().unwrap(), "local");
+        let sha = sig_json["commit_sha"].as_str().unwrap().to_string();
+
+        // No record persisted: signature lookup 404s.
+        let sig_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/repos/{repo_id}/commits/{sha}/signature"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sig_resp.status(), StatusCode::NOT_FOUND);
     }
 
     /// jj undo returns 204.
