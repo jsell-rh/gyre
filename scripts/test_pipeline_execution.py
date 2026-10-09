@@ -84,6 +84,19 @@ class CrashTest(unittest.TestCase):
         delete.assert_called_once_with('sandbox', 'delete', 'pod', timeout=180, check=False)
         self.assertEqual(self.store.db.execute("SELECT state FROM resources WHERE name='pod'").fetchone()[0], 'absent')
 
+    def test_error_after_an_earlier_attachment_still_attempts_source_capture(self):
+        self.store.reserve('pod', self.work, self.claim['token'], 'sandbox', 1)
+        earlier = self.store.directory / 'attempts' / self.work / '0'
+        earlier.mkdir(parents=True)
+        (earlier / 'remote.offset').write_text('100')
+        self.store.finish(self.work, self.claim['token'], {})
+        self.store.enqueue('cleanup', 'task-001', 'g', {'resource': 'pod'})
+        execution = Execution(self.store, self.store.claim('cleanup', 'cleaner'))
+        item = {'name': 'pod', 'phase': 'Error', 'labels': {'gyre.dev/pipeline': self.store.setting('owner')}}
+        with patch.object(execution, 'login'), patch('pipeline.stages.gateway.inventory', side_effect=[[item], [], []]), patch.object(execution, 'remote', side_effect=subprocess.TimeoutExpired('capture', 30)) as remote, patch.object(execution, 'os', return_value=subprocess.CompletedProcess([], 0, '', '')):
+            cleanup(execution, self.store.task('task-001'))
+        remote.assert_called_once()
+
     def merge_cleanup(self, observation):
         self.store.reserve('merge-old', self.work, self.claim['token'], 'merge', 1,
                            {'url': 'https://github.com/jsell-rh/gyre/pull/633'})

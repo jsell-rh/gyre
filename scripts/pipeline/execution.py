@@ -341,7 +341,7 @@ class Execution:
             # Retain logs and source before releasing expensive compute. A
             # separate cleanup reconciler handles crashes and failed deletes.
             self.phase('Deleting', sandbox=sandbox)
-            if allocated and ready:
+            if allocated and (ready or any(self.directory.parent.glob('*/remote.offset'))):
                 if not completed:
                     try:
                         code = """import json,os,pathlib,signal,time
