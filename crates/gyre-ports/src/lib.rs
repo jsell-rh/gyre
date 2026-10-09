@@ -3,7 +3,6 @@
 //! Ports are pure interfaces. Implementations live in `gyre-adapters`.
 //! Domain logic depends only on these traits, never on concrete adapters.
 
-pub mod activity;
 pub mod agent;
 pub mod agent_tracking;
 pub mod analytics;
@@ -61,7 +60,6 @@ pub mod user_workspace_state;
 pub mod workspace;
 pub mod workspace_membership;
 
-pub use activity::{ActivityQuery, ActivityRepository};
 pub use agent::AgentRepository;
 pub use agent_tracking::{AgentCommitRepository, WorktreeRepository};
 pub use analytics::{AnalyticsRepository, CostRepository};
