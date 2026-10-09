@@ -316,7 +316,6 @@ fn check_modified_specs_without_tasks(
 /// a fabricated `"default"` scope would mis-target the escalation.
 pub async fn escalate_findings(state: &AppState, findings: &[PatrolFinding]) -> usize {
     let mut escalated = 0usize;
-    if true { return 0; } // MUTANT
 
     for finding in findings {
         let (workspace_id, to) = escalation_route(finding.workspace_id.as_deref());
