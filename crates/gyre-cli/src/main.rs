@@ -1011,8 +1011,8 @@ async fn main() -> Result<()> {
                     .search(&q, entity_type, workspace_id.as_deref(), limit)
                     .await?;
 
-                if suggest.is_some() {
-                    print_search_suggestions(&response);
+                if let Some(prefix) = suggest.as_deref() {
+                    print_search_suggestions(prefix, &response);
                 } else {
                     print_search_results(&response);
                 }
@@ -2312,15 +2312,32 @@ fn build_search_query(
     q.trim().to_string()
 }
 
-/// Render autocomplete suggestions: one line per title that starts with the
-/// prefix, in `type  title  id` form.
-fn print_search_suggestions(results: &client::SearchResponse) {
-    if results.results.is_empty() {
-        println!("No suggestions for '{}'.", results.query);
+/// Collect autocomplete suggestions for `prefix`: results whose title starts
+/// with the prefix (case-insensitive). The server's search endpoint matches
+/// by substring anywhere in the title or body, so the prefix filter for
+/// autocomplete is applied client-side.
+fn collect_suggestions<'a>(
+    prefix: &str,
+    results: &'a client::SearchResponse,
+) -> Vec<(&'a str, &'a str, &'a str)> {
+    let p = prefix.to_lowercase();
+    results
+        .results
+        .iter()
+        .filter(|r| r.title.to_lowercase().starts_with(&p))
+        .map(|r| (r.entity_type.as_str(), r.title.as_str(), r.entity_id.as_str()))
+        .collect()
+}
+
+/// Render autocomplete suggestions for `prefix` in `type  title  (id)` form.
+fn print_search_suggestions(prefix: &str, results: &client::SearchResponse) {
+    let matches = collect_suggestions(prefix, results);
+    if matches.is_empty() {
+        println!("No suggestions for '{}'.", prefix);
         return;
     }
-    for r in &results.results {
-        println!("{}    {}    ({})", r.entity_type, r.title, r.entity_id);
+    for (entity_type, title, entity_id) in &matches {
+        println!("{entity_type}    {title}    ({entity_id})");
     }
 }
 
@@ -3213,6 +3230,85 @@ mod tests {
     fn build_search_query_facets_only() {
         let q = build_search_query(None, Some("spec"), None, None);
         assert_eq!(q, "type:spec");
+    }
+
+    #[test]
+    fn suggest_filters_to_title_prefix() {
+        let results = client::SearchResponse {
+            query: "iden".into(),
+            total: 3,
+            results: vec![
+                client::SearchResult {
+                    entity_type: "spec".into(),
+                    entity_id: "system/identity-security.md".into(),
+                    title: "Identity & Security".into(),
+                    snippet: String::new(),
+                    score: 3.0,
+                    facets: Default::default(),
+                },
+                client::SearchResult {
+                    entity_type: "task".into(),
+                    entity_id: "task-042".into(),
+                    title: "Coincidental iden-tifier cleanup".into(),
+                    snippet: String::new(),
+                    score: 1.0,
+                    facets: Default::default(),
+                },
+                client::SearchResult {
+                    entity_type: "spec".into(),
+                    entity_id: "system/identity.md".into(),
+                    title: "identity model".into(),
+                    snippet: String::new(),
+                    score: 2.0,
+                    facets: Default::default(),
+                },
+            ],
+        };
+        let suggestions = collect_suggestions("iden", &results);
+        assert_eq!(
+            suggestions,
+            vec![
+                ("spec", "Identity & Security", "system/identity-security.md"),
+                ("spec", "identity model", "system/identity.md"),
+            ]
+        );
+    }
+
+    #[test]
+    fn suggest_prefix_is_case_insensitive() {
+        let results = client::SearchResponse {
+            query: "IDEN".into(),
+            total: 1,
+            results: vec![client::SearchResult {
+                entity_type: "spec".into(),
+                entity_id: "system/identity.md".into(),
+                title: "identity model".into(),
+                snippet: String::new(),
+                score: 2.0,
+                facets: Default::default(),
+            }],
+        };
+        assert_eq!(
+            collect_suggestions("IDEN", &results),
+            vec![("spec", "identity model", "system/identity.md")]
+        );
+    }
+
+    #[test]
+    fn suggest_no_prefix_match_reports_none() {
+        let results = client::SearchResponse {
+            query: "xyz".into(),
+            total: 1,
+            results: vec![client::SearchResult {
+                entity_type: "task".into(),
+                entity_id: "task-001".into(),
+                title: "unrelated".into(),
+                snippet: String::new(),
+                score: 1.0,
+                facets: Default::default(),
+            }],
+        };
+        assert!(collect_suggestions("xyz", &results).is_empty());
     }
 
     // ── Trace command tests ─────────────────────────────────────────────────
