@@ -2,8 +2,8 @@
 title: "Repair verified failure on main cd1c5f044e49"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
-progress: ready-for-review
-commits: ["3b3b64b96e02cb9428158c80c36d295c2201f14c", "32444a1a06e19a559bc7fc721ed7a68cfe58553a", "059ea581413b9ecf741d1040fa6e551fe2f031e5", "0021459fc76e93b8b5926c683db9bd6beaca7315"]
+progress: complete
+commits: ["77e3e6fed06a141d16916dfb94a690fc17baa982", "d59d2720f29ed764cf40cca1f7a1d66b6e099099", "4ee40d38a523568dc6627ef590d9b21c959fa367", "e44234d68da4fb6e50f81a8e697554f1dae278d4"]
 ---
 
 ## Required behavior
@@ -953,3 +953,86 @@ e2e	UNKNOWN STEP	2026-10-08T22:06:51.0723885Z Cleaning up orphan processes
 e2e	UNKNOWN STEP	2026-10-08T22:06:51.1073990Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4, actions/setup-node@v4, actions/upload-artifact@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/
 
 ```
+
+
+## Review
+
+Root diagnosed the stalled mutation command: it launched npx from /tmp/gyre-review-probe instead of its web/ directory. Root stopped only that npm process and ran the installed Vitest directly from web/. Observed mutation result: 2 failed, 38 passed, 41 pre-existing skipped tests. The failed cases were workspace-B retention and epoch-seconds recency. This was an isolated pre-fix component mutation, not the assigned checkout. A summary is preserved in the root attempt artifacts; full-log retrieval failed, so do not rely on that temporary log path. Use your own focused probe evidence for the verdict.
+
+### Round 7 — independent review (2026-10-09, sandbox-safe)
+
+Scope inspected: full diff `cd1c5f04..ed10249` (18 files) plus commit-by-commit
+walk of the four attributed `wip(task-210)` checkpoints and the unlabeled guard
+fix `d7b957a`. Verdict based on own probes run from `web/` in this session.
+
+**Finding 1 — stale cross-workspace response guard: repaired.**
+`WorkspaceHome.svelte` `loadRules` uses a request-generation counter
+(`rulesRequestSeq`): success, error, and finally paths all drop writes once a
+newer load started. Reachable through the real entry point — `App.svelte:1587`
+renders `<WorkspaceHome workspace={currentWorkspace}>` unkeyed, so a workspace
+switch mutates the prop and the `$effect` (line 1160, tracks `workspace?.id`)
+reruns `loadRules`, bumping the generation. Mutation probe (isolated worktree,
+component reverted to pre-fix, all else fixed): root's case 2
+`keeps workspace B rules when workspace A finishes loading after navigation`
+FAILS; assigned checkout: 2/2 pass. Test is meaningful, not self-confirming.
+
+**Finding 2 — updated_at unit: repaired.** Domain `MetaSpec.updated_at` is
+`u64` (meta_spec.rs:141); server writes `now_secs()` (UNIX seconds) at
+meta_specs.rs:1021/1093; both adapters store i64 seconds. Component now uses
+`toEpochSec(m.updated_at)` (handles sec/ms/ISO/SystemTime shapes). Mutation
+probe: new epoch-seconds case `treats meta-spec updated_at as epoch seconds`
+FAILS on pre-fix component; passes on candidate (both the 1h-ago recent and
+30d-old not-recent branches). The unsupported "Reconciling" status text is
+replaced with the factual "N meta-specs updated in the last 7 days"
+(en.json + template); class renamed, `reconcile-status` testid unchanged.
+
+**Finding 3 — docs/ui.md: repaired.** No permanent-Sidebar claims remain
+(`grep sidebar` → only "no persistent sidebar" statements); documents the
+canonical ui-navigation two-mode shell, actual repo tabs, and actual g-key
+bindings incl. the 500ms g-sequence expiry and input suppression.
+
+**Baseline E2E defects — root cause chain verified.** The 37 CI failures all
+stemmed from the seed fixture asserting non-existent markup and a tenant-scope
+leak: `admin.rs` `admin_seed` now derives tenant from the authenticated caller
+(`auth.tenant_id`), rejects a foreign-owned global seed fixture with 409
+naming the collision (both the repo->workspace path at :430-451 and the
+workspace-id path at :487-496), propagates storage errors, and derives seed
+repo paths from `state.repos_root` instead of relative "./..." literals —
+which let 3 entries be REMOVED from relative-path-defaults-exemptions.txt
+(gate tightened, and `check-relative-path-defaults.sh` passes). Seed fixture
+`seeded.js` fails fast on seed/workspace-visibility errors and exports the
+real identities (slug "default", repo "gyre-core") matching `admin_seed`
+data; the repos-section locator now targets the real production markup
+(`repo-card` in RepoCard.svelte) and additionally asserts non-empty repo
+names. Focused Rust proof: `cargo test -p gyre-server --lib admin::tests` →
+32 passed / 0 failed, including
+`admin_seed_rejects_caller_from_foreign_tenant`,
+`admin_seed_rejects_when_workspace_id_already_owned_by_foreign_tenant`,
+`admin_seed_inconsistent_repo_without_workspace_is_conflict`,
+`admin_seed_workspace_visible_to_calling_tenant`.
+
+**No test weakening.** Deleted AppShell/Sidebar tests assert the removed
+`Sidebar.svelte` component (canonical ui-navigation supersedes HSI §1.3;
+replacement NoSidebar/WorkspaceDrawerSectionNav tests present and passing
+78/78 in the shell suite). Root-authored WorkspaceHomeRulesFailure.test.js is
+unmodified (byte-compared to the handoff copy). Screenshots unchanged.
+No new exemptions anywhere; invariant scripts (arch, migration versions, ABAC
+registry, task attribution, relative-path defaults) all pass on the candidate.
+
+**Residual risk — accepted per process.** Full Playwright E2E and the full
+frontend/Rust suites cannot run in this sandbox (no loopback listeners, no
+browser download). Root's isolated draft preview passed all 64 E2E tests with
+unchanged screenshots, but final proof remains the controller's host suites +
+GitHub E2E on the exact merge SHA. This review confirms the repaired behaviors
+through focused probes and code inspection only — which is exactly its mandate.
+
+Verdict: **complete**. All three handoff findings repaired with production
+code, each backed by a regression test proven to fail on the pre-fix code.
+Task scope respected: no task-200 feature work.
+
+## Shipped
+
+- `admin_seed` seeds the demo workspace in the authenticated caller's tenant, rejects foreign/missing ownership of the global seed fixtures with a 409 naming the collision, propagates storage errors, and derives seed repo paths from `state.repos_root` — the E2E tenant-scope leak and relative-path exemptions are gone (3 exemption entries removed, check passes).
+- `WorkspaceHome` Agent Rules loads are generation-guarded: a delayed response (success or failure) from a superseded workspace can no longer overwrite the current workspace's rules; a failed lookup surfaces as an error with Retry, never an empty successful rule set.
+- MetaSpec `updated_at` is parsed as UNIX seconds (matching domain `u64` / `now_secs()` writes) via `toEpochSec`; the recency note reports only what the data proves ("N meta-specs updated in the last 7 days").
+- The E2E seeded fixture fails fast with the real cause on seed or workspace-visibility errors, uses the real fixture identities (workspace `default`, repo `gyre-core`), and asserts the actual `repo-card` production markup; `docs/ui.md` documents the shipped no-sidebar shell (canonical ui-navigation) with the real tabs and g-key bindings.
