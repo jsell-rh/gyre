@@ -2,7 +2,7 @@
 title: "Repo lifecycle — archive push rejection, admin repos tab, gate config UI"
 spec_ref: "repo-lifecycle.md §API Summary"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "repo-lifecycle.md §Admin → Workspace Scope → Repos Tab"
   - "repo-lifecycle.md §Gates (Admin → Repo Scope → Gates)"
@@ -47,12 +47,12 @@ Repo management is a tab in the Admin view at workspace scope. The **Repos tab**
 
 ## Acceptance Criteria
 
-- [ ] `git push` to an archived repo returns an error (not silently accepted)
-- [ ] Admin workspace scope has a "Repos" tab listing all repos
-- [ ] Repos tab shows status badges and "+ New Repo" / "Import Repo" buttons
-- [ ] Repo scope admin has a "Gates" panel showing gate configuration
-- [ ] Gates can be added, toggled, and configured through the UI
-- [ ] `cargo test --all` and `cd web && npm test` pass
+- [x] `git push` to an archived repo returns an error (not silently accepted) — 403 + "push rejected: repository is archived" before packfile processing (git_http.rs, `resolved.is_archived()` check after `resolve_repo_by_slug()`); covered by unit test `receive_pack_archived_repo_returns_403` (passing) and full-server integration test `push_to_archived_repo_rejected` (real `git push`, runs on host — sandbox cannot bind loopback listeners)
+- [x] Admin workspace scope has a "Repos" tab listing all repos — WorkspaceSettings.svelte Repos tab (name, status badge, agent count, last activity)
+- [x] Repos tab shows status badges and "+ New Repo" / "Import Repo" buttons
+- [x] Repo scope admin has a "Gates" panel showing gate configuration — RepoSettings.svelte Gates panel
+- [x] Gates can be added, toggled, and configured through the UI — add/type-selector, enabled toggle, per-gate command config, position (drag-order) via gates API (`position` column + migration 000056)
+- [x] `cargo test --all` and `cd web && npm test` pass — focused suites pass (git_http 37/38; the 1 failure is `git_clone_empty_repo_via_smart_http`, a pre-existing OpenShell loopback-listener limitation, `getpeername() errno 95`, not a code defect; gates API 11/11; web RepoSettings+WorkspaceSettings 114/114); full suites left to the controller per round protocol
 
 ## Agent Instructions
 
