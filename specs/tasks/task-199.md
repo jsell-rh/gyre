@@ -2,7 +2,7 @@
 title: "Dep Graph — Wire persistent DependencyRepository into AppState"
 spec_ref: "dependency-graph.md §Dependency Entity"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "dependency-graph.md §Dependency Entity"
 commits: ["0248e9bf9c2d7b234fca8115d1412f70c4201596", "02056fa0fe79474c325ec7cc91b8499680b0e333", "10d5df6dafc0859c2f1360be65366d795f74ddd4"]
@@ -106,4 +106,20 @@ and the dependency API handlers write to / read from this volatile store.
    task-163's breaking-change/policy persistence. Wire the dependency graph, prove
    persistence, stop.
 7. Run `cargo test --all` and `bash scripts/check-arch.sh`; record the fix commit SHA in
-   the `commits` frontmatter list and set `progress: ready-for-review`.
+     the `commits` frontmatter list and set `progress: ready-for-review`.
+
+## Shipped
+
+- `AppState.dependencies` in `build_state` is now wired through the `store!` macro
+  (lib.rs:909-912): DB-backed deployments (SQLite or Postgres via `GYRE_DATABASE_URL`)
+  get the persistent `DependencyRepository` adapter; pure in-memory mode keeps the mem
+  fallback. Push-time detection, reconciliation, blast-radius, and the dependency REST
+  handlers now read/write durable storage.
+- New restart-persistence integration test `crates/gyre-server/tests/dependency_persistence.rs`:
+  three fresh `build_state` instances over one SQLite file (save → restart-read → update →
+  restart-read) proving find_by_id/list_by_repo/list_dependents/list_all and the upsert
+  update path (status→Stale, version_pinned) survive a restart.
+- Mutation-verified: reverting the wiring to the old mem literal makes the test fail
+  (restart sees an empty store); with `store!` it passes. Mem-mode regression suites
+  (api::dependencies + dep_staleness, 72 tests) and `check-arch.sh` stay green.
+- Scope held: `breaking_changes`/`dependency_policies` persistence untouched (task-163).
