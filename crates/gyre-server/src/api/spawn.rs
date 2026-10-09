@@ -426,10 +426,6 @@ pub(crate) async fn spawn_agent_core(
         state.agent_jwt_ttl_secs
     };
 
-    // Pre-mint a JWT without workload claims so it can be injected into the
-    // container environment at spawn time.  After spawn we create the workload
-    // attestation record (stored in state.workload_attestations) which is
-    // queryable via GET /api/v1/agents/{id}/workload.
     // Pre-mint a JWT carrying the worker's repo scope so `subject.repo_scope`
     // (§Attributes, source "Agent OIDC claim") is real on every request the
     // agent makes. Workload claims are attached later via the workload
@@ -445,6 +441,21 @@ pub(crate) async fn spawn_agent_core(
             jwt_ttl,
             &repo.workspace_id.to_string(),
             &req.repo_id,
+            // No persona input exists on the spawn request; workers run
+            // persona-less until a persona assignment mechanism exists.
+            None,
+            // identity-security.md attestation levels: 1=raw subprocess,
+            // 2=CLI-managed, 3=Gyre-managed container with attestation.
+            resolved_ct_entity
+                .as_ref()
+                .map(|ct| match ct.target_type {
+                    ComputeTargetType::Container => 3,
+                    ComputeTargetType::Ssh => 2,
+                    // No target (None) is a plain local subprocess: level 1.
+                    // Kubernetes falls back to 1 until the runtime reports
+                    // workload attestations for pods (tracked by task-129).
+                    ComputeTargetType::Kubernetes => 1,
+                }),
         )
         .unwrap_or_else(|e| {
             tracing::error!("JWT pre-mint failed, falling back to UUID token: {e}");

@@ -69,6 +69,17 @@ async fn validate_persona(state: &AppState, name: &str) {
     }
 }
 
+/// Persona name for an orchestrator tier — the meta-spec persona the
+/// orchestrator runs with (agent-runtime.md §2; the names validated by
+/// `validate_persona`).
+fn orchestrator_persona(tier: &OrchestratorType) -> &'static str {
+    match tier {
+        OrchestratorType::WorkspaceOrchestrator => "workspace-orchestrator",
+        OrchestratorType::RepoOrchestrator => "repo-orchestrator",
+        OrchestratorType::Worker => "worker",
+    }
+}
+
 /// Common tail: persist agent, mint scoped JWT, register it, bootstrap the
 /// signing keypair so the orchestrator can sign DerivedInputs for children,
 /// bump budgets, track analytics.
@@ -121,6 +132,7 @@ async fn spawn_orchestrator(
             &workspace_id.to_string(),
             repo_id.map(|r| r.to_string()).as_deref(),
             &orchestrator_type.to_string(),
+            orchestrator_persona(orchestrator_type),
         )
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("orchestrator token mint: {e}")))?;
     let _ = state

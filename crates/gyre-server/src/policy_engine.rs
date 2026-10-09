@@ -59,10 +59,23 @@ impl AttributeContext {
     }
 
     /// Merge JWT claims into the context under the `subject.` namespace.
+    ///
+    /// Insert-only: a key already present in the context keeps its existing
+    /// value. The middleware sets auth-extractor identity facts
+    /// (`subject.type`, `subject.id`, `subject.global_role`) before merging
+    /// claims, and a raw claim must not override them — `subject.global_role`
+    /// is sourced from the User entity by the extractor (§Attributes), and
+    /// `subject.id`/`subject.type` are the authenticated identity. Claims
+    /// sourced by the spec from "Auth context / OIDC" (e.g.
+    /// `subject.tenant_id`) still flow through when the extractor set
+    /// nothing.
     pub fn merge_jwt_claims(&mut self, claims: &serde_json::Value) {
         if let Some(obj) = claims.as_object() {
             for (key, val) in obj {
                 let full_key = format!("subject.{key}");
+                if self.attrs.contains_key(&full_key) {
+                    continue;
+                }
                 match val {
                     serde_json::Value::String(s) => {
                         self.set(full_key, s.clone());
@@ -582,6 +595,75 @@ mod tests {
         assert!(ctx.has("subject.workspace_role"));
         assert!(ctx.has("subject.groups"));
         assert!(ctx.has("subject.attestation_level"));
+    }
+
+    #[test]
+    fn merge_jwt_claims_never_overrides_existing_attributes() {
+        // The middleware sets auth-extractor identity facts before merging
+        // raw JWT claims. A claim sharing an attribute's name (e.g. a
+        // Keycloak `global_role` claim) must NOT override the extractor-
+        // resolved value — `subject.global_role` is sourced from the User
+        // entity (§Attributes), not from arbitrary claims. Before the
+        // insert-only fix this test fails: HashMap::insert let the claim
+        // overwrite the resolved "ReadOnly" with "Admin", so the
+        // readonly Allow no longer matched and the request fell to
+        // default deny.
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.global_role", "ReadOnly");
+        ctx.set("subject.type", "user");
+        let claims = serde_json::json!({
+            "global_role": "Admin",
+            "type": "agent",
+            "tenant_id": "tenant-a"
+        });
+        ctx.merge_jwt_claims(&claims);
+
+        // Direct attribute assertions: extractor facts stand, unclaimed
+        // spec attributes still merge.
+        assert_eq!(
+            ctx.get("subject.global_role"),
+            Some(&AttrValue::Single("ReadOnly".to_string()))
+        );
+        assert_eq!(
+            ctx.get("subject.type"),
+            Some(&AttrValue::Single("user".to_string()))
+        );
+        assert_eq!(
+            ctx.get("subject.tenant_id"),
+            Some(&AttrValue::Single("tenant-a".to_string()))
+        );
+
+        // Behavioral assertion: an Allow keyed on the extractor value must
+        // match. If the claim overwrote global_role to "Admin", the Allow
+        // would not match and default deny would flip the decision.
+        let allow_readonly = Policy {
+            id: Id::new("allow-readonly"),
+            name: "readonly-allow".to_string(),
+            description: String::new(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 900,
+            effect: PolicyEffect::Allow,
+            conditions: vec![Condition {
+                attribute: "subject.global_role".to_string(),
+                operator: ConditionOp::Equals,
+                value: ConditionValue::String("ReadOnly".to_string()),
+            }],
+            actions: vec!["read".to_string()],
+            resource_types: vec!["*".to_string()],
+            enabled: true,
+            built_in: false,
+            immutable: false,
+            created_by: "test".to_string(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        let result = evaluate(vec![allow_readonly], &ctx, "read", "repo");
+        assert_eq!(
+            result.effect,
+            PolicyEffect::Allow,
+            "claim-injected global_role must not override the extractor-resolved value"
+        );
     }
 
     // --- Immutable Deny policy tests (HSI §2) ---------------------------------

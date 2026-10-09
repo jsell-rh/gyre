@@ -949,6 +949,11 @@ pub async fn abac_middleware(
 
     let global_role = auth.roles.first().map(|r| r.as_str()).unwrap_or("ReadOnly");
     ctx.set("subject.global_role", global_role);
+    // Tenant identity from the auth context (§Attributes: subject.tenant_id,
+    // source "Auth context / OIDC"). Set for every auth path — agent and
+    // API-key callers do not carry JWT claims, so they get tenant_id only
+    // from here.
+    ctx.set("subject.tenant_id", &auth.tenant_id);
     // OIDC-claim-sourced subject attributes (§Attributes: persona, stack_hash,
     // attestation_level, repo_scope — source "Agent OIDC claim"). Raw claims
     // merge first; spec-named normalization maps the agent-JWT `wl_stack_hash`
@@ -1747,6 +1752,8 @@ pub mod tests {
                 3600,
                 "ws-claims",
                 "repo-7",
+                None,
+                None,
             )
             .unwrap();
         // Register it so the auth extractor resolves the agent identity.
@@ -1916,6 +1923,234 @@ pub mod tests {
         );
     }
 
+    /// §Attributes: `subject.persona` and `subject.attestation_level` are
+    /// sourced from the "Agent OIDC claim" — the persona claim merges raw and
+    /// the attestation_level claim is normalized to a number. Both must reach
+    /// live evaluation from a real minted JWT.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_jwt_persona_and_attestation_level_reach_live_evaluation() {
+        use axum::routing::get;
+
+        let state = crate::mem::test_state();
+        tokio::task::block_in_place(|| {
+            let h = tokio::runtime::Handle::current();
+            h.block_on(seed_builtin_policies(&state));
+        });
+
+        // Two agents: one with a persona + full attestation, one with neither.
+        let strong = state
+            .agent_signing_key
+            .mint_scoped(
+                "agent-persona-1",
+                "task-1",
+                "spawner",
+                &state.base_url,
+                3600,
+                "ws-persona",
+                "repo-1",
+                Some("repo-orchestrator"),
+                Some(3),
+            )
+            .unwrap();
+        let weak = state
+            .agent_signing_key
+            .mint_scoped(
+                "agent-persona-2",
+                "task-1",
+                "spawner",
+                &state.base_url,
+                3600,
+                "ws-persona",
+                "repo-1",
+                None,
+                Some(1),
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-persona-1", strong.clone())
+            .await
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-persona-2", weak.clone())
+            .await
+            .unwrap();
+
+        // Allow spec writes only for repo-orchestrator personas with
+        // attestation level >= 3. Both conditions fail closed when the
+        // claims are missing, so the un-attested agent falls through to
+        // default-deny (priority 1).
+        state
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-persona-attestation-allow"),
+                name: "persona-attestation-allow".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 730,
+                effect: PolicyEffect::Allow,
+                actions: vec!["write".to_string()],
+                resource_types: vec!["spec".to_string()],
+                conditions: vec![
+                    Condition {
+                        attribute: "subject.persona".to_string(),
+                        operator: ConditionOp::Equals,
+                        value: ConditionValue::String("repo-orchestrator".to_string()),
+                    },
+                    Condition {
+                        attribute: "subject.attestation_level".to_string(),
+                        operator: ConditionOp::GreaterThanOrEqual,
+                        value: ConditionValue::Number(3),
+                    },
+                ],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: "system".to_string(),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route(
+                "/api/v1/specs",
+                axum::routing::post(ok_handler),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state);
+
+        let ok = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs")
+                    .header("Authorization", format!("Bearer {strong}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            ok.status(),
+            StatusCode::OK,
+            "persona + attestation_level >= 3 claims must reach live evaluation and allow"
+        );
+
+        let denied = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs")
+                    .header("Authorization", format!("Bearer {weak}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            denied.status(),
+            StatusCode::FORBIDDEN,
+            "agent without the persona claim must fail closed (persona condition unmet)"
+        );
+    }
+
+    /// `subject.tenant_id` is set from the auth context for every auth path,
+    /// including agent tokens (which carry no JWT claims object).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn subject_tenant_id_set_for_agent_token_auth() {
+        use axum::routing::get;
+
+        let state = crate::mem::test_state();
+        tokio::task::block_in_place(|| {
+            let h = tokio::runtime::Handle::current();
+            h.block_on(seed_builtin_policies(&state));
+        });
+
+        // Raw agent token (no JWT): tenant_id can only come from the
+        // auth context line in the middleware.
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agent-tenant-1", "raw-uuid-token")
+            .await
+            .unwrap();
+
+        // Deny read on specs for subjects in tenant "default" (the tenant
+        // mem::test_state scopes everything to).
+        state
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-tenant-deny"),
+                name: "tenant-default-no-spec-read".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 820,
+                effect: PolicyEffect::Deny,
+                conditions: vec![
+                    Condition {
+                        attribute: "subject.type".to_string(),
+                        operator: ConditionOp::Equals,
+                        value: ConditionValue::String("agent".to_string()),
+                    },
+                    Condition {
+                        attribute: "subject.tenant_id".to_string(),
+                        operator: ConditionOp::Equals,
+                        value: ConditionValue::String("default".to_string()),
+                    },
+                ],
+                actions: vec!["read".to_string()],
+                resource_types: vec!["spec".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: "system".to_string(),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+           StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/specs", get(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs")
+                    .header("Authorization", "Bearer raw-uuid-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "subject.tenant_id from the auth context must reach live evaluation for agent tokens"
+        );
+    }
+
     /// `env.budget_remaining` must be extracted from the real budget system
     /// (BudgetConfig + BudgetUsage) for the addressed workspace. A policy
     /// keyed on it must match; with no budget configured the attribute must
@@ -2049,7 +2284,7 @@ pub mod tests {
     /// `"green"` otherwise (§Attributes, source "Forge state").
     #[tokio::test(flavor = "multi_thread")]
     async fn env_main_health_from_real_forge_state() {
-        use axum::routing::{get, post};
+        use axum::routing::post;
 
         let (state, _user_id) = setup_membership_state().await;
 
