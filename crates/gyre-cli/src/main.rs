@@ -1726,20 +1726,64 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
     );
     step.advance("init spec registry");
 
-    // ── Step 6: spec registry (report-only; sync happens on push) ──
-    match &repo_path {
-        Some(path) if path.join("specs").join("manifest.yaml").exists() => {
-            println!("  Spec manifest found at {} - ledger syncs on push to the default branch",
-                path.join("specs").join("manifest.yaml").display());
-        }
-        _ => println!("  No spec manifest found - spec registry stays empty until specs are pushed"),
-    }
+    // ── Step 6: initialize spec registry (platform-model.md §8 step 6) ──
+    // With a manifest present (pre-existing or just written by the starter
+    // kit), push the local tree to the server repo and run the server-side
+    // ledger sync so the registry is populated at first-run time. The
+    // post-receive hook keeps it in sync on every later push.
     if args.starter_kit {
-        let target = repo_path
-            .clone()
-            .unwrap_or_else(|| std::path::PathBuf::from(&repo_name));
+        // F6: the starter kit must land in an explicit directory. Writing it
+        // to a bare repo name would resolve against the process cwd -- an
+        // arbitrary directory -- so require --repo-path.
+        let target = repo_path.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "--starter-kit requires --repo-path: the kit is written into your local \
+                 repo checkout, and a bare repo name would resolve against the \
+                 current directory"
+            )
+        })?;
         bootstrap::write_starter_kit(&target)?;
         println!("  Starter kit written to {}", target.display());
+    }
+    match &repo_path {
+        Some(path) if path.join("specs").join("manifest.yaml").exists() => {
+            let clone_url = repo.clone_url.clone().unwrap_or_else(|| {
+                format!("{}/git/{}/{}", args.server, workspace.slug, repo_name)
+            });
+            match bootstrap::push_and_sync_specs(
+                &client_api,
+                path,
+                &summary.repo_id,
+                &clone_url,
+            )
+            .await
+            {
+                Ok(registered) => {
+                    summary.specs_registered = registered;
+                    println!(
+                        "  Spec manifest registered - {registered} spec(s) in the platform registry"
+                    );
+                }
+                Err(e) => {
+                    // Non-fatal: the specs register on the next push to the
+                    // default branch (post-receive hook). Report why.
+                    println!(
+                        "  Spec manifest found but not registered yet ({e}); \
+                         it will register on your next push to the default branch"
+                    );
+                }
+            }
+        }
+        Some(path) => {
+            println!(
+                "  No spec manifest found under {} - spec registry stays empty \
+                 until specs are pushed",
+                path.display()
+            );
+        }
+        None => println!(
+            "  No --repo-path given - spec registry stays empty until specs are pushed"
+        ),
     }
     step.advance("configure gates");
 

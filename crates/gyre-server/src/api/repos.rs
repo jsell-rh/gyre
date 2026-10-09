@@ -580,6 +580,98 @@ pub async fn sync_mirror(
     Ok(Json(repo_response_with_clone_url(&state, repo).await))
 }
 
+#[derive(Serialize)]
+pub struct SyncSpecsResponse {
+    /// Number of ledger entries present after the sync.
+    pub registered: usize,
+    /// Default-branch HEAD the sync ran against.
+    pub head_sha: String,
+}
+
+/// POST /api/v1/repos/:id/sync-specs
+///
+/// Re-runs the spec-ledger sync against the repo's current default-branch
+/// HEAD (platform-model.md §8 step 6: "INITIALIZE SPEC REGISTRY -- if repo
+/// contains specs/manifest.yaml, parse and register specs"). This is the
+/// same `sync_spec_ledger` the post-receive hook runs on push; bootstrap
+/// calls it after pushing the local specs so the registry is populated at
+/// first-run time instead of waiting for the next push.
+///
+/// Auth: ABAC `repo:write` (middleware) + per-handler check that the
+/// caller's tenant matches the repo's workspace tenant.
+pub async fn sync_specs(
+    State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
+    Path(id): Path<String>,
+) -> Result<Json<SyncSpecsResponse>, ApiError> {
+    let repo = state
+        .repos
+        .find_by_id(&Id::new(&id))
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+
+    // Per-handler authorization: the repo must belong to a workspace in the
+    // caller's tenant (system token bypasses -- tenant "system").
+    let workspace = state
+        .workspaces
+        .find_by_id(&repo.workspace_id)
+        .await?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "workspace {} not found for repo {id}",
+                repo.workspace_id
+            ))
+        })?;
+    if auth.tenant_id != "system" && auth.tenant_id != workspace.tenant_id.to_string() {
+        return Err(ApiError::Forbidden(
+            "repo does not belong to the caller's tenant".to_string(),
+        ));
+    }
+
+    // Resolve the default-branch HEAD.
+    let default_ref = format!("refs/heads/{}", repo.default_branch);
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let output = tokio::process::Command::new(&git_bin)
+        .args(["-C", &repo.path, "rev-parse", &default_ref])
+        .output()
+        .await
+        .map_err(|e| {
+            ApiError::InvalidInput(format!(
+                "failed to resolve {default_ref} in {}: {e}",
+                repo.path
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(ApiError::InvalidInput(format!(
+            "cannot resolve {default_ref} in {} -- push an initial commit first",
+            repo.path
+        )));
+    }
+    let head_sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    let now = now_secs();
+    crate::spec_registry::sync_spec_ledger(
+        &state.spec_ledger,
+        &state.spec_links_store,
+        &repo.path,
+        &head_sha,
+        now,
+        Some(&repo.id.to_string()),
+        Some(&repo.workspace_id.to_string()),
+        Some(&state.workspaces),
+        Some(&state.repos),
+        Some(&workspace.tenant_id),
+        Some(&state.tasks),
+    )
+    .await;
+
+    let registered = state.spec_ledger.list_all().await?.len();
+    Ok(Json(SyncSpecsResponse {
+        registered,
+        head_sha,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::mem::test_state;

@@ -104,6 +104,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/commits", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/diff", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/mirror/sync", "repo", Some("write")),
+                RouteResourceMapping::api("/api/v1/repos/:id/sync-specs", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/status", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/queue/pause", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/queue/resume", "repo", Some("write")),

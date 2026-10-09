@@ -23,10 +23,15 @@ use std::sync::Arc;
 /// Response for orchestrator spawn: agent summary + scoped JWT. Orchestrators
 /// have no worktree/branch/clone URL, so those fields are omitted entirely
 /// rather than defaulted (task-093).
-#[derive(Serialize)]
 pub struct SpawnOrchestratorResponse {
     pub agent: super::spawn::OrchestratorAgentResponse,
     pub token: String,
+    /// F3: truthful process status -- "running" or "launch_failed". A
+    /// persisted agent row alone is not a running orchestrator.
+    pub launch_status: String,
+    /// Failure reason when launch_status == "launch_failed".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_detail: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -108,6 +113,187 @@ async fn resolve_orchestrator_persona(
     )))
 }
 
+/// Launch outcome for an orchestrator process (F3: a persisted row is not
+/// "running" -- the spawn response must report what actually happened).
+#[derive(Clone)]
+pub(crate) struct LaunchOutcome {
+    /// "running" or "launch_failed" (mirrors spawn.rs best-effort launch).
+    pub launch_status: String,
+    /// Failure reason when launch_status == "launch_failed".
+    pub launch_detail: Option<String>,
+}
+
+/// Launch the orchestrator process on the workspace's compute target (§3:
+/// both orchestrator tiers use the workspace's configured compute target).
+///
+/// Mirrors the agent spawn path (api/spawn.rs): compute-target priority
+/// request → workspace assignment → tenant default → local. The command is
+/// server-controlled only (GYRE_ORCHESTRATOR_COMMAND env or the agent image
+/// entrypoint) -- never user input (C-1 RCE fix).
+///
+/// Failure is reported, not swallowed: the caller surfaces it in the spawn
+/// response so `gyre bootstrap` prints a truthful orchestrator status. A
+/// launch-failed orchestrator keeps restart_on_failure=true; the stale
+/// detector replaces it once its heartbeat times out.
+pub(crate) async fn launch_orchestrator_process(
+    state: &AppState,
+    agent: &gyre_domain::Agent,
+    workspace: &gyre_domain::Workspace,
+    token: &str,
+) -> LaunchOutcome {
+    // Compute-target priority: workspace assignment -> tenant default -> local.
+    let target_config: Option<super::compute::ComputeTargetConfig> = workspace
+        .compute_target_id
+        .as_ref()
+        .and_then(|ct_id| state.compute_targets.get_by_id(ct_id).await.ok().flatten())
+        .or_else(|| {
+            // Tenant default resolved synchronously is not possible here;
+            // handled below via get_default_for_tenant.
+            None
+        })
+        .map(|e| super::compute::ComputeTargetConfig {
+            id: e.id.to_string(),
+            name: e.name.clone(),
+            target_type: match e.target_type {
+                gyre_domain::ComputeTargetType::Container => "container".to_string(),
+                gyre_domain::ComputeTargetType::Ssh => "ssh".to_string(),
+                gyre_domain::ComputeTargetType::Kubernetes => "kubernetes".to_string(),
+            },
+            config: e.config.clone(),
+        });
+    // Tenant default when the workspace has no assignment.
+    let target_config = match target_config {
+        Some(cfg) => Some(cfg),
+        None => state
+            .compute_targets
+            .get_default_for_tenant(&workspace.tenant_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|e| super::compute::ComputeTargetConfig {
+                id: e.id.to_string(),
+                name: e.name.clone(),
+                target_type: match e.target_type {
+                    gyre_domain::ComputeTargetType::Container => "container".to_string(),
+                    gyre_domain::ComputeTargetType::Ssh => "ssh".to_string(),
+                    gyre_domain::ComputeTargetType::Kubernetes => "kubernetes".to_string(),
+                },
+                config: e.config.clone(),
+            }),
+    };
+
+    // Server-controlled command: compute-target config, GYRE_ORCHESTRATOR_COMMAND,
+    // or the agent image entrypoint (same contract as api/spawn.rs).
+    let command = target_config
+        .as_ref()
+        .and_then(|cfg| cfg.config.get("command"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| std::env::var("GYRE_ORCHESTRATOR_COMMAND").ok())
+        .or_else(|| std::env::var("GYRE_AGENT_COMMAND").ok())
+        .unwrap_or_else(|| "/gyre/entrypoint.sh".to_string());
+    let args: Vec<String> = target_config
+        .as_ref()
+        .and_then(|cfg| cfg.config.get("args"))
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    // Agent context env vars (agent-protocol.md M24). The orchestrator's
+    // "task" claim is its own id (orchestrators are not task-bound).
+    let mut env = std::collections::HashMap::new();
+    env.insert("GYRE_SERVER_URL".to_string(), state.base_url.clone());
+    env.insert("GYRE_AUTH_TOKEN".to_string(), token.to_string());
+    env.insert("GYRE_AGENT_ID".to_string(), agent.id.to_string());
+    env.insert("GYRE_TASK_ID".to_string(), agent.id.to_string());
+    env.insert("GYRE_ORCHESTRATOR".to_string(), agent.orchestrator_type.to_string());
+    if let Some(rid) = &agent.repo_id {
+        env.insert("GYRE_REPO_ID".to_string(), rid.to_string());
+    }
+    env.insert("GYRE_WORKSPACE_ID".to_string(), agent.workspace_id.to_string());
+
+    let spawn_config = gyre_ports::SpawnConfig {
+        name: agent.name.clone(),
+        command: command.clone(),
+        args: args.clone(),
+        env,
+        // Local fallback work dir: absolute /tmp (the orchestrator clones
+        // from GYRE_SERVER_URL; no worktree exists for it).
+        work_dir: "/tmp".to_string(),
+    };
+
+    let launch_result = match &target_config {
+        Some(cfg) if cfg.target_type == "container" => {
+            let image = cfg.config["image"].as_str().unwrap_or("gyre-agent:latest").to_string();
+            let mut ct = gyre_adapters::compute::ContainerTarget::new(image.clone());
+            ct = ct.with_network(cfg.config["network"].as_str().unwrap_or("none"));
+            if let Some(mem) = cfg.config["memory_limit"].as_str() {
+                ct = ct.with_memory_limit(mem);
+            }
+            if let Some(pids) = cfg.config["pids_limit"].as_u64() {
+                ct = ct.with_pids_limit(pids as u32);
+            }
+            gyre_ports::ComputeTarget::spawn_process(&ct, &spawn_config).await
+        }
+        _ => {
+            // Default: local process spawn.
+            let local = gyre_adapters::compute::LocalTarget;
+            gyre_ports::ComputeTarget::spawn_process(&local, &spawn_config).await
+        }
+    };
+
+    match launch_result {
+        Ok(handle) => {
+            let agent_id_str = agent.id.to_string();
+            state
+                .process_registry
+                .lock()
+                .await
+                .insert(agent_id_str.clone(), handle.clone());
+            // Monitor: on exit, free the registry slot and drop the agent to
+            // Idle so the stale detector / restart loop takes over.
+            let state_mon = std::sync::Arc::clone(state);
+            let orch_type = agent.orchestrator_type.clone();
+            tokio::spawn(async move {
+                let local = gyre_adapters::compute::LocalTarget;
+                let _ = &local;
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    let alive =
+                        gyre_ports::ComputeTarget::is_alive(&local, &handle).await.unwrap_or(false);
+                    if !alive {
+                        state_mon
+                            .process_registry
+                            .lock()
+                            .await
+                            .remove(&agent_id_str);
+                        if let Ok(Some(mut a)) =
+                            state_mon.agents.find_by_id(&Id::new(&agent_id_str)).await
+                        {
+                            if a.status == AgentStatus::Active && orch_type == a.orchestrator_type
+                            {
+                                // Orchestrator process died; mark Dead so the
+                                // stale detector spawns a replacement.
+                                let _ = a.transition_status(AgentStatus::Dead);
+                                let _ = state_mon.agents.update(&a).await;
+                            }
+                        }
+                        break;
+                    }
+                }
+            });
+            LaunchOutcome {
+                launch_status: "running".to_string(),
+                launch_detail: None,
+            }
+        }
+        Err(e) => LaunchOutcome {
+            launch_status: "launch_failed".to_string(),
+            launch_detail: Some(format!("{e}")),
+        },
+    }
+}
+
 /// Common tail: persist agent, mint scoped JWT, register it, bootstrap the
 /// signing keypair so the orchestrator can sign DerivedInputs for children,
 /// bump budgets, track analytics.
@@ -121,7 +307,7 @@ async fn spawn_orchestrator(
     parent_id: Option<String>,
     auth_agent_id: &str,
     persona_id: Id,
-) -> Result<(gyre_domain::Agent, String), ApiError> {
+) -> Result<(gyre_domain::Agent, String, LaunchOutcome), ApiError> {
     let now = now_secs();
 
     let mut agent = gyre_domain::Agent::new(new_id(), name, now);
@@ -190,7 +376,18 @@ async fn spawn_orchestrator(
 
     budget::increment_active_agents(state, &workspace_id.to_string()).await;
 
-    Ok((agent, token))
+    // F3: launch the orchestrator process (workspace compute target). The
+    // outcome is returned so the REST/MCP responses report a truthful
+    // status -- a persisted row alone is not "running".
+    let workspace = state
+        .workspaces
+        .find_by_id(workspace_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {workspace_id} not found")))?;
+    let launch = launch_orchestrator_process(state, &agent, &workspace, &token).await;
+
+    Ok((agent, token, launch))
 }
 
 /// Shared core of POST /api/v1/workspaces/:id/orchestrator/spawn (task-093).
@@ -199,7 +396,7 @@ pub(crate) async fn spawn_workspace_orchestrator_core(
     workspace_id: &str,
     req: SpawnOrchestratorRequest,
     auth_agent_id: &str,
-) -> Result<(gyre_domain::Agent, String), ApiError> {
+) -> Result<(gyre_domain::Agent, String, LaunchOutcome), ApiError> {
     let ws_id = Id::new(workspace_id.to_string());
     let workspace = match state.workspaces.find_by_id(&ws_id).await {
         Ok(Some(ws)) => ws,
@@ -260,7 +457,7 @@ pub async fn spawn_workspace_orchestrator(
     Path(workspace_id): Path<String>,
     Json(req): Json<SpawnOrchestratorRequest>,
 ) -> Result<(StatusCode, Json<SpawnOrchestratorResponse>), ApiError> {
-    let (agent, token) =
+    let (agent, token, launch) =
         spawn_workspace_orchestrator_core(&state, &workspace_id, req, &auth.agent_id).await?;
 
     Ok((
@@ -268,6 +465,8 @@ pub async fn spawn_workspace_orchestrator(
         Json(SpawnOrchestratorResponse {
             agent: orchestrator_response(agent),
             token,
+            launch_status: launch.launch_status,
+            launch_detail: launch.launch_detail,
         }),
     ))
 }
@@ -303,7 +502,7 @@ pub(crate) async fn spawn_repo_orchestrator_core(
     repo_id: &str,
     req: SpawnOrchestratorRequest,
     auth_agent_id: &str,
-) -> Result<(gyre_domain::Agent, String), ApiError> {
+) -> Result<(gyre_domain::Agent, String, LaunchOutcome), ApiError> {
     let rid = Id::new(repo_id.to_string());
     let repo = state
         .repos
@@ -362,7 +561,7 @@ pub async fn spawn_repo_orchestrator(
         .await
         .map_err(ApiError::Forbidden)?;
 
-    let (agent, token) =
+    let (agent, token, launch) =
         spawn_repo_orchestrator_core(&state, &repo_id, req, &auth.agent_id).await?;
 
     Ok((
@@ -370,6 +569,8 @@ pub async fn spawn_repo_orchestrator(
         Json(SpawnOrchestratorResponse {
             agent: orchestrator_response(agent),
             token,
+            launch_status: launch.launch_status,
+            launch_detail: launch.launch_detail,
         }),
     ))
 }

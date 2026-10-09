@@ -139,13 +139,64 @@ pub fn write_starter_kit(root: &Path) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+// ─── Spec registration (§8 step 6) ───────────────────────────────────────────
+
+/// Push the local repo checkout to the server's bare repo, then trigger the
+/// server-side spec-ledger sync so the platform registry is populated at
+/// first-run time (§8 step 6: "If repo contains specs/manifest.yaml, parse
+/// and register specs").
+///
+/// `repo_path` must be a git work tree with at least one commit. A push is
+/// required because the server's ledger sync reads specs from the default
+/// branch of its bare repo -- there is no other transport for spec content.
+pub async fn push_and_sync_specs(
+    api: &crate::client::GyreClient,
+    repo_path: &Path,
+    repo_id: &str,
+    clone_url: &str,
+) -> Result<usize> {
+    // Push the current branch to the server's bare repo (all specs; the
+    // server's post-receive hook also handles default-branch pushes).
+    let push = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args([
+            "-c",
+            &format!("http.extraHeader=Authorization: Bearer {}", api.token()),
+        ])
+        .args(["push", clone_url, "HEAD:refs/heads/main"])
+        .output()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to run git push: {e}"))?;
+    if !push.status.success() {
+        return Err(anyhow::anyhow!(
+            "git push failed: {}",
+            String::from_utf8_lossy(&push.stderr).trim()
+        ));
+    }
+
+    // Sync the ledger against the server repo's current default-branch HEAD.
+    let synced = api
+        .sync_specs(repo_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("spec sync call failed: {e}"))?;
+    Ok(synced.registered)
+}
+
 pub const STARTER_MANIFEST: &str = r#"version: 1
+
+defaults:
+  requires_approval: true
+  auto_create_tasks: true
+  auto_invalidate_on_change: true
+
 specs:
-  - path: specs/system/design-principles.md
+  - path: system/design-principles.md
     title: Design Principles
     owner: admin
     kind: system
-    approval: human
+    approval:
+      mode: human_only
     requires_approval: true
 "#;
 
@@ -229,6 +280,8 @@ pub struct BootstrapSummary {
     pub server_url: String,
     pub clone_url: Option<String>,
     pub orchestrator_agent_id: Option<String>,
+    /// Specs registered in the platform ledger during step 6.
+    pub specs_registered: usize,
     pub gates_configured: Vec<String>,
     pub personas_registered: Vec<String>,
 }
@@ -383,17 +436,37 @@ mod tests {
 
     #[test]
     fn starter_manifest_parses_as_documented_shape() {
-        // Must parse as SpecManifest: version u32 + specs: Vec<SpecEntry> with
-        // path/title/owner. (serde_yaml is available via gyre-common? No -
-        // parse structurally with a minimal shape check.)
+        // Must parse as the server's SpecManifest (spec_registry.rs):
+        // version u32 + specs: Vec<SpecEntry> with path/title/owner, and
+        // approval (when present) as ApprovalConfig {mode: ...} -- the F5
+        // defect was a bare `approval: human` string that fails
+        // parse_manifest, silently emptying the spec ledger on push.
         let v: serde_yaml::Value = serde_yaml::from_str(STARTER_MANIFEST).unwrap();
         assert_eq!(v["version"].as_u64(), Some(1));
         let specs = v["specs"].as_sequence().expect("specs must be a list");
         assert!(!specs.is_empty());
         let first = &specs[0];
-        assert!(first["path"].as_str().unwrap().starts_with("specs/"));
+        // SpecEntry.path is relative to specs/ (sync_spec_ledger prefixes
+        // "specs/" when resolving the file): system/design-principles.md.
+        assert_eq!(
+            first["path"].as_str().unwrap(),
+            "system/design-principles.md"
+        );
+        assert_eq!(first["kind"].as_str(), Some("system"));
+        assert_eq!(first["requires_approval"].as_bool(), Some(true));
         assert!(first["title"].as_str().is_some());
         assert!(first["owner"].as_str().is_some());
+        // Approval must be a mapping with a known mode, never a scalar.
+        if let Some(approval) = first.get("approval") {
+            let mode = approval
+                .get("mode")
+                .and_then(|m| m.as_str())
+                .unwrap_or_else(|| panic!("approval must be {{mode: ...}}, got: {approval:?}"));
+            assert!(
+                matches!(mode, "human_only" | "agent_only" | "human_and_agent"),
+                "unknown approval mode: {mode}"
+            );
+        }
     }
 
     #[test]

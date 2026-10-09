@@ -139,6 +139,14 @@ pub struct SpawnOrchestratorAgent {
     pub persona_id: Option<String>,
 }
 
+#[derive(Deserialize, Debug, Clone)]
+pub struct SyncSpecsResponse {
+    /// Number of ledger entries present after the sync.
+    pub registered: usize,
+    /// Default-branch HEAD the sync ran against.
+    pub head_sha: String,
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Percent-encode a spec path for use as a single URL path segment.
@@ -161,6 +169,12 @@ impl GyreClient {
             token,
             client: Client::new(),
         }
+    }
+
+    /// The bearer token this client authenticates with (needed when the
+    /// bootstrap flow shells out to `git push` against the server).
+    pub fn token(&self) -> &str {
+        &self.token
     }
 
     fn auth_header(&self) -> String {
@@ -1030,6 +1044,28 @@ impl GyreClient {
         }
         let repos: Vec<RepoResponse> = serde_json::from_str(&text).context("parsing repo list")?;
         Ok(repos.into_iter().find(|r| r.name == name))
+    }
+
+    /// POST /api/v1/repos/:id/sync-specs - re-run the spec-ledger sync
+    /// against the repo's default-branch HEAD (bootstrap step 6 registers
+    /// the specs in the platform registry at first-run time).
+    pub async fn sync_specs(&self, repo_id: &str) -> Result<SyncSpecsResponse> {
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/v1/repos/{repo_id}/sync-specs",
+                self.base_url
+            ))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("spec sync failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing spec sync response")
     }
 
     /// GET /api/v1/personas - find an existing persona by slug (resume path:

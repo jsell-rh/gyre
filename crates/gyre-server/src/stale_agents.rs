@@ -182,11 +182,11 @@ async fn restart_orchestrator(state: &AppState, dead: &gyre_domain::Agent, now: 
         dead.repo_id.as_ref().map(|r| r.to_string()).as_deref(),
         &dead.orchestrator_type.to_string(),
     );
-    match token {
+    match &token {
         Ok(t) => {
             let _ = state
                 .kv_store
-                .kv_set("agent_tokens", &replacement.id.to_string(), t)
+                .kv_set("agent_tokens", &replacement.id.to_string(), t.clone())
                 .await;
         }
         Err(e) => warn!("restart: failed to mint orchestrator JWT: {e}"),
@@ -197,6 +197,28 @@ async fn restart_orchestrator(state: &AppState, dead: &gyre_domain::Agent, now: 
 
     // Budget: the dead agent's slot was freed by the Dead transition, claim it.
     crate::api::budget::increment_active_agents(state, &dead.workspace_id.to_string()).await;
+
+    // F3: relaunch the process. A replacement that is only a persisted row
+    // is not a running orchestrator; if the launch fails the replacement
+    // will be declared Dead by this same detector and restarted again.
+    if let Ok(t) = &token {
+        if let Some(workspace) = state.workspaces.find_by_id(&replacement.workspace_id).await.ok().flatten() {
+            let outcome = crate::api::orchestrator::launch_orchestrator_process(
+                state,
+                &replacement,
+                &workspace,
+                t,
+            )
+            .await;
+            if outcome.launch_status != "running" {
+                warn!(
+                    agent_id = %replacement.id,
+                    detail = outcome.launch_detail.as_deref().unwrap_or_default(),
+                    "restart: orchestrator process launch failed"
+                );
+            }
+        }
+    }
 
     info!(
         agent_id = %replacement.id,

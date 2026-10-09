@@ -108,6 +108,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/repos/:id/commits", get(repos::commit_log))
         .route("/api/v1/repos/:id/diff", get(repos::diff))
         .route("/api/v1/repos/:id/mirror/sync", post(repos::sync_mirror))
+        .route("/api/v1/repos/:id/sync-specs", post(repos::sync_specs))
         // Commit provenance (M13.2)
         .route(
             "/api/v1/repos/:id/provenance",

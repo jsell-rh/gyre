@@ -50,6 +50,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST` | `/api/v1/repos/{id}/unarchive` | Unarchive a repo — restores `status=active` (M35-lifecycle) |
 | `POST` | `/api/v1/repos/mirror` | Create a pull mirror from an external git URL (bare clone + periodic background sync); body: `{url, name, interval_secs?}`; URL must use `https://` (M12.2) |
 | `POST` | `/api/v1/repos/{id}/mirror/sync` | Manually trigger a fetch sync on a mirror repo (M12.2) |
+| `POST` | `/api/v1/repos/{id}/sync-specs` | Re-run the spec-ledger sync against the repo's default-branch HEAD (same sync the post-receive hook runs on push); used by `gyre bootstrap` step 6 to initialize the spec registry at first-run. ABAC `repo:write`; handler additionally verifies the repo's workspace tenant matches the caller's tenant. Returns `{registered, head_sha}` (platform-model.md §8) |
 | `GET` | `/api/v1/repos/{id}/branches` | List branches in repository |
 | `GET` | `/api/v1/repos/{id}/commits` | Commit log (`?branch=<name>&limit=50`) |
 | `GET` | `/api/v1/repos/{id}/diff` | Diff between refs (`?from=<ref>&to=<ref>`) |

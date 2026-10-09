@@ -767,10 +767,12 @@ async fn handle_spawn_repo_orchestrator(
     )
     .await
     {
-        Ok((agent, token)) => tool_result(
+        Ok((agent, token, launch)) => tool_result(
             serde_json::to_string(&crate::api::orchestrator::SpawnOrchestratorResponse {
                 agent: crate::api::spawn::orchestrator_response(agent),
                 token,
+                launch_status: launch.launch_status,
+                launch_detail: launch.launch_detail,
             })
             .unwrap_or_default(),
         ),
