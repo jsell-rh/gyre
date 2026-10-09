@@ -1434,7 +1434,7 @@ async fn spec_approval_auto_invalidated_on_spec_change() {
         .unwrap();
 
     let agent_token = spawn_resp["token"].as_str().unwrap().to_string();
-    let agent_hdr = format!("Bearer {agent_token}");
+    let _agent_hdr = format!("Bearer {agent_token}");
 
     // Build clone URL using repo_id.
     let clone_url = format!("{base_url}/git/{ws_id}/spec-inv-repo.git");
