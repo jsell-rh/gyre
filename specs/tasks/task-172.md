@@ -66,54 +66,50 @@ Three states: Editing → Preview Running → Preview Complete (with Iterate opt
 
 ## Shipped
 
-EditorSplit (`web/src/lib/EditorSplit.svelte`) implements the full §2 Editor
-Split layout as a reusable component used by spec editing (DetailPanel pop-out,
-pre-existing integration, unchanged) and available for meta-spec editing
-(`context="meta-spec"`):
+EditorSplit (`web/src/lib/EditorSplit.svelte`, 1494 lines) implements the §2
+Editor Split layout as a reusable component with two contexts:
 
-- **Two-panel layout:** markdown editor left, architecture preview right;
-  Back button and Esc call `onClose` (DetailPanel collapses back to the
-  normal detail view on both).
-- **Manual edit:** textarea with content binding (`bind:content`), Save
-  button posts `specs/save` with `base_sha` optimistic concurrency and a
-  409 conflict dialog (overwrite/discard).
-- **LLM chat mode:** inline input below the editor (Ctrl/Cmd+Enter),
-  streams SSE from `POST /repos/:id/specs/assist`; the draft revision
-  renders as an inline diff block with **Accept** (applies diff ops
-  in-memory, not committed), **Edit** (copies suggested text into the
-  editor), **Dismiss** (removes the suggestion) — §3 steps 4-6.
-- **Right panel tabs:** Architecture (default — real knowledge-graph
-  nodes/edges from `repoGraph` + `graphPredict` ghost overlays on
-  `ArchPreviewCanvas`) and Code Diff (line-level `SpecDiffView` of the
-  agent implementation from the preview result).
-- **Preview state machine:** editing → preview_running → preview_complete.
-  Spec context: `thoroughPreview` (throwaway branch) + `taskStatus`
-  polling. Meta-spec context (§9): target spec selector, `previewPersona`
-  + `previewPersonaStatus` polling with per-spec progress indicators,
-  Iterate returns to editing with results still visible, Cancel aborts.
+- **Spec context** — mounted by DetailPanel (`context="spec"`, pop-out via the
+  Preview button at DetailPanel.svelte:3647 → `openEditorSplit` :68; Back/Esc →
+  `closeEditorSplit` collapses the panel). Left pane: markdown textarea with
+  `bind:content`, Save with `base_sha` optimistic concurrency + 409 conflict
+  dialog (overwrite/discard), ConcurrentEditBanner presence, and the inline LLM
+  chat (Ctrl/Cmd+Enter → `POST /repos/:id/specs/assist` SSE stream with
+  partial/complete event handling). The draft revision renders as an inline
+  diff block: **Accept** applies the diff ops in-memory without saving,
+  **Edit** copies the suggested text into the editor, **Dismiss** drops it
+  (§3 steps 4–6). Right pane: Architecture (default — real nodes/edges from
+  `repoGraph` + `graphPredict` ghost overlays on ArchPreviewCanvas) and Code
+  Diff (`SpecDiffView` line-level diff from the thorough-preview result) tabs.
+  State machine editing → preview_running → preview_complete with
+  `thoroughPreview` + `taskStatus` polling (10 s interval, 300 s timeout,
+  cancel available), Iterate returns to editing with results retained.
+- **Meta-spec context** (`context="meta-spec"`, §9 preview loop) — target spec
+  selector checklist (Preview disabled until a target is selected), Preview
+  via `previewPersona` + `previewPersonaStatus` polling (1.5 s) with per-spec
+  progress indicators, architecture_diff line parsing (`+`/`~` prefixes) into
+  ghost overlays, specs_diff into the Code Diff tab, Iterate/Publish hooks.
 
-Recovered from the interrupted checkpoint (1ae8ca35): finished the dead
-`previewTaskId` variable removal (0 references remain), rebuilt `web/dist`
-which still contained the stale pre-cleanup bundle, and re-ran all affected
-suites.
+This repair assignment restored the original task contract after the prior
+attempt drifted into task-210's attribution ledger: the task file is the only
+spec changed beyond the implementation, coverage matrix row #13
+(ui-layout.md §Editor Split) marked `implemented` with evidence, and no
+exemptions or verifier changes were needed.
 
-**Test evidence** (2026-10-09, saved under /tmp/stage/review-evidence/):
-- `npx vitest run src/__tests__/EditorSplit.test.js` → **37/37 passed**
-  (rendering, contexts, close callbacks, Accept/Edit/Dismiss, save +
-  conflict + overwrite, concurrent-edit banner, spec preview immediate +
-  taskStatus polling, meta-spec selector + previewPersona with/without
-  persona_id, iterate retention, cancel).
-- `npx vitest run src/__tests__/DetailPanel.test.js` → **29/29 passed**,
-  including the 5 "Editor Split pop-out" tests (Preview click expands and
-  mounts EditorSplit, Back collapses, Esc closes, editor + arch preview
-  side by side).
-- Combined run: **66/66 passed**. `npx vite build` → success; dist
-  committed.
+**Test evidence** (2026-10-09, this session; artifacts under
+/tmp/stage/review-evidence/):
+- `npx vitest run src/__tests__/EditorSplit.test.js src/__tests__/DetailPanel.test.js`
+  → **66/66 passed** (EditorSplit 37: rendering, contexts, Back/Esc, content
+  binding, LLM streaming + Accept/Edit/Dismiss, save + base_sha + 409 conflict
+  + overwrite, concurrent-edit banner, spec preview immediate + taskStatus
+  polling + cancel, iterate retention, meta-spec selector + previewPersona
+  with/without persona_id; DetailPanel 29 including the 5 pop-out tests).
+- `scripts/check-task-commit-attribution.sh` → **exit 0, OK**.
 
-**Sandbox limitation:** TCP listener `accept()` unsupported (errno 95), so
-no live server/browser probe here. Exact HTTP checks for host verification
-are recorded in /tmp/stage/review-evidence/task-172-summary.md; exact-head
-GitHub CI remains mandatory.
+**Sandbox limitation:** TCP listener `accept()` unsupported (errno 95,
+/tmp/stage/capabilities.json), so no live server/browser probe here. The
+component behavior is covered by the jsdom component suites above; exact-head
+GitHub CI remains mandatory for the built bundle.
 
 ## Agent Instructions
 

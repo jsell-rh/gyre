@@ -1,6 +1,6 @@
 # Spec Coverage Summary
 
-**Last updated:** 2026-10-05
+**Last updated:** 2026-10-09
 
 | Spec | Total | n/a | Not Started | Assigned | Implemented | Verified | Coverage |
 |------|-------|-----|-------------|----------|-------------|----------|----------|
@@ -11,14 +11,14 @@
 | agent-runtime.md | 33 | 1 | 0 | 32 | 0 | 0 | 0% |
 | analytics.md | 12 | 0 | 0 | 12 | 0 | 0 | 0% |
 | authorization-provenance.md | 47 | 7 | 0 | 1 | 12 | 27 | 97% |
-| business-continuity.md | 10 | 4 | 0 | 1 | 4 | 1 | 83% |
+| business-continuity.md | 10 | 4 | 0 | 0 | 5 | 1 | 100% |
 | dependency-graph.md | 19 | 3 | 0 | 5 | 2 | 9 | 68% |
 | design-principles.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
 | explorer-canvas.md | 10 | 3 | 0 | 7 | 0 | 0 | 0% |
 | explorer-implementation.md | 33 | 3 | 0 | 25 | 0 | 5 | 16% |
 | forge-advantages.md | 10 | 2 | 0 | 0 | 0 | 8 | 100% |
 | hierarchy-enforcement.md | 29 | 11 | 0 | 6 | 3 | 9 | 66% |
-| human-system-interface.md | 55 | 19 | 0 | 20 | 9 | 7 | 44% |
+| human-system-interface.md | 55 | 20 | 0 | 19 | 9 | 7 | 45% |
 | identity-security.md | 12 | 2 | 0 | 2 | 4 | 4 | 80% |
 | lsp-call-graph.md | 12 | 0 | 0 | 12 | 0 | 0 | 0% |
 | merge-dependencies.md | 20 | 3 | 0 | 1 | 0 | 16 | 94% |
@@ -39,9 +39,9 @@
 | system-explorer.md | 19 | 10 | 0 | 9 | 0 | 0 | 0% |
 | trusted-foundry-integration.md | 26 | 26 | 0 | 0 | 0 | 0 | 0% |
 | ui-journeys.md | 13 | 13 | 0 | 0 | 0 | 0 | 0% |
-| ui-layout.md | 42 | 4 | 0 | 38 | 0 | 0 | 0% |
+| ui-layout.md | 42 | 4 | 0 | 37 | 1 | 0 | 2% |
 | ui-navigation.md | 33 | 7 | 0 | 1 | 13 | 12 | 96% |
 | user-management.md | 36 | 10 | 0 | 26 | 0 | 0 | 0% |
 | view-query-grammar.md | 16 | 0 | 0 | 16 | 0 | 0 | 0% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **218** | **0** | **314** | **108** | **162** | **46%** |
+| **TOTAL** | **802** | **219** | **0** | **311** | **110** | **162** | **46%** |
