@@ -3,7 +3,7 @@ title: "View Query Grammar — Scope Resolution, Emphasis & Rendering Primitives
 spec_ref: "view-query-grammar.md §4–9"
 depends_on:
   - task-062
-progress: complete
+progress: needs-revision
 review: "specs/reviews/task-063.md"
 coverage_sections:
   - "view-query-grammar.md §4 2. Scope — What Subgraph to Show"
@@ -114,3 +114,11 @@ Read `specs/system/view-query-grammar.md` §4–9. Then audit existing implement
 - `web/src/lib/view-query-validator.js` — validation logic
 
 The scope resolver is the core deliverable. It takes a `Scope` enum variant + the graph (nodes, edges) and returns a `HashSet<Id>` of matched nodes. This must handle computed references via the resolver from task-062. The frontend rendering likely already works — verify and fix gaps.
+
+## Review
+
+### Review changed source code
+
+- specs/coverage/system/view-query-grammar.md
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
