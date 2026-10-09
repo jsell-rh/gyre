@@ -2,7 +2,7 @@
 title: "Platform Model Secrets Domain Types + Port"
 spec_ref: "platform-model.md §7 Secrets Delivery"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 coverage_sections:
   - "platform-model.md §7 Secrets Delivery"
   - "platform-model.md §7 Principle"
@@ -104,3 +104,48 @@ Default: secrets encrypted at rest with SOPS in database. Optional Vault integra
 ## Agent Instructions
 
 Read `specs/system/platform-model.md` §7 "Secrets Delivery" for the full spec. The current credential injection is in `gyre-server/src/api/spawn.rs` around lines 603-637 (GYRE_CRED_* prefix). Follow the hexagonal pattern: types in gyre-common, port in gyre-ports, adapter in gyre-adapters. Use `ring` for encryption (already a dependency for Ed25519 in key_binding.rs). The migration numbering is currently at 000038 — check the latest migration number before creating yours.
+
+## Shipped
+
+Platform Model §7 secrets substrate (Principle / Architecture / Secret Scoping /
+Secret Types / Storage Backend), including the round-1 review fixes F1-F5 and the
+round-3 absorbed reviewer edits:
+
+- `Secret`/`SecretScope`/`SecretType` domain types in gyre-common (metadata struct
+  carries no value field; test-enforced), `SecretRepository` port (create/get_value/
+  list_by_scope/delete/rotate/resolve_for_agent with documented duplicate-rejection
+  contract), SQLite adapter with AES-256-GCM at rest via `ring` (per-value random
+  nonce, key from `GYRE_SECRET_ENCRYPTION_KEY` hex/passphrase or persisted
+  auto-generated key with operator-visible obfuscation-downgrade warning on both
+  degraded paths), migration `2026-09-30-000053_secrets` with scope index, and mem
+  adapter enforcing the same duplicate contract in code (F1, 4 contract tests).
+- Agent spawn resolves scoped secrets (tenant -> workspace -> repo -> task,
+  nearest scope wins, expired excluded) and injects them as `GYRE_CRED_*` env vars
+  for the cred-proxy sidecar; the hardcoded `GYRE_AGENT_CREDENTIALS`/
+  `GYRE_AGENT_GCP_SA_JSON` injection is gone. Unresolvable workspace skips all
+  scoped resolution with a warn (no fabricated "default" tenant, F3), non-UTF-8
+  values are skipped with a warn naming the secret (F4), and a resolve error does
+  not fail the spawn (documented availability posture, test-pinned).
+- Five end-to-end spawn tests deliver secrets through a real spawned child process
+  (env-dump compute target): all-scopes delivery, nearest-scope-wins,
+  unresolvable-workspace skip (asserts the seeded tenant-"default" LEAK secret does
+  NOT reach the agent env), non-UTF-8 skip with sibling delivery, and
+  resolve-error-continue (F2). Round-3 mutation probes confirmed the tests kill the
+  original F1/F3/F4 bugs.
+
+Test evidence (focused suites; full workspace gates are owned by verification and
+publication): `cargo test -p gyre-common --lib secret` 5 passed; `cargo test -p
+gyre-adapters --lib sqlite::secret` 17 passed (encrypted-at-rest, tampered
+ciphertext/wrong-key failure, key derivation, reopen stability, tenant isolation,
+scope cascade, expiry); `cargo test -p gyre-server --lib mem::secret_contract_tests`
+4 passed; `cargo test -p gyre-server --lib api::spawn::tests` 34 passed including
+the five secret-delivery tests by name. Mechanical gates on the touched areas all
+OK (arch, migration-versions, mem-port-contracts, fabricated-scope-defaults,
+lossy-secret-conversion, unwritten-store-fields, task-commit-attribution after
+clearing absorbed upstream debt a781ede2 from the base merge, rustfmt-diff vs
+8c2d1775). Suite provenance: the common (5) and adapters (17) suites were re-run
+green this continuation at HEAD with a fresh target dir; the server suites (mem 4,
+spawn 34) were run green by the implementation agent and the round-3 reviewer on
+trees whose crates/ bytes are identical to HEAD (git diff on the four task-owned
+product files vs both trees is empty; this continuation's time budget did not allow
+another cold gyre-server build). Probe logs under /tmp/stage/review-evidence.
