@@ -307,6 +307,46 @@
     }
   }
 
+  // ── Agent Rules state (ui-navigation.md §2 — meta-spec cascade) ───────
+  let rulesLoading = $state(true);
+  let rulesError = $state(null);
+  let workspaceMetaSpecs = $state([]);
+  let globalMetaSpecs = $state([]);
+
+  // ── Agent Rules: load ──────────────────────────────────────────────────
+  // A failed lookup must surface as an error, never as an empty successful
+  // rule set — the section summarizes the MANDATORY prompt set agents
+  // receive, and a masked failure understates it. Either scope failing
+  // fails the section (partial cascade data would mislead the same way).
+  async function loadRules() {
+    if (!workspace?.id) return;
+    rulesLoading = true;
+    rulesError = null;
+    try {
+      const [wsData, globalData] = await Promise.all([
+        api.getMetaSpecs({ scope: 'Workspace', scope_id: workspace.id }),
+        api.getMetaSpecs({ scope: 'Global' }),
+      ]);
+      workspaceMetaSpecs = Array.isArray(wsData) ? wsData : [];
+      globalMetaSpecs = Array.isArray(globalData) ? globalData : [];
+    } catch (e) {
+      rulesError = e.message || 'Failed to load agent rules';
+    } finally {
+      rulesLoading = false;
+    }
+  }
+
+  // ── Derived: meta-spec aggregates ─────────────────────────────────────
+  let allMetaSpecs = $derived([...globalMetaSpecs, ...workspaceMetaSpecs]);
+  let requiredMetaSpecs = $derived(allMetaSpecs.filter(m => m.required));
+  let recentlyUpdated = $derived(
+    allMetaSpecs.filter(m => {
+      if (!m.updated_at) return false;
+      const age = Date.now() - new Date(m.updated_at).getTime();
+      return age < 7 * 24 * 3600 * 1000; // within last 7 days
+    })
+  );
+
   // ── Spec navigation ────────────────────────────────────────────────────
   function navigateToSpec(spec) {
     const repo = repoMap[spec.repo_id];
@@ -1104,12 +1144,12 @@
     return Math.min(100, Math.round((used / maxTokens) * 100));
   });
 
-  // ── Load all data when workspace changes ───────────────────────────────
   $effect(() => {
     void workspace?.id;
     loadDecisions();
     loadRepos();
     loadSpecs();
+    loadRules();
     loadTasks();
     loadMrs();
     loadAgents();
@@ -1500,6 +1540,60 @@
                     {/each}
                   </tbody>
                 </table>
+              {/if}
+            </div>
+          </section>
+
+          <!-- ── Agent Rules (ui-navigation.md §2 — meta-spec cascade summary) ── -->
+          <section class="home-section" aria-labelledby="section-agent-rules" data-testid="section-agent-rules">
+            <div class="section-header">
+              <h2 class="section-title" id="section-agent-rules">{$t('workspace_home.sections.agent_rules')}</h2>
+              <button
+                class="section-action"
+                data-testid="manage-rules-link"
+                onclick={() => goToAgentRules?.()}
+              >{$t('workspace_home.manage_rules')}</button>
+            </div>
+            <div class="section-body">
+              {#if rulesLoading}
+                <div class="skeleton-row"></div>
+              {:else if rulesError}
+                <div class="error-row" role="alert">
+                  <p class="error-text">{rulesError}</p>
+                  <button class="retry-btn" onclick={loadRules}>{$t('common.retry')}</button>
+                </div>
+              {:else}
+                <p class="rules-summary" data-testid="rules-summary">
+                  {allMetaSpecs.length} meta-spec{allMetaSpecs.length !== 1 ? 's' : ''} active
+                  {#if requiredMetaSpecs.length > 0}
+                    ({requiredMetaSpecs.length} required)
+                  {/if}
+                </p>
+
+                {#if recentlyUpdated.length > 0}
+                  <div class="reconcile-status" role="status" data-testid="reconcile-status">
+                    {$t('workspace_home.rules_reconciling', { values: { count: recentlyUpdated.length } })}
+                  </div>
+                {/if}
+
+                {#if requiredMetaSpecs.length > 0}
+                  <ul class="rules-list" role="list" data-testid="rules-list">
+                    {#each requiredMetaSpecs as ms (ms.id)}
+                      <li class="rule-item" data-testid="rule-item">
+                        <span class="rule-lock" aria-label="Required" aria-hidden="true">🔒</span>
+                        <span class="rule-name">{ms.name}</span>
+                        {#if ms.kind}
+                          <span class="rule-kind">{ms.kind.replace('meta:', '')}</span>
+                        {/if}
+                        {#if ms.version}
+                          <span class="rule-version">v{ms.version}</span>
+                        {/if}
+                      </li>
+                    {/each}
+                  </ul>
+                {:else if allMetaSpecs.length === 0}
+                  <p class="empty-text">{$t('workspace_home.rules_no_metaspecs')}</p>
+                {/if}
               {/if}
             </div>
           </section>
@@ -5930,6 +6024,61 @@
     cursor: pointer;
     text-align: left;
     transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+
+  /* ── Agent Rules section (ui-navigation.md §2) ────────────────────────── */
+  .rules-summary {
+    margin: 0;
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+  }
+
+  .reconcile-status {
+    margin: var(--space-2) 0 0;
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-xs);
+    color: var(--color-warning, #b8860b);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+  }
+
+  .rules-list {
+    list-style: none;
+    margin: var(--space-2) 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .rule-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--color-text);
+  }
+
+  .rule-lock {
+    flex-shrink: 0;
+  }
+
+  .rule-name {
+    font-weight: 500;
+  }
+
+  .rule-kind {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+    background: var(--color-surface-elevated);
+    border-radius: var(--radius);
+    padding: 1px var(--space-2);
+  }
+
+  .rule-version {
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
   }
 
   .decision-entity-link:hover {
