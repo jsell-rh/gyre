@@ -22,7 +22,8 @@ jobs:
         with:
           node-version: '24'
       - run: python3 -m unittest discover -s scripts -p 'test_dev*.py'
-      - run: node --test scripts/dashboard/test/dev-stream.test.mjs
+      - run: python3 -m unittest discover -s scripts -p 'test_pipeline*.py'
+      - run: node --test scripts/dashboard/test/*.test.mjs
 
   fmt:
     name: Format
