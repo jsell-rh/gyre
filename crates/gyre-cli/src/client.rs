@@ -17,8 +17,14 @@ pub struct AgentResponse {
     pub id: String,
     pub name: String,
     pub status: String,
+    #[serde(default)]
     pub current_task_id: Option<String>,
+    #[serde(default)]
     pub last_heartbeat: Option<u64>,
+    /// When the agent was spawned (UNIX seconds) — the recency signal for
+    /// `gyre search --since` on agent results (agents have no updated_at).
+    #[serde(default)]
+    pub spawned_at: u64,
 }
 
 #[derive(Deserialize, Debug)]
@@ -36,20 +42,33 @@ pub struct TaskResponse {
     pub title: String,
     pub status: String,
     pub priority: String,
+    #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
     pub assigned_to: Option<String>,
+    #[serde(default)]
     pub labels: Vec<String>,
+    /// Last-modified timestamp (UNIX seconds) — maintained by the server on
+    /// task update and status transitions. Used by `gyre search --since`.
+    #[serde(default)]
+    pub updated_at: u64,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[allow(dead_code)]
 pub struct MrResponse {
     pub id: String,
     pub repository_id: String,
     pub title: String,
+    #[serde(default)]
     pub source_branch: String,
+    #[serde(default)]
     pub target_branch: String,
     pub status: String,
+    /// Last-modified timestamp (UNIX seconds) — maintained by the server on
+    /// MR status transitions. Used by `gyre search --since`.
+    #[serde(default)]
+    pub updated_at: u64,
 }
 
 // ── Bootstrap response types (platform-model.md §8) ──────────────────────────
@@ -221,6 +240,43 @@ impl GyreClient {
         serde_json::from_str(&text).context("parsing agent response")
     }
 
+    /// GET /api/v1/tasks/:id — live task detail. Search index facets are
+    /// frozen at create time, so `gyre search --status/--since` resolves
+    /// current task state through this endpoint.
+    pub async fn get_task(&self, task_id: &str) -> Result<TaskResponse> {
+        let resp = self
+            .client
+            .get(format!("{}/api/v1/tasks/{task_id}", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("get task failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing task response")
+    }
+
+    /// GET /api/v1/merge-requests/:id — live MR detail. See `get_task` for
+    /// why `gyre search --status/--since` needs the live record.
+    pub async fn get_mr(&self, mr_id: &str) -> Result<MrResponse> {
+        let resp = self
+            .client
+            .get(format!("{}/api/v1/merge-requests/{mr_id}", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("get MR failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing MR response")
+    }
+
     /// List tasks with optional filters.
     pub async fn list_tasks(
         &self,
@@ -324,11 +380,13 @@ impl GyreClient {
 
     /// GET /api/v1/search — full-text search across all entities.
     ///
-    /// `q` uses the server's query language (terms, quoted phrases, and
-    /// `facet:value` tokens); the CLI folds its `--type`/`--status`/`--since`
-    /// flags into that string so every filter reaches the same parser.
-    /// `workspace_id` is the pre-resolved workspace filter (see
-    /// `resolve_workspace_slug`).
+    /// `q` is passed to the server as-is (the server's current engine is
+    /// AND-of-terms substring matching; the facet query language of
+    /// search.md §Query Language is task-154). `entity_type` and
+    /// `workspace_id` are real server-side filters. The CLI's
+    /// `--status`/`--since` filters are applied client-side against live
+    /// entity state (see `gyre search` in main.rs) because search results
+    /// carry no timestamps and index facets freeze at create time.
     pub async fn search(
         &self,
         q: &str,
