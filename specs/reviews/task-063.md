@@ -257,3 +257,73 @@ No new findings. F1/F2/F3 remain repaired (verified R2, unchanged by rebase), th
 coverage rows are implementer-authored and accurate, and the committed dist matches
 the fixed source. The task meets spec §4–9 on every verifiable surface.
 Setting `progress: complete`.
+
+## Round 5 (fresh independent review — recovered candidate 0076fd5c)
+
+Comparison base `8c2d1775`, candidate `0076fd5c`. Mandate: the recovered tree
+(durable finding `21300e4ef` — interrupted assignment) needed a fresh review of
+the exact candidate; the previous attempt's review model did not complete. All
+evidence under `/tmp/stage/review-evidence/task-063-r6/`.
+
+Independently verified, from the diff itself (not prior-round labels):
+
+- **Task-063 implementation present and byte-identical to the R4-approved
+  tree**: `git diff 656c1281..0076fd5c -- web/src/lib/ExplorerCanvas.svelte
+  web/src/__tests__/ExplorerCanvas.test.js` is 0 bytes; the web/src delta since
+  `656c1281` is other tasks' no-sidebar/WorkspaceHome work
+  (`a781ede2`, task-210 territory). The candidate diff vs base is exactly:
+  ExplorerCanvas all-scope branch + diff-scope port to real fields
+  (`created_sha`/`last_modified_sha`/`created_at`/`last_modified_at`, both-refs
+  guard, `~epoch` temporal half-open, ≥7-char SHA prefix, from-exclusion) +
+  `highlight.matched.label` rendering + hardened tests + coverage rows +
+  task/review records + fresh dist.
+- **No `last_commit_sha` anywhere in production code or dist** (grep over
+  web/src + dist: only explanatory test comments). The F1 dead-field defect is
+  genuinely gone.
+- **Focused suites re-run on this tree**: ExplorerCanvas.test.js → **139
+  passed, 0 failed**; `cargo test -p gyre-domain --lib view_query_resolver`
+  (gcc linker override — workspace mold/clang absent, environmental) →
+  **116 passed, 0 failed**. Rust scope tests cover all 6 types including 3
+  Diff tests (temporal/same-commit/SHA-prefix :4385–4451).
+- **Mutation probes re-run independently on this tree** (source restored clean
+  after each): `all`-branch deletion → "all scope: {{count}}…" fails;
+  diff-scope reversion to the dead field → component diff-count test fails;
+  highlight-label branch deletion → positive label test fails in the full run
+  (the `-t 'highlight label'` filter artifact matched only the negative test's
+  title — filter artifact, not a test weakness; full-suite run kills the
+  mutation). Each mutation killed by exactly its targeted test.
+- **Full `npm test` A/B against the clean base**: candidate 10 failed / 1531
+  passed (ghost-overlay 3 + performance 7, all 5–6s timeouts), base 13 failed /
+  1521 passed with the same files — candidate failures are a strict subset of
+  base failures under identical sandbox load. The one candidate-only flake
+  ("10k graph draw calls are bounded by culling") was isolated: it times out at
+  5000ms on BOTH trees (same error), i.e. load-flake, not a regression.
+- **Dist freshness**: committed `index-DJOFnUtw.js` carries `type==="all"`,
+  `from_commit`/`to_commit`, `~(\d+)$` epoch regex, `created_at`/
+  `last_modified_at`, `WorkspaceHome` (task-210 markers) — and a from-source
+  rebuild of the candidate tree differs only by minifier symbol naming (all
+  functional markers identical, lengths within 0.4%). Dist is current.
+- **This round's source-tree change (attribution repair) verified as the
+  prescribed fix**: `check-task-commit-attribution.sh` fails on the base
+  (missing `a781ede2` task-210 product commit, exit 1) and passes on the
+  candidate (exit 0) after recording the full SHA in task-210's frontmatter —
+  no exemption entries added. The commit is a genuine task-210 product commit
+  (admin.rs seed scoping, WorkspaceHome generation guard, no-sidebar shell)
+  that landed via the base merge.
+- **Coverage rows 4–9**: spot-checked citations against the current tree —
+  correct (all :1940, dim :2117–2119, tiered :2181–2186, heat :2127–2177,
+  highlight label :3274–3287, badges :3290–3321, edge restriction :3575–3582,
+  zoom :4769–4801, annotation :4992–5009, bindings :55–87 and :4160–4171).
+  The rows' flagged divergences (both-refs guard vs Rust single-ref; regex vs
+  contains name_pattern) are correctly annotated as validator-unreachable /
+  pre-existing task-062 territory.
+- **Validator cross-check**: `view-query-validator.js` rejects empty
+  from_commit/to_commit (:162–166) and identical refs — the client-side
+  both-refs-required guard is unreachable through validated queries, as the
+  coverage row states.
+
+No new findings. The recovered candidate carries the R2/R4-verified F1/F2/F3
+repairs unchanged, the fresh dist matches source, and the only new tree change
+is the script-prescribed task-210 attribution repair that turns a real gate
+failure on base into a pass on candidate. All 6 scope types resolve on both
+surfaces with mutation-verified tests. Approving `0076fd5c`.
