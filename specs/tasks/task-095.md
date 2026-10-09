@@ -2,7 +2,7 @@
 title: "Platform Model Post-Merge Validation + Recovery Protocol"
 spec_ref: "platform-model.md §6 Rollback & Recovery"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 review: specs/reviews/task-095.md
 coverage_sections:
   - "platform-model.md §6 Rollback & Recovery"
@@ -159,3 +159,11 @@ this runtime (`errno 95`, `/tmp/stage/capabilities.json`), so no live
 server/browser smoke test was performed here; behavior is verified by
 the in-process axum `oneshot` handler tests above. GitHub CI on the
 branch head remains the authoritative transport-level check.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/merge_processor.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.

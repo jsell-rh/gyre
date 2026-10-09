@@ -6199,6 +6199,42 @@ mod tests {
     /// impossible when the MR id is the key). Two MRs bound to the same
     /// spec share one breaker; a different spec is unaffected.
     #[tokio::test]
+    /// REVIEW PROBE (temporary, do not commit): does the breaker key
+    /// `spec:<spec_ref>` leak across repos? Two repos, different MRs,
+    /// same spec path — spec_ref is not repo-qualified.
+    #[tokio::test]
+    async fn probe_breaker_key_leaks_across_repos() {
+        let state = test_state();
+        let repo_a = create_repo_in_workspace(&state, "probe-repo-a", "ws-1").await;
+        let repo_b = create_repo_in_workspace(&state, "probe-repo-b", "ws-1").await;
+
+        let mk = |id: &str, repo: &Repository, spec: &str| {
+            let mut m = gyre_domain::MergeRequest::new(
+                Id::new(id),
+                repo.id.clone(),
+                "cross-repo",
+                "feat/x",
+                "main",
+                1000,
+            );
+            m.workspace_id = Id::new("ws-1");
+            m.spec_ref = Some(spec.to_string());
+            m
+        };
+        let mr_a = mk("probe-mr-a", &repo_a, "specs/system/foo.md@aaaa");
+        let mr_b = mk("probe-mr-b", &repo_b, "specs/system/foo.md@aaaa");
+        state.merge_requests.create(&mr_a).await.unwrap();
+        state.merge_requests.create(&mr_b).await.unwrap();
+
+        assert_eq!(increment_revert_count(&state, &mr_a).await.unwrap(), 1);
+        // If the key leaks across repos, this returns 2, not 1.
+        assert_eq!(
+            increment_revert_count(&state, &mr_b).await.unwrap(),
+            1,
+            "BREAKER KEY LEAKS ACROSS REPOS: same spec_ref in a different repo accumulated"
+        );
+    }
+
     async fn revert_breaker_accumulates_across_resubmitted_mrs() {
         let state = test_state();
         let (repo, _mr) = setup_recovery_mr(&state).await;
