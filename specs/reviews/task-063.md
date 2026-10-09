@@ -178,3 +178,28 @@ Residual notes (unchanged from R1, triaged, not blockers):
 
 F1, F2, F3 all genuinely repaired with mutation-verified regression coverage. The task's
 checked criteria are met on the verifiable surface. Setting `progress: complete`.
+
+## Round 3 (implementer takeover of review-authored coverage edits)
+
+The R2 verdict approved the F1/F2/F3 repairs but the integration was rejected because the
+review itself authored the coverage-row flips (`specs/coverage/system/view-query-grammar.md`
+rows 4-9) — a review cannot approve its own verifier edits. The preserved rows were taken
+over as implementer work this round:
+
+- Every behavior claim in the rows re-verified against the current tree; three line
+  citations had drifted from the R2 review's diff base and were corrected (`heat
+  :2090-2138` → :2127-2177, `badges :3252-3267` → :3290-3321, annotation `:4992-4997` →
+  :4992-5009). Rows re-stamped `[2026-10-09 task-063, R3 re-verified]`.
+- All-branch mutation probe re-run on the current tree: deleting the `all` branch fails
+  its targeted test; source restored clean after the probe.
+- `web/dist` regenerated from the fixed source and committed: shipped bundle now carries
+  the F1/F2 client fixes (created_sha diff logic, `~epoch` temporal half-open, ≥7-char
+  SHA-prefix guard, `type==="all"` branch); `last_commit_sha` appears nowhere in it.
+  R2 had defused dist staleness via the integration-gate rebuild; committing the regen
+  removes the stale-at-rest state entirely and follows the task's own d22f50f precedent.
+- Focused checks: ExplorerCanvas.test.js 139/139; gyre-domain scope tests 11/11
+  (gcc linker override — workspace mold/clang absent, environmental).
+
+No production source was changed this round (source was already correct per R2); the
+deliverables are the implementer-owned coverage rows, the task-file record, and the
+fresh dist. Requests a fresh independent review.
