@@ -98,6 +98,20 @@ class CrashTest(unittest.TestCase):
         self.assertEqual(updates, {})
         self.assertIsNone(self.store.task('task-001')['data'].get('candidate'))
 
+    def test_cleanup_captures_but_never_promotes_explicitly_fenced_source(self):
+        self.store.reserve('fenced-pod', self.work, self.claim['token'], 'sandbox', 1)
+        self.store.resource_state('fenced-pod', 'absent')
+        self.store.db.execute("UPDATE work SET state='obsolete',token=token+1 WHERE id=?", (self.work,))
+        prior = self.store.directory / 'attempts' / self.work / str(self.claim['token'])
+        prior.mkdir(parents=True)
+        (prior / 'recovery.json').write_text(json.dumps({'base': 'obsolete-source'}))
+        self.store.enqueue('cleanup', 'task-001', 'g', {'resource': 'fenced-pod'}, priority=10000)
+        claim = self.store.claim('cleanup', 'cleaner')
+        execution = Execution(self.store, claim)
+        with patch.object(execution, 'login'), patch('pipeline.stages.gateway.inventory', return_value=[]), patch('pipeline.stages.checkout', side_effect=AssertionError('must not promote fenced source')):
+            _, updates, _ = cleanup(execution, self.store.task('task-001'))
+        self.assertEqual(updates, {})
+
     def test_metadata_only_resubmission_does_not_resolve_a_real_review_finding(self):
         root = self.store.directory / 'source-proof'
         root.mkdir()

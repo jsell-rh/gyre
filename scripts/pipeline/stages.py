@@ -462,7 +462,7 @@ if p.exists():
         execution.store.resource_state(resource, 'absent')
     receipt = old_directory / 'recovery.json'
     if (receipt.exists() and old_work and old_work['stage'] == 'implement'
-            and old_work['state'] != 'succeeded' and old_work['generation'] == task['generation']
+            and old_work['state'] not in ('succeeded', 'obsolete') and old_work['generation'] == task['generation']
             and not task['data'].get('delivered')):
         old_input = json.loads(old_work['input'])
         if task['data'].get('candidate') == old_input.get('candidate'):
