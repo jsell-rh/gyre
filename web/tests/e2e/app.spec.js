@@ -175,13 +175,20 @@ test.describe('Workspace home', () => {
     const reposSection = page.locator('[data-testid="section-repos"]');
     await expect(reposSection).toBeVisible({ timeout: 5000 });
 
-    // Repo rows or empty state must be visible
+    // Repo cards or empty state must be visible. The production markup is
+    // RepoCard.svelte ([data-testid="repo-card"]); a seeded workspace has
+    // three, so also assert real content — the card names the repo — rather
+    // than accepting a bare container.
     const reposContent = reposSection
-      .locator('[data-testid="repo-row"]')
+      .locator('[data-testid="repo-card"]')
       .or(reposSection.locator('[data-testid="repos-empty"]'))
       .or(reposSection.locator('.skeleton-row'))
       .first();
     await expect(reposContent).toBeVisible({ timeout: 8000 });
+    const cards = reposSection.locator('[data-testid="repo-card"]');
+    if (await cards.count()) {
+      await expect(cards.first().locator('.repo-card-name')).toHaveText(/\S/, { timeout: 3000 });
+    }
   });
 
   test('briefing_section_renders', async ({ page }) => {

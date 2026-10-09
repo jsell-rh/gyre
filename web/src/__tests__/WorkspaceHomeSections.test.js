@@ -830,7 +830,7 @@ describe('Specs section (HSI §1.3 — workspace-scope scroll target)', () => {
 
 // ── Agent Rules section ───────────────────────────────────────────────────────
 
-describe.skip('Agent Rules section (old layout — needs update)', () => {
+describe('Agent Rules section (ui-navigation.md §2 — meta-spec cascade)', () => {
   it('calls api.getMetaSpecs for Workspace scope', async () => {
     render(WorkspaceHome, { props: { workspace: WORKSPACE } });
     await waitFor(() => {
