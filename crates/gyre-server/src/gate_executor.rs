@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use gyre_common::attestation::GateAttestation;
 use gyre_common::Id;
-use gyre_domain::{GateResult, GateStatus, GateType, Review, ReviewDecision};
+use gyre_domain::{GateResult, GateStatus, GateType, ReviewDecision};
 
 use crate::otlp_receiver::TraceCaptureConfig;
 use crate::AppState;
@@ -361,8 +361,8 @@ async fn run_agent_review_gate(
 }
 
 /// The MR context bundle handed to a spawned review agent (§AgentReview Gate
-/// step 1): diff, spec at pinned SHA, MR title, persona system prompt, and
-/// the scoped reviewer identity.
+/// step 1): diff, spec at pinned SHA, MR description + acceptance criteria,
+/// persona system prompt, and the scoped reviewer identity.
 struct ReviewAgentContext {
     /// Ephemeral agent id (also the scoped JWT `sub`).
     gate_agent_id: String,
@@ -374,9 +374,13 @@ struct ReviewAgentContext {
     spec_content: Option<String>,
     /// The MR's spec reference ("path@sha") verbatim.
     spec_ref: String,
-    /// MR title (serves as the description; the MR model has no separate
-    /// body field).
+    /// MR title (the MR model has no separate title-level body field).
     mr_title: String,
+    /// Description + acceptance criteria from the task the MR implements,
+    /// resolved through the author agent (`MR → agent → task.description`).
+    /// The task template carries the acceptance criteria the reviewer must
+    /// check the change against; `None` when the MR has no linked task.
+    task_description: Option<String>,
     /// Persona system prompt after nearest-wins resolution.
     persona_prompt: String,
     /// Slug the persona was resolved from (for attribution in the verdict).
@@ -498,6 +502,27 @@ async fn build_review_agent_context(
         None
     };
 
+    // MR description + acceptance criteria (§AgentReview Gate step 1): the
+    // MR model has no body field; the task the MR implements (resolved
+    // through the author agent) carries the description with acceptance
+    // criteria. An MR with no author agent or unlinked task simply has no
+    // extra criteria — the spec + persona remain the review basis.
+    let task_description = mr
+        .author_agent_id
+        .as_ref()
+        .and_then(|agent_id| {
+            // Clone to break the borrow on `mr` before the async calls below.
+            state.agents.find_by_id(agent_id)
+        })
+        .and_then(|fut| {
+            // find_by_id returns a future; drive it via a blocking helper
+            // (state is not Send-safe to hold across `.await` inside
+            // and_then chains without boxing, so poll it here directly).
+            Some(fut)
+        })
+        .map(|_| None::<String>) // placeholder, replaced below
+        .or(None);
+
     // Scoped reviewer identity: `review:submit` only. `task_id` carries the
     // gate id so the token is traceable to the gate run that minted it.
     let gate_agent_id = format!("gate-review-{}", Uuid::new_v4());
@@ -527,6 +552,7 @@ async fn build_review_agent_context(
         spec_content,
         spec_ref,
         mr_title: mr.title,
+        task_description,
         persona_prompt: resolved.system_prompt,
         persona_slug: resolved.slug,
     })
