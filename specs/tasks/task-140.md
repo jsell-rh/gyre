@@ -2,11 +2,10 @@
 title: "Seed built-in personas at tenant bootstrap"
 spec_ref: "platform-model.md §2 Built-In Personas"
 depends_on: []
-progress: complete
+progress: not-started
 coverage_sections:
   - "platform-model.md §Built-In Personas"
-commits: ["151cf7d2fef662f87f0306ba70b8f3197fb41802", "fcb712c51c1f27b597e4a0cb798e63d7f341f6e9", "f16e969ce52622e8f6133deb60550d77dd7ed47e"]
-review: specs/reviews/task-140.md
+commits: []
 ---
 
 ## Spec Excerpt
@@ -51,38 +50,12 @@ Built-in personas can be overridden at workspace or repo scope (with human appro
 
 ## Acceptance Criteria
 
-- [x] Server startup creates 4 built-in personas at the tenant level: `workspace-orchestrator`, `repo-orchestrator`, `accountability`, `security`
-- [x] All built-in personas have `approval_status: Approved` (pre-approved)
-- [x] `specs/personas/repo-orchestrator.md` file exists with appropriate persona definition
-- [x] Seeding is idempotent — restarting the server does not duplicate personas
-- [x] Content hash is computed from the prompt content via SHA-256
-- [x] Tests pass
-
-## Implementation Notes
-
-- Domain: `BUILTIN_PERSONA_DEFS` (crates/gyre-domain/src/workspace.rs) — the four
-  personas in spec-table order, prompts embedded byte-for-byte from
-  `specs/personas/<slug>.md` via `include_str!`; `builtin_personas(tenant_id, now)`
-  returns tenant-scoped, pre-approved `Persona` entities (approved_by "system",
-  SHA-256 content hash over prompt+capabilities).
-- Server: `seed_builtin_personas(state)` (crates/gyre-server/src/lib.rs) runs at
-  startup after meta-spec seeding (main.rs:55), enumerating tenants;
-  `seed_builtin_personas_for_tenant` is the shared idempotent tail, also called
-  from `POST /api/v1/tenants` (tenants.rs:80) and admin seed (admin.rs:447) so
-  every tenant gets the §2 table at creation. Idempotency key is
-  `find_by_slug_and_scope(slug, Tenant(tenant_id))` — existing personas are never
-  overwritten (user customizations survive restarts).
-- Tests: domain (defs cover spec table, pre-approved tenant-scoped, hash
-  recomputation), server (seed four + idempotent, preserve customized, tenant
-  isolation, tenant-create seeds), adapter (SQLite round-trip + idempotent
-  reseed against real rows — added this round; the production storage path was
-  previously covered only by mem-adapter tests). All pass.
-
-## Shipped
-
-- The four built-in personas (`workspace-orchestrator`, `repo-orchestrator`, `accountability`, `security`) are seeded as pre-approved `PersonaScope::Tenant` entities with prompts embedded byte-for-byte from `specs/personas/<slug>.md` and SHA-256 content hashes — `gyre_domain::BUILTIN_PERSONA_DEFS` / `builtin_personas()`.
-- Seeding runs at server startup (main.rs, before the listener binds), on `POST /api/v1/tenants` tenant creation, and on the admin demo-seed path, so every tenant gets the §2 table the moment it exists; existing slug+scope personas are never overwritten (customizations survive restarts).
-- Idempotency and durability proven against real SQLite rows (scope-JSON symmetry between `create` and `find_by_slug_and_scope`, reseed-after-restart produces no duplicates) plus a full-router test that tenant creation returns the four approved personas over HTTP.
+- [ ] Server startup creates 4 built-in personas at the tenant level: `workspace-orchestrator`, `repo-orchestrator`, `accountability`, `security`
+- [ ] All built-in personas have `approval_status: Approved` (pre-approved)
+- [ ] `specs/personas/repo-orchestrator.md` file exists with appropriate persona definition
+- [ ] Seeding is idempotent — restarting the server does not duplicate personas
+- [ ] Content hash is computed from the prompt content via SHA-256
+- [ ] Tests pass
 
 ## Agent Instructions
 
