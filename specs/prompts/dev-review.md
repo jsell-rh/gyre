@@ -6,6 +6,9 @@ enforced, scoped, durable, and wired through the real entry point. Look for
 tests that could pass without the behavior. Run focused probes where they can
 settle a material doubt. The controller separately runs deterministic gates
 on the eventual integration commit.
+OpenShell disallows loopback listeners. Use supplied exact-SHA logs for failures
+that require a running server or browser; the host and GitHub run those gates.
+Do not install browsers or repeat full suites here to reproduce those failures.
 
 If a repair handoff is supplied, independently check each reported failure
 and its reproduction. Reject gate weakening, deleted meaningful tests, new
@@ -20,3 +23,5 @@ detectable failure classes into scripts or focused tests.
 Before marking a task complete, add a `## Shipped` section to its task file
 with 2–4 concise bullets describing the behavior actually delivered. Base
 these on the reviewed code; this section becomes the GitHub merge description.
+Once the evidence supports a verdict, write the findings and task status and
+end the round. Leave the full integration verification to the controller.

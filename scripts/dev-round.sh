@@ -52,11 +52,15 @@ PY
         printf '\n## Bounded handoff from the previous round\n\n%s\n' "$compact_note"
         printf '\n## Current branch changes\n\n'
         git diff --stat origin/main
-        printf '\nThe prior round already mapped the code. Make the next production edit now; avoid repeating broad repository exploration.\n'
+        printf '\nThe prior round already mapped the code; avoid repeating broad repository exploration.\n'
       fi
     else
-      printf '%s\n' 'Continue this task from the saved session. The checkout and task frontmatter are authoritative. You have already inspected the code in the previous round: make the next concrete production edit now, then run a focused check. Avoid repeating broad repository exploration. If you cannot edit, state the specific blocker in the task file.'
+      printf '%s\n' 'Continue this task from the saved session. The checkout and task frontmatter are authoritative. Avoid repeating broad repository exploration.'
     fi
+    case "$role" in
+      implementation) printf '%s\n' 'Make the next concrete production edit, then run a focused check. If blocked, record the specific blocker in the task file.' ;;
+      review|audit-review) printf '%s\n' 'Review the remaining concrete findings independently. Write the verdict and task status when supported by evidence; do not restart implementation or broad exploration.' ;;
+    esac
     printf '\n## Assigned task\n\n'
     cat "$file"
     if [ -f /tmp/stage/audit-contract.json ]; then
