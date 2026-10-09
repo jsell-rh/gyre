@@ -2,7 +2,7 @@
 title: "Message bus — wire MessageConsumer dispatcher and event TTL expiry job"
 spec_ref: "message-bus.md §Relationship to Notifications"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "message-bus.md §Relationship to Notifications"
   - "message-bus.md §Implementation Notes"
