@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "hierarchy-enforcement.md §5"
-commits: ["a5f43d426920d4fd61defcf8aec505cf6fc8d95f"]
+commits: ["988b7e931d752c38c07d183726e504212c61d30a"]
 ---
 
 ## Spec Excerpt
