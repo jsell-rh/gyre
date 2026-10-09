@@ -5,7 +5,7 @@ import { dirname, extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { attemptLog, collectController, controllerPaths, coverageHistory, coverageMetrics, retryAllTasks, retryTask, setSlots, taskPullRequests, taskTitles } from "./dev-controller.mjs";
+import { attemptLog, attemptLogPath, collectController, controllerPaths, coverageHistory, coverageMetrics, retryAllTasks, retryTask, setSlots, taskPullRequests, taskTitles } from "./dev-controller.mjs";
 
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml" };
@@ -20,8 +20,7 @@ async function githubRepository(root) {
 }
 
 export async function followAttemptEvents(paths, id, req, res) {
-  if (!/^[a-f0-9]{16}$/.test(id)) throw new Error("invalid attempt id");
-  const fh = await open(join(paths.attempts, id, "output.log"), "r");
+  const fh = await open(attemptLogPath(paths, id), "r");
   const size = (await fh.stat()).size;
   const resume = String(req.headers["last-event-id"] || "");
   const validResume = /^\d+$/.test(resume) && Number(resume) <= size;
