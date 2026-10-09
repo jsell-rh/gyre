@@ -3,7 +3,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use gyre_common::Id;
-use gyre_domain::BudgetUsage;
+use gyre_domain::{BudgetCallRecord, BudgetUsage};
 use gyre_domain::{
     Agent, AgentCommit, AgentStatus, AgentUsage, AgentWorktree, AnalyticsEvent, AuditEvent,
     CostEntry, DependencyEdge, LlmFunctionConfig, MergeQueueEntry, MergeQueueEntryStatus,
@@ -14,12 +14,12 @@ use gyre_domain::{
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
-    AuditQueryFilter, AuditRepository, BudgetRepository, BudgetUsageRepository, CostRepository,
-    DependencyRepository, KvJsonStore, LlmConfigRepository, MergeQueueRepository,
-    MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository, PersonaRepository,
-    RepoRepository, ReviewRepository, SpawnLogEntry, SpawnLogRepository, TaskRepository,
-    TenantRepository, UserRepository, UserWorkspaceStateRepository, WorkspaceRepository,
-    WorktreeRepository,
+    AuditQueryFilter, AuditRepository, BudgetCallRepository, BudgetRepository,
+    BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore,
+    LlmConfigRepository, MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository,
+    NetworkPeerRepository, PersonaRepository, RepoRepository, ReviewRepository, SpawnLogEntry,
+    SpawnLogRepository, TaskRepository, TenantRepository, UserRepository,
+    UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -2403,6 +2403,50 @@ impl BudgetUsageRepository for MemBudgetUsageRepository {
     }
 }
 
+// ── MemBudgetCallRepository ───────────────────────────────────────────────────
+
+/// In-memory BudgetCallRepository for tests and development.
+/// Mirrors the SQLite/Postgres adapters: insert-only with duplicate-id
+/// rejection, workspace-scoped reads newest-first.
+#[derive(Default)]
+pub struct MemBudgetCallRepository {
+    store: Arc<Mutex<Vec<BudgetCallRecord>>>,
+}
+
+#[async_trait]
+impl BudgetCallRepository for MemBudgetCallRepository {
+    async fn save(&self, record: &BudgetCallRecord) -> Result<()> {
+        let mut store = self.store.lock().await;
+        if store
+            .iter()
+            .any(|r| r.id.as_str() == record.id.as_str())
+        {
+            anyhow::bail!("budget call record {} already exists", record.id.as_str());
+        }
+        store.push(record.clone());
+        Ok(())
+    }
+
+    async fn list_by_workspace(
+        &self,
+        workspace_id: &str,
+        since: u64,
+        limit: i64,
+    ) -> Result<Vec<BudgetCallRecord>> {
+        let store = self.store.lock().await;
+        let mut records: Vec<BudgetCallRecord> = store
+            .iter()
+            .filter(|r| r.workspace_id.as_str() == workspace_id && r.timestamp >= since)
+            .cloned()
+            .collect();
+        records.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        if limit >= 0 {
+            records.truncate(limit as usize);
+        }
+        Ok(records)
+    }
+}
+
 #[derive(Default)]
 pub struct MemGateResultRepository {
     results: Arc<Mutex<HashMap<String, gyre_domain::GateResult>>>,
@@ -3318,6 +3362,7 @@ fn test_state_inner(
         spec_links_store: Arc::new(Mutex::new(Vec::new())),
         budget_configs: Arc::new(MemBudgetConfigRepository::default()),
         budget_usages: Arc::new(MemBudgetUsageRepository::default()),
+        budget_calls: Arc::new(MemBudgetCallRepository::default()),
         search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
         tenants: Arc::new(MemTenantRepository::default()),
         workspaces,
