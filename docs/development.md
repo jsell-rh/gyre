@@ -31,8 +31,12 @@ gyre-cli    --> gyre-common
 ## Key Commands
 
 Cargo uses each checkout's `target/` by default. To share build artifacts
-across local worktrees, set `CARGO_TARGET_DIR` to an absolute path in your
-shell; do not commit a machine-specific path to `.cargo/config.toml`.
+within a checkout, set `CARGO_TARGET_DIR` to an absolute path in your shell;
+do not commit a machine-specific path to `.cargo/config.toml`. Isolated baseline
+and mutation worktrees need separate target directories. If a serialized gate
+shares a target across worktrees, it must invalidate workspace packages first
+(`python3 scripts/dev-cargo-clean.py`); otherwise Cargo can reuse the wrong
+checkout's artifacts. The controller does this before every host Rust gate.
 
 ```bash
 # Build everything
@@ -266,118 +270,74 @@ Key specs to read before making changes:
 > web rebuild and use the committed `web/dist/` instead (useful for Rust-only development
 > or environments without Node). CI runs the web build in a separate `web-build` job and
 > sets `SKIP_WEB_BUILD=1` is NOT set in the `test` job — ubuntu-latest runners have npm.
-# Parallel sandbox controller and cockpit
+# Development reconcilers and cockpit
 
-`scripts/dev-controller.py` is the development loop. It imports task progress
-from remote `main` and unfinished `worker/task-*` branches, including branches
-left by the retired fleet. Local uncommitted files are not imported. The
-controller rejects an obsolete loop process if one is still running.
+The development pipeline consists of independent discover/claim/run stages.
+See [dev-pipeline.md](dev-pipeline.md) for state, claims, and execution semantics.
 
 ```bash
-python3 scripts/dev-controller.py sync                 # inspect imported state
-python3 scripts/dev-controller.py status               # inspect ledger and logs
-python3 scripts/dev-controller.py run --slots 1         # dispatch cloud attempts
-python3 scripts/dev-controller.py run --slots 50 --launch-burst 8  # ramp a larger pool
-python3 scripts/dev-controller.py run --only-task task-151 --slots 1  # trace one task
-python3 scripts/dev-controller.py retry task-099        # retry a failed task
-python3 scripts/dev-controller.py retry-all             # retry every failed task
-node scripts/loop-dashboard.mjs                         # cockpit: http://127.0.0.1:7690
+# Every stage can be triggered independently (including from cron).
+python3 scripts/dev-pipeline.py discover triage
+python3 scripts/dev-pipeline.py run triage
+python3 scripts/dev-pipeline.py tick implement
+python3 scripts/dev-pipeline.py tick review
+python3 scripts/dev-pipeline.py tick verify
+python3 scripts/dev-pipeline.py tick publish
+python3 scripts/dev-pipeline.py tick cleanup
+
+# Optional supervisor wakes all stages. Independent workers survive its restart.
+python3 scripts/dev-pipeline.py slots 8
+python3 scripts/dev-pipeline.py serve
+python3 scripts/dev-pipeline.py serve --task task-210
+python3 scripts/dev-pipeline.py status --json
+python3 scripts/dev-pipeline.py retry task-210
+python3 scripts/dev-pipeline.py retry-all
+
+# Drain compute admission while existing workers finish and clean up.
+python3 scripts/dev-pipeline.py slots 0
+node scripts/loop-dashboard.mjs
 ```
 
-It requires the OpenShell `gyre-gyre` gateway, `gyre-pricetag` and
-`gyre-github-rw` providers, `docker/dev-worker/policy.yaml`, the worker image,
-`OPENSHELL_OIDC_CLIENT_SECRET`, and local OMP model configuration. Runtime state is kept in
-`.gyre-dev-controller/state.sqlite3` (SQLite WAL); attempts and logs are in
-`.gyre-dev-controller/attempts/`. Keep this directory when restarting the
-controller. Only one controller process may run at a time. `--slots` is the
-desired upper bound; `--launch-burst` limits starts per scheduling cycle.
-Gateway admission starts at one and increases by one whenever a sandbox
-reaches Ready. Provisioning timeouts and gateway transport failures impose
-durable, jittered exponential backoff (30 seconds to 15 minutes). Existing
-sandboxes keep running; after the backoff, exactly one additional sandbox
-probes gateway recovery. A Ready signal resumes the gradual ramp.
-An explicit `ConfigurationInvalid` response pauses admission until the
-configuration is repaired and its failed task is retried.
-The cockpit reads
-the ledger, shows task dependencies, attempt history and logs, and writes the
-live `.gyre-dev-controller/slots` control. Set slots to `0` to drain; running
-attempts finish. `--max-attempts` limits worker attempts per retry cycle.
-The cockpit shows desired and admitted slots, gateway condition, next retry
-time, and tasks waiting for infrastructure. Infrastructure failures do not
-consume work-attempt budget; they retry automatically after backoff. The
-Needs attention section offers Retry and Retry all for task or configuration
-failures; an explicit retry grants a fresh attempt budget. A failed
-checker stays failed until explicitly retried, with its output in the attempt
-log. The overview shows current coverage from the coverage matrix and its
-history from `specs/coverage/SUMMARY.md` commits. The task table and detail
-drawer link GitHub PRs whose branch, title, or explicit body task reference
-matches a task. PR lookup uses `gh` and refreshes once per minute.
-The task drawer's Agent stream follows OMP text and tool events live through
-the local attempt log; Raw log shows sandbox transport and bootstrap output.
-Attempts started before streaming was enabled have only their raw logs until
-their next agent round. Prompt text and private thinking events are omitted.
-Transient source-fetch failures leave the controller alive and retry on the
-next cycle. Worker agent rounds are bounded to 30 minutes by default
-(`GYRE_DEV_ROUND_TIMEOUT` overrides this); the sandbox checkpoints and pushes
-the branch after each round, including a timed-out round. A disconnected
-sandbox exec or failed Cargo registry download is retried in the same sandbox
-rather than provisioning another.
-Branch pushes use the remote's exact current SHA as their lease and retry
-transport failures in the same sandbox. If an attempt still exits with
-unpushed edits, the driver saves `attempts/<id>/recovery.patch` locally before
-deleting the sandbox.
-Implementation and review rounds keep separate OMP sessions inside the sandbox
-so a timed-out round can continue its prior inspection without contaminating
-the independent review. When a session exceeds 400 KB, the next round archives
-it and starts from a bounded handoff: the last three agent text messages,
-current task, and branch diff summary. This keeps long tool transcripts out of
-the next model request. Implementation rounds use the configured Qwen Flash
-model by default (`GYRE_DEV_IMPLEMENTATION_MODEL` overrides it); review rounds
-remain on the independent default model.
-Bootstrap files are staged as one retryable bundle. Sandbox Cargo commands use
-`cc`/`lld` and `/tmp/gyre-target`, overriding the checkout's `clang`/`mold`
-linker settings.
-The pinned worker image is built from `docker/dev-worker/Dockerfile`; it includes
-`rustfmt`, Clippy, and `jj`.
-OpenShell cannot accept loopback sockets, including those used by library
-tests, so the sandbox checker typechecks every Rust target with Clippy and runs
-the static and frontend build gates there. Performance tests also need stable
-host resources. Before promotion, the controller runs `cargo test --all` and the
-full frontend suite in an isolated host worktree at the exact verified merge SHA.
-Its result is recorded in `attempts/<id>/host-tests.log`; a failure blocks the
-push to `main`. The host gate runs as a separate recorded process, so the
-controller continues scheduling, reaping, and deleting sandboxes while it runs.
+State is private to `.gyre-pipeline/`: SQLite WAL, fenced claims, structured
+findings, resources, and per-claim artifacts. `--state` or `GYRE_PIPELINE_STATE`
+selects another absolute state directory. Stage concurrency is enforced by
+claims, including when separate cron invocations race. Sandbox capacity includes
+provisioning and pending deletion, rather than just live model processes.
 
-Every finished sandbox is deleted, including failed attempts. The controller
-periodically retries deletion if a driver crashes or gateway deletion fails.
-A Git clone/bootstrap failure retries within its existing sandbox and then
-marks the task failed for explicit retry; it does not provision another
-sandbox automatically. Prior failed attempts with clear provisioning or
-gateway transport evidence migrate to automatic waiting on controller start.
-Set slots to `0` to drain dispatch.
+The supervisor does not own task transitions. Each stage records its outcome;
+subsequent discovery derives work from those outcomes and current upstream
+state. Review and CI failures return actionable findings to implementation.
+An infrastructure failure backs off on durable work. Checkpoints with complete
+capture receipts can be reconstructed and published with an explicit Git lease.
+Uncertain or corrupt capture receipts cannot authorize overwriting a branch.
 
-Each worker gets a unique `devloop/task-NNN/attempt-N` branch and may resume
-from an old worker branch or a previous attempt. It checkpoints after each
-agent round. Completion only nominates a candidate. A separate sandbox merges
-that exact candidate with the current remote `main`, checks changed-line Rust
-format and Clippy diagnostics, runs static architecture gates and the frontend
-build, then reviews the integration tree. Long Clippy and web build
-gates have a 30-minute timeout each (`GYRE_DEV_GATE_TIMEOUT` overrides it), so a
-hung build cannot retain a checker sandbox indefinitely. The sandbox publishes
-a verified merge commit after those gates and review pass. Its GitHub commit
-page shows the task title, spec, candidate SHA, and the reviewed `## Shipped`
-summary from the task file (or existing implementation notes for older tasks).
-The cockpit task drawer links the shipped commit directly to GitHub.
-The controller then
-runs the full Rust and frontend suites on that exact merge SHA on the host and
-blocks promotion if either fails. The controller checks the candidate
-and base SHAs again before a non-force push to `main`; if `main` moved, it
-checks again on the new base. An attempt whose process exits while the
-controller is down is recovered from its recorded exit status and remote branch
-on restart.
+The cockpit displays stage counts, pending retries, sandbox reservations,
+coverage history, PR links, and live agent events. Streams retain collapse
+controls, relative times, automatic following, and a return-to-bottom control.
 
-The new round prompts in `specs/prompts/dev-*.md` are short and task specific.
-The repeatable verification commands live in `scripts/dev-check.sh`, which the
-independent checker runs against the integrated commit. When a new mechanical
-failure class is found, add a check or focused test rather than appending it
-to an ever growing agent prompt.
+Gateway setup remains `python3 scripts/dev-gateway.py --inference`. Authenticate
+with `OPENSHELL_OIDC_CLIENT_SECRET`; the ignored gateway credential file can be
+sourced into the shell running the supervisor. Inference setup reads
+`secret-tool lookup service pricetag key api-token`. The attached providers are
+`gyre-enmaas` and `gyre-github-rw`; the model is explicitly pinned to
+`enmaas-glm-5-3/rits/zai-org/glm-5-3`. `python3 scripts/dev-inference.py --smoke-only`
+checks inference without changing the configured providers.
+
+Implementation and review each execute one bounded OMP assignment in an isolated
+sandbox. Their prompts are `specs/prompts/pipeline-*.md`; repeatable deterministic
+checks stay in scripts. Independent review cannot edit production code or
+verifiers. Verification integrates the candidate with an exact main revision and
+runs the maintained guards, full Rust tests, and frontend tests on the host.
+Publication opens or updates a task PR, observes required checks, and requests an
+exact-head merge without an administrator bypass. Delivery is recorded only
+after observing the GitHub merge and checking its source tree.
+
+To resume an existing unpublished task, seed its definition and exact source:
+
+```bash
+python3 scripts/dev-pipeline.py seed /absolute/path/task-210.md \
+  --candidate FULL_COMMIT_SHA --base FULL_BASE_SHA
+```
+
+A seed is retained work, not an approval. Triage, independent review, verification,
+and GitHub checks still apply. The old controller is not part of this pipeline.

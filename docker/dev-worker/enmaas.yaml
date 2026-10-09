@@ -1,0 +1,21 @@
+id: gyre-enmaas
+display_name: Gyre EnMaaS
+description: EnMaaS OpenAI completions for the pinned GLM 5.3 model
+category: inference
+inference_capable: true
+credentials:
+  - name: api_key
+    description: EnMaaS key from the local pricetag secret-store entry
+    env_vars: [ENMAAS_API_KEY]
+    required: true
+    auth_style: bearer
+    header_name: Authorization
+discovery:
+  credentials: [api_key]
+endpoints:
+  - host: api.enmaas.devshift.net
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+binaries: [/usr/local/bin/omp, /usr/bin/curl, /usr/bin/node]

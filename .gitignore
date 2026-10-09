@@ -56,6 +56,8 @@ snapshots/
 crates/gyre-server/snapshots/
 scripts/node_modules/
 node_modules/
+__pycache__/
+*.py[cod]
 
 # Compiled binaries in scripts/
 scripts/go-callgraph/go-callgraph
@@ -64,3 +66,4 @@ scripts/go-callgraph/go-callgraph
 web/test-results/
 # Local agent goal notes (secrets — never commit)
 OPENSHELL-GOAL.md
+.gyre-pipeline/
