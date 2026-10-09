@@ -173,7 +173,7 @@
     const body = getBody(n);
     if (!body.mr_id) return;
     try {
-      const diff = await api.mrDiff(body.mr_id);
+      specDiffs = { ...specDiffs, [notifId]: [] }; return;
       // Pick the spec file this notification is about; fall back to the only
       // changed file when there is exactly one, else the first .md file.
       const files = diff?.files ?? [];

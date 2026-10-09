@@ -2,7 +2,7 @@
 title: "Specs and Inbox view layouts — spec list, inbox cards, briefing narrative"
 spec_ref: "ui-layout.md §6-§8"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "ui-layout.md §6. Specs View Layout"
   - "ui-layout.md §7. Inbox Layout"
@@ -108,3 +108,11 @@ the Inbox actions consume; `cargo check -p gyre-server` passes.
 `ExplorerCanvas.test.js` ghost-overlay test fail under full-suite load but
 pass standalone; reproduced identically on the merge-base baseline
 (389267a) in an isolated worktree, so they predate this branch.
+
+## Review
+
+### Review changed source code
+
+- web/src/components/Inbox.svelte
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
