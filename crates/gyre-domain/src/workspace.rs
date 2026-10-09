@@ -32,15 +32,27 @@ impl std::fmt::Display for TrustLevel {
 }
 
 impl TrustLevel {
+    /// Strictly parse a caller-supplied trust level string (API input).
+    ///
+    /// Unlike [`from_db_str`], unknown strings are NOT coerced to
+    /// `Supervised` — a typo like `"Autonomus"` must be rejected by the
+    /// caller (400), not silently transition the workspace to Supervised
+    /// and rewrite its trust policies. Mirrors
+    /// `ComputeTargetType::from_db_str`'s Option contract.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "Supervised" => Some(TrustLevel::Supervised),
+            "Guided" => Some(TrustLevel::Guided),
+            "Autonomous" => Some(TrustLevel::Autonomous),
+            "Custom" => Some(TrustLevel::Custom),
+            _ => None,
+        }
+    }
+
     /// Parse a stored trust level string. Unknown/legacy values fall back to
     /// `Supervised` (HSI §2 default — safest level on ambiguity).
     pub fn from_db_str(s: &str) -> Self {
-        match s {
-            "Guided" => TrustLevel::Guided,
-            "Autonomous" => TrustLevel::Autonomous,
-            "Custom" => TrustLevel::Custom,
-            _ => TrustLevel::Supervised,
-        }
+        Self::parse(s).unwrap_or_default()
     }
 }
 
@@ -249,5 +261,24 @@ mod tests {
             TrustLevel::from_db_str("supervised"),
             TrustLevel::Supervised
         );
+    }
+
+    // ── TASK-077 revision: strict parse for caller-supplied API input ──
+
+    #[test]
+    fn parse_accepts_exactly_the_four_spec_levels() {
+        assert_eq!(TrustLevel::parse("Supervised"), Some(TrustLevel::Supervised));
+        assert_eq!(TrustLevel::parse("Guided"), Some(TrustLevel::Guided));
+        assert_eq!(TrustLevel::parse("Autonomous"), Some(TrustLevel::Autonomous));
+        assert_eq!(TrustLevel::parse("Custom"), Some(TrustLevel::Custom));
+    }
+
+    #[test]
+    fn parse_rejects_typos_case_and_empty() {
+        // Typos, wrong case, and empty must NOT coerce to a level — the
+        // API layer 400s on `None` instead of silently transitioning.
+        assert_eq!(TrustLevel::parse("Autonomus"), None);
+        assert_eq!(TrustLevel::parse("autonomous"), None);
+        assert_eq!(TrustLevel::parse(""), None);
     }
 }
