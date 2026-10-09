@@ -1866,7 +1866,12 @@ pub mod tests {
             .unwrap();
 
         // Allow spec reads only for agents with this exact stack hash.
-        // Default deny (priority 1) denies when subject.stack_hash is absent.
+        //
+        // The blanket agent-role Allow (builtin agent-scoped-access, priority
+        // 700) would grant the 200 even when subject.stack_hash is absent —
+        // this test would then be self-confirming. A Deny at 705 (between
+        // the builtin Allow at 700 and this Allow at 720) closes that path:
+        // the ONLY route to 200 is the stack-hash-keyed Allow above it.
         state
             .policies
             .create(&Policy {
@@ -1882,6 +1887,31 @@ pub mod tests {
                     operator: ConditionOp::Equals,
                     value: ConditionValue::String("sha256:stack-abc".to_string()),
                 }],
+                actions: vec!["read".to_string()],
+                resource_types: vec!["spec".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: "system".to_string(),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        // Discriminating Deny at 705: blocks the builtin agent-role Allow at
+        // 700 so a 200 requires the stack-hash condition to match.
+        state
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-stack-hash-deny"),
+                name: "stack-hash-deny".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 705,
+                effect: PolicyEffect::Deny,
+                conditions: vec![],
                 actions: vec!["read".to_string()],
                 resource_types: vec!["spec".to_string()],
                 enabled: true,
@@ -1978,8 +2008,11 @@ pub mod tests {
             .unwrap();
 
         // Allow spec writes only for repo-orchestrator personas with
-        // attestation level >= 3. Both conditions fail closed when the
-        // claims are missing, so the un-attested agent falls through to
+        // attestation level >= 3. The spec's 8 operators have no >=, so the
+        // bound is expressed as GreaterThan 2 (levels are the integers 1-3;
+        // the spec's own gate-approved-persona example expresses the same
+        // bound as a Deny on less_than 3). Both conditions fail closed when
+        // the claims are missing, so the un-attested agent falls through to
         // default-deny (priority 1).
         state
             .policies
@@ -2001,10 +2034,39 @@ pub mod tests {
                     },
                     Condition {
                         attribute: "subject.attestation_level".to_string(),
-                        operator: ConditionOp::GreaterThanOrEqual,
-                        value: ConditionValue::Number(3),
+                        operator: ConditionOp::GreaterThan,
+                        value: ConditionValue::Number(2),
                     },
                 ],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: "system".to_string(),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        // Discriminating Deny at 715: without it the builtin agent-role
+        // Allow (agent-scoped-access, priority 700) grants the weak agent a
+        // 200 even when the persona/attestation conditions fail — the test
+        // would be self-confirming. With the Deny between the builtin Allow
+        // (700) and this test Allow (730), the ONLY path to 200 is the
+        // persona+attestation-keyed Allow above it.
+        state
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-persona-attestation-deny"),
+                name: "persona-attestation-deny".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 715,
+                effect: PolicyEffect::Deny,
+                conditions: vec![],
+                actions: vec!["write".to_string()],
+                resource_types: vec!["spec".to_string()],
                 enabled: true,
                 built_in: false,
                 immutable: false,
@@ -2082,7 +2144,7 @@ pub mod tests {
         // auth context line in the middleware.
         state
             .kv_store
-            .kv_set("agent_tokens", "agent-tenant-1", "raw-uuid-token")
+            .kv_set("agent_tokens", "agent-tenant-1", "raw-uuid-token".to_string())
             .await
             .unwrap();
 

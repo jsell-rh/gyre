@@ -22,7 +22,7 @@ pub struct AttributeContext {
     attrs: HashMap<String, AttrValue>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum AttrValue {
     Single(String),
     List(Vec<String>),

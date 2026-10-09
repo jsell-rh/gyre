@@ -132,7 +132,7 @@ async fn spawn_orchestrator(
             &workspace_id.to_string(),
             repo_id.map(|r| r.to_string()).as_deref(),
             &orchestrator_type.to_string(),
-            orchestrator_persona(orchestrator_type),
+            orchestrator_persona(&orchestrator_type),
         )
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("orchestrator token mint: {e}")))?;
     let _ = state

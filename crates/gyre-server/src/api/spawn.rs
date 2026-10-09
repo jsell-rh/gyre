@@ -461,6 +461,13 @@ pub(crate) async fn spawn_agent_core(
             tracing::error!("JWT pre-mint failed, falling back to UUID token: {e}");
             uuid::Uuid::new_v4().to_string()
         });
+    // Register the token so the spawned agent can authenticate immediately
+    // upon start (auth.rs path 2: agent_tokens lookup; a JWT missing from
+    // this map is treated as revoked — 401 before any handler runs).
+    let _ = state
+        .kv_store
+        .kv_set("agent_tokens", &agent.id.to_string(), token.clone())
+        .await;
 
     // HSI §4: For interrogation agents — create scoped ABAC policies and store
     // the conversation context for the conversation://context MCP resource.
@@ -1072,9 +1079,9 @@ pub(crate) async fn spawn_agent_core(
             .await;
     }
 
-    // Token was pre-minted above and already stored in agent_tokens.
-    // Workload attestation claims are stored in state.workload_attestations
-    // and queryable via GET /api/v1/agents/{id}/workload.
+    // Token was minted and registered in agent_tokens at mint time above;
+    // workload attestation claims live in state.workload_attestations
+    // (queryable via GET /api/v1/agents/{id}/workload), not in the JWT.
 
     // Phase 3 (TASK-008, §7.4): Create workload KeyBinding and DerivedInput
     // from the parent task's attestation chain, then inject into the agent's
