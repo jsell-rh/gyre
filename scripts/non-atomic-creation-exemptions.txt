@@ -14,7 +14,7 @@
 # --- independent-record fan-out (each record stands alone; mid-sequence
 # failure leaves complete-but-partial seed/apply output, no parent-child
 # invariant violated) ---
-crates/gyre-server/src/api/admin.rs:401        # admin_seed: dev bootstrap; tenants/workspaces/repos/agents/tasks/MRs are independent seed records
+crates/gyre-server/src/api/admin.rs:409        # admin_seed: dev bootstrap; tenants/workspaces/repos/agents/tasks/MRs are independent seed records (re-anchored 401→409: task-210 a781ede2 inserted lines above)
 crates/gyre-server/src/api/compose.rs:52       # compose_apply: fan-out creates independent tasks + agents per compose item
 crates/gyre-server/src/snapshot.rs:132         # restore_snapshot: bulk re-creation of an already-consistent snapshot bundle
 

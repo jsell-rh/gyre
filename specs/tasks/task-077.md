@@ -2,7 +2,7 @@
 title: "HSI Trust Gradient — Trust Levels, Enforcement & Mechanical Implementation"
 spec_ref: "human-system-interface.md §9–13"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 review: specs/reviews/task-077.md
 coverage_sections:
   - "human-system-interface.md §9 2. Trust Gradient"
@@ -82,6 +82,99 @@ Trust is a **workspace-level setting** (`trust_level: TrustLevel` enum: `Supervi
 - [ ] Unit tests for trust policy generation and transition logic
 - [ ] Integration test: change trust level → verify policies created/deleted
 - [ ] `cargo test --all` passes, `cargo fmt --all` clean
+
+
+## Shipped
+
+HSI §2 Trust Gradient is enforced end-to-end at head `d780c343` (recovered
+checkpoint source; this round verified it whole, re-anchored one stale
+exemption line, and recorded listener-sandbox restrictions — no product-code
+changes were needed beyond what the checkpoint already carried).
+
+**Behavior shipped (per acceptance criterion):**
+
+- `TrustLevel` enum (Supervised/Guided/Autonomous/Custom) in `gyre-domain`,
+  `trust_level` on `Workspace` defaulting to Supervised; migration
+  `2026-09-29-000050` fixes the DB default to `Supervised` (000024 had
+  `Guided`, contradicting HSI §2); migration `2026-03-26-000028` adds
+  `immutable` to policies (schema + SQLite + PG adapters round-trip it).
+- `trust_policies_for_level` generates the preset sets: Supervised → one
+  `trust:require-human-mr-review` Deny (priority 150, merge/mr, subject.type
+  == "system", workspace-scoped); Guided/Autonomous/Custom → empty (Guided's
+  delta is the removal; spec approval stays with the builtin).
+- Trust transitions are atomic: `apply_trust_transition` (port method,
+  implemented transactionally in SQLite and PG via one `conn.transaction`
+  upserting the workspace row + deleting `trust:` policies for the scope +
+  inserting the new set; mem adapter mirrors with a fail hook) is used by
+  both `create_workspace` (seeds initial preset atomically) and
+  `update_workspace` (single call — no double write; 409 with the verbatim
+  HSI §2 message on failure). Preset → Custom preserves `trust:` policies;
+  Custom → preset deletes and reseeds them; user-created and `builtin:`
+  policies survive transitions.
+- ABAC engine (`policy_engine::evaluate`) evaluates immutable Deny policies
+  FIRST, before priority-based evaluation; they cannot be overridden by any
+  Allow regardless of priority. `builtin:require-human-spec-approval`
+  (priority 999, immutable, Deny approve/spec for non-user subjects) is
+  seeded fail-closed at startup (`seed_builtin_policies`, main.rs:50).
+- Policy CRUD rejects `trust:`/`builtin:` name prefixes with 400 on create
+  and on caller-side rename (api/policies.rs:81-88, 165-171).
+- **Merge-time enforcement (review F5, the central deliverable):** the merge
+  processor evaluates real ABAC as an internal service (subject.type
+  "system", subject.id "merge-processor" — not the ABAC-bypassing
+  GYRE_AUTH_TOKEN identity; hierarchy-enforcement.md §4 records the amended
+  bypass rule) with action `merge` on resource `mr`, on both the
+  single-entry path and the atomic-group path. On an explicit Deny match the
+  merge is held and requeued (not failed) until a human approves; agents are
+  forbidden from setting MR status `approved` (transition_mr_status 403), so
+  the processor cannot self-satisfy the escape. Guided/Autonomous
+  workspaces merge without human approval (no trust Deny exists — engine
+  default-deny is not treated as a hold).
+- Fail-closed creation (review F6): interrogation-agent policy seeding
+  propagates errors and rolls back the agent record + token on failure;
+  builtin seeding refuses to serve on partial seeding.
+- `trust_level` is in every Workspace API response; the UI ships a trust
+  radio group in Workspace Settings (PUT on save). docs/api-reference.md
+  documents trust_level, the 409, and the reserved prefixes.
+
+**Test evidence (in-process, this sandbox; commands + exit codes in
+`/tmp/stage/review-evidence/task-077-revision-evidence.md`):**
+
+- `cargo test -p gyre-server --lib api::workspaces` — 14 passed (includes
+  create-time seeding, 409-on-failed-transition with rollback assertions,
+  both Custom transition directions).
+- `cargo test -p gyre-server --lib merge_processor` — 55 passed (Supervised
+  open MR held + requeued with reason, human-approved MR merges, Guided MR
+  merges).
+- `cargo test -p gyre-server --lib policy_engine` — 19 passed
+  (immutable-Deny-first, priority order, builtin integration).
+- `cargo test -p gyre-server --lib api::policies` — 12 passed
+  (trust:/builtin: prefix rejection → 400).
+- `cargo test -p gyre-server --lib api::spawn` — 30 passed (F6 fail-closed).
+- `cargo test -p gyre-server --lib abac_middleware` — 10 passed (seeded
+  builtin set).
+- `cargo test -p gyre-domain --lib` — 369 passed (field-level generator
+  assertions, from_db_str fallback).
+- Lints: check-inert-enforcement OK, check-warn-continue-creation OK,
+  check-non-atomic-creation OK (after re-anchor, below),
+  check-migration-sql-portability OK.
+- All 36 changed .rs files pass `rustfmt --check`; full `cargo fmt`/`cargo
+  test --all` runs are blocked/hung in this sandbox by the target-dir lock
+  and by two listener-dependent tests failing on the documented no-TCP-accept
+  restriction (Errno 95) — recorded in
+  `/tmp/stage/review-evidence/sandbox-transport-restriction.md`; those gates
+  are owned by verification/publication (exact-head CI).
+
+**This round's repair:** re-anchored the pre-existing `admin_seed` exemption
+in `scripts/non-atomic-creation-exemptions.txt` from admin.rs:401 → :409
+(task-210 a781ede2 inserted 8 lines above the function after the baseline
+was pinned; same site, same classification, entry count unchanged —
+precedent db7a0073). No new exemptions; no verifier weakening; web/dist
+rebuild from the build probe was reverted (task branches don't ship dist).
+
+Remaining for downstream tasks (explicitly out of scope here per the task
+list): HSI §2a Policies↔Trust UI integration (task-084), trust suggestions
+job (task-085), notification-volume behavior per level (§2 table rows beyond
+MR merge/spec approval are owned by their sections' tasks).
 
 ## Agent Instructions
 
