@@ -2,77 +2,14 @@
 title: "Enhance User entity with profile fields and preferences"
 spec_ref: "user-management.md §User Entity"
 depends_on: []
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "user-management.md §User Entity"
   - "user-management.md §Username vs Display Name"
   - "user-management.md §User Preferences"
-commits: ["0dfba43fb64499f158b96276a982c51d3f6ce71b", "0e15d87d862a91bbd9585300cdb844cc7b5c7f11", "bbeadf6a3f06728801a0f98cf62da56971bf33d0", "04fde7df77b884b20e4108dff917a5324174f034", "0170f283e0289a10468b4683efa64f7b266ad83b", "e9a63c7d50520dcedbeb832dab9e213c74e91340"]
+commits: ["e9a63c7d50520dcedbeb832dab9e213c74e91340", "0170f283e0289a10468b4683efa64f7b266ad83b", "04fde7df77b884b20e4108dff917a5324174f034", "bbeadf6a3f06728801a0f98cf62da56971bf33d0", "0e15d87d862a91bbd9585300cdb844cc7b5c7f11", "0dfba43fb64499f158b96276a982c51d3f6ce71b"]
 review: specs/reviews/task-120.md
 ---
-
-## Shipped
-
-- `User` entity carries every spec profile field (username, display_name, avatar_url, timezone, locale, preferences, last_login_at, updated_at) with `UserPreferences` (Theme/UiDensity/DiffView/FeedScope) stored server-side as JSON; migration 000056 adds the columns, backfills defaults (UTC/en-US), and sanitizes legacy rows to unique URL-safe handles via 38 depth-1 portable-SQL UPDATEs (no parser overflow on SQLite).
-- Username contract enforced across the chain: unique (index + create checks), URL-safe (`validate_username`/`sanitize_username`), immutable after creation (adapter guards in sqlite/postgres/mem; SCIM update ignores rename attempts; SCIM create sanitizes with external-id fallback and 400/409 on unusable/duplicate handles). First login derives the handle from SSO `preferred_username` (sub fallback) and stamps `last_login_at`.
-- `PUT /api/v1/users/me` implements genuine partial-update semantics (`UserPreferencesPatch` merge — omitted fields keep stored values), returned via `GET /users/me`; malformed preferences → 400 with nothing applied.
-- Port `find_by_username` implemented in sqlite/postgres/mem with parity contract guards; `gyre-adapters --lib` 349/0, `api::scim` 9/0, `api::users` 14/0, `auth::` 39/0 on this tree.
-
-## Revision Round 1 (2026-10-09)
-
-All three review findings repaired:
-
-- **F1 (critical, migration parser overflow):** the 39-deep nested
-  `REPLACE(...)` predicate in `000056/up.sql` is replaced by 38 sequential
-  depth-1 `UPDATE` statements over a `tmp_username_scratch` column (dropped
-  after); the sanitize predicate reads the scratch remainder. Portable SQL
-  on both backends (no GLOB/regexp/JSON1). Regression test
-  `migration_000056_backfills_unique_url_safe_usernames` builds a
-  pre-000056 DB and applies 000056 alone, asserting sanitize/dedup/pass-2
-  collision semantics.
-- **F2 (SCIM cutover):** `scim_create_user` derives the handle via
-  `User::sanitize_username` with external-id fallback and 400 when neither
-  yields a usable handle; duplicate → precise 409. `scim_update_user`
-  leaves `username`/`external_id` untouched (immutable after creation) and
-  replaces only `displayName`/`emails`. Four focused SCIM tests.
-- **F3 (dedup suffix collision):** pass-2 dedup renames any row still
-  sharing a handle to `<handle>-<row id>` so `CREATE UNIQUE INDEX` cannot
-  fail; covered by the `jsell`/`jsell-2` pre-existing-handle case in the
-  migration test.
-
-Focused verification on this tree (2026-10-09): `gyre-adapters --lib` →
-**349 passed, 0 failed** (pre-repair: 84/264 — every SqliteStorage test
-died at migration time); `gyre-server --lib api::scim` → 9 passed
-(incl. `scim_update_user`, previously 500); `api::users` → 14 passed;
-`auth::` → 39 passed; `gyre-domain --lib user` → 11 passed. Mechanical
-gates OK: migration versions, SQL portability, mem-port contracts, arch,
-ABAC route registry, commit attribution, fabricated/scope-literal
-defaults, inert enforcement, lossy secret conversion, forged scope
-fields, unbounded external HTTP.
-
-Test-harness note: the migration regression test initially failed with
-`no such table: __diesel_schema_migrations` — raw
-`MigrationHarness::run_migrations` (unlike `run_pending_migrations`) does
-not set up the bookkeeping table; fixed by calling `conn.setup()` first.
-
-## Revision Round 2 (2026-10-09) — integration-rejection repair
-
-The rejected integration's only preserved item was `specs/coverage/SUMMARY.md`
-(review-changed source: the reviewer cannot approve its own or verifier
-edits). Verified the committed summary was already a byte-faithful mechanical
-regeneration (`bash scripts/update-coverage-summary.sh` reproduces it
-exactly), and its business-continuity/HSI number changes were accumulated
-sync drift from accepted audit commits on the matrices — correct numbers,
-verifier-owned provenance. Repaired by making the coverage bookkeeping
-implementation-owned per repo convention (task-151 `1e8141f`, task-207
-`ff3fbb8`): user-management.md rows 2 (User Entity), 3 (Username vs
-Display Name), and 11 (User Preferences) flipped task-assigned → implemented
-with evidence notes citing the code paths, header counts updated
-(26/3 → 23/3), SUMMARY regenerated via the script. No product code changes
-this round — the F1/F2/F3 repairs from Round 1 are already on this tree and
-re-verified (focused probes: `migration_000056_backfills_unique_url_safe_usernames`
-ok; `gyre-domain --lib user` 11/11; scim/users/auth suites previously green
-on this tree).
 
 ## Spec Excerpt
 
@@ -163,10 +100,59 @@ Preferences stored server-side (not localStorage). Persist across devices and se
 
 Read `specs/system/user-management.md` §User Entity through §User Preferences for full requirements. Existing User model: `gyre-domain/src/user.rs`. User port: `gyre-ports/src/user.rs` (or grep for `UserRepository`). SQLite adapter: grep for `impl UserRepository` in `gyre-adapters/`. Auth flow: `gyre-server/src/auth.rs`. User API: `gyre-server/src/api/users.rs`. Profile adapter: `gyre-adapters/src/sqlite/user_profile.rs`. Check migration numbering: `ls crates/gyre-adapters/migrations/ | tail -5` — currently at 000049.
 
-## Review
+## Shipped
 
-### Review changed source code
+This is a resume of retained source `c0dd943c` (attempt-12 branch): the full
+task-120 implementation — all six product commits, the Round-1 F1/F2/F3 repairs,
+and the Round-2 integration-rejection bookkeeping repair — is preserved on this
+tree byte-identically (merge `be1223b9` with the newer base `4b9d61c4` touched
+no task-120 product surface; verified by empty `git diff c0dd943 HEAD --
+crates/gyre-domain/src/user.rs crates/gyre-adapters/ ...` over all six commit
+paths). This round's work: re-verification on the merged tree plus truthful
+progress/bookkeeping restoration for fresh independent review.
 
-- specs/coverage/SUMMARY.md
+- `User` entity (`gyre-domain/src/user.rs`) carries every spec profile field
+  (username, display_name, avatar_url, timezone, locale, preferences,
+  last_login_at, updated_at) with `UserPreferences` (Theme/UiDensity/DiffView/
+  FeedScope) stored server-side as JSON; migration 000056 adds the columns,
+  backfills defaults (UTC/en-US), and sanitizes legacy rows to unique URL-safe
+  handles via 38 depth-1 portable-SQL UPDATEs (no parser overflow on SQLite).
+- Username contract enforced across the chain: unique (index + create checks),
+  URL-safe (`validate_username`/`sanitize_username`), immutable after creation
+  (adapter guards in sqlite/postgres/mem; SCIM update ignores rename attempts;
+  SCIM create sanitizes with external-id fallback and 400/409 on unusable/
+  duplicate handles). First login derives the handle from SSO
+  `preferred_username` (sub fallback) and stamps `last_login_at`.
+- `PUT /api/v1/users/me` implements genuine partial-update semantics
+  (`UserPreferencesPatch` merge — omitted fields keep stored values), returned
+  via `GET /users/me`; malformed preferences → 400 with nothing applied.
+- Port `find_by_username` implemented in sqlite/postgres/mem with parity
+  contract guards.
 
-Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
+### Resume verification (2026-10-09, merged tree `be1223b9`)
+
+Product surface identity: `git diff c0dd943..be1223b9 -- crates/gyre-domain/src/user.rs
+crates/gyre-adapters/src/sqlite/ crates/gyre-adapters/src/postgres/user.rs
+crates/gyre-adapters/migrations/2026-10-08-000056_user_entity_profile_fields/
+crates/gyre-server/src/api/users.rs crates/gyre-server/src/api/scim.rs
+crates/gyre-server/src/auth.rs` → empty (byte-identical). Focused probes
+re-run on the merged tree, evidence persisted under
+`/tmp/stage/review-evidence/task-120-resume/`:
+
+- `cargo test -p gyre-adapters --lib` → 349 passed, 0 failed (includes the
+  SQLite-boot path the F1 parser overflow broke and
+  `migration_000056_backfills_unique_url_safe_usernames`).
+- `cargo test -p gyre-server --lib api::scim` → 9 passed; `api::users` → 14
+  passed; `auth::` → 39 passed (username derivation, last_login_at stamping,
+  SCIM cutover, partial-update preferences).
+- `cargo test -p gyre-domain --lib user` → 11 passed.
+- Mechanical gates re-run on the merged tree: migration versions, SQL
+  portability, mem-port contracts, arch, ABAC route registry, commit
+  attribution (with the six product commits restored in frontmatter), scope
+  guards — all OK.
+
+Transport note (recorded per assignment): this sandbox's listener probe
+(`accept`) is not supported (errno 95) — server-boot smoke over HTTP cannot run
+here; the SQLite migration-boot path is instead proven by every
+`SqliteStorage::new`-constructing adapter test (349/349). Host-side checks:
+`cargo test --all` + GitHub CI on this exact head.
