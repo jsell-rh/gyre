@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Budget Tracking"
-commits: ["a0ddfba4dd9b284c93c102a2ca156ceb309f611b", "b82196260bc3c52ed363f4bd6d3e5d797fb6ec8a", "9b046efe4eb7038b7fb5e7b9e064c78e2453a73d", "d38e94d46481bd57ebe7787d0ee56097544e2cde", "21986645c231814dffef3c9e5c6670e47bf8a690"]
+commits: ["d503a16b89eda489564bc8acaba60fa36ecbf898", "e7d205fcb42195ffa220d7daec798c75109d7245", "251a9738a3da10c92e61e4b5fc70cb0a6a70a22e", "eae13c6d8a29b9718784b6c3185702fae14f2be0", "8f97ffb76b67b6904315c42acbec254a86efe5f9"]
 ---
 
 ## Spec Excerpt
