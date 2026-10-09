@@ -899,7 +899,6 @@
     "send": "Send",
     "llm_requires_repo": "LLM editing requires repo context.",
     "llm_hint": "Ctrl+Enter \u00B7 Produces draft suggestions \u2014 accept to apply",
-    "architecture_preview": "Architecture Preview",
     "loading_graph": "Loading graph\u2026",
     "predicted_changes": "{count} predicted changes",
     "llm_assist_failed": "LLM assist failed: {error}",
