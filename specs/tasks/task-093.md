@@ -2,7 +2,7 @@
 title: "Platform Model Orchestrator Lifecycle Protocol"
 spec_ref: "platform-model.md §3 Two-Level Orchestration"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 coverage_sections:
   - "platform-model.md §3 Two-Level Orchestration"
   - "platform-model.md §3 Workspace Orchestrator"
@@ -87,6 +87,10 @@ One per repo. Manages the Ralph loop for its repo. Uses the `repo-orchestrator` 
 - Auto-restart and escalation on every terminal path (stale-detector abort, fail, stop) via shared `handle_orchestrator_death`: budget-symmetric replacement that inherits the full lifecycle config (`disconnected_behavior`, `restart_on_failure`) and repo-tier deaths escalate to the live workspace orchestrator with an informational payload naming the replacement.
 - MCP tool suite with tier gates: `gyre_spawn_repo_orchestrator`/`gyre_list_repo_orchestrators`/`gyre_cross_repo_task` (workspace tier) and `gyre_decompose_spec`/`gyre_spawn_worker` (repo tier), all delegating to shared `_core` fns; `gyre_message_send` restored to the write-role gate.
 - Verified by 16 orchestrator + 9 message-send handler tests (cross-tenant Forbidden paths, budget exhaustion, second-death restart chain, escalation payload) plus the ABAC registry, MCP write-tool, and exempt-handler mechanical checks.
+
+## Integration Repair (attempt 35e4850835de47f4)
+
+
 
 ## Agent Instructions
 
