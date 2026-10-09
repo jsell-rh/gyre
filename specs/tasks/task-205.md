@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "realized-model.md §4. Concept Views"
-commits: ["fcd83271fbb7b8dacaadf7709e4e67a892c26a1d"]
+commits: ["4052081908cf27a9d7abec9923fe24ee850f1a88", "fcd83271fbb7b8dacaadf7709e4e67a892c26a1d"]
 review: specs/reviews/task-205.md
 ---
 
