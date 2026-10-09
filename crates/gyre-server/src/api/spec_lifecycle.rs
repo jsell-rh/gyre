@@ -1,7 +1,7 @@
 //! Per-repo spec lifecycle configuration.
 //!
-//! GET  /api/v1/repos/:id/spec-lifecycle  — get current config
-//! PUT  /api/v1/repos/:id/spec-lifecycle  — set config (Admin/Developer)
+//! GET  /api/v1/repos/:id/settings/spec-lifecycle  — get current config
+//! PUT  /api/v1/repos/:id/settings/spec-lifecycle  — set config (Admin/Developer)
 
 use axum::{
     extract::{Path, State},
@@ -17,7 +17,7 @@ use super::error::ApiError;
 
 pub use gyre_domain::SpecLifecycleConfig;
 
-/// GET /api/v1/repos/:id/spec-lifecycle — get the repo's spec lifecycle config.
+/// GET /api/v1/repos/:id/settings/spec-lifecycle — get the repo's spec lifecycle config.
 ///
 /// Returns defaults when none has been configured.
 pub async fn get_spec_lifecycle(
@@ -38,7 +38,7 @@ pub async fn get_spec_lifecycle(
     Ok(Json(config))
 }
 
-/// PUT /api/v1/repos/:id/spec-lifecycle — set the repo's spec lifecycle config.
+/// PUT /api/v1/repos/:id/settings/spec-lifecycle — set the repo's spec lifecycle config.
 ///
 /// Admin and Developer roles only: the config controls which spec paths
 /// trigger automatic task creation and approval invalidation on push.
@@ -133,7 +133,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn get_returns_spec_defaults_for_unconfigured_repo() {
         let (app, _state) = app_with_repo();
-        let resp = get(&app, "/api/v1/repos/repo-1/spec-lifecycle").await;
+        let resp = get(&app, "/api/v1/repos/repo-1/settings/spec-lifecycle").await;
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert!(json["enabled"].as_bool().unwrap());
@@ -162,13 +162,13 @@ mod tests {
             "default_priority_modified": "Low",
             "default_priority_deleted": "Medium",
         });
-        let resp = put(&app, "/api/v1/repos/repo-1/spec-lifecycle", body).await;
+        let resp = put(&app, "/api/v1/repos/repo-1/settings/spec-lifecycle", body).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert!(!json["enabled"].as_bool().unwrap());
 
         // GET reflects persisted value through the same port the push hook uses.
-        let resp = get(&app, "/api/v1/repos/repo-1/spec-lifecycle").await;
+        let resp = get(&app, "/api/v1/repos/repo-1/settings/spec-lifecycle").await;
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert!(!json["enabled"].as_bool().unwrap());
@@ -197,7 +197,7 @@ mod tests {
         // zero-values: serde defaults keep the spec baseline.
         let (app, _state) = app_with_repo();
         let body = serde_json::json!({"enabled": true});
-        let resp = put(&app, "/api/v1/repos/repo-1/spec-lifecycle", body).await;
+        let resp = put(&app, "/api/v1/repos/repo-1/settings/spec-lifecycle", body).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(
@@ -217,7 +217,7 @@ mod tests {
         let (app, _state) = app_with_repo();
         let resp = put(
             &app,
-            "/api/v1/repos/no-such/spec-lifecycle",
+            "/api/v1/repos/no-such/settings/spec-lifecycle",
             serde_json::json!({"enabled": true}),
         )
         .await;
@@ -263,7 +263,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::PUT)
-                    .uri("/api/v1/repos/repo-jwt/spec-lifecycle")
+                    .uri("/api/v1/repos/repo-jwt/settings/spec-lifecycle")
                     .header("authorization", format!("Bearer {agent_token}"))
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))

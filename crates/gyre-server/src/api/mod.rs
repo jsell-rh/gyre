@@ -187,7 +187,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
         )
         // Spec lifecycle configuration (spec-lifecycle.md §Configuration)
         .route(
-            "/api/v1/repos/:id/spec-lifecycle",
+            "/api/v1/repos/:id/settings/spec-lifecycle",
             get(spec_lifecycle::get_spec_lifecycle).put(spec_lifecycle::set_spec_lifecycle),
         )
         // ABAC policies (G6)

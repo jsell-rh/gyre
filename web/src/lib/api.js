@@ -154,9 +154,9 @@ export const api = {
   setRepoSpecPolicy: (id, policy) =>
     request(`/repos/${id}/spec-policy`, { method: 'PUT', body: JSON.stringify(policy) }),
   // Spec lifecycle config (spec-lifecycle.md §Configuration)
-  repoSpecLifecycle: (id) => request(`/repos/${id}/spec-lifecycle`),
+  repoSpecLifecycle: (id) => request(`/repos/${id}/settings/spec-lifecycle`),
   setRepoSpecLifecycle: (id, config) =>
-    request(`/repos/${id}/spec-lifecycle`, { method: 'PUT', body: JSON.stringify(config) }),
+    request(`/repos/${id}/settings/spec-lifecycle`, { method: 'PUT', body: JSON.stringify(config) }),
   // Hot files & blame
   repoHotFiles: (id, limit = 20) => request(`/repos/${id}/hot-files?limit=${limit}`),
   repoBlame: (id, path) => request(`/repos/${id}/blame?path=${encodeURIComponent(path)}`),
