@@ -981,10 +981,10 @@
     "system_title": "System Explorer",
     "architecture_title": "Architecture",
     "system_subtitle": "Realized architecture — navigate the living knowledge graph",
+    "arch_subtabs_label": "Architecture sub-tabs",
     "sub_tabs": {
       "architecture": "Architecture",
       "graph": "Graph",
-      "arch_subtabs_label": "Architecture sub-tabs",
       "briefing": "Briefing",
       "code": "Code"
     },
