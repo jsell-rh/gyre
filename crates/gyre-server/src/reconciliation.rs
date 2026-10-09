@@ -21,7 +21,7 @@
 //! cheap"). Agent spawning from reconciliation tasks happens through the
 //! normal signal chain (`task_type: delegation` → repo orchestrator).
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use gyre_common::{Id, Notification, NotificationType};
@@ -257,8 +257,8 @@ pub fn diff_meta_spec_set(
 ) -> Vec<String> {
     use crate::api::meta_specs::MetaSpecSet;
 
-    fn entries(set: &MetaSpecSet) -> HashMap<String, String> {
-        let mut m: HashMap<String, String> = set
+    fn entries(set: &MetaSpecSet) -> BTreeMap<String, String> {
+        let mut m: BTreeMap<String, String> = set
             .personas
             .iter()
             .map(|(_k, e)| (e.path.clone(), e.sha.clone()))
@@ -659,12 +659,16 @@ mod tests {
     }
 
     fn make_set(ws_id: &str, entries: Vec<MetaSpecPinnedEntry>) -> crate::api::meta_specs::MetaSpecSet {
+        // Distinct persona keys per entry: a single reused key would make the
+        // map collapse to the last entry, silently dropping the others (the
+        // set-diff test would then pass by disappearance, not comparison).
+        let mut personas = std::collections::BTreeMap::new();
+        for (i, e) in entries.into_iter().enumerate() {
+            personas.insert(format!("role-{i}"), e);
+        }
         crate::api::meta_specs::MetaSpecSet {
             workspace_id: ws_id.to_string(),
-            personas: entries
-                .into_iter()
-                .map(|e| ("backend".to_string(), e))
-                .collect(),
+            personas,
             principles: vec![],
             standards: vec![],
             process: vec![],
@@ -1051,6 +1055,145 @@ mod tests {
             1,
             "identical re-PUT must not create a second task"
         );
+    }
+
+    // -- §10/§9: identical set re-PUT must not flip the set SHA -----------
+
+    /// `compute_meta_spec_set_sha` hashes the stored JSON bytes. The sweep
+    /// (§10) compares that hash against provenance records, and the §9 merge
+    /// gate compares `agent.meta_spec_set_sha == input.meta_spec_set_sha`.
+    /// If serializing the same set twice produced different bytes (e.g. a
+    /// HashMap's per-instance key order), an identical re-PUT would rewrite
+    /// the stored JSON under a new SHA and false-drift every provenance
+    /// record. This test pins the canonical-serialization invariant.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn identical_reput_keeps_set_sha_stable() {
+        use axum::{body::Body, Router};
+        use http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let state = test_state();
+        let app: Router = crate::api::api_router().with_state(state.clone());
+
+        // Create a workspace via the API.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"name": "ws-sha", "slug": "ws-sha"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let ws_json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+        let ws_id = Id::new(&ws_id);
+
+        // Multiple personas: HashMap ordering is per-instance random, so a
+        // multi-entry set is what exposes nondeterministic serialization.
+        let put_body = serde_json::json!({
+            "personas": {
+                "backend":  {"path": "backend-developer", "sha": "a1"},
+                "frontend": {"path": "frontend-developer", "sha": "b2"},
+                "sre":      {"path": "sre-operator", "sha": "c3"}
+            },
+            "principles": [], "standards": [], "process": []
+        });
+        let put = |app: Router| {
+            let body = put_body.to_string();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/api/v1/workspaces/{}/meta-spec-set", ws_id.as_str()))
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        let r1 = put(app.clone()).await;
+        assert_eq!(r1.status(), StatusCode::OK);
+        let sha1 = crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws_id).await;
+        assert!(!sha1.is_empty());
+
+        // Identical re-PUT: same entries (deliberately supplied in the same
+        // JSON object order; key order in the REQUEST must not matter
+        // either, since deserialization into BTreeMap canonicalizes).
+        let r2 = put(app.clone()).await;
+        assert_eq!(r2.status(), StatusCode::OK);
+        let sha2 = crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws_id).await;
+        assert_eq!(sha1, sha2, "identical re-PUT must not change the set SHA");
+
+        // Re-PUT with the SAME entries in a DIFFERENT request key order:
+        // still identical after deserialization → same SHA.
+        let reordered = serde_json::json!({
+            "personas": {
+                "sre":      {"path": "sre-operator", "sha": "c3"},
+                "backend":  {"path": "backend-developer", "sha": "a1"},
+                "frontend": {"path": "frontend-developer", "sha": "b2"}
+            },
+            "principles": [], "standards": [], "process": []
+        });
+        let r3 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{}/meta-spec-set", ws_id.as_str()))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(reordered.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r3.status(), StatusCode::OK);
+        let sha3 = crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws_id).await;
+        assert_eq!(
+            sha1, sha3,
+            "request key order must not leak into the stored set SHA"
+        );
+
+        // A genuinely different set (one pinned SHA changed) must change
+        // the SHA — the invariant must not be trivially "SHA never moves".
+        let changed = serde_json::json!({
+            "personas": {
+                "backend":  {"path": "backend-developer", "sha": "a9"},
+                "frontend": {"path": "frontend-developer", "sha": "b2"},
+                "sre":      {"path": "sre-operator", "sha": "c3"}
+            },
+            "principles": [], "standards": [], "process": []
+        });
+        let r4 = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{}/meta-spec-set", ws_id.as_str()))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(changed.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r4.status(), StatusCode::OK);
+        let sha4 = crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws_id).await;
+        assert_ne!(sha1, sha4, "a changed pin must change the set SHA");
     }
 
     // -- §6 step 2: task per repo, scoped per workspace ----------------------

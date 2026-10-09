@@ -13,7 +13,7 @@ use axum::{
 };
 use gyre_common::Id;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::{auth::AuthenticatedAgent, AppState};
@@ -33,12 +33,20 @@ pub struct MetaSpecPinnedEntry {
 }
 
 /// The bound collection of meta-specs active in a workspace.
+///
+/// `personas` is a `BTreeMap` (not a `HashMap`) so that serialization is
+/// canonical: the same set of pinned entries always serializes to
+/// byte-identical JSON. `compute_meta_spec_set_sha` hashes the stored JSON,
+/// and the conformance sweep (meta-spec-reconciliation.md §10) plus the §9
+/// constraint `agent.meta_spec_set_sha == input.meta_spec_set_sha` compare
+/// those hashes — a HashMap's per-instance iteration order would flip the
+/// SHA on every re-PUT of an identical set, false-drifting all provenance.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct MetaSpecSet {
     pub workspace_id: String,
     /// Named persona bindings: role -> pinned entry (e.g. "backend" -> path@sha).
     #[serde(default)]
-    pub personas: HashMap<String, MetaSpecPinnedEntry>,
+    pub personas: BTreeMap<String, MetaSpecPinnedEntry>,
     /// Ordered principle specs.
     #[serde(default)]
     pub principles: Vec<MetaSpecPinnedEntry>,
@@ -54,7 +62,7 @@ pub struct MetaSpecSet {
 #[derive(Deserialize)]
 pub struct UpdateMetaSpecSetRequest {
     #[serde(default)]
-    pub personas: HashMap<String, MetaSpecPinnedEntry>,
+    pub personas: BTreeMap<String, MetaSpecPinnedEntry>,
     #[serde(default)]
     pub principles: Vec<MetaSpecPinnedEntry>,
     #[serde(default)]
