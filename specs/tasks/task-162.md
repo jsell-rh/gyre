@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "message-bus.md §Relationship to Notifications"
   - "message-bus.md §Implementation Notes"
-commits: ["a6d68c96f6230b12ccbf4f3cd5a9a04b057eeaab", "5b6916364df8addff588d18ea073ce0aa614ef20", "a839ca651885fa196728a70c154859fb8674ae02", "fdf7087735fda2bdf886cd644ce473e054acd64f"]
+commits: ["6c96b6a354fe0560690108f8fb21ace8c4265a58", "4e0e851a640ca11434e12c307174cb3c4c7ad22b", "8ff81618b342f583faa695b5138def122694f64d", "df0cdafe61cf1f3083dbe8638fa94d77ef1baefb"]
 ---
 
 ## Spec Excerpt
