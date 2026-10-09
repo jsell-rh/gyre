@@ -1037,4 +1037,47 @@ mod tests {
             "identical re-PUT must not create a second task"
         );
     }
+
+    // PROBE (review): two workspaces binding the same meta-spec — does the
+    // second workspace get a task, or is it suppressed by the first's task?
+    #[tokio::test(flavor = "multi_thread")]
+    async fn probe_two_workspaces_same_spec() {
+        let state = test_state();
+        let ws1 = make_workspace(&state, "ws-probe-a").await;
+        let _repo1 = make_repo(&state, "repo-pa", "ws-probe-a").await;
+        let ws2 = make_workspace(&state, "ws-probe-b").await;
+        let _repo2 = make_repo(&state, "repo-pb", "ws-probe-b").await;
+        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+
+        let s1 = run_reconciliation(&state, &ws1.id, &[ms.name.clone()]).await;
+        assert_eq!(s1.tasks_created, 1);
+        let s2 = run_reconciliation(&state, &ws2.id, &[ms.name.clone()]).await;
+        println!("probe: ws1 created={} skipped={}", s1.tasks_created, s1.tasks_skipped);
+        println!("probe: ws2 created={} skipped={}", s2.tasks_created, s2.tasks_skipped);
+        let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
+        println!("probe: total recon tasks={}", tasks.len());
+        for t in &tasks {
+            println!("probe: task ws={} repo={} title={}", t.workspace_id.as_str(), t.repo_id.as_str(), t.title);
+        }
+        assert_eq!(s2.tasks_created, 1, "second workspace must get its own reconciliation task");
+    }
+
+    // PROBE (review): workspace with 3 repos — one task or one per repo?
+    #[tokio::test(flavor = "multi_thread")]
+    async fn probe_multi_repo_granularity() {
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-probe-multi").await;
+        let _r1 = make_repo(&state, "repo-m1", "ws-probe-multi").await;
+        let _r2 = make_repo(&state, "repo-m2", "ws-probe-multi").await;
+        let _r3 = make_repo(&state, "repo-m3", "ws-probe-multi").await;
+        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+
+        let s = run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
+        let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
+        println!("probe-multi: created={} tasks={}", s.tasks_created, tasks.len());
+        for t in &tasks {
+            println!("probe-multi: repo={} title={}", t.repo_id.as_str(), t.title);
+        }
+        assert_eq!(s.tasks_created, 3, "spec §6: task per affected repo");
+    }
 }

@@ -2,7 +2,7 @@
 title: "Implement reconciliation controller and conformance sweep background job"
 spec_ref: "meta-spec-reconciliation.md §6, §10"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "meta-spec-reconciliation.md §6 Reconciliation: The Slow Rollout"
   - "meta-spec-reconciliation.md §10 Conformance Sweeps (Steady State)"
@@ -74,3 +74,11 @@ From §10 — Conformance Sweeps:
 - Read `crates/gyre-common/src/notification.rs` for MetaSpecDrift notification type
 - Read `crates/gyre-common/src/message.rs` for ReconciliationCompleted MessageKind
 - The task creation pattern is in `crates/gyre-server/src/git_http.rs` (spec lifecycle task creation) — follow the same deduplication pattern
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/reconciliation.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
