@@ -2,10 +2,11 @@
 title: "Manifest-driven Concept Views for the knowledge graph"
 spec_ref: "realized-model.md §4 Concept Views"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "realized-model.md §4. Concept Views"
-commits: []
+commits: ["fcd83271fbb7b8dacaadf7709e4e67a892c26a1d"]
+review: specs/reviews/task-205.md
 ---
 
 ## Spec Excerpt
@@ -169,3 +170,31 @@ Real work only — no substring stand-in for the manifest projection.
   and the tests you add/touch. Conventional commits; author unchanged.
 - When done, set this task's `progress: complete`, record commit SHAs, and the
   reviewer will re-audit the coverage row.
+
+## Shipped
+
+- `specs/manifest.yaml` `concepts:` blocks parse into domain `ConceptView`s
+  (five include-rule vectors, repeated-key aggregation) via
+  `SpecManifest.concepts` + `From<&ConceptDef>`; repos without a concepts
+  block parse cleanly.
+- `GET /api/v1/repos/:id/graph/concept/:name` and
+  `GET /api/v1/workspaces/:id/graph/concept/:name` return the
+  manifest-driven union projection (types/traits/modules/endpoints/specs,
+  anchored case-sensitive `*`-globs, edge-metadata route paths, GovernedBy
+  spec linkage) with 404/no-contribution for undefined concept names —
+  substring fallback removed; the `?concept=` substring query param on
+  `/graph` is preserved as a distinct surface per spec §7.
+- MCP `graph_concept` tool shares the same projection assembly (HSI §11
+  parity) for repo and workspace scopes, with explicit errors for undefined
+  concepts and unknown repos.
+- Glob matcher + projection live in `gyre-common` (`glob_match`,
+  `ConceptView::project`); no new crate dependencies; 16 new tests including
+  integration tests a mutation probe confirms fail under substring revert.
+
+## Review
+
+### Review changed source code
+
+- specs/coverage/system/realized-model.md
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.

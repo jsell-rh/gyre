@@ -477,11 +477,11 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "graph_concept",
-                "description": "Search the knowledge graph by concept name. Returns matching nodes with type, name, qualified_name, spec linkage, and connecting edges. Searches repo-scoped or workspace-scoped graphs.",
+                "description": "Project the knowledge graph through a named concept view (realized-model.md §4). The concept is resolved from the repo's specs/manifest.yaml concepts: block; returns the union of nodes matching its include patterns (types, traits, modules, endpoints, specs) with edges between matched nodes. Searches repo-scoped or workspace-scoped graphs (workspace scope unions per-repo projections).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "concept": { "type": "string", "description": "Concept name to search for (case-insensitive substring match)" },
+                        "concept": { "type": "string", "description": "Concept name (case-insensitive exact match on a manifest-defined concept)" },
                         "repo_id": { "type": "string", "description": "Repository ID (search within a single repo)" },
                         "workspace_id": { "type": "string", "description": "Workspace ID (search across all repos in workspace)" }
                     },
@@ -2372,34 +2372,42 @@ async fn handle_node_provenance(state: &AppState, args: &Value) -> Value {
 }
 
 /// MCP tool handler for `graph.concept` — delegates to the same shared
-/// `assemble_concept_results` function used by the REST handlers (HSI §11 parity).
+/// assembly functions the REST handlers use (HSI §11 parity): the named
+/// concept is resolved from the repo's spec manifest and the graph is
+/// projected through its include patterns.
 async fn handle_graph_concept(state: &AppState, args: &Value) -> Value {
     let concept = match require_str(args, "concept") {
         Ok(c) => c.to_string(),
         Err(_) => return tool_error("missing required field: concept"),
     };
 
-    // Determine scope: repo_id or workspace_id.
-    let repo_ids: Vec<String> = if let Some(repo_id) = get_str(args, "repo_id") {
-        vec![repo_id.to_string()]
+    let response = if let Some(repo_id) = get_str(args, "repo_id") {
+        // Repo-scoped projection.
+        let repo = match state.repos.find_by_id(&Id::new(repo_id)).await {
+            Ok(Some(r)) => r,
+            Ok(None) => return tool_error(format!("repo not found: {repo_id}")),
+            Err(e) => return tool_error(format!("failed to look up repo: {e}")),
+        };
+        crate::api::graph::assemble_concept_projection(state, &repo, &concept).await
     } else if let Some(workspace_id) = get_str(args, "workspace_id") {
-        let ws_id = Id::new(workspace_id);
-        match state.repos.list_by_workspace(&ws_id).await {
-            Ok(repos) => repos.into_iter().map(|r| r.id.to_string()).collect(),
-            Err(e) => return tool_error(format!("failed to list repos: {e}")),
-        }
+        // Workspace-scoped union of per-repo projections.
+        crate::api::graph::assemble_workspace_concept_projection(
+            state,
+            &Id::new(workspace_id),
+            &concept,
+        )
+        .await
     } else {
         return tool_error("provide either repo_id or workspace_id");
     };
 
-    // Delegate to the same assembly logic the REST handler uses (HSI §11 parity).
-    match crate::api::graph::assemble_concept_results(state, &repo_ids, &concept).await {
+    match response {
         Ok(response) => {
             let result =
                 serde_json::to_value(&response).unwrap_or_else(|e| json!({"error": e.to_string()}));
             tool_result(serde_json::to_string_pretty(&result).unwrap_or_default())
         }
-        Err(_) => tool_error("concept search failed"),
+        Err(e) => tool_error(e.to_string()),
     }
 }
 
@@ -4838,10 +4846,186 @@ mod tests {
         assert!(text.contains("provide either repo_id or workspace_id"));
     }
 
-    #[tokio::test]
-    async fn mcp_graph_concept_with_repo_id() {
+    /// Create a real (non-bare) git repo at a tempdir with the given
+    /// `specs/manifest.yaml` committed on `main`. Returns the repo path.
+    fn init_concept_manifest_repo(manifest_yaml: &str) -> (tempfile::TempDir, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().to_str().unwrap().to_string();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .output()
+                .unwrap();
+            assert!(
+                status.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&status.stderr)
+            );
+        };
+        git(&["init", "--initial-branch=main"]);
+        git(&["config", "user.email", "test@gyre.dev"]);
+        git(&["config", "user.name", "Gyre Test"]);
+        std::fs::create_dir_all(std::path::Path::new(&repo_path).join("specs")).unwrap();
+        std::fs::write(
+            std::path::Path::new(&repo_path).join("specs/manifest.yaml"),
+            manifest_yaml,
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "seed manifest"]);
+        (tmp, repo_path)
+    }
+
+    /// graph_concept must be a manifest-based concept-view projection, not a
+    /// substring search (HSI §11 parity with the REST concept endpoints).
+    /// Seeding: manifest defines the spec's Authentication concept; the graph
+    /// holds an Auth-named Type, an unrelated Type, a module under *::auth*,
+    /// an endpoint node, and a spec-governed node. The tool must return
+    /// exactly the concept-matching nodes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mcp_graph_concept_manifest_projection_not_substring() {
+        const AUTH_MANIFEST: &str = r#"
+version: 1
+specs:
+  - path: system/identity-security.md
+    title: Identity Security
+    owner: user:test
+concepts:
+  - name: Authentication
+    description: "Token validation, RBAC, ABAC, JWT handling"
+    include:
+      - types: ["*Auth*"]
+      - modules: ["*::auth*"]
+      - endpoints: ["/api/v1/auth/*"]
+      - specs: ["identity-security.md"]
+"#;
+        let state = test_state();
+        // Workspace + repo pointing at a real git checkout with the manifest.
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-concept"),
+            gyre_common::Id::new("tenant-1"),
+            "concept-ws",
+            "concept-ws",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let (_tmp, repo_path) = init_concept_manifest_repo(AUTH_MANIFEST);
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-concept"),
+            gyre_common::Id::new("ws-concept"),
+            "auth-service",
+            repo_path,
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        // Seed the graph: concept-matching + unrelated nodes.
+        let node = |name: &str,
+                    node_type: gyre_common::NodeType,
+                    qualified_name: &str,
+                    spec_path: Option<&str>|
+         -> gyre_common::graph::GraphNode {
+            gyre_common::graph::GraphNode {
+                id: gyre_common::Id::new(format!("node-{name}")),
+                repo_id: repo.id.clone(),
+                node_type,
+                name: name.to_string(),
+                qualified_name: qualified_name.to_string(),
+                file_path: format!("src/{name}.rs"),
+                line_start: 1,
+                line_end: 2,
+                visibility: gyre_common::graph::Visibility::Public,
+                doc_comment: None,
+                spec_path: spec_path.map(str::to_string),
+                spec_paths: vec![],
+                spec_confidence: gyre_common::graph::SpecConfidence::None,
+                last_modified_sha: "abc".to_string(),
+                last_modified_by: None,
+                last_modified_at: 0,
+                created_sha: "abc".to_string(),
+                created_at: 0,
+                complexity: None,
+                churn_count_30d: 0,
+                test_coverage: None,
+                first_seen_at: 0,
+                last_seen_at: 0,
+                deleted_at: None,
+                test_node: false,
+                spec_approved_at: None,
+                milestone_completed_at: None,
+            }
+        };
+        let auth_type = node(
+            "JwtAuthProvider",
+            gyre_common::NodeType::Type,
+            "crates::JwtAuthProvider",
+            None,
+        );
+        let unrelated_type = node(
+            "Invoice",
+            gyre_common::NodeType::Type,
+            "crates::Invoice",
+            None,
+        );
+        let auth_module = node(
+            "auth",
+            gyre_common::NodeType::Module,
+            "gyre_domain::auth::tokens",
+            None,
+        );
+        let auth_endpoint = node(
+            "login",
+            gyre_common::NodeType::Endpoint,
+            "api::v1::auth::login",
+            None,
+        );
+        let governed = node(
+            "TokenStore",
+            gyre_common::NodeType::Type,
+            "crates::TokenStore",
+            Some("specs/system/identity-security.md"),
+        );
+        // "user_authentication_service" contains the case-insensitive
+        // substring "authentication" of the concept NAME (what the old
+        // substring implementation matched on) but matches none of the
+        // concept's case-sensitive include globs (`*Auth*` requires
+        // capital-A `Auth`; the qualified name avoids the `*::auth*`
+        // module prefix) — must be excluded (substring regression guard).
+        let substring_decoy = node(
+            "user_authentication_service",
+            gyre_common::NodeType::Type,
+            "crates::user_authentication_service",
+            None,
+        );
+        for n in [
+            auth_type.clone(),
+            unrelated_type,
+            auth_module,
+            auth_endpoint.clone(),
+            governed,
+            substring_decoy,
+        ] {
+            state.graph_store.create_node(n).await.unwrap();
+        }
+        // Endpoint route path in edge metadata (extractor convention).
+        let mut route_edge = gyre_common::graph::GraphEdge {
+            id: gyre_common::Id::new("edge-route"),
+            repo_id: repo.id.clone(),
+            source_id: auth_endpoint.id.clone(),
+            target_id: auth_type.id.clone(),
+            edge_type: gyre_common::graph::EdgeType::RoutesTo,
+            metadata: Some(r#"{"path":"/api/v1/auth/login","method":"POST"}"#.to_string()),
+            first_seen_at: 0,
+            last_seen_at: 0,
+            deleted_at: None,
+        };
+        route_edge.id = gyre_common::Id::new("edge-route");
+        state.graph_store.create_edge(route_edge).await.unwrap();
+
+        let app = crate::build_router(state.clone());
         let (status, json) = mcp_post(
-            app(),
+            app,
             json!({
                 "jsonrpc": "2.0",
                 "id": 132,
@@ -4849,8 +5033,8 @@ mod tests {
                 "params": {
                     "name": "graph_concept",
                     "arguments": {
-                        "concept": "auth",
-                        "repo_id": "repo-1"
+                        "concept": "Authentication",
+                        "repo_id": "repo-concept"
                     }
                 }
             }),
@@ -4860,9 +5044,150 @@ mod tests {
         assert!(!json["result"]["isError"].as_bool().unwrap());
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
         let result: Value = serde_json::from_str(text).unwrap();
-        assert!(result["nodes"].as_array().is_some());
-        assert!(result["edges"].as_array().is_some());
-        assert!(result["repo_id"].as_str().is_some());
+        assert_eq!(result["repo_id"].as_str().unwrap(), "repo-concept");
+        let names: Vec<&str> = result["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            names.contains(&"JwtAuthProvider"),
+            "type glob must match: {names:?}"
+        );
+        assert!(names.contains(&"auth"), "module glob must match: {names:?}");
+        assert!(
+            names.contains(&"login"),
+            "endpoint glob must match: {names:?}"
+        );
+        assert!(
+            names.contains(&"TokenStore"),
+            "spec-governed node must match: {names:?}"
+        );
+        assert!(
+            !names.contains(&"user_authentication_service"),
+            "substring-matching node must be excluded — this is a concept projection, not a substring search: {names:?}"
+        );
+        assert!(
+            !names.contains(&"Invoice"),
+            "unrelated node must be excluded: {names:?}"
+        );
+        assert_eq!(
+            result["nodes"].as_array().unwrap().len(),
+            4,
+            "exactly the 4 concept-matching nodes: {names:?}"
+        );
+        // Edge between matched endpoint and matched type is included.
+        assert_eq!(result["edges"].as_array().unwrap().len(), 1);
+
+        // Workspace scope: same projection, repo_id label reflects the union.
+        let state2 = state;
+        let app = crate::build_router(state2);
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 133,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_concept",
+                    "arguments": {
+                        "concept": "Authentication",
+                        "workspace_id": "ws-concept"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(result["nodes"].as_array().unwrap().len(), 4);
+    }
+
+    /// An undefined concept name must be an error — the tool has no substring
+    /// fallback (parity with the REST 404).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mcp_graph_concept_undefined_concept_is_error() {
+        const NO_CONCEPT_MANIFEST: &str = r#"
+version: 1
+specs:
+  - path: system/other.md
+    title: Other
+    owner: user:test
+"#;
+        let state = test_state();
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-concept-2"),
+            gyre_common::Id::new("tenant-1"),
+            "concept-ws-2",
+            "concept-ws-2",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let (_tmp, repo_path) = init_concept_manifest_repo(NO_CONCEPT_MANIFEST);
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-concept-2"),
+            gyre_common::Id::new("ws-concept-2"),
+            "other-service",
+            repo_path,
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        let app = crate::build_router(state);
+        // "auth" is a substring of "Authentication" but no concept is
+        // defined in this repo's manifest — must error, not fall back.
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 134,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_concept",
+                    "arguments": {
+                        "concept": "auth",
+                        "repo_id": "repo-concept-2"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("not defined in the spec manifest"),
+            "error must name the undefined concept: {text}"
+        );
+    }
+
+    /// A repo that does not exist must be an explicit error, not a silent
+    /// empty result.
+    #[tokio::test]
+    async fn mcp_graph_concept_unknown_repo_is_error() {
+        let (status, json) = mcp_post(
+            app(),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 135,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_concept",
+                    "arguments": {
+                        "concept": "auth",
+                        "repo_id": "nonexistent-repo"
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("repo not found"), "got: {text}");
     }
 
     // ── TASK-010: spec_assist tool ───────────────────────────────────────────
