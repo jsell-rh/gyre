@@ -2,10 +2,10 @@
 title: "Fix persona scope resolution to walk the real parent chain"
 spec_ref: "platform-model.md §2 Scope Resolution"
 depends_on: []
-progress: complete
+progress: not-started
 coverage_sections:
   - "platform-model.md §Scope Resolution"
-commits: ["a977a9175d0f3e6c96172156c7983a2d25cb0803", "8cd3f081bd1a53eab155700f7522799943322237", "2d1e74d949a55a5b166a317d19f5faf2478490e3"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -58,30 +58,12 @@ Workspace-scoped personas key on the **workspace id** and tenant-scoped personas
 
 ## Acceptance Criteria
 
-- [x] `resolve_persona` walks the actual parent chain: repo → its workspace → that workspace's tenant, using the entities' real parent ids, not a cloned `scope_id`.
-- [x] A persona defined **only** at workspace scope resolves when queried with `scope_kind=Repo&scope_id=<repo in that workspace>`.
-- [x] A persona defined **only** at tenant scope resolves when queried with `scope_kind=Repo` (repo whose workspace belongs to that tenant) and with `scope_kind=Workspace` (workspace in that tenant).
-- [x] Nearest-wins precedence holds: a repo-scoped persona with the same slug shadows a workspace- or tenant-scoped one; a workspace-scoped one shadows a tenant-scoped one.
-- [x] Querying a `scope_id` whose repo/workspace does not exist returns `NotFound` (not a spurious persona miss).
-- [x] `scope_kind=Tenant` still resolves tenant-global personas directly.
-
-## Implementation Notes
-
-- `resolve_persona` now derives each scope level from the entities: `Repo` walks
-  `state.repos.find_by_id(scope_id)` → `Repository::workspace_id` →
-  `state.workspaces.find_by_id(...)` → `Workspace::tenant_id`; `Workspace` walks
-  to the tenant the same way; `Tenant` is unchanged. A missing repo/workspace is
-  `ApiError::NotFound` naming the entity, not a persona miss.
-- Pre-fix evidence: the 4 resolve tests failed against the cloned-id logic (404
-  on all parent-scope fallbacks; bad-id test got the persona-miss message
-  instead of entity-not-found). Post-fix: `cargo test -p gyre-server --lib
-  personas` → 8 passed, 0 failed.
-- Step 4 verified: SQLite/Postgres `find_by_slug_and_scope` filter
-  `personas.scope` on `serde_json::to_string(scope)` — the same serialization
-  `create` stores, so discriminator + id match exactly as constructed; the mem
-  adapter compares `&p.scope == scope` on the same enum. No mismatch to align.
-- `resolve_persona` is the only production caller of `find_by_slug_and_scope`;
-  no other site shares the cloned-id bug.
+- [ ] `resolve_persona` walks the actual parent chain: repo → its workspace → that workspace's tenant, using the entities' real parent ids, not a cloned `scope_id`.
+- [ ] A persona defined **only** at workspace scope resolves when queried with `scope_kind=Repo&scope_id=<repo in that workspace>`.
+- [ ] A persona defined **only** at tenant scope resolves when queried with `scope_kind=Repo` (repo whose workspace belongs to that tenant) and with `scope_kind=Workspace` (workspace in that tenant).
+- [ ] Nearest-wins precedence holds: a repo-scoped persona with the same slug shadows a workspace- or tenant-scoped one; a workspace-scoped one shadows a tenant-scoped one.
+- [ ] Querying a `scope_id` whose repo/workspace does not exist returns `NotFound` (not a spurious persona miss).
+- [ ] `scope_kind=Tenant` still resolves tenant-global personas directly.
 
 ## Tests (must fail before the fix, pass after)
 
@@ -102,10 +84,3 @@ Do not write self-confirming tests: seed personas with distinct `system_prompt`/
 - Confirm the route `GET /api/v1/personas/resolve` registration in `crates/gyre-server/src/api/mod.rs` before relying on the path in tests.
 - Do NOT change the query contract (`scope_kind`, `scope_id`, `slug`); only fix the resolution logic behind it.
 - Skip project-wide lint/format/test suites; run `cargo test -p gyre-server personas` (or the crate's persona tests) to validate.
-
-## Shipped
-
-- `GET /api/v1/personas/resolve` now walks the real parent chain — repo → its workspace → that workspace's tenant — using `Repository.workspace_id` and `Workspace.tenant_id` from storage instead of cloning the queried `scope_id` into every scope variant, so workspace- and tenant-scoped personas actually resolve from repo/workspace queries (nearest-scope-wins per platform-model.md §2).
-- Missing scope entities are rejected with a descriptive `NotFound` naming the repo/workspace, not a spurious persona miss; unknown `scope_kind` still returns `InvalidInput`.
-- Five regression tests seed a real tenant→workspace→repo chain with distinct ids and distinct persona bodies: both parent-scope fallbacks, workspace→tenant fallback, nearest-wins shadowing at all three levels, and the bad-scope-id discrimination. Mutation probe: reverting the handler to the pre-fix cloned-id logic fails 4 of the 5.
-
