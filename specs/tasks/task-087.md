@@ -2,7 +2,7 @@
 title: "HSI Test-Time Trace Capture Gate"
 spec_ref: "human-system-interface.md §3 Test-Time Trace Capture"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 review: specs/reviews/task-087.md
 coverage_sections:
   - "human-system-interface.md §3 Test-Time Trace Capture"
@@ -94,3 +94,11 @@ The `TraceRepository` port already exists in `crates/gyre-ports/src/trace.rs` an
 ## Agent Instructions
 
 Read `specs/system/human-system-interface.md` §3 "Test-Time Trace Capture" for the full design. The `TraceRepository` port exists in `crates/gyre-ports/src/trace.rs`, adapters in `crates/gyre-adapters/src/sqlite/trace.rs`. REST handlers exist in `crates/gyre-server/src/api/traces.rs`. Start by reading these files to understand what's already implemented. The gate executor is in `crates/gyre-server/src/gate_executor.rs`. For the OTLP receiver, consider using the `opentelemetry-proto` crate for protobuf types and `tonic` for gRPC. The receiver should be minimal — accept `ExportTraceServiceRequest`, extract spans, buffer them. Server config env vars (`GYRE_OTLP_ENABLED`, etc.) go in `docs/server-config.md`.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-adapters/tests/review_probe_trace.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
