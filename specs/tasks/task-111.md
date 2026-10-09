@@ -5,7 +5,7 @@ depends_on: []
 progress: not-started
 coverage_sections:
   - "user-management.md §Session Management"
-commits: ["e5a5068b162c084132d9cdc6e43247079195f56d", "8fbc45c9bc665d0cf218f3737e335fddb4dbf25b"]
+commits: ["4d68b16575b6ad5628f9781227556cda9deceddb", "e5a5068b162c084132d9cdc6e43247079195f56d", "8fbc45c9bc665d0cf218f3737e335fddb4dbf25b"]
 ---
 
 ## Spec Excerpt
