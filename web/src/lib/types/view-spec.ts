@@ -28,8 +28,16 @@
 /**
  * Layout names, exactly as they appear in serialized ViewSpec JSON
  * (kebab-case, matching the Rust `#[serde(rename_all = "kebab-case")]`).
+ *
+ * The eight names below are the specced grammar (ui-layout.md §4 Layout
+ * Layer). The set is open for NEW layouts (§4 Extensibility: new layouts
+ * are added via the layout registry) but closed for modification —
+ * `registerLayoutName` rejects names already present, so an existing
+ * layout's semantics can never be redefined by a later registration.
+ * This array is mutated in place by `registerLayoutName`; membership
+ * checks (`LAYOUT_TYPES.includes`) therefore see registered layouts.
  */
-export const LAYOUT_TYPES = /** @type {const} */ ([
+export const LAYOUT_TYPES = /** @type {string[]} */ ([
   'graph',
   'hierarchical',
   'layered',
@@ -40,9 +48,23 @@ export const LAYOUT_TYPES = /** @type {const} */ ([
   'flow',
 ]);
 
-/** @typedef {(typeof LAYOUT_TYPES)[number]} LayoutType */
+/** @typedef {string} LayoutType */
 
-// ── Data layer ───────────────────────────────────────────────────────────────
+/**
+ * Register a new layout name (called by the layout registry's
+ * `registerLayout`, ui-layout.md §4 Extensibility). Returns false and does
+ * NOT add the name when it is already known — the grammar is closed for
+ * modification, so an existing layout name can never be re-registered.
+ * Exported because it is the registry↔grammar extension point.
+ * @param {string} name
+ * @returns {boolean} true if the name was newly added
+ */
+export function registerLayoutName(name) {
+  if (typeof name !== 'string' || name.length === 0) return false;
+  if (LAYOUT_TYPES.includes(name)) return false;
+  LAYOUT_TYPES.push(name);
+  return true;
+}
 
 /**
  * @typedef {Object} DataFilter

@@ -20,6 +20,7 @@
  *   onSelectNode — callback(node) when a node is selected
  */
 
+import { registerLayoutName } from './types/view-spec.ts';
 import ExplorerCanvas from './ExplorerCanvas.svelte';
 import FlowRenderer from './FlowRenderer.svelte';
 
@@ -63,7 +64,9 @@ const registry = [
 ];
 
 /**
- * Register a new layout renderer. Adding a name that already exists is a
+ * Register a new layout renderer and extend the grammar's accepted layout
+ * names to match (ui-layout.md §4 Extensibility — the registry is the only
+ * sanctioned way to add a layout). Adding a name that already exists is a
  * no-op — the grammar is closed for modification, so an existing layout's
  * renderer can never be swapped by a later registration.
  *
@@ -75,6 +78,10 @@ export function registerLayout(layout) {
     return;
   }
   registry.push(layout);
+  // Keep validateViewSpec's accepted layout set in sync: without this, a
+  // spec using the newly registered layout name would be rejected by the
+  // client-side grammar check even though the renderer exists.
+  registerLayoutName(layout.name);
 }
 
 /**

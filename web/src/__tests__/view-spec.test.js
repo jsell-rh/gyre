@@ -5,8 +5,9 @@
  * `validate_view_spec` in crates/gyre-common/src/view_spec.rs — the same
  * cases must fail both places (belt and suspenders).
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { validateViewSpec, isViewSpec, LAYOUT_TYPES } from '../lib/types/view-spec.ts';
+import { registerLayout } from '../lib/layoutRegistry.js';
 
 // The complete example from ui-layout.md §4 "Structure".
 const SPEC_EXAMPLE = {
@@ -204,5 +205,27 @@ describe('ViewSpec grammar — rejection cases', () => {
     });
     expect(result.valid).toBe(false);
     expect(result.errors.join()).toMatch(/only allowed with layout 'side-by-side'/);
+  });
+});
+describe('ViewSpec grammar — extensibility (ui-layout.md §4)', () => {
+  // registerLayoutName mutates the shared LAYOUT_TYPES array; restore it so
+  // the exact-equality assertions elsewhere stay order-independent.
+  afterEach(() => {
+    const i = LAYOUT_TYPES.indexOf('sankey-ext-test');
+    if (i !== -1) LAYOUT_TYPES.splice(i, 1);
+  });
+  it('a layout registered through the registry passes validateViewSpec', () => {
+    registerLayout({ name: 'sankey-ext-test', component: null, labelKey: 'x', icon: '' });
+    const result = validateViewSpec({
+      name: 'Ext',
+      data: { node_types: [], edge_types: [], depth: 1 },
+      layout: 'sankey-ext-test',
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.valid).toBe(true);
+    // Registering the same name again is a no-op (closed for modification)
+    // and does not corrupt the set.
+    registerLayout({ name: 'sankey-ext-test', component: null, labelKey: 'x', icon: '' });
+    expect(LAYOUT_TYPES.filter((l) => l === 'sankey-ext-test').length).toBe(1);
   });
 });
