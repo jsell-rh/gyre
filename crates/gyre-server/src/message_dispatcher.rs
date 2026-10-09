@@ -473,6 +473,12 @@ mod tests {
     use super::*;
     use gyre_common::message::{Destination, MessageOrigin};
 
+    /// Serializes tests that mutate process-global env vars
+    /// (`GYRE_EVENT_TTL_SECS` / `GYRE_DEAD_INBOX_TTL_SECS`). `#[tokio::test]`
+    /// runs tests concurrently on shared threads, so without this lock the
+    /// two TTL tests race on the env read in `run_message_expiry`.
+    static TEST_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn test_message(kind: MessageKind, ws: &str, payload: serde_json::Value) -> Message {
         Message {
             id: Id::new(uuid::Uuid::new_v4().to_string()),
@@ -706,12 +712,10 @@ mod tests {
     }
 
     /// A stored message with an arbitrary created_at, for TTL tests.
-    fn stored_message(
-        id: &str,
-        to: Destination,
-        created_at: u64,
-        acknowledged: bool,
-    ) -> Message {
+    /// `acknowledged` is always false: both adapters store new messages as
+    /// unacked (SQLite `message_to_new_row` forces `acknowledged: 0`); ack
+    /// state only changes via `acknowledge()`/`acknowledge_all()`.
+    fn stored_message(id: &str, to: Destination, created_at: u64) -> Message {
         Message {
             id: Id::new(id.to_string()),
             tenant_id: Id::new("default"),
@@ -723,13 +727,16 @@ mod tests {
             created_at,
             signature: None,
             key_id: None,
-            acknowledged,
+            acknowledged: false,
         }
     }
 
     #[tokio::test]
     async fn message_expiry_deletes_old_events_and_dead_inboxes() {
         // Short TTLs so the cutoff is deterministic relative to now_ms().
+        // Serialized with the other env-mutating TTL test — env vars are
+        // process-global and #[tokio::test] runs tests concurrently.
+        let _guard = TEST_ENV_LOCK.lock().await;
         std::env::set_var("GYRE_EVENT_TTL_SECS", "1000");
         std::env::set_var("GYRE_DEAD_INBOX_TTL_SECS", "1000");
 
@@ -739,40 +746,66 @@ mod tests {
         // Event-tier (workspace-targeted): one expired, one fresh.
         state
             .messages
-            .store(&stored_message("old-event", Destination::Workspace(Id::new("ws-1".to_string())), now - 2000_000, false))
+            .store(&stored_message(
+                "old-event",
+                Destination::Workspace(Id::new("ws-1".to_string())),
+                now - 2000_000,
+            ))
             .await
             .unwrap();
         state
             .messages
-            .store(&stored_message("new-event", Destination::Workspace(Id::new("ws-1".to_string())), now, false))
+            .store(&stored_message(
+                "new-event",
+                Destination::Workspace(Id::new("ws-1".to_string())),
+                now,
+            ))
             .await
             .unwrap();
-        // Directed (agent-targeted): never touched by expire_events.
+        // Unacked Directed (agent-targeted): expire_events must never touch it.
         state
             .messages
-            .store(&stored_message("old-directed", Destination::Agent(Id::new("agent-1".to_string())), now - 2000_000, false))
+            .store(&stored_message(
+                "old-directed",
+                Destination::Agent(Id::new("agent-1".to_string())),
+                now - 2000_000,
+            ))
             .await
             .unwrap();
-        // Agent-targeted, acked as agent_completed long ago: dead inbox.
+        // Dead inbox: agent-2 completed, so its unacked Directed messages are
+        // bulk-acked with reason "agent_completed" — the dead-inbox TTL
+        // deletes these. Uses a distinct agent from the unacked fixture so
+        // acknowledge_all cannot sweep the unacked case into this one.
         state
             .messages
-            .store(&stored_message("old-dead-inbox", Destination::Agent(Id::new("agent-1".to_string())), now - 2000_000, true))
+            .store(&stored_message(
+                "old-dead-inbox",
+                Destination::Agent(Id::new("agent-2".to_string())),
+                now - 2000_000,
+            ))
             .await
             .unwrap();
         state
             .messages
-            .acknowledge_all(&Id::new("agent-1".to_string()), "agent_completed")
+            .acknowledge_all(&Id::new("agent-2".to_string()), "agent_completed")
             .await
             .unwrap();
         // Agent-targeted, explicitly acked long ago: NOT a dead inbox — retained.
         state
             .messages
-            .store(&stored_message("old-explicit-ack", Destination::Agent(Id::new("agent-2".to_string())), now - 2000_000, false))
+            .store(&stored_message(
+                "old-explicit-ack",
+                Destination::Agent(Id::new("agent-3".to_string())),
+                now - 2000_000,
+            ))
             .await
             .unwrap();
         state
             .messages
-            .acknowledge(&Id::new("old-explicit-ack".to_string()), &Id::new("agent-2".to_string()))
+            .acknowledge(
+                &Id::new("old-explicit-ack".to_string()),
+                &Id::new("agent-3".to_string()),
+            )
             .await
             .unwrap();
 
@@ -811,19 +844,30 @@ mod tests {
 
     #[tokio::test]
     async fn message_expiry_env_ttl_respected() {
-        // 1-second TTL: only messages older than 1s are deleted.
+        // 1-second TTL: only messages older than 1s are deleted. Serialized
+        // with the other env-mutating TTL test (process-global env).
+        let _guard = TEST_ENV_LOCK.lock().await;
         std::env::set_var("GYRE_EVENT_TTL_SECS", "1");
+        std::env::set_var("GYRE_DEAD_INBOX_TTL_SECS", "1000");
         let state = crate::mem::test_state();
         let now = now_ms();
 
         state
             .messages
-            .store(&stored_message("ancient-event", Destination::Workspace(Id::new("ws-1".to_string())), now - 10_000, false))
+            .store(&stored_message(
+                "ancient-event",
+                Destination::Workspace(Id::new("ws-1".to_string())),
+                now - 10_000,
+            ))
             .await
             .unwrap();
         state
             .messages
-            .store(&stored_message("recent-event", Destination::Workspace(Id::new("ws-1".to_string())), now, false))
+            .store(&stored_message(
+                "recent-event",
+                Destination::Workspace(Id::new("ws-1".to_string())),
+                now,
+            ))
             .await
             .unwrap();
 
@@ -832,6 +876,7 @@ mod tests {
 
         // Restore defaults for other tests in this process.
         std::env::set_var("GYRE_EVENT_TTL_SECS", "604800");
+        std::env::set_var("GYRE_DEAD_INBOX_TTL_SECS", "604800");
     }
 
     #[tokio::test]
