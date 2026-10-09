@@ -1331,12 +1331,11 @@ describe('MetaSpecs -- DiffSuggestion accept updates textarea', () => {
     });
 
     const acceptBtn = document.querySelector('.diff-actions button');
-    if (acceptBtn) {
-      await fireEvent.click(acceptBtn);
-      await waitFor(() => {
-        expect(textarea.value.length).toBeGreaterThan(initialValue.length);
-      });
-    }
+    expect(acceptBtn).toBeTruthy(); // fail loudly if the suggestion never rendered
+    await fireEvent.click(acceptBtn);
+    await waitFor(() => {
+      expect(textarea.value.length).toBeGreaterThan(initialValue.length);
+    });
   });
 });
 

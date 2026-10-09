@@ -673,10 +673,13 @@ pub(crate) async fn finish_preview_agent(state: &AppState, agent_id: &str) -> bo
         branch = %agent_ref.branch,
         "preview agent finished"
     );
-    stop_preview_agent_row(state, agent_id).await;
-    revoke_preview_token(state, agent_id).await;
+    // Teardown before the ledger flip: terminal-in-ledger ⇒ fully torn down.
+    // The status the ledger reports is the contract; a client that observes
+    // Stopped must never find a live worktree or a valid token behind it.
     remove_preview_worktree(state, &agent_ref).await;
+    revoke_preview_token(state, agent_id).await;
     release_preview_slot(state, &agent_ref).await;
+    stop_preview_agent_row(state, agent_id).await;
     true
 }
 
