@@ -37,11 +37,11 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use gyre_ports::commit_signature_repo::{CommitSignature, SigstoreMode, ALGORITHM_ECDSA_P256};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::time::Duration;
 use std::future::Future;
+use std::time::Duration;
 
-use async_trait::async_trait;
 use crate::commit_signatures::{SigningAttribution, SigningConfig};
+use async_trait::async_trait;
 
 // ── Wire types ────────────────────────────────────────────────────────────────
 
@@ -348,12 +348,11 @@ pub async fn sign_commit_keyless(
     //    against the token subject. ECDSA_P256_SHA256_ASN1 produces the DER
     //    signature format sigstore's verifier accepts; base64 for protojson.
     let sub = extract_jwt_sub(oidc_jwt)?;
-    let ecdsa_key =
-        ring::signature::EcdsaKeyPair::from_pkcs8(
-            &ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING,
-            &key_pair.serialize_der(),
-            &ring::rand::SystemRandom::new(),
-        )?;
+    let ecdsa_key = ring::signature::EcdsaKeyPair::from_pkcs8(
+        &ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING,
+        &key_pair.serialize_der(),
+        &ring::rand::SystemRandom::new(),
+    )?;
     let pop = BASE64.encode(
         ecdsa_key
             .sign(&ring::rand::SystemRandom::new(), sub.as_bytes())?
@@ -376,7 +375,9 @@ pub async fn sign_commit_keyless(
         },
     };
     let body = serde_json::to_string(&request)?;
-    let response_text = transport.fulcio_signing_cert(&config.fulcio_url, &body).await?;
+    let response_text = transport
+        .fulcio_signing_cert(&config.fulcio_url, &body)
+        .await?;
     let response: FulcioSigningCertResponse = serde_json::from_str(&response_text)
         .context("fulcio signingCert response is not valid protojson")?;
 
@@ -440,7 +441,9 @@ pub async fn sign_commit_keyless(
         },
     };
     let entry_body = serde_json::to_string(&entry)?;
-    let rekor_response_text = transport.rekor_post_entry(&config.rekor_url, &entry_body).await?;
+    let rekor_response_text = transport
+        .rekor_post_entry(&config.rekor_url, &entry_body)
+        .await?;
     let rekor_response: RekorEntryResponse =
         serde_json::from_str(&rekor_response_text).context("rekor entry response invalid")?;
     let rekor_entry_id = rekor_response
@@ -481,43 +484,6 @@ pub async fn sign_commit_keyless(
 /// verified by the API layer against the forge Ed25519 key, which this
 /// module does not own.
 pub async fn verify_signature_fulcio(
-    record: &CommitSignature,
-    config: &SigningConfig,
-    transport: &dyn SigningHttpTransport,
-    now: std::time::SystemTime,
-) -> SignatureVerificationResult {
-    verify_fulcio(record, config, transport, now).await
-}
-
-impl SignatureVerificationResult {
-    /// Result for a local-mode record whose signature was verified (real
-    /// Ed25519 check) by the caller against the forge signing key. There is
-    /// no Fulcio certificate chain or Rekor entry for local records; the
-    /// non-applicable phases are reported as `false` with a reason naming
-    /// the mode.
-    pub fn local_mode(record: &CommitSignature, signature_valid: bool) -> Self {
-        let reason = if signature_valid {
-            "local-mode signature verified against the forge Ed25519 key (no Fulcio/Rekor in local mode)"
-                .to_string()
-        } else {
-            "local-mode signature did not verify against the forge Ed25519 key".to_string()
-        };
-        Self {
-            valid: signature_valid,
-            signature_valid,
-            certificate_chain_valid: false,
-            subject_matches: false,
-            rekor_entry_exists: false,
-            signer_id: record.signer_id.clone(),
-            task_id: record.task_id.clone(),
-            spawned_by: record.spawned_by.clone(),
-            sigstore_mode: SigstoreMode::Local,
-            reason: Some(reason),
-        }
-    }
-}
-
-async fn verify_fulcio(
     record: &CommitSignature,
     config: &SigningConfig,
     transport: &dyn SigningHttpTransport,
@@ -575,7 +541,8 @@ async fn verify_fulcio(
     let rekor_ok = check_rekor_entry(record, &config.rekor_url, transport).await;
     result.rekor_entry_exists = rekor_ok;
     if !rekor_ok {
-        failures.push("no matching Rekor entry (or entry contents do not match this commit)".into());
+        failures
+            .push("no matching Rekor entry (or entry contents do not match this commit)".into());
     }
 
     if failures.is_empty() {
@@ -585,6 +552,34 @@ async fn verify_fulcio(
         result.reason = Some(failures.join("; "));
     }
     result
+}
+
+impl SignatureVerificationResult {
+    /// Result for a local-mode record whose signature was verified (real
+    /// Ed25519 check) by the caller against the forge signing key. There is
+    /// no Fulcio certificate chain or Rekor entry for local records; the
+    /// non-applicable phases are reported as `false` with a reason naming
+    /// the mode.
+    pub fn local_mode(record: &CommitSignature, signature_valid: bool) -> Self {
+        let reason = if signature_valid {
+            "local-mode signature verified against the forge Ed25519 key (no Fulcio/Rekor in local mode)"
+                .to_string()
+        } else {
+            "local-mode signature did not verify against the forge Ed25519 key".to_string()
+        };
+        Self {
+            valid: signature_valid,
+            signature_valid,
+            certificate_chain_valid: false,
+            subject_matches: false,
+            rekor_entry_exists: false,
+            signer_id: record.signer_id.clone(),
+            task_id: record.task_id.clone(),
+            spawned_by: record.spawned_by.clone(),
+            sigstore_mode: SigstoreMode::Local,
+            reason: Some(reason),
+        }
+    }
 }
 
 fn fail(mut result: SignatureVerificationResult, reason: &str) -> SignatureVerificationResult {
@@ -647,7 +642,11 @@ fn check_chain_all_bundles(
     }
     // Each link must be signed by the next; the last must be self-signed.
     for pair in stored.windows(2) {
-        if pair[0].cert.verify_signature(Some(&pair[1].cert.subject_pki)).is_err() {
+        if pair[0]
+            .cert
+            .verify_signature(Some(&pair[1].cert.subject_pki))
+            .is_err()
+        {
             return false;
         }
     }
@@ -671,7 +670,10 @@ fn check_chain_all_bundles(
 }
 
 /// F5: `not_before <= now <= not_after`.
-fn within_validity(cert: &x509_parser::certificate::X509Certificate<'_>, now: std::time::SystemTime) -> bool {
+fn within_validity(
+    cert: &x509_parser::certificate::X509Certificate<'_>,
+    now: std::time::SystemTime,
+) -> bool {
     let now_secs = now
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -698,9 +700,7 @@ fn check_subject(record: &CommitSignature, leaf_pem: &str) -> bool {
                     x509_parser::extensions::GeneralName::RFC822Name(s) => {
                         *s == record.oidc_subject
                     }
-                    x509_parser::extensions::GeneralName::DNSName(s) => {
-                        *s == record.oidc_subject
-                    }
+                    x509_parser::extensions::GeneralName::DNSName(s) => *s == record.oidc_subject,
                     _ => false,
                 };
                 if matched {
@@ -710,11 +710,11 @@ fn check_subject(record: &CommitSignature, leaf_pem: &str) -> bool {
         }
     }
     // CN fallback.
-    let cn_matches = cert
-        .cert
-        .subject()
-        .iter_common_name()
-        .any(|cn| cn.as_str().map(|s| s == record.oidc_subject).unwrap_or(false));
+    let cn_matches = cert.cert.subject().iter_common_name().any(|cn| {
+        cn.as_str()
+            .map(|s| s == record.oidc_subject)
+            .unwrap_or(false)
+    });
     cn_matches
 }
 
@@ -803,7 +803,10 @@ async fn check_rekor_entry(
 /// a Rekor body may re-encode the same certificate with different wrapping).
 fn pem_equal_mod_whitespace(a: &[u8], b: &[u8]) -> bool {
     let strip = |v: &[u8]| -> Vec<u8> {
-        v.iter().copied().filter(|c| !c.is_ascii_whitespace()).collect()
+        v.iter()
+            .copied()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect()
     };
     strip(a) == strip(b)
 }
@@ -904,7 +907,10 @@ fn parse_pem_chain(chain_pem: &str) -> Vec<ParsedCertificate> {
             None => break,
         };
         // Block = BEGIN .. end of the END line.
-        let block_end = match rest[end_marker..].find("-----\n").or_else(|| rest[end_marker..].find("-----\r\n")) {
+        let block_end = match rest[end_marker..]
+            .find("-----\n")
+            .or_else(|| rest[end_marker..].find("-----\r\n"))
+        {
             Some(i) => end_marker + i + "-----".len(),
             None => rest.len(),
         };
@@ -1071,9 +1077,7 @@ mod tests {
                 .distinguished_name
                 .push(rcgen::DnType::CommonName, san);
             params.subject_alt_names = vec![rcgen::SanType::URI(
-                san.to_string()
-                    .try_into()
-                    .expect("SAN must be IA5-encoded"),
+                san.to_string().try_into().expect("SAN must be IA5-encoded"),
             )];
             params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
             params.not_before = not_before;
@@ -1188,12 +1192,10 @@ mod tests {
                 BASE64.encode(leaf_der),
                 BASE64.encode(issuer.cert.der().as_ref()),
             ];
-            Ok(
-                serde_json::json!({
-                    "signedCertificateEmbeddedSct": { "chain": { "certificates": chain } }
-                })
-                .to_string(),
-            )
+            Ok(serde_json::json!({
+                "signedCertificateEmbeddedSct": { "chain": { "certificates": chain } }
+            })
+            .to_string())
         }
 
         async fn fulcio_trust_bundle(&self, _fulcio_url: &str) -> Result<String> {
@@ -1235,8 +1237,9 @@ mod tests {
     fn test_jwt(sub: &str) -> String {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"EdDSA"}"#);
-        let payload = URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(&serde_json::json!({"sub": sub, "iss": "http://gyre"})).unwrap());
+        let payload = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&serde_json::json!({"sub": sub, "iss": "http://gyre"})).unwrap(),
+        );
         format!("{header}.{payload}.sig")
     }
 
@@ -1261,10 +1264,7 @@ mod tests {
         std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_730_000_000)
     }
 
-    async fn sign(
-        stack: &MockSigningStack,
-        commit_sha: &str,
-    ) -> CommitSignature {
+    async fn sign(stack: &MockSigningStack, commit_sha: &str) -> CommitSignature {
         sign_commit_keyless(
             "repo-1",
             commit_sha,

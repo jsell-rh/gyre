@@ -235,8 +235,8 @@ pub async fn get_commit_signature(
     State(state): State<Arc<AppState>>,
     Path((repo_id, sha)): Path<(String, String)>,
 ) -> Result<Json<CommitSignature>, ApiError> {
-    // Verify the repo exists.
-    let _ = repo_path(&state, &repo_id).await?;
+    // Verify the repo exists (errors propagate).
+    repo_path(&state, &repo_id).await?;
 
     state
         .commit_signatures
@@ -266,8 +266,8 @@ pub async fn get_commit_signature_verification(
     State(state): State<Arc<AppState>>,
     Path((repo_id, sha)): Path<(String, String)>,
 ) -> Result<Json<crate::sigstore::SignatureVerificationResult>, ApiError> {
-    // Verify the repo exists.
-    let _ = repo_path(&state, &repo_id).await?;
+    // Verify the repo exists (errors propagate).
+    repo_path(&state, &repo_id).await?;
 
     match crate::sigstore::verify_state_commit_signature(&state, &repo_id, &sha).await {
         Ok(Some(result)) => Ok(Json(result)),
@@ -317,12 +317,12 @@ pub async fn jj_bookmark(
 
 #[cfg(test)]
 mod tests {
+    use crate::commit_signatures;
     use crate::mem::test_state;
     use axum::{body::Body, Router};
     use http::{Request, StatusCode};
-    use tower::ServiceExt;
     use std::sync::Arc;
-    use crate::commit_signatures;
+    use tower::ServiceExt;
 
     fn app() -> Router {
         crate::build_router(test_state())
@@ -553,6 +553,14 @@ mod tests {
             rekor_url: "https://rekor.invalid".to_string(),
         };
         let app = crate::build_router(state.clone());
+
+        // Production seeds the built-in ABAC policies at startup; the agent
+        // JWT below carries UserRole::Agent and is allowed by
+        // `builtin-agent-scoped-access` (write on any resource type). The
+        // bare test state has an empty policy store, which would 403 the
+        // request before the signing path under test is ever reached.
+        crate::abac_middleware::seed_builtin_policies(&state).await;
+
         let (app, repo_id) = create_project_and_repo(app).await;
 
         // Mint and register a real agent JWT with DISTINCT attribution
@@ -560,14 +568,19 @@ mod tests {
         // bug (`task_id: "task-107"`, `spawned_by: "system"` — F2).
         let jwt = state
             .agent_signing_key
-            .mint("agent-fallback", "task-77", "user-fallback", &state.base_url, 3600)
+            .mint(
+                "agent-fallback",
+                "task-77",
+                "user-fallback",
+                &state.base_url,
+                3600,
+            )
             .expect("mint JWT");
         state
             .kv_store
             .kv_set("agent_tokens", "agent-fallback", jwt.clone())
             .await
             .unwrap();
-
         let resp = app
             .clone()
             .oneshot(

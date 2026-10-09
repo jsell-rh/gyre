@@ -9,7 +9,7 @@ crates/gyre-server/src/api/spawn.rs:643: tenant fallback for secret resolution �
 crates/gyre-server/src/constraint_check.rs:1357: tenant fallback for violation emission — same class as task-097 F3, unflagged by review
 # Pre-existing legacy sites (older than task-097; fix when touching):
 crates/gyre-server/src/api/specs.rs:959: tenant_id fallback in spec-rejected notification fanout
-crates/gyre-server/src/auth.rs:773: JWT claims.tenant_id fallback — validated by validate_tenant_id before use
+crates/gyre-server/src/auth.rs:786: JWT claims.tenant_id fallback — validated by validate_tenant_id before use
 crates/gyre-server/src/git_http.rs:1495: ws_id fallback for push event emission
 crates/gyre-server/src/speculative_merge.rs:372: ws_id fallback for speculative result notification
 crates/gyre-server/src/gate_executor.rs:111: ws_id fallback for gate event emission
