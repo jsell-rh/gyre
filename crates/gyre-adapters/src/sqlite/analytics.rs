@@ -103,6 +103,7 @@ impl AnalyticsRepository for SqliteStorage {
     async fn record(&self, event: &AnalyticsEvent) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let e = event.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
             let props = serde_json::to_string(&e.properties)?;
@@ -112,7 +113,7 @@ impl AnalyticsRepository for SqliteStorage {
                 agent_id: e.agent_id.as_deref(),
                 properties: props,
                 timestamp: e.timestamp as i64,
-                tenant_id: "default",
+                tenant_id: &tenant,
             };
             diesel::insert_into(analytics_events::table)
                 .values(&record)
@@ -131,9 +132,13 @@ impl AnalyticsRepository for SqliteStorage {
     ) -> Result<Vec<AnalyticsEvent>> {
         let pool = Arc::clone(&self.pool);
         let event_name = event_name.map(|s| s.to_string());
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<AnalyticsEvent>> {
             let mut conn = pool.get().context("get db connection")?;
-            let mut query = analytics_events::table.into_boxed();
+            // Spec hierarchy-enforcement.md §3: every read filters by tenant_id.
+            let mut query = analytics_events::table
+                .filter(analytics_events::tenant_id.eq(&tenant))
+                .into_boxed();
             if let Some(s) = since {
                 query = query.filter(analytics_events::timestamp.ge(s as i64));
             }
@@ -153,9 +158,11 @@ impl AnalyticsRepository for SqliteStorage {
     async fn count(&self, event_name: &str, since: u64, until: u64) -> Result<u64> {
         let pool = Arc::clone(&self.pool);
         let event_name = event_name.to_string();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<u64> {
             let mut conn = pool.get().context("get db connection")?;
             let n = analytics_events::table
+                .filter(analytics_events::tenant_id.eq(&tenant))
                 .filter(analytics_events::event_name.eq(event_name.as_str()))
                 .filter(analytics_events::timestamp.ge(since as i64))
                 .filter(analytics_events::timestamp.le(until as i64))
@@ -175,17 +182,22 @@ impl AnalyticsRepository for SqliteStorage {
     ) -> Result<Vec<(String, u64)>> {
         let pool = Arc::clone(&self.pool);
         let event_name = event_name.to_string();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<(String, u64)>> {
             let mut conn = pool.get().context("get db connection")?;
+            // Spec hierarchy-enforcement.md §3: the raw aggregation filters by
+            // tenant_id too — a name-prefix lint cannot see this query, so the
+            // predicate is carried here explicitly.
             let rows = diesel::sql_query(
                 "SELECT date(timestamp, 'unixepoch') as day, COUNT(*) as cnt \
                  FROM analytics_events \
-                 WHERE event_name = ? AND timestamp >= ? AND timestamp <= ? \
+                 WHERE event_name = ? AND timestamp >= ? AND timestamp <= ? AND tenant_id = ? \
                  GROUP BY day ORDER BY day",
             )
             .bind::<Text, _>(event_name)
             .bind::<BigInt, _>(since as i64)
             .bind::<BigInt, _>(until as i64)
+            .bind::<Text, _>(tenant)
             .load::<DayCount>(&mut *conn)
             .context("aggregate analytics_events by day")?;
             Ok(rows.into_iter().map(|r| (r.day, r.cnt as u64)).collect())
@@ -212,6 +224,7 @@ impl CostRepository for SqliteStorage {
     async fn record(&self, entry: &CostEntry) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let e = entry.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
             let record = CostEntryRecord {
@@ -222,7 +235,7 @@ impl CostRepository for SqliteStorage {
                 amount: e.amount,
                 currency: &e.currency,
                 timestamp: e.timestamp as i64,
-                tenant_id: "default",
+                tenant_id: &tenant,
             };
             diesel::insert_into(cost_entries::table)
                 .values(&record)
@@ -236,9 +249,11 @@ impl CostRepository for SqliteStorage {
     async fn query_by_agent(&self, agent_id: &Id, since: Option<u64>) -> Result<Vec<CostEntry>> {
         let pool = Arc::clone(&self.pool);
         let agent_id = agent_id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<CostEntry>> {
             let mut conn = pool.get().context("get db connection")?;
             let mut query = cost_entries::table
+                .filter(cost_entries::tenant_id.eq(&tenant))
                 .filter(cost_entries::agent_id.eq(agent_id.as_str()))
                 .order(cost_entries::timestamp.desc())
                 .into_boxed();
@@ -256,9 +271,11 @@ impl CostRepository for SqliteStorage {
     async fn query_by_task(&self, task_id: &Id) -> Result<Vec<CostEntry>> {
         let pool = Arc::clone(&self.pool);
         let task_id = task_id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<CostEntry>> {
             let mut conn = pool.get().context("get db connection")?;
             let rows = cost_entries::table
+                .filter(cost_entries::tenant_id.eq(&tenant))
                 .filter(cost_entries::task_id.eq(task_id.as_str()))
                 .order(cost_entries::timestamp.desc())
                 .load::<CostEntryRow>(&mut *conn)
@@ -271,9 +288,11 @@ impl CostRepository for SqliteStorage {
     async fn total_by_agent(&self, agent_id: &Id) -> Result<f64> {
         let pool = Arc::clone(&self.pool);
         let agent_id = agent_id.clone();
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<f64> {
             let mut conn = pool.get().context("get db connection")?;
             let total = cost_entries::table
+                .filter(cost_entries::tenant_id.eq(&tenant))
                 .filter(cost_entries::agent_id.eq(agent_id.as_str()))
                 .select(diesel::dsl::sum(cost_entries::amount))
                 .get_result::<Option<f64>>(&mut *conn)
@@ -285,9 +304,11 @@ impl CostRepository for SqliteStorage {
 
     async fn total_by_period(&self, since: u64, until: u64) -> Result<f64> {
         let pool = Arc::clone(&self.pool);
+        let tenant = self.tenant_id.clone();
         tokio::task::spawn_blocking(move || -> Result<f64> {
             let mut conn = pool.get().context("get db connection")?;
             let total = cost_entries::table
+                .filter(cost_entries::tenant_id.eq(&tenant))
                 .filter(cost_entries::timestamp.ge(since as i64))
                 .filter(cost_entries::timestamp.le(until as i64))
                 .select(diesel::dsl::sum(cost_entries::amount))

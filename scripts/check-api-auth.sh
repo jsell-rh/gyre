@@ -15,11 +15,15 @@
 # This script verifies:
 #   Check 1: The ABAC middleware chain is present on the api router in build_router().
 #   Check 2: Non-ABAC POST/PUT/DELETE routes have per-handler auth extractors.
+#   Check 3: Every route has an ABAC RouteResourceMapping — delegated to
+#            check-abac-route-registry.sh, the single source of truth for the
+#            route↔resolver cross-reference and its frozen exemptions.
 #
 # Run by pre-commit and CI.
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LIB_RS="crates/gyre-server/src/lib.rs"
 SERVER_SRC="crates/gyre-server/src"
 FAIL=0
@@ -145,6 +149,26 @@ if [ "$CHECKED" -gt 0 ] && [ "$FAIL" -eq 0 ]; then
     echo "  OK: ${CHECKED} non-ABAC handlers checked, ${SKIPPED} exempt. All have auth extractors."
 elif [ "$CHECKED" -eq 0 ]; then
     echo "  OK: No non-ABAC mutating handlers found (${SKIPPED} exempt)."
+fi
+
+# ── Check 3: every route has a RouteResourceMapping (spec §7) ───────────
+#
+# An api route without a resolver mapping rides the ABAC middleware with NO
+# policy evaluation (AGENTS.md invariant; hierarchy-enforcement §7). That
+# cross-reference — route registry vs abac_middleware resolvers, with its
+# frozen exemption/duplicate baselines — is owned by
+# scripts/check-abac-route-registry.sh. Re-implementing it here would fork
+# the frozen baselines; this check runs the owning script and folds its
+# result into this gate, so passing check-api-auth.sh means passing the full
+# §7 route-coverage requirement.
+
+echo "Check 3: Verifying every route has an ABAC RouteResourceMapping (delegated)..."
+
+if ! bash "$SCRIPT_DIR/check-abac-route-registry.sh"; then
+    echo "  ROUTE REGISTRY VIOLATION: check-abac-route-registry.sh failed (details above)."
+    echo "    Register the route's RouteResourceMapping in abac_middleware.rs or"
+    echo "    the FROZEN route-registry exemption file — never a new exemption."
+    FAIL=1
 fi
 
 # ── Result ──────────────────────────────────────────────────────────────
