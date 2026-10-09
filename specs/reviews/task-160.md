@@ -57,3 +57,62 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+## Round 5 — independent review of candidate e1e16020 (verdict: complete)
+
+Candidate: `e1e16020` against base `8c2d1775`. The task surface
+(scripts/, adapters, pre-commit, CI wiring) is byte-identical to the
+round-4-reviewed tree `13ff2a51` (empty diff on all task files); the only
+candidate-authored commit is the docs commit recording re-verification at
+the merged HEAD plus the task-210 attribution-drift repair. All round-5
+evidence independently re-derived, not reused:
+
+**Clean runs at candidate (exit 0 all):** check-hierarchy.sh;
+check-tenant-filter.sh (111 checked / 0 violations, backlog visible);
+check-api-auth.sh (3 checks, Check 3 delegated to the frozen-baseline
+owner); check-scope-literal-defaults.sh `crates`; check-abac-route-registry;
+check-abac-exempt-handlers (89 handlers); check-task-commit-attribution.
+`cargo test -p gyre-adapters --test tenant_isolation` 2 passed / 0 failed;
+`cargo test -p gyre-adapters --lib` 344 passed / 0 failed.
+
+**Mutation kills (isolated worktrees, restored after each):** hierarchy —
+`Task.workspace_id → Option<Id>` exit 1 naming task.rs:60, field deletion
+exit 1; tenant-filter — sqlite workspace find_by_id, pg notification get,
+pg compute_target has_workspace_references, sqlite resolve_for_agent,
+sqlite agent record_usage (both F2-repair prefixes), sqlite secret
+get_value — all exit 1 with exact file:line; api-auth — abac_middleware
+layer removal, resolver-entry deletion, route-rename-without-registry,
+POST handler auth-extractor removal all exit 1. The tenant_isolation test
+kills both defect shapes: deleting the workspace find_by_id tenant
+predicate fails with "find_by_id leaked tenant B's workspace id to tenant
+A"; corrupting it fails the positive control.
+
+**Skip-list controls:** disabling the message.rs skip entry surfaces 10
+MISSING violations (the skip list is load-bearing, not blanket-pass);
+disabling the kv_store.rs skip entry changes nothing — its read methods
+(`kv_get`/`kv_list`) lack read-name prefixes so they were never in the
+checked set; the entry is redundant documentation today, not a bypass.
+
+**Non-findings (checked, not material):** (a) coverage rows 10/14/27 in
+`specs/coverage/system/hierarchy-enforcement.md` remain `task-assigned` —
+the task contract has no coverage-flip clause (unlike task-207), and the
+task-206 precedent (d60a850b) established that implementer/review
+self-flips are rejected as self-grading; status stays literally true until
+the task completes; the stale notes describe the base's advisory state.
+PM/auditor follow-up. (b) check-api-auth Check 2 covers mutating verbs
+only by documented design (base and candidate identical); a GET outer-
+router handler losing its auth extractor is outside it — git handlers
+derive the repo from `auth.tenant_id`-scoped find_by_slug, so the actual
+exposure is compile-time or tenant-scoped anyway. (c) `check-path-scope-
+binding.sh` dies with a mawk syntax error (gawk-only `match(..., arr)`)
+and exits 2 — pre-existing at base, file untouched by this task; belongs
+to that script's owner. (d) pg secret `resolve_for_agent` remains a
+pre-existing `bail!` stub — out of scope (no tenant-column read terminal
+either way).
+
+Evidence: `/tmp/stage/review-evidence/task-160-r5/` (25 files: clean runs,
+all mutation outputs with commands, skip-list controls, coverage-matrix
+check, GET-handler gap analysis). Network note: crates.io sparse index
+unreachable from the review sandbox; the registry index cache was seeded
+from the exact Cargo.lock crate list via static.crates.io-backed fetches,
+then normal cargo built and ran unchanged.
