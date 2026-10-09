@@ -5,7 +5,7 @@ depends_on: []
 progress: not-started
 coverage_sections:
   - "spec-registry.md §9"
-commits: ["10d0f5fc3438e9bef80cb387d4dad3de2c862205", "1015ca297e0ad116e5989c06745f0752d16750ad", "afc323529f1c8ae985931d7dabf5386f2082d288"]
+commits: ["b4671c3564f85f72209da3b9e39f70b0075b6109", "b357fc66663a755beae5b0cf83112b7ab4f5e1a4", "2d445b1501300d385ee270b59f441e1ce8872a07"]
 ---
 
 ## Spec Excerpt
