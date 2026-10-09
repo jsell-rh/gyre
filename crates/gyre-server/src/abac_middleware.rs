@@ -287,6 +287,16 @@ impl ResourceResolver {
                 ),
                 RouteResourceMapping::api("/api/v1/repos/:id/specs/save", "spec", Some("write")),
                 RouteResourceMapping::api(
+                    "/api/v1/repos/:id/spec-assertions/check",
+                    "spec",
+                    Some("write"),
+                ),
+                RouteResourceMapping::api(
+                    "/api/v1/repos/:id/specs/:path/assertions",
+                    "spec",
+                    None,
+                ),
+                RouteResourceMapping::api(
                     "/api/v1/repos/:id/prompts/save",
                     "spec",
                     Some("generate"),

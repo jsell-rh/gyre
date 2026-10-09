@@ -1,9 +1,12 @@
-//! Executable spec assertion endpoint (system-explorer spec S9).
+//! Executable spec assertion endpoints (system-explorer spec S9).
 //!
 //! POST /api/v1/repos/:id/spec-assertions/check
+//!   Parses `<!-- gyre:assert ... -->` comments from spec markdown content,
+//!   evaluates them against the repo's knowledge graph, and returns results.
 //!
-//! Parses `<!-- gyre:assert ... -->` comments from spec markdown content,
-//! evaluates them against the repo's knowledge graph, and returns results.
+//! GET /api/v1/repos/:id/specs/:path/assertions
+//!   Returns the results persisted by the last push's knowledge-graph check
+//!   for a spec, so the inline spec view can show the last checked state.
 
 use axum::{
     extract::{Path, State},
@@ -92,7 +95,81 @@ pub async fn check_spec_assertions(
         })
         .collect();
 
+
     Ok((StatusCode::OK, Json(CheckAssertionsResponse { assertions })))
+}
+/// A stored assertion result in the GET response.
+#[derive(Serialize)]
+pub struct StoredAssertionResultResponse {
+    /// 1-based line of the `<!-- gyre:assert ... -->` comment in the spec.
+    pub line: usize,
+    /// Canonical assertion type (`no_dependency`, `implements`, `all_have`, ...).
+    #[serde(rename = "type")]
+    pub assertion_type: String,
+    /// Assertion parameters as a JSON object.
+    pub params: serde_json::Value,
+    /// Whether the assertion passed at the last check.
+    pub passed: bool,
+    /// Human-readable explanation of the result.
+    pub details: String,
+    /// Commit SHA the knowledge graph was extracted from when checked.
+    pub commit_sha: String,
+    /// Unix epoch seconds when the check ran.
+    pub checked_at: u64,
+}
+
+/// Response for GET /api/v1/repos/:id/specs/:path/assertions.
+#[derive(Serialize)]
+pub struct StoredAssertionsResponse {
+    pub assertions: Vec<StoredAssertionResultResponse>,
+}
+
+/// GET /api/v1/repos/:id/specs/:path/assertions
+///
+/// Returns the assertion results persisted by the last push's post-extraction
+/// check for the given spec. The spec path is URL-encoded into the `:path`
+/// segment (same convention as `GET /api/v1/specs/:path`), e.g. for
+/// `/api/v1/repos/r1/specs/system%2Farchitecture.md/assertions` the spec path
+/// is `system/architecture.md`.
+pub async fn get_spec_assertion_results(
+    State(state): State<Arc<AppState>>,
+    Path((id, spec_path)): Path<(String, String)>,
+) -> Result<Json<StoredAssertionsResponse>, ApiError> {
+    // Verify repo exists (same containment as the check endpoint).
+    state
+        .repos
+        .find_by_id(&Id::new(&id))
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+
+    // Stored spec paths are canonical (no `specs/` prefix — same identity as
+    // the spec ledger); tolerate a caller that sends the prefixed form.
+    let spec_path = spec_path
+        .strip_prefix("specs/")
+        .unwrap_or(&spec_path)
+        .to_string();
+
+    let results = state
+        .spec_assertion_results
+        .list_by_spec(&id, &spec_path)
+        .await
+        .map_err(ApiError::Internal)?;
+
+    let assertions = results
+        .into_iter()
+        .map(|r| StoredAssertionResultResponse {
+            line: r.line,
+            assertion_type: r.assertion_type,
+            params: serde_json::from_str(&r.params_json).unwrap_or(serde_json::Value::Null),
+            passed: r.passed,
+            details: r.explanation,
+            commit_sha: r.commit_sha,
+            checked_at: r.checked_at,
+        })
+        .collect();
+
+    Ok(Json(StoredAssertionsResponse { assertions }))
 }
 
 #[cfg(test)]
@@ -286,5 +363,166 @@ mod tests {
         let json = body_json(resp).await;
         let assertions = json["assertions"].as_array().unwrap();
         assert!(assertions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_spec_assertion_results_returns_stored_rows() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Create a repo via HTTP (shares the same state).
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "name": "assert-get-repo",
+                            "workspace_id": "ws-1",
+                            "tenant_id": "tenant-1",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_json = body_json(repo_resp).await;
+        let repo_id = repo_json["id"].as_str().unwrap().to_string();
+
+        // Seed stored results the way the post-push check does: canonical spec
+        // path (no `specs/` prefix), one passing and one failing assertion.
+        state
+            .spec_assertion_results
+            .save_results(&[
+                gyre_domain::SpecAssertionResult {
+                    id: "r1".to_string(),
+                    repo_id: repo_id.clone(),
+                    spec_path: "system/architecture.md".to_string(),
+                    line: 3,
+                    assertion_type: "no_dependency".to_string(),
+                    assertion_text: "<!-- gyre:assert type=\"no_dependency\" from=\"gyre-domain\" to=\"gyre-adapters\" -->".to_string(),
+                    params_json: r#"{"type":"no_dependency","from":"gyre-domain","to":"gyre-adapters"}"#.to_string(),
+                    passed: true,
+                    explanation: "no dependency edge from gyre-domain to gyre-adapters".to_string(),
+                    commit_sha: "deadbeef".to_string(),
+                    checked_at: 1700000000,
+                },
+                gyre_domain::SpecAssertionResult {
+                    id: "r2".to_string(),
+                    repo_id: repo_id.clone(),
+                    spec_path: "system/architecture.md".to_string(),
+                    line: 5,
+                    assertion_type: "implements".to_string(),
+                    assertion_text: "<!-- gyre:assert type=\"implements\" subject=\"SearchService\" trait=\"FullTextPort\" -->".to_string(),
+                    params_json: r#"{"type":"implements","subject":"SearchService","trait":"FullTextPort"}"#.to_string(),
+                    passed: false,
+                    explanation: "SearchService not found in graph".to_string(),
+                    commit_sha: "deadbeef".to_string(),
+                    checked_at: 1700000000,
+                },
+            ])
+            .await
+            .unwrap();
+
+        // URL-encoded path segment (same convention as GET /api/v1/specs/:path).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/api/v1/repos/{repo_id}/specs/system%2Farchitecture.md/assertions"
+                    ))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let assertions = json["assertions"].as_array().unwrap();
+        assert_eq!(assertions.len(), 2);
+        assert_eq!(assertions[0]["line"].as_u64().unwrap(), 3);
+        assert_eq!(assertions[0]["type"].as_str().unwrap(), "no_dependency");
+        assert!(assertions[0]["passed"].as_bool().unwrap());
+        assert_eq!(assertions[0]["commit_sha"].as_str().unwrap(), "deadbeef");
+        assert_eq!(assertions[0]["checked_at"].as_u64().unwrap(), 1700000000);
+        assert_eq!(
+            assertions[0]["params"]["from"].as_str().unwrap(),
+            "gyre-domain"
+        );
+        assert!(!assertions[1]["passed"].as_bool().unwrap());
+        assert_eq!(assertions[1]["type"].as_str().unwrap(), "implements");
+    }
+
+    #[tokio::test]
+    async fn get_spec_assertion_results_unknown_repo_404s() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/repos/nonexistent/specs/test%2Fspec.md/assertions")
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_spec_assertion_results_no_stored_rows_returns_empty() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let repo_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({
+                            "name": "assert-empty-get-repo",
+                            "workspace_id": "ws-1",
+                            "tenant_id": "tenant-1",
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repo_resp.status(), StatusCode::CREATED);
+        let repo_json = body_json(repo_resp).await;
+        let repo_id = repo_json["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/v1/repos/{repo_id}/specs/never%2Fchecked.md/assertions"))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["assertions"].as_array().unwrap().is_empty());
     }
 }

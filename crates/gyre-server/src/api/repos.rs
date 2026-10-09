@@ -361,6 +361,12 @@ pub async fn delete_repo(
 
     state.repos.delete(&repo.id).await?;
 
+    // Remove persisted spec assertion results so a deleted repo leaves no
+    // orphaned rows behind.
+    if let Err(e) = state.spec_assertion_results.delete_by_repo(&repo.id.as_str()).await {
+        tracing::warn!(repo_id = %id, "failed to delete spec assertion results on repo delete: {e}");
+    }
+
     // Clean up the git directory on disk to prevent stale directories from
     // blocking future repo/mirror creation with the same workspace + name.
     let path = std::path::Path::new(&repo.path);
@@ -477,8 +483,24 @@ pub async fn create_mirror_repo(
         let extract_repo_id = repo.id.to_string();
         let extract_path = repo_path.clone();
         let graph_store = Arc::clone(&state.graph_store);
+        let extract_results_repo = Arc::clone(&state.spec_assertion_results);
         let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
         let default_ref = format!("refs/heads/{}", repo.default_branch);
+        // §9: resolve the workspace scope + notification ports before the
+        // spawn — the initial mirror clone is a push-equivalent event.
+        let notification_scope = state
+            .workspaces
+            .find_by_id(&repo.workspace_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|ws| crate::graph_extraction::PushNotificationScope {
+                workspace_id: repo.workspace_id.to_string(),
+                tenant_id: ws.tenant_id.to_string(),
+            });
+        // DivergencePorts borrows `&dyn` repo refs, so it must be built inside
+        // the spawned future from an owned state clone ('static requirement).
+        let state_for_extract = Arc::clone(&state);
         tokio::spawn(async move {
             if let Ok(output) = tokio::process::Command::new(&git_bin)
                 .args(["-C", &extract_path, "rev-parse", &default_ref])
@@ -487,6 +509,11 @@ pub async fn create_mirror_repo(
             {
                 if output.status.success() {
                     let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    let divergence_ports =
+                        Some(crate::graph_extraction::DivergencePorts {
+                            notification_repo: state_for_extract.notifications.as_ref(),
+                            membership_repo: state_for_extract.workspace_memberships.as_ref(),
+                        });
                     crate::graph_extraction::extract_and_store_graph(
                         &extract_path,
                         &extract_repo_id,
@@ -494,7 +521,9 @@ pub async fn create_mirror_repo(
                         graph_store,
                         &git_bin,
                         None,
-                        None,
+                        divergence_ports,
+                        extract_results_repo,
+                        notification_scope,
                     )
                     .await;
                 }
@@ -564,6 +593,18 @@ pub async fn sync_mirror(
             )
             .await;
 
+            // §9: mirror-synced repos resolve the workspace scope from the
+            // repo's own workspace — mirror pushes notify too.
+            let notification_scope = workspace_tenant_id.map(|tenant_id| {
+                crate::graph_extraction::PushNotificationScope {
+                    workspace_id: workspace_id_str.clone(),
+                    tenant_id: tenant_id.to_string(),
+                }
+            });
+            let divergence_ports = Some(crate::graph_extraction::DivergencePorts {
+                notification_repo: state.notifications.as_ref(),
+                membership_repo: state.workspace_memberships.as_ref(),
+            });
             crate::graph_extraction::extract_and_store_graph(
                 &repo.path,
                 &repo_id_str,
@@ -571,7 +612,9 @@ pub async fn sync_mirror(
                 Arc::clone(&state.graph_store),
                 &git_bin,
                 None,
-                None,
+                divergence_ports,
+                Arc::clone(&state.spec_assertion_results),
+                notification_scope,
             )
             .await;
         }
@@ -1202,6 +1245,68 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(del_resp2.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn delete_repo_removes_spec_assertion_results() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let id = create_repo_via_api(&app, "repo-assert-cleanup").await;
+
+        // Seed persisted assertion results for the repo (as the post-push
+        // check would).
+        let record = gyre_domain::SpecAssertionResult {
+            id: "assert-del-1".to_string(),
+            repo_id: id.clone(),
+            spec_path: "system/architecture.md".to_string(),
+            line: 3,
+            assertion_type: "no_dependency".to_string(),
+            assertion_text: "no_dependency gyre-domain -> gyre-adapters".to_string(),
+            params_json: r#"{"from":"gyre-domain","to":"gyre-adapters"}"#.to_string(),
+            passed: true,
+            explanation: "ok".to_string(),
+            commit_sha: "deadbeef".to_string(),
+            checked_at: 1_000,
+        };
+        state
+            .spec_assertion_results
+            .save_results(&[record])
+            .await
+            .unwrap();
+
+        // Archive, then delete.
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{id}/archive"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let del_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/repos/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_resp.status(), StatusCode::NO_CONTENT);
+
+        // The repo's assertion results are gone.
+        let stored = state
+            .spec_assertion_results
+            .list_by_spec(&id, "system/architecture.md")
+            .await
+            .unwrap();
+        assert!(
+            stored.is_empty(),
+            "assertion results must be removed on repo delete"
+        );
     }
 
     #[tokio::test]
