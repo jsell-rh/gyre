@@ -24,6 +24,11 @@ class ContextTest(unittest.TestCase):
         self.assertIn('Newest concrete finding', result)
         self.assertIn('Read task.md', result)
         self.assertEqual(context.contract.generation(body, {}), context.contract.generation(result, {}))
+        requirements = context.task_context(body, 'task.md', include_history=False)
+        self.assertNotIn('Newest concrete finding', requirements)
+        self.assertNotIn('old diagnostic', requirements)
+        self.assertIn('Keep all enforcement active.', requirements)
+        self.assertEqual(context.contract.generation(body, {}), context.contract.generation(requirements, {}))
 
     def test_non_generated_baseline_and_unknown_headings_are_requirements(self):
         body = ('---\ntitle: ordinary feature\nprogress: ready-for-review\n---\n'

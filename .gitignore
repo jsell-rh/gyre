@@ -66,3 +66,4 @@ scripts/go-callgraph/go-callgraph
 web/test-results/
 # Local agent goal notes (secrets — never commit)
 OPENSHELL-GOAL.md
+.gyre-pipeline/
