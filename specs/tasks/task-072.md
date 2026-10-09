@@ -2,7 +2,7 @@
 title: "LSP Call Graph — Core Pipeline + Go Extractor Integration"
 spec_ref: "lsp-call-graph.md §1–6, §10 Phase 1, §11"
 depends_on: []
-progress: complete
+progress: ready-for-review
 review: specs/reviews/task-072.md
 coverage_sections:
   - "lsp-call-graph.md §1 Problem"
@@ -13,7 +13,7 @@ coverage_sections:
   - "lsp-call-graph.md §6 Extraction Pipeline"
   - "lsp-call-graph.md §10 Implementation Phases (Phase 1)"
   - "lsp-call-graph.md §11 Prerequisites"
-commits: ["9cf2a5a67a0926fa4bef3032c8a20e134453a672", "e707d31b2999d835052ae3d8e19a1687949e65a7", "ea7ba523536e314551c0da3ee3612e0dbb01deb0", "1777385e90664f0c0470d38f62a326a9d62dd6ad", "756f4b356aa5b9cb93be22b6b7691a2859fa75ba", "286927ae62802f7a8b0a7fbd795f10ae0c72b2c7", "bd85151d2d8e5fdd8e74e3347f9f1c107ac3e006"]
+commits: ["9cf2a5a67a0926fa4bef3032c8a20e134453a672", "e707d31b2999d835052ae3d8e19a1687949e65a7", "ea7ba523536e314551c0da3ee3612e0dbb01deb0", "1777385e90664f0c0470d38f62a326a9d62dd6ad", "756f4b356aa5b9cb93be22b6b7691a2859fa75ba", "286927ae62802f7a8b0a7fbd795f10ae0c72b2c7", "bd85151d2d8e5fdd8e74e3347f9f1c107ac3e006", "17c81d5a4d8fe8dc93387ba2c8360187a8028737"]
 ---
 
 ## Spec Excerpt
@@ -65,9 +65,15 @@ Read `specs/system/lsp-call-graph.md` for full context. The Go binary already ex
 
 ## Round R3 Notes (implementation, 2026-10-06)
 
-- R2 findings F6/F7/F8 are fixed by product code on this branch: Pass 1 qnames built from Go's import-path rule (`go_extractor.rs`); one ambiguity policy — hint-corroborated `select`, no ordering picks (`call_graph_resolve.rs`); `Calls` sweep exemption, content-derived edge ids, and Pass 2 self-reconciliation (`graph_extraction.rs`). Verified green at this HEAD: `cargo test -p gyre-domain go_extractor` 13/13, domain `call_graph_resolve` 14/14, `cargo test -p gyre-adapters call_graph` 2/2, `cargo test -p gyre-server --lib graph_extraction` 22/22 — including every R3 regression (`sync_go_repo_persists_calls_edges_in_graph_store`, `pass2_edge_ids_stable_across_runs`, `sweep_preserves_calls_edges_owned_by_pass2`, `pass2_reconciles_stale_calls_edges`, `pass2_reconcile_skipped_when_toolchain_unavailable`, `pass2_reconcile_removes_legacy_duplicate_id_rows`, `resolve_go_prefix_similar_package_is_not_guessed`). `check-task-commit-attribution.sh`, `check-arch.sh`, `check-mem-port-contracts.sh`, `check-inert-enforcement.sh`, `check-relative-path-defaults.sh` all pass; `rustfmt --check` clean on every branch-touched file (repo-wide `cargo fmt --check` drift is pre-existing main baseline in files this branch never touches).
+- R2 findings F6/F7/F8 are fixed by product code on this branch: Pass 1 qnames built from Go's import-path rule (`go_extractor.rs`); one ambiguity policy — hint-corroborated `select`, no ordering picks (`call_graph_resolve.rs`); `Calls` sweep exemption, content-derived edge ids, and Pass 2 self-reconciliation (`graph_extraction.rs`). Verified green at this HEAD: `cargo test -p gyre-domain go_extractor` 13/13, domain `call_graph_resolve` 16/16, `cargo test -p gyre-adapters call_graph` 2/2, `cargo test -p gyre-server --lib graph_extraction` 22/22 — including every R3 regression (`sync_go_repo_persists_calls_edges_in_graph_store`, `pass2_edge_ids_stable_across_runs`, `sweep_preserves_calls_edges_owned_by_pass2`, `pass2_reconciles_stale_calls_edges`, `pass2_reconcile_skipped_when_toolchain_unavailable`, `pass2_reconcile_removes_legacy_duplicate_id_rows`, `resolve_go_prefix_similar_package_is_not_guessed`). `check-task-commit-attribution.sh`, `check-arch.sh`, `check-mem-port-contracts.sh`, `check-inert-enforcement.sh`, `check-relative-path-defaults.sh` all pass; `rustfmt --check` clean on every branch-touched file (repo-wide `cargo fmt --check` drift is pre-existing main baseline in files this branch never touches).
 - HTTP-bound in-process-server verification CANNOT run in this worker sandbox: loopback TCP data transfer is reset by the sandbox after accept for any process — demonstrated with a pure Python HTTP server/client pair (v4, v6, and raw socket, zero gyre code involved) getting `ConnectionResetError`. All 35 `graph_integration` and all 21 `auth_integration` tests consequently fail on the harness's first request (`reqwest IncompleteMessage`) irrespective of this branch, which touches neither binary nor the router (last change: d7940e8, already on main). Full deterministic gates must run on the integrated commit in an environment with working loopback; the pipeline's own storage-level integration is covered by the 22 lib tests above.
 - `17c81d5a` (task-072 surface style fix that landed on `main`) MUST stay in the `commits:` list: `check-task-commit-attribution.sh` scans full history, while the controller's `process: record task-072 branch commits` recorder regenerates the list from `main..HEAD` only — it dropped this SHA in 64ef557 and re-triggered the gate violation. If the recorder rewrites this frontmatter again, re-add `17c81d5a4d8fe8dc93387ba2c8360187a8028737`.
+
+## Round R4 Notes (resume repair, 2026-10-09)
+
+- Resume condition: the pipeline cutover reset this task to `needs-revision` with a five-SHA `commits:` list that does not resolve in current history — `a8d036f4` now names an unrelated task-091 commit (history rewrite collision) and `ac3a99bf`/`2b34ae1f`/`144aa70c`/`547b5496` exist nowhere in this repository (pre-cutover legacy SHAs). The retained source itself was intact: `git diff 7e71ac9d HEAD -- crates/` shows the only product change is `api/admin.rs`, which came in via the upstream merge (task-210 surface, not task-072).
+- Repair: frontmatter restored to the eight resolvable full SHAs of the real task-072 work; R3 notes + Shipped restored after the cutover stripped them (they carry the durable sandbox findings and the recorder-drop warning).
+- Inherited upstream gate failure repaired in the same round: main commit `a781ede2` (`feat(task-210)`, landed on main after task-210's last `process: record task-210 branch commits`) is missing from `specs/tasks/task-210.md` `commits:`, so `check-task-commit-attribution.sh` fails on main and on this branch after the merge — same recorder class as R3-F9. Fixed by recording `a781ede2` in task-210.md.
 
 ## Shipped
 
