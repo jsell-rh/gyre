@@ -165,21 +165,27 @@ describe('ExplorerCanvas — large graph performance', () => {
     expect(nodes.length).toBeGreaterThanOrEqual(10000);
     expect(edges.length).toBeGreaterThanOrEqual(20000);
 
-    // Measure render time — jsdom timing is not identical to browser timing
-    // but serves as a regression guard for computational performance.
+    // Measure CPU time — jsdom timing is not identical to browser timing but
+    // serves as a regression guard for computational performance. CPU time is
+    // measured instead of wall time so the guard stays deterministic when the
+    // full suite runs workers in parallel and the event loop is contended:
+    // under load, wall time inflates (observed 16s for this render in a full
+    // suite run vs ~3s isolated) while CPU time does not.
     // The AC target is <100ms in a real browser. In jsdom, rendering 10k nodes
     // takes several seconds because jsdom is single-threaded JS without GPU
     // acceleration. We use a generous threshold as a regression guard —
     // a sudden 10x increase would indicate an algorithmic regression.
-    const start = performance.now();
+    const startCpu = process.cpuUsage();
     render(ExplorerCanvas, {
       props: { nodes, edges },
     });
-    const elapsed = performance.now() - start;
+    const cpuUsed = process.cpuUsage(startCpu);
+    const cpuMs = (cpuUsed.user + cpuUsed.system) / 1000;
 
     // jsdom regression guard — not the AC target (which requires real browser).
-    // Typical jsdom: 2-5s for 10k nodes. Threshold set at 15s to avoid flaky CI.
-    expect(elapsed).toBeLessThan(15000);
+    // Typical jsdom: ~3s CPU for 10k nodes. Threshold set at 15s to catch a
+    // sudden algorithmic regression without flaky CI.
+    expect(cpuMs).toBeLessThan(15000);
   }, 30000);
 
   it('10k graph renders a canvas element', () => {
@@ -284,15 +290,17 @@ describe('ExplorerCanvas — large graph performance', () => {
     const { nodes, edges } = generateLargeGraph(15000, 30000);
     expect(nodes.length).toBeGreaterThanOrEqual(15000);
 
-    const start = performance.now();
+    const startCpu = process.cpuUsage();
     render(ExplorerCanvas, {
       props: { nodes, edges },
     });
-    const elapsed = performance.now() - start;
+    const cpuUsed = process.cpuUsage(startCpu);
+    const cpuMs = (cpuUsed.user + cpuUsed.system) / 1000;
 
-    // jsdom regression guard for 15k graph. Typical: 3-8s.
-    // Real browser target would be <200ms; jsdom is orders of magnitude slower.
-    expect(elapsed).toBeLessThan(20000);
+    // jsdom regression guard for 15k graph (CPU time — see 10k test above).
+    // Typical: ~5s CPU. Real browser target would be <200ms; jsdom is
+    // orders of magnitude slower.
+    expect(cpuMs).toBeLessThan(20000);
   }, 30000);
 
 });

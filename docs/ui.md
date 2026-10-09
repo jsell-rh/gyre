@@ -156,7 +156,7 @@ Clicking a repo from Workspace Home enters Repo Mode. The top bar shows `[←] W
 
 ## Design System
 
-Red Hat brand CSS variables (`web/src/lib/design-system.css`) — dark theme with `gray-95` (#151515) background, `red-50` (#ee0000) primary. Component library: `Button`, `Badge`, `Card`, `Table`, `Input`, `Modal`, `Toast`, `Tabs`, `Skeleton`, `EmptyState`, `Breadcrumb`, `SearchBar`, `NodeBadge`, `StatusBadge`, `DiffSuggestion`.
+Red Hat brand CSS variables (`web/src/lib/design-system.css`) — dark theme with `gray-95` (#151515) background, `red-50` (#ee0000) primary. Component library: `Button`, `Badge`, `Card`, `Table`, `Input`, `Modal`, `Toast`, `Tabs`, `Skeleton`, `EmptyState`, `Breadcrumb`, `SearchBar`, `StatusBadge`, `DiffSuggestion`.
 
 ---
 
