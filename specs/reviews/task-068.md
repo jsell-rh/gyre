@@ -17,6 +17,10 @@ Commits under review: the 7 attributed in the task frontmatter (92b6aa1, be0f528
 - **Probe results (this sandbox):** `cargo check -p gyre-server --tests` clean; `cargo test -p gyre-server --lib mcp` 78/78 pass; `cargo test -p gyre-domain --lib view_query_resolver` 124/124 pass.
 - **RBAC:** all five graph tools are read-only (list_nodes/list_edges/get_node only) and correctly absent from the `needs_write` gate (mcp.rs:3011-3025) — matches handler effects; `check-mcp-write-tools.sh` passes.
 
+### Verdict (round 1)
+
+**needs-revision** — one minor finding (F1). All §9/§22/§23 behavior is real, enforced through the MCP protocol path, and covered by tests that fail when the behavior breaks. Repair is a one-line assertion restore; after that the task meets the spec.
+
 ## Round 2 (F1 repair verification)
 
 Comparison base 66422bd4 (per controller scope); task source at HEAD 0b74e20 identical to 4093cd3 (only `process:` attribution commits after). The only source change since round 1's verified HEAD 50e86a1 is the one-line fb9893c repair in mcp.rs; `view_query_resolver.rs`, `explorer_ws.rs`, `graph_integration.rs`, and the exemptions file are byte-identical to round 1, so round-1 evidence for those files carries.
@@ -36,10 +40,6 @@ Comparison base 66422bd4 (per controller scope); task source at HEAD 0b74e20 ide
 - Listener-based `graph_integration.rs` tests cannot run here (accept() fails with Errno 95 — no loopback listeners in this sandbox); those run in the controller's gates. The in-process `oneshot` tests are the local equivalent for the MCP protocol path.
 - Evidence recorded under `/tmp/stage/review-evidence/task-068-r2/` (commands, results, mutation probe detail incl. a first mis-cwd'd mutation attempt that was immediately restored and redone correctly).
 
-### Verdict
-
-**complete** — F1 resolved with evidence; no new findings. All round-1 verified behavior (§9 five tools over MCP incl. the envelope round-trip, §22 graph_summary six fields + real BFS test coverage, §23 dryrun resolution + boundary-tested warnings) stands, re-probed at HEAD where source changed.
-
 ### Findings
 
 - [x] **F1 (minor, RESOLVED by fb9893c): deleted meaningful test assertion — `gyre_search` had zero test coverage repo-wide.** Commit 01121b1 removed `assert!(names.contains(&"gyre_search"))` from `mcp_tools_list` (mcp.rs) and replaced it with the five §9 graph-tool assertions. `gyre_search` (entity full-text search, M22.7) remained registered (mcp.rs:329) and dispatched (mcp.rs:3094), but no test referenced it. **Repair verified:** fb9893c restored the assertion at HEAD mcp.rs:3230. Mutation probe in an isolated copy: removing the gyre_search entry from `tool_definitions()` fails `mcp_tools_list` with `assertion failed: names.contains(&"gyre_search")` — the restored assertion has teeth. Side effect of the repair checked: it swapped the `gyre_agent_complete` line for `gyre_search` rather than adding alongside; this is coverage-neutral, not a meaningful-test deletion — `gyre_agent_complete` registration+dispatch remain enforced by two dedicated pre-existing tests (`agent_complete_tool_schema_includes_summary`, `.expect("gyre_agent_complete must be in tools list")` on the real tools/list path, mcp.rs:3795; `agent_complete_unknown_agent_returns_error`, mcp.rs:3822; both present unchanged at base 66422bd4:3713/3740 and still passing at HEAD).
@@ -51,4 +51,4 @@ Comparison base 66422bd4 (per controller scope); task source at HEAD 0b74e20 ide
 
 ## Verdict
 
-**needs-revision** — one minor finding (F1). All §9/§22/§23 behavior is real, enforced through the MCP protocol path, and covered by tests that fail when the behavior breaks. Repair is a one-line assertion restore; after that the task meets the spec.
+**complete** — F1 resolved with evidence; no new findings. All round-1 verified behavior (§9 five tools over MCP incl. the envelope round-trip, §22 graph_summary six fields + real BFS test coverage, §23 dryrun resolution + boundary-tested warnings) stands, re-probed at HEAD where source changed. Source at final HEAD f134e8a is byte-identical to the evidence HEAD 0b74e20 (f134e8a touches only this review file), so round-2 probes remain valid.

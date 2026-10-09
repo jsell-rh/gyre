@@ -3,7 +3,7 @@ title: "Graph Summary & Dry-Run MCP Tools"
 spec_ref: "explorer-implementation.md §9, §22–23"
 depends_on:
   - task-062
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "explorer-implementation.md §9 MCP Tools Available to the Agent"
   - "explorer-implementation.md §22 Graph Summary MCP Tool"
@@ -94,6 +94,13 @@ Response shape:
 - [ ] `graph_query_dryrun` reports unresolved callouts
 - [ ] All 5 MCP tools (`graph_summary`, `graph_query_dryrun`, `graph_nodes`, `graph_edges`, `search`) are callable via MCP protocol
 - [ ] `cargo test --all` passes
+
+## Shipped
+
+- All five §9 explorer agent tools (`graph_summary`, `graph_query_dryrun`, `graph_nodes`, `graph_edges`, `search`) are callable over the real MCP protocol path (JSON-RPC `tools/call` → `build_router` → `AuthenticatedAgent` extractor → dispatch), with the explorer SDK script allowlisting the matching `mcp__gyre__*` names and Bearer-token `mcpServers.gyre` config.
+- `graph_summary` returns all six §22 spec fields; `test_coverage` is a real multi-source BFS from `test_node == true` nodes over outgoing `Calls` edges (soft-deleted edges excluded), proven against a real graph store.
+- `graph_query_dryrun` resolves scope, groups, callouts, and narrative, returns the spec's `{"query": …, "result": {DryRunResult}}` envelope, and generates all three warning classes with tested boundary semantics (empty scope, >200-node cluttered scope, >20-node too-broad groups, unresolved callouts).
+- `search` is a domain-level ranked full-text search (name/qualified_name/file_path/spec_path/doc_comment, soft-deleted excluded, char-boundary-safe truncation) shared by both the MCP handler and the inline explorer fallback, replacing a duplicated byte-slicing inline implementation.
 
 ## Agent Instructions
 
