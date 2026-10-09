@@ -242,12 +242,7 @@ pub async fn create_gate(
         Some(p) => p,
         None => {
             let existing = state.quality_gates.list_by_repo_id(&repo_id).await?;
-            existing
-                .iter()
-                .map(|g| g.position)
-                .max()
-                .unwrap_or(0)
-                + 1
+            existing.iter().map(|g| g.position).max().unwrap_or(0) + 1
         }
     };
 
@@ -283,7 +278,11 @@ pub async fn list_gates(
         .into_iter()
         .map(GateResponse::from)
         .collect();
-    result.sort_by(|a, b| a.position.cmp(&b.position).then(a.created_at.cmp(&b.created_at)));
+    result.sort_by(|a, b| {
+        a.position
+            .cmp(&b.position)
+            .then(a.created_at.cmp(&b.created_at))
+    });
     Ok(Json(result))
 }
 
@@ -325,7 +324,9 @@ pub async fn update_gate(
     if let Some(name) = req.name {
         let name = name.trim().to_string();
         if name.is_empty() {
-            return Err(ApiError::InvalidInput("gate name must be non-empty".to_string()));
+            return Err(ApiError::InvalidInput(
+                "gate name must be non-empty".to_string(),
+            ));
         }
         gate.name = name;
     }
@@ -643,6 +644,109 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
         let json = body_json(resp).await;
         assert_eq!(json["gate_type"], "agent_validation");
+    }
+
+    #[tokio::test]
+    async fn list_gates_orders_by_position() {
+        let state = test_state();
+        create_repo(state.clone()).await;
+        let app = crate::api::api_router().with_state(state);
+
+        // Create three gates; the second is explicitly positioned first.
+        for (name, gate_type, command, position) in [
+            ("lint", "lint_command", "cargo clippy", None),
+            ("unit-tests", "test_command", "cargo test", Some(1)),
+            ("review", "agent_review", None, None),
+        ] {
+            let mut body = serde_json::json!({
+                "name": name,
+                "gate_type": gate_type,
+            });
+            if let Some(cmd) = command {
+                body["command"] = serde_json::json!(cmd);
+            }
+            if let Some(p) = position {
+                body["position"] = serde_json::json!(p);
+            }
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/repos/repo-1/gates")
+                        .header("content-type", "application/json")
+                        .header("authorization", "Bearer test-token")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED, "gate {name} created");
+        }
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-1/gates")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let names: Vec<&str> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["name"].as_str().unwrap())
+            .collect();
+        // unit-tests (position 1) sorts before lint (default 3) and review (default 4);
+        // creation-order defaults append after existing max.
+        assert_eq!(names, vec!["unit-tests", "lint", "review"]);
+
+        // Reorder via PUT: move review to the front.
+        let review_id = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["name"] == "review")
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/repos/repo-1/gates/{review_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "position": 0 })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repos/repo-1/gates")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let names: Vec<&str> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["review", "unit-tests", "lint"]);
     }
 
     #[tokio::test]
