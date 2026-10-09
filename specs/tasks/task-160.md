@@ -112,3 +112,30 @@ passes.
 Review history: rounds 1–4 in `specs/reviews/task-160.md` (round-3 findings
 F1 dead exemptions / F2 read-name blind spot fixed in 06df8bfb and verified
 complete in round 4).
+
+## Recovery verification (checkpoint 60873ea7)
+
+Assignment base 8c2d1775 → candidate f6069758 ("Recovered an interrupted
+assignment"). The task surface (scripts, adapters, wiring, task-210 fix) is
+byte-identical to reviewed candidate 13ff2a51 — the base→candidate diff
+contains only pipeline-infra files (scripts/pipeline/*, dev-pipeline docs) and
+this task file. Review rounds 1–4 stand; this section records the fresh
+verification at the recovered HEAD f6069758 (evidence:
+`/tmp/stage/review-evidence/task-160-recovery/`):
+
+- Clean runs: hierarchy exit 0; tenant-filter exit 0 (111 checked /
+  0 violations); api-auth exit 0; attribution OK; scope-literal-defaults OK.
+- Mutation kills re-confirmed in an isolated worktree (restored after each):
+  `Task.workspace_id → Option<Id>` → hierarchy exit 1 (task.rs:60);
+  tenant predicate stripped from `sqlite/secret.rs::get_value` →
+  tenant-filter exit 1 (file:line); deleted `/api/v1/activity` resolver
+  entry → api-auth exit 1; renamed route without registry → api-auth exit 1.
+- `cargo test -p gyre-adapters --test tenant_isolation` at recovered HEAD:
+  2 passed / 0 failed.
+- Durable finding 8a9f53d6 (checks.sh exit 1): log tail is Svelte CSS/a11y
+  warnings with a successful vite build; no finding touches this task's
+  surface. Artifact path absent from this sandbox; treated as context per
+  assignment.
+- Sandbox transport note: TCP listener probe unsupported (EOPNOTSUPP) —
+  irrelevant here; scripts are static analysis and the focused test needs no
+  listener. Full workspace suites and GitHub CI remain owned by verification.
