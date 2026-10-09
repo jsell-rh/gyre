@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "dependency-graph.md §Dependency Entity"
-commits: ["10d5df6dafc0859c2f1360be65366d795f74ddd4", "02056fa0fe79474c325ec7cc91b8499680b0e333", "0248e9bf9c2d7b234fca8115d1412f70c4201596"]
+commits: ["0248e9bf9c2d7b234fca8115d1412f70c4201596", "02056fa0fe79474c325ec7cc91b8499680b0e333", "10d5df6dafc0859c2f1360be65366d795f74ddd4"]
 ---
 
 ## Spec Excerpt
