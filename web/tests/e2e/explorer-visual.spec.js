@@ -22,11 +22,11 @@
  * 4. Blast radius interactive mode
  */
 
-import { test, expect } from './fixtures/seeded.js';
+import { test, expect, SEED_WORKSPACE_SLUG, SEED_REPO_NAME } from './fixtures/seeded.js';
 import { MOCK_GRAPH, VIEW_QUERY_WITH_ANNOTATIONS, BLAST_RADIUS_QUERY } from './fixtures/mock-graph.js';
 
-const SEED_SLUG = 'default';
-const SEED_REPO = 'gyre-core';
+const SEED_SLUG = SEED_WORKSPACE_SLUG;
+const SEED_REPO = SEED_REPO_NAME;
 const REPO_ID = 'seed-repo-1';
 
 // Mock workspace and repo data for deterministic rendering.
