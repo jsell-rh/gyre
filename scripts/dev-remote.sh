@@ -18,6 +18,8 @@ cp /tmp/stage/models.yml /tmp/stage/config.yml /tmp/.omp/agent/
 git config --global user.name gyre-dev-controller
 git config --global user.email jsell-rh@users.noreply.github.com
 git config --global --add safe.directory '*'
+# Keep later fetches and lazy blob requests on the same transport as clone.
+git config --global http.version HTTP/1.1
 # shellcheck disable=SC2016 # The helper expands GITHUB_TOKEN when Git invokes it.
 git config --global credential.helper '!f(){ echo username=x-access-token; echo password=$GITHUB_TOKEN; }; f'
 if [ ! -d /tmp/gyre/.git ]; then
