@@ -1273,7 +1273,7 @@ pub async fn briefing_ask(
     // Optional repo scope (HSI §1.5 repo-scope Briefing / ui-navigation.md §2
     // Architecture Briefing sub-tab): same validation as the GET briefing
     // repo filter — repo must exist AND belong to the path workspace.
-    let repo_scope = match &req.repo_id {
+    let repo_scope = match &req.repo_id { // forged-scope-fields:ok — validated below: repo lookup + workspace containment vs the path workspace id
         Some(rid) => {
             let repo = state
                 .repos
