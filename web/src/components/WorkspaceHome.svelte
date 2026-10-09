@@ -14,7 +14,7 @@
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import { entityName, shortId, formatId, seedEntityName, seedFromEntities } from '../lib/entityNames.svelte.js';
-  import { relativeTime, formatDuration } from '../lib/timeFormat.js';
+  import { relativeTime, formatDuration, toEpochSec } from '../lib/timeFormat.js';
   import { specStatusTooltip, taskStatusTooltip, mrStatusTooltip, agentStatusTooltip, SPEC_STATUS_ICONS } from '../lib/statusTooltips.js';
   import RepoCard from './RepoCard.svelte';
   import DependencyHealthCard from './DependencyHealthCard.svelte';
@@ -312,6 +312,13 @@
   let rulesError = $state(null);
   let workspaceMetaSpecs = $state([]);
   let globalMetaSpecs = $state([]);
+  // Request generation: a load started for one workspace must never write
+  // state for another. Without this guard, a slow response for workspace A
+  // that settles after the user navigated to workspace B overwrites B's
+  // rules (or error) with A's — a cross-workspace leak in the cascade
+  // summary. Cleared/checked on every load so a late A success OR failure
+  // is dropped once B's load has started.
+  let rulesRequestSeq = 0;
 
   // ── Agent Rules: load ──────────────────────────────────────────────────
   // A failed lookup must surface as an error, never as an empty successful
@@ -320,6 +327,7 @@
   // fails the section (partial cascade data would mislead the same way).
   async function loadRules() {
     if (!workspace?.id) return;
+    const request = ++rulesRequestSeq;
     rulesLoading = true;
     rulesError = null;
     try {
@@ -327,12 +335,14 @@
         api.getMetaSpecs({ scope: 'Workspace', scope_id: workspace.id }),
         api.getMetaSpecs({ scope: 'Global' }),
       ]);
+      if (request !== rulesRequestSeq) return; // a newer load superseded this one
       workspaceMetaSpecs = Array.isArray(wsData) ? wsData : [];
       globalMetaSpecs = Array.isArray(globalData) ? globalData : [];
     } catch (e) {
+      if (request !== rulesRequestSeq) return; // a newer load superseded this one
       rulesError = e.message || 'Failed to load agent rules';
     } finally {
-      rulesLoading = false;
+      if (request === rulesRequestSeq) rulesLoading = false;
     }
   }
 
@@ -341,9 +351,12 @@
   let requiredMetaSpecs = $derived(allMetaSpecs.filter(m => m.required));
   let recentlyUpdated = $derived(
     allMetaSpecs.filter(m => {
-      if (!m.updated_at) return false;
-      const age = Date.now() - new Date(m.updated_at).getTime();
-      return age < 7 * 24 * 3600 * 1000; // within last 7 days
+      // MetaSpec.updated_at is u64 UNIX SECONDS (domain/meta_spec.rs), not
+      // milliseconds — new Date(updated_at) would misparse it as 1970-01.
+      const updated = toEpochSec(m.updated_at);
+      if (updated == null) return false;
+      const age = Date.now() / 1000 - updated;
+      return age < 7 * 24 * 3600; // within last 7 days
     })
   );
 
@@ -1571,7 +1584,7 @@
                 </p>
 
                 {#if recentlyUpdated.length > 0}
-                  <div class="reconcile-status" role="status" data-testid="reconcile-status">
+                  <div class="recent-updates-status" role="status" data-testid="reconcile-status">
                     {$t('workspace_home.rules_reconciling', { values: { count: recentlyUpdated.length } })}
                   </div>
                 {/if}
@@ -6033,7 +6046,7 @@
     color: var(--color-text-secondary);
   }
 
-  .reconcile-status {
+  .recent-updates-status {
     margin: var(--space-2) 0 0;
     padding: var(--space-2) var(--space-3);
     font-size: var(--text-xs);
