@@ -2,7 +2,7 @@
 title: "Dep Graph — Wire persistent DependencyRepository into AppState"
 spec_ref: "dependency-graph.md §Dependency Entity"
 depends_on: []
-progress: in-progress
+progress: ready-for-review
 coverage_sections:
   - "dependency-graph.md §Dependency Entity"
 commits: ["0248e9bf9c2d7b234fca8115d1412f70c4201596", "02056fa0fe79474c325ec7cc91b8499680b0e333", "10d5df6dafc0859c2f1360be65366d795f74ddd4"]
@@ -68,20 +68,26 @@ and the dependency API handlers write to / read from this volatile store.
 
 ## Acceptance Criteria
 
-- [ ] `AppState.dependencies` is constructed via `store!(dyn DependencyRepository, …)`; no
+- [x] `AppState.dependencies` is constructed via `store!(dyn DependencyRepository, …)`; no
       remaining `Arc::new(mem::MemDependencyRepository…)` literal in `build_state`.
-- [ ] A new integration/persistence test proves the graph survives a restart: with
-      `GYRE_DATABASE_URL` pointing at a temp SQLite file, `build_state`, `save()` a
-      `DependencyEdge` through `state.dependencies`, drop that state, `build_state` **again
-      on the same DB file**, and assert the edge is returned by the second instance
-      (`list_for_source` / `find` / equivalent). This test MUST fail against the old
-      `Arc::new(mem::MemDependencyRepository)` wiring (the second instance would see an
-      empty store) and pass after the fix. Do not assert against the same in-process
-      `Arc` — the test must exercise a genuinely fresh storage instance over the same file.
-- [ ] Pure in-memory mode (no `GYRE_DATABASE_URL`) still works: `store!` falls back to
-      `MemDependencyRepository`; existing dependency-graph tests keep passing.
-- [ ] `cargo test --all` passes; `bash scripts/check-arch.sh` passes (no hexagonal
-      boundary violation introduced).
+      Verified: lib.rs:909-912 uses `store!`; the only remaining mem literal is the
+      `#[cfg(test)]` `test_state_inner` builder (mem.rs:3289), which is intentional
+      pure-in-memory test state.
+- [x] A new integration/persistence test proves the graph survives a restart:
+      `crates/gyre-server/tests/dependency_persistence.rs` — three fresh `build_state`
+      instances over the same SQLite file (save → restart-read → update → restart-read),
+      asserting find_by_id/list_by_repo/list_dependents/list_all plus the update path
+      (status→Stale, version_pinned). Mutation-probed: with the old
+      `Arc::new(mem::MemDependencyRepository)` literal restored in `build_state`, the test
+      FAILS (`dependency_graph_survives_restart_on_sqlite` … 0 passed; 1 failed); with the
+      `store!` wiring it passes.
+- [x] Pure in-memory mode still works: `cargo test -p gyre-server --lib api::dependencies`
+      (64 passed) and `--lib dep_staleness` (8 passed) — all use `test_state()` mem state.
+- [x] `bash scripts/check-arch.sh` passes ("Architecture lint passed"). Focused runs on
+      this sandbox: `cargo build -p gyre-server` (SKIP_WEB_BUILD=1) and
+      `cargo test -p gyre-server --test dependency_persistence` pass; full
+      `cargo test --all` deferred to the controller's gates (sandbox cannot run the
+      loopback-listener integration suites).
 
 ## Agent Instructions
 
