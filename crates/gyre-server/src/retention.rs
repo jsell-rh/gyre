@@ -1242,9 +1242,13 @@ mod tests {
         // Real snapshot names as create_snapshot writes them (<unix_secs>.json),
         // plus a non-.json file that must survive.
         for i in 0..30u64 {
-            // 30 files aged 0..29 hours: newest 24 fill the 24h band; the
-            // 6 oldest are band surplus — deleted, no spillover.
-            make_file(&dir, &format!("{}.json", now - i * 3_600), now - i * 3_600);
+            // 30 files aged 30min..15.5h (30-min steps), all strictly
+            // inside the 24h band (edge is age <= 24h, inclusive): the
+            // newest 24 fill the band; the 6 oldest are band surplus —
+            // deleted, no spillover. (Hourly steps would put ages 25h..29h
+            // in the 7d band instead.)
+            let age = 1_800 + i * 1_800;
+            make_file(&dir, &format!("{}.json", now - age), now - age);
         }
         for i in 3..7u64 {
             make_file(&dir, &format!("{}.json", now - i * DAY), now - i * DAY);
@@ -1264,11 +1268,14 @@ mod tests {
         // 32 survivors = 24 + 4 + 4 snapshot bands + README.txt.
         assert_eq!(left.len(), 33, "survivors: {left:?}");
         assert!(left.contains(&"README.txt".to_string()), "non-json files survive");
-        // Hour-aged surplus did NOT spill into deeper bands — deleted on disk.
+        // Hour-band surplus (files 24..29 of the 30 seeded, i.e. aged
+        // 12.5h..15.5h — the 6 oldest of the band) did NOT spill into
+        // deeper bands — deleted on disk.
         for i in 24..30u64 {
+            let age = 1_800 + i * 1_800;
             assert!(
-                !left.contains(&format!("{}.json", now - i * 3_600)),
-                "recent-{i} is 24h-band surplus, must be deleted"
+                !left.contains(&format!("{}.json", now - age)),
+                "hour-band surplus file (aged {}s) must be deleted", age
             );
         }
         for i in [4u64, 5] {
@@ -1283,8 +1290,10 @@ mod tests {
                 "ancient-{i} must be deleted"
             );
         }
+        // Band members kept: 24 newest hour-band files, 4 day-band, 4 week-band.
         for i in 0..24u64 {
-            assert!(left.contains(&format!("{}.json", now - i * 3_600)));
+            let age = 1_800 + i * 1_800;
+            assert!(left.contains(&format!("{}.json", now - age)));
         }
         for i in [3u64, 4, 5, 6] {
             assert!(left.contains(&format!("{}.json", now - i * DAY)));
