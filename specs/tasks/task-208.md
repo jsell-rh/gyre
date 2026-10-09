@@ -2,7 +2,7 @@
 title: "Remove My Tasks/MRs/Agents from profile; amend user-management 'My Stuff'"
 spec_ref: "human-system-interface.md §12"
 depends_on: []
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is NOT"
 commits: ["98fd096e3972e7a6d1df78b700b63ea1dee15fe5", "ad1121c5093cd2f1f2b3824ed88352ac4e181fd9"]
@@ -112,3 +112,16 @@ After both parts, run the acceptance-criteria greps yourself and fix any straggl
 - M22 milestone annotation verified (three rows struck with HSI §12 / task-208 pointer, historical count intact).
 - All round-1 probes still green at this HEAD: `my_stuff_endpoints_are_removed` ok, ABAC route-registry + exempt-handlers gates OK, UserProfile.test.js 23/23, attribution gate OK (now including `ad1121c` in frontmatter).
 - Verdict: **complete** — every acceptance criterion holds; the only residual (attribution gate's `web/dist/` blind spot) is a process-script gap outside this task's product scope, recorded here for a process-task owner.
+
+## Resume Round (2026-10-09, post-merge re-verification)
+
+Assignment: resume retained source (candidate `74a1529`, review-round-2 verdict complete) on fresh base `8c2d1775` (infrastructure-phase retry); obtain fresh independent review.
+
+- **Merge conflict resolved:** merging `8c2d1775` conflicted only in `specs/coverage/system/human-system-interface.md` header (both sides edited counts). Resolution combined both intents — theirs' navigation-binding correction (row 3 sidebar → `n/a`, superseded by ui-navigation.md) + ours' task-208 row 54 (`implemented`), with recomputed arithmetic: 55 rows = 20 n/a + 0 not-started + 18 task-assigned + 10 implemented + 7 verified; 17/35. Both parents' "19 task-assigned" reconciled: ours carried row 3 as task-assigned, theirs row 54. Merge commit `6eaed819`.
+- **No product drift:** `git diff 74a1529..HEAD` on all ten task-208 surfaces (users.rs, api/mod.rs, abac_middleware.rs, api.js, UserProfile.svelte, UserProfile.test.js, e2e-flow.sh, user-management.md spec+coverage, web/dist/, api-reference.md) is empty — the 118-file upstream merge touched none of them, and its UI diffs (WorkspaceHome/App/Sidebar/locales) contain zero my-stuff reintroduction.
+- **Frontmatter repairs (concrete findings fixed this round):**
+  - `01495885` ("process: record task-208 branch commits") had clobbered review round 2's frontmatter, silently dropping the `ad1121c` dist-regen entry (recorded by `39304a95`). Restored: `82a76097`.
+  - The pipeline's sandbox retry had reset the working-tree task file to the `not-started` template; restored from HEAD.
+  - Base-inherited failure `a781ede2` (task-210) missing from task-210.md frontmatter on the `8c2d1775` lineage (its recording commits `cb58c9ae`/`afc56d17`/`f4fae4e2` live on unmerged sibling checkpoint branches): appended the sanctioned bookkeeping entry `8d28d65e`. Gate now OK.
+- **All acceptance criteria re-verified at `8d28d65e`:** `my_stuff_endpoints_are_removed` ok via real router (cargo test, SKIP_WEB_BUILD=1); UserProfile.test.js 23/23 including exact-six-tab guard; dead-code grep over `crates/` + `web/src/` → zero; dist grep over `web/dist/assets/*.js` → zero forbidden identifiers, six kept tabs confirmed in bundle; kept `users/me/*` routes + per-handler auth model untouched; ABAC route-registry + exempt-handlers gates OK (89 handlers); attribution gate OK. Evidence: `/tmp/stage/review-evidence/task-208-greps.txt`, `task-208-runtime.txt`.
+- **Sandbox transport restriction (recorded, not inferred as defect):** TCP `accept` blocked (EOPNOTSUPP errno 95, see `/tmp/stage/capabilities.json`) — live HTTP 404 probes against a running server are impossible here; the in-process router test exercises the identical route table. Host verification / GitHub CI must run the live checks.
