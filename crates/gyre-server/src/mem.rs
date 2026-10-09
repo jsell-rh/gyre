@@ -3,6 +3,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use gyre_common::Id;
+use gyre_domain::spec_approval::ApprovalTransitionError;
 use gyre_domain::BudgetUsage;
 use gyre_domain::{
     Agent, AgentCommit, AgentStatus, AgentUsage, AgentWorktree, AnalyticsEvent, AuditEvent,
@@ -12,8 +13,6 @@ use gyre_domain::{
 };
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
-#[cfg(test)]
-use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
     AuditQueryFilter, AuditRepository, BudgetRepository, BudgetUsageRepository, CostRepository,
@@ -23,8 +22,9 @@ use gyre_ports::{
     TenantRepository, UserRepository, UserWorkspaceStateRepository, WorkspaceRepository,
     WorktreeRepository,
 };
+#[cfg(test)]
+use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
 use sha2::{Digest, Sha256};
-use gyre_domain::spec_approval::ApprovalTransitionError;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;

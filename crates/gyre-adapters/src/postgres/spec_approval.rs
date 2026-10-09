@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
 use gyre_common::Id;
-use gyre_domain::SpecApproval;
 use gyre_domain::spec_approval::ApprovalTransitionError;
+use gyre_domain::SpecApproval;
 use gyre_ports::SpecApprovalRepository;
 use std::sync::Arc;
 
@@ -71,32 +71,28 @@ impl PgStorage {
     async fn transition(
         &self,
         id: &Id,
-        apply: impl FnOnce(&mut SpecApproval) -> Result<(), ApprovalTransitionError>
-            + Send
-            + 'static,
+        apply: impl FnOnce(&mut SpecApproval) -> Result<(), ApprovalTransitionError> + Send + 'static,
     ) -> Result<Option<()>, ApprovalTransitionError> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
-        tokio::task::spawn_blocking(
-            move || -> Result<Option<()>, ApprovalTransitionError> {
-                let mut conn = pool
-                    .get()
-                    .map_err(|e| ApprovalTransitionError::Storage(e.to_string()))?;
-                let row = spec_approvals::table
-                    .find(id.as_str())
-                    .first::<SpecApprovalRow>(&mut conn)
-                    .optional()
-                    .map_err(|e| ApprovalTransitionError::Storage(e.to_string()))?;
-                let Some(row) = row else {
-                    return Ok(None);
-                };
-                let mut approval = row.into_approval();
-                apply(&mut approval)?;
-                upsert_row(&mut conn, &approval)
-                    .map_err(|e| ApprovalTransitionError::Storage(e.to_string()))?;
-                Ok(Some(()))
-            },
-        )
+        tokio::task::spawn_blocking(move || -> Result<Option<()>, ApprovalTransitionError> {
+            let mut conn = pool
+                .get()
+                .map_err(|e| ApprovalTransitionError::Storage(e.to_string()))?;
+            let row = spec_approvals::table
+                .find(id.as_str())
+                .first::<SpecApprovalRow>(&mut conn)
+                .optional()
+                .map_err(|e| ApprovalTransitionError::Storage(e.to_string()))?;
+            let Some(row) = row else {
+                return Ok(None);
+            };
+            let mut approval = row.into_approval();
+            apply(&mut approval)?;
+            upsert_row(&mut conn, &approval)
+                .map_err(|e| ApprovalTransitionError::Storage(e.to_string()))?;
+            Ok(Some(()))
+        })
         .await
         .map_err(|e| ApprovalTransitionError::Storage(e.to_string()))?
     }
@@ -229,7 +225,6 @@ impl SpecApprovalRepository for PgStorage {
         .await?
     }
 
-
     async fn approve(&self, id: &Id, now: u64) -> Result<Option<()>, ApprovalTransitionError> {
         self.transition(id, move |a| a.approve(now)).await
     }
@@ -284,9 +279,7 @@ impl SpecApprovalRepository for PgStorage {
                 // spec content changes. Rows already revoked/rejected keep
                 // their terminal state; only Approved rows transition.
                 if approval.status() == gyre_domain::spec_approval::ApprovalStatus::Approved
-                    && approval
-                        .revoke(&revoked_by, &reason, now)
-                        .is_ok()
+                    && approval.revoke(&revoked_by, &reason, now).is_ok()
                 {
                     upsert_row(&mut conn, &approval)?;
                     revoked += 1;

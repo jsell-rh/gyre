@@ -626,8 +626,16 @@ mod tests {
         let apr2 = seed_ledger_entry(&state, "apr-2", "system/design.md", &sha2).await;
 
         // Multiple approvals for the same path (different SHAs) are allowed.
-        let all = state.spec_approvals.list_by_path("system/design.md").await.unwrap();
-        assert_eq!(all.len(), 2, "multiple approvals per path must be supported");
+        let all = state
+            .spec_approvals
+            .list_by_path("system/design.md")
+            .await
+            .unwrap();
+        assert_eq!(
+            all.len(),
+            2,
+            "multiple approvals per path must be supported"
+        );
 
         // Transition the second entry: Pending → Approved.
         state
@@ -709,7 +717,12 @@ mod tests {
         );
 
         // Mutual exclusivity: approved_at cleared, revoked_at set.
-        let reloaded = state.spec_approvals.find_by_id(&apr).await.unwrap().unwrap();
+        let reloaded = state
+            .spec_approvals
+            .find_by_id(&apr)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(reloaded.approved_at, None);
         assert_eq!(reloaded.revoked_at, Some(1700000200));
         assert_eq!(reloaded.revoked_by.as_deref(), Some("user:admin"));

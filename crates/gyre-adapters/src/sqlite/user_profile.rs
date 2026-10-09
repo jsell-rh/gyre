@@ -284,9 +284,7 @@ impl JudgmentLedgerRepository for SqliteStorage {
                         spec_approvals::revoked_at,
                         spec_approvals::revocation_reason,
                     ))
-                    .load::<(String, String, Option<i64>, Option<i64>, Option<String>)>(
-                        &mut *conn,
-                    )
+                    .load::<(String, String, Option<i64>, Option<i64>, Option<String>)>(&mut *conn)
                     .context("load spec_approvals for judgment ledger")?;
 
                 for (_, spec_path, approved_at, revoked_at, revocation_reason) in rows {

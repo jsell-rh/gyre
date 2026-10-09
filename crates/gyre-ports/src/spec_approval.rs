@@ -1,8 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use gyre_common::Id;
-use gyre_domain::SpecApproval;
 use gyre_domain::spec_approval::ApprovalTransitionError;
+use gyre_domain::SpecApproval;
 
 #[async_trait]
 pub trait SpecApprovalRepository: Send + Sync {

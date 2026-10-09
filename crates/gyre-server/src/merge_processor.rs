@@ -1188,11 +1188,8 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                     let current = match crate::git_refs::resolve_blob_sha(&repo.path, path).await {
                         Some(sha) => Some(sha),
                         None => {
-                            crate::git_refs::resolve_blob_sha(
-                                &repo.path,
-                                &format!("specs/{path}"),
-                            )
-                            .await
+                            crate::git_refs::resolve_blob_sha(&repo.path, &format!("specs/{path}"))
+                                .await
                         }
                     };
                     let is_stale = match &current {
@@ -6091,12 +6088,7 @@ mod tests {
         mr.workspace_id = Id::new("ws-1");
         mr.spec_ref = Some(format!("system/identity.md@{stale_sha}"));
         state.merge_requests.create(&mr).await.unwrap();
-        let entry = MergeQueueEntry::new(
-            Id::new("entry-stale-spec"),
-            mr.id.clone(),
-            50,
-            1000,
-        );
+        let entry = MergeQueueEntry::new(Id::new("entry-stale-spec"), mr.id.clone(), 50, 1000);
         state.merge_queue.enqueue(&entry).await.unwrap();
 
         run_once(&state).await.unwrap();
@@ -6126,12 +6118,7 @@ mod tests {
         mr2.workspace_id = Id::new("ws-1");
         mr2.spec_ref = Some(format!("system/identity.md@{head_blob}"));
         state.merge_requests.create(&mr2).await.unwrap();
-        let entry2 = MergeQueueEntry::new(
-            Id::new("entry-current-spec"),
-            mr2.id.clone(),
-            50,
-            1001,
-        );
+        let entry2 = MergeQueueEntry::new(Id::new("entry-current-spec"), mr2.id.clone(), 50, 1001);
         state.merge_queue.enqueue(&entry2).await.unwrap();
 
         run_once(&state).await.unwrap();

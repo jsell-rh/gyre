@@ -839,8 +839,7 @@ pub async fn revoke_spec_approval(
     };
 
     // Only the original approver or an Admin can revoke.
-    let is_admin =
-        auth.agent_id == "system" || auth.roles.contains(&gyre_domain::UserRole::Admin);
+    let is_admin = auth.agent_id == "system" || auth.roles.contains(&gyre_domain::UserRole::Admin);
     let caller_id = format!(
         "{}:{}",
         if auth.jwt_claims.is_some() {
@@ -880,7 +879,8 @@ pub async fn revoke_spec_approval(
                 Ok(Some(())) => ledger_revoked_id = Some(latest.id.clone()),
                 Ok(None) => {
                     return Err(ApiError::NotFound(format!(
-                        "approval {} vanished from ledger", latest.id
+                        "approval {} vanished from ledger",
+                        latest.id
                     )))
                 }
                 Err(e) => {
@@ -967,7 +967,6 @@ pub async fn reject_spec(
             "only Admin or Developer roles can reject specs".to_string(),
         ));
     }
-
 
     // Fetch the spec from the ledger.
     let mut entry = state
