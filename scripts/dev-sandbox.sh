@@ -76,6 +76,7 @@ stage_bundle() {
     "$ROOT/scripts/dev-merge-message.py" \
     "$ROOT/scripts/dev-static-gate.py" \
     "$ROOT/scripts/dev-coverage.py" "$ROOT/scripts/dev-audit-check.py" "$ROOT/scripts/dev-attribution.py" \
+    "$ROOT/scripts/dev-context.py" "$ROOT/scripts/dev-contract.py" \
     "$ROOT/scripts/check-rustfmt-diff.py" "$ROOT/scripts/check-clippy-diff.py" "$bundle/"
   for role in implementation review rebase integration-review audit audit-review; do
     cp "$ROOT/specs/prompts/dev-$role.md" "$bundle/dev-$role.md"

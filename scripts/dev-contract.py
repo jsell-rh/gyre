@@ -5,7 +5,7 @@ import json
 import re
 
 
-def generation(body, specs, goal="", *, include_baseline_diagnostics=False):
+def requirement_parts(body, *, include_baseline_diagnostics=False):
     parts = body.split("---", 2)
     if len(parts) != 3:
         raise ValueError("task has no YAML frontmatter")
@@ -20,6 +20,11 @@ def generation(body, specs, goal="", *, include_baseline_diagnostics=False):
         operational.append('Baseline failure')
     prose = re.sub(r"^## (?:" + '|'.join(operational) + r")\s*\n.*?(?=^## |\Z)",
                    "", parts[2], flags=re.M | re.S)
+    return front, prose
+
+
+def generation(body, specs, goal="", *, include_baseline_diagnostics=False):
+    front, prose = requirement_parts(body, include_baseline_diagnostics=include_baseline_diagnostics)
     refs = set(re.findall(r"[\w-]+\.md", front))
     requirements = {path: text for path, text in specs.items() if path.rsplit("/", 1)[-1] in refs}
     missing = sorted(ref for ref in refs if not any(path.endswith("/" + ref) for path in requirements)

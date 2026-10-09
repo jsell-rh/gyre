@@ -71,25 +71,26 @@ PY
         ;;
     esac
     printf '\n## Assigned task\n\n'
-    cat "$file"
+    python3 /tmp/stage/dev-context.py task "$file"
     if [ -f /tmp/stage/audit-contract.json ]; then
       printf '\n## Mechanically enforced fidelity scope\n\n'
       cat /tmp/stage/audit-contract.json
     fi
     if [ -f /tmp/stage/repair.md ]; then
       printf '\n## Findings from the rejected integration\n\n'
-      cat /tmp/stage/repair.md
+      python3 /tmp/stage/dev-context.py history /tmp/stage/repair.md
     fi
     review=$(bash scripts/task-field.sh "$file" review)
     if [ -n "$review" ] && [ -f "$review" ]; then
       printf '\n## Existing review\n\n'
-      cat "$review"
+      python3 /tmp/stage/dev-context.py history "$review"
     fi
   } | timeout --signal=INT --kill-after=30s "${GYRE_DEV_ROUND_TIMEOUT:-1800}" \
     omp -p "${model[@]}" "${resume[@]}" --session-dir "$session_dir" --mode=json --approval-mode yolo \
     | node /tmp/stage/dev-stream.mjs "$role"
 }
 
+python3 /tmp/stage/dev-checkpoint.py "$(git branch --show-current)"
 progress=$(bash scripts/task-field.sh "$file" progress)
 case "$progress" in
   complete) echo "already complete"; exit 0;;
