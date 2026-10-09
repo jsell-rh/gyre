@@ -85,21 +85,32 @@
       error = null;
       let raw = await api.myNotifications();
       let data = Array.isArray(raw) ? raw : (raw?.notifications ?? []);
-      // Normalize PascalCase notification types from the server to snake_case
+      // Normalize PascalCase notification types from the server to snake_case.
+      // The server persists NotificationType::as_str() (gyre-common/src/notification.rs),
+      // so every variant with a template branch MUST be mapped here — an
+      // unmapped type renders a card with no action buttons.
       const typeNormMap = {
-        AgentCompleted: 'agent_completed',
-        AgentFailed: 'agent_failed',
+        // HSI §8 priority table (10 item types) — canonical NotificationType values
+        AgentNeedsClarification: 'agent_clarification',
         SpecPendingApproval: 'spec_approval',
-        SpecApproved: 'spec_approved',
+        GateFailure: 'gate_failure',
+        CrossWorkspaceSpecChange: 'cross_workspace_change',
+        ConflictingInterpretations: 'conflicting_interpretations',
+        MetaSpecDrift: 'meta_spec_drift',
+        BudgetWarning: 'budget_warning',
+        TrustSuggestion: 'trust_suggestion',
+        SpecAssertionFailure: 'spec_assertion_failure',
+        SuggestedSpecLink: 'suggested_link',
+        // Other NotificationType variants with template branches
+        AgentCompleted: 'agent_completed',
         SpecRejected: 'spec_rejected',
+        // Legacy/defensive entries kept for older rows
+        AgentFailed: 'agent_failed',
+        SpecApproved: 'spec_approved',
         MrMerged: 'mr_merged',
         MrNeedsReview: 'mr_needs_review',
-        GateFailure: 'gate_failure',
-        SuggestedSpecLink: 'suggested_link',
         TaskCreated: 'task_created',
-        BudgetWarning: 'budget_warning',
         SpecChanged: 'spec_changed',
-        MetaSpecDrift: 'meta_spec_drift',
       };
       data = data.map(n => ({
         ...n,
@@ -173,7 +184,7 @@
     const body = getBody(n);
     if (!body.mr_id) return;
     try {
-      specDiffs = { ...specDiffs, [notifId]: [] }; return;
+      const diff = await api.mrDiff(body.mr_id);
       // Pick the spec file this notification is about; fall back to the only
       // changed file when there is exactly one, else the first .md file.
       const files = diff?.files ?? [];

@@ -885,4 +885,44 @@ describe('Inbox', () => {
       expect(document.body.textContent).toContain('Reconciliation task created (task-42)');
     });
   });
+
+  // The server persists NotificationType::as_str() PascalCase values
+  // (gyre-common/src/notification.rs). Every HSI §8 priority type with a
+  // template branch must normalize to snake_case or the card renders with
+  // no action buttons — these tests fail if a typeNormMap entry is missing.
+  const PASCAL_CASE_TYPES = [
+    ['AgentNeedsClarification', 'agent_clarification', 'Respond to Agent'],
+    ['SpecPendingApproval', 'spec_approval', 'Approve'],
+    ['GateFailure', 'gate_failure', 'Retry'],
+    ['CrossWorkspaceSpecChange', 'cross_workspace_change', 'Review Changes'],
+    ['ConflictingInterpretations', 'conflicting_interpretations', 'Pick A'],
+    ['MetaSpecDrift', 'meta_spec_drift', 'Adjust Meta-spec'],
+    ['BudgetWarning', 'budget_warning', 'Pause Work'],
+    ['TrustSuggestion', 'trust_suggestion', 'Increase Trust'],
+    ['SpecAssertionFailure', 'spec_assertion_failure', 'View Code'],
+    ['SuggestedSpecLink', 'suggested_link', 'Confirm'],
+  ];
+
+  describe.each(PASCAL_CASE_TYPES)('server wire format: %s', (wireType, snakeType, actionLabel) => {
+    it('normalizes to snake_case and renders its action buttons', async () => {
+      api.myNotifications.mockResolvedValue([
+        makeNotification({
+          id: `pascal-${snakeType}`,
+          notification_type: wireType,
+          title: `Wire-format ${wireType}`,
+        }),
+      ]);
+      const { findByText, findByRole } = render(Inbox);
+      // The card renders
+      await findByText(`Wire-format ${wireType}`);
+      // Expanding the card shows the specced action button for this type —
+      // only reachable when the PascalCase wire type normalized to snake_case
+      const header = await findByRole('button', { name: /Expand: Wire-format/ });
+      await fireEvent.click(header);
+      await waitFor(() => {
+        expect(document.querySelector('.card-actions')).not.toBeNull();
+      });
+      expect(document.querySelector('.card-actions').textContent).toContain(actionLabel);
+    });
+  });
 });
