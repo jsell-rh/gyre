@@ -77,6 +77,8 @@ network_policies:
         protocol: rest
         access: read-only
         enforcement: enforce
+        # npm encodes the slash in scoped package metadata paths.
+        allow_encoded_slash: true
     binaries:
       - path: /usr/bin/node
       - path: /usr/local/bin/npm

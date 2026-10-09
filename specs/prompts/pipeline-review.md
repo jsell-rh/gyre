@@ -11,6 +11,7 @@ Use the smallest meaningful probe. Full workspace suites and all-target Clippy
 belong to verification. If a focused probe needs a listener, check whether the
 current sandbox permits it. Record concrete checks the verifier must run if an
 actual transport restriction blocks the probe. A restriction is not a code defect.
+Use `npm ci` before frontend probes so repository tools use the locked versions.
 
 Do not modify production code, scripts, verifiers, unrelated tasks, or specs.
 Temporary experiments must be restored. Source edits invalidate review.

@@ -20,6 +20,8 @@ exact-head GitHub checks remain mandatory after independent review.
 
 Full workspace suites, architecture checks, all-target Clippy, and GitHub CI are
 owned by verification and publication. Use the smallest relevant probe here.
+Install frontend dependencies with `npm ci` before running repository test tools;
+use the locked versions rather than letting `npx` download an unrelated release.
 Do not repeat full gates inside this assignment. If a focused probe needs a
 listener, first check whether this sandbox permits it. Record any actual transport
 restriction for host verification; do not infer a code defect from that restriction.
