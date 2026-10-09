@@ -36,6 +36,8 @@ elif 'exec' in args and 'GYRE_RECOVERY_BEGIN' in args[-1]:
     print('GYRE_RECOVERY_BEGIN')
     print(base64.b64encode(b'diff --git a/file b/file\\n').decode())
     print('GYRE_RECOVERY_END')
+    print('GYRE_STASH_COUNT 0')
+    print('GYRE_RECOVERY_COMPLETE')
 elif 'exec' in args:
     with tarfile.open(fileobj=io.BytesIO(sys.stdin.buffer.read())) as bundle:
         models = bundle.extractfile('./models.yml').read().decode()
@@ -76,6 +78,8 @@ print('gateway notice')
 print('GYRE_RECOVERY_BEGIN')
 print(base64.b64encode(b'diff --git a/file b/file\\n').decode())
 print('GYRE_RECOVERY_END')
+print('GYRE_STASH_COUNT 0')
+print('GYRE_RECOVERY_COMPLETE')
 """)
             fake.chmod(0o755)
             output = root / "recovery.patch"
