@@ -126,8 +126,24 @@ Verification evidence (this round, on branch head `1b55d097` =
  task-107-relevant mechanical gates (ABAC route registry, in-memory
   state stores, unbounded external HTTP, migration versions and SQL
   portability, mem port contracts, arch) all pass — outputs retained
-  under `/tmp/stage/review-evidence/`. Full `cargo test --all` and
-  GitHub CI are owned by the verification/publication stages.
+under `/tmp/stage/review-evidence/`. Full `cargo test --all` and
+GitHub CI are owned by the verification/publication stages.
+
+Follow-up repair round (head `fee16d55`): the earlier ready-for-review
+process commit `b97aa290` consumed the frontmatter's closing `---`
+delimiter without restoring it, so `scripts/pipeline/catalog.py::
+metadata()` raised `task must have frontmatter` on this file and the
+pipeline could not read `progress`. Repaired via
+`scripts/dev-attribution.py task-107` (which also regenerated the
+scoped `commits:` list — the implementation checkpoint only; process
+commits touch no product surface and are outside the attribution scan)
+and committed as `fee16d55`. All suites and mechanical gates re-run
+green on `fee16d55` (sigstore 15, jj 14, provenance 5,
+commit_signatures 6, adapters commit_signature 5; 10 mechanical gates
+including task-commit-attribution, ABAC route registry, in-memory
+state stores, unbounded external HTTP, migration versions/portability,
+mem port contracts, arch) — outputs retained under
+`/tmp/stage/review-evidence/`.
 
 This round additionally repaired a pre-existing gate failure inherited
 from the upstream base: task-210's main-merge commit `a781ede2`
