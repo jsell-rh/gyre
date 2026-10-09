@@ -2,12 +2,13 @@
 title: "Enhance User entity with profile fields and preferences"
 spec_ref: "user-management.md §User Entity"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "user-management.md §User Entity"
   - "user-management.md §Username vs Display Name"
   - "user-management.md §User Preferences"
-commits: []
+commits: ["0dfba43fb64499f158b96276a982c51d3f6ce71b", "0e15d87d862a91bbd9585300cdb844cc7b5c7f11", "bbeadf6a3f06728801a0f98cf62da56971bf33d0", "04fde7df77b884b20e4108dff917a5324174f034", "0170f283e0289a10468b4683efa64f7b266ad83b", "e9a63c7d50520dcedbeb832dab9e213c74e91340"]
+review: specs/reviews/task-120.md
 ---
 
 ## Spec Excerpt
@@ -98,3 +99,60 @@ Preferences stored server-side (not localStorage). Persist across devices and se
 ## Agent Instructions
 
 Read `specs/system/user-management.md` §User Entity through §User Preferences for full requirements. Existing User model: `gyre-domain/src/user.rs`. User port: `gyre-ports/src/user.rs` (or grep for `UserRepository`). SQLite adapter: grep for `impl UserRepository` in `gyre-adapters/`. Auth flow: `gyre-server/src/auth.rs`. User API: `gyre-server/src/api/users.rs`. Profile adapter: `gyre-adapters/src/sqlite/user_profile.rs`. Check migration numbering: `ls crates/gyre-adapters/migrations/ | tail -5` — currently at 000049.
+
+## Shipped
+
+This is a resume of retained source `c0dd943c` (attempt-12 branch): the full
+task-120 implementation — all six product commits, the Round-1 F1/F2/F3 repairs,
+and the Round-2 integration-rejection bookkeeping repair — is preserved on this
+tree byte-identically (merge `be1223b9` with the newer base `4b9d61c4` touched
+no task-120 product surface; verified by empty `git diff c0dd943 HEAD --
+crates/gyre-domain/src/user.rs crates/gyre-adapters/ ...` over all six commit
+paths). This round's work: re-verification on the merged tree plus truthful
+progress/bookkeeping restoration for fresh independent review.
+
+- `User` entity (`gyre-domain/src/user.rs`) carries every spec profile field
+  (username, display_name, avatar_url, timezone, locale, preferences,
+  last_login_at, updated_at) with `UserPreferences` (Theme/UiDensity/DiffView/
+  FeedScope) stored server-side as JSON; migration 000056 adds the columns,
+  backfills defaults (UTC/en-US), and sanitizes legacy rows to unique URL-safe
+  handles via 38 depth-1 portable-SQL UPDATEs (no parser overflow on SQLite).
+- Username contract enforced across the chain: unique (index + create checks),
+  URL-safe (`validate_username`/`sanitize_username`), immutable after creation
+  (adapter guards in sqlite/postgres/mem; SCIM update ignores rename attempts;
+  SCIM create sanitizes with external-id fallback and 400/409 on unusable/
+  duplicate handles). First login derives the handle from SSO
+  `preferred_username` (sub fallback) and stamps `last_login_at`.
+- `PUT /api/v1/users/me` implements genuine partial-update semantics
+  (`UserPreferencesPatch` merge — omitted fields keep stored values), returned
+  via `GET /users/me`; malformed preferences → 400 with nothing applied.
+- Port `find_by_username` implemented in sqlite/postgres/mem with parity
+  contract guards.
+
+### Resume verification (2026-10-09, merged tree `be1223b9`)
+
+Product surface identity: `git diff c0dd943..be1223b9 -- crates/gyre-domain/src/user.rs
+crates/gyre-adapters/src/sqlite/ crates/gyre-adapters/src/postgres/user.rs
+crates/gyre-adapters/migrations/2026-10-08-000056_user_entity_profile_fields/
+crates/gyre-server/src/api/users.rs crates/gyre-server/src/api/scim.rs
+crates/gyre-server/src/auth.rs` → empty (byte-identical). Focused probes
+re-run on the merged tree, evidence persisted under
+`/tmp/stage/review-evidence/task-120-resume/`:
+
+- `cargo test -p gyre-adapters --lib` → 349 passed, 0 failed (includes the
+  SQLite-boot path the F1 parser overflow broke and
+  `migration_000056_backfills_unique_url_safe_usernames`).
+- `cargo test -p gyre-server --lib api::scim` → 9 passed; `api::users` → 14
+  passed; `auth::` → 39 passed (username derivation, last_login_at stamping,
+  SCIM cutover, partial-update preferences).
+- `cargo test -p gyre-domain --lib user` → 11 passed.
+- Mechanical gates re-run on the merged tree: migration versions, SQL
+  portability, mem-port contracts, arch, ABAC route registry, commit
+  attribution (with the six product commits restored in frontmatter), scope
+  guards — all OK.
+
+Transport note (recorded per assignment): this sandbox's listener probe
+(`accept`) is not supported (errno 95) — server-boot smoke over HTTP cannot run
+here; the SQLite migration-boot path is instead proven by every
+`SqliteStorage::new`-constructing adapter test (349/349). Host-side checks:
+`cargo test --all` + GitHub CI on this exact head.
