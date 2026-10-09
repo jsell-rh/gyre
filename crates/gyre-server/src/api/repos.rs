@@ -361,6 +361,17 @@ pub async fn delete_repo(
 
     state.repos.delete(&repo.id).await?;
 
+    // Clean up the spec-link graph rows sourced from this repo (spec-links.md
+    // §Forge-Maintained Spec Graph): durable table first, then the hot cache.
+    if let Err(e) = state.spec_link_repo.delete_by_source_repo(&repo.id.to_string()).await {
+        tracing::warn!(repo_id = %repo.id, "Failed to delete spec links for repo: {e}");
+    }
+    state
+        .spec_links_store
+        .lock()
+        .await
+        .retain(|l| l.source_repo_id.as_deref() != Some(&repo.id.to_string()));
+
     // Clean up the git directory on disk to prevent stale directories from
     // blocking future repo/mirror creation with the same workspace + name.
     let path = std::path::Path::new(&repo.path);
@@ -552,6 +563,7 @@ pub async fn sync_mirror(
             crate::spec_registry::sync_spec_ledger(
                 &state.spec_ledger,
                 &state.spec_links_store,
+                &state.spec_link_repo,
                 &repo.path,
                 &new_sha,
                 now,

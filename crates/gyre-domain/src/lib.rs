@@ -42,6 +42,7 @@ pub mod rust_extractor;
 pub mod spec_approval;
 pub mod spec_assertions;
 pub mod spec_ledger;
+pub mod spec_links;
 pub mod spec_policy;
 pub mod task;
 pub mod team;

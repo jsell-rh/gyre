@@ -39,6 +39,7 @@ pub mod spawn_log;
 pub mod spec_approval;
 pub mod spec_approval_event;
 pub mod spec_ledger;
+pub mod spec_links;
 pub mod spec_policy;
 pub mod task;
 pub mod team;

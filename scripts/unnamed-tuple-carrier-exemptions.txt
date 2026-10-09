@@ -5,8 +5,8 @@ crates/gyre-domain/src/typescript_extractor.rs:687
 crates/gyre-domain/src/typescript_extractor.rs:696
 crates/gyre-domain/src/typescript_extractor.rs:718
 crates/gyre-server/src/api/aibom.rs:178
-crates/gyre-server/src/spec_registry.rs:643
-crates/gyre-server/src/spec_registry.rs:1701
-crates/gyre-server/src/spec_registry.rs:1883
-crates/gyre-server/src/mem.rs:2720
-crates/gyre-server/src/git_http.rs:3246
+crates/gyre-server/src/spec_registry.rs:639
+crates/gyre-server/src/spec_registry.rs:1706
+crates/gyre-server/src/spec_registry.rs:1888
+crates/gyre-server/src/mem.rs:2925
+crates/gyre-server/src/git_http.rs:3358
