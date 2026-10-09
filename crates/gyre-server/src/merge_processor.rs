@@ -1828,6 +1828,17 @@ pub(crate) async fn pause_merge_queue(state: &AppState, repo: &gyre_domain::Repo
             })),
         )
         .await;
+
+    // user-management.md §Who Gets Notified — "Merge queue paused" notifies
+    // all workspace Admins/Owners. Event above reaches the orchestrator; this
+    // reaches the humans.
+    crate::notification_dispatcher::notify_merge_queue_paused(
+        state,
+        &repo.workspace_id,
+        repo,
+        reason,
+    )
+    .await;
 }
 
 /// Resume the merge queue for this repo: clear the pause state and emit

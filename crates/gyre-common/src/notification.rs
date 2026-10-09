@@ -61,6 +61,16 @@ pub enum NotificationType {
     /// Priority 1 — post-merge revert re-validation failed on the reverted
     /// HEAD; queue stays paused until a human intervenes (platform-model.md §6).
     MergeQueueEscalation,
+    /// Priority 3 — a persona was created pending approval and its owner
+    /// must approve it (user-management.md §Who Gets Notified).
+    PersonaApprovalRequested,
+    /// Priority 3 — the merge queue for a repo was paused (post-merge
+    /// validation failed); all workspace Admins/Owners are notified
+    /// (user-management.md §Who Gets Notified).
+    MergeQueuePaused,
+    /// Priority 2 — agent budget is exhausted; spawner + workspace Owner
+    /// are notified (user-management.md §Who Gets Notified).
+    BudgetExhausted,
 }
 
 impl NotificationType {
@@ -89,6 +99,9 @@ impl NotificationType {
             Self::SpecConflict => "SpecConflict",
             Self::MrReverted => "MrReverted",
             Self::MergeQueueEscalation => "MergeQueueEscalation",
+            Self::PersonaApprovalRequested => "PersonaApprovalRequested",
+            Self::MergeQueuePaused => "MergeQueuePaused",
+            Self::BudgetExhausted => "BudgetExhausted",
         }
     }
 
@@ -114,9 +127,11 @@ impl NotificationType {
             "CascadeTestFailed" => Some(Self::CascadeTestFailed),
             "DependencyChainTooDeep" => Some(Self::DependencyChainTooDeep),
             "AtomicGroupFailure" => Some(Self::AtomicGroupFailure),
-            "SpecConflict" => Some(Self::SpecConflict),
             "MrReverted" => Some(Self::MrReverted),
             "MergeQueueEscalation" => Some(Self::MergeQueueEscalation),
+            "PersonaApprovalRequested" => Some(Self::PersonaApprovalRequested),
+            "MergeQueuePaused" => Some(Self::MergeQueuePaused),
+            "BudgetExhausted" => Some(Self::BudgetExhausted),
             _ => None,
         }
     }
@@ -146,6 +161,9 @@ impl NotificationType {
             Self::SpecConflict => 2,
             Self::MrReverted => 2,
             Self::MergeQueueEscalation => 1,
+            Self::PersonaApprovalRequested => 2,
+            Self::MergeQueuePaused => 3,
+            Self::BudgetExhausted => 2,
         }
     }
 }

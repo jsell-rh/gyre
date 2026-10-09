@@ -123,7 +123,7 @@ impl From<Persona> for PersonaResponse {
 }
 
 pub async fn create_persona(
-    _auth: crate::auth::AuthenticatedAgent,
+    auth: crate::auth::AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreatePersonaRequest>,
 ) -> Result<(StatusCode, Json<PersonaResponse>), ApiError> {
@@ -142,9 +142,22 @@ pub async fn create_persona(
     persona.temperature = req.temperature;
     persona.max_tokens = req.max_tokens;
     persona.budget = req.budget;
+    // The creator owns the persona (its approval notifications route to the
+    // owner per user-management.md §Who Gets Notified).
+    persona.owner = Some(auth.agent_id.clone());
     // Recompute hash now that capabilities are set.
     persona.refresh_content_hash();
     state.personas.create(&persona).await?;
+
+    // Persona is created Pending; notify its owner that approval is
+    // requested (user-management.md §Who Gets Notified: "Persona approval
+    // requested" → Persona's `owner`).
+    crate::notification_dispatcher::notify_persona_approval_requested(
+        state.as_ref(),
+        &persona,
+    )
+    .await;
+
     Ok((StatusCode::CREATED, Json(PersonaResponse::from(persona))))
 }
 

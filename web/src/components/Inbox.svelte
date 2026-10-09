@@ -97,13 +97,14 @@
         MrNeedsReview: 'mr_needs_review',
         GateFailure: 'gate_failure',
         SuggestedSpecLink: 'suggested_link',
-        TaskCreated: 'task_created',
         BudgetWarning: 'budget_warning',
         SpecChanged: 'spec_changed',
         MetaSpecDrift: 'meta_spec_drift',
+        PersonaApprovalRequested: 'persona_approval_requested',
+        MergeQueuePaused: 'merge_queue_paused',
+        BudgetExhausted: 'budget_exhausted',
       };
       data = data.map(n => ({
-        ...n,
         notification_type: typeNormMap[n.notification_type] ?? n.notification_type,
       }));
 
