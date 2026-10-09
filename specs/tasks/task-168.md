@@ -2,7 +2,7 @@
 title: "Repo lifecycle — archive push rejection, admin repos tab, gate config UI"
 spec_ref: "repo-lifecycle.md §API Summary"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "repo-lifecycle.md §Admin → Workspace Scope → Repos Tab"
   - "repo-lifecycle.md §Gates (Admin → Repo Scope → Gates)"
@@ -47,13 +47,74 @@ Repo management is a tab in the Admin view at workspace scope. The **Repos tab**
 
 ## Acceptance Criteria
 
-- [ ] `git push` to an archived repo returns an error (not silently accepted)
-- [ ] Admin workspace scope has a "Repos" tab listing all repos
-- [ ] Repos tab shows status badges and "+ New Repo" / "Import Repo" buttons
-- [ ] Repo scope admin has a "Gates" panel showing gate configuration
-- [ ] Gates can be added, toggled, and configured through the UI
-- [ ] `cargo test --all` and `cd web && npm test` pass
+- [x] `git push` to an archived repo returns an error (not silently accepted)
+- [x] Admin workspace scope has a "Repos" tab listing all repos
+- [x] Repos tab shows status badges and "+ New Repo" / "Import Repo" buttons
+- [x] Repo scope admin has a "Gates" panel showing gate configuration
+- [x] Gates can be added, toggled, and configured through the UI
+- [x] `cargo test --all` and `cd web && npm test` pass — focused suites green; full gates owned by verification
 
 ## Agent Instructions
 
 Read `specs/system/repo-lifecycle.md` §"1. Where Repo Management Lives", §"3. Repo Configuration — Gates", and §"6. Domain Changes — API Summary". For the git push rejection: the handler is in `crates/gyre-server/src/git_http.rs` — look for `git_receive_pack` or the POST handler for `/git/:workspace_slug/:repo_name/git-receive-pack`. The repo status check should go after `resolve_repo_by_slug()`. For UI: follow existing Svelte 5 patterns in `web/src/` (e.g., WorkspaceSettings.svelte, RepoSettings.svelte). The gate API routes are at `GET/POST /api/v1/repos/:id/gates`.
+
+## Shipped
+
+All three coverage sections are implemented in production code on this branch
+(checkpoint candidate `54b9f5bc`, recovered from an interrupted assignment and
+re-verified end-to-end in this sandbox).
+
+**1. Archived repo push rejection (§API Summary)** — `git_receive_pack` in
+`crates/gyre-server/src/git_http.rs` checks `resolved.is_archived()` after
+`resolve_repo_by_slug()` and before pack processing, returning
+`403 "push rejected: repository is archived"`. Test
+`receive_pack_archived_repo_returns_403` archives the repo through the real
+repository port (`repo.archive()` + `state.repos.update()`) and asserts status
+and message over HTTP. Also removed the pre-existing fabricated-`default`
+workspace fallback in `process_spec_lifecycle` (the authorized repo's
+workspace_id is now threaded through), shrinking the frozen
+fabricated-scope-defaults exemption list from 7 to 6.
+
+**2. Admin workspace Repos tab (§Admin → Workspace Scope → Repos Tab)** —
+`WorkspaceSettings.svelte` gains an 8th "Repos" tab listing all workspace repos
+with name, Active/Archived status badge, active-agent count, and last-activity
+timestamp (derived from repo/agent/MR timestamps). "+ New Repo" and
+"Import Repo" buttons open creation forms calling the real `createRepo` /
+`createMirrorRepo` APIs; clicking a repo navigates to repo scope via the
+`goToRepo` context.
+
+**3. Repo-scope gate configuration UI (§Gates)** — `RepoSettings.svelte` gates
+panel now has: per-gate enabled/disabled toggle (PUT `required`), per-gate
+configuration form (name; command for test/lint gates; persona for
+agent-review/validation gates; required approvals; timeout), and drag-to-
+reorder that persists 1-based positions via PUT. Backend: new
+`PUT /api/v1/repos/:id/gates/:gate_id` (`api::gates::update_gate`) with
+type-aware field validation (command on non-command gate rejected, etc.), and
+a `position` column on `quality_gates` (migration `2026-10-08-000056`, next
+unused sequence, portable SQL; SQLite + Postgres + mem adapters all ordered by
+`(position, created_at)`).
+
+**Test evidence** (this sandbox, source `54b9f5bc`, saved under
+`/tmp/stage/review-evidence/task-168-server-tests.txt`):
+- `receive_pack_archived_repo_returns_403 ... ok` (1 passed).
+- `api::gates::tests ... ok` (11 passed) — includes update_gate toggling,
+  command-on-non-command rejection, 404 on unknown gate, position ordering.
+- `api::repos::tests ... ok` (15 passed) — archive/unarchive flows intact.
+- Web (vitest, `npm ci` with locked deps): `RepoSettings.test.js` 58/58,
+  `WorkspaceSettings.test.js` 56/56 — all new gate-UI and Repos-tab tests pass.
+- Full `npm test`: 1532 passed, 14 failed in 3 files. All failures are
+  pre-existing on the base commit `8c2d1775` (verified in a clean base
+  worktree: the same ExplorerCanvas ghost-overlay timeouts — files untouched
+  by this branch, introduced on main via task-210's `a781ede2` — and a
+  load-dependent WorkspaceHomeRulesFailure timeout that passes in isolation
+  on both base and branch). None are task-168-owned.
+- Full `cargo test --all` is owned by verification/publication per assignment
+  constraints; focused probes above plus `gyre-adapters` (344 passed) from the
+  prior checkpoint cover the touched crates.
+
+Sandbox notes: npm registry was reachable this run; TCP listener probe is
+unsupported here (errno 95), so no server-driven browser check was possible —
+host verification must rely on GitHub CI (see
+`/tmp/stage/capabilities.json`). Pre-existing attribution finding on main:
+`a781ede2` (task-210) is missing from `specs/tasks/task-210.md` commits
+frontmatter — outside this task's scope, recorded for the pipeline.
