@@ -2,7 +2,7 @@
 title: "Enhance User entity with profile fields and preferences"
 spec_ref: "user-management.md §User Entity"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "user-management.md §User Entity"
   - "user-management.md §Username vs Display Name"
@@ -136,3 +136,11 @@ Preferences stored server-side (not localStorage). Persist across devices and se
 ## Agent Instructions
 
 Read `specs/system/user-management.md` §User Entity through §User Preferences for full requirements. Existing User model: `gyre-domain/src/user.rs`. User port: `gyre-ports/src/user.rs` (or grep for `UserRepository`). SQLite adapter: grep for `impl UserRepository` in `gyre-adapters/`. Auth flow: `gyre-server/src/auth.rs`. User API: `gyre-server/src/api/users.rs`. Profile adapter: `gyre-adapters/src/sqlite/user_profile.rs`. Check migration numbering: `ls crates/gyre-adapters/migrations/ | tail -5` — currently at 000049.
+
+## Review
+
+### Review changed source code
+
+- specs/coverage/SUMMARY.md
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
