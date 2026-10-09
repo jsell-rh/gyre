@@ -43,3 +43,79 @@ New findings (same root: presence liveness is only half-implemented, so the feat
 
 - [-] [process-revision-complete] **F3: no client presence heartbeat — active editors are evicted after 60s, breaking the warning and the both-Inboxes requirement.** Spec §1 (line 84): presence updates are sent immediately after WS connect, then on both a 30-second timer AND view changes, with `view: "disconnected"` sent on `beforeunload`. The only `UserPresence` sender in `web/src` is `sendEditingPresence` (`web/src/lib/presence.js:18`), called solely from DetailPanel's editor-tab effect (`DetailPanel.svelte:993-996`) — one announce on open, one clear on in-app navigation away. There is no 30s interval, no send-on-connect, no send-on-view-change, and no `beforeunload` handler sending a disconnect (grep across `web/src`: `beforeunload` appears only in ExplorerView/MetaSpecs dirty-check… Process surface patched: implementation.md item 161 (client liveness contracts are all-or-nothing — every spec'd leg enumerated and tested) + verifier.md flaw-class bullet. Product fix owned by task-092's revision round.
 - [-] [process-revision-complete] **F4: server never rebroadcasts departures — the warning does not disappear when the other user closes their tab.** Spec §7 Presence Awareness (line 1180): the server rebroadcasts `UserPresence` to other workspace subscribers; §1 (line 84): graceful disconnect via `view: "disconnected"`. `ConcurrentEditBanner` clears a live warning only when it receives a `UserPresence` for that session with `view: "disconnected"` or cleared `editing_entity` (`ConcurrentEditBanner.svelte:78-86`). Three server paths remove a presence entry without telling any other subscriber: (1) `view: "disconnected"` handling removes the map entry but the rebroadcast block sits inside the `else` branch (`ws.rs:217-296`), so a disconnect is never rebroadcast; (2) socket-close cleanup… Process surface patched: implementation.md item 161 (every removal path must notify other subscribers — enumerate all removal sites) + verifier.md flaw-class bullet. Product fix owned by task-092's revision round.
+
+## Round 5 — repair round verified; environmental socket failures ruled out
+
+Bounded handoff: the prior round's repair note deferred socket-level tests to
+the controller. This sandbox has loopback, and the new socket tests fail — the
+question was whether that is a sandbox artifact or a product bug. Decisive
+control experiment (evidence: `/tmp/stage/review-evidence/`):
+
+- The 4 pre-existing socket tests (`ws_valid_auth_succeeds`, `ws_ping_pong`,
+  `ws_invalid_auth_fails`, `ws_activity_event_emits_to_telemetry` — untouched
+  by this task) fail at HEAD `de063c0` with `ConnectionReset` (Os code 104) at
+  the first `connect_async`.
+- Identical command at comparison base `66422bd` (isolated worktree, private
+  `CARGO_TARGET_DIR`): same 4 failures, same signature (base `ws.rs:513/539/
+  565/587` ≡ HEAD `:583/609/635/965`, same statements — line offset only from
+  the task's added lines). Both runs exit 101, 0 passed / 4 failed.
+- Additional control: `tty::tests::tty_auth_valid` + `tty_auth_invalid_rejected`
+  (also `connect_async`, untouched) fail identically at HEAD.
+
+Conclusion: **the ConnectionReset is environmental to this sandbox (loopback
+connections accepted then reset), not a task-092 regression.** Socket-level
+gates remain the controller's to run on the host. The socket-free F4 tests
+(`broadcast_presence_departure_reaches_only_workspace_subscribers`,
+`evict_stale_presence_removes_stale_and_notifies_evictee_and_subscribers`)
+cover the same removal-path logic without TCP and pass at HEAD (2/2).
+
+Repair-round claims re-verified at HEAD `de063c0`:
+
+- Root lockfile stub gone (tree + index); anchored `/package-lock.json` ignore
+  rule does not affect the tracked `web/`, `scripts/`, `docker/gyre-agent/`
+  lockfiles (`git check-ignore` exit 1 for all three).
+- `scripts/check-sandbox-sweep-artifacts.sh` is a genuine gate (tracked-file
+  check, anchor check, unignored-stub check), wired into `.pre-commit-config.yaml`
+  and `.github/workflows/ci.yml` as non-advisory. Runs OK.
+- `cargo test -p gyre-server --lib specs_assist` — 21/21 ok.
+- Six task web suites (presence, ConcurrentEditBanner, Inbox, SpecConflictDialog, ws, EditorSplit) — 105/105 ok.
+- Mutation probe (isolated to the file, restored, `git status` clean after): disabling the
+  eviction-check condition (`if (msg?.type === 'PresenceEvicted' && msg.session_id === wsStore.sessionId)`)
+  makes `stops heartbeating after PresenceEvicted names its own session` FAIL — the eviction-leg
+  regression test is load-bearing, not self-confirming.
+- Attribution gate (`scripts/check-task-commit-attribution.sh`) passes with no new exemptions
+  (3 frozen, none for task-092); every task-labeled product-surface commit in the range is
+  recorded in the frontmatter (unlisted wips touch only `specs/` + the removed root lockfile
+  stub, outside the gate's product-surface scope). `6af57ea3` cited in the task body was
+ orphaned by the rebase; its content is preserved in recorded `a4c3e59`.
+- `spawn_presence_eviction` is spawned from `main.rs:73`; `evict_stale_presence`
+  extracted as a testable unit.
+- F1 (`selfUserId` wiring: `App.svelte:775/1104`, both DetailPanel instances) and
+- F2 (`spec_conflict_response` persists `diff` array; `Inbox.svelte:459-462` renders
+  `SpecDiffView` from `body.diff`) intact post-rebase.
+- F4 wiring verified in source: all four removal paths (graceful disconnect
+  `ws.rs:219-231`, socket-close cleanup `:445-457` broadcast-before-deregister,
+  5-session cap eviction `:276-284`, idle sweeper `lib.rs evict_stale_presence`)
+  call `broadcast_presence_departure`; synthesized departure carries
+  server-verified `user_id` and `editing_entity: None`. Lock ordering
+  (`ws_connection_workspaces` → `ws_connections`, both read-only in broadcasts)
+  is consistent with the existing update path; no new deadlock surface.
+- F3 wiring verified in source: `createPresenceHeartbeat` implements all four
+  §1 legs + session-scoped eviction stop; wired in `App.svelte` with
+  `getEditingEntity` fed from DetailPanel's `oneditingentity` so beats re-send
+  the current entity; view-change leg wired to `presenceViewLabel` with the
+  registered-status-first reconnect guard; `ws.js` exposes the required
+  `onMessage`/`onStatus`/`sessionId` API.
+- ConcurrentEditBanner additionally gained the §7 "reconnect re-seeds presence
+  from `GET /workspaces/:id/presence`" leg (spec line 1198) with a
+  stale-response sequence guard.
+
+No new findings. F1-F4 all hold; the repair round's only change (lockfile
+sweep hardening) is sound and mechanically gated.
+
+**Verdict: `progress: complete`.** The R4/R3 fixes and repair round meet
+HSI §7 (warning banner, optimistic concurrency 409 + diff, both-Inboxes diff
+view, conflict dialog) and the §1/§7 presence liveness contracts (heartbeat
+legs, departure rebroadcast on all removal paths, session-scoped eviction
+stop, reconnect re-seed). Socket-level end-to-end tests remain for the
+controller's host run — they are environmental here.

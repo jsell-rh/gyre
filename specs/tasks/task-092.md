@@ -2,7 +2,7 @@
 title: "HSI Conflict Prevention — Concurrent Spec Editing Warning"
 spec_ref: "human-system-interface.md §7 Conflict Prevention"
 depends_on: []
-progress: ready-for-review
+progress: complete
 review: specs/reviews/task-092.md
 coverage_sections:
   - "human-system-interface.md §7 Conflict Prevention"
@@ -91,6 +91,22 @@ attribution check sees every reachable task-labeled product commit.
 ## Agent Instructions
 
 Read `specs/system/human-system-interface.md` §7 "Conflict Prevention" for the full spec. The UserPresence WsMessage is defined in `gyre-common/src/protocol.rs`. The presence map is managed in `gyre-server/src/ws.rs`. The spec save flow is in `gyre-server/src/api/specs.rs`. For the frontend, look at how specs are edited in the Svelte components. The existing presence infrastructure (session_id, workspace_id, view tracking) provides the foundation — you're extending it with entity-level granularity.
+
+## Shipped
+
+- **Concurrent spec-editing warning:** `UserPresence.editing_entity` announced per tab with a
+  full §1 heartbeat (send-on-connect, 30s timer, debounced view-change re-send, disconnect on
+  unload, session-scoped eviction stop); `ConcurrentEditBanner` shows "{user} is also editing
+  this spec" from live WS updates + presence snapshots, re-seeded on reconnect.
+- **Optimistic concurrency with conflict resolution:** spec save compares `base_sha` against
+  the ledger and returns 409 with a line diff; both editors get a `SpecConflict` Inbox
+  notification carrying the persisted diff, and the dialog offers Overwrite / Discard / Copy.
+- **Presence departure rebroadcast on every removal path:** graceful disconnect, socket
+  close, 5-session cap eviction, and the 60s idle sweeper each notify other workspace
+  subscribers via `broadcast_presence_departure`, so warnings clear in real time.
+- **Sweep-artifact gate:** root `package-lock.json` npm stubs are ignored (anchored rule) and
+  mechanically rejected by `scripts/check-sandbox-sweep-artifacts.sh` (pre-commit + CI),
+  preventing verifier tooling artifacts from contaminating task-labeled commits.
 
 ## Review
 
