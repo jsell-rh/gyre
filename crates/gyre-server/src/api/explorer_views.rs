@@ -523,6 +523,41 @@ pub async fn generate_explorer_view(
     );
     let _ = state.costs.record(&cost_entry).await;
 
+    // Budget Tracking (platform-model.md §5): persist an `llm_query`
+    // BudgetCallRecord and increment the workspace + tenant counters. The
+    // LlmPort does not report actual usage for predict_json, so the existing
+    // estimate is split into input/output tokens. If the workspace cannot be
+    // resolved, skip and log rather than fabricate a tenant.
+    let tenant_id = state
+        .workspaces
+        .find_by_id(&ws_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|ws| ws.tenant_id.to_string());
+    match tenant_id {
+        Some(tenant_id) => {
+            super::budget::record_llm_budget_call(
+                &state,
+                &tenant_id,
+                &workspace_id,
+                None,
+                None,
+                None,
+                "llm_query",
+                estimated_input as u64,
+                (estimated_tokens - estimated_input as f64) as u64,
+                0.0,
+                &model,
+            )
+            .await;
+        }
+        None => tracing::warn!(
+            workspace_id = %workspace_id,
+            "explorer-views/generate: workspace unresolvable; budget counters not incremented"
+        ),
+    }
+
     let partial_data =
         serde_json::to_string(&json!({"explanation": "Generating view..."})).unwrap_or_default();
     let complete_data = serde_json::to_string(&json!({

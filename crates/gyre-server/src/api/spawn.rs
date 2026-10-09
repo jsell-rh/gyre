@@ -1407,6 +1407,44 @@ pub async fn record_agent_usage(
 
     state.agents.record_usage(&usage).await?;
 
+    // Budget Tracking (platform-model.md §5): every agent usage report is an
+    // `agent_run` budget call — persist the per-call audit record and bump the
+    // workspace + tenant tokens/cost counters so daily budgets are enforceable.
+    // The workspace (and its owning tenant) is required scope: if it cannot be
+    // resolved, skip the budget recording and log — never fabricate a tenant
+    // identity to charge (check-fabricated-scope-defaults.sh).
+    match state.workspaces.find_by_id(&agent.workspace_id).await {
+        Ok(Some(ws)) => {
+            let (model, _) =
+                crate::llm_helpers::resolve_llm_model(&state, &agent.workspace_id, "specs-assist")
+                    .await;
+            super::budget::record_llm_budget_call(
+                &state,
+                ws.tenant_id.as_str(),
+                agent.workspace_id.as_str(),
+                agent.repo_id.as_ref().map(|i| i.as_str()),
+                Some(agent.id.as_str()),
+                agent.current_task_id.as_ref().map(|i| i.as_str()),
+                "agent_run",
+                req.tokens_input,
+                req.tokens_output,
+                req.cost_usd,
+                &model,
+            )
+            .await;
+        }
+        Ok(None) => tracing::warn!(
+            agent_id = %id,
+            workspace_id = %agent.workspace_id,
+            "agent usage recorded but workspace not found; budget counters not incremented"
+        ),
+        Err(e) => tracing::warn!(
+            agent_id = %id,
+            workspace_id = %agent.workspace_id,
+            "agent usage recorded but workspace lookup failed; budget counters not incremented: {e}"
+        ),
+    }
+
     tracing::info!(
         agent_id = %id,
         tokens_input = req.tokens_input,

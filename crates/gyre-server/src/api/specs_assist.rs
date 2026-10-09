@@ -443,6 +443,42 @@ pub async fn assist_spec(
         tracing::warn!("Failed to record specs/assist cost entry: {e}");
     }
 
+    // Budget Tracking (platform-model.md §5): persist an `llm_query`
+    // BudgetCallRecord and increment the workspace + tenant counters. The
+    // LlmPort does not report actual usage for stream_complete, so the
+    // existing estimate is split into input/output tokens. Tenant scope comes
+    // from the repo's workspace; skip and log if unresolvable.
+    let tenant_id = state
+        .workspaces
+        .find_by_id(&repo.workspace_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|ws| ws.tenant_id.to_string());
+    match tenant_id {
+        Some(tenant_id) => {
+            super::budget::record_llm_budget_call(
+                &state,
+                &tenant_id,
+                repo.workspace_id.as_str(),
+                Some(repo.id.as_str()),
+                None,
+                None,
+                "llm_query",
+                estimated_input as u64,
+                (estimated_tokens - estimated_input as f64) as u64,
+                0.0,
+                &model,
+            )
+            .await;
+        }
+        None => tracing::warn!(
+            repo_id = %repo_id,
+            workspace_id = %repo.workspace_id,
+            "specs/assist: workspace unresolvable; budget counters not incremented"
+        ),
+    }
+
     // Build SSE events: partial events stream the explanation progressively,
     // complete event carries the full {diff, explanation} response.
     let mut events: Vec<Result<Event, std::convert::Infallible>> = Vec::new();

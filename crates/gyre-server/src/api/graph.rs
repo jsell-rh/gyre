@@ -1208,6 +1208,42 @@ pub async fn briefing_ask(
 
     let chunks: Vec<String> = stream.filter_map(|r| async { r.ok() }).collect().await;
     let full_text = chunks.join("");
+    // Budget Tracking (platform-model.md §5): charge the workspace for the
+    // briefing Q&A as an `llm_query` budget call — persist the audit record
+    // and increment the workspace + tenant counters. The LlmPort does not
+    // report actual usage for stream_complete; estimate from prompt/response
+    // size the same way the other LLM endpoints do (~4 chars per token).
+    // Skip and log if the workspace cannot be resolved rather than
+    // fabricating a tenant scope.
+    let estimated_input = (user_prompt.len() + system_prompt.len()) / 4;
+    let estimated_output = full_text.len() / 4;
+    if let Some(ws) = state
+        .workspaces
+        .find_by_id(&workspace_id_obj)
+        .await
+        .ok()
+        .flatten()
+    {
+        super::budget::record_llm_budget_call(
+            &state,
+            ws.tenant_id.as_str(),
+            &id,
+            None,
+            None,
+            None,
+            "llm_query",
+            estimated_input as u64,
+            estimated_output as u64,
+            0.0,
+            &model,
+        )
+        .await;
+    } else {
+        tracing::warn!(
+            workspace_id = %id,
+            "briefing/ask: workspace unresolvable; budget counters not incremented"
+        );
+    }
 
     let mut events: Vec<Result<Event, std::convert::Infallible>> = Vec::new();
     for chunk in &chunks {
