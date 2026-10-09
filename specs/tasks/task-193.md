@@ -2,10 +2,10 @@
 title: "Mode-based spec approval status resolution with attestation/stack_hash validity"
 spec_ref: "spec-registry.md §9 Approval Status Resolution"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "spec-registry.md §9"
-commits: ["1e55eef5973023193199d136a844f072d25f1b36", "b1ead356c8c96561b8b88374922312ca82831824", "5d4ebb171e2f01c7d5fdd6898c5c008f854ac74a", "e42c374d89663ff8bac7990edb2853942534fdf2", "0e6c1b88e05e10e2ab8c40eb958d28e27579a6d6", "56b51b3fa52d5d978ec8ca9519884ddc31bf58a9"]
+commits: ["1e55eef5973023193199d136a844f072d25f1b36", "b1ead356c8c96561b8b88374922312ca82831824", "5d4ebb171e2f01c7d5fdd6898c5c008f854ac74a", "e42c374d89663ff8bac7990edb2853942534fdf2", "0e6c1b88e05e10e2ab8c40eb958d28e27579a6d6", "56b51b3fa52d5d978ec8ca9519884ddc31bf58a9", "32c94f62f2cf75f6b3d3838824ec1ee87fa0552b"]
 ---
 
 ## Spec Excerpt
@@ -75,3 +75,22 @@ Additionally, `SpecApprovalEvent` (`crates/gyre-domain/src/spec_ledger.rs:60-75`
 - Verify the diesel table mapping for the approval-history table in `crates/gyre-adapters/src/schema.rs` before adding columns; write a real migration.
 - This task introduces `read_manifest()` in `spec_registry.rs`; tasks 194 and 195 reuse it — keep the signature `read_manifest(repo_path, sha) -> Option<SpecManifest>`.
 - Run only touched-crate tests plus `scripts/check-arch.sh`; skip formatters and the full workspace suite.
+
+## Shipped
+
+§9 mode-based approval resolution is implemented and verified at `32c94f62` (crates bit-identical to the reviewed checkpoint `3e467f37`; merge `32c94f62` only brought in the updated base `8c2d1775`).
+
+**Behavior:**
+- `SpecApprovalEvent` now carries `attestation_level: Option<u32>` and `stack_hash: Option<String>` (`gyre-domain/src/spec_ledger.rs`), persisted via diesel migration `2026-10-08-000056_spec_approval_attestation` (portable `ALTER TABLE ADD COLUMN`, both SQLite + Postgres adapters map the new columns; mem adapter stores the struct). Schema updated, no data dropped.
+- `approve_spec` (`api/specs.rs`) captures agent attestation from the approver's **verified JWT claims**: `stack_hash` from the `wl_stack_hash` claim; `attestation_level` derived from the agent's real workload-attestation record via the same `derive_attestation_level` used by constraint checks (supply-chain levels 0–3). Humans (API-key/global-token auth, or non-agent-scope JWT) record `None`/`None`. Values are never invented.
+- New `read_manifest(repo_path, sha) -> Option<SpecManifest>` in `spec_registry.rs` (signature as specified for tasks 194/195; `read_manifest_paths` delegates to it). The resolver reads the manifest at `HEAD` because `current_sha` is a blob SHA, not a commit.
+- Pure resolver `resolve_approval_status(entry, defaults, current_sha, events)` in `spec_registry.rs`: event valid iff `spec_sha == current_sha` && active; agent validity additionally requires persona ∈ `agent_approvers`, `attestation_level >= min_attestation_level` (default 1), and exact `stack_hash` match when pinned; human validity requires `approver_type == "human"` and `approver_id ∈ human_approvers` when that list is non-empty. Modes: `human_only` → ≥1 valid human; `agent_only` → ≥1 valid agent; `human_and_agent` → both. `requires_approval: false` → Approved regardless (§17). Wired into `approve_spec` and `revoke_spec_approval` via `resolve_new_approval_status` (manifest-less repos fall back to legacy single-approval semantics, logged at debug).
+- `SpecApproved` message-bus event fires only on the transition *into* Approved (partial approvals of a `human_and_agent` pair no longer trigger the signal chain).
+
+**Test evidence (all at `32c94f62`, logs in /tmp/stage/review-evidence/):**
+- 13 resolver unit tests pass, including per-mode tests that fail under a reverted "any valid approval" resolver, attestation-too-low (`test_resolve_agent_only_pending_when_attestation_below_minimum`), stack_hash-mismatch and stack_hash-missing.
+- 4 E2E tests through the real HTTP router with real committed git repos and real minted agent JWTs + workload attestations: `human_and_agent_requires_both_approvals_e2e` (Pending after agent-only, Approved after human completes the pair), `agent_only_rejects_attestation_below_minimum_e2e` (level 2 vs min 3 → Pending; level 3 → Approved), `agent_only_requires_exact_stack_hash_match_e2e` (wrong stack → Pending; pinned stack → Approved), `agent_attestation_fields_round_trip_via_history_api` (JWT-derived level 3 + `sha256:pinned` persist and read back).
+- Adapters round-trip: 3/3 (`agent_attestation_fields_round_trip`, `human_approval_keeps_attestation_fields_null`, `record_and_list_by_path_round_trip`). gyre-domain: 363/363. gyre-server spec_registry: 55/55; api::specs: 55/55.
+- `cargo build --all` exit 0. `scripts/check-arch.sh`, `check-migration-versions.sh`, `check-migration-sql-portability.sh`, `check-mem-port-contracts.sh` all pass.
+
+Sandbox note: no TCP listener support (capabilities.json), so no live-server HTTP check was performed here; the E2E tests exercise the full axum router (auth middleware → handler → SQLite-backed stores) in-process, which is the strongest available transport-level verification. Exact-head GitHub CI remains mandatory.
