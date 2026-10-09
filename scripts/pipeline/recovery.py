@@ -32,7 +32,9 @@ def restore(directory, repository, expected_branch=None):
         return subprocess.check_output(['git', *args], cwd=repository,
                                        env=env, input=data).decode().strip()
 
-    git('fetch', '--quiet', 'origin', receipt['base'])
+    git('config', 'remote.origin.promisor', 'true')
+    git('config', 'remote.origin.partialclonefilter', 'blob:none')
+    git('fetch', '--quiet', '--filter=blob:none', 'origin', receipt['base'])
     saved = directory / 'restored.json'
     if saved.exists():
         outcome = json.loads(saved.read_text())
@@ -55,7 +57,7 @@ def restore(directory, repository, expected_branch=None):
             head = git('commit-tree', tree, '-p', receipt['base'], env=env,
                        data=b'checkpoint: recover interrupted pipeline source\n')
             if published:
-                git('fetch', '--quiet', 'origin', published)
+                git('fetch', '--quiet', '--filter=blob:none', 'origin', published)
                 head = git('commit-tree', tree, '-p', head, '-p', published, env=env,
                            data=b'checkpoint: retain published pipeline history\n')
             outcome = {'head': head, 'tree': tree, 'branch': branch,

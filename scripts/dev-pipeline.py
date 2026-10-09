@@ -27,7 +27,9 @@ def source(store):
         if not (path / '.git').exists():
             subprocess.run(['git', 'clone', '--quiet', '--shared', str(ROOT), str(path)], check=True, timeout=120)
             subprocess.run(['git', 'remote', 'set-url', 'origin', store.setting('repo_url', 'https://github.com/jsell-rh/gyre.git')], cwd=path, check=True)
-        subprocess.run(['git', 'fetch', '--quiet', 'origin', 'main'], cwd=path, check=True, timeout=120)
+        subprocess.run(['git', 'config', 'remote.origin.promisor', 'true'], cwd=path, check=True)
+        subprocess.run(['git', 'config', 'remote.origin.partialclonefilter', 'blob:none'], cwd=path, check=True)
+        subprocess.run(['git', 'fetch', '--quiet', '--filter=blob:none', 'origin', 'main'], cwd=path, check=True, timeout=120)
         subprocess.run(['git', 'checkout', '--quiet', '--detach', 'origin/main'], cwd=path, check=True)
         revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=path, text=True).strip()
         sync_checkout(store, path, revision)

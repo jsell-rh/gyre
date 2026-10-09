@@ -113,9 +113,11 @@ def review(execution, task):
                 verdict.get('candidate') == execution.claim['input']['candidate'] and
                 isinstance(verdict.get('findings'), list) and not verdict['findings'])
     receipt = {'candidate': execution.claim['input']['candidate'], 'approved': approved,
+               'checkpoint': result['head'], 'branch': result['branch'],
+               'record': next((name for name in changes if name.startswith('specs/reviews/')), None),
                'artifact': str(execution.directory / 'outcome.json')}
     if approved:
-        return result, {'review': receipt}, []
+        return result, {'review': receipt, 'retained_artifacts': None}, []
     finding = {'category': 'review', 'source': execution.claim['input']['candidate'],
                'review_checkpoint': result['head'], 'branch': result['branch'],
                'details': result.get('source_edits') or verdict.get('findings') or ['review did not produce an affirmative exact-source verdict'],
@@ -130,7 +132,17 @@ def checkout(execution, source):
                           str(ROOT), str(path), timeout=120)
         execution.command('git', 'remote', 'set-url', 'origin',
                           execution.store.setting('repo_url', 'https://github.com/jsell-rh/gyre.git'), cwd=path)
-    execution.command('git', 'fetch', '--quiet', 'origin', source, timeout=180, cwd=path)
+    # A shared clone of a partial repository must preserve promisor semantics.
+    # Otherwise Git advertises ancestors whose omitted blobs it cannot resolve.
+    execution.command('git', 'config', 'remote.origin.promisor', 'true', cwd=path)
+    execution.command('git', 'config', 'remote.origin.partialclonefilter', 'blob:none', cwd=path)
+    fetch = execution.command('git', 'fetch', '--quiet', '--filter=blob:none', 'origin', source,
+                              timeout=180, cwd=path, check=False)
+    if fetch.returncode:
+        # Refetch avoids negotiating against an earlier incomplete pack. Keep
+        # the same checkout, logs and work identity throughout recovery.
+        execution.command('git', 'fetch', '--quiet', '--filter=blob:none', '--refetch',
+                          'origin', source, timeout=180, cwd=path)
     execution.command('git', 'checkout', '--detach', source, cwd=path)
     return path
 
@@ -271,6 +283,10 @@ def publish(execution, task):
     description = execution.directory / 'pr.md'
     description.write_text(shipped + f"\nVerified base: {verified['base']}\nVerified tree: {verified['tree']}\n\n"
                            "Independent review approved the exact candidate. Deterministic guards, full Rust tests, and frontend tests passed. GitHub checks must pass before merge.\n")
+    review_receipt = data.get('review') or {}
+    if review_receipt.get('checkpoint') and review_receipt.get('record'):
+        with description.open('a') as output:
+            output.write(f"\nReview record: https://github.com/{repo}/blob/{review_receipt['checkpoint']}/{review_receipt['record']}\n")
     # Stable delivery branch, guarded against unexpected external updates.
     remote = execution.command('git', 'ls-remote', '--heads', 'origin', branch, cwd=path).stdout.split()
     expected = data.get('published_head')
@@ -432,7 +448,9 @@ if p.exists():
             raise Retry('sandbox deletion still pending')
         execution.store.resource_state(resource, 'absent')
     receipt = old_directory / 'recovery.json'
-    if receipt.exists() and old_work and old_work['generation'] == task['generation'] and not task['data'].get('delivered'):
+    if (receipt.exists() and old_work and old_work['stage'] == 'implement'
+            and old_work['state'] != 'succeeded' and old_work['generation'] == task['generation']
+            and not task['data'].get('delivered')):
         old_input = json.loads(old_work['input'])
         if task['data'].get('candidate') == old_input.get('candidate'):
             from .recovery import restore

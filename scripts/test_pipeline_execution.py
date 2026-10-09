@@ -41,6 +41,7 @@ class CrashTest(unittest.TestCase):
         with patch.object(execution, 'login', side_effect=AssertionError('must not allocate')):
             result = execution.cloud_step(self.store.task('task-001'), '')
         self.assertEqual(result['head'], 'source')
+        self.assertEqual(json.loads((execution.directory / 'outcome.json').read_text())['head'], 'source')
         self.assertEqual(self.store.db.execute('SELECT count(*) FROM resources').fetchone()[0], 0)
 
     def test_failed_capture_still_purges_expensive_compute(self):
@@ -80,6 +81,22 @@ class CrashTest(unittest.TestCase):
         with patch.object(execution, 'login', side_effect=RuntimeError('new model assignment required')):
             with self.assertRaisesRegex(RuntimeError, 'new model assignment required'):
                 execution.cloud_step(self.store.task('task-001'), '')
+
+    def test_cleanup_never_promotes_a_reviewers_checkpoint_to_implementation(self):
+        self.store.reserve('finished-review', self.work, self.claim['token'], 'sandbox', 1)
+        self.store.resource_state('finished-review', 'absent')
+        self.store.db.execute("UPDATE work SET stage='review' WHERE id=?", (self.work,))
+        self.store.retry(self.work, self.claim['token'], {'message': 'review host handoff interrupted'}, delay=0)
+        prior = self.store.directory / 'attempts' / self.work / str(self.claim['token'])
+        prior.mkdir(parents=True)
+        (prior / 'recovery.json').write_text(json.dumps({'base': 'review-source'}))
+        ident = self.store.enqueue('cleanup', 'task-001', 'g', {'resource': 'finished-review'}, priority=10000)
+        claim = self.store.claim('cleanup', 'cleaner')
+        execution = Execution(self.store, claim)
+        with patch.object(execution, 'login'), patch('pipeline.stages.gateway.inventory', return_value=[]), patch('pipeline.stages.checkout', side_effect=AssertionError('must not promote review source')):
+            _, updates, _ = cleanup(execution, self.store.task('task-001'))
+        self.assertEqual(updates, {})
+        self.assertIsNone(self.store.task('task-001')['data'].get('candidate'))
 
 
 if __name__ == '__main__':

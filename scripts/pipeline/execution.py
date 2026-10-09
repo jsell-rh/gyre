@@ -116,6 +116,9 @@ class Execution:
                 raise ValueError('published receipt belongs to another assignment')
             self.phase('AdoptingPublishedOutcome', head=receipt['head'])
             self.branch = old_job['branch']
+            (self.directory / 'outcome.json').write_text(json.dumps(receipt))
+            with self.log.open('a') as output:
+                output.write(f'Adopted published outcome from attempt {prior.parent.name}; no model rerun.\n')
             return receipt | {'branch': self.branch}
         previous = self.store.db.execute("SELECT * FROM resources WHERE work=? AND kind='sandbox' AND state IN ('intent','present') ORDER BY updated DESC LIMIT 1", (claim['id'],)).fetchone()
         logical_token = json.loads(previous['data']).get('logical_token', previous['token']) if previous else claim['token']
@@ -169,7 +172,8 @@ class Execution:
         bundle.mkdir(exist_ok=True)
         (bundle / 'job.json').write_text(json.dumps(job))
         (bundle / 'prompt.md').write_text(prompt)
-        artifacts = (task['data'].get('repair') or {}).get('stash_artifacts', [])
+        artifacts = list(dict.fromkeys((task['data'].get('retained_artifacts') or []) +
+                                      (task['data'].get('repair') or {}).get('stash_artifacts', [])))
         for index, value in enumerate(artifacts):
             source = Path(value).resolve()
             if not source.is_relative_to(self.store.directory) or source.stat().st_size > 16 * 1024 * 1024:
