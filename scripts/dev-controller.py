@@ -128,6 +128,7 @@ def db_open():
     for column, definition in (("inventory_at", "INTEGER NOT NULL DEFAULT 0"), ("inventory_error", "TEXT")):
         if column not in {row[1] for row in db.execute("PRAGMA table_info(controller_health)")}:
             db.execute(f"ALTER TABLE controller_health ADD COLUMN {column} {definition}")
+    db.commit()
     return db
 
 
@@ -823,8 +824,10 @@ def gc_sandboxes(db):
 def promote(db):
     # Published PRs remain under reconciliation in both publication modes.
     db.execute("UPDATE tasks SET state='promoting' WHERE state='published'")
+    db.commit()
     merged = {row["name"] for row in db.execute("SELECT name FROM tasks WHERE state='merged'")}
     for task in db.execute("SELECT * FROM tasks WHERE state='promoting' ORDER BY name").fetchall():
+        db.commit()
         if task['retry_at'] > time.time():
             continue
         if stale_audit(task):
@@ -957,6 +960,7 @@ def promote(db):
             event(db, task['name'], f'merged {landed}')
         else:
             defer_promotion(db, task, 'GitHubMergePending')
+    db.commit()
 
 
 def reconcile_pr_checks(db, task, check, merge_sha, pr):
@@ -1667,6 +1671,7 @@ def main():
             if source_error:
                 event(db, None, "source refresh recovered")
                 source_error = None
+        db.commit()
         if args.once:
             break
         time.sleep(args.interval)

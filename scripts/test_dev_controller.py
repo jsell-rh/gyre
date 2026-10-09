@@ -364,6 +364,15 @@ class ControllerGitTest(unittest.TestCase):
         self.assertRegex(observations[0], r'^[0-9a-f]{40}$')
         self.assertEqual(self.db.execute("SELECT count(*) FROM events WHERE message='concurrent control write'").fetchone()[0], 1)
 
+    def test_database_initialization_and_idle_promotion_release_writer(self):
+        for phase in ('initialized', 'idle promotion'):
+            with self.subTest(phase=phase):
+                if phase == 'idle promotion':
+                    controller.sync(self.db)
+                    controller.promote(self.db)
+                with sqlite3.connect(controller.STATE / 'state.sqlite3', timeout=.1) as other:
+                    other.execute('INSERT INTO events(at,task,message) VALUES(1,NULL,?)', (phase,))
+
     def test_shared_source_refresh_waits_for_other_process_lock(self):
         script = Path(__file__).with_name('dev-controller.py').resolve()
         code = ('import importlib.util; '
