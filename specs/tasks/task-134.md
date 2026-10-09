@@ -2,11 +2,11 @@
 title: "Define AgentReview and AgentValidation gate types with review protocol"
 spec_ref: "agent-gates.md §Part 1"
 depends_on: []
-progress: needs-revision
+progress: not-started
 coverage_sections:
   - "agent-gates.md §Gate Types (Extended)"
   - "agent-gates.md §AgentReview Gate"
-commits: ["e7172465f4a51aba2b8fc13bd672af94ac433ace", "a53b998f148b442a502d859a159908c6256b83e7", "3bf9f6fb007555d64986a22264e6a1f9de10999c", "4e44c4b532959cfe04e5e797600e14cc509e29fd", "71046576b850cfb675489c3ad36cd73f1ed64c4f", "596d2170113c32f67339f141ef3a871b40f509b8", "da4b7a36edb07bb3fdd683e7eb372c4a9b445db7", "1b40aacb758aa0fbf8aae9fec8e1f084899055c8"]
+commits: []
 ---
 
 ## Spec Excerpt
@@ -83,11 +83,3 @@ From `agent-gates.md` §Gate Types (Extended) and §AgentReview Gate:
 ## Agent Instructions
 
 Read `specs/system/agent-gates.md` Part 1 §Gate Types through §AgentReview Gate. Existing gate implementation: `gyre-server/src/api/gates.rs`, gate types in domain. Merge request reviews: `gyre-server/src/api/merge_requests.rs` (submit_review, list_reviews). Agent spawn: `gyre-server/src/api/spawn.rs`. Gate routes: `GET/POST /api/v1/repos/:id/gates` registered in `gyre-server/src/api/mod.rs` at line ~152. Persona resolution: `gyre-server/src/api/personas.rs` (resolve_persona). JWT minting: `gyre-server/src/auth.rs` (mint_with_workload). Check migration numbering: currently at 000049.
-
-## Review
-
-### Review changed source code
-
-- crates/gyre-server/tests/task134_review_probe.rs
-
-Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
