@@ -2,7 +2,7 @@
 title: "Add gyre budget CLI: show and set at repo/workspace/tenant scope"
 spec_ref: "platform-model.md §CLI"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "platform-model.md §CLI"
 commits: ["4d16c6c5b2ded0f53c67e528f4ecf5299fd714ca", "6f4d1366b84193c972c2e7c13a1a42059da2806a", "a5a82183d3e67df0aac25f30e2ba16c5709081f2"]
@@ -64,3 +64,10 @@ The `SetBudgetRequest` shape (`crates/gyre-server/src/api/budget.rs:63-69`) acce
 - Match the existing CLI output/formatting and error-handling style (see the `Deps`/`Trace` handlers).
 - Confirm `SetBudgetRequest`/`BudgetResponse`/`TenantBudgetSummary` field names in `crates/gyre-server/src/api/budget.rs` before serializing.
 - Run only the touched crates' tests plus `scripts/check-arch.sh`; do not run the full workspace suite or formatters.
+
+## Shipped
+
+- `gyre budget show` / `set` CLI against the real server routes: `GET/PUT /api/v1/workspaces/{id}/budget` and `GET /api/v1/budget/summary` (Admin-only surfaces surface the server's 403/400 bodies verbatim). Repo scope resolves the owning workspace via the existing git-remote → slug → id helpers; `--workspace-name` targets a named workspace; `--tenant` prints the per-workspace summary table with totals. Help text documents that repo scope maps to the owning workspace (no repo-keyed budget exists).
+- `set` is fetch-merge-put: the server PUT replaces the whole config, so the client GETs the current config, merges the provided limits (`--llm-tokens`, `--llm-cost`, `--max-agents`, `--max-agent-lifetime-secs`), and PUTs — unset limits keep their values. Tenant-level `set` is rejected honestly (no such endpoint server-side) instead of inventing a route.
+- Output: workspace view prints limits vs live usage (tokens/cost/active agents with % utilization, lifetime cap); tenant view prints tenant totals plus a per-workspace table and summed workspace usage.
+- Tests assert the exact method/URL/auth-header/JSON body via `RequestBuilder::build()` and the verbatim error path via `reqwest::Response::from` with the server's wire shape — 3/3 mutation round (wrong URL, dropped merge, swallowed error body) killed. `docs/cli.md` documents the command tree.
