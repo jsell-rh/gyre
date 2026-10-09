@@ -491,6 +491,8 @@ if p.exists():
   if stat.exists(): os.killpg(pid,signal.SIGKILL)
 """
         try:
+            if item['phase'].lower() != 'ready' and not any(old_directory.parent.glob('*/remote.offset')):
+                raise RuntimeError('No agent was attached; skip unreachable source capture and purge the unready sandbox')
             execution.remote(resource, 'python3', '-c', code, timeout=30, check=False)
             raw = execution.remote(resource, 'tail', '-c', '1048576', '/tmp/stage/step.log', timeout=30, check=False)
             (old_directory / 'orphan.log').write_text(raw.stdout)
