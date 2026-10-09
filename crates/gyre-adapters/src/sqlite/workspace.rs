@@ -561,3 +561,87 @@ impl PersonaRepository for SqliteStorage {
         .await?
     }
 }
+
+#[cfg(test)]
+mod persona_tests {
+    use super::*;
+    use crate::sqlite::SqliteStorage;
+    use tempfile::NamedTempFile;
+
+    fn tmp_storage() -> (NamedTempFile, SqliteStorage) {
+        let tmp = NamedTempFile::new().unwrap();
+        let storage = SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap();
+        (tmp, storage)
+    }
+
+    /// platform-model.md §2 / task-140: the four built-in personas (from
+    /// `gyre_domain::builtin_personas`) must round-trip through real SQLite
+    /// rows with scope, approval, hash, and prompt intact — the startup seed
+    /// and every later read depend on this serialization contract.
+    #[tokio::test]
+    async fn builtin_personas_round_trip_through_sqlite() {
+        let (_tmp, storage) = tmp_storage();
+        let tenant = Id::new("t-sql");
+        for p in gyre_domain::builtin_personas(&tenant, 1_700_000_000) {
+            PersonaRepository::create(&storage, &p).await.unwrap();
+        }
+
+        let scope = PersonaScope::Tenant(tenant.clone());
+        let listed = storage.list_by_scope(&scope).await.unwrap();
+        assert_eq!(listed.len(), 4, "all four built-ins must persist");
+        for p in &listed {
+            assert_eq!(p.scope, scope, "scope must round-trip");
+            assert_eq!(p.approval_status, PersonaApprovalStatus::Approved);
+            assert_eq!(p.approved_by.as_deref(), Some("system"));
+            assert_eq!(p.approved_at, Some(1_700_000_000));
+            assert_eq!(p.version, 1);
+            assert!(!p.content_hash.is_empty(), "hash must persist");
+            assert_eq!(p.system_prompt.len(), {
+                let orig = gyre_domain::builtin_personas(&tenant, 0)
+                    .into_iter()
+                    .find(|o| o.slug == p.slug)
+                    .unwrap();
+                orig.system_prompt.len()
+            });
+            let by_slug = storage
+                .find_by_slug_and_scope(&p.slug, &scope)
+                .await
+                .unwrap()
+                .expect("find_by_slug_and_scope must hit after round-trip");
+            assert_eq!(by_slug.id, p.id);
+        }
+    }
+
+    /// The startup-seed idempotency key is `find_by_slug_and_scope` against
+    /// real rows: re-running the check-then-insert loop over the same SQLite
+    /// database (server restart) must find the previously inserted rows and
+    /// not duplicate them. If the scope JSON stored by `create` ever stops
+    /// matching the JSON `find_by_slug_and_scope` filters on, this test
+    /// fails while every in-memory test stays green.
+    #[tokio::test]
+    async fn slug_scope_lookup_supports_idempotent_reseed() {
+        let (_tmp, storage) = tmp_storage();
+        let tenant = Id::new("t-reseed");
+        let scope = PersonaScope::Tenant(tenant.clone());
+
+        // First boot: seed via the same check-then-insert loop as
+        // `seed_builtin_personas_for_tenant` (lib.rs).
+        for p in gyre_domain::builtin_personas(&tenant, 1_700_000_000) {
+            match storage.find_by_slug_and_scope(&p.slug, &scope).await.unwrap() {
+                Some(_) => panic!("fresh DB must not find {} yet", p.slug),
+                None => PersonaRepository::create(&storage, &p).await.unwrap(),
+            }
+        }
+        // Second boot (restart): the lookup must now find every row.
+        for p in gyre_domain::builtin_personas(&tenant, 1_700_000_001) {
+            let found = storage
+                .find_by_slug_and_scope(&p.slug, &scope)
+                .await
+                .unwrap()
+                .expect("re-seed lookup must find the existing row");
+            assert_eq!(found.approved_at, Some(1_700_000_000));
+        }
+        let after = storage.list_by_scope(&scope).await.unwrap();
+        assert_eq!(after.len(), 4, "re-seed must not duplicate rows");
+    }
+}
