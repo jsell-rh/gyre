@@ -2,7 +2,7 @@
 title: "Implement automatic jj rebase on target branch movement"
 spec_ref: "source-control.md §4. Automatic Rebasing"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 review: specs/reviews/task-106.md
 coverage_sections:
   - "source-control.md §4 Automatic Rebasing"
@@ -65,6 +65,42 @@ onto the old parent; the adapter therefore runs `jj rebase -b @ -d <dest>`,
 which rebases the branch containing `@` (the entire in-flight stack).
 Verified empirically against jj 0.39.0 (see
 `jj_rebase_clean_after_target_moves` in `crates/gyre-adapters/src/jj_ops.rs`).
+
+## Shipped (revision round 3 — R2 F6/F7/F8)
+
+The recovered checkpoint (10dc345c) contains the complete F6/F7/F8 product
+fixes; this round verified them end-to-end and pins the web/dist rebuild.
+
+- **F6 (relative repos_root / legacy relative `repo.path` rows):**
+  `configured_repos_path()` (`gyre-server/src/lib.rs:763`) now anchors
+  `GYRE_REPOS_PATH` (and the `./repos` default) at the process cwd, so
+  `repos_root` is absolute at rest; `spawn_agent_core` additionally
+  absolutizes legacy relative `repo.path` rows before any jj/git child
+  call (`spawn.rs:533-545`). Pinned by
+  `configured_repos_path_{makes_relative_config_absolute,default_is_absolute,absolute_passthrough}`
+  and `spawn_absolutizes_legacy_relative_repo_path_for_jj_children`.
+- **F7 (stale jj view + half-created workspace defeating the git
+  fallback):** `jj_workspace_add` runs `jj git import` in the shared
+  checkout before resolving `-r <branch>` (mirroring `jj_rebase`), and on
+  a failed add forgets the workspace and removes the half-created dir so
+  the plain-git worktree fallback stays reachable. Pinned by
+  `jj_workspace_add_resolves_branch_created_after_init` and
+  `jj_workspace_add_failure_cleans_half_created_dir` (real jj 0.39.0).
+- **F8 (replay dropped a deferred rebase on infra Err):** the replay path
+  now keeps the pending marker unless the rebase reaches a terminal
+  outcome; `run_rebase` returns false on Err and the marker is only
+  removed on Success/Conflict. Pinned by `replay_failure_keeps_pending_rebase`.
+- **web/dist churn:** the committed `web/dist` differs from base because
+  base's dist was stale; `npm ci && npm run build` on unchanged `web/src`
+  reproduces the committed bundle byte-for-byte (md5 recorded in
+  /tmp/stage/review-evidence/task-106-r3-1791584245/).
+
+Test evidence (this round, sandbox): `cargo check` (server+adapters+ports)
+clean; `cargo test -p gyre-adapters jj` → 14/14 (real jj 0.39.0);
+`cargo test -p gyre-server --lib merge_processor` → 57/57;
+`spawn::` → 30/30; `agent_tracking` → 7/7; `configured_repos_path` → 3/3;
+`scripts/check-relative-path-defaults.sh`, `check-ignored-tool-tests.sh`,
+`check-arch.sh`, `check-mem-port-contracts.sh` all OK.
 
 ## Agent Instructions
 
