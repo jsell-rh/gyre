@@ -2,7 +2,7 @@
 title: "Ground Briefing Q&A in real briefing data with sources and history validation"
 spec_ref: "human-system-interface.md §9 Briefing Q&A (§1295-1332)"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §47"
 commits: ["e0523048b7382550b7228228d3bc28c7e1947357", "cfc3669e84e5473b7a2481d39b86a3ee2da88d22", "95efd42591226beb24761c08e6361916a72b29aa", "62a1b7b6e3ae6c946b1c65c11efd07c7bc3cbc66"]
@@ -115,3 +115,19 @@ All work in `crates/gyre-server/src/api/graph.rs` unless noted.
   leaving mirrored/self-confirming assertions.
 - Skip formatters/linters/full-suite runs beyond the two test commands above; the loop
   handles global validation.
+
+## Verification (implementation round 2026-10-09)
+
+- `cargo test -p gyre-server --lib briefing_ask` — 5/5 pass (400 cap, 503, rate
+  limit, SSE shape, prompt grounding with captured system prompt).
+- `web` vitest: `Briefing.test.js` 24/24, `InlineChat.test.js` +
+  `WorkspaceHomeSections.test.js` 43/43 pass.
+- `bash scripts/check-arch.sh` passes.
+- Route registration, ABAC `generate` mapping, rate limiter, and
+  LlmUnavailable handling untouched (verified via commit diffs).
+- Sandbox limitation: `tests/graph_integration.rs::test_briefing_ask_sse` and
+  `test_briefing_ask_not_found` cannot run here — this sandbox disallows
+  loopback listeners (both fail at the shared request helper with
+  `hyper IncompleteMessage`, including the pre-existing 404 path untouched by
+  this task). Controller should run `cargo test -p gyre-server --test
+  graph_integration` on host.
