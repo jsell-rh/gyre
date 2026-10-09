@@ -365,56 +365,72 @@
   }
 
   /** Navigate to a full-page entity detail view within repo mode.
-   *  Works from any mode — if currentRepo is not set, resolves it from data.repo_id / data.repository_id. */
+   *  Works from any mode — if currentRepo is not set, resolves it from data.repo_id / data.repository_id.
+   *  Cross-workspace entry (§10): when the entity's repo belongs to a different
+   *  workspace than the current one (e.g. an item clicked in the /all view),
+   *  switch currentWorkspace to the owning workspace first — the URL and every
+   *  subsequent query must reflect the actual owning scope, not the scope the
+   *  user happened to be browsing. */
   async function goToEntityDetail(entityType, entityId, data) {
     if (!currentWorkspace) return;
     const d = data ?? {};
     const parentTab = entityType === 'mr' ? 'mrs' : entityType === 'task' ? 'tasks' : entityType === 'agent' ? 'agents' : 'specs';
-    // Capture previous mode before we change it (used in history state for back nav)
-    const prevMode = mode;
 
-    // If we're not in repo mode or the entity belongs to a different repo, resolve context
-    const entityRepoId = d.repo_id ?? d.repository_id;
-    if (!currentRepo && entityRepoId) {
-      // Resolve repo name from the ID so we can build the URL
+    // Resolve the entity's repo so its owning workspace can be determined.
+    // data.workspace_id wins when present; otherwise look the repo up.
+    let entityRepoId = d.repo_id ?? d.repository_id ?? null;
+    let entityRepo = null;
+
+    if (entityRepoId) {
+      entityRepo = await api.repo(entityRepoId).catch(() => null);
+    } else {
+      // No repo id supplied — resolve from the entity itself (task/agent/MR
+      // payloads carry repo_id / repository_id).
+      try {
+        if (entityType === 'task') {
+          entityRepoId = (await api.task(entityId).catch(() => null))?.repo_id ?? null;
+        } else if (entityType === 'agent') {
+          entityRepoId = (await api.agent(entityId).catch(() => null))?.repo_id ?? null;
+        } else if (entityType === 'mr') {
+          const mrData = await api.mergeRequest(entityId).catch(() => null);
+          entityRepoId = mrData?.repository_id ?? mrData?.repo_id ?? null;
+        }
+        if (entityRepoId) entityRepo = await api.repo(entityRepoId).catch(() => null);
+      } catch { /* best effort */ }
+    }
+
+    // Enter the owning workspace when it differs from the current one (§10
+    // "opening an item must enter its actual owning scope"). The membership
+    // list is the source of truth — no fabricated scope identity.
+    const ownerWsId = d.workspace_id ?? entityRepo?.workspace_id ?? null;
+    if (ownerWsId && ownerWsId !== currentWorkspace.id) {
+      const ownerWs = workspaces.find(w => w.id === ownerWsId);
+      if (!ownerWs) {
+        showToast('Workspace not found for this item', { type: 'error' });
+        return;
+      }
+      currentWorkspace = ownerWs;
+      try { localStorage.setItem('gyre_workspace_id', ownerWs.id); } catch { /* private browsing */ }
+      loadWorkspaceData(ownerWs.id);
+      currentRepo = null; // re-resolved below under the owning workspace
+    }
+
+    // Resolve the repo within the (possibly switched) owning workspace.
+    if (!currentRepo && entityRepo) {
+      currentRepo = { id: entityRepo.id, name: entityRepo.name };
+      if (currentWorkspace?.id) {
+        repoIdCache.set(`${currentWorkspace.id}:${entityRepo.name}`, entityRepo.id);
+      }
+    }
+    // Fallback: the repo may live in the current workspace but only its id
+    // was supplied — look it up there.
+    if (!currentRepo && entityRepoId && currentWorkspace?.id) {
       try {
         const repos = await api.workspaceRepos(currentWorkspace.id);
-        const repo = (repos ?? []).find(r => r.id === entityRepoId);
+        const repo = (Array.isArray(repos) ? repos : []).find(r => r.id === entityRepoId);
         if (repo) {
           currentRepo = { id: repo.id, name: repo.name };
           repoIdCache.set(`${currentWorkspace.id}:${repo.name}`, repo.id);
-        } else {
-          // Fallback: try to get repo directly
-          const repoDetail = await api.repo(entityRepoId).catch(() => null);
-          if (repoDetail?.name) {
-            currentRepo = { id: entityRepoId, name: repoDetail.name };
-            repoIdCache.set(`${currentWorkspace.id}:${repoDetail.name}`, entityRepoId);
-          }
-        }
-      } catch { /* best effort */ }
-    }
-    // If we still don't have repo context, try to resolve from the entity itself
-    if (!currentRepo && !entityRepoId) {
-      try {
-        let resolvedRepoId = null;
-        if (entityType === 'task') {
-          const taskData = await api.task(entityId).catch(() => null);
-          resolvedRepoId = taskData?.repo_id;
-        } else if (entityType === 'agent') {
-          const agentData = await api.agent(entityId).catch(() => null);
-          resolvedRepoId = agentData?.repo_id;
-        } else if (entityType === 'mr') {
-          const mrData = await api.mergeRequest(entityId).catch(() => null);
-          resolvedRepoId = mrData?.repository_id ?? mrData?.repo_id;
-        }
-        if (resolvedRepoId) {
-          const repos = await api.workspaceRepos(currentWorkspace.id);
-          const repo = (Array.isArray(repos) ? repos : []).find(r => r.id === resolvedRepoId);
-          if (repo) {
-            currentRepo = { id: repo.id, name: repo.name };
-            repoIdCache.set(`${currentWorkspace.id}:${repo.name}`, repo.id);
-            d.repo_id = repo.id;
-          }
         }
       } catch { /* best effort */ }
     }
