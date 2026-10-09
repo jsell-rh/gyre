@@ -175,3 +175,41 @@ task-210 commit a781ede2, which is an ancestor of the assignment base
 8c2d1775 (verified via merge-base; identical failure at base checkout).
 Sandbox note: vitest fork workers are load-sensitive on 8 shared CPUs;
 this round's runs completed at normal load.
+
+---
+
+**Checkpoint-recovery round (2026-10-09).** Recovered an interrupted
+assignment (durable finding 301df7d1: "implementation must finish and
+obtain fresh review"). The implementation was already complete in the
+lineage (working tree clean at candidate 808a7825); this round re-ran the
+full verification with a fresh node_modules install and regenerated the
+evidence for review. No code changes — this round is verification and
+evidence.
+
+Fresh evidence (this round, sandbox):
+
+- `npm ci` (locked versions) → 169 packages, 8s.
+- `cd web && npm test` → **56 files passed, 1513 passed | 41 skipped,
+  0 failed** (90s).
+- Focused `canvas-filters.test.js` + `ExplorerCanvas.test.js` → **157
+  passed**.
+- Acceptance-criteria audit re-verified at head 808a7825 with file:line
+  evidence for all eight criteria (unified cutover, three lenses, five
+  presets, treemap drill, view-query rendering, interactions, minimap,
+  §17 props).
+- Mutation re-proof regenerated (evidence:
+  /tmp/stage/review-evidence/task-065-checkpoint-recovery-evidence.txt):
+  all three mutations (dependencies→unconditional dim; depends_on
+  participant dropped; dim 0.1→0.5) re-applied against the pristine tree
+  and killed; sources restored pristine after each (`git status` clean).
+  The prior round's evidence file names a different path
+  (task-065-repair-mutation-proof.txt) — this sandbox is fresh and only
+  the new evidence file exists.
+- Sandbox transport restriction recorded in the evidence file: TCP
+  listener probe unsupported (errno 95) — live dev-server browser check
+  deferred to host verification (exact-head GitHub CI plus manual UI
+  check at localhost:3000); jsdom-mounted component tests with recorded
+  canvas draw calls serve as the in-sandbox behavioral substitute.
+
+Progress remains `ready-for-review` awaiting fresh review on this
+candidate.
