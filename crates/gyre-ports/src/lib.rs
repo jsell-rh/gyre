@@ -32,6 +32,7 @@ pub mod merge_request;
 pub mod message;
 pub mod meta_spec_repository;
 pub mod meta_spec_set;
+pub mod invitation;
 pub mod network;
 pub mod notification;
 pub mod policy;
@@ -87,6 +88,7 @@ pub use llm::{
     ContentBlock, ConversationContent, ConversationMessage, LlmPort, LlmPortFactory, ToolCall,
     ToolCallingResponse, ToolDefinition,
 };
+pub use invitation::{TenantInvitationRepository, WorkspaceInvitationRepository};
 pub use llm_config::LlmConfigRepository;
 pub use merge_queue::MergeQueueRepository;
 pub use merge_request::MergeRequestRepository;

@@ -22,6 +22,7 @@ pub mod explorer_views;
 pub mod federation;
 pub mod gates;
 pub mod graph;
+pub mod invitations;
 pub mod jj;
 pub mod key_binding;
 pub mod llm_config;
@@ -72,6 +73,10 @@ use compose::{compose_apply, compose_status, compose_teardown};
 use compute::{
     close_tunnel, create_compute_target, delete_compute_target, get_compute_target,
     list_compute_targets, list_tunnels, open_tunnel,
+};
+use invitations::{
+    bulk_invite_to_tenant, invite_to_tenant, invite_to_workspace, list_tenant_invitations,
+    list_workspace_invitations, revoke_tenant_invitation, revoke_workspace_invitation,
 };
 use discover::{discover_agents, get_agent_card, update_agent_card};
 use gyre_common::Id;
@@ -833,6 +838,29 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/members/:user_id",
             put(update_member_role).delete(remove_member),
+        )
+        // Tenant invitations (task-110, user-management.md §API > Tenant
+        // Invitations). TenantAdmin-only, enforced per-handler.
+        .route("/api/v1/tenant/invite", post(invite_to_tenant))
+        .route("/api/v1/tenant/invite/bulk", post(bulk_invite_to_tenant))
+        .route(
+            "/api/v1/tenant/invitations",
+            get(list_tenant_invitations),
+        )
+        .route(
+            "/api/v1/tenant/invitations/:id",
+            delete(revoke_tenant_invitation),
+        )
+        // Workspace invitations (task-110, user-management.md §API >
+        // Workspace Membership). Owner/Admin enforced per-handler.
+        .route("/api/v1/workspaces/:id/invite", post(invite_to_workspace))
+        .route(
+            "/api/v1/workspaces/:id/invitations",
+            get(list_workspace_invitations),
+        )
+        .route(
+            "/api/v1/workspaces/:id/invitations/:id",
+            delete(revoke_workspace_invitation),
         )
         // Teams (M22.8)
         .route(
