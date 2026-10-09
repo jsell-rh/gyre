@@ -2,7 +2,7 @@
 title: "Ground Briefing Q&A in real briefing data with sources and history validation"
 spec_ref: "human-system-interface.md §9 Briefing Q&A (§1295-1332)"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "human-system-interface.md §47"
 commits: ["e0523048b7382550b7228228d3bc28c7e1947357", "cfc3669e84e5473b7a2481d39b86a3ee2da88d22", "95efd42591226beb24761c08e6361916a72b29aa", "62a1b7b6e3ae6c946b1c65c11efd07c7bc3cbc66"]
@@ -131,3 +131,11 @@ All work in `crates/gyre-server/src/api/graph.rs` unless noted.
   `hyper IncompleteMessage`, including the pre-existing 404 path untouched by
   this task). Controller should run `cargo test -p gyre-server --test
   graph_integration` on host.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/api/graph.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.

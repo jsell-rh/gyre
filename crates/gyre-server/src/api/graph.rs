@@ -1213,13 +1213,13 @@ pub async fn briefing_ask(
 {
     require_workspace(&state, &id).await?;
 
-    // HSI §1325: history is capped at 20 entries — the server REJECTS requests
-    // with more than 20 entries (the client drops older ones). Do not truncate.
-    // Checked before the rate limiter so invalid requests never consume budget.
-    if req.history.as_ref().is_some_and(|h| h.len() > 20) {
-        return Err(ApiError::InvalidInput(
-            "history must contain at most 20 entries".to_string(),
-        ));
+    // MUTANT: silently truncate instead of rejecting.
+    let mut req = req;
+    if let Some(history) = req.history.as_mut() {
+        if history.len() > 20 {
+            let excess = history.len() - 20;
+            history.drain(..excess);
+        }
     }
 
     // Per-user/workspace sliding-window rate limit (HSI §6): 10 req/60 s.
