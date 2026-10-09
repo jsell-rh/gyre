@@ -8,4 +8,4 @@ pub use container::ContainerTarget;
 pub use docker::DockerTarget;
 pub use kubernetes::KubernetesTarget;
 pub use local::LocalTarget;
-pub use ssh::{SshTarget, SshTunnel, TunnelKind};
+pub use ssh::{SshDockerTarget, SshTarget, SshTunnel, TunnelKind};

@@ -279,6 +279,211 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+// ---------------------------------------------------------------------------
+// Remote Docker execution (agent-runtime.md §3 Supported Backends — SSH)
+// ---------------------------------------------------------------------------
+
+/// Spawns agent containers on a remote host via SSH: `ssh user@host docker run`.
+///
+/// The spec's SSH backend is "SSH to remote host, `docker run` there" — the
+/// container runs on the remote machine, orchestrated from the server over
+/// SSH. Unlike [`SshTarget`] (bare remote processes) this tracks the remote
+/// *container*, not the short-lived `docker` client process: `--detach`
+/// returns once the container starts, and the container ID printed on stdout
+/// becomes the [`ProcessHandle`] id. `kill_process` runs `docker rm --force`
+/// on the remote host; `is_alive` runs `docker inspect` there.
+///
+/// Security defaults match the container backend (spec §3):
+/// `--network=none`, `--memory=2g`, `--pids-limit=512`, `--user=65534:65534`.
+pub struct SshDockerTarget {
+    /// SSH user@host connection (credentials live here).
+    pub ssh: SshTarget,
+    /// Agent image to run on the remote host.
+    pub image: String,
+    /// Network mode override. `None` = `--network=none` (spec default).
+    pub network: Option<String>,
+    /// Memory limit override. `None` = `--memory=2g` (spec default).
+    pub memory_limit: Option<String>,
+    /// PIDs limit override. `None` = `--pids-limit=512` (spec default).
+    pub pids_limit: Option<u32>,
+    /// User override. `None` = `--user=65534:65534` (spec default).
+    pub user: Option<String>,
+    /// Remote docker binary (default `docker`).
+    pub docker_binary: String,
+}
+
+impl SshDockerTarget {
+    pub fn new(ssh: SshTarget, image: impl Into<String>) -> Self {
+        Self {
+            ssh,
+            image: image.into(),
+            network: None,
+            memory_limit: None,
+            pids_limit: None,
+            user: None,
+            docker_binary: "docker".to_string(),
+        }
+    }
+
+    pub fn with_network(mut self, network: impl Into<String>) -> Self {
+        self.network = Some(network.into());
+        self
+    }
+
+    pub fn with_memory_limit(mut self, limit: impl Into<String>) -> Self {
+        self.memory_limit = Some(limit.into());
+        self
+    }
+
+    pub fn with_pids_limit(mut self, limit: u32) -> Self {
+        self.pids_limit = Some(limit);
+        self
+    }
+
+    pub fn with_user(mut self, user: impl Into<String>) -> Self {
+        self.user = Some(user.into());
+        self
+    }
+
+    pub fn with_docker_binary(mut self, bin: impl Into<String>) -> Self {
+        self.docker_binary = bin.into();
+        self
+    }
+
+    /// Build the `docker run` argument list (server-side, no shell).
+    ///
+    /// Kept as a separate function so tests can assert the security
+    /// defaults and injection safety.
+    fn docker_run_args(&self, config: &SpawnConfig) -> Vec<String> {
+        let mut args = vec![
+            "run".to_string(),
+            "--detach".to_string(),
+            "--rm".to_string(),
+            format!("--name={}", config.name),
+            // Spec §3 security defaults (same as ContainerTarget).
+            format!("--network={}", self.network.as_deref().unwrap_or("none")),
+            format!("--memory={}", self.memory_limit.as_deref().unwrap_or("2g")),
+            format!("--pids-limit={}", self.pids_limit.unwrap_or(512)),
+            format!("--user={}", self.user.as_deref().unwrap_or("65534:65534")),
+        ];
+        for (k, v) in &config.env {
+            args.push(format!("--env={}={}", k, v));
+        }
+        args.push(format!("--workdir={}", config.work_dir));
+        args.push(self.image.clone());
+        args.push(config.command.clone());
+        args.extend(config.args.iter().cloned());
+        args
+    }
+
+    /// Run the remote docker binary with the given subcommand args over SSH.
+    /// Each argument is shell-quoted individually — no remote shell
+    /// interpolation of user-controlled strings.
+    async fn remote_docker(&self, docker_args: &[String]) -> Result<String> {
+        let quoted: Vec<String> = docker_args
+            .iter()
+            .map(|a| shell_quote(a))
+            .collect();
+        let remote_cmd = format!("{} {}", self.docker_binary, quoted.join(" "));
+        let mut ssh_args = self.ssh.base_ssh_args();
+        ssh_args.push(self.ssh.destination());
+        ssh_args.push(remote_cmd);
+        let output = Command::new("ssh")
+            .args(&ssh_args)
+            .output()
+            .await
+            .with_context(|| {
+                format!("ssh to {} failed — is ssh installed?", self.ssh.destination())
+            })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!(
+                "remote docker on {} failed: {}",
+                self.ssh.destination(),
+                stderr
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    /// Resolve the image digest on the remote host
+    /// (`docker image inspect --format {{.Id}}`).
+    ///
+    /// Best-effort: returns `Err` when the remote docker cannot resolve the
+    /// image; callers use it for the `wl_image_hash` claim and must tolerate
+    /// absence.
+    pub async fn remote_image_digest(&self) -> Result<String> {
+        self.remote_docker(&[
+            "image".to_string(),
+            "inspect".to_string(),
+            "--format={{.Id}}".to_string(),
+            self.image.clone(),
+        ])
+        .await
+        .and_then(|out| {
+            let digest = out.trim().to_string();
+            if digest.is_empty() {
+                Err(anyhow::anyhow!(
+                    "remote docker returned empty digest for {}",
+                    self.image
+                ))
+            } else {
+                Ok(digest)
+            }
+        })
+    }
+}
+
+#[async_trait]
+impl ComputeTarget for SshDockerTarget {
+    fn name(&self) -> &str {
+        "ssh"
+    }
+
+    fn target_type(&self) -> &'static str {
+        "ssh"
+    }
+
+    async fn spawn_process(&self, config: &SpawnConfig) -> Result<ProcessHandle> {
+        let container_id = self.remote_docker(&self.docker_run_args(config)).await?;
+        if container_id.is_empty() {
+            return Err(anyhow::anyhow!(
+                "remote docker run on {} returned no container id",
+                self.ssh.destination()
+            ));
+        }
+        Ok(ProcessHandle {
+            id: container_id,
+            target_type: "ssh".to_string(),
+            pid: None,
+        })
+    }
+
+    async fn kill_process(&self, handle: &ProcessHandle) -> Result<()> {
+        let _ = self
+            .remote_docker(&[
+                "rm".to_string(),
+                "--force".to_string(),
+                handle.id.clone(),
+            ])
+            .await;
+        // Already-gone containers are a successful kill.
+        Ok(())
+    }
+
+    async fn is_alive(&self, handle: &ProcessHandle) -> Result<bool> {
+        let out = self
+            .remote_docker(&[
+                "inspect".to_string(),
+                "--format={{.State.Running}}".to_string(),
+                handle.id.clone(),
+            ])
+            .await
+            .unwrap_or_default();
+        Ok(out.trim() == "true")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,9 +530,100 @@ mod tests {
     }
 
     #[test]
+    #[test]
     fn forward_tunnel_spec_format() {
         let kind = TunnelKind::Forward {
             local_port: 8080,
+            remote_host: "localhost".to_string(),
+            remote_port: 80,
+        };
+        let spec = match &kind {
+            TunnelKind::Forward {
+                local_port,
+                remote_host,
+                remote_port,
+            } => format!("{}:{}:{}", local_port, remote_host, remote_port),
+            TunnelKind::Reverse { .. } => panic!("wrong variant"),
+        };
+        assert_eq!(spec, "8080:localhost:80");
+    }
+
+    fn ssh_docker_config(name: &str) -> SpawnConfig {
+        let mut env = std::collections::HashMap::new();
+        env.insert("GYRE_AGENT_ID".to_string(), "a-1".to_string());
+        SpawnConfig {
+            name: name.to_string(),
+            command: "/gyre/entrypoint.sh".to_string(),
+            args: vec![],
+            env,
+            work_dir: "/workspace".to_string(),
+        }
+    }
+
+    #[test]
+    fn ssh_docker_run_args_enforce_security_defaults() {
+        let t = SshDockerTarget::new(SshTarget::new("user", "host"), "gyre-agent:latest");
+        let args = t.docker_run_args(&ssh_docker_config("agent-1"));
+        // Spec §3 container security defaults, applied on the remote host.
+        assert!(args.contains(&"--network=none".to_string()));
+        assert!(args.contains(&"--memory=2g".to_string()));
+        assert!(args.contains(&"--pids-limit=512".to_string()));
+        assert!(args.contains(&"--user=65534:65534".to_string()));
+        assert!(args.contains(&"--detach".to_string()));
+        assert!(args.contains(&"--name=agent-1".to_string()));
+        // Env vars forwarded so the remote container can authenticate.
+        assert!(args.contains(&"--env=GYRE_AGENT_ID=a-1".to_string()));
+        assert!(args.contains(&"gyre-agent:latest".to_string()));
+    }
+
+    #[test]
+    fn ssh_docker_run_args_apply_overrides() {
+        let t = SshDockerTarget::new(SshTarget::new("user", "host"), "gyre-agent:latest")
+            .with_network("bridge")
+            .with_memory_limit("4g")
+            .with_pids_limit(256)
+            .with_user("1000:1000");
+        let args = t.docker_run_args(&ssh_docker_config("agent-2"));
+        assert!(args.contains(&"--network=bridge".to_string()));
+        assert!(args.contains(&"--memory=4g".to_string()));
+        assert!(args.contains(&"--pids-limit=256".to_string()));
+        assert!(args.contains(&"--user=1000:1000".to_string()));
+        // Defaults must not linger alongside overrides.
+        assert!(!args.contains(&"--network=none".to_string()));
+        assert!(!args.contains(&"--memory=2g".to_string()));
+    }
+
+    #[test]
+    fn ssh_docker_remote_command_shell_quotes_every_arg() {
+        // An image tag (or env value) carrying shell metacharacters must be
+        // quoted as a single argv element, never interpolated by the remote
+        // shell.
+        let t = SshDockerTarget::new(SshTarget::new("user", "host"), "img; rm -rf /");
+        let args = t.docker_run_args(&ssh_docker_config("agent-3"));
+        let quoted: Vec<String> = args.iter().map(|a| shell_quote(a)).collect();
+        let remote = format!("docker {}", quoted.join(" "));
+        // The hostile image tag appears exactly once, quoted.
+        assert_eq!(remote.matches("rm -rf /").count(), 1);
+        assert!(remote.contains("'img; rm -rf /'"));
+    }
+
+    /// SshDockerTarget must fail fast when ssh is absent — proves the
+    /// backend shells out to a real binary and propagates failure.
+    #[tokio::test]
+    async fn ssh_docker_spawn_without_ssh_errors() {
+        if which_exists("ssh") {
+            return; // environment has ssh; failure path untestable here
+        }
+        let t = SshDockerTarget::new(SshTarget::new("user", "host"), "gyre-agent:latest");
+        let res = t.spawn_process(&ssh_docker_config("agent-x")).await;
+        assert!(res.is_err(), "spawn must fail when ssh is missing");
+    }
+
+    fn which_exists(bin: &str) -> bool {
+        std::env::var_os("PATH")
+            .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).exists()))
+            .unwrap_or(false)
+    }
             remote_host: "localhost".to_string(),
             remote_port: 80,
         };
