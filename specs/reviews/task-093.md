@@ -62,3 +62,23 @@ One non-blocking observation (not a finding): `fail_agent`/`stop_agent` are them
 All ten findings from round 1 are fixed with production code and kill-tested. No material gap remains against `platform-model.md` §3 (Workspace Orchestrator, Repo Orchestrator, Auto-Restart on Death, escalation).
 
 — Verifier, 2026-10-06
+
+# Post-integration review — task-093 (round 3)
+
+Trigger: integration candidate `3cbd6d9ec8c063d37b8de22abf0e812146fe3902` rejected on the rustfmt changed-lines gate only (log: abac_middleware.rs 152-156, orchestrator.rs 716-721/738/758-762, spawn.rs 1516, mcp.rs 5248-5253/5290, stale_agents.rs 44-48). Comparison base for this round: `8cde8130f8bb04d24ba4d75997357b87d73324d1` → HEAD `7db5ee23d7ce3755a1797ac0a7ca4fc669516989`.
+
+Verdict: **complete**.
+
+What this round checked and found:
+
+- **The rejection was formatting-only.** The candidate's product files were tree-identical to the round-2-approved revision `7ac4f681` (verified per-file via `git diff --stat 3cbd6d9 7ac4f681`: identical for all five changed Rust files), so no behavioral review was lost by the rejection — round 2's `complete` applied to the same code.
+- **The repair is formatting-only.** `git diff 7ac4f681 HEAD` across all five Rust files shows only line-join/split changes in `mod tests` call sites, one deleted blank line in `spawn.rs`, and collapsed `RouteResourceMapping::api(...)` literals in `abac_middleware.rs` — zero semantic changes; no code, tests, or checks weakened or deleted.
+- **The exact failed gate now passes.** `python3 scripts/check-rustfmt-diff.py 8cde8130` → "rustfmt: changed lines clean (5 Rust files checked)". Failure reproduction on the candidate's tree (rustfmt + opcode diff) reproduces the exact violating lines from the gate log (mcp.rs 5248-5253/5290, stale_agents.rs 44-48), confirming the repair class was correct rather than gate weakening.
+- **Mechanical checks pass:** ABAC route registry OK (both orchestrator spawn routes in the resolver; exemption count frozen at 51 — honest shrink from 53, entries removed not maintained), MCP write-tools OK (7 gated, exemptions empty), exempt-handlers OK (87), inert-enforcement OK, arch OK, task-commit attribution OK (all four listed commits are real ancestors of HEAD).
+- **Focused tests pass:** `api::orchestrator` 16/16 (wrapper tenant-containment both tiers and directions, budget decrement/reclaim and exhausted-budget no-restart, second-death restart chain, fail/stop-path replacement + escalation payload with replacement_agent_id/informational), `mcp::tests::mcp_message_send` 9/9 (ReadOnly API-key denial with nothing persisted + Agent-role positive control), MCP orchestrator-tier tools 6/6 (cross_repo_task workspace scoping, spawn_repo_orchestrator happy/wrong-workspace, list live-only, decompose_spec repo scope, spawn_worker tier denial).
+- **Exemption-file deltas audited:** all honest-direction. The `inert-enforcement-exemptions.txt` re-anchor (orchestrator.rs:283→311) is line-shift upkeep for a `validate_persona` call that existed at base at both sites (187/283→187/311; entry count unchanged) and is owned by task-099's revision round per the file header — no new exemption for new code. `abac-exempt-handlers-exemptions.txt` shrinks by 6 lines (the two task-093 handler entries plus header comments, now resolver-registered). `.done` (empty stray marker committed at base by a task-082 sandbox) is deleted; nothing references it.
+- **Budget-decrement safety re-checked** (new unconditional decrement in the stale Abort path): all three adapters floor at zero (`GREATEST/MAX(0, active_agents - 1)` in SQLite/Postgres, `saturating_sub` in mem), so no negative-count lockout is possible; no-op for non-existent usage rows.
+
+No material gap remains. Round 2's ten findings stay resolved; the integration-blocking formatting defect is repaired with no behavioral change.
+
+— Verifier, 2026-10-09
