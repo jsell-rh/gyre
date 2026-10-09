@@ -5,7 +5,7 @@ depends_on: []
 progress: not-started
 coverage_sections:
   - "realized-model.md §4. Concept Views"
-commits: ["f509a7ce64074fc88defb531f3412298fab0c77f"]
+commits: ["ccd17cee2bc713a5524e11395a4573b7e5096342"]
 ---
 
 ## Spec Excerpt
