@@ -7,7 +7,8 @@
 #
 # The scan: for each fn whose name marks a read (list*/find*/get*/query*/
 # search*/count*/load*, plus the read-by-behavior prefixes has*/total*/
-# aggregate*/since*/stats*/next*) that builds a Diesel query (a terminal
+# aggregate*/since_/stats*/next_ AND record_*/resolve* — see the note at
+# the is_read line below) that builds a Diesel query (a terminal
 # .load/.first/.get_result/... call in its body), require the pattern
 # `tenant_id.eq(` (or raw-SQL `tenant_id = ?/$n`) somewhere in the method
 # body whenever the body touches a table that HAS a tenant_id column. Which
@@ -210,7 +211,14 @@ scan_file() {
         # list/find/get prefix set silently skipped (found live:
         # has_workspace_references on workspaces, has_recent_dismissal on
         # notifications — both tenant-column tables, both unfiltered).
-        is_read = (method ~ /^(list|find|get|query|search|count|load|has|total|aggregate|since|stats|next)/)
+        # Round 3 (review F2) added record_/resolve: record_usage is a
+        # read-modify-write whose .first() read terminal loads current
+        # usage from the agents table, and resolve_for_agent is a pure
+        # .load() read of the secrets table — both reads-by-behavior the
+        # name heuristic missed. The other record*/resolve* fns are pure
+        # inserts/updates with no read terminal, so the has_diesel gate
+        # keeps them out of the checked set automatically.
+        is_read = (method ~ /^(list|find|get|query|search|count|load|has|total|aggregate|since|stats|next|record|resolve)/)
         if (method ~ /^test_/ || intests) is_read = 0
         next
     }
