@@ -4986,12 +4986,16 @@ concepts:
             "crates::TokenStore",
             Some("specs/system/identity-security.md"),
         );
-        // "Authority" contains the substring "auth" but does not match any
-        // include pattern — must be excluded (substring regression guard).
+        // "OauthAuthenticationProvider" contains the case-insensitive
+        // substring "authentication" of the concept NAME (what the old
+        // substring implementation matched on), but matches none of the
+        // concept's case-sensitive include globs (`*Auth*` requires capital-A
+        // `Auth`; the trailing lowercase run and the `Oauth` prefix both
+        // diverge) — must be excluded (substring regression guard).
         let substring_decoy = node(
-            "Authority",
+            "OauthAuthenticationProvider",
             gyre_common::NodeType::Type,
-            "crates::Authority",
+            "crates::OauthAuthenticationProvider",
             None,
         );
         for n in [
@@ -5061,8 +5065,8 @@ concepts:
             "spec-governed node must match: {names:?}"
         );
         assert!(
-            !names.contains(&"Invoice"),
-            "unrelated node must be excluded: {names:?}"
+            !names.contains(&"OauthAuthenticationProvider"),
+            "substring-matching node must be excluded — this is a concept projection, not a substring search: {names:?}"
         );
         assert!(
             !names.contains(&"Authority"),
