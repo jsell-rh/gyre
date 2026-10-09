@@ -3,7 +3,7 @@ title: "ExplorerCanvas — Unified Canvas with Semantic Zoom Treemap"
 spec_ref: "explorer-canvas.md §1–3, §8; explorer-implementation.md §1–2, §17, §25"
 depends_on:
   - task-062
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "explorer-canvas.md §1 Problem"
   - "explorer-canvas.md §2 Design"
@@ -162,3 +162,24 @@ ExplorerCanvas-performance.test.js).
 - ExplorerChat.svelte references 16 `explorer_chat.*` i18n keys missing from
   en.json (e.g. `status_connecting`, `no_saved_views`). Pre-existing at
   baseline 2bf5eb2 — belongs to task-071 (ExplorerChat), not this task.
+## Review Round 1 (2026-10-09)
+
+**Verdict: needs-revision** — one material gap (unpinned filter behavior); all other acceptance criteria verified against code.
+
+### Verified (no action needed)
+
+- **Props (§17)**: ExplorerCanvas.svelte accepts exactly repoId/nodes/edges/activeQuery/filter($bindable)/lens($bindable); dead `filters` prop removed. Both callers (ExplorerView bind:filter/bind:lens; WorkspaceHome defaulted) verified.
+- **Lens toggle (§3)**: three buttons, Structural default, Evaluative functional, Observable aria-disabled + grayed CSS (.tb-btn-observable opacity 0.35) + click shows ObservableBanner naming GYRE_OTLP_ENDPOINT/OpenTelemetry. Spec text "requires production telemetry integration" present.
+- **Filter preset UI**: five buttons (All/Endpoints/Types/Calls/Dependencies) in .filter-preset-group, aria-pressed switching pinned by ExplorerCanvas.test.js:98-115, 808-831.
+- **Cutover completeness**: zero live references to MoldableView/FlowCanvas/FlowRenderer/ExplorerFilterPanel/NodeBadge anywhere in web/src (verified 2026-10-09, post-deletion). MoldableView was test-only at review base 66422bd (no imports outside web/src/__tests__), so deletion is dead-code removal, not functionality loss; its List/Timeline functionality survives in ExplorerView (timeline scrubber + delta stats + ghost overlays, graph_too_large list fallback) and RepoMode tabs. 63 removed i18n keys all dead (moldable_view.*, explorer_filter.*, explorer_treemap.empty_filtered — zero $t references remain); zero keys added, zero values changed.
+- **Badge behavior (§Evaluative)**: drawn on canvas 2d layer (ExplorerCanvas.svelte:3210-3293: emphasis.badges with server node_metrics, evaluative span_duration/span_count/error_rate, TEST-node badge); Svelte NodeBadge components were dead (one an unimported file, one left from deleted FlowRenderer). docs/ui.md updated consistently.
+- **Attribution gate**: scripts/check-task-commit-attribution.sh OK; all 4 frontmatter commits exist on the branch and the two product-surface commits (3566b64, plus wip commits 52c93ac/90159da/4689d4c containing the deletions) are recorded.
+- **Perf guards**: CPU-time measurement (process.cpuUsage) with same 15s/20s thresholds is a legitimate de-flake, not gate weakening — the assertion semantics (catch ~10x algorithmic regression) are preserved; per-test 30s timeouts added. Full-suite flake claim independently confirmed: solo full suite at HEAD passed (exit 0, 55 files, 1509 passed — /tmp/stage/review-evidence/task065-perf-full-suite.log, Run C) while concurrent-load runs hit vitest 30s test timeouts, not the cpuMs assertion. Evidence revision e9edc5a differs from HEAD only in scripts/docs, not web/src, so the pass applies to HEAD.
+
+### Finding F1 (material) — Dependencies preset node-dimming is unpinned; the shipped fix has no killing test
+
+ExplorerCanvas.svelte:1580 fixed the at-base stub `case 'dependencies': return 0.1` (dim every node) to highlight depends_on/calls edge participants. But no test renders the canvas with `filter` set to any preset, so nothing pins node-side filterOpacity at all.
+
+**Mutation proof** (/tmp/stage/review-evidence/task065-mutation-run.log): reverting line 1580 to the at-base stub in an isolated worktree — full suite passes: 55 files, 1509 tests, exit 0. The exact regression class that task-062 F4 caught on the edge side (canvas-filters.test.js) is unguarded on the node side, and this repo has already silently lost this case once.
+
+**Repair path** (implementation role): add a focused test that renders ExplorerCanvas with `filter: 'dependencies'` on a fixture with both depends_on-participant and non-participant nodes and asserts the dimming is selective — e.g. capture ctx.globalAlpha values passed to drawLeafNode draws (mock ctx already exposes globalAlpha; assign via a setter or record values in the existing mock) and assert participants draw at 1.0 while non-participants draw at 0.1. Cover at least `dependencies` (the fixed stub) and ideally `endpoints`/`calls` node cases the same way. The test must fail on the reverted stub.
