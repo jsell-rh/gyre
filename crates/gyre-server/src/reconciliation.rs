@@ -661,9 +661,14 @@ mod tests {
     fn make_set(ws_id: &str, entries: Vec<MetaSpecPinnedEntry>) -> crate::api::meta_specs::MetaSpecSet {
         crate::api::meta_specs::MetaSpecSet {
             workspace_id: ws_id.to_string(),
+            // Distinct persona keys: with a single fixed key, a multi-entry
+            // set would silently collapse to its last entry, so the diff
+            // test's "identical pin does not trigger" case would never
+            // exercise two pins at all.
             personas: entries
                 .into_iter()
-                .map(|e| ("backend".to_string(), e))
+                .enumerate()
+                .map(|(i, e)| (format!("p{i}"), e))
                 .collect(),
             principles: vec![],
             standards: vec![],
@@ -1050,6 +1055,114 @@ mod tests {
             open_tasks_with_label(&state, RECONCILIATION_LABEL).await.len(),
             1,
             "identical re-PUT must not create a second task"
+        );
+    }
+
+    // -- §6/§10: identical re-PUT must not flip the set SHA ---------------
+
+    /// Regression (task-156 review finding): `MetaSpecSet.personas` used to
+    /// be a `HashMap`, so the stored set bytes — the input to
+    /// `compute_meta_spec_set_sha` — were serialized in seed-random key
+    /// order. An identical re-PUT re-serialized from a fresh deserialization
+    /// and could flip the set SHA, making the §10 conformance sweep
+    /// manufacture false drift against provenance recorded minutes earlier.
+    /// `personas` is now a `BTreeMap` (canonical, sorted serialization).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn identical_reput_keeps_set_sha_stable() {
+        use axum::{body::Body, Router};
+        use http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let state = test_state();
+        let app: Router = crate::api::api_router().with_state(state.clone());
+
+        // Create the workspace via the API.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"ws-sha","slug":"ws-sha"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let ws_json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+
+        make_repo(&state, "repo-sha", &ws_id).await;
+
+        // Five persona bindings: with a HashMap-backed serialization the
+        // stored key order was seed-random per deserialization, so an
+        // identical re-PUT flipped the SHA with overwhelming probability.
+        let body = serde_json::json!({
+            "personas": {
+                "backend":  {"path": "backend-developer",  "sha": "a1"},
+                "frontend": {"path": "frontend-developer", "sha": "b2"},
+                "sre":      {"path": "sre-operator",       "sha": "c3"},
+                "security": {"path": "security",           "sha": "d4"},
+                "data":     {"path": "data-engineer",      "sha": "e5"}
+            },
+            "principles": [], "standards": [], "process": []
+        });
+        let put = |app: Router, ws_id: String| {
+            let body = body.to_string();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/api/v1/workspaces/{ws_id}/meta-spec-set"))
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        let r1 = put(app.clone(), ws_id.clone()).await;
+        assert_eq!(r1.status(), StatusCode::OK);
+        let sha1 =
+            crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &Id::new(&ws_id)).await;
+        assert!(!sha1.is_empty());
+
+        let r2 = put(app, ws_id.clone()).await;
+        assert_eq!(r2.status(), StatusCode::OK);
+        let sha2 =
+            crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &Id::new(&ws_id)).await;
+        assert_eq!(
+            sha1, sha2,
+            "identical re-PUT must not change the stored set SHA"
+        );
+
+        // §10 consequence: provenance recorded under the first PUT's SHA
+        // must not be reported as drift after the identical re-PUT.
+        let repo = state
+            .repos
+            .list_by_workspace(&Id::new(&ws_id))
+            .await
+            .unwrap()
+            .remove(0);
+        let att = sample_attestation(repo.id.as_str(), &ws_id, &sha1, now());
+        state.chain_attestations.save(&att).await.unwrap();
+
+        let summary = run_conformance_sweep(&state).await.unwrap();
+        assert_eq!(
+            summary.drift_detected, 0,
+            "identical re-PUT must not manufacture conformance drift"
+        );
+        assert_eq!(
+            open_tasks_with_label(&state, DRIFT_REVIEW_LABEL).await.len(),
+            0
         );
     }
 

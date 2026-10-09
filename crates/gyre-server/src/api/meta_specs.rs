@@ -13,7 +13,7 @@ use axum::{
 };
 use gyre_common::Id;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::{auth::AuthenticatedAgent, AppState};
@@ -37,15 +37,20 @@ pub struct MetaSpecPinnedEntry {
 pub struct MetaSpecSet {
     pub workspace_id: String,
     /// Named persona bindings: role -> pinned entry (e.g. "backend" -> path@sha).
+    ///
+    /// `BTreeMap` (not `HashMap`): the serialized set bytes are the input to
+    /// `compute_meta_spec_set_sha`, and `HashMap` iteration order is
+    /// seed-random per instance — an identical re-PUT could flip the stored
+    /// key order and thus the set SHA, making the §10 conformance sweep
+    /// manufacture false drift and provenance SHAs irreproducible. Sorted
+    /// keys make the serialization canonical.
     #[serde(default)]
-    pub personas: HashMap<String, MetaSpecPinnedEntry>,
-    /// Ordered principle specs.
+    pub personas: BTreeMap<String, MetaSpecPinnedEntry>,
     #[serde(default)]
     pub principles: Vec<MetaSpecPinnedEntry>,
     /// Ordered coding standard specs.
     #[serde(default)]
     pub standards: Vec<MetaSpecPinnedEntry>,
-    /// Ordered process specs.
     #[serde(default)]
     pub process: Vec<MetaSpecPinnedEntry>,
 }
@@ -54,7 +59,7 @@ pub struct MetaSpecSet {
 #[derive(Deserialize)]
 pub struct UpdateMetaSpecSetRequest {
     #[serde(default)]
-    pub personas: HashMap<String, MetaSpecPinnedEntry>,
+    pub personas: BTreeMap<String, MetaSpecPinnedEntry>,
     #[serde(default)]
     pub principles: Vec<MetaSpecPinnedEntry>,
     #[serde(default)]
