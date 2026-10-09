@@ -281,7 +281,7 @@ pub fn evaluate(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        ctx.set_number("env.time", now);
+        ctx.set_number("env.time", now as i64);
     }
 
     // Filter to enabled policies that apply to this action/resource_type.
@@ -294,7 +294,7 @@ pub fn evaluate(
     for policy in &policies {
         if policy.immutable
             && policy.effect == PolicyEffect::Deny
-            && eval_policy_conditions(policy, ctx)
+            && eval_policy_conditions(policy, &ctx)
         {
             let ms = t0.elapsed().as_secs_f64() * 1000.0;
             return EvalResult {
@@ -319,7 +319,7 @@ pub fn evaluate(
     });
 
     for policy in &remaining {
-        if eval_policy_conditions(policy, ctx) {
+        if eval_policy_conditions(policy, &ctx) {
             let ms = t0.elapsed().as_secs_f64() * 1000.0;
             return EvalResult {
                 effect: policy.effect.clone(),

@@ -16,6 +16,7 @@
 //! ```
 
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 
 use axum::{
     body::Body,
@@ -30,8 +31,10 @@ use gyre_domain::policy::{
     Condition, ConditionOp, ConditionValue, Policy, PolicyEffect, PolicyScope,
 };
 use serde_json::json;
-
-use crate::{auth::AuthenticatedAgent, policy_engine, policy_engine::AttributeContext, AppState};
+use crate::{
+    auth::AuthenticatedAgent, policy_engine, policy_engine::AttributeContext, policy_engine::AttrValue,
+    AppState,
+};
 
 // ---------------------------------------------------------------------------
 // Resource resolver
@@ -902,19 +905,86 @@ pub async fn abac_middleware(
     let global_role = auth.roles.first().map(|r| r.as_str()).unwrap_or("ReadOnly");
     ctx.set("subject.global_role", global_role);
     ctx.set("subject.tenant_id", &auth.tenant_id);
+    // Resource identity attributes from the request path (§Attributes:
+    // resource.id / resource.workspace_id / resource.repo_id, source
+    // "Request path"). Runs BEFORE membership extraction: the membership
+    // block reads `resource.workspace_id` to select the caller's role in the
+    // addressed workspace. `resource.type`, `action`, and `env.time` are
+    // injected by the evaluation engine itself.
+    extract_path_attributes(&mut ctx, &pattern, req.uri().path(), resource_type);
 
-    if let Some(claims) = &auth.jwt_claims {
-        ctx.merge_jwt_claims(claims);
+    // Membership-sourced subject attributes (§Attributes: source "Membership",
+    // "Memberships", "Team memberships"). JWT claims above may carry richer
+    // claim sets, but membership stores are the canonical source for human
+    // users authenticated via JWT or API key. An empty/failed lookup leaves
+    // the attributes unset — conditions on them then fail closed (a missing
+    // attribute never matches), which is the safe direction.
+    if let Some(user_id) = &auth.user_id {
+        match state.workspace_memberships.list_by_user(user_id).await {
+            Ok(memberships) if !memberships.is_empty() => {
+                let workspace_ids: Vec<String> = memberships
+                    .iter()
+                    .map(|m| m.workspace_id.to_string())
+                    .collect();
+                ctx.set_list("subject.workspace_ids", workspace_ids);
+
+                // Team memberships: scan each workspace's teams for
+                // membership. `Team.member_ids` is the only team-membership
+                // index (no per-user team lookup port).
+                let mut team_ids: Vec<String> = Vec::new();
+                for membership in &memberships {
+                    if let Ok(teams) = state.teams.list_by_workspace(&membership.workspace_id).await
+                    {
+                        for team in teams {
+                            if team.member_ids.contains(user_id) {
+                                team_ids.push(team.id.to_string());
+                            }
+                        }
+                    }
+                }
+                if !team_ids.is_empty() {
+                    ctx.set_list("subject.team_ids", team_ids);
+                }
+
+                // `subject.workspace_role` (source "Membership") is the role
+                // the caller holds in the workspace being addressed. When the
+                // path names a workspace, use that membership's role; agents
+                // and workspace-less requests have none.
+                if let Some(ws_id) = ctx.get("resource.workspace_id").and_then(|v| match v {
+                    AttrValue::Single(s) => Some(s.clone()),
+                    _ => None,
+                }) {
+                    if let Some(m) = memberships
+                        .iter()
+                        .find(|m| m.workspace_id.to_string() == ws_id)
+                    {
+                        ctx.set("subject.workspace_role", m.role.as_str());
+                    }
+                }
+            }
+            Ok(_) => {} // no memberships — attributes stay unset
+            Err(e) => {
+                tracing::warn!(
+                    user_id = %user_id,
+                    err = %e,
+                    "workspace membership lookup failed; membership subject attributes unset"
+                );
+            }
+        }
+    }
+
+    // Environment attributes (§Attributes: env.ip, source "Request" — client
+    // socket address). Forwarded headers are caller-controlled and are NOT
+    // read (CWE-348; see check-forwarded-header-trust.sh).
+    if let Some(peer) = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+    {
+        ctx.set("env.ip", peer.0.ip().to_string());
     }
 
     // Resolve action.
     let action = action_override.unwrap_or_else(|| method_to_action(&method));
-
-    // Resource identity attributes from the request path (§Attributes:
-    // resource.id / resource.workspace_id / resource.repo_id, source
-    // "Request path"). `resource.type`, `action`, and `env.time` are injected
-    // by the evaluation engine itself.
-    extract_path_attributes(&mut ctx, &pattern, req.uri().path(), resource_type);
 
     // Load policies and evaluate.
     // Policies are loaded from the shared store on EVERY request — there is
@@ -922,7 +992,6 @@ pub async fn abac_middleware(
     // dep-staleness caches exist, none of which cache policy decisions).
     // Trust-level transitions write workspace row + trust: policies through
     // this same store in one transaction, so any transition is visible to the
-    // next request with no cache invalidation needed (TASK-077 review note).
     let policies = state.policies.list().await.unwrap_or_default();
     let result = policy_engine::evaluate(policies, &ctx, action, resource_type);
 
@@ -1293,5 +1362,276 @@ pub mod tests {
             .filter(|p| p.name == "builtin:require-human-spec-approval")
             .count();
         assert_eq!(count, 1);
+    }
+
+    // --- Membership-sourced subject attributes (§Attributes) -------------------
+
+    /// Common setup: JWT-enabled state, a user pre-created via
+    /// `find_or_create_user` (matching the JWT `sub`), a Viewer membership in
+    /// `ws-1`, and membership in `team-platform` there. Returns (state, user).
+    async fn setup_membership_state() -> (Arc<AppState>, gyre_common::Id) {
+        use crate::auth::test_helpers::make_test_state_with_jwt;
+        use gyre_domain::{Team, User, WorkspaceMembership, WorkspaceRole};
+
+        let state = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            let h = tokio::runtime::Handle::current();
+            h.block_on(seed_builtin_policies(&state));
+        });
+
+        // Pre-create the user the JWT will resolve to (external_id = sub).
+        let user_id = gyre_common::Id::new("11111111-1111-1111-1111-111111111111");
+        let mut user = User::new(
+            user_id.clone(),
+            "member-sub",
+            "member-user",
+            0,
+        );
+        user.roles = vec![gyre_domain::UserRole::Developer];
+        state.users.create(&user).await.unwrap();
+
+        // Viewer membership in ws-1.
+        let membership = WorkspaceMembership::new(
+            gyre_common::Id::new("m-1"),
+            user_id.clone(),
+            gyre_common::Id::new("ws-1"),
+            WorkspaceRole::Viewer,
+            gyre_common::Id::new("inviter"),
+            0,
+        );
+        state.workspace_memberships.create(&membership).await.unwrap();
+
+        // Team membership in ws-1.
+        let mut team = Team::new(
+            gyre_common::Id::new("team-platform"),
+            gyre_common::Id::new("ws-1"),
+            "Platform",
+            0,
+        );
+        team.add_member(user_id.clone());
+        state.teams.create(&team).await.unwrap();
+
+        (state, user_id)
+    }
+
+    fn member_jwt() -> String {
+        use crate::auth::test_helpers::sign_test_jwt;
+        sign_test_jwt(
+            &serde_json::json!({
+                "sub": "member-sub",
+                "preferred_username": "member-user",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        )
+    }
+
+    /// A Deny policy on `subject.workspace_role == Viewer` must fire for a
+    /// user whose GLOBAL role is Developer but whose MEMBERSHIP role in the
+    /// addressed workspace is Viewer. Fails when the middleware does not
+    /// extract `subject.workspace_role` from the membership store: without
+    /// it the Deny condition can't match and the global-role Developer Allow
+    /// (priority 800) grants the request.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn membership_workspace_role_denies_write_for_workspace_viewer() {
+        use axum::routing::post;
+
+        let (state, _user_id) = setup_membership_state().await;
+
+        // Deny writes on workspace resources for workspace Viewers,
+        // at a priority ABOVE the Developer global-role Allow (800).
+        state
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-viewer-ws-deny"),
+                name: "viewer-no-workspace-write".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 810,
+                effect: PolicyEffect::Deny,
+                conditions: vec![Condition {
+                    attribute: "subject.workspace_role".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("Viewer".to_string()),
+                }],
+                actions: vec!["write".to_string()],
+                resource_types: vec!["task".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: "system".to_string(),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/workspaces/:workspace_id/tasks", post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state);
+
+        let token = member_jwt();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-1/tasks")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "workspace Viewer membership must override global Developer allow"
+        );
+    }
+
+    /// `subject.workspace_ids` and `subject.team_ids` must be extracted from
+    /// the membership/team stores. A policy keyed on team membership must
+    /// match. Fails when list-valued membership attributes are never
+    /// populated.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn membership_team_ids_populated_from_team_store() {
+        use axum::routing::post;
+
+        let (state, _user_id) = setup_membership_state().await;
+
+        // Deny task writes for members of team-platform (via subject.team_ids).
+        state
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-team-deny"),
+                name: "team-platform-no-task-write".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 810,
+                effect: PolicyEffect::Deny,
+                conditions: vec![Condition {
+                    attribute: "subject.team_ids".to_string(),
+                    operator: ConditionOp::Contains,
+                    value: ConditionValue::String("team-platform".to_string()),
+                }],
+                actions: vec!["write".to_string()],
+                resource_types: vec!["task".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: "system".to_string(),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/workspaces/:workspace_id/tasks", post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state);
+
+        let token = member_jwt();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-1/tasks")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "subject.team_ids must be populated from the team store"
+        );
+    }
+
+    /// `env.ip` must be extracted from the request's ConnectInfo extension
+    /// (socket peer address). Fails when env.ip is never populated.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn env_ip_extracted_from_connect_info() {
+        use axum::routing::get;
+
+        let (state, _user_id) = setup_membership_state().await;
+
+        // Allow reads only for requests from 10.0.0.5 — the policy only
+        // matches when env.ip is extracted from ConnectInfo. Default deny
+        // (priority 1) makes a missing env.ip deny the request.
+        state
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-env-ip-allow"),
+                name: "env-ip-allow".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 950,
+                effect: PolicyEffect::Allow,
+                conditions: vec![Condition {
+                    attribute: "env.ip".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("10.0.0.5".to_string()),
+                }],
+                actions: vec!["read".to_string()],
+                resource_types: vec!["task".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: "system".to_string(),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/workspaces/:workspace_id/tasks", get(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state);
+
+        let token = member_jwt();
+        let peer: std::net::SocketAddr = "10.0.0.5:4242".parse().unwrap();
+        let mut req = Request::builder()
+            .uri("/api/v1/workspaces/ws-1/tasks")
+            .header("Authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(peer));
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "env.ip must be extracted from ConnectInfo and allow the pinned peer"
+        );
     }
 }
