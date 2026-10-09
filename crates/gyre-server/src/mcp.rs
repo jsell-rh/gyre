@@ -3394,6 +3394,7 @@ mod tests {
             agent_id: "alice".to_string(),
             user_id: None,
             roles: vec![UserRole::Developer],
+            tenant_id: "default".to_string(),
             jwt_claims: Some(serde_json::json!({
                 "sub": "user-abc",
                 "realm_access": {"roles": ["developer"]}

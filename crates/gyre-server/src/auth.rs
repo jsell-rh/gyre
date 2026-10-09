@@ -2116,6 +2116,7 @@ mod tests {
             roles: vec![UserRole::Admin],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
         };
         let ticket = store.issue(auth);
@@ -2145,6 +2146,7 @@ mod tests {
             roles: vec![UserRole::Admin],
             tenant_id: "default".to_string(),
             jwt_claims: None,
+            bearer_token: None,
             deprecated_token_auth: false,
         };
         let ticket = store.issue(auth);

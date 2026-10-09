@@ -3310,6 +3310,7 @@ fn test_state_inner(
         trusted_issuers: vec![],
         commit_signatures: Arc::new(MemCommitSignatureRepository::default()),
         signing_config: crate::commit_signatures::SigningConfig::default(),
+        remote_jwks_cache: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
         container_audits: Arc::new(MemContainerAuditRepository::default()),
         spec_ledger: Arc::new(MemSpecLedgerRepository::default()),

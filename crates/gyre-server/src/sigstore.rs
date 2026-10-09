@@ -748,7 +748,11 @@ async fn check_rekor_entry(
     // "spec": {"data": {"hash": {...}}, "signature": {"content", "publicKey": {"content"}}}}
     let spec = match body.get("spec").and_then(|s| s.as_object()) {
         Some(s) => s,
-        None => return false,
+        None => {
+            #[cfg(test)]
+            eprintln!("DEBUG rekor: no spec in body: {body}");
+            return false;
+        }
     };
 
     // Digest must match this commit.
@@ -761,6 +765,15 @@ async fn check_rekor_entry(
         .map(|v| v == digest)
         .unwrap_or(false);
     if !hash_matches {
+        #[cfg(test)]
+        eprintln!(
+            "DEBUG rekor: hash mismatch: entry={:?} record={}",
+            spec.get("data")
+                .and_then(|d| d.get("hash"))
+                .and_then(|h| h.get("value"))
+                .and_then(|v| v.as_str()),
+            digest
+        );
         return false;
     }
 
@@ -772,6 +785,12 @@ async fn check_rekor_entry(
         .map(|c| c == record.signature)
         .unwrap_or(false);
     if !sig_matches {
+        #[cfg(test)]
+        eprintln!(
+            "DEBUG rekor: sig mismatch: entry={:?} record={}",
+            spec.get("signature").and_then(|s| s.get("content")).and_then(|c| c.as_str()),
+            record.signature
+        );
         return false;
     }
 
@@ -792,6 +811,10 @@ async fn check_rekor_entry(
                 || pem_equal_mod_whitespace(&pem_bytes, leaf_pem.as_bytes())
         })
         .unwrap_or(false);
+    if !key_matches {
+        #[cfg(test)]
+        eprintln!("DEBUG rekor: key mismatch");
+    }
     key_matches
 }
 
@@ -863,9 +886,13 @@ fn pem_to_der(pem_str: &str) -> Result<Vec<u8>> {
     let rest = pem_str
         .find(BEGIN)
         .ok_or_else(|| anyhow!("no PEM BEGIN marker"))?;
-    let after_label = pem_str[rest..]
+    // The label terminator is the first "-----" AFTER the "-----BEGIN "
+    // prefix — searching from `rest` would match BEGIN's own dashes and
+    // swallow the label into the "base64" body.
+    let label_start = rest + BEGIN.len();
+    let after_label = pem_str[label_start..]
         .find("-----")
-        .map(|i| rest + i + "-----".len())
+        .map(|i| label_start + i + "-----".len())
         .ok_or_else(|| anyhow!("unterminated PEM label"))?;
     let end_rel = pem_str[after_label..]
         .find(END)
@@ -1437,9 +1464,10 @@ mod tests {
     async fn verification_fails_when_rekor_entry_missing() {
         let stack = MockSigningStack::new();
         let record = sign(&stack, "norekor").await;
+        let bundle = stack.trust_bundle_json();
         let verifying = FixedBundleStack {
             inner: stack,
-            bundle: stack.trust_bundle_json(),
+            bundle,
             knobs: MockKnobs {
                 drop_rekor_entry: true,
                 ..Default::default()

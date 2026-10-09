@@ -262,6 +262,7 @@ mod tests {
             remote_jwks_cache: base.remote_jwks_cache.clone(),
             commit_signatures: base.commit_signatures.clone(),
             signing_config: base.signing_config.clone(),
+            tunnel_store: base.tunnel_store.clone(),
             container_audits: base.container_audits.clone(),
             spec_ledger: base.spec_ledger.clone(),
             spec_approval_history: base.spec_approval_history.clone(),
