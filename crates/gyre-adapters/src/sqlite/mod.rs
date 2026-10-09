@@ -14,11 +14,13 @@ pub mod analytics;
 pub mod attestation;
 pub mod audit;
 pub mod budget;
+pub mod breaking_change;
 pub mod chain_attestation;
 pub mod compute_target;
 pub mod container_audit;
 pub mod conversation;
 pub mod dependency;
+pub mod dependency_policy;
 pub mod graph;
 pub mod key_binding;
 pub mod kv_store;
@@ -260,6 +262,9 @@ mod tests {
             "trust_anchors",
             "key_bindings",
             "chain_attestations",
+            // Dependency breaking changes + policies (migration 000056, task-163)
+            "breaking_changes",
+            "dependency_policies",
             // Raw-SQL tables (not in schema.rs but created by migrations)
             "explorer_views",
             "prompt_templates",
