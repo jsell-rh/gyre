@@ -12,7 +12,7 @@ use axum::{
     Json,
 };
 use futures_util::{stream, StreamExt as _};
-use gyre_common::{Id, Notification, NotificationType};
+use gyre_common::{Id, NotificationType};
 use gyre_domain::{CostEntry, MergeRequest, MrStatus};
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
@@ -227,7 +227,6 @@ async fn spec_conflict_response(
         }
     }
 
-    let now = now_secs();
     // Persist the full line diff (and summary) in the notification body so BOTH
     // editors get a diff view in their Inbox (HSI §7 item 3) — not just the
     // second editor who receives the transient 409 response. `to_value` borrows
@@ -244,21 +243,18 @@ async fn spec_conflict_response(
     .to_string();
 
     for uid in &recipients {
-        let mut notif = Notification::new(
-            new_id(),
+        crate::notifications::notify_rich(
+            state,
             repo.workspace_id.clone(),
-            Id::new(uid),
+            Id::new(uid.clone()),
             NotificationType::SpecConflict,
             format!("Spec edit conflict: {spec_path}"),
             &tenant_id,
-            now as i64,
-        );
-        notif.body = Some(body.clone());
-        notif.entity_ref = Some(spec_path.to_string());
-        notif.repo_id = Some(repo.id.to_string());
-        if let Err(e) = state.notifications.create(&notif).await {
-            tracing::warn!(spec_path = %spec_path, recipient = %uid, "Failed to create spec-conflict notification: {e}");
-        }
+            Some(body.clone()),
+            Some(spec_path.to_string()),
+            Some(repo.id.to_string()),
+        )
+        .await;
     }
 
     (
@@ -721,21 +717,18 @@ pub async fn save_spec(
     }
 
     for recipient in approval_recipients {
-        let notif_id = new_id();
-        let mut notif = Notification::new(
-            notif_id,
+        crate::notifications::notify_rich(
+            state.as_ref(),
             repo.workspace_id.clone(),
             recipient,
             NotificationType::SpecPendingApproval,
             format!("Spec pending approval: {}", req.spec_path),
             &tenant_id,
-            now as i64,
-        );
-        notif.entity_ref = Some(mr_id.to_string());
-        // Non-fatal — MR is created even if notification fails.
-        if let Err(e) = state.notifications.create(&notif).await {
-            tracing::warn!(mr_id = %mr_id, "Failed to create spec-pending-approval notification: {e}");
-        }
+            None,
+            Some(mr_id.to_string()),
+            None,
+        )
+        .await;
     }
 
     Ok((

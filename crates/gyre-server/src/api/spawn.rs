@@ -1450,17 +1450,31 @@ pub async fn fail_agent(
     // is offline, workspace Owners when the priority is Urgent.
     // (AgentEscalation is HSI §8 priority 5 → High band; Admin fan-out when
     // the spawner is offline is the operative branch here.)
-    crate::notification_dispatcher::notify_agent_escalation(
-        state.as_ref(),
-        &agent,
-        gyre_common::NotificationType::AgentEscalation,
-        &format!("Agent '{}' failed and needs attention", agent.name),
-        "default",
-        None,
-        Some(agent.id.to_string()),
-        None,
-    )
-    .await;
+    // Tenant resolved from the agent's workspace — never fabricated.
+    let tenant_id = match state.workspaces.find_by_id(&agent.workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        _ => {
+            tracing::warn!(
+                agent_id = %agent.id,
+                workspace_id = %agent.workspace_id,
+                "fail_agent: cannot resolve tenant for escalation notification — skipping"
+            );
+            "".to_string()
+        }
+    };
+    if !tenant_id.is_empty() {
+        crate::notification_dispatcher::notify_agent_escalation(
+            state.as_ref(),
+            &agent,
+            gyre_common::NotificationType::AgentEscalation,
+            &format!("Agent '{}' failed and needs attention", agent.name),
+            &tenant_id,
+            None,
+            Some(agent.id.to_string()),
+            None,
+        )
+        .await;
+    }
 
     // TASK-022: If this agent's task was a cascade test, report failure.
     if let Some(ref task_id) = agent.current_task_id {
