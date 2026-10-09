@@ -5,7 +5,7 @@ depends_on: []
 progress: not-started
 coverage_sections:
   - "system-explorer.md §9. Executable Spec Assertions"
-commits: ["5891e61748ca7979acb462fc93ca5fdd4bb53031", "b1ca65339330de0131d7d0f70424441f533d5fb4", "48f7ac75730d9bf6d54ddb45d5e106208387cddd", "83e0d0d9e629186226e67c86fa2cb801ec50d2fc", "b1df86c88588b99c210299fe9b1c41f91db216a0"]
+commits: ["ebac445152053807ce16c2245e6cad956fc8faf9", "5891e61748ca7979acb462fc93ca5fdd4bb53031", "b1ca65339330de0131d7d0f70424441f533d5fb4", "48f7ac75730d9bf6d54ddb45d5e106208387cddd", "83e0d0d9e629186226e67c86fa2cb801ec50d2fc", "b1df86c88588b99c210299fe9b1c41f91db216a0"]
 ---
 
 ## Spec Excerpt
