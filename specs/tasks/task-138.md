@@ -7,7 +7,7 @@ coverage_sections:
   - "agent-gates.md §Spec Approval Ledger"
   - "agent-gates.md §The Provenance Chain"
   - "agent-gates.md §How It Works"
-commits: ["157f307c063540ae499dfce4b0fbc32d52fa61d0", "b7405ea66047c3f1d033b3ccc3c810a8077a53b3", "44b3280d239e36060e59423b6d600d33aa8bf7ef", "2a7e98309df9adb15e7c691f7427a5aaf3103914", "8533a3b099fe86fee79e2d3c6f2eccfb4cf63753", "5992e7b2acd70a91a5ce4b843fc6af3f269e80ec"]
+commits: ["c8f5a0e19881066aab0cb98f0b43fa08b91eaa8d", "805bdc8151cefaa397b09c2fc3d8e039316377b3", "f8163ab80236ddabf892c2f1170ffe9ef569322f", "5fbbd8604b093922570dcda280e10c845ca60610", "d3e076151f6917b34d88e4059c1e8bedef17e156", "f635b3417fad52d9b7abf54d0dea47d118009907"]
 ---
 
 ## Spec Excerpt
