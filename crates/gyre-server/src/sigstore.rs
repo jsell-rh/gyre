@@ -70,7 +70,7 @@ struct FulcioCredentials<'a> {
 struct FulcioSigningCertRequest<'a> {
     credentials: FulcioCredentials<'a>,
     #[serde(rename = "publicKeyRequest")]
-    public_key_request: FulcoPublicKeyRequest<'a>,
+    public_key_request: FulcioPublicKeyRequest<'a>,
 }
 
 /// Fulcio v2 `CreateSigningCertificateResponse` (protojson). Oneof variants
@@ -85,14 +85,14 @@ struct FulcioSigningCertResponse {
 
 #[derive(Deserialize)]
 struct SignedCertificateEmbeddedSct {
-    chain: Option<FulcoChain>,
+    chain: Option<FulcioChain>,
 }
 
 /// The detached-SCT variant carries the same `chain` field; both oneof arms
 /// are handled uniformly by extracting the chain.
 #[derive(Deserialize)]
 struct SignedCertificateDetachedSct {
-    chain: Option<FulcoChain>,
+    chain: Option<FulcioChain>,
 }
 
 /// `Chain` carries `certificates` as repeated `bytes` — in protojson each is
@@ -373,7 +373,7 @@ pub async fn sign_commit_keyless(
         },
     };
     let body = serde_json::to_string(&request)?;
-    let response_text = transport.fulcio_signing_cert(&config.fulcio_url, &body)?;
+    let response_text = transport.fulcio_signing_cert(&config.fulcio_url, &body).await?;
     let response: FulcioSigningCertResponse = serde_json::from_str(&response_text)
         .context("fulcio signingCert response is not valid protojson")?;
 
@@ -437,7 +437,7 @@ pub async fn sign_commit_keyless(
         },
     };
     let entry_body = serde_json::to_string(&entry)?;
-    let rekor_response_text = transport.rekor_post_entry(&config.rekor_url, &entry_body)?;
+    let rekor_response_text = transport.rekor_post_entry(&config.rekor_url, &entry_body).await?;
     let rekor_response: RekorEntryResponse =
         serde_json::from_str(&rekor_response_text).context("rekor entry response invalid")?;
     let rekor_entry_id = rekor_response
@@ -599,7 +599,7 @@ fn check_signature(record: &CommitSignature, leaf_pem: &str) -> bool {
     use ring::signature::UnparsedPublicKey;
     let pk = UnparsedPublicKey::new(
         &ring::signature::ECDSA_P256_SHA256_ASN1,
-        spki.subject_public_key.data,
+        spki.subject_public_key.data.as_ref(),
     );
     pk.verify(record.commit_sha.as_bytes(), &sig_bytes).is_ok()
 }
@@ -609,7 +609,7 @@ async fn fetch_trust_bundle(
     fulcio_url: &str,
     transport: &dyn SigningHttpTransport,
 ) -> Result<Vec<Vec<String>>> {
-    let text = transport.fulcio_trust_bundle(fulcio_url)?;
+    let text = transport.fulcio_trust_bundle(fulcio_url).await?;
     let bundle: TrustBundleResponse =
         serde_json::from_str(&text).context("fulcio trust bundle response invalid")?;
     Ok(bundle.chains)
@@ -633,18 +633,18 @@ fn check_chain_all_bundles(
     }
     // Validity window on every stored certificate (leaf + intermediates).
     for cert in &stored {
-        if !within_validity(cert, now) {
+        if !within_validity(&cert.cert, now) {
             return false;
         }
     }
     // Each link must be signed by the next; the last must be self-signed.
     for pair in stored.windows(2) {
-        if pair[0].verify_signature(Some(&pair[1].subject_pki)).is_err() {
+        if pair[0].cert.verify_signature(Some(&pair[1].cert.subject_pki)).is_err() {
             return false;
         }
     }
     let root = &stored[stored.len() - 1];
-    if root.verify_signature(None).is_err() {
+    if root.cert.verify_signature(None).is_err() {
         return false;
     }
 
@@ -680,7 +680,7 @@ fn check_subject(record: &CommitSignature, leaf_pem: &str) -> bool {
         return false;
     };
     // SANs first (Fulcio binds the OIDC subject as a SAN).
-    for ext in cert.extensions() {
+    for ext in cert.cert.extensions() {
         if let x509_parser::extensions::ParsedExtension::SubjectAlternativeName(san) =
             ext.parsed_extension()
         {
@@ -702,9 +702,12 @@ fn check_subject(record: &CommitSignature, leaf_pem: &str) -> bool {
         }
     }
     // CN fallback.
-    cert.subject()
+    let cn_matches = cert
+        .cert
+        .subject()
         .iter_common_name()
-        .any(|cn| cn.as_str().map(|s| s == record.oidc_subject).unwrap_or(false))
+        .any(|cn| cn.as_str().map(|s| s == record.oidc_subject).unwrap_or(false));
+    cn_matches
 }
 
 /// (d) Rekor entry: fetch `{rekor}/api/v1/log/entries/{uuid}` and confirm the
@@ -718,7 +721,7 @@ async fn check_rekor_entry(
     let Some(uuid) = record.rekor_entry_id.as_deref() else {
         return false;
     };
-    let Ok(text) = transport.rekor_get_entry(rekor_url, uuid) else {
+    let Ok(text) = transport.rekor_get_entry(rekor_url, uuid).await else {
         return false;
     };
     let Ok(response) = serde_json::from_str::<RekorEntryResponse>(&text) else {
