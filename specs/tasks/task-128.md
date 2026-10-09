@@ -10,7 +10,7 @@ coverage_sections:
   - "abac-policy-engine.md §Policy Entity"
   - "abac-policy-engine.md §Conditions"
   - "abac-policy-engine.md §Policy Examples"
-commits: ["ec8c399479cd5ef6fb3b1de1694b2ff6ccfb3cc0"]
+commits: ["7637665cc573e025b53c1e7501fd5516c8727a15"]
 ---
 
 ## Spec Excerpt
