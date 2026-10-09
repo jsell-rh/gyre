@@ -14,6 +14,9 @@ For CI repair, use the current PR head and run IDs in the durable finding.
 Historical task review notes and upstream baseline logs are context, not the
 current failing test list. Inspect current failure artifacts before changing
 visual snapshots; preserve the specified UI and existing assertion strength.
+Inspect staged CI artifacts before attempting local browser setup. Avoid a cold
+release build of the whole server merely to investigate screenshot differences;
+exact-head GitHub checks remain mandatory after independent review.
 
 Full workspace suites, architecture checks, all-target Clippy, and GitHub CI are
 owned by verification and publication. Use the smallest relevant probe here.

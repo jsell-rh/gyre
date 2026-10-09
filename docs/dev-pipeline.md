@@ -67,6 +67,9 @@ The pinned worker image includes Chromium and its system dependencies matching
 Playwright 1.58.2 in the web lockfile. Rebuild the image when that version changes.
 Browser dependencies do not require runtime downloads or system writes. Individual
 probes still need to check the sandbox's actual process and network capabilities.
+Remote Chromium probes may need `--no-zygote` and `--disable-dev-shm-usage` because
+the sandbox restricts process credentials and system shared-memory writes. These
+are probe runtime options; repository tests and GitHub assertions stay intact.
 
 `seed /absolute/path/task-123.md --candidate SHA --base SHA` retains an existing
 unfinished checkpoint. `--pr URL` associates an existing open PR at that exact
