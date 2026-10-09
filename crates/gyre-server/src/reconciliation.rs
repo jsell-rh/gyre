@@ -251,7 +251,7 @@ pub fn diff_meta_spec_set(
         let mut m: HashMap<String, String> = set
             .personas
             .iter()
-            .map(|(k, e)| (e.path.clone(), e.sha.clone()))
+            .map(|(_k, e)| (e.path.clone(), e.sha.clone()))
             .collect();
         // Two personas may pin the same spec path — keep the first pin.
         for e in set.principles.iter().chain(&set.standards).chain(&set.process) {
@@ -530,14 +530,14 @@ fn record_reconciliation_metrics(state: &AppState, workspace_id: &str, created: 
             .metrics
             .reconciliation_tasks_total
             .with_label_values(&[workspace_id, "created"])
-            .inc_by(created);
+            .inc_by(created as f64);
     }
     if skipped > 0 {
         state
             .metrics
             .reconciliation_tasks_total
             .with_label_values(&[workspace_id, "skipped"])
-            .inc_by(skipped);
+            .inc_by(skipped as f64);
     }
 }
 
@@ -566,6 +566,7 @@ mod tests {
     use gyre_common::message::MessageKind;
     use gyre_domain::meta_spec::{MetaSpec, MetaSpecApprovalStatus, MetaSpecKind, MetaSpecScope};
     use gyre_domain::{Repository, Workspace, WorkspaceMembership, WorkspaceRole};
+    use std::future::Future;
 
     fn now() -> u64 {
         std::time::SystemTime::now()
@@ -660,10 +661,10 @@ mod tests {
         state.meta_spec_sets.upsert(&Id::new(ws_id), &json).await.unwrap();
     }
 
-    fn open_tasks_with_label(
-        state: &Arc<AppState>,
-        label: &str,
-    ) -> impl Future<Output = Vec<gyre_domain::Task>> + '_ {
+    fn open_tasks_with_label<'a>(
+        state: &'a Arc<AppState>,
+        label: &'a str,
+    ) -> impl Future<Output = Vec<gyre_domain::Task>> + 'a {
         async move {
             state
                 .tasks
@@ -792,7 +793,7 @@ mod tests {
             valid_until: created_at + 3600,
             expected_generation: None,
             signature: vec![1, 2, 3],
-            key_binding: KeyBinding {
+            key_binding: gyre_common::KeyBinding {
                 public_key: vec![1],
                 user_identity: "user:admin".to_string(),
                 issuer: "https://gyre.local".to_string(),
