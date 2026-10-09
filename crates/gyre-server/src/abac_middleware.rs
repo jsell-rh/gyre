@@ -735,11 +735,9 @@ pub async fn seed_builtin_policies(state: &Arc<AppState>) -> anyhow::Result<()> 
     policies.extend(domain_builtin_policies());
     for policy in policies {
         match state.policies.find_by_id(&policy.id.to_string()).await {
-            Ok(None) => state
-                .policies
-                .create(&policy)
-                .await
-                .map_err(|e| anyhow::anyhow!("failed to seed built-in ABAC policy {}: {e}", policy.id))?,
+            Ok(None) => state.policies.create(&policy).await.map_err(|e| {
+                anyhow::anyhow!("failed to seed built-in ABAC policy {}: {e}", policy.id)
+            })?,
             Ok(Some(_)) => {} // already exists → idempotent
             Err(e) => {
                 return Err(anyhow::anyhow!(
@@ -1233,7 +1231,8 @@ pub mod tests {
         let result = seed_builtin_policies(&state).await;
         let err = result.expect_err("seed must fail when policy creation fails");
         assert!(
-            err.to_string().contains("failed to seed built-in ABAC policy"),
+            err.to_string()
+                .contains("failed to seed built-in ABAC policy"),
             "error must name the failed seed, got: {err}"
         );
         // Nothing was persisted — the store must not contain a partial seed.

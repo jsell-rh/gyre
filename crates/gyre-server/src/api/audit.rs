@@ -449,7 +449,9 @@ mod tests {
         use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
         let state = make_test_state_with_jwt();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state))
+                .expect("seed built-in policies")
         });
 
         // Agent-role JWT with known sub.
