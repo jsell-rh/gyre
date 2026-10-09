@@ -142,6 +142,27 @@ task's scope; task-210.md on this branch is byte-identical to base. This
 branch's own task-labeled surface commits are all recorded. Evidence:
 /tmp/stage/review-evidence/task-172-verification.md.
 
+**Round-3 re-verification (2026-10-09, fresh sandbox):** inherited HEAD
+cf9dc871 with the pipeline's fresh-assignment reset in the working tree;
+re-verified the implementation independently with no source changes needed:
+`npm ci` (169 locked packages) → EditorSplit + DetailPanel suites **66/66
+passed**; `npx vite build` run twice, both reproducing the committed dist
+bundles byte-exactly (empty `git status web/dist`); all 51 EditorSplit i18n
+keys present in en.json with zero dead `editor_split.*` keys. Bug-injection
+probe: replacing `acceptSuggestion`'s `applyDiffOps(content, diff)` with
+`applyDiffOps(content, [])` fails the Accept test
+(`expected '# Auth\n\nExisting body.\n' to contain '## Error Handling'`),
+confirming the suite encodes the specced behavior; source restored
+byte-identical to 471563d7 and re-passed. Contract verified: task-172.md
+normative sections byte-identical to base 8c2d1775 (only progress/commits/
+checkboxes/Shipped differ); task-210.md byte-identical to base. Attribution
+gate at HEAD fails solely on `a781ede2 task-210` (identical failure in a
+clean worktree at base — pre-existing upstream drift on main, out of scope
+here); this branch's own task-labeled surface commits are all recorded in
+frontmatter, and the working-tree reset that transiently dropped 471563d7
+was restored from HEAD. Evidence:
+/tmp/stage/review-evidence/task-172-verification-round3.md.
+
 ## Agent Instructions
 
 Read `ui-layout.md` §2 "Editor Split" and §9 "Meta-specs Preview Loop Layout" for the full interaction design including all three states. Check the existing `MetaSpecs.svelte` component — it may already have partial editor functionality. The EditorSplit is used by BOTH spec editing and meta-spec editing; build it as a reusable component. The meta-spec preview loop layout (§9) shows the exact wireframes for States 1-3.
