@@ -95,6 +95,8 @@ Test evidence (focused probes, exit 0): `gyre-domain --lib analytics` 3 passed (
 
 Note: this sandbox cannot accept TCP listeners (errno 95, `capabilities.json`), so verification is via the in-process router tests above; live HTTP smoke belongs to host/CI verification.
 
+Closeout (verification session, head `f3ea040d`): the branch's code insertions had drifted four line-number-pinned exemption files off their pre-existing constructs, breaking `check-inert-enforcement`, `check-abac-exempt-handlers`, and `check-fabricated-scope-defaults` (pass at base, fail at head). Re-pinned the same entries to current lines — entry counts and frozen baselines unchanged, no new exemptions (commits `79fa2dd5`, `f3ea040d`); all four affected checks exit 0. Also attributed pre-existing task-210 commit `a781ede2` in its frontmatter (commit `6ae8207f`) so `check-task-commit-attribution` exits 0. Remaining repo-check failures are byte-identical at base `8c2d1775` and head (verified via worktree diff) — pre-existing, owned elsewhere. Full audit: `/tmp/stage/review-evidence/task-146-verification.md`.
+
 ## Agent Instructions
 
 - Read `crates/gyre-server/src/api/analytics.rs` for existing analytics implementation
