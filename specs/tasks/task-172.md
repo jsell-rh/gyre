@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "ui-layout.md §Editor Split"
-commits: ["1ae8ca350439f07c5c75dcfbb7704dbf0ce96021", "a53ade326e99a7954fe976a84981e3df0212465b", "80925c2145b51e64ddb69ef1b4fb900c44ee0a89", "3688b5cddbfddbed2f4cdc158f03ce35bb172951"]
+commits: ["1ae8ca350439f07c5c75dcfbb7704dbf0ce96021", "a53ade326e99a7954fe976a84981e3df0212465b", "80925c2145b51e64ddb69ef1b4fb900c44ee0a89", "3688b5cddbfddbed2f4cdc158f03ce35bb172951", "471563d7d218003d6d2dbbab3ba0598e801d6f3a"]
 ---
 
 ## Spec Excerpt
@@ -125,6 +125,22 @@ marked `implemented` with evidence, no exemptions or verifier changes.
 /tmp/stage/capabilities.json), so no live server/browser probe here. The
 component behavior is covered by the jsdom component suites above; exact-head
 GitHub CI remains mandatory for the built bundle.
+
+
+**Fresh-round re-verification (2026-10-09, this sandbox):** inherited the
+repaired implementation at 67139daf and re-proved it in a clean environment:
+`npm ci` (169 locked packages) then EditorSplit + DetailPanel suites
+**66/66 passed**; `npx vite build` reproduced the committed dist bundles
+byte-exactly. One inherited defect found and fixed: dead i18n key
+`editor_split.architecture_preview` (defined by this task's commits, unused
+anywhere — the tab uses `editor_split.architecture`); removed and dist
+rebuilt, suites re-run 66/66 (commit 471563d7, recorded above). Attribution
+gate re-checked: branch HEAD fails only on `a781ede2 task-210`, and a clean
+worktree at base 8c2d177505852b3e39cd77f4f782fb355de245aa fails identically
+(exit 1, same sole violation) — pre-existing upstream drift, outside this
+task's scope; task-210.md on this branch is byte-identical to base. This
+branch's own task-labeled surface commits are all recorded. Evidence:
+/tmp/stage/review-evidence/task-172-verification.md.
 
 ## Agent Instructions
 
