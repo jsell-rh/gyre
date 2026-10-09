@@ -486,6 +486,22 @@ pub async fn create_mirror_repo(
         let extract_results_repo = Arc::clone(&state.spec_assertion_results);
         let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
         let default_ref = format!("refs/heads/{}", repo.default_branch);
+        // §9: resolve the workspace scope + notification ports before the
+        // spawn — the initial mirror clone is a push-equivalent event.
+        let notification_scope = state
+            .workspaces
+            .find_by_id(&repo.workspace_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|ws| crate::graph_extraction::PushNotificationScope {
+                workspace_id: repo.workspace_id.to_string(),
+                tenant_id: ws.tenant_id.to_string(),
+            });
+        let divergence_ports = Some(crate::graph_extraction::DivergencePorts {
+            notification_repo: state.notifications.as_ref(),
+            membership_repo: state.workspace_memberships.as_ref(),
+        });
         tokio::spawn(async move {
             if let Ok(output) = tokio::process::Command::new(&git_bin)
                 .args(["-C", &extract_path, "rev-parse", &default_ref])
@@ -501,8 +517,9 @@ pub async fn create_mirror_repo(
                         graph_store,
                         &git_bin,
                         None,
-                        None,
+                        divergence_ports,
                         extract_results_repo,
+                        notification_scope,
                     )
                     .await;
                 }
@@ -572,6 +589,18 @@ pub async fn sync_mirror(
             )
             .await;
 
+            // §9: mirror-synced repos resolve the workspace scope from the
+            // repo's own workspace — mirror pushes notify too.
+            let notification_scope = workspace_tenant_id.map(|tenant_id| {
+                crate::graph_extraction::PushNotificationScope {
+                    workspace_id: workspace_id_str.clone(),
+                    tenant_id: tenant_id.to_string(),
+                }
+            });
+            let divergence_ports = Some(crate::graph_extraction::DivergencePorts {
+                notification_repo: state.notifications.as_ref(),
+                membership_repo: state.workspace_memberships.as_ref(),
+            });
             crate::graph_extraction::extract_and_store_graph(
                 &repo.path,
                 &repo_id_str,
@@ -579,8 +608,9 @@ pub async fn sync_mirror(
                 Arc::clone(&state.graph_store),
                 &git_bin,
                 None,
-                None,
+                divergence_ports,
                 Arc::clone(&state.spec_assertion_results),
+                notification_scope,
             )
             .await;
         }

@@ -70,6 +70,19 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                         .await;
 
                         // Knowledge graph extraction.
+                        // §9: mirror syncs resolve the workspace scope from
+                        // the repo's own workspace — mirror pushes notify too.
+                        let notification_scope = workspace_tenant_id.map(|tenant_id| {
+                            crate::graph_extraction::PushNotificationScope {
+                                workspace_id: workspace_id_str.clone(),
+                                tenant_id: tenant_id.to_string(),
+                            }
+                        });
+                        let divergence_ports =
+                            Some(crate::graph_extraction::DivergencePorts {
+                                notification_repo: state.notifications.as_ref(),
+                                membership_repo: state.workspace_memberships.as_ref(),
+                            });
                         crate::graph_extraction::extract_and_store_graph(
                             &repo.path,
                             &repo_id_str,
@@ -77,8 +90,9 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                             Arc::clone(&state.graph_store),
                             &git_bin,
                             None, // no agent context for mirror syncs
-                            None, // no divergence check
+                            divergence_ports,
                             Arc::clone(&state.spec_assertion_results),
+                            notification_scope,
                         )
                         .await;
 

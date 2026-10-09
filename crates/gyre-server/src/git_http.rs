@@ -752,6 +752,13 @@ pub async fn git_receive_pack(
                 notification_repo: state_clone.notifications.as_ref(),
                 membership_repo: state_clone.workspace_memberships.as_ref(),
             });
+            // §9 spec-assertion notifications are scoped by the repo's
+            // workspace — every push type notifies, not just agent pushes.
+            let notification_scope =
+                Some(crate::graph_extraction::PushNotificationScope {
+                    workspace_id: repo_workspace_id_str.clone(),
+                    tenant_id: push_tenant_id.clone(),
+                });
             crate::graph_extraction::extract_and_store_graph(
                 &repo_path_clone,
                 &repo_id_clone,
@@ -761,6 +768,7 @@ pub async fn git_receive_pack(
                 agent_push_ctx,
                 divergence_ports,
                 Arc::clone(&state_clone.spec_assertion_results),
+                notification_scope,
             )
             .await;
         }

@@ -101,6 +101,7 @@
         BudgetWarning: 'budget_warning',
         SpecChanged: 'spec_changed',
         MetaSpecDrift: 'meta_spec_drift',
+        SpecAssertionFailure: 'spec_assertion_failure',
       };
       data = data.map(n => ({
         ...n,

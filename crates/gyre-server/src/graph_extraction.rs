@@ -42,7 +42,20 @@ pub struct AgentPushContext {
     pub tenant_id: String,
 }
 
-/// Port references needed only for the post-extraction divergence check.
+/// Workspace/tenant identity for push-scoped notifications (system-explorer §9).
+///
+/// Derived at each extraction call site from the repo's own workspace, so
+/// assertion-failure notifications fire for every push — including CLI/user
+/// pushes and mirror syncs, which carry no agent context. Without a scope
+/// (repo workspace unresolvable) notifications are skipped and the failure
+/// is only persisted.
+pub struct PushNotificationScope {
+    pub workspace_id: String,
+    pub tenant_id: String,
+}
+
+/// Port references needed for push-scoped notifications and the divergence
+/// check (spec assertion failures use the notification + membership repos).
 ///
 /// Bundled into a single struct to stay within clippy's argument-count limit.
 pub struct DivergencePorts<'a> {
@@ -69,6 +82,10 @@ pub struct DivergenceScope<'a> {
 /// When `agent_ctx` is provided, the delta is enriched with agent identity and
 /// spec reference, and a post-extraction divergence check is performed.
 ///
+/// `notification_scope` carries the repo's workspace/tenant identity for
+/// spec-assertion-failure notifications (§9) — independent of `agent_ctx`, so
+/// notifications also fire for user and mirror pushes.
+///
 /// All errors are logged and swallowed — extraction must never fail a push.
 pub async fn extract_and_store_graph(
     repo_path: &str,
@@ -79,6 +96,7 @@ pub async fn extract_and_store_graph(
     agent_ctx: Option<AgentPushContext>,
     divergence_ports: Option<DivergencePorts<'_>>,
     results_repo: Arc<dyn gyre_ports::SpecAssertionResultRepository>,
+    notification_scope: Option<PushNotificationScope>,
 ) {
     if let Err(e) = do_extract(
         repo_path,
@@ -89,6 +107,7 @@ pub async fn extract_and_store_graph(
         agent_ctx,
         divergence_ports,
         results_repo,
+        notification_scope,
     )
     .await
     {
@@ -105,6 +124,7 @@ async fn do_extract(
     agent_ctx: Option<AgentPushContext>,
     divergence_ports: Option<DivergencePorts<'_>>,
     results_repo: Arc<dyn gyre_ports::SpecAssertionResultRepository>,
+    notification_scope: Option<PushNotificationScope>,
 ) -> anyhow::Result<()> {
     // --- Step 1: snapshot the commit tree into a temp directory ---------------
 
@@ -367,7 +387,7 @@ async fn do_extract(
             &spec_edges,
             &repo_id_parsed,
             new_sha,
-            &agent_ctx,
+            notification_scope.as_ref(),
             divergence_ports.as_ref(),
             results_repo.as_ref(),
         )
@@ -846,14 +866,20 @@ pub async fn extract_and_persist_call_graph(
 ///
 /// Scans the extracted repo tree for markdown files containing
 /// `<!-- gyre:assert ... -->` comments, evaluates each assertion against the
-/// fresh graph data, and creates inbox notifications for failures.
+/// fresh graph data, persists the results (§9 inline view), and creates
+/// priority-9 inbox notifications for failures.
+///
+/// Notifications are scoped by `notification_scope` (the repo's workspace),
+/// NOT by agent context — every push type (agent, user CLI, mirror sync)
+/// notifies. Failures already recorded for the same commit are not
+/// re-notified (mirror-sync cycles re-extract unchanged SHAs).
 async fn check_spec_assertions_on_push(
     repo_root: &Path,
     nodes: &[GraphNode],
     edges: &[GraphEdge],
     repo_id: &Id,
     commit_sha: &str,
-    agent_ctx: &Option<AgentPushContext>,
+    notification_scope: Option<&PushNotificationScope>,
     divergence_ports: Option<&DivergencePorts<'_>>,
     results_repo: &dyn gyre_ports::SpecAssertionResultRepository,
 ) -> anyhow::Result<()> {
@@ -865,7 +891,11 @@ async fn check_spec_assertions_on_push(
         return Ok(());
     }
 
-    let mut failed_assertions: Vec<(String, spec_assertions::AssertionResult)> = Vec::new();
+    let mut failed_assertions: Vec<(String, usize, String)> = Vec::new();
+    // Specs whose failures were already recorded for this exact commit
+    // (duplicate-suppressed — see below).
+    let mut specs_already_notified: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     // Walk the specs directory for markdown files.
     fn walk_md_files(dir: &Path, results: &mut Vec<std::path::PathBuf>) {
@@ -922,6 +952,14 @@ async fn check_spec_assertions_on_push(
             .unwrap_or_default()
             .as_secs();
 
+        // Previously stored rows for this spec — the last push's check state.
+        // Used both for duplicate suppression (same commit re-extracted by a
+        // mirror-sync cycle) and to detect newly failing assertions.
+        let prior_results = results_repo
+            .list_by_spec(repo_id.as_str(), &spec_path)
+            .await
+            .unwrap_or_default();
+
         let records: Vec<gyre_domain::SpecAssertionResult> = parsed
             .iter()
             .zip(spec_assertions::evaluate_assertions(&parsed, nodes, edges))
@@ -944,12 +982,8 @@ async fn check_spec_assertions_on_push(
             if !record.passed {
                 failed_assertions.push((
                     spec_path.clone(),
-                    spec_assertions::AssertionResult {
-                        line: record.line,
-                        assertion_text: record.assertion_text.clone(),
-                        passed: record.passed,
-                        explanation: record.explanation.clone(),
-                    },
+                    record.line,
+                    record.explanation.clone(),
                 ));
             }
         }
@@ -963,7 +997,20 @@ async fn check_spec_assertions_on_push(
                 "failed to persist spec assertion results: {e}"
             );
         }
+
+        // Duplicate suppression: if the stored set for this spec was already
+        // produced by this exact commit (mirror-sync cycles re-extract
+        // unchanged SHAs every interval), do not notify again.
+        let already_recorded_for_commit = !prior_results.is_empty()
+            && prior_results.iter().all(|r| r.commit_sha == commit_sha);
+        if already_recorded_for_commit {
+            specs_already_notified.insert(spec_path);
+        }
     }
+
+    // Only failures from specs whose failing state is new for this commit
+    // warrant a notification; drop suppressed ones.
+    failed_assertions.retain(|(path, _, _)| !specs_already_notified.contains(path));
 
     if failed_assertions.is_empty() {
         return Ok(());
@@ -975,22 +1022,29 @@ async fn check_spec_assertions_on_push(
         "spec assertion failures detected on push"
     );
 
-    // Create notifications for assertion failures (when agent context and
-    // divergence ports are available).
-    if let (Some(ctx), Some(ports)) = (agent_ctx, divergence_ports) {
+    // Create priority-9 notifications for the failures (§9 Inbox items).
+    // Scoped by the repo's workspace — fires for every push type, not just
+    // agent pushes. Skipped when the scope or notification ports are
+    // unavailable (repo workspace unresolvable, or a caller without ports).
+    if let (Some(scope), Some(ports)) = (notification_scope, divergence_ports) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
 
+        // The first failing spec — linked as the notification's entity_ref so
+        // the Inbox "Update Spec" action can open it.
+        let first_spec_path = failed_assertions[0].0.clone();
+
         let body = serde_json::json!({
             "repo_id": repo_id.as_str(),
-            "failures": failed_assertions.iter().map(|(path, r)| {
+            "spec_path": first_spec_path,
+            "commit_sha": commit_sha,
+            "failures": failed_assertions.iter().map(|(path, line, explanation)| {
                 serde_json::json!({
                     "spec_path": path,
-                    "line": r.line,
-                    "assertion": r.assertion_text,
-                    "explanation": r.explanation,
+                    "line": line,
+                    "explanation": explanation,
                 })
             }).collect::<Vec<_>>(),
         })
@@ -1001,7 +1055,7 @@ async fn check_spec_assertions_on_push(
             failed_assertions.len()
         );
 
-        let ws_id = Id::new(&ctx.workspace_id);
+        let ws_id = Id::new(&scope.workspace_id);
         let members = ports.membership_repo.list_by_workspace(&ws_id).await?;
 
         for member in members {
@@ -1019,11 +1073,13 @@ async fn check_spec_assertions_on_push(
                 member.user_id.clone(),
                 NotificationType::SpecAssertionFailure,
                 &title,
-                &ctx.tenant_id,
+                &scope.tenant_id,
                 now,
             );
             notif.body = Some(body.clone());
             notif.repo_id = Some(repo_id.as_str().to_string());
+            // Link to the failing spec so Inbox actions can open it.
+            notif.entity_ref = Some(first_spec_path.clone());
 
             if let Err(e) = ports.notification_repo.create(&notif).await {
                 warn!(
@@ -1416,7 +1472,7 @@ mod tests {
             &[],
             &repo_id,
             "deadbeef",
-            &None,
+            None,
             None,
             &results_repo,
         )
@@ -1451,7 +1507,7 @@ mod tests {
             &[],
             &repo_id,
             "deadbeef2",
-            &None,
+            None,
             None,
             &results_repo,
         )
@@ -1518,9 +1574,7 @@ mod tests {
             .await
             .unwrap();
 
-        let ctx = AgentPushContext {
-            agent_id: "agent-1".to_string(),
-            spec_ref: "system/architecture.md".to_string(),
+        let scope = PushNotificationScope {
             workspace_id: "ws-1".to_string(),
             tenant_id: "tenant-1".to_string(),
         };
@@ -1535,7 +1589,7 @@ mod tests {
             &[],
             &repo_id,
             "deadbeef",
-            &Some(ctx),
+            Some(&scope),
             Some(&ports),
             &results_repo,
         )
@@ -1565,6 +1619,10 @@ mod tests {
             serde_json::from_str(n.body.as_deref().unwrap()).unwrap();
         assert_eq!(body["failures"][0]["spec_path"], "system/architecture.md");
         assert_eq!(body["repo_id"], "repo-assert-notif");
+        // §9: the notification links to the failing spec so the Inbox
+        // "Update Spec" action can open it.
+        assert_eq!(n.entity_ref.as_deref(), Some("system/architecture.md"));
+        assert_eq!(body["spec_path"], "system/architecture.md");
 
         // The Viewer is outside the notify set.
         let view_notifs = notif_repo
@@ -1587,6 +1645,70 @@ mod tests {
         // All-failing assertions must not spam one notification per failure:
         // still a single notification per user for the push.
         assert_eq!(body["failures"].as_array().unwrap().len(), 1);
+
+        // Duplicate suppression: re-checking the same commit (mirror-sync
+        // cycle re-extracting an unchanged SHA) must not notify again.
+        check_spec_assertions_on_push(
+            dir.path(),
+            &nodes,
+            &[],
+            &repo_id,
+            "deadbeef",
+            Some(&scope),
+            Some(&ports),
+            &results_repo,
+        )
+        .await
+        .unwrap();
+        let dev_notifs_after = notif_repo
+            .list_for_user(
+                &Id::new("user-dev"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            dev_notifs_after.len(),
+            1,
+            "same-commit re-check must not duplicate the notification"
+        );
+
+        // A new commit with the same failure does notify again (the failure
+        // is still live and the state is new for this push).
+        check_spec_assertions_on_push(
+            dir.path(),
+            &nodes,
+            &[],
+            &repo_id,
+            "deadbeef3",
+            Some(&scope),
+            Some(&ports),
+            &results_repo,
+        )
+        .await
+        .unwrap();
+        let dev_notifs_new_commit = notif_repo
+            .list_for_user(
+                &Id::new("user-dev"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            dev_notifs_new_commit.len(),
+            2,
+            "a new commit with a failing assertion must notify again"
+        );
     }
 
     #[tokio::test]

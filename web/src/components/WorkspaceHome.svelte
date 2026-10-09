@@ -119,6 +119,7 @@
     BudgetWarning: 'budget_warning',
     SpecChanged: 'spec_changed',
     MetaSpecDrift: 'meta_spec_drift',
+    SpecAssertionFailure: 'spec_assertion_failure',
   };
 
   function typeLabel(type) {
