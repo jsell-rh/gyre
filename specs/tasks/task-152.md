@@ -2,10 +2,10 @@
 title: "Implement graph narrative generation (template-based + LLM-synthesized)"
 spec_ref: "realized-model.md §6"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "realized-model.md §6 Narrative Generation"
-commits: ["95f1a147e04b1e0ff8b380aa37a9c5556c39af01", "f88e55b70b980e2f9823a51315097d3e8a8b6334"]
+commits: ["95f1a147e04b1e0ff8b380aa37a9c5556c39af01", "f88e55b70b980e2f9823a51315097d3e8a8b6334", "1c4a7bb4"]
 ---
 
 ## Spec Excerpt
@@ -68,13 +68,13 @@ From `realized-model.md` §6 — Narrative Generation:
 
 ## Acceptance Criteria
 
-- [ ] `generate_template_narrative()` produces human-readable summaries from ArchitecturalDelta
-- [ ] Template narratives include spec governance ("Governed by spec: X") when `governed_by` edges exist
-- [ ] Template narratives include agent attribution ("Produced by agent Y under persona Z") when provenance exists
-- [ ] Timeline endpoint includes `narrative` field in each delta response
-- [ ] LLM narrative function exists and falls back to template on failure
-- [ ] Briefing endpoint uses narratives for architectural change summaries
-- [ ] Tests cover addition, removal, modification, and empty delta cases
+- [x] `generate_template_narrative()` produces human-readable summaries from ArchitecturalDelta
+- [x] Template narratives include spec governance ("Governed by spec: X") when `governed_by` edges exist
+- [x] Template narratives include agent attribution ("Produced by agent Y under persona Z") when provenance exists
+- [x] Timeline endpoint includes `narrative` field in each delta response
+- [x] LLM narrative function exists and falls back to template on failure
+- [x] Briefing endpoint uses narratives for architectural change summaries
+- [x] Tests cover addition, removal, modification, and empty delta cases
 
 ## Agent Instructions
 
@@ -84,3 +84,65 @@ From `realized-model.md` §6 — Narrative Generation:
 - Read `crates/gyre-domain/src/extractor.rs` for the extraction pipeline that produces deltas
 - The narrative module goes in `gyre-domain` (pure logic, no infrastructure deps) per hexagonal architecture
 - Follow existing patterns in `gyre-domain` for new modules (add `pub mod narrative;` to lib.rs)
+
+## Shipped
+
+Implemented in `f88e55b7` (recovered into this branch by checkpoint `f4e08ad0`), with gate follow-up
+`95f1a14` (byte-slice annotation on an index-typed `Vec::truncate`) and this round's `1c4a7bb4`
+(restore main's committed `web/dist` — the recovered checkpoint carried an unreviewed shared-build-lane
+dist rebuild; `web/src` is byte-identical to base, so the rebuild was pollution, removed per the task-210
+round-12 convention that task branches never ship dist rebuilds).
+
+- **Template generator** (`crates/gyre-domain/src/narrative.rs`): `NarrativeGrounding::from_graph` indexes
+  the live graph (Contains parent, Implements traits, FieldOf fields, node `spec_path`/`spec_paths` +
+  GovernedBy edges → specs; soft-deleted nodes/edges excluded, edges to missing nodes skipped).
+  `generate_template_narrative` renders per-node additions with module/trait/field sentences, removals,
+  modifications with old→new field changes (char-boundary-safe truncation at 60 chars), >3 additions
+  grouped per module+type ("N types added to `module`"), count-only legacy `delta_json` formats,
+  relationship counts, "Governed by spec: X." (grounding specs ∪ commit `spec_ref`, `@sha` stripped),
+  "Produced by agent Y under persona Z." `""` for empty/malformed deltas. Fully deterministic.
+- **Timeline/diff endpoints** (`crates/gyre-server/src/api/graph.rs`): `DeltaResponse.narrative` on every
+  delta; grounding loaded once per request from real `graph_store.list_nodes/list_edges`; per-delta
+  attribution via real `agents.find_by_id` + `agent_personas` kv binding (falls back to the stored agent
+  id when the agent row is gone; `None` only when the delta records no agent). The old "stubbed for now"
+  comment is gone.
+- **LLM synthesis** (`llm_architecture_narrative`, graph.rs): grounded facts JSON (from
+  `build_narrative_facts`) injected into the `graph-narrative` prompt template
+  (`PROMPT_GRAPH_NARRATIVE` hardcoded fallback), model resolved via `resolve_llm_model`, call wrapped in
+  `tokio::time::timeout(10s)`. Falls back to concatenated template narratives on unconfigured LLM, port
+  error, timeout, or empty completion — each branch logged. The LLM call lives in `gyre-server` because
+  `gyre-domain` must not depend on the LLM port (hexagonal boundary; the plan's `generate_llm_narrative`
+  in gyre-domain would have violated `check-arch.sh`).
+- **Briefing** (`assemble_briefing`): collects the workspace's recent deltas (repo listing → per-repo
+  `list_deltas` since `since`, 10 most recent, grounding cached per repo), renders template narratives,
+  and appends "Architecture: {narrative}" to the summary — LLM-synthesized when configured, template as
+  the quality floor. Both REST and MCP briefing handlers delegate to `assemble_briefing`.
+- **Tests** (11 domain + 3 server, all passing this round):
+  - Domain: single addition renders the spec's example shape; grouping at >3; removals/modifications;
+    count-only; empty/malformed → ""; spec governance from GovernedBy edges and `spec_ref` (`@sha`
+    stripped); deleted-node exclusion; agent attribution; facts JSON carries grounding; long field-change
+    values truncated at char boundary (`"é".repeat(120)`).
+  - Server: `timeline_endpoint_returns_grounded_narrative` drives the real router with a seeded graph and
+    asserts every clause of the spec's template example; `briefing_summary_falls_back_to_template_narrative_without_llm`;
+    `briefing_summary_uses_llm_narrative_when_configured` (echo-mock asserts the LLM path ran AND the
+    template fallback text does not appear).
+- **Docs**: `docs/api-reference.md` timeline row documents `narrative`; briefing row corrected to the
+  actual HSI §9 response shape.
+- **Gate repair** (e69fa0f lineage, already on this branch's script state):
+  `scripts/check-template-substitution.sh` const-span swallowed the next const's `/// Variables:` doc
+  block (7 false positives on pristine main, pre-commit-only so CI never saw it); fixed by
+  comment-stripping the span, proven non-blinding by planted-bug probes.
+
+Test evidence this round (`CARGO_HOME=/tmp/cargo`, `CARGO_TARGET_DIR=/tmp/gyre-target`, exact commands
+and output under `/tmp/stage/review-evidence/`):
+
+- `cargo test -p gyre-domain --lib narrative` → **11 passed, 0 failed**.
+- `cargo test -p gyre-server --lib -- narrative briefing` → **20 passed, 0 failed** (includes the 3
+  task tests).
+
+Known pre-existing, out of scope for this task: `check-task-commit-attribution.sh` fails on main's own
+base (commit `a781ede2` "feat(task-210)" landed on main without task-210 frontmatter attribution —
+drift inherited from the base commit `8c2d1775`, not introduced by this branch; the fix that records it,
+`63d66b46`, exists only on an unrelated task-116 branch, not on main). Also `web/dist` committed on main
+is stale relative to `web/src` (missing `briefing-since` markup, still containing `sidebar-badge` markup
+deleted 2026-03-28) — a main-side dist regeneration is a separate task, not this branch's to ship.
