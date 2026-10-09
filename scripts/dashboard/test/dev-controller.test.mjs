@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, mkdir, copyFile, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, mkdir, copyFile, cp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFile } from "node:child_process";
@@ -25,7 +25,7 @@ test("PRs attach from task branch, title, or explicit body reference", () => {
 test("coverage follows the controller's fetched main instead of a stale checkout", async () => {
   const root = await mkdtemp(join(tmpdir(), "gyre-coverage-"));
   const local = join(root, "specs", "coverage", "system");
-  const source = join(root, ".gyre-dev-controller", "source");
+  const source = join(root, ".gyre-pipeline", "source");
   await mkdir(local, { recursive: true });
   await mkdir(join(root, "specs", "tasks"), { recursive: true });
   await writeFile(join(local, "example.md"), "| 1 | section | evidence | verified | note |\n");
@@ -47,26 +47,29 @@ test("coverage follows the controller's fetched main instead of a stale checkout
   assert.equal(history[0].pct, 0);
 });
 
-test("cockpit reads the durable ledger and controls only its own slot file", async (t) => {
+test("cockpit reads pipeline stages and updates the durable sandbox budget", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "gyre-cockpit-"));
   await mkdir(join(root, "scripts"));
   await mkdir(join(root, "specs", "tasks"), { recursive: true });
-  for (const name of ["dev-controller.py", "dev-contract.py", "dev-coverage.py", "dev-ci.py"])
+  for (const name of ["dev-pipeline.py", "dev-contract.py", "dev-gateway-job.py"])
     await copyFile(resolve("scripts", name), join(root, "scripts", name));
-  await execFileP("python3", [join(root, "scripts", "dev-controller.py"), "status", "--json"], { cwd: root });
+  await cp(resolve("scripts/pipeline"), join(root, "scripts/pipeline"), { recursive: true });
+  await execFileP("python3", [join(root, "scripts", "dev-pipeline.py"), "status", "--json"], { cwd: root });
   const paths = controllerPaths(root);
   const state = await collectController(paths);
   assert.equal(state.present, true);
   assert.equal(state.online, false);
   assert.deepEqual(state.tasks, []);
+  assert.deepEqual(Object.keys(state.stages), ["triage", "implement", "review", "verify", "publish", "cleanup"]);
 
   await setSlots(paths, 7);
-  assert.equal(await readFile(paths.slots, "utf8"), "7\n");
+  assert.equal((await collectController(paths)).slots, 7);
   await assert.rejects(setSlots(paths, 1001), /slots/);
 
-  const id = "abcdef0123456789";
-  await mkdir(join(paths.attempts, id), { recursive: true });
-  await writeFile(join(paths.attempts, id, "output.log"), "attempt output\n");
+  const id = "abcdef0123456789abcdef0123456789-1";
+  const log = join(paths.attempts, id.slice(0, 32), "1", "output.log");
+  await mkdir(join(paths.attempts, id.slice(0, 32), "1"), { recursive: true });
+  await writeFile(log, "attempt output\n");
   assert.equal(await attemptLog(paths, id), "attempt output\n");
   await assert.rejects(attemptLog(paths, "../../etc/passwd"), /invalid attempt/);
 
@@ -79,7 +82,7 @@ test("cockpit reads the durable ledger and controls only its own slot file", asy
   assert.equal(snap.slots, 7);
   const changed = await fetch(base + "/api/slots", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ value: 0 }) });
   assert.equal(changed.status, 200);
-  assert.equal(await readFile(paths.slots, "utf8"), "0\n");
+  assert.equal((await collectController(paths)).slots, 0);
   const bad = await fetch(base + "/api/slots", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
   assert.equal(bad.status, 400);
   const retryAll = await (await fetch(base + "/api/retry-all", { method: "POST" })).json();
@@ -91,7 +94,7 @@ test("cockpit reads the durable ledger and controls only its own slot file", asy
   assert.match(stream.headers.get("content-type"), /text\/event-stream/);
   const reader = stream.body.getReader();
   await reader.read(); // connection comment
-  await appendFile(join(paths.attempts, id, "output.log"), 'GYRE_AGENT_EVENT {"role":"implementation","type":"text","text":"live"}\n');
+  await appendFile(log, 'GYRE_AGENT_EVENT {"role":"implement","type":"text","text":"live"}\n');
   const next = await Promise.race([reader.read(), new Promise((_, reject) => setTimeout(() => reject(new Error("stream did not advance")), 3000))]);
   assert.match(new TextDecoder().decode(next.value), /"text":"live"/);
   abort.abort();

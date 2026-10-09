@@ -15,12 +15,13 @@ class AttachmentTest(unittest.TestCase):
     def test_disconnect_resumes_one_job_and_its_exact_exit_status(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for name in ('dev-attach.py', 'dev-process.sh'):
+            for name in ('pipeline-attach.py', 'pipeline-transport.py', 'dev-process.sh'):
                 shutil.copy2(SCRIPTS / name, root / name)
-            (root / 'dev-remote.sh').write_text(
-                'cd "$(dirname "$0")"\necho run >> runs\necho started\n'
-                'for i in $(seq 1 200); do [ ! -f release ] || break; sleep .05; done\necho finished\nexit 7\n')
-            command = ['python3', str(root / 'dev-attach.py'), 'worker', 'task-001', 'branch', 'seed', 'id']
+            (root / 'pipeline-remote.py').write_text(
+                'import pathlib,time,sys\nr=pathlib.Path(__file__).parent\n'
+                '(r/"runs").open("a").write("run\\n")\nprint("started",flush=True)\n'
+                'while not (r/"release").exists(): time.sleep(.05)\nprint("finished",flush=True)\nsys.exit(7)\n')
+            command = ['python3', str(root / 'pipeline-attach.py')]
             capture = root / 'attachment.log'
             with capture.open('wb') as output:
                 first = subprocess.Popen(command + ['0'], stdout=output, stderr=subprocess.PIPE)
@@ -54,25 +55,15 @@ class AttachmentTest(unittest.TestCase):
             self.assertEqual(result.stdout, b'first\nsecond\n')
             self.assertEqual(path.read_text(), '13\n')
 
-    def test_completed_failure_requires_explicit_retry_and_reuses_log(self):
+    def test_ambiguous_launch_does_not_start_another_process(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for name in ('dev-attach.py', 'dev-process.sh'):
+            for name in ('pipeline-attach.py', 'pipeline-transport.py', 'dev-process.sh'):
                 shutil.copy2(SCRIPTS / name, root / name)
-            (root / 'dev-remote.sh').write_text(
-                'cd "$(dirname "$0")"\necho run >> runs\n'
-                '[ "$(wc -l < runs)" -gt 1 ] || { echo registry-failed; exit 77; }\necho succeeded\n')
-            command = ['python3', str(root / 'dev-attach.py'), 'worker', 'task-001', 'branch', 'seed', 'id', '0']
-            first = subprocess.run(command, capture_output=True, timeout=5)
-            self.assertEqual(first.returncode, 77)
-            cached = subprocess.run(command, capture_output=True, timeout=5)
-            self.assertEqual(cached.returncode, 77)
-            self.assertEqual((root / 'runs').read_text(), 'run\n')
-            retried = subprocess.run(command + ['--retry-failed'], capture_output=True, timeout=5)
-            self.assertEqual(retried.returncode, 0, retried.stderr.decode())
-            self.assertIn(b'succeeded', retried.stdout)
-            self.assertIn('registry-failed', (root / 'remote.log').read_text())
-            self.assertEqual((root / 'runs').read_text(), 'run\nrun\n')
+            (root / 'step.intent').touch()
+            result = subprocess.run(['python3', str(root / 'pipeline-attach.py'), '0'], capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 77)
+            self.assertFalse((root / 'step.exit.process.json').exists())
 
 
 if __name__ == '__main__':
