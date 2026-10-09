@@ -57,6 +57,38 @@ class CrashTest(unittest.TestCase):
         delete.assert_called_once_with('sandbox', 'delete', 'pod', timeout=180, check=False)
         self.assertEqual(self.store.db.execute("SELECT state FROM resources WHERE name='pod'").fetchone()[0], 'absent')
 
+    def merge_cleanup(self, observation):
+        self.store.reserve('merge-old', self.work, self.claim['token'], 'merge', 1,
+                           {'url': 'https://github.com/jsell-rh/gyre/pull/633'})
+        self.store.db.execute("UPDATE work SET state='obsolete',token=token+1 WHERE id=?", (self.work,))
+        self.store.enqueue('cleanup', 'task-001', 'g', {'resource': 'merge-old'})
+        claim = self.store.claim('cleanup', 'cleaner')
+        execution = Execution(self.store, claim)
+        result = {'data': {'repository': {'pullRequest': observation}}}
+        with patch.object(execution, 'command', return_value=subprocess.CompletedProcess([], 0, json.dumps(result), '')):
+            return cleanup(execution, self.store.task('task-001'))
+
+    def test_rejected_merge_does_not_permanently_block_other_deliveries(self):
+        self.merge_cleanup({'state': 'OPEN', 'headRefOid': 'head', 'mergeCommit': None,
+                            'autoMergeRequest': None, 'mergeQueueEntry': None})
+        self.store.put_task('task-002', 'g', 'body', {})
+        self.store.enqueue('publish', 'task-002', 'g', {})
+        claim = self.store.claim('publish', 'next-publisher')
+        self.assertTrue(self.store.reserve('merge-new', claim['id'], claim['token'], 'merge', 1))
+
+    def test_queued_merge_retains_its_global_permit(self):
+        from pipeline.execution import Wait
+        with self.assertRaises(Wait):
+            self.merge_cleanup({'state': 'OPEN', 'headRefOid': 'head', 'mergeCommit': None,
+                                'autoMergeRequest': None, 'mergeQueueEntry': {'id': 'entry'}})
+        self.assertEqual(self.store.db.execute("SELECT state FROM resources WHERE name='merge-old'").fetchone()[0], 'intent')
+
+    def test_unknown_merge_observation_retains_its_global_permit(self):
+        from pipeline.execution import Retry
+        with self.assertRaises(Retry):
+            self.merge_cleanup({'state': 'OPEN', 'headRefOid': 'head'})
+        self.assertEqual(self.store.db.execute("SELECT state FROM resources WHERE name='merge-old'").fetchone()[0], 'intent')
+
     def test_implementer_cannot_weaken_its_assigned_contract(self):
         body = '---\ntitle: Thing\nspec_ref: behavior.md\ndepends_on: []\nprogress: not-started\n---\n\n## Required behavior\nReject foreign tenants.\n'
         self.store.put_task('task-001', 'g', body, {'dependencies': []})

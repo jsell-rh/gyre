@@ -395,6 +395,33 @@ def baseline_repair(execution, observation):
         return name
 
 
+def merge_observation(execution, url):
+    """Distinguish a queued merge from a rejected or lost merge request."""
+    from urllib.parse import urlparse
+    owner, repository = execution.store.setting('repository', 'jsell-rh/gyre').split('/')
+    parsed = urlparse(url)
+    number = int(parsed.path.rstrip('/').rsplit('/', 1)[-1])
+    if parsed.hostname != 'github.com' or parsed.path.rstrip('/') != f'/{owner}/{repository}/pull/{number}':
+        raise Retry('merge URL does not identify a PR in the configured repository')
+    query = '''query($owner:String!,$repository:String!,$number:Int!) {
+      repository(owner:$owner,name:$repository) { pullRequest(number:$number) {
+        state headRefOid mergeCommit { oid }
+        autoMergeRequest { enabledAt } mergeQueueEntry { id }
+      } }
+    }'''
+    value = json.loads(execution.command('gh', 'api', 'graphql', '-f', 'query=' + query,
+                       '-f', 'owner=' + owner, '-f', 'repository=' + repository,
+                       '-F', 'number=' + str(number), timeout=30).stdout)
+    if value.get('errors'):
+        raise Retry('GitHub merge observation unavailable')
+    observation = value['data']['repository']['pullRequest']
+    fields = {'state', 'headRefOid', 'mergeCommit', 'autoMergeRequest', 'mergeQueueEntry'}
+    if (not observation or not fields.issubset(observation) or
+            observation['state'] not in ('OPEN', 'CLOSED', 'MERGED')):
+        raise Retry('GitHub merge observation incomplete')
+    return observation
+
+
 def cleanup(execution, task):
     resource = execution.claim['input']['resource']
     record = execution.store.db.execute('SELECT * FROM resources WHERE name=?', (resource,)).fetchone()
@@ -415,10 +442,13 @@ def cleanup(execution, task):
         return {'released': resource}, {}, []
     if record['kind'] == 'merge':
         data = json.loads(record['data'])
-        observation = json.loads(execution.command('gh', 'pr', 'view', data['url'], '--json',
-                                                    'state,headRefOid', timeout=30).stdout)
-        if observation['state'] not in ('MERGED', 'CLOSED'):
-            raise Retry('merge outcome is unresolved; holding the global merge permit')
+        observation = merge_observation(execution, data['url'])
+        if observation['state'] == 'OPEN' and (
+                observation['autoMergeRequest'] is not None or observation['mergeQueueEntry'] is not None):
+            raise Wait('queued upstream merge is unresolved; holding the global merge permit')
+        # A rejected request (e.g. main advanced during strict merge checks)
+        # leaves the PR open without an automatic or queued merge. Keeping
+        # its permit forever would prevent every subsequent delivery.
         execution.store.resource_state(resource, 'absent')
         return {'merge_observed': observation}, {}, []
     execution.login()

@@ -96,6 +96,10 @@ resolves findings for the approved revision. A moved upstream base requires new
 verification before merge. Publication polls GitHub checks and requests a normal
 protected merge with an exact head match; completion is recorded only after the
 resulting upstream commit and its verified tree are observed.
+The shared merge permit survives unresolved queued or automatic merge requests.
+Cleanup releases it when GitHub reports no pending request, including a strict
+merge rejection after main advances, so one rejected request cannot block all
+subsequent deliveries. Missing observations keep the permit reserved.
 
 Candidate CI repair starts from the exact verified PR head. Current candidate
 logs are kept separate from baseline failures; bounded logs and screenshot
