@@ -84,6 +84,11 @@ describe('Briefing S4.3', () => {
   });
 
   describe('Sections from API data', () => {
+    /** Expand a briefing section accordion (single-expansion; see ui-layout.md §3). */
+    async function expandSection(testId) {
+      await fireEvent.click(screen.getByTestId(testId));
+    }
+
     it('renders COMPLETED section with data', async () => {
       render(Briefing, { props: { workspaceId: 'ws-1', scope: 'workspace' } });
       await waitFor(() => {
@@ -97,6 +102,7 @@ describe('Briefing S4.3', () => {
       await waitFor(() => {
         expect(screen.getByTestId('section-in-progress')).toBeTruthy();
       });
+      await expandSection('section-toggle-in-progress');
       expect(screen.getByText('Auth refactor')).toBeTruthy();
     });
 
@@ -105,6 +111,7 @@ describe('Briefing S4.3', () => {
       await waitFor(() => {
         expect(screen.getByTestId('section-cross-workspace')).toBeTruthy();
       });
+      await expandSection('section-toggle-cross-workspace');
       expect(screen.getByText('platform-core updated idempotent-api.md')).toBeTruthy();
     });
 
@@ -113,6 +120,7 @@ describe('Briefing S4.3', () => {
       await waitFor(() => {
         expect(screen.getByTestId('section-exceptions')).toBeTruthy();
       });
+      await expandSection('section-toggle-exceptions');
       expect(screen.getByText(/cargo test failed/i)).toBeTruthy();
     });
 
@@ -137,12 +145,14 @@ describe('Briefing S4.3', () => {
     it('shows uncertainty warning for in-progress items', async () => {
       render(Briefing, { props: { workspaceId: 'ws-1', scope: 'workspace' } });
       await waitFor(() => screen.getByTestId('section-in-progress'));
+      await expandSection('section-toggle-in-progress');
       expect(screen.getByText(/token refresh for offline/i)).toBeTruthy();
     });
 
     it('shows action buttons for in-progress items', async () => {
       render(Briefing, { props: { workspaceId: 'ws-1', scope: 'workspace' } });
       await waitFor(() => screen.getByTestId('section-in-progress'));
+      await expandSection('section-toggle-in-progress');
       expect(screen.getByTestId('respond-to-agent-btn')).toBeTruthy();
       expect(screen.getByTestId('view-spec-btn')).toBeTruthy();
     });
@@ -150,6 +160,7 @@ describe('Briefing S4.3', () => {
     it('shows action buttons for exceptions', async () => {
       render(Briefing, { props: { workspaceId: 'ws-1', scope: 'workspace' } });
       await waitFor(() => screen.getByTestId('section-exceptions'));
+      await expandSection('section-toggle-exceptions');
       expect(screen.getByTestId('view-diff-btn')).toBeTruthy();
       expect(screen.getByTestId('view-output-btn')).toBeTruthy();
       expect(screen.getByTestId('override-btn')).toBeTruthy();
@@ -159,6 +170,7 @@ describe('Briefing S4.3', () => {
     it('shows review changes and dismiss buttons for cross-workspace items', async () => {
       render(Briefing, { props: { workspaceId: 'ws-1', scope: 'workspace' } });
       await waitFor(() => screen.getByTestId('section-cross-workspace'));
+      await expandSection('section-toggle-cross-workspace');
       expect(screen.getByTestId('review-changes-btn')).toBeTruthy();
       expect(screen.getByTestId('dismiss-btn')).toBeTruthy();
     });
@@ -219,6 +231,7 @@ describe('Briefing S4.3', () => {
         context: new Map([['openDetailPanel', openDetailPanel]]),
       });
       await waitFor(() => screen.getByTestId('section-in-progress'));
+      await fireEvent.click(screen.getByTestId('section-toggle-in-progress'));
       await fireEvent.click(screen.getByTestId('agent-ref-link'));
       expect(openDetailPanel).toHaveBeenCalledWith(
         expect.objectContaining({ type: 'agent' })
@@ -232,6 +245,7 @@ describe('Briefing S4.3', () => {
         context: new Map([['openDetailPanel', openDetailPanel]]),
       });
       await waitFor(() => screen.getByTestId('section-exceptions'));
+      await fireEvent.click(screen.getByTestId('section-toggle-exceptions'));
       await fireEvent.click(screen.getByTestId('mr-ref-link'));
       expect(openDetailPanel).toHaveBeenCalledWith(
         expect.objectContaining({ type: 'mr' })
@@ -243,11 +257,41 @@ describe('Briefing S4.3', () => {
     it('removes cross-workspace item on dismiss click', async () => {
       render(Briefing, { props: { workspaceId: 'ws-1', scope: 'workspace' } });
       await waitFor(() => screen.getByTestId('section-cross-workspace'));
+      await fireEvent.click(screen.getByTestId('section-toggle-cross-workspace'));
       expect(screen.getByText('platform-core updated idempotent-api.md')).toBeTruthy();
       await fireEvent.click(screen.getByTestId('dismiss-btn'));
       await waitFor(() => {
         expect(screen.queryByText('platform-core updated idempotent-api.md')).toBeNull();
       });
+    });
+  });
+
+  describe('Section accordion (ui-layout.md §3 Inline Expansion)', () => {
+    it('expands a section below its header on click and collapses it on second click', async () => {
+      render(Briefing, { props: { workspaceId: 'ws-1', scope: 'workspace' } });
+      await waitFor(() => screen.getByTestId('section-in-progress'));
+      // Collapsed by default (completed is the default-expanded section)
+      expect(screen.queryByText('Auth refactor')).toBeNull();
+      await fireEvent.click(screen.getByTestId('section-toggle-in-progress'));
+      expect(screen.getByText('Auth refactor')).toBeTruthy();
+      expect(screen.getByTestId('section-toggle-in-progress').getAttribute('aria-expanded')).toBe('true');
+      await fireEvent.click(screen.getByTestId('section-toggle-in-progress'));
+      expect(screen.queryByText('Auth refactor')).toBeNull();
+      expect(screen.getByTestId('section-toggle-in-progress').getAttribute('aria-expanded')).toBe('false');
+    });
+
+    it('expanding one section collapses the previously expanded one', async () => {
+      render(Briefing, { props: { workspaceId: 'ws-1', scope: 'workspace' } });
+      await waitFor(() => screen.getByTestId('section-completed'));
+      // Completed is expanded by default
+      expect(screen.getByText('Payment retry logic')).toBeTruthy();
+      expect(screen.getByTestId('section-toggle-completed').getAttribute('aria-expanded')).toBe('true');
+      // Expanding in-progress must collapse completed (single-expansion)
+      await fireEvent.click(screen.getByTestId('section-toggle-in-progress'));
+      expect(screen.getByTestId('section-toggle-in-progress').getAttribute('aria-expanded')).toBe('true');
+      expect(screen.getByTestId('section-toggle-completed').getAttribute('aria-expanded')).toBe('false');
+      expect(screen.queryByText('Payment retry logic')).toBeNull();
+      expect(screen.getByText('Auth refactor')).toBeTruthy();
     });
   });
 

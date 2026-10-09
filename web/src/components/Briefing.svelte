@@ -208,6 +208,16 @@
     return api.briefingAsk(workspaceId, { question, history: trimmedHistory });
   }
 
+  // ── Section accordion (ui-layout.md §3 Inline Expansion) ──────────────
+  // Briefing sections expand inline below their header; only one section
+  // expanded at a time. Metrics and the Q&A chat are always visible (they
+  // are not list sections).
+  let expandedSection = $state('completed');
+
+  function toggleSection(id) {
+    expandedSection = expandedSection === id ? null : id;
+  }
+
   // Reload when scope or workspaceId changes (not just on mount)
   $effect(() => {
     void scope;
@@ -280,10 +290,20 @@
       <!-- COMPLETED -->
       {#if briefing.completed?.length}
         <section class="briefing-section" data-testid="section-completed" aria-labelledby="briefing-completed">
-          <h2 class="section-heading" id="briefing-completed">
+          <button
+            class="section-heading section-toggle"
+            id="briefing-completed"
+            onclick={() => toggleSection('completed')}
+            aria-expanded={expandedSection === 'completed'}
+            aria-controls="briefing-section-completed-body"
+            data-testid="section-toggle-completed"
+          >
             <span class="section-icon completed-icon" aria-hidden="true">✓</span>
             {$t('briefing.section_completed')}
-          </h2>
+            <span class="expand-icon" aria-hidden="true">{expandedSection === 'completed' ? '▲' : '▼'}</span>
+          </button>
+          {#if expandedSection === 'completed'}
+          <div class="section-body-list" id="briefing-section-completed-body">
           {#each briefing.completed as item (item.id ?? item.title)}
             <div class="section-item" data-testid="completed-item">
               <div class="item-title">
@@ -318,16 +338,28 @@
               </div>
             </div>
           {/each}
+          </div>
+          {/if}
         </section>
       {/if}
 
       <!-- IN PROGRESS -->
       {#if briefing.in_progress?.length}
         <section class="briefing-section" data-testid="section-in-progress" aria-labelledby="briefing-inprogress">
-          <h2 class="section-heading" id="briefing-inprogress">
+          <button
+            class="section-heading section-toggle"
+            id="briefing-inprogress"
+            onclick={() => toggleSection('in_progress')}
+            aria-expanded={expandedSection === 'in_progress'}
+            aria-controls="briefing-section-in-progress-body"
+            data-testid="section-toggle-in-progress"
+          >
             <span class="section-icon inprogress-icon" aria-hidden="true">◐</span>
             {$t('briefing.section_in_progress')}
-          </h2>
+            <span class="expand-icon" aria-hidden="true">{expandedSection === 'in_progress' ? '▲' : '▼'}</span>
+          </button>
+          {#if expandedSection === 'in_progress'}
+          <div class="section-body-list" id="briefing-section-in-progress-body">
           {#each briefing.in_progress as item (item.id ?? item.title)}
             <div class="section-item" data-testid="in-progress-item">
               <div class="item-title">
@@ -397,16 +429,28 @@
               </div>
             </div>
           {/each}
+          </div>
+          {/if}
         </section>
       {/if}
 
       <!-- CROSS-WORKSPACE -->
       {#if briefing.cross_workspace?.length}
         <section class="briefing-section" data-testid="section-cross-workspace" aria-labelledby="briefing-crossworkspace">
-          <h2 class="section-heading" id="briefing-crossworkspace">
+          <button
+            class="section-heading section-toggle"
+            id="briefing-crossworkspace"
+            onclick={() => toggleSection('cross_workspace')}
+            aria-expanded={expandedSection === 'cross_workspace'}
+            aria-controls="briefing-section-cross-workspace-body"
+            data-testid="section-toggle-cross-workspace"
+          >
             <span class="section-icon cross-icon" aria-hidden="true">↔</span>
             {$t('briefing.section_cross_workspace')}
-          </h2>
+            <span class="expand-icon" aria-hidden="true">{expandedSection === 'cross_workspace' ? '▲' : '▼'}</span>
+          </button>
+          {#if expandedSection === 'cross_workspace'}
+          <div class="section-body-list" id="briefing-section-cross-workspace-body">
           {#each briefing.cross_workspace as item (item.id ?? item.spec_ref)}
             <div class="section-item" data-testid="cross-workspace-item">
               <div class="item-title">
@@ -445,16 +489,28 @@
               </div>
             </div>
           {/each}
+          </div>
+          {/if}
         </section>
       {/if}
 
       <!-- EXCEPTIONS -->
       {#if briefing.exceptions?.length}
         <section class="briefing-section exceptions-section" data-testid="section-exceptions" aria-labelledby="briefing-exceptions">
-          <h2 class="section-heading" id="briefing-exceptions">
+          <button
+            class="section-heading section-toggle"
+            id="briefing-exceptions"
+            onclick={() => toggleSection('exceptions')}
+            aria-expanded={expandedSection === 'exceptions'}
+            aria-controls="briefing-section-exceptions-body"
+            data-testid="section-toggle-exceptions"
+          >
             <span class="section-icon exception-icon" aria-hidden="true">✗</span>
             {$t('briefing.section_exceptions')}
-          </h2>
+            <span class="expand-icon" aria-hidden="true">{expandedSection === 'exceptions' ? '▲' : '▼'}</span>
+          </button>
+          {#if expandedSection === 'exceptions'}
+          <div class="section-body-list" id="briefing-section-exceptions-body">
           {#each briefing.exceptions as item (item.id ?? item.mr_id)}
             <div class="section-item exception-item" data-testid="exception-item">
               <div class="item-title">
@@ -515,6 +571,8 @@
               </div>
             </div>
           {/each}
+          </div>
+          {/if}
         </section>
       {/if}
 
@@ -737,6 +795,27 @@
     margin: 0 0 var(--space-3) 0;
     padding-bottom: var(--space-2);
     border-bottom: 1px solid var(--color-border);
+  }
+
+  /* Accordion toggle (ui-layout.md §3 Inline Expansion): the section
+     heading is itself the disclosure button. */
+  .section-toggle {
+    width: 100%;
+    background: none;
+    border: none;
+    border-bottom: 1px solid var(--color-border);
+    cursor: pointer;
+    text-align: left;
+    font: inherit;
+  }
+  .section-toggle:hover { color: var(--color-text); }
+  .section-toggle:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+  .expand-icon {
+    margin-left: auto;
+    font-size: 0.75em;
   }
 
   .completed-icon { color: var(--color-success); }
