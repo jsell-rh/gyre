@@ -3,7 +3,7 @@ title: "Repair verified failure on main cd1c5f044e49"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
 progress: ready-for-review
-commits: ["4c7c1c57eb2f654fed61d4a86bb8e20ff3c335f2", "0d30a129f90ffc34dae2d39a478b86776f1813ae", "ea9646703adf1e0ce986de0acbc33239fab8a56c", "294970a545f2a73b6fc6a56d2487696016516528", "bc71ae74b2355f52169274006ddcd7f5d5f3e99e"]
+commits: ["06f8e2deb25c14c046becaa75a99ce7cc5082e02", "62f05fe7b3aebd7e07f9b70138148e18b01a2ce4", "e83fc267c681cd0e946ba90d3ef1eb36fea673bb", "c0d51b0d9a076c599c2a2a388e46950385a8376d", "7c0b857d2a7193e222b83a2ae31fa02d741a1992"]
 ---
 
 ## Required behavior
@@ -1073,3 +1073,9 @@ to a warning by the gate's `-W clippy::all` and is not a changed-line finding.
 An independent two-checkout Rust fixture reproduces stale test reuse: a good implementation returns true, a mutant returns false, and the unchanged test asserts true. With one CARGO_TARGET_DIR: good exits 0, mutant ALSO exits 0 and Cargo replays the good source warning without compiling. With an isolated target: the same mutant exits 101. This is actual command evidence, not a claim that the tenant test is flaky.
 
 Your isolated probe worktree and assigned checkout inherit /tmp/gyre-target. Results from that shared target are not reliable evidence of the current tree. Give the probe its own target directory, or cargo clean each workspace package before a serialized check. Avoid running both checkouts concurrently against the shared target. Do not alter the production tenant enforcement or weaken its assertions based on a stale test binary. Independently verify the current code after invalidating workspace artifacts, then write your supported verdict. Root is repairing the controller host gate to clean workspace packages while retaining third-party caches.
+
+## Review
+
+### Current review comparison base
+
+Use git merge-base origin/main HEAD for the comparison base. It is currently 9db1fec3fb53387ad555453baa64494cd914daa4 after this round's successful rebase. Inspect git diff 9db1fec3fb53387ad555453baa64494cd914daa4 for current task changes, including uncommitted repairs. The cd1 failed-main Base and d1a4c17 checked base in historical findings are diagnostic provenance, not the current review range. Controller commits 2efd64a, acd2091, c37c349, and 9db1fec were inherited from upstream and are outside task-210's diff. Commit attribution is refreshed mechanically; do not repeat historical hash reconstruction unless a concrete behavioral finding needs it. Investigate the cache collision using isolated artifacts and conclude with an evidence-supported verdict. Final full suites and GitHub E2E are enforced separately.
