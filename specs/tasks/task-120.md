@@ -2,7 +2,7 @@
 title: "Enhance User entity with profile fields and preferences"
 spec_ref: "user-management.md §User Entity"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 coverage_sections:
   - "user-management.md §User Entity"
   - "user-management.md §Username vs Display Name"
@@ -10,6 +10,43 @@ coverage_sections:
 commits: ["4dd6e88e079d41513832c001e13b154ce7942f28", "4a27b51ed0e4e1a6fe81733f664b3041302017b3", "3c2c4eea4470e9f80e60c66f60d20d8318ed89fc", "2cdb34b17c93f4ac901b31fde24dba8980497ca0", "e9c4a16008564aa9492c41d0a78741a32102025f", "5aa09fc7c0465ba165af0665fb192de93850b1d6"]
 review: specs/reviews/task-120.md
 ---
+
+## Revision Round 1 (2026-10-09)
+
+All three review findings repaired:
+
+- **F1 (critical, migration parser overflow):** the 39-deep nested
+  `REPLACE(...)` predicate in `000056/up.sql` is replaced by 38 sequential
+  depth-1 `UPDATE` statements over a `tmp_username_scratch` column (dropped
+  after); the sanitize predicate reads the scratch remainder. Portable SQL
+  on both backends (no GLOB/regexp/JSON1). Regression test
+  `migration_000056_backfills_unique_url_safe_usernames` builds a
+  pre-000056 DB and applies 000056 alone, asserting sanitize/dedup/pass-2
+  collision semantics.
+- **F2 (SCIM cutover):** `scim_create_user` derives the handle via
+  `User::sanitize_username` with external-id fallback and 400 when neither
+  yields a usable handle; duplicate → precise 409. `scim_update_user`
+  leaves `username`/`external_id` untouched (immutable after creation) and
+  replaces only `displayName`/`emails`. Four focused SCIM tests.
+- **F3 (dedup suffix collision):** pass-2 dedup renames any row still
+  sharing a handle to `<handle>-<row id>` so `CREATE UNIQUE INDEX` cannot
+  fail; covered by the `jsell`/`jsell-2` pre-existing-handle case in the
+  migration test.
+
+Focused verification on this tree (2026-10-09): `gyre-adapters --lib` →
+**349 passed, 0 failed** (pre-repair: 84/264 — every SqliteStorage test
+died at migration time); `gyre-server --lib api::scim` → 9 passed
+(incl. `scim_update_user`, previously 500); `api::users` → 14 passed;
+`auth::` → 39 passed; `gyre-domain --lib user` → 11 passed. Mechanical
+gates OK: migration versions, SQL portability, mem-port contracts, arch,
+ABAC route registry, commit attribution, fabricated/scope-literal
+defaults, inert enforcement, lossy secret conversion, forged scope
+fields, unbounded external HTTP.
+
+Test-harness note: the migration regression test initially failed with
+`no such table: __diesel_schema_migrations` — raw
+`MigrationHarness::run_migrations` (unlike `run_pending_migrations`) does
+not set up the bookkeeping table; fixed by calling `conn.setup()` first.
 
 ## Spec Excerpt
 
