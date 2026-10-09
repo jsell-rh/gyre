@@ -2,7 +2,7 @@
 title: "LLM Endpoint Contract — SSE streaming, prompt templates, rate limiting"
 spec_ref: "ui-layout.md §2 LLM Endpoint Contract"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "ui-layout.md §LLM Endpoint Contract"
   - "ui-layout.md §Role"
