@@ -1403,7 +1403,6 @@ async fn queue_graph_reflects_enqueued_mrs_and_deps() {
 //   4. The post-receive hook should auto-revoke the approval.
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "POST /api/v1/specs/approve removed in M34 Slice 5; needs spec ledger registration via push-triggered flow"]
 async fn spec_approval_auto_invalidated_on_spec_change() {
     let token = "git-test-spec-invalidate-token";
     let (_port, base_url) = start_server(token).await;
@@ -1440,7 +1439,9 @@ async fn spec_approval_auto_invalidated_on_spec_change() {
     // Build clone URL using repo_id.
     let clone_url = format!("{base_url}/git/{ws_id}/spec-inv-repo.git");
 
-    // Step 1: push initial commit with a spec file to main.
+    // Step 1: push initial commit with a manifest-registered spec file to main.
+    // The manifest entry makes the push-triggered spec_registry sync register
+    // "system/test-spec.md" in the ledger with its git blob SHA.
     let clone_url_c = clone_url.clone();
     let agent_token_c = agent_token.clone();
     tokio::task::spawn_blocking(move || {
@@ -1458,8 +1459,13 @@ async fn spec_approval_auto_invalidated_on_spec_change() {
         git_local(&["config", "user.email", "spec-inv@gyre.local"], &dir);
         git_local(&["config", "user.name", "Spec Inv Agent"], &dir);
 
-        // Create specs directory and initial spec file.
+        // Create specs directory, manifest, and initial spec file.
         std::fs::create_dir_all(dir.join("specs/system")).unwrap();
+        std::fs::write(
+            dir.join("specs/manifest.yaml"),
+            "version: 1\nspecs:\n  - path: system/test-spec.md\n    title: Test Spec\n    owner: spec-inv@gyre.local\n",
+        )
+        .unwrap();
         std::fs::write(
             dir.join("specs/system/test-spec.md"),
             "# Test Spec\n\nInitial content.\n",
@@ -1479,14 +1485,41 @@ async fn spec_approval_auto_invalidated_on_spec_change() {
     .await
     .unwrap();
 
-    // Step 2: record a spec approval for the spec path (any 40-char hex SHA).
-    let fake_sha = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+    // Wait for the async post-receive spec registry sync to register the spec.
+    let ledger_entry = {
+        let mut found = None;
+        for _ in 0..20 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            let resp: serde_json::Value = client
+                .get(format!("{api}/specs/system%2Ftest-spec.md"))
+                .header("Authorization", &auth_hdr)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if resp.get("current_sha").is_some() {
+                found = Some(resp);
+                break;
+            }
+        }
+        found.expect("spec should be registered in the ledger after push")
+    };
+    let spec_sha = ledger_entry["current_sha"]
+        .as_str()
+        .expect("ledger entry carries a blob SHA")
+        .to_string();
+    assert_eq!(spec_sha.len(), 40, "blob SHA must be 40 hex chars: {spec_sha}");
+
+    // Step 2: approve the spec version through the ledger-backed route
+    // (POST /api/v1/specs/:path/approve). The path is the LEDGER path
+    // (no specs/ prefix), URL-encoded.
     let approval_resp: serde_json::Value = client
-        .post(format!("{api}/specs/approve"))
-        .header("Authorization", &agent_hdr)
+        .post(format!("{api}/specs/system%2Ftest-spec.md/approve"))
+        .header("Authorization", &auth_hdr)
         .json(&serde_json::json!({
-            "path": "specs/system/test-spec.md",
-            "sha": fake_sha,
+            "sha": spec_sha,
         }))
         .send()
         .await
@@ -1495,12 +1528,29 @@ async fn spec_approval_auto_invalidated_on_spec_change() {
         .await
         .unwrap();
 
-    let approval_id = approval_resp["id"].as_str().unwrap().to_string();
-    assert!(!approval_id.is_empty(), "approval should have an ID");
     assert!(
-        approval_resp["revoked_at"].is_null(),
-        "approval should be active initially"
+        approval_resp.get("id").is_some(),
+        "approval should be recorded: {approval_resp}"
     );
+
+    // Confirm the ledger has an active approval row for this spec version.
+    let approvals: serde_json::Value = client
+        .get(format!("{api}/specs/approvals?path=system/test-spec.md"))
+        .header("Authorization", &auth_hdr)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let rows = approvals.as_array().unwrap();
+    assert!(!rows.is_empty(), "approval ledger must list the entry");
+    let active_row = rows
+        .iter()
+        .find(|a| a["spec_sha"].as_str() == Some(spec_sha.as_str()))
+        .expect("approved entry present in ledger");
+    assert_eq!(active_row["status"], "approved");
+    assert!(active_row["active"].as_bool().unwrap());
 
     // Step 3: push a modification to the spec file.
     let clone_url_c = clone_url.clone();
@@ -1554,32 +1604,28 @@ async fn spec_approval_auto_invalidated_on_spec_change() {
     .await
     .unwrap();
 
-    // Step 4: wait briefly for the async post-receive hook to complete.
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    // Step 4: poll for the async post-receive hook to invalidate the approval.
+    let mut revoked_row = None;
+    for _ in 0..20 {
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        let approvals: serde_json::Value = client
+            .get(format!("{api}/specs/approvals?path=system/test-spec.md"))
+            .header("Authorization", &auth_hdr)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if let Some(row) = approvals.as_array().unwrap().iter().find(|a| {
+            a["spec_sha"].as_str() == Some(spec_sha.as_str()) && !a["revoked_at"].is_null()
+        }) {
+            revoked_row = Some(row.clone());
+            break;
+        }
+    }
 
-    // Step 5: verify the approval is now revoked.
-    let approvals: serde_json::Value = client
-        .get(format!(
-            "{api}/specs/approvals?path=specs/system/test-spec.md"
-        ))
-        .header("Authorization", &auth_hdr)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-
-    let approvals_list = approvals.as_array().unwrap();
-    let our_approval = approvals_list
-        .iter()
-        .find(|a| a["id"].as_str() == Some(&approval_id));
-
-    assert!(
-        our_approval.is_some(),
-        "approval {approval_id} should still appear in the ledger"
-    );
-    let our_approval = our_approval.unwrap();
+    let our_approval = revoked_row.expect("approval should be revoked after spec file was modified in a push");
     assert!(
         !our_approval["revoked_at"].is_null(),
         "approval should be revoked after spec file was modified in a push: {our_approval}"
@@ -1589,6 +1635,12 @@ async fn spec_approval_auto_invalidated_on_spec_change() {
         Some("system:spec-lifecycle"),
         "revoked_by should be system:spec-lifecycle"
     );
+    assert_eq!(our_approval["status"], "revoked");
+
+    // And the modified spec's new SHA requires a fresh approval: the stale
+    // approval must not verify (forge blocks merges referencing the old SHA).
+    // Verified indirectly via status=revoked above; verify_spec_ref behavior
+    // is covered by the git_http unit test.
 }
 
 // ---------------------------------------------------------------------------
