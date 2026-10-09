@@ -2,7 +2,7 @@
 title: "Enhance User entity with profile fields and preferences"
 spec_ref: "user-management.md §User Entity"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "user-management.md §User Entity"
   - "user-management.md §Username vs Display Name"
@@ -10,6 +10,13 @@ coverage_sections:
 commits: ["0dfba43fb64499f158b96276a982c51d3f6ce71b", "0e15d87d862a91bbd9585300cdb844cc7b5c7f11", "bbeadf6a3f06728801a0f98cf62da56971bf33d0", "04fde7df77b884b20e4108dff917a5324174f034", "0170f283e0289a10468b4683efa64f7b266ad83b", "e9a63c7d50520dcedbeb832dab9e213c74e91340"]
 review: specs/reviews/task-120.md
 ---
+
+## Shipped
+
+- `User` entity carries every spec profile field (username, display_name, avatar_url, timezone, locale, preferences, last_login_at, updated_at) with `UserPreferences` (Theme/UiDensity/DiffView/FeedScope) stored server-side as JSON; migration 000056 adds the columns, backfills defaults (UTC/en-US), and sanitizes legacy rows to unique URL-safe handles via 38 depth-1 portable-SQL UPDATEs (no parser overflow on SQLite).
+- Username contract enforced across the chain: unique (index + create checks), URL-safe (`validate_username`/`sanitize_username`), immutable after creation (adapter guards in sqlite/postgres/mem; SCIM update ignores rename attempts; SCIM create sanitizes with external-id fallback and 400/409 on unusable/duplicate handles). First login derives the handle from SSO `preferred_username` (sub fallback) and stamps `last_login_at`.
+- `PUT /api/v1/users/me` implements genuine partial-update semantics (`UserPreferencesPatch` merge — omitted fields keep stored values), returned via `GET /users/me`; malformed preferences → 400 with nothing applied.
+- Port `find_by_username` implemented in sqlite/postgres/mem with parity contract guards; `gyre-adapters --lib` 349/0, `api::scim` 9/0, `api::users` 14/0, `auth::` 39/0 on this tree.
 
 ## Revision Round 1 (2026-10-09)
 

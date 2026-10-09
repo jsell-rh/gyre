@@ -42,3 +42,48 @@ Non-findings (checked, judged out of scope or acceptable):
 Summary: the domain model, port contracts, adapter mappings, auth derivation flow, and the `PUT /users/me` partial-update semantics are real and well-tested — the sections' substance is in place, and the mem-backed tests prove the behaviors. But the shipped migration cannot run on SQLite (F1: default-deployment startup failure masked by mem-backed green tests — exactly the failure class the repo's storage-portability rules exist to prevent), and the immutability cutover broke the SCIM update endpoint while leaving SCIM create able to violate the URL-safe contract (F2). Revision required.
 
 — Reviewer, 2026-10-08
+
+## Round 2 (2026-10-09) — repairs re-verified, verdict PASS
+
+Comparison base `66422bd4`… HEAD `7b922a3` (product tree identical since `0dfba43`; only process/docs/spec commits after). Round-1 product history was rebased into checkpoint commits (`e9a63c7`→`0dfba43`); attribution check passes mechanically, and the post-round-1 repair commits touched only migration + SCIM + `sqlite/mod.rs` (`bbeadf6`: up.sql + scim.rs; `0e15d87`: up.sql + sqlite/mod.rs; `0dfba43`: sqlite/mod.rs), so the round-1 PASS findings on auth/users/domain/mem/postgres apply unchanged to identical bytes.
+
+### F1 (critical — migration parser overflow): REPAIRED
+
+`000056/up.sql:70-120`: the 39-deep nested `REPLACE(...)` predicate is gone; the delete-every-allowed-character pass now runs as 38 sequential depth-1 `UPDATE` statements over a `tmp_username_scratch` column, dropped after. The final predicate (`:110-119`) reads the scratch remainder plus length/edge/consecutive-separator checks, matching the Rust contract. Portable SQL only (REPLACE/substr/length/IN — no GLOB/regexp/JSON1); portability gate OK.
+
+Evidence (persisted, `/tmp/stage/review-evidence/task-120-round2/`):
+- `adapters-lib.txt` — `cargo test -p gyre-adapters --lib` at source `034f8fd` (product tree byte-identical to HEAD, verified via `git diff 034f8fd..HEAD -- crates/` → empty): **349 passed, 0 failed** (12 ignored). Pre-repair: 84/264.
+- `migration-000056-regression.txt` — `migration_000056_backfills_unique_url_safe_usernames` at `7b922a3`: **ok** (1 passed, exit 0).
+- Re-ran the full adapters suite on this tree via the prebuilt binary (built from this tree; verified no `.rs` under `crates/` newer than the binary): **349 passed, 0 failed** — independently confirms the persisted evidence.
+
+The regression test itself is real: builds a pre-000056 DB by running all migrations except 000056, inserts legacy rows (`Alice Smith`×2, `jörg`, `jsell`×2 + pre-existing `jsell-2`, empty name, 65-char name), applies 000056 alone, and asserts exact handles including `jsell-2-u-jsell-3` for the pass-2 collision plus `validate_username` on every result (`sqlite/mod.rs:326-424`). Panics on the original overflow version and on a dedup abort — cannot pass without the repaired migration.
+
+### F2 (major — SCIM cutover): REPAIRED
+
+- `scim_create_user` (`api/scim.rs:268-318`): derives the handle via `User::sanitize_username(&req.user_name)`, falls back to `external_id`, returns 400 when neither yields a usable handle, and 409 (via `find_by_username`) when the handle is taken — precise conflicts instead of raw storage 500s, matching the `api::users::create_user` pattern.
+- `scim_update_user` (`api/scim.rs:345-370`): no longer touches `username` or `external_id`; replaces only `displayName`/`emails` and stamps `updated_at`. The documented choice (ignore a changed `userName` rather than 409) is sound — IdPs re-send their original pre-sanitized `userName` on every sync PUT, so 409 would break sync loops; immutability is still enforced.
+
+Test quality checked (`api/scim.rs:512-626`): assertions genuinely pin the behavior — `scim_update_user` PUTs `bob-renamed` + swapped `externalId` and asserts the response (and a follow-up GET) still shows `bob`/null externalId; `scim_create_sanitizes_user_name` asserts `"Bad Handle!"` → `bad-handle` (display name keeps raw); `scim_create_sanitizes_falls_back_to_external_id` asserts the ext-id fallback AND the 400 when no fallback exists; `scim_create_conflict_on_duplicate_username` asserts distinct external ids colliding on the sanitized handle → 409.
+
+Evidence (persisted, `scim-suite.txt`): `api::scim` at `7b922a3` via prebuilt binary from this tree: **9 passed, 0 failed** — including `scim_update_user` (the round-1 regression, previously 500) and the three new sanitize/fallback/409 tests.
+
+### F3 (minor — dedup suffix collision): REPAIRED
+
+`up.sql:149-158`: pass-2 dedup re-ranks the post-pass-1 table and renames any row still sharing a handle to `<handle>-<row id>` — unique by primary key, so `CREATE UNIQUE INDEX idx_users_username` (`:168`) cannot fail on dedup collisions. Covered by the `jsell`/`jsell-2` pre-existing-handle case in the migration test (`u-jsell-3` → `jsell-2-u-jsell-3`). Deterministic tie-break: earliest-created row keeps the shorter handle.
+
+### Round-2 bookkeeping repair (integration rejection): VERIFIED
+
+The rejected integration's only preserved item was `specs/coverage/SUMMARY.md`. Repaired by flipping the bookkeeping to implementation ownership: `user-management.md` rows 2 (User Entity), 3 (Username vs Display Name), 11 (User Preferences) → `implemented` with evidence notes citing the code paths; header counts updated (26/3 → 23/3); SUMMARY regenerated. Verified: `bash scripts/update-coverage-summary.sh` reproduces `SUMMARY.md` **byte-identically**; `grep -c -F '| not-started |' specs/coverage/system/user-management.md` → **0**; all other rows untouched. The business-continuity/HSI count changes in SUMMARY are accumulated sync drift from accepted audit commits — mechanical regeneration output, not hand-edited numbers.
+
+### Fresh verification on this tree (2026-10-09)
+
+- `api::scim` → 9 passed, 0 failed. `api::users` → 14 passed. `auth::` → 39 passed. `health` (SQLite-backed `SqliteStorage::new` construction) → 15 passed — the default-deployment boot path F1 broke is exercised and green.
+- `gyre-adapters --lib` → 349 passed, 0 failed (persisted at `034f8fd` + re-run at `7b922a3` via prebuilt binary).
+- Mechanical gates re-run: migration versions, SQL portability, mem-port contracts, arch, commit attribution — all OK.
+- Round-1 verified-PASS surfaces (domain `user` 11/11, users API 14/14, auth 39/39) re-run green on this tree.
+
+### Verdict
+
+All three findings repaired with real implementations and regression tests that fail on the original failure classes. No new exemptions, no gate weakening, no deleted tests, no unrelated changes — the round-2 diff beyond the F1/F2/F3 product repairs is spec/coverage bookkeeping and this task file. **progress: complete.**
+
+— Reviewer, 2026-10-09
