@@ -360,6 +360,29 @@ mod tests {
     }
 
     #[test]
+    fn orphan_sub_views_rejected_on_non_side_by_side_layout() {
+        // `left`/`right` are meaningful only for 'side-by-side'. On any other
+        // layout they are smuggled content no renderer consumes — and the
+        // nesting-depth rule would never see them.
+        let mut v = valid_spec();
+        v["layout"] = json!("list");
+        v["left"] = json!({
+            "data": {},
+            "layout": "side-by-side"
+        });
+        v["right"] = json!({
+            "data": {},
+            "layout": "list"
+        });
+        let spec = parse(v);
+        let err = validate_view_spec(&spec).unwrap_err();
+        assert!(
+            err.contains("only allowed with layout 'side-by-side'"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
     fn flow_sub_view_requires_trace_source() {
         let mut v = valid_spec();
         v["layout"] = json!("side-by-side");

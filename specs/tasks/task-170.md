@@ -2,7 +2,7 @@
 title: "View Specification Grammar — TypeScript types and server-side validation"
 spec_ref: "ui-layout.md §4"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 coverage_sections:
   - "ui-layout.md §4. View Specification Grammar"
   - "ui-layout.md §Structure"
@@ -67,10 +67,28 @@ LLM Constraints: LLM can only produce view specs within this grammar, read-only 
 
 Read `ui-layout.md` §4 thoroughly — it contains extensive detail on each layer, the flow layout particle rendering, composability rules, and LLM constraints. The TypeScript types must match the JSON schema examples in the spec exactly. The server validation must reject the same invalid cases both server-side and client-side (belt and suspenders). Check existing graph types in `web/src/lib/types/` and `crates/gyre-common/src/` for naming conventions.
 
-## Review
+## Repair (this round)
 
-### Review changed source code
+Addressed the review finding (probe artifacts + smuggling bypass):
 
-- crates/gyre-common/examples/probe_parse.rs
+1. **Hybrid grammar bypass (root cause)** — `parse_and_validate` no longer
+   parses ViewQuery-first with serde's unknown-field tolerance. It classifies
+   the payload by top-level key sets (`VIEW_QUERY_FIELDS` / `VIEW_SPEC_FIELDS`,
+   each verified to exactly match its struct's fields): mixed payloads 400
+   ("view spec mixes ViewQuery and ViewSpec fields"), pure ViewQuery payloads
+   validate as ViewQuery, everything else parses as ViewSpec (unknown fields
+   400 via serde). The confirmed bypass — valid `scope` + nested
+   `side-by-side` riding the ViewQuery branch to 201 — is closed.
+2. **Same-class hole** — orphan `left`/`right` on a non-`side-by-side` layout
+   is now rejected in both `validate_view_spec` (Rust) and `validateViewSpec`
+   (TS mirror).
+3. **Probe artifacts** — `crates/gyre-common/examples/probe_parse.rs`
+   deleted; the `PROBE_` test converted to a proper regression test
+   (`create_view_rejects_hybrid_viewquery_viewspec_payload`), which fails on
+   the pre-repair code (201 instead of 400).
 
-Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
+Verification: `cargo test -p gyre-server --lib explorer_views` (16 passed),
+`cargo test -p gyre-common view_spec` (13 passed, incl. new
+`orphan_sub_views_rejected_on_non_side_by_side_layout`), `vitest run
+src/__tests__/view-spec.test.js` (16 passed, incl. new orphan left/right
+rejection test).
