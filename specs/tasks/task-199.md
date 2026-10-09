@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "dependency-graph.md §Dependency Entity"
-commits: ["0248e9bf9c2d7b234fca8115d1412f70c4201596", "02056fa0fe79474c325ec7cc91b8499680b0e333", "10d5df6dafc0859c2f1360be65366d795f74ddd4"]
+commits: ["10d5df6dafc0859c2f1360be65366d795f74ddd4", "02056fa0fe79474c325ec7cc91b8499680b0e333", "0248e9bf9c2d7b234fca8115d1412f70c4201596", "fa649abc64fdb377d89f4e87c801a31050c77868"]
 ---
 
 ## Spec Excerpt
@@ -107,38 +107,37 @@ and the dependency API handlers write to / read from this volatile store.
 `AppState.dependencies` is wired through the `store!` macro
 (crates/gyre-server/src/lib.rs:909-912), exactly like every sibling repository: DB-backed
 deployments (`GYRE_DATABASE_URL` SQLite or Postgres) get `SqliteStorage`/`PgStorage` as
-the `DependencyRepository`; pure in-memory mode still falls back to
-`MemDependencyRepository`. The cross-repo dependency graph — every `DependencyEdge`
-written by push-time detection, reconciliation, staleness jobs, and the dependency API —
-is durable across server restarts instead of dying with the process.
+the `DependencyRepository`; pure in-memory mode (no `GYRE_DATABASE_URL`) keeps
+`MemDependencyRepository`. `breaking_changes` and `dependency_policies` remain mem-wired
+untouched (task-163 scope). The persistent adapters, `dependency_edges` migration, and
+schema all pre-existed at base — this task only fixed the dead wiring.
 
-Evidence for this repair attempt (contract finding
-`945c3524c43d4f76ad68c5533a1a61ce`; logs under `/tmp/stage/review-evidence/`):
+Persistence is proven by `crates/gyre-server/tests/dependency_persistence.rs`: three
+genuinely fresh `build_state` instances over one temp SQLite file (save → restart-read
+with full field round-trip → update → restart-read of the update).
 
-- Wiring: `store!(dyn DependencyRepository, mem::MemDependencyRepository::default())` at
-  lib.rs:909-912. No `Arc::new(mem::MemDependencyRepository…)` literal remains in
-  `build_state`; the only remaining one in the tree is the intentional `#[cfg(test)]`
-  `test_state_inner` builder. `breaking_changes` (lib.rs:913) and `dependency_policies`
-  (lib.rs:914) untouched per scope — owned by task-163.
-- Persistence: `cargo test -p gyre-server --test dependency_persistence` → 1 passed;
-  0 failed; exit 0 (`task-199-good-persistence.log`). The test round-trips an edge
-  through three genuinely fresh `build_state` instances over one SQLite file
-  (save → restart-read → update → restart-read), asserting field-level round-trip,
-  list_by_repo, list_dependents, list_all, and the status/version_pinned update path.
-- Mutation probe (test kills the defect): in an isolated worktree, the old
-  `Arc::new(mem::MemDependencyRepository::default())` literal was restored in
-  `build_state` → the test fails at the restart assertion
-  (dependency_persistence.rs:70 "edge must survive restart on SQLite-backed state";
-  0 passed; 1 failed). `store!` wiring restored → passes (`task-199-mutation-probe.log`).
-- Pure in-memory mode: `cargo test -p gyre-server --lib -- api::dependencies
-  dep_staleness` → 72 passed; 0 failed; exit 0 (`task-199-mem-mode.log`).
-- Hexagonal boundary: `bash scripts/check-arch.sh` → "Architecture lint passed", exit 0
-  (`task-199-arch-lint.log`).
-- Attribution: `bash scripts/check-task-commit-attribution.sh` previously failed with the
-  empty `commits:` list (0248e9bf/02056fa0/10d5df6d unlisted); the frontmatter now lists
-  the three product-surface fix commits.
+Evidence (this repair attempt, at HEAD `c7fbc363` + task-file mutations only, under
+`/tmp/stage/review-evidence/task-199-repair/`):
 
-Full-workspace `cargo test --all` and CI are owned by verification/publication; this
-sandbox's seccomp denies `accept()` (Errno 95, `/tmp/stage/capabilities.json`), so
-loopback-listener integration suites cannot run here — exact-head GitHub checks remain
-required, no code defect inferred from that restriction.
+- Persistence test on the wired code: **1 passed, exit 0**
+  (`cargo test -p gyre-server --test dependency_persistence`).
+- Mutation probe (isolated detached worktree, wiring reverted to the old
+  `Arc::new(mem::MemDependencyRepository::default())` literal): **0 passed, 1 failed** at
+  `dependency_persistence.rs:70` "edge must survive restart on SQLite-backed state" —
+  the test kills the regression. Worktree removed; main tree untouched.
+- Mem-mode regression (`--lib -- api::dependencies dep_staleness`): **72 passed, exit 0**.
+- `bash scripts/check-arch.sh`: **exit 0**.
+- Attribution gate: filling `commits:` cleared all task-199 entries; the single remaining
+  failure (`a781ede2` task-210) pre-exists at base `8c2d1775` (ancestor commit absent
+  from task-210's frontmatter on this branch) — out of scope here.
+
+Not run in this sandbox, per assignment scope: full `cargo test --all` and CI are owned by
+verification/publication. This sandbox's seccomp denies `accept()` (Errno 95,
+`/tmp/stage/capabilities.json`), so loopback-listener integration suites cannot execute
+here; exact-head GitHub checks remain required, no code defect inferred.
+
+Contract repair note for finding `fc6cf5d17e164ff99d418f7774c993fb` (category: contract):
+the previous candidate rewrote the Acceptance Criteria bullet text. This attempt started
+from the byte-identical base contract (verified `git diff 8c2d1775 -- <file>` empty) and
+applied only the legitimate mutations: frontmatter `progress` + `commits`, the four
+`- [ ]`→`- [x]` flips with bullet text unchanged, and this appended Shipped section.
