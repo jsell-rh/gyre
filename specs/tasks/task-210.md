@@ -2,7 +2,7 @@
 title: "Repair verified failure on main cd1c5f044e49"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 commits: ["887611b1dea39ea7e8b19c172bdc22482608e38a", "f61f0a4ad4434e49dcdf1029429b76f8e92b98fc", "f9abdf065be5d3c01f47597e6689515de5f6624a", "8bfbf263763f53ad3c211dc54a69dac7d3b36ef3", "0484dd6ad10157e54ed2edd96c57d70fdb3654d4", "402f9f74cb8e60894003cf0c8ac5974c7f3b72d4", "cefb7c6eb6aa8d30212328ecb186d4c528f083d4"]
 ---
 
@@ -1242,3 +1242,86 @@ Python bytecode are not reintroduced anywhere in the diff.
 
 None within sandbox scope. Full Playwright E2E, full vitest, and full Rust
 suites remain the controller's host/GitHub gates on the exact merge SHA.
+
+
+## Repair record (2026-10-09, round 12 — dist rebuild dropped, all gates green on assigned base)
+
+Merge-base vs origin/main this round: `66422bd4` (main advanced past `1e2e3962`
+with `389267ac`, `3214c982`, `66422bd4` — dev-loop process fixes only, no
+product overlap with this task's 18-file diff). This is exactly the assignment
+base; working tree was clean at start, no active rebase.
+
+### New finding this round — checkpoint-captured dist rebuild failed diff-check
+
+The timeout-recovery checkpoint `de90a0a2` committed a `web/dist` rebuild
+(build output produced during the aborted verification). It replaced main's
+bundle (`index-fzyK9GaC.js`) with a newly hashed one
+(`index-D4CX8rVo.js`), whose vendored svelte-i18n runtime contains a trailing
+TAB inside a template literal on line 5 — the identical byte construct main's
+bundle carries, but now on an added line, so `git diff --check 66422bd4` →
+exit 2. Rounds 9–11 recorded diff-check clean because their HEADs had
+`web/dist` identical to origin/main; the regression entered only via the
+checkpoint.
+
+Repair: commit `08361ee0` restores `web/dist` to the main state
+(`git restore --source=origin/main`). This matches repo convention — task
+branches do not regenerate dist (4 `web/src` commits on main since Sept 30
+with no dist regen; CI `ci.yml`/`e2e.yml` both run `npm run build`, and
+`dev-check.sh` rebuilds dist, then explicitly restores the committed one).
+No dist regen has ever passed the `git diff --check HEAD^1 HEAD` gate (checked
+every historical dist add: `defec35a`, `a3fde958` exit 2 pre-gate-era;
+`44a8187f` passed only because it deleted a stale bundle while keeping the
+already-present `index-fzyK9GaC.js`). Hand-editing the minified vendored
+runtime to strip the tab would corrupt the template literal and diverge from
+the next real build output — not a repair.
+
+### Focused verification on the current tree (this session, fresh artifacts)
+
+- Toolchain now supplies cc/lld (previous round's timeout cause); no shared
+  target dirs existed at session start.
+- `CARGO_TARGET_DIR=/tmp/task210-target` (created empty this session, fresh
+  413s compile): `cargo test -p gyre-server --lib admin::tests` → **32
+  passed, 0 failed**, including all four tenant-scope tests
+  (`admin_seed_rejects_caller_from_foreign_tenant`,
+  `admin_seed_rejects_when_workspace_id_already_owned_by_foreign_tenant`,
+  `admin_seed_inconsistent_repo_without_workspace_is_conflict`,
+  `admin_seed_workspace_visible_to_calling_tenant`).
+- Frontend (`web/`, `npm ci` fresh this session): WorkspaceHome suites (Home
+  + Sections + RulesFailure) → 44 passed / 41 pre-existing skipped; shell
+  suites (AppShell, NoSidebar, WorkspaceDrawerSectionNav) → 78/78 passed.
+
+### Gates on the current merge-base range (`66422bd4..HEAD`)
+
+- `git diff --check 66422bd4` → clean (after the dist restore; before it,
+  exit 2 on the bundle tab).
+- `python3 scripts/check-rustfmt-diff.py 66422bd4` → "changed lines clean
+  (1 Rust files checked)".
+- `python3 scripts/check-clippy-diff.py 66422bd4` → "changed lines clean
+  (1 Rust files, 1145 existing warnings outside changes)", exit 0.
+- All 21 static invariant scripts → OK (arch, hierarchy, relative-path
+  defaults, task attribution, mem-port contracts, inert enforcement,
+  fabricated/lookup scope defaults, lossy secrets, forged scope fields,
+  forwarded-header trust, in-memory state stores, unbounded external HTTP,
+  fail-open refs, byte-slice truncation, dead message kinds, migration
+  versions, migration SQL portability, ABAC route registry, ABAC exempt
+  handlers, MCP write tools).
+- `python3 scripts/dev-attribution.py task-210` → no drift; frontmatter
+  unchanged (the dist-restore commit touches only `web/dist`, outside the
+  `crates/`/`web/src`/`web/tests` scope prefixes, and the labeled chain was
+  already complete).
+
+Evidence: `/tmp/stage/review-evidence/` (gates-r12.txt, rust-admin-tests-r12.txt,
+vitest-workspacehome-r12.txt, vitest-shell-r12.txt, invariant-scripts-r12.txt).
+
+### Unresolved
+
+None within sandbox scope. Full Playwright E2E, full vitest, and full Rust
+suites remain the controller's host/GitHub gates on the exact merge SHA.
+
+## Shipped
+
+- `admin_seed` seeds the demo workspace in the authenticated caller's tenant, rejects foreign/missing ownership of the global seed fixtures with a 409 naming the collision, propagates storage errors, and derives seed repo paths from `state.repos_root` — the E2E tenant-scope leak and relative-path exemptions are gone (3 exemption entries removed, check passes).
+- `WorkspaceHome` Agent Rules loads are generation-guarded: a delayed response (success or failure) from a superseded workspace can no longer overwrite the current workspace's rules; a failed lookup surfaces as an error with Retry, never an empty successful rule set.
+- MetaSpec `updated_at` is parsed as UNIX seconds (matching domain `u64` / `now_secs()` writes) via `toEpochSec`; the recency note reports only what the data proves ("N meta-specs updated in the last 7 days").
+- The E2E seeded fixture fails fast with the real cause on seed or workspace-visibility errors, uses the real fixture identities (workspace `default`, repo `gyre-core`), and asserts the actual `repo-card` production markup; `docs/ui.md` documents the shipped no-sidebar shell (canonical ui-navigation) with the real tabs and g-key bindings.
+- Round 12: dropped the timeout-recovery checkpoint's accidental `web/dist` rebuild (commit `08361ee0`), restoring main's committed bundle — the rebuild had introduced a new-file trailing tab in the vendored svelte-i18n runtime that failed `git diff --check`; task branches don't ship dist rebuilds (CI and the integration gate build from source).
