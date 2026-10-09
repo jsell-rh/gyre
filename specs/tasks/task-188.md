@@ -2,10 +2,10 @@
 title: "Enforce SignedInput context binding (replay prevention) at verification"
 spec_ref: "authorization-provenance.md §2.4"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "authorization-provenance.md §2.4 Context Binding (Replay Prevention)"
-commits: []
+commits: ["e97df1461b20d6c16063e79c1af888ae4ba64856", "cf9549ab8b722c8bbeb3990d577fee92dc81681b"]
 ---
 
 ## Spec Excerpt
@@ -70,3 +70,68 @@ Add a real, fail-closed context-binding check that runs at every verification bo
 - Reuse the existing `VerificationResult` tree shape and the existing violation/audit emission helpers; do not invent a parallel notification path.
 - Verify route/handler wiring by reading `crates/gyre-server/src/api/tasks.rs` for the reassignment path before editing.
 - Run only the touched crates' tests plus `scripts/check-arch.sh`; do not run the full workspace suite or formatters as part of this task.
+
+## Shipped
+
+SignedInput §2.4 context binding is now enforced at every verification
+boundary with real comparisons against the actual push/merge target; a valid
+authorization for repo-A/workspace-A can no longer authorize work on
+repo-B/workspace-B.
+
+- **`verify_context_binding`** (`crates/gyre-server/src/git_http.rs:3367`):
+  compares the signed root `InputContent` against the real target —
+  `repo_id`, `workspace_id`, `spec_sha` (vs the task's currently approved
+  SHA), and `expected_generation` (vs the task's persisted generation) —
+  each as a `context_binding.*` child of the existing `VerificationResult`
+  tree. `valid_until` stays where it already was (not duplicated). Fails
+  closed: unresolvable task ⇒ `generation = None` ⇒ any generation pin
+  rejects.
+- **Enforcement** (`constraint_check.rs`): `enforce_push_constraints`
+  (:357) and `enforce_merge_constraints` (:616) call the check after
+  `verify_chain` succeeds, using the real `repo_id`/`workspace_id` already
+  in scope (git_http.rs:348, merge_processor.rs:1412). Mismatch ⇒ `Err`
+  naming the failing binding(s) + `attestation.chain_invalid` audit event +
+  `ConstraintViolation` messages and Inbox notifications via the existing
+  emission path. Audit-only mirrors in `evaluate_push_constraints` (:91)
+  and `evaluate_merge_constraints` (:860) log
+  `attestation.context_binding_mismatch` without blocking (Phase 2).
+- **Real generation counter**: `Task.generation` (default 1) persisted in
+  domain, SQLite + Postgres adapters (migration
+  `2026-10-08-000056_task_generation`, portable SQL, next unused sequence
+  number) and exposed in `TaskResponse`. Bumped on every reassignment to a
+  different agent in all four mutation paths: `update_task` (PUT
+  /api/v1/tasks/:id), spawn reassignment, admin reassign, MCP reassign.
+
+Tests that kill removal of the check (mutation-verified): with the binding
+block disabled, `enforce_push_rejects_repo_id_mismatch`,
+`enforce_push_rejects_stale_generation`, and
+`enforce_push_rejects_spec_sha_mismatch` FAIL; `enforce_merge_rejects_workspace_id_mismatch`
+covers merge; `enforce_push_matching_generation_passes` /
+`enforce_push_matching_context_passes` guard against over-rejection. All use
+real git repos, real Ed25519 signatures, and real persisted state.
+`task_generation_increments_on_reassignment` (port) and
+`update_task_api_reassignment_bumps_generation` (PUT API) prove the bump.
+
+Evidence: `cargo test -p gyre-server --lib -- constraint_check` → 40 passed /
+0 failed; `gyre-common -p gyre-domain -p gyre-adapters` → 344+94+363 passed /
+0 failed; `check-arch.sh`, `check-migration-versions.sh`,
+`check-migration-sql-portability.sh`, `check-relative-path-defaults.sh`,
+`check-conditional-test-guards.sh` → EXIT 0. Full run details and the
+mutation proof at `/tmp/stage/review-evidence/test-results.md`.
+
+Sandbox restrictions recorded for host verification
+(`/tmp/stage/review-evidence/`): TCP `accept()` never completes (errno 95),
+so listener-based `ws::`/`tty::`/smart-http-clone tests can't run here —
+pre-existing tests, unchanged by this task, none touch the enforcement
+paths. `check-crypto-verify.sh` / `check-assertionless-tests.sh` fail on
+mawk 1.3.4 (gawk-only syntax) identically at the base commit — environment,
+not branch; manual confirmation of their intent for this diff recorded in
+`mechanical-checks.md`. Full workspace suite, all-target clippy, and
+exact-head GitHub CI remain with the verification stage as mandated.
+
+Scope note: the spec-approval signing endpoint (`api/specs.rs:610`) still
+creates SignedInputs with `expected_generation: None` — the signer-side pin
+is not exposed in the `ApproveSpecRequest` API. Enforcement (comparison
+against the persisted `Task.generation`) is fully implemented and
+mutation-tested; exposing a signer-side pin would extend the request
+contract and was not part of this task's enumerated scope.
