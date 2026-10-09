@@ -41,6 +41,7 @@ elif 'exec' in args and 'GYRE_RECOVERY_BEGIN' in args[-1]:
     print('GYRE_RECOVERY_COMPLETE')
 elif 'exec' in args:
     with tarfile.open(fileobj=io.BytesIO(sys.stdin.buffer.read())) as bundle:
+        assert bundle.getmember('./dev-build-command.sh').mode & 0o111
         models = bundle.extractfile('./models.yml').read().decode()
         config = bundle.extractfile('./config.yml').read().decode()
         repair = bundle.extractfile('./repair.md').read().decode()

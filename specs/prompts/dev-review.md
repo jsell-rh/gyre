@@ -21,6 +21,10 @@ Background job handles disappear when the model session ends. On a resumed
 round, inspect persisted results before starting another build; reuse evidence
 only after confirming the relevant source is unchanged. Run mutations in an
 isolated worktree and restore them even when the command is interrupted.
+Sandboxes have a bounded build lane to fit their memory limit. Run good and
+mutant builds sequentially in the same isolated worktree and its private target
+directory, changing and restoring the actual source between runs. Do not launch
+multiple empty Cargo targets or frontend suites in parallel inside one sandbox.
 
 If a repair handoff is supplied, independently check each reported failure
 and its reproduction. Reject gate weakening, deleted meaningful tests, new

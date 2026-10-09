@@ -13,6 +13,15 @@ mark_complete() {
   if [ "$result" -eq 0 ]; then touch /tmp/stage/attempt.complete; fi
 }
 trap mark_complete EXIT
+mkdir -p /tmp/stage/bin
+for build_command in cargo npm npx; do
+  real_command=$(command -v "$build_command")
+  printf -v "GYRE_DEV_REAL_${build_command^^}" '%s' "$real_command"
+  export "GYRE_DEV_REAL_${build_command^^}"
+  ln -sf ../dev-build-command.sh "/tmp/stage/bin/$build_command"
+done
+export PATH="/tmp/stage/bin:$PATH"
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
 mkdir -p /tmp/.omp/agent
 cp /tmp/stage/models.yml /tmp/stage/config.yml /tmp/.omp/agent/
 git config --global user.name gyre-dev-controller
