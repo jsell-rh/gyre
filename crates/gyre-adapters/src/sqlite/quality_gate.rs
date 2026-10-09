@@ -117,6 +117,7 @@ impl QualityGateRepository for SqliteStorage {
                     quality_gates::required_approvals.eq(row.required_approvals),
                     quality_gates::persona.eq(row.persona),
                     quality_gates::validation_type.eq(row.validation_type),
+                    quality_gates::required.eq(row.required),
                     quality_gates::gate_phase.eq(row.gate_phase),
                     quality_gates::timeout_secs.eq(row.timeout_secs),
                 ))
@@ -316,5 +317,67 @@ impl GateResultRepository for SqliteStorage {
             Ok(rows.into_iter().map(GateResultRow::into_result).collect())
         })
         .await?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sqlite::SqliteStorage;
+    use tempfile::NamedTempFile;
+
+    fn tmp_storage() -> (NamedTempFile, SqliteStorage) {
+        let tmp = NamedTempFile::new().unwrap();
+        let storage = SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap();
+        (tmp, storage)
+    }
+
+    fn sample_gate() -> QualityGate {
+        QualityGate {
+            id: Id::new("gate-upsert-1"),
+            repo_id: Id::new("repo-1"),
+            name: "domain-validation".to_string(),
+            gate_type: GateType::AgentValidation,
+            command: Some("true".to_string()),
+            required_approvals: None,
+            persona: Some("personas/accountability.md".to_string()),
+            validation_type: Some("license-scan".to_string()),
+            required: true,
+            gate_phase: GatePhase::PreMerge,
+            timeout_secs: Some(30),
+            created_at: 1000,
+        }
+    }
+
+    /// task-134 regression guard: the upsert `.set(...)` clause must update
+    /// EVERY mutable config column. The checkpoint that added
+    /// `validation_type` accidentally dropped `required` from the set list —
+    /// re-saving a gate silently kept the old blocking flag (PG kept it;
+    /// SQLite drifted). This test fails on that class of drift: flip both
+    /// columns, re-save, and assert the persisted row carries the new values.
+    #[tokio::test]
+    async fn save_upsert_updates_all_config_columns() {
+        let (_tmp, storage) = tmp_storage();
+        let gate = sample_gate();
+        QualityGateRepository::save(&storage, &gate).await.unwrap();
+
+        let mut updated = gate.clone();
+        updated.required = false;
+        updated.validation_type = Some("accessibility".to_string());
+        QualityGateRepository::save(&storage, &updated).await.unwrap();
+
+        let reloaded = QualityGateRepository::find_by_id(&storage, "gate-upsert-1")
+            .await
+            .unwrap()
+            .expect("gate survives upsert");
+        assert_eq!(
+            reloaded.validation_type.as_deref(),
+            Some("accessibility"),
+            "upsert must persist validation_type changes"
+        );
+        assert!(
+            !reloaded.required,
+            "upsert must persist required changes — the task-134 checkpoint dropped this column from .set()"
+        );
     }
 }
