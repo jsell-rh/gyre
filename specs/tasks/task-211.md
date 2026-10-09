@@ -2,7 +2,7 @@
 title: "Repair verified failure on main 8c2d17750585"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 commits: []
 ---
 
@@ -71,3 +71,12 @@ Do NOT add entries to /home/jsell/code/gyre/.gyre-pipeline/attempts/4f40bb82f00d
 GYRE_BASELINE_FAILURE_JSON {"base": "8c2d177505852b3e39cd77f4f782fb355de245aa", "environment": "61f092e025ec4bba7cdcf4797b454fd3b7bf86825ab1ddd7d2084bd9a163061e", "probe": ["bash", "scripts/check-task-commit-attribution.sh"], "log": "FAIL: task-labeled product-surface commits missing from their task's commits: frontmatter:\n\n  a781ede2  task-210  feat(task-210): Repair verified failure on main cd1c5f044e49\n\nA task-labeled commit absent from the task's commits: list is invisible\nto review scoping \u2014 the verifier scopes each round to that list\n(task-095 R3-F4: 5aaded21, +880 lines, was never examined). Fix by\nadding the short SHA to specs/tasks/task-NNN.md's commits: frontmatter.\nDo NOT add entries to /tmp/gyre-gate-baseline-qa4_oepq/scripts/task-commit-attribution-exemptions.txt.\n"}
 
 ```
+
+## Shipped
+
+- Reproduced the verified baseline failure at assignment HEAD (`b70aa057`, tree equal to base `8c2d1775` plus only `specs/tasks/task-211.md`): `bash scripts/check-task-commit-attribution.sh` exited 1 listing `a781ede2  task-210  feat(task-210): Repair verified failure on main cd1c5f044e49` — a product-surface commit (touches `crates/gyre-server/src/api/admin.rs`, `scripts/relative-path-defaults-exemptions.txt`, `docs/ui.md`) missing from task-210's `commits:` frontmatter, i.e. invisible to review scoping (task-095 R3-F4 flaw class).
+- Repair (the check's documented remedy, commit `ce96eb64`): appended the full SHA `a781ede2ea21a5153dbcb49c65771f990344a093` to `specs/tasks/task-210.md`'s `commits:` frontmatter list. No exemptions added — `scripts/task-commit-attribution-exemptions.txt` untouched, still frozen at its 3-entry baseline; no check, skip, or gate weakened.
+- Probe after fix: `bash scripts/check-task-commit-attribution.sh` → `OK: every task-labeled product-surface commit is recorded in its task's commits: frontmatter (or exempted legacy drift).` exit 0 (evidence: `/tmp/stage/review-evidence/attribution-after.txt`, HEAD recorded in `head-commit.txt`).
+- The other baseline-log failures were artifacts of the superseded attempt checkout (`4f40bb82...`), not current tree state; verified clean at this HEAD: `check-relative-path-defaults.sh` (the `main.rs:1863` dynamic-default flag no longer exists — 0 Rust files differ from base), `check-byte-slice-truncation.sh`, `check-fail-open-ref-resolution.sh`, `check-abac-route-registry.sh`, `check-migration-versions.sh`, `check-dead-message-kinds.sh`, and `check-rustfmt-diff.py 8c2d1775` (0 Rust files checked — the flagged `client.rs`/`main.rs` formatting lines were in the old attempt's diff, not in this history).
+- Attribution for this task: `commits: []` is correct — the only branch commits (`ce96eb64` process, `38032f4e`/`0599ac9c`/`b70aa057` checkpoints) touch `specs/` only, no product surface. Verified with `python3 /tmp/stage/dev-attribution.py task-211` (no change produced).
+- Independent review, full deterministic gates, and GitHub checks remain required before merge (per assignment); no full-suite rerun performed here per the smallest-relevant-probe constraint.
