@@ -123,7 +123,7 @@ async fn evaluate_workspace(
                     Some(&ws.id),
                     Some(9),
                     Some(9),
-                    Some(NotificationType::AbandonedBranch.as_str()),
+                    Some(NotificationType::AbandonedBranch.as_str()), &[],
                     100,
                     0,
                 )
@@ -302,7 +302,7 @@ mod tests {
                 Some(&Id::new("ws1")),
                 Some(9),
                 Some(9),
-                None,
+                None, &[],
                 10,
                 0,
             )
@@ -353,7 +353,7 @@ mod tests {
                 Some(&Id::new("ws2")),
                 Some(9),
                 Some(9),
-                None,
+                None, &[],
                 10,
                 0,
             )
@@ -374,7 +374,7 @@ mod tests {
                 Some(&Id::new("ws2")),
                 Some(9),
                 Some(9),
-                None,
+                None, &[],
                 10,
                 0,
             )
@@ -395,7 +395,7 @@ mod tests {
                 Some(&Id::new("ws2")),
                 Some(9),
                 Some(9),
-                None,
+                None, &[],
                 10,
                 0,
             )
@@ -443,7 +443,7 @@ mod tests {
                 Some(&Id::new("ws3")),
                 Some(9),
                 Some(9),
-                None,
+                None, &[],
                 10,
                 0,
             )
@@ -492,7 +492,7 @@ mod tests {
                 Some(&Id::new("ws4")),
                 Some(9),
                 Some(9),
-                None,
+                None, &[],
                 10,
                 0,
             )
@@ -540,7 +540,7 @@ mod tests {
                 Some(&Id::new("ws5")),
                 Some(9),
                 Some(9),
-                None,
+                None, &[],
                 10,
                 0,
             )
@@ -589,7 +589,7 @@ mod tests {
                 Some(&Id::new("ws6")),
                 Some(9),
                 Some(9),
-                None,
+                None, &[],
                 10,
                 0,
             )
@@ -657,7 +657,7 @@ mod tests {
                 Some(&Id::new("ws7")),
                 Some(9),
                 Some(9),
-                None,
+                None, &[],
                 10,
                 0,
             )
@@ -727,7 +727,7 @@ mod tests {
                 Some(&Id::new("ws8")),
                 Some(9),
                 Some(9),
-                None,
+                None, &[],
                 100,
                 0,
             )

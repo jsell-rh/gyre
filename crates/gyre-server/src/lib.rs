@@ -851,6 +851,26 @@ pub fn build_state(
     // come from the same storage struct, so this store is unused.
     let mem_policy_store = Arc::new(Mutex::new(HashMap::new()));
 
+    // In pure in-memory mode (no DB), the judgment ledger (HSI §12) aggregates
+    // the SAME audit / spec-approval / spec-ledger stores these repos write
+    // through. In DB-backed mode these stores are unused.
+    let mem_audit = Arc::new(mem::MemAuditRepository::default());
+    let mem_spec_approvals = Arc::new(mem::MemSpecApprovalRepository::default());
+    let mem_spec_ledger = Arc::new(mem::MemSpecLedgerRepository::default());
+
+    // Same as `store!` but the mem branch shares a pre-constructed store.
+    macro_rules! store_shared {
+        ($trait:ty, $arc:expr) => {
+            if let Some(d) = &pg_db {
+                Arc::clone(d) as Arc<$trait>
+            } else if let Some(d) = &sqlite_db {
+                Arc::clone(d) as Arc<$trait>
+            } else {
+                Arc::clone(&$arc) as Arc<$trait>
+            }
+        };
+    }
+
     Arc::new(AppState {
         auth_token: auth_token.to_string(),
         base_url: base_url.to_string(),
@@ -899,7 +919,7 @@ pub fn build_state(
             mem::MemAnalyticsRepository::default()
         ),
         costs: store!(dyn CostRepository, mem::MemCostRepository::default()),
-        audit: store!(dyn AuditRepository, mem::MemAuditRepository::default()),
+        audit: store_shared!(dyn AuditRepository, mem_audit),
         siem_store: SiemStore::new(),
         audit_broadcast_tx,
         network_peers: store!(
@@ -933,10 +953,7 @@ pub fn build_state(
         ),
         db_storage,
         storage,
-        spec_approvals: store!(
-            dyn SpecApprovalRepository,
-            mem::MemSpecApprovalRepository::default()
-        ),
+        spec_approvals: store_shared!(dyn SpecApprovalRepository, mem_spec_approvals),
         spec_policies: store!(
             dyn SpecPolicyRepository,
             mem::MemSpecPolicyRepository::default()
@@ -974,10 +991,7 @@ pub fn build_state(
             dyn ContainerAuditRepository,
             mem::MemContainerAuditRepository::default()
         ),
-        spec_ledger: store!(
-            dyn SpecLedgerRepository,
-            mem::MemSpecLedgerRepository::default()
-        ),
+        spec_ledger: store_shared!(dyn SpecLedgerRepository, mem_spec_ledger),
         spec_approval_history: store!(
             dyn SpecApprovalEventRepository,
             mem::MemSpecApprovalEventRepository::default()
@@ -1096,7 +1110,11 @@ pub fn build_state(
         ),
         judgment_ledger: store!(
             dyn gyre_ports::JudgmentLedgerRepository,
-            mem::MemJudgmentLedgerRepository
+            mem::MemJudgmentLedgerRepository::with_sources(
+                &mem_audit,
+                &mem_spec_approvals,
+                &mem_spec_ledger
+            )
         ),
         ws_tickets: auth::WsTicketStore::new(),
         llm: match std::env::var("GYRE_VERTEX_PROJECT") {

@@ -34,13 +34,19 @@
   let activeTab = $state('info');
   let unread = $state(0);
 
-  // Notification preferences — per-type toggles.
-  // Per HSI §12, stored in user_notification_preferences table (backend).
-  // Using localStorage as fallback until backend endpoint is wired.
+  // Notification preferences — per-type toggles (HSI §12).
+  // Type ids are the canonical `NotificationType::as_str()` names the backend
+  // stores in user_notification_preferences.notification_type; PUT rejects
+  // any other spelling, and the inbox filter only matches these names.
   const NOTIF_TYPE_IDS = [
-    'SpecApproval', 'GateOverride', 'TrustChange', 'MetaSpecEdit',
-    'MergeRequestReview', 'MergeRequestMerged', 'AgentFailure',
-    'TrustSuggestion', 'SpecDrift', 'AgentNeedsClarification',
+    'AgentNeedsClarification', 'SpecPendingApproval', 'GateFailure',
+    'CrossWorkspaceSpecChange', 'ConflictingInterpretations', 'MetaSpecDrift',
+    'BudgetWarning', 'TrustSuggestion', 'SpecAssertionFailure',
+    'AbandonedBranch', 'AgentCompleted', 'AgentEscalation',
+    'SuggestedSpecLink', 'SpecRejected', 'ConstraintViolation',
+    'CascadeTestTriggered', 'CascadeTestFailed', 'DependencyChainTooDeep',
+    'AtomicGroupFailure', 'SpecConflict', 'MrReverted',
+    'MergeQueueEscalation',
   ];
   // Build NOTIF_TYPES array with localized labels for compatibility with defaultPrefs()
   const NOTIF_TYPES = NOTIF_TYPE_IDS.map(id => ({ id, labelKey: `user_profile.notif_types.${id}` }));
@@ -55,16 +61,19 @@
 
   async function loadPrefs() {
     try {
-      const serverPrefs = await api.getNotificationPreferences();
-      if (serverPrefs && typeof serverPrefs === 'object' && !Array.isArray(serverPrefs)) {
-        const defaults = defaultPrefs();
-        for (const t of NOTIF_TYPES) {
-          if (typeof serverPrefs[t.id] === 'boolean') defaults[t.id] = serverPrefs[t.id];
+      const resp = await api.getNotificationPreferences();
+      // GET /users/me/notification-preferences →
+      //   { preferences: [{ notification_type, enabled }] }
+      const rows = Array.isArray(resp?.preferences) ? resp.preferences : [];
+      const defaults = defaultPrefs();
+      for (const row of rows) {
+        if (typeof row?.notification_type === 'string' && typeof row.enabled === 'boolean') {
+          defaults[row.notification_type] = row.enabled;
         }
-        notifPrefs = defaults;
       }
+      notifPrefs = defaults;
     } catch {
-      // Server may not support this yet — fall back to defaults
+      // Server unreachable — fall back to defaults
     }
     prefsLoaded = true;
   }
@@ -72,7 +81,15 @@
   async function savePrefs() {
     prefsSaving = true;
     try {
-      await api.updateNotificationPreferences(notifPrefs);
+      // PUT /users/me/notification-preferences expects
+      //   { preferences: [{ notification_type, enabled }] }
+      // with canonical NotificationType names (400 otherwise).
+      await api.updateNotificationPreferences({
+        preferences: NOTIF_TYPES.map(t => ({
+          notification_type: t.id,
+          enabled: notifPrefs[t.id] ?? true,
+        })),
+      });
       showToast($t('user_profile.prefs_saved'), { type: 'success' });
     } catch {
       showToast($t('user_profile.prefs_failed'), { type: 'error' });
@@ -179,7 +196,14 @@
       if (ntR.status === 'fulfilled') {
         const raw = ntR.value;
         notifications = Array.isArray(raw?.notifications) ? raw.notifications : Array.isArray(raw) ? raw : [];
-        unread = notifications.filter(n => !n.read).length;
+      }
+      // Badge = the server-side count of active notifications (resolved_at and
+      // dismissed_at both NULL), filtered by the same disabled-type exclusion
+      // the inbox list applies — NOT a client-side count of the current page.
+      try {
+        unread = await api.notificationCount();
+      } catch {
+        unread = 0;
       }
       if (jdR.status === 'fulfilled') {
         const raw = jdR.value;
@@ -210,45 +234,54 @@
     }
   }
 
+  // A notification is "read" once resolved or dismissed (HSI §2: badge count
+  // is resolved_at IS NULL AND dismissed_at IS NULL).
+  function isNotifRead(n) {
+    return Boolean(n?.resolved_at ?? n?.dismissed_at);
+  }
+
   async function markRead(id) {
     try {
       await api.markNotificationRead(id);
-      notifications = notifications.map(n => n.id === id ? { ...n, read: true } : n);
-      unread = notifications.filter(n => !n.read).length;
+      notifications = notifications.map(n => n.id === id ? { ...n, dismissed_at: Math.floor(Date.now() / 1000) } : n);
+      unread = Math.max(0, unread - 1);
     } catch {
       showToast('Failed to mark notification as read', { type: 'error' });
     }
   }
-
   function judgmentEventColor(ev) {
     if (!ev) return 'default';
     const e = ev.toLowerCase();
     if (e.includes('approv')) return 'success';
-    if (e.includes('revok') || e.includes('reject') || e.includes('invalidat')) return 'danger';
-    if (e.includes('override') || e.includes('trust')) return 'warning';
-    if (e.includes('meta') || e.includes('edit') || e.includes('publish')) return 'info';
+    if (e.includes('reject') || e.includes('revok')) return 'danger';
+    if (e.includes('gate')) return 'warning';
+    if (e.includes('trust')) return 'warning';
+    if (e.includes('meta')) return 'info';
     return 'neutral';
   }
 
+  // Judgment entries are JudgmentEntryResponse:
+  //   { judgment_type, entity_ref, workspace_id, timestamp, detail }
   function judgmentLabel(j) {
-    return j.event_type ?? j.event ?? j.action ?? j.type ?? 'event';
+    return j.judgment_type ?? 'event';
   }
 
   function judgmentTarget(j) {
-    return j.spec_path ?? j.path ?? j.resource_id ?? j.mr_id ?? j.resource ?? '—';
+    return j.entity_ref ?? '—';
   }
 
   function judgmentWorkspace(j) {
-    return j.workspace_name ?? j.workspace_slug ?? j.workspace_id ?? null;
+    return j.workspace_id ?? null;
   }
 
   function notifColor(type) {
     const t = (type ?? '').toLowerCase();
-    if (t.includes('failure') || t.includes('conflict') || t.includes('drift')) return 'danger';
+    if (t.includes('failure') || t.includes('conflict') || t.includes('drift') || t.includes('violation') || t.includes('escalation')) return 'danger';
     if (t.includes('merged') || t.includes('complete') || t.includes('approval')) return 'success';
     if (t.includes('review') || t.includes('clarification')) return 'info';
     return 'default';
   }
+
 
   function rel(ts) {
     if (!ts) return '—';
@@ -510,8 +543,8 @@
                 {#if judgmentWorkspace(j)}
                   <span class="ledger-ws muted">{judgmentWorkspace(j)}</span>
                 {/if}
-                {#if j.sha || j.spec_sha}
-                  <span class="ledger-sha mono muted">{(j.sha ?? j.spec_sha).slice(0, 7)}</span>
+                {#if j.detail}
+                  <span class="ledger-sha muted">{j.detail}</span>
                 {/if}
               </div>
             </div>
@@ -530,7 +563,7 @@
                 type="checkbox"
                 class="pref-checkbox"
                 bind:checked={notifPrefs[nt.id]}
-                aria-label={$t('user_profile.enable_notification', { values: { label: nt.label } })}
+                aria-label={$t('user_profile.enable_notification', { values: { label: $t(nt.labelKey) } })}
               />
               <span class="pref-label">{$t(nt.labelKey)}</span>
             </label>
@@ -549,11 +582,11 @@
       {:else}
         <div class="notif-list">
           {#each notifications as notif}
-            <div class="notif-item" class:unread={!notif.read}>
+            <div class="notif-item" class:unread={!isNotifRead(notif)}>
               <div class="notif-top">
                 <Badge variant={notifColor(notif.notification_type)} value={notif.notification_type ?? 'info'} />
                 <span class="notif-time muted">{rel(notif.created_at)}</span>
-                {#if !notif.read}
+                {#if !isNotifRead(notif)}
                   <button class="mark-read-btn" onclick={() => markRead(notif.id)} aria-label={$t('user_profile.mark_as_read')}>
                     <span aria-hidden="true">✓</span>
                   </button>
