@@ -398,13 +398,26 @@ pub struct SeedResponse {
 }
 
 /// POST /api/v1/admin/seed — populate demo data (Admin only, idempotent).
+///
+/// The demo tenant/workspace is created in the CALLER's authenticated tenant
+/// scope (static system token resolves as tenant "default"). Every other
+/// workspace query filters by the caller's tenant — seeding into a scope the
+/// caller cannot see produced a seed that returned zero workspaces for the
+/// very identity that created it.
 pub async fn admin_seed(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
 ) -> Result<Json<SeedResponse>, ApiError> {
     use gyre_domain::{
         Agent, AgentStatus, MergeQueueEntry, MergeRequest, MrStatus, Repository, Task,
         TaskPriority, TaskStatus, Tenant, Workspace,
     };
+
+    // Scope: derived from the authenticated caller, never caller-supplied.
+    // The global token resolves as tenant "default" with Admin role; JWT
+    // callers seed their own tenant. The tenant row is upserted so JWT tenants
+    // get a real parent row.
+    let tenant_id = auth.tenant_id;
 
     // Idempotency: if seed repo already exists, return early.
     let existing = state.repos.find_by_id(&Id::new("seed-repo-1")).await?;
@@ -427,23 +440,21 @@ pub async fn admin_seed(
     // Repos below reference workspace_id: "default". Upsert the tenant and
     // workspace records so the frontend can resolve them (e.g. GET /workspaces/default).
     let tenant = Tenant::new(
-        Id::new("default-tenant"),
+        Id::new(&tenant_id),
         "Default Tenant",
-        "default-tenant",
+        &tenant_id,
         now,
     );
     let _ = state.tenants.create(&tenant).await;
 
     let workspace = Workspace::new(
         Id::new("default"),
-        Id::new("default-tenant"),
+        Id::new(&tenant_id),
         "Default Workspace",
         "default",
         now,
     );
     let _ = state.workspaces.create(&workspace).await;
-
-    // ── Repos ─────────────────────────────────────────────────────────────────
     let repo1 = Repository::new(
         Id::new("seed-repo-1"),
         Id::new("default"),
