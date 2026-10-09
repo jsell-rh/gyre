@@ -1016,6 +1016,38 @@ elif 'delete' in args:
         self.assertEqual((exit_file.parent / "host-tests.ok").read_text().strip(), sha)
         controller.reap_host_processes()
 
+    def test_candidate_metadata_failure_is_classified_as_code_failure(self):
+        (self.work / 'web').mkdir()
+        (self.work / 'web/package.json').write_text('{}\n')
+        git(self.work, 'add', '.')
+        git(self.work, 'commit', '-m', 'baseline with frontend')
+        git(self.work, 'push', 'origin', 'main')
+        base = git(self.work, 'rev-parse', 'HEAD')
+        (self.work / 'bad-manifest').write_text('candidate manifest defect\n')
+        sha = self.candidate()
+        controller.sync(self.db)
+        self.db.execute("INSERT INTO attempts(id,task,kind,state,started,base) VALUES('metadata','task-001','check','done',1,?)", (base,))
+        self.db.commit()
+        fake_bin = Path(self.temp.name) / 'bin'
+        fake_bin.mkdir()
+        scripts = {'cargo': '''#!/bin/sh
+if [ "$1" = metadata ]; then
+  [ -f bad-manifest ] && { echo 'error: invalid candidate manifest' >&2; exit 101; }
+  echo '{"workspace_members":["fixture"],"packages":[{"id":"fixture"}]}'
+fi
+exit 0
+''', 'npm': '#!/bin/sh\nexit 0\n'}
+        for name, body in scripts.items():
+            path = fake_bin / name
+            path.write_text(body)
+            path.chmod(0o755)
+        with patch.dict(os.environ, {'PATH': str(fake_bin) + ':' + os.environ['PATH']}), \
+             patch.object(controller, 'host_test_verified', REAL_HOST_TEST):
+            self.assertFalse(controller.host_test_verified(sha, 'metadata'))
+        result = json.loads((controller.STATE / 'attempts/metadata/host-tests.result.json').read_text())
+        self.assertEqual(result['status'], 'candidate_failed')
+        self.assertIn('invalid candidate manifest', (controller.STATE / 'attempts/metadata/host-tests.log').read_text())
+
     def test_ambiguous_push_timeout_checks_remote_before_retrying(self):
         sha = self.candidate()
         controller.sync(self.db)

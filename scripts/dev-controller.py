@@ -1111,9 +1111,9 @@ def host_test_verified(merge_sha, check_id):
                                             stderr=subprocess.STDOUT, timeout=timeout)
                     if result.returncode:
                         log.flush()
-                        if command[0] == sys.executable:
+                        if command[0] == sys.executable and result.returncode == 75:
                             operational = True
-                        elif command[:2] == ['npm', 'ci'] or command[0] == 'cargo':
+                        elif command[:2] == ['npm', 'ci'] or command[0] in ('cargo', sys.executable):
                             text = (attempt_dir / 'host-tests.log').read_text(errors='replace')[-65536:]
                             operational = bool(re.search(r'failed to download|failed to get .* dependency|Could not resolve (?:host|proxy)|Temporary failure in name resolution|ENOTFOUND|ENETUNREACH|EAI_AGAIN|ECONNRESET|ETIMEDOUT', text))
                         passed = False

@@ -8,6 +8,15 @@ import unittest
 
 
 class CargoArtifactTest(unittest.TestCase):
+    def test_invalid_manifest_preserves_code_failure_and_diagnostics(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'Cargo.toml').write_text('[package\ninvalid manifest\n')
+            result = subprocess.run([sys.executable, str(Path(__file__).with_name('dev-cargo-clean.py'))],
+                                    cwd=root, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 101, result.stdout + result.stderr)
+            self.assertIn('error:', result.stderr)
+
     def test_rebuilds_current_checkout_and_retains_dependency_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
