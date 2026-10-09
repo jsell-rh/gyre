@@ -1407,6 +1407,44 @@ pub async fn record_agent_usage(
 
     state.agents.record_usage(&usage).await?;
 
+    // Budget Tracking (platform-model.md §5): every agent usage report is an
+    // `agent_run` budget call — persist the per-call audit record and bump the
+    // workspace + tenant tokens/cost counters so daily budgets are enforceable.
+    // The workspace (and its owning tenant) is required scope: if it cannot be
+    // resolved, skip the budget recording and log — never fabricate a tenant
+    // identity to charge (check-fabricated-scope-defaults.sh).
+    match state.workspaces.find_by_id(&agent.workspace_id).await {
+        Ok(Some(ws)) => {
+            let (model, _) =
+                crate::llm_helpers::resolve_llm_model(&state, &agent.workspace_id, "specs-assist")
+                    .await;
+            super::budget::record_llm_budget_call(
+                &state,
+                ws.tenant_id.as_str(),
+                agent.workspace_id.as_str(),
+                agent.repo_id.as_ref().map(|i| i.as_str()),
+                Some(agent.id.as_str()),
+                agent.current_task_id.as_ref().map(|i| i.as_str()),
+                "agent_run",
+                req.tokens_input,
+                req.tokens_output,
+                req.cost_usd,
+                &model,
+            )
+            .await;
+        }
+        Ok(None) => tracing::warn!(
+            agent_id = %id,
+            workspace_id = %agent.workspace_id,
+            "agent usage recorded but workspace not found; budget counters not incremented"
+        ),
+        Err(e) => tracing::warn!(
+            agent_id = %id,
+            workspace_id = %agent.workspace_id,
+            "agent usage recorded but workspace lookup failed; budget counters not incremented: {e}"
+        ),
+    }
+
     tracing::info!(
         agent_id = %id,
         tokens_input = req.tokens_input,
@@ -2898,5 +2936,101 @@ mod tests {
             StatusCode::CREATED,
             "interrogation agents should bypass task_type filtering"
         );
+    }
+
+    #[tokio::test]
+    async fn record_agent_usage_charges_budget_and_persists_agent_run_record() {
+        // Regression (task-190 / task-171): POST /api/v1/agents/:id/usage must
+        // (a) append an `agent_run` BudgetCallRecord and (b) increment the
+        // workspace budget counters. If the recording wiring in
+        // record_agent_usage is removed, every assertion below fails.
+        let state = crate::mem::test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // The agent's workspace must exist so the tenant scope is resolvable;
+        // budget recording skips (and logs) when it is not.
+        let ws_id = gyre_common::Id::new("ws-usage-budget");
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                ws_id.clone(),
+                gyre_common::Id::new("tenant-usage"),
+                "UsageWs",
+                "usage-ws",
+                0,
+            ))
+            .await
+            .unwrap();
+
+        // Create a repo inside that workspace (the agent inherits its
+        // workspace_id from the repo at spawn).
+        let body = serde_json::json!({"workspace_id": ws_id.as_str(), "name": "usage-repo"});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let repo_id = body_json(resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let (app, task_id) = create_task(app, "Usage reporting task").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/usage-report").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let usage_body = serde_json::json!({
+            "tokens_input": 700,
+            "tokens_output": 300,
+            "cost_usd": 0.05,
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/usage"))
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&usage_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Workspace counters incremented by input+output tokens and cost.
+        let ws_key = crate::api::budget::workspace_key(ws_id.as_str());
+        let ws_usage = state
+            .budget_usages
+            .get_usage(&ws_key)
+            .await
+            .unwrap()
+            .expect("workspace usage must exist after usage report");
+        assert_eq!(ws_usage.tokens_used_today, 1000);
+        assert!((ws_usage.cost_today - 0.05).abs() < 1e-9);
+
+        // Audit record retrievable via the repository, scoped to the agent.
+        let records = state
+            .budget_calls
+            .list_by_workspace(ws_id.as_str(), 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].usage_type, "agent_run");
+        assert_eq!(
+            records[0].agent_id.as_ref().map(|i| i.as_str()),
+            Some(agent_id.as_str())
+        );
+        assert_eq!(records[0].workspace_id.as_str(), ws_id.as_str());
+        assert_eq!(records[0].input_tokens, 700);
+        assert_eq!(records[0].output_tokens, 300);
     }
 }

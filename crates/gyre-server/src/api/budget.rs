@@ -15,7 +15,7 @@ use axum::{
 use gyre_domain::{BudgetConfig, BudgetUsage};
 use serde::{Deserialize, Serialize};
 
-use super::now_secs;
+use super::{new_id, now_secs};
 use crate::{api::error::ApiError, auth::AuthenticatedAgent, AppState};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -337,6 +337,60 @@ pub async fn record_budget_usage(state: &AppState, project_id: &str, tokens: u64
         .await;
 }
 
+/// Record one LLM invocation into the budget audit log and the real-time
+/// workspace + tenant usage counters (platform-model.md §5 Budget Tracking).
+///
+/// Single entry point shared by the agent usage report path (`agent_run`) and
+/// every user-initiated LLM query path (`llm_query`: briefing/ask,
+/// explorer-views/generate, specs/assist, MCP specs/assist). Appends a
+/// `BudgetCallRecord` via `state.budget_calls` and increments the
+/// `tokens_used_today`/`cost_today` counters via [`record_budget_usage`].
+///
+/// Best-effort on the audit insert (a failed audit row must not fail the LLM
+/// response), but the counter increment always runs.
+pub async fn record_llm_budget_call(
+    state: &AppState,
+    tenant_id: &str,
+    workspace_id: &str,
+    repo_id: Option<&str>,
+    agent_id: Option<&str>,
+    task_id: Option<&str>,
+    usage_type: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cost_usd: f64,
+    model: &str,
+) {
+    let record = gyre_domain::BudgetCallRecord {
+        id: new_id(),
+        tenant_id: gyre_common::Id::new(tenant_id.to_string()),
+        workspace_id: gyre_common::Id::new(workspace_id.to_string()),
+        repo_id: repo_id.map(|i| gyre_common::Id::new(i.to_string())),
+        agent_id: agent_id.map(|i| gyre_common::Id::new(i.to_string())),
+        task_id: task_id.map(|i| gyre_common::Id::new(i.to_string())),
+        usage_type: usage_type.to_string(),
+        input_tokens,
+        output_tokens,
+        cost_usd,
+        model: model.to_string(),
+        timestamp: now_secs(),
+    };
+    if let Err(e) = state.budget_calls.save(&record).await {
+        tracing::warn!(
+            workspace_id = %workspace_id,
+            usage_type = %usage_type,
+            "Failed to persist budget call record: {e}"
+        );
+    }
+    record_budget_usage(
+        state,
+        workspace_id,
+        input_tokens.saturating_add(output_tokens),
+        cost_usd,
+    )
+    .await;
+}
+
 /// Reset daily counters to zero. Called at midnight UTC by background job.
 pub async fn reset_daily_counters(state: &AppState) -> anyhow::Result<()> {
     let now = now_secs();
@@ -573,5 +627,101 @@ mod tests {
             .map(|w| w["entity_id"].as_str().unwrap().to_string())
             .collect();
         assert!(ws_ids.contains(&"proj-sum".to_string()));
+    }
+
+    #[tokio::test]
+    async fn record_llm_budget_call_increments_counters_and_persists_record() {
+        // Regression (task-190): the budget counters were frozen at zero
+        // because nothing ever called record_budget_usage. If the wiring from
+        // record_llm_budget_call is removed, this test fails on both the
+        // counter and the audit-record assertions.
+        let state = crate::mem::test_state();
+        let ws_key = super::workspace_key("ws-budget-rec");
+        let tenant_key = super::tenant_key().to_string();
+
+        super::record_llm_budget_call(
+            &state,
+            "tenant-1",
+            "ws-budget-rec",
+            None,
+            None,
+            None,
+            "llm_query",
+            700,
+            300,
+            0.01,
+            "test-model",
+        )
+        .await;
+
+        // Workspace counters incremented by input+output.
+        let ws_usage = state
+            .budget_usages
+            .get_usage(&ws_key)
+            .await
+            .unwrap()
+            .expect("workspace usage entry must exist after recording");
+        assert_eq!(ws_usage.tokens_used_today, 1000);
+        assert!((ws_usage.cost_today - 0.01).abs() < 1e-9);
+
+        // Tenant counters incremented too (forge aggregates in real time).
+        let tenant_usage = state
+            .budget_usages
+            .get_usage(&tenant_key)
+            .await
+            .unwrap()
+            .expect("tenant usage entry must exist after recording");
+        assert_eq!(tenant_usage.tokens_used_today, 1000);
+
+        // Audit record retrievable via the repository.
+        let records = state
+            .budget_calls
+            .list_by_workspace("ws-budget-rec", 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].usage_type, "llm_query");
+        assert_eq!(records[0].input_tokens, 700);
+        assert_eq!(records[0].output_tokens, 300);
+        assert_eq!(records[0].tenant_id.as_str(), "tenant-1");
+        assert_eq!(records[0].model, "test-model");
+    }
+
+    #[tokio::test]
+    async fn recorded_usage_enforces_max_tokens_per_day() {
+        // Regression (task-190): check_spawn_budget could never fire on
+        // token limits because the counters were never incremented by real
+        // usage. Record usage past the limit and assert the error.
+        let state = crate::mem::test_state();
+        state
+            .budget_configs
+            .set_config(
+                &super::workspace_key("ws-cap"),
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: Some(1000),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        super::record_llm_budget_call(
+            &state,
+            "tenant-1",
+            "ws-cap",
+            None,
+            None,
+            None,
+            "llm_query",
+            600,
+            600,
+            0.0,
+            "test-model",
+        )
+        .await;
+
+        let result = super::check_spawn_budget(&state, "ws-cap").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("max_tokens_per_day=1000"));
     }
 }

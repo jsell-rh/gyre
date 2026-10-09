@@ -319,6 +319,8 @@ pub struct AppState {
     pub budget_configs: Arc<dyn BudgetRepository>,
     /// Real-time budget usage per entity: entity_key -> BudgetUsage (M22.2).
     pub budget_usages: Arc<dyn BudgetUsageRepository>,
+    /// Per-call LLM budget audit records (platform-model.md §5 Budget Tracking).
+    pub budget_calls: Arc<dyn gyre_ports::BudgetCallRepository>,
     /// Full-text search index (M22.7).
     pub search: Arc<dyn gyre_ports::SearchPort>,
     /// Tenant repository (M34).
@@ -990,6 +992,10 @@ pub fn build_state(
         budget_usages: store!(
             dyn BudgetUsageRepository,
             mem::MemBudgetUsageRepository::default()
+        ),
+        budget_calls: store!(
+            dyn gyre_ports::BudgetCallRepository,
+            mem::MemBudgetCallRepository::default()
         ),
         search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
         tenants: store!(

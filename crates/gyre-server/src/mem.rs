@@ -2403,6 +2403,45 @@ impl BudgetUsageRepository for MemBudgetUsageRepository {
     }
 }
 
+// ── MemBudgetCallRepository ───────────────────────────────────────────────────
+
+/// In-memory BudgetCallRepository for tests and development.
+#[derive(Default)]
+pub struct MemBudgetCallRepository {
+    store: Mutex<Vec<gyre_domain::BudgetCallRecord>>,
+}
+
+#[async_trait]
+impl gyre_ports::BudgetCallRepository for MemBudgetCallRepository {
+    async fn save(&self, record: &gyre_domain::BudgetCallRecord) -> Result<()> {
+        self.store.lock().await.push(record.clone());
+        Ok(())
+    }
+
+    async fn list_by_workspace(
+        &self,
+        workspace_id: &str,
+        since: u64,
+        limit: i64,
+    ) -> Result<Vec<gyre_domain::BudgetCallRecord>> {
+        let mut records: Vec<gyre_domain::BudgetCallRecord> = self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|r| r.workspace_id.as_str() == workspace_id && r.timestamp >= since)
+            .cloned()
+            .collect();
+        records.sort_by(|a, b| {
+            b.timestamp
+                .cmp(&a.timestamp)
+                .then(b.id.as_str().cmp(a.id.as_str()))
+        });
+        records.truncate(limit.max(0) as usize);
+        Ok(records)
+    }
+}
+
 #[derive(Default)]
 pub struct MemGateResultRepository {
     results: Arc<Mutex<HashMap<String, gyre_domain::GateResult>>>,
@@ -3318,6 +3357,7 @@ fn test_state_inner(
         spec_links_store: Arc::new(Mutex::new(Vec::new())),
         budget_configs: Arc::new(MemBudgetConfigRepository::default()),
         budget_usages: Arc::new(MemBudgetUsageRepository::default()),
+        budget_calls: Arc::new(MemBudgetCallRepository::default()),
         search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
         tenants: Arc::new(MemTenantRepository::default()),
         workspaces,

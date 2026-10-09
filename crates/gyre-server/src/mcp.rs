@@ -2554,6 +2554,41 @@ async fn handle_spec_assist(state: &AppState, args: &Value, auth: &Authenticated
         tracing::warn!("Failed to record MCP specs/assist cost entry: {e}");
     }
 
+    // Budget Tracking (platform-model.md §5): persist an `llm_query`
+    // BudgetCallRecord and increment the workspace + tenant counters
+    // (REST handler parity, HSI §11). Tenant scope comes from the repo's
+    // workspace; skip and log if unresolvable.
+    let tenant_id = state
+        .workspaces
+        .find_by_id(&repo.workspace_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|ws| ws.tenant_id.to_string());
+    match tenant_id {
+        Some(tenant_id) => {
+            crate::api::budget::record_llm_budget_call(
+                state,
+                &tenant_id,
+                repo.workspace_id.as_str(),
+                Some(repo.id.as_str()),
+                None,
+                None,
+                "llm_query",
+                estimated_input as u64,
+                (estimated_tokens - estimated_input as f64) as u64,
+                0.0,
+                &model,
+            )
+            .await;
+        }
+        None => tracing::warn!(
+            repo_id = %repo_id,
+            workspace_id = %repo.workspace_id,
+            "MCP specs/assist: workspace unresolvable; budget counters not incremented"
+        ),
+    }
+
     // Validate LLM response: parse JSON, check diff+explanation fields, validate diff ops.
     // Must match REST handler validation (specs_assist.rs) per HSI §11 MCP parity.
     match serde_json::from_str::<serde_json::Value>(&full_text) {
