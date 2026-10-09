@@ -2825,6 +2825,7 @@ specs:
                     new_links.push(crate::spec_registry::SpecLinkEntry {
                         id: format!("{}-{}-{}", entry.path, link.link_type, link.target),
                         source_path: entry.path.clone(),
+                        source_repo_id: None,
                         source_sha: "src-sha".to_string(),
                         link_type: link.link_type.clone(),
                         target_path: link.target.clone(),

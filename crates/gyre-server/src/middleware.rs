@@ -266,6 +266,7 @@ mod tests {
             container_audits: base.container_audits.clone(),
             spec_ledger: base.spec_ledger.clone(),
             spec_approval_history: base.spec_approval_history.clone(),
+            spec_link_repo: base.spec_link_repo.clone(),
             spec_links_store: base.spec_links_store.clone(),
             budget_configs: base.budget_configs.clone(),
             budget_usages: base.budget_usages.clone(),
