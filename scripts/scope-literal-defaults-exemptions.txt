@@ -9,15 +9,15 @@
 # task-099 F1 revision round owns these (admin user is never bound to a
 # tenant; AuthenticatedAgent for API-key users hardcodes the fabricated
 # identity; emit_event/emit_telemetry messages carry it):
-crates/gyre-server/src/auth.rs:512
-crates/gyre-server/src/auth.rs:550
-crates/gyre-server/src/auth.rs:583
-crates/gyre-server/src/auth.rs:624
-crates/gyre-server/src/auth.rs:654
-crates/gyre-server/src/auth.rs:678
-crates/gyre-server/src/auth.rs:1001
-crates/gyre-server/src/lib.rs:490
-crates/gyre-server/src/lib.rs:534
+crates/gyre-server/src/auth.rs:530
+crates/gyre-server/src/auth.rs:568
+crates/gyre-server/src/auth.rs:601
+crates/gyre-server/src/auth.rs:642
+crates/gyre-server/src/auth.rs:672
+crates/gyre-server/src/auth.rs:696
+crates/gyre-server/src/auth.rs:1019
+crates/gyre-server/src/lib.rs:494
+crates/gyre-server/src/lib.rs:538
 
 # Unowned legacy (record-conversion `From` impls fabricating tenant on the
 # wire; domain constructor defaults) — opportunistic fixes welcome:
