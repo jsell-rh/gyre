@@ -86,4 +86,111 @@ The rejected integration's only preserved item was `specs/coverage/SUMMARY.md`. 
 
 All three findings repaired with real implementations and regression tests that fail on the original failure classes. No new exemptions, no gate weakening, no deleted tests, no unrelated changes — the round-2 diff beyond the F1/F2/F3 product repairs is spec/coverage bookkeeping and this task file. **progress: complete.**
 
+
+## Round 3 (2026-10-09) — independent review of candidate `ace30eed`, verdict APPROVED
+
+Assigned base `8c2d1775`, candidate `ace30eed` (checkpoint recovery: `7f00472c` product
+checkpoint + `4dd13430`/`fa03834d`/`ace30eed` process commits). Previous assignment's review
+model did not complete; this is a fresh independent review of the same candidate.
+
+### Provenance of the checkpointed product surface
+
+- `git diff 0dfba43 7f00472c -- <all task-120 product paths>` (domain/ports/sqlite/postgres/
+  schema/migrations/users.rs/scim.rs/auth.rs/mem.rs) → **0 lines** — the checkpoint preserves
+  the six-commit product surface byte-identically. The only crates/ difference between
+  `0dfba43` and HEAD is `admin.rs`, which comes from `a781ede2` (task-210, verified ancestor
+  of the *base* `8c2d1775` — pre-existing upstream work, not this candidate's change).
+- The original six product SHAs are not ancestors of HEAD (checkpoint squashed them into
+  `7f00472c`); the frontmatter was correspondingly rewritten in `ace30eed` to list
+  `7f00472c` only, and `check-task-commit-attribution.sh` passes on the final tree — the
+  bookkeeping matches the actual history rather than papering over it.
+- `4dd13430` records `a781ede2` in task-210's frontmatter: verified pre-existing attribution
+  drift (ancestor of base, absent from task-210.md), repaired exactly as on sibling pipeline
+  branches. Frontmatter-only diff confirmed.
+- `fa03834d`/`ace30eed` touch only task-120.md (Shipped notes + commits list).
+
+### Fresh probes on `ace30eed` (evidence: `/tmp/stage/review-evidence/task-120-round3/`)
+
+All run on the exact candidate tree; `git status` clean before and after (web/dist restored
+after an unguarded `cargo test` triggered build.rs; no production file ever modified).
+
+- `cargo test -p gyre-adapters --lib` → **349 passed, 0 failed** (12 ignored) — includes every
+  `SqliteStorage::new`-constructing test, i.e. the SQLite migration-boot path round-1's F1
+  broke, plus `sqlite::user` (15 passed: round-trip of every new column, username
+  uniqueness/immutability, login-stamp persistence) and
+  `migration_000056_backfills_unique_url_safe_usernames` (1 passed: pre-000056 DB built by
+  running all migrations except 000056, legacy rows covering dup names, non-ASCII, empty,
+  over-long, and the dedup-suffix-vs-pre-existing-handle collision; asserts exact handles,
+  `validate_username` on every result, and global uniqueness).
+- `cargo test -p gyre-server --lib api::scim` → **9 passed** (sanitize-on-create,
+  external-id fallback + 400 when no fallback, 409 on duplicate handle, PUT ignores
+  userName/externalId rename attempts while replacing displayName/emails).
+- `cargo test -p gyre-server --lib api::users` → **14 passed** (GET /users/me returns stored
+  preferences; PUT partial-update merge with omitted-fields-keep-values asserted through a
+  fresh round-trip; malformed theme → 400 with nothing applied; create_user rejects
+  non-URL-safe and duplicate usernames).
+- `cargo test -p gyre-server --lib auth::` → **39 passed**, incl. by name:
+  `first_login_derives_url_safe_username_from_preferred`,
+  `second_login_stamps_last_login_and_keeps_username`,
+  `preferred_username_unsanitizable_falls_back_to_subject`,
+  `jwt_auto_creates_user_on_first_login`. These sign real RS256 JWTs with ring RSA key
+  material and traverse the production `validate_jwt` → `find_or_create_user` path (real
+  signature verification, real user store).
+- `cargo test -p gyre-domain --lib user` → **11 passed**; `health` (SQLite-backed boot) →
+  **15 passed**.
+- All 20 mechanical gates pass: arch, migration versions, migration SQL portability, mem-port
+  contracts, ABAC route registry, ABAC exempt handlers, commit attribution,
+  fabricated/scope-literal defaults, inert enforcement, lossy secret conversion, forged scope
+  fields, in-memory state stores, unbounded external HTTP, forwarded-header trust, dead
+  message kinds, MCP write tools, byte-slice truncation, relative path defaults, fail-open
+  ref resolution.
+- `bash scripts/update-coverage-summary.sh` reproduces `specs/coverage/SUMMARY.md`
+  byte-identically; `grep -c -F '| not-started |' specs/coverage/system/user-management.md` →
+  **0** (rows 2/3/11 → implemented).
+
+### Acceptance criteria re-check
+
+- All spec'd User fields present and persisted (round-trip test asserts every column).
+- UserPreferences + Theme/UiDensity/DiffView/FeedScope enums, variants match spec exactly;
+  JSON round-trip test.
+- Username unique (adapter create-contract + idx_users_username), URL-safe
+  (validated/sanitized on every creation path — audited all production `User::new`/`new_sso`
+  callers: bootstrap `create_user` validates, auth and SCIM sanitize), immutable after
+  creation (adapter guards in sqlite/postgres/mem; SCIM PUT ignores renames; re-login never
+  rewrites).
+- SSO preferred_username derivation with sub fallback; last_login_at stamped on each auth.
+- Preferences server-side JSON via GET/PUT /users/me with partial-update semantics.
+- Migration adds columns with UTC/en-US/Member defaults + preferences default JSON matching
+  `UserPreferences::default()` exactly.
+- Focused suites equivalent to round-1/2 verification all green on this tree; full
+  `cargo test --all` deferred to host verification per the transport restriction below.
+
+### Transport restriction (recorded, not a code defect)
+
+This sandbox's listener probe (`accept`) is unsupported (errno 95, `capabilities.json`), so a
+server-boot smoke over HTTP cannot run here. The SQLite migration-boot path is instead
+exercised by every `SqliteStorage::new`-constructing adapter test (349/349) and the 15 health
+tests. Host verification must run `cargo test --all` (and CI) on this exact head `ace30eed`.
+
+### Non-findings (carried from rounds 1–2, re-examined)
+
+- Global `UNIQUE(username)` instead of per-tenant — documented in the migration, strictly
+  stronger than per-tenant, consistent with the spec's cross-tenant isolation stance.
+- `get_me` fallback fabricating `username: agent_id` for agent-token principals with no
+  stored user — read-only synthetic response, nothing persisted, pre-existing shape.
+- Per-request `users.update()` write on JWT auth (last_login_at stamping) — literal spec
+  reading satisfied and tested; write-amplification is a follow-up if it matters in practice.
+- Legacy non-ASCII backfill degradation (`jörg` → `u-<id>`) — documented trade-off; new users
+  go through the Rust sanitizer.
+
+### Verdict
+
+Real implementations throughout: migration runs on SQLite (the round-1 boot-breaker is
+repaired and regression-guarded), username contract enforced across auth/SCIM/bootstrap/
+adapter layers, preferences genuinely persisted server-side with partial-update semantics,
+and the tests fail on the failure classes they guard (parser overflow, dedup collision,
+replace-with-defaults, immutable-handle rewrite, unsanitized SCIM handle). Checkpoint
+provenance is byte-verified and the frontmatter matches the actual history. **Approved.**
+
+— Reviewer, 2026-10-09 (round 3, candidate `ace30eed`)
 — Reviewer, 2026-10-09
