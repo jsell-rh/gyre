@@ -7,7 +7,7 @@ coverage_sections:
   - "search.md §Search Index"
   - "search.md §Technology"
   - "search.md §Index Schema"
-commits: ["97284104f706cb9d6f31023fff28263f5d1def92", "dc7a3d1f386938a169a5eb0bc703bcd5dc40a22d", "e455e0c4a0723b5cece8eb2d2f4356e3589b5e8d", "6714745772f031e110a3876bfee0b1b09ba8f2cf", "3f34fcfbc24a56c7f5b6971bc763d551687250e9", "84883d3ea49e45070f8397d6472c75cf8d444704", "a05dc8a53db6dbd195bf8d7fd72c6e9a1c62b547"]
+commits: ["4b2a7b0730aed3a341aff3fd59ac70e4f31dd9d9", "06149be2c21de14e8a3c310cbe9dc6251e49bdfd", "a550da3739d298561cde9eaace74ae7d6fdd0097", "88ab2a656b4477456b83c1788ff22b6e2d91b2ec", "e4cf94f49c2222cda5030e4bd52270c7e721a068", "4319f2bb63eb94de4fc819ebdeaeb9ca6d30e4e8", "0c980dda5cfdd9cebe56cdabe4c1a0db74da56e0"]
 ---
 
 ## Spec Excerpt
