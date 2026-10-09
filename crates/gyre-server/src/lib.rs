@@ -1185,7 +1185,7 @@ pub async fn emit_reconciliation_completed(
     workspace_id: Id,
     payload: Option<serde_json::Value>,
 ) {
-    use gyre_common::{Notification, NotificationType};
+    use gyre_common::NotificationType;
     use gyre_domain::WorkspaceRole;
 
     // Emit Event-tier message.
@@ -1226,11 +1226,6 @@ pub async fn emit_reconciliation_completed(
         }
     };
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-
     for member in &members {
         if !matches!(
             member.role,
@@ -1238,22 +1233,16 @@ pub async fn emit_reconciliation_completed(
         ) {
             continue;
         }
-        let notif_id = Id::new(uuid::Uuid::new_v4().to_string());
-        let notif = Notification::new(
-            notif_id,
+        // Channel fan-out per user-management.md §Delivery Channels.
+        crate::notifications::notify(
+            state,
             workspace_id.clone(),
             member.user_id.clone(),
             NotificationType::MetaSpecDrift,
             "Meta-spec reconciliation completed — workspace specs may have drifted",
-            &tenant_id,
-            now,
-        );
-        if let Err(e) = state.notifications.create(&notif).await {
-            tracing::warn!(
-                "emit_reconciliation_completed: failed to create MetaSpecDrift notification for {}: {e}",
-                member.user_id
-            );
-        }
+            tenant_id.clone(),
+        )
+        .await;
     }
 }
 

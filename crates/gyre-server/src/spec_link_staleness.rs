@@ -91,8 +91,7 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
 
             // user-management.md §Who Gets Notified — "Spec drift detected"
             // also notifies the spec owner.
-            notify_spec_owner_of_drift(state, &link.source_path, &link.target_path, now_secs)
-                .await;
+            notify_spec_owner_of_drift(state, &link.source_path, &link.target_path).await;
         }
     }
 
@@ -263,6 +262,9 @@ async fn notify_workspace_members(
                 error = %e,
                 "spec_link_staleness: failed to create notification"
             );
+        } else {
+            // Channel fan-out per user-management.md §Delivery Channels.
+            crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
         }
     }
 }
@@ -276,7 +278,6 @@ async fn notify_spec_owner_of_drift(
     state: &AppState,
     source_path: &str,
     target_path: &str,
-    now_secs: u64,
 ) {
     let Some(entry) = state.spec_ledger.find_by_path(source_path).await.ok().flatten() else {
         return;
@@ -304,9 +305,16 @@ async fn notify_spec_owner_of_drift(
     };
     let owner_id = Id::new(owner.to_string());
 
-    let id = Id::new(uuid::Uuid::new_v4().to_string());
-    let mut notif = Notification::new(
-        id,
+    let notif_body = serde_json::json!({
+        "source_path": source_path,
+        "target_path": target_path,
+        "link_status": "stale",
+        "reason": "spec_drift",
+    })
+    .to_string();
+    // Channel fan-out per user-management.md §Delivery Channels.
+    crate::notifications::notify_rich(
+        state,
         workspace_id.clone(),
         owner_id,
         NotificationType::CrossWorkspaceSpecChange,
@@ -315,27 +323,11 @@ async fn notify_spec_owner_of_drift(
             source_path, target_path
         ),
         tenant_id,
-        now_secs as i64,
-    );
-    notif.body = Some(
-        serde_json::json!({
-            "source_path": source_path,
-            "target_path": target_path,
-            "link_status": "stale",
-            "reason": "spec_drift",
-        })
-        .to_string(),
-    );
-    notif.entity_ref = Some(source_path.to_string());
-
-    if let Err(e) = state.notifications.create(&notif).await {
-        warn!(
-            spec_path = %source_path,
-            owner,
-            error = %e,
-            "spec_link_staleness: failed to notify spec owner"
-        );
-    }
+        Some(notif_body),
+        Some(source_path.to_string()),
+        None,
+    )
+    .await;
 }
 
 #[cfg(test)]

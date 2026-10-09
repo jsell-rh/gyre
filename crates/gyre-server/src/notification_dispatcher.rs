@@ -582,6 +582,19 @@ mod tests {
         m
     }
 
+    /// Seed the workspace so tenant resolution succeeds — the routing
+    /// functions skip (never fabricate) when the workspace is missing.
+    async fn seed_workspace(state: &AppState, ws_id: &Id) {
+        let ws = gyre_domain::Workspace::new(
+            ws_id.clone(),
+            Id::new("tenant-1"),
+            "Test Workspace",
+            "test-workspace",
+            1000,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+    }
+
     fn sample_notif(user: &str, priority: u8) -> Notification {
         Notification::new(
             Id::new("notif-1"),
@@ -877,6 +890,7 @@ mod tests {
     async fn persona_approval_requested_notifies_owner() {
         let state = test_state();
         let ws = Id::new("ws-1");
+        seed_workspace(&state, &ws).await;
         seed_member(&state, &ws, "owner-1", WorkspaceRole::Owner).await;
 
         let mut persona = gyre_domain::Persona::new(
@@ -950,6 +964,7 @@ mod tests {
     async fn merge_queue_paused_notifies_all_admins_and_owners() {
         let state = test_state();
         let ws = Id::new("ws-1");
+        seed_workspace(&state, &ws).await;
         seed_member(&state, &ws, "admin-1", WorkspaceRole::Admin).await;
         seed_member(&state, &ws, "admin-2", WorkspaceRole::Admin).await;
         seed_member(&state, &ws, "owner-1", WorkspaceRole::Owner).await;

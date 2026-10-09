@@ -187,8 +187,10 @@ async fn evaluate_workspace(
                     workspace = %ws.slug,
                     user = %member.user_id,
                     mr = %mr.id,
-                    "abandoned_branch_check: notification created"
+                    "abandoned_branch_check: created abandoned-branch notification"
                 );
+                // Channel fan-out per user-management.md §Delivery Channels.
+                crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
             }
         }
     }
