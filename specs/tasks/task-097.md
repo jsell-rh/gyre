@@ -2,7 +2,7 @@
 title: "Platform Model Secrets Domain Types + Port"
 spec_ref: "platform-model.md §7 Secrets Delivery"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 coverage_sections:
   - "platform-model.md §7 Secrets Delivery"
   - "platform-model.md §7 Principle"
@@ -144,3 +144,20 @@ No exemption files grew; no checks weakened; no test deletions.
 - scripts/unwritten-store-fields-exemptions.txt
 
 Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
+
+## Review Repair Round (round-3)
+
+The reviewer's preserved edits were absorbed and verified within task scope:
+
+- `api/spawn.rs` (commit `86c11e3`): reviewer's restatement of the F3/F4 injection block — tenant resolved from the workspace record with `match workspace.as_ref()`, `None` arm warns and skips all scoped secret resolution, fallible `String::from_utf8` with skip-and-warn naming the secret — is semantically identical to the reviewed round-2 tree and byte-identical after the rustfmt repair; the five F2 tests pass against it unchanged.
+- `scripts/unwritten-store-fields-exemptions.txt`: the `MemTraceRepository.payloads` entry's line number shifted 3547→3558 (mechanical consequence of the round-2 `mem.rs` test relocation); verified line 3558 is the `payloads` read in `get_span_payload` and `check-unwritten-store-fields.sh` passes.
+- Restored the empty `.done` sandbox marker (present in main via task-082's `c652bfb`, dropped by a task-097 sandbox round-trip merge) so the branch diff no longer deletes an unrelated main file.
+
+Verification on this round's tree (merge-base `66422bd`, current main; isolated `CARGO_TARGET_DIR=/tmp/gyre-t097-target`, `SKIP_WEB_BUILD=1`):
+
+- `python3 scripts/check-rustfmt-diff.py 66422bd` → changed lines clean (4 Rust files) — the gate that rejected candidate e189359c.
+- `python3 scripts/check-clippy-diff.py 66422bd` → changed lines clean (4 Rust files, 1145 existing warnings outside changes).
+- `cargo test -p gyre-adapters --lib sqlite::secret` → 17 passed; `cargo test -p gyre-common --lib secret` → 5 passed; `cargo test -p gyre-server --lib mem::secret_contract_tests` → 4 passed; `cargo test -p gyre-server --lib api::spawn::tests` → 34 passed, all five F2 secret-delivery tests present and passing by name (`spawn_delivers_scoped_secrets_across_all_scopes`, `spawn_secret_delivery_nearest_scope_wins`, `spawn_unresolvable_workspace_skips_secret_resolution`, `spawn_non_utf8_secret_skipped_others_delivered`, `spawn_secret_resolve_error_does_not_fail_spawn`).
+- `check-arch.sh`, `check-migration-versions.sh`, `check-mem-port-contracts.sh`, `check-fabricated-scope-defaults.sh`, `check-lossy-secret-conversion.sh`, `check-unwritten-store-fields.sh`, `check-in-memory-state-stores.sh`, `check-task-commit-attribution.sh` → all OK; every SHA in `commits:` resolves.
+
+No exemption files grew; no checks weakened; no test deletions. Ready for fresh independent review.
