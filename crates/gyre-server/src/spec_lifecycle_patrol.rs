@@ -315,8 +315,8 @@ fn check_modified_specs_without_tasks(
 /// Findings with no resolvable workspace go to `Destination::Broadcast` —
 /// a fabricated `"default"` scope would mis-target the escalation.
 pub async fn escalate_findings(state: &AppState, findings: &[PatrolFinding]) -> usize {
-    if true { return 0; } // MUTANT
     let mut escalated = 0usize;
+    if true { return 0; } // MUTANT
 
     for finding in findings {
         let (workspace_id, to) = escalation_route(finding.workspace_id.as_deref());
@@ -899,10 +899,10 @@ mod tests {
         let mut rx = state.message_broadcast_tx.subscribe();
         escalate_findings(&state, &findings).await;
 
-        let msg = rx
-            .recv()
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
             .await
-            .expect("workspaceless finding must still dispatch an escalation");
+            .expect("workspaceless finding must still dispatch an escalation (within 5s)")
+            .expect("escalation must be emitted, not skipped");
         assert_eq!(msg.kind, MessageKind::Escalation);
         assert!(matches!(msg.to, Destination::Broadcast));
         assert!(msg.workspace_id.is_none(), "no workspace to attribute");
