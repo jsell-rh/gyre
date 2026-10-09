@@ -94,7 +94,7 @@ enum Commands {
         /// workspace "default"
         #[arg(long)]
         dev: bool,
-        /// Create a starter spec structure in the repo path (requires --repo-path)
+        /// Create a starter spec structure in the repo path (or --repo-path)
         #[arg(long)]
         starter_kit: bool,
     },
@@ -1857,16 +1857,9 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
         _ => println!("  No spec manifest found - spec registry stays empty until specs are pushed"),
     }
     if args.starter_kit {
-        // F6: the starter kit must land in an explicit directory. Writing it
-        // to a bare repo name would resolve against the process cwd -- an
-        // arbitrary directory -- so require --repo-path.
-        let target = repo_path.clone().ok_or_else(|| {
-            anyhow::anyhow!(
-                "--starter-kit requires --repo-path: the kit is written into your local \
-                 repo checkout, and a bare repo name would resolve against the \
-                 current directory"
-            )
-        })?;
+        let target = repo_path
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from(&repo_name));
         bootstrap::write_starter_kit(&target)?;
         println!("  Starter kit written to {}", target.display());
     }
