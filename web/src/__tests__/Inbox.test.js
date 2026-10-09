@@ -385,6 +385,9 @@ describe('Inbox', () => {
     await waitFor(() => {
       expect(container.textContent).not.toContain('SpecAssertionFailure');
     });
+    // Actions live in the expanded accordion body — expand the card first.
+    const header = await findByRole('button', { name: /Expand: Spec assertion failures/ });
+    await fireEvent.click(header);
     // Both §9 actions are offered.
     expect(await findByRole('button', { name: 'View Code' })).toBeTruthy();
     expect(await findByRole('button', { name: 'Update Spec' })).toBeTruthy();
