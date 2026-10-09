@@ -90,6 +90,70 @@ impl AttributeContext {
 }
 
 // ---------------------------------------------------------------------------
+// Dynamic references
+// ---------------------------------------------------------------------------
+
+/// Resolve dynamic references in a condition value (§Conditions).
+///
+/// A value starting with `$` (e.g. `"$resource.repo_id"`) is replaced at
+/// evaluation time by the current value of the referenced attribute in the
+/// context; list values resolve element-wise. Returns `None` when a reference
+/// does not resolve: the condition cannot be established and must evaluate to
+/// false. No value is fabricated for a missing attribute — an Allow with an
+/// unresolvable reference must not grant (fail closed), mirroring the
+/// `resolve_ref` discipline on git refs.
+fn resolve_condition_value(
+    value: &ConditionValue,
+    ctx: &AttributeContext,
+) -> Option<ConditionValue> {
+    match value {
+        ConditionValue::String(s) => {
+            if s.starts_with('$') {
+                resolve_dynamic_value(s, ctx)
+            } else {
+                Some(value.clone())
+            }
+        }
+        ConditionValue::StringList(list) => {
+            let mut resolved = Vec::with_capacity(list.len());
+            for s in list {
+                if s.starts_with('$') {
+                    resolved.push(resolve_dynamic_scalar(s, ctx)?);
+                } else {
+                    resolved.push(s.clone());
+                }
+            }
+            Some(ConditionValue::StringList(resolved))
+        }
+        other => Some(other.clone()),
+    }
+}
+
+/// Resolve a `$path` reference to a full condition value, preserving the
+/// referenced attribute's type (string, list, number, bool).
+fn resolve_dynamic_value(s: &str, ctx: &AttributeContext) -> Option<ConditionValue> {
+    let key = s.strip_prefix('$')?;
+    match ctx.get(key)? {
+        AttrValue::Single(v) => Some(ConditionValue::String(v.clone())),
+        AttrValue::List(v) => Some(ConditionValue::StringList(v.clone())),
+        AttrValue::Number(n) => Some(ConditionValue::Number(*n)),
+        AttrValue::Bool(b) => Some(ConditionValue::Bool(*b)),
+    }
+}
+
+/// Resolve a `$path` reference in scalar (string) position.
+fn resolve_dynamic_scalar(s: &str, ctx: &AttributeContext) -> Option<String> {
+    let key = s.strip_prefix('$')?;
+    match ctx.get(key)? {
+        AttrValue::Single(v) => Some(v.clone()),
+        AttrValue::Number(n) => Some(n.to_string()),
+        AttrValue::Bool(b) => Some(b.to_string()),
+        // List-valued attribute referenced in scalar position.
+        AttrValue::List(_) => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Condition evaluation
 // ---------------------------------------------------------------------------
 
@@ -101,7 +165,12 @@ fn eval_condition(cond: &Condition, ctx: &AttributeContext) -> bool {
             let Some(attr_val) = ctx.get(&cond.attribute) else {
                 return false;
             };
-            match (&cond.operator, attr_val, &cond.value) {
+            // Dynamic references resolve against the same context; an
+            // unresolvable reference fails the condition.
+            let Some(value) = resolve_condition_value(&cond.value, ctx) else {
+                return false;
+            };
+            match (&cond.operator, attr_val, &value) {
                 (ConditionOp::Equals, AttrValue::Single(s), ConditionValue::String(expected)) => {
                     s == expected
                 }
@@ -197,6 +266,23 @@ pub fn evaluate(
     resource_type: &str,
 ) -> EvalResult {
     let t0 = std::time::Instant::now();
+
+    // Action, resource.type, and env.time are evaluation inputs (§Attributes)
+    // owned by this function: inject them so conditions can reference them
+    // uniformly regardless of caller. `env.time` is only set when absent so a
+    // dry-run caller can pin a specific evaluation time. The context is small
+    // (a few dozen entries built per request); the clone is not on any hot
+    // loop.
+    let mut ctx = ctx.clone();
+    ctx.set("action", action);
+    ctx.set("resource.type", resource_type);
+    if !ctx.has("env.time") {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        ctx.set_number("env.time", now);
+    }
 
     // Filter to enabled policies that apply to this action/resource_type.
     policies.retain(|p| p.enabled && p.applies_to(action, resource_type));

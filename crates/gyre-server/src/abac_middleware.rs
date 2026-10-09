@@ -15,7 +15,7 @@
 //! Handler
 //! ```
 
-use std::sync::{Arc, OnceLock};
+use std::collections::HashMap;
 
 use axum::{
     body::Body,
@@ -512,6 +512,81 @@ fn method_to_action(method: &Method) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// Path attribute extraction
+// ---------------------------------------------------------------------------
+
+/// Zip a route pattern against a concrete request path and collect the
+/// `:param` → value bindings. Segment values are taken verbatim (no
+/// percent-decoding); registry route params are plain slugs/ids.
+fn path_params(pattern: &str, path: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for (p, v) in pattern.split('/').zip(path.split('/')) {
+        if let Some(name) = p.strip_prefix(':') {
+            out.insert(name.to_string(), v.to_string());
+        }
+    }
+    out
+}
+
+/// Extract resource identity attributes from the request path into the
+/// attribute context (§Attributes: `resource.id`, `resource.workspace_id`,
+/// `resource.repo_id` — source "Request path").
+///
+/// Path-parameter conventions in the route registry:
+/// - `:workspace_id` / `:repo_id` name those entities explicitly wherever
+///   they appear.
+/// - On parent-scoped routes (`/api/v1/workspaces/:id/...`,
+///   `/api/v1/repos/:id/...`) the `:id` names the PARENT entity, exposed as
+///   `resource.workspace_id` / `resource.repo_id` respectively.
+/// - Elsewhere `:id` names the route's own entity → `resource.id`.
+///   On workspace-parented child routes (e.g. `/workspaces/:id/tasks`,
+///   resource type ≠ workspace) the `:id` is the workspace, not the
+///   addressed entity, so no `resource.id` is set.
+///
+/// Attributes requiring entity lookup (`resource.tenant_id`, `owner`, `team`,
+/// `approval_status`, `visibility`, and nested child ids like `:node_id`)
+/// are populated by the evaluation-flow entity lookup (§Evaluation Flow
+/// step 2).
+fn extract_path_attributes(
+    ctx: &mut AttributeContext,
+    pattern: &str,
+    path: &str,
+    resource_type: &str,
+) {
+    let params = path_params(pattern, path);
+
+    let workspace_id = params.get("workspace_id").cloned().or_else(|| {
+        pattern
+            .starts_with("/api/v1/workspaces/")
+            .then(|| params.get("id").cloned())
+            .flatten()
+    });
+    if let Some(ws) = workspace_id {
+        ctx.set("resource.workspace_id", ws);
+    }
+
+    let repo_id = params.get("repo_id").cloned().or_else(|| {
+        pattern
+            .starts_with("/api/v1/repos/")
+            .then(|| params.get("id").cloned())
+            .flatten()
+    });
+    if let Some(repo) = repo_id {
+        ctx.set("resource.repo_id", repo);
+    }
+
+    let resource_id = if pattern.starts_with("/api/v1/workspaces/") && resource_type != "workspace"
+    {
+        None
+    } else {
+        params.get("id").cloned()
+    };
+    if let Some(id) = resource_id {
+        ctx.set("resource.id", id);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Built-in policy seed (M34 Slice 4)
 // ---------------------------------------------------------------------------
 
@@ -811,7 +886,7 @@ pub async fn abac_middleware(
         return next.run(req).await;
     }
 
-    // Build attribute context.
+    // Build attribute context (§Attributes).
     let mut ctx = AttributeContext::default();
 
     let subject_type = if auth.roles.contains(&gyre_domain::UserRole::Agent) {
@@ -820,6 +895,9 @@ pub async fn abac_middleware(
         "user"
     };
     ctx.set("subject.type", subject_type);
+    // Subject identity from the auth context: the authenticated identity
+    // string (JWT display name, agent-token id, or API-key subject).
+    ctx.set("subject.id", &auth.agent_id);
 
     let global_role = auth.roles.first().map(|r| r.as_str()).unwrap_or("ReadOnly");
     ctx.set("subject.global_role", global_role);
@@ -831,6 +909,12 @@ pub async fn abac_middleware(
 
     // Resolve action.
     let action = action_override.unwrap_or_else(|| method_to_action(&method));
+
+    // Resource identity attributes from the request path (§Attributes:
+    // resource.id / resource.workspace_id / resource.repo_id, source
+    // "Request path"). `resource.type`, `action`, and `env.time` are injected
+    // by the evaluation engine itself.
+    extract_path_attributes(&mut ctx, &pattern, req.uri().path(), resource_type);
 
     // Load policies and evaluate.
     // Policies are loaded from the shared store on EVERY request — there is
