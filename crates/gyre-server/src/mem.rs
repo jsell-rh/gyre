@@ -991,6 +991,29 @@ impl UserRepository for MemUserRepository {
         self.store.lock().await.remove(id.as_str());
         Ok(())
     }
+
+    async fn record_login(
+        &self,
+        user_id: &Id,
+        oidc_issuer: &str,
+        at: u64,
+        min_interval_secs: u64,
+    ) -> Result<()> {
+        // Same debounce contract as the SQL adapters: write only when the
+        // stored last_login_at is unset or at/older than the threshold.
+        let mut store = self.store.lock().await;
+        if let Some(u) = store.get_mut(user_id.as_str()) {
+            let stale = match u.last_login_at {
+                None => true,
+                Some(prev) => prev <= at.saturating_sub(min_interval_secs),
+            };
+            if stale {
+                u.oidc_issuer = Some(oidc_issuer.to_string());
+                u.last_login_at = Some(at);
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -1163,6 +1186,14 @@ impl CostRepository for MemCostRepository {
 #[derive(Default)]
 pub struct MemAuditRepository {
     store: Arc<Mutex<Vec<AuditEvent>>>,
+}
+
+impl MemAuditRepository {
+    /// Shared handle so the in-memory judgment ledger aggregates the SAME
+    /// audit store this repo writes to (HSI §12).
+    pub fn shared(&self) -> Arc<Mutex<Vec<AuditEvent>>> {
+        Arc::clone(&self.store)
+    }
 }
 
 #[async_trait]
@@ -2050,6 +2081,7 @@ impl NotificationRepository for MemNotificationRepository {
         min_priority: Option<u8>,
         max_priority: Option<u8>,
         notification_type: Option<&str>,
+        exclude_types: &[&str],
         limit: u32,
         offset: u32,
     ) -> Result<Vec<Notification>> {
@@ -2062,6 +2094,7 @@ impl NotificationRepository for MemNotificationRepository {
                     && min_priority.is_none_or(|min| n.priority >= min)
                     && max_priority.is_none_or(|max| n.priority <= max)
                     && notification_type.is_none_or(|nt| n.notification_type.as_str() == nt)
+                    && !exclude_types.contains(&n.notification_type.as_str())
             })
             .cloned()
             .collect();
@@ -2105,7 +2138,12 @@ impl NotificationRepository for MemNotificationRepository {
         Ok(())
     }
 
-    async fn count_unresolved(&self, user_id: &Id, workspace_id: Option<&Id>) -> Result<u64> {
+    async fn count_unresolved(
+        &self,
+        user_id: &Id,
+        workspace_id: Option<&Id>,
+        exclude_types: &[&str],
+    ) -> Result<u64> {
         Ok(self
             .store
             .lock()
@@ -2113,9 +2151,10 @@ impl NotificationRepository for MemNotificationRepository {
             .iter()
             .filter(|n| {
                 n.user_id == *user_id
-                    && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
                     && n.resolved_at.is_none()
                     && n.dismissed_at.is_none()
+                    && workspace_id.is_none_or(|ws| n.workspace_id == *ws)
+                    && !exclude_types.contains(&n.notification_type.as_str())
             })
             .count() as u64)
     }
@@ -2481,6 +2520,13 @@ pub struct MemSpecApprovalRepository {
     store: Arc<Mutex<HashMap<String, gyre_domain::SpecApproval>>>,
 }
 
+impl MemSpecApprovalRepository {
+    /// Shared handle for the in-memory judgment ledger (HSI §12).
+    pub fn shared(&self) -> Arc<Mutex<HashMap<String, gyre_domain::SpecApproval>>> {
+        Arc::clone(&self.store)
+    }
+}
+
 #[async_trait]
 impl gyre_ports::SpecApprovalRepository for MemSpecApprovalRepository {
     async fn create(&self, approval: &gyre_domain::SpecApproval) -> Result<()> {
@@ -2678,6 +2724,14 @@ impl gyre_ports::ContainerAuditRepository for MemContainerAuditRepository {
 #[derive(Default)]
 pub struct MemSpecLedgerRepository {
     store: Arc<Mutex<HashMap<String, gyre_domain::SpecLedgerEntry>>>,
+}
+
+impl MemSpecLedgerRepository {
+    /// Shared handle for the in-memory judgment ledger (HSI §12 workspace
+    /// attribution of spec approvals).
+    pub fn shared(&self) -> Arc<Mutex<HashMap<String, gyre_domain::SpecLedgerEntry>>> {
+        Arc::clone(&self.store)
+    }
 }
 
 #[async_trait]
@@ -3250,6 +3304,11 @@ fn test_state_inner(
 ) -> Arc<crate::AppState> {
     use std::collections::HashMap;
     use tokio::sync::{broadcast, Mutex};
+    // In-memory judgment ledger aggregates the SAME audit / spec-approval /
+    // spec-ledger stores these repos write through (HSI §12).
+    let mem_audit = Arc::new(MemAuditRepository::default());
+    let mem_spec_approvals = Arc::new(MemSpecApprovalRepository::default());
+    let mem_spec_ledger = Arc::new(MemSpecLedgerRepository::default());
     Arc::new(crate::AppState {
         auth_token: "test-token".to_string(),
         base_url: "http://localhost:3000".to_string(),
@@ -3282,7 +3341,7 @@ fn test_state_inner(
         job_registry: Arc::new(crate::jobs::JobRegistry::new()),
         analytics: Arc::new(MemAnalyticsRepository::default()),
         costs: Arc::new(MemCostRepository::default()),
-        audit: Arc::new(MemAuditRepository::default()),
+        audit: Arc::clone(&mem_audit) as Arc<dyn AuditRepository>,
         siem_store: crate::siem::SiemStore::new(),
         audit_broadcast_tx: broadcast::channel(64).0,
         network_peers: Arc::new(MemNetworkPeerRepository::default()),
@@ -3301,7 +3360,7 @@ fn test_state_inner(
         spawn_log: Arc::new(MemSpawnLogRepository::default()),
         db_storage: None,
         storage,
-        spec_approvals: Arc::new(MemSpecApprovalRepository::default()),
+        spec_approvals: Arc::clone(&mem_spec_approvals) as Arc<dyn gyre_ports::SpecApprovalRepository>,
         spec_policies: Arc::new(MemSpecPolicyRepository::default()),
         attestation_store: Arc::new(MemAttestationRepository::default()),
         chain_attestations: Arc::new(MemChainAttestationRepository::default()),
@@ -3313,7 +3372,7 @@ fn test_state_inner(
         sigstore_mode: crate::commit_signatures::SigstoreMode::Local,
         tunnel_store: Arc::new(Mutex::new(HashMap::new())),
         container_audits: Arc::new(MemContainerAuditRepository::default()),
-        spec_ledger: Arc::new(MemSpecLedgerRepository::default()),
+        spec_ledger: Arc::clone(&mem_spec_ledger) as Arc<dyn gyre_ports::SpecLedgerRepository>,
         spec_approval_history: Arc::new(MemSpecApprovalEventRepository::default()),
         spec_links_store: Arc::new(Mutex::new(Vec::new())),
         budget_configs: Arc::new(MemBudgetConfigRepository::default()),
@@ -3365,7 +3424,11 @@ fn test_state_inner(
         llm: Some(Arc::new(gyre_adapters::MockLlmPortFactory::echo())),
         user_notification_prefs: Arc::new(MemUserNotificationPreferenceRepository::default()),
         user_tokens: Arc::new(MemUserTokenRepository::default()),
-        judgment_ledger: Arc::new(MemJudgmentLedgerRepository),
+        judgment_ledger: Arc::new(MemJudgmentLedgerRepository::with_sources(
+            &mem_audit,
+            &mem_spec_approvals,
+            &mem_spec_ledger,
+        )),
         secrets: Arc::new(MemSecretRepository::default()),
         ws_tickets: crate::auth::WsTicketStore::new(),
     })
@@ -4001,21 +4064,189 @@ impl gyre_ports::UserTokenRepository for MemUserTokenRepository {
 
 // ─── MemJudgmentLedgerRepository ─────────────────────────────────────────────
 
-#[derive(Default)]
-pub struct MemJudgmentLedgerRepository;
+/// Aggregates the judgment ledger (HSI §12) from the SAME in-memory stores
+/// the audit / spec-approval / spec-ledger repos use — construct via
+/// [`MemJudgmentLedgerRepository::with_sources`] so the sources are shared.
+pub struct MemJudgmentLedgerRepository {
+    audits: Arc<Mutex<Vec<AuditEvent>>>,
+    approvals: Arc<Mutex<HashMap<String, gyre_domain::SpecApproval>>>,
+    spec_ledger: Arc<Mutex<HashMap<String, gyre_domain::SpecLedgerEntry>>>,
+}
+
+impl Default for MemJudgmentLedgerRepository {
+    fn default() -> Self {
+        Self {
+            audits: Arc::default(),
+            approvals: Arc::default(),
+            spec_ledger: Arc::default(),
+        }
+    }
+}
+
+impl MemJudgmentLedgerRepository {
+    pub fn with_sources(
+        audit: &MemAuditRepository,
+        approvals: &MemSpecApprovalRepository,
+        spec_ledger: &MemSpecLedgerRepository,
+    ) -> Self {
+        Self {
+            audits: audit.shared(),
+            approvals: approvals.shared(),
+            spec_ledger: spec_ledger.shared(),
+        }
+    }
+}
 
 #[async_trait]
 impl gyre_ports::JudgmentLedgerRepository for MemJudgmentLedgerRepository {
     async fn list_for_user(
         &self,
-        _approver_id: &str,
-        _workspace_id: Option<&Id>,
-        _judgment_type: Option<gyre_domain::JudgmentType>,
-        _since: Option<u64>,
-        _limit: u32,
-        _offset: u32,
+        approver_id: &str,
+        workspace_id: Option<&Id>,
+        judgment_type: Option<gyre_domain::JudgmentType>,
+        since: Option<u64>,
+        limit: u32,
+        offset: u32,
     ) -> Result<Vec<gyre_domain::JudgmentEntry>> {
-        Ok(vec![])
+        use gyre_domain::{AuditEventType, JudgmentEntry, JudgmentType};
+        let jt = judgment_type;
+        let mut entries: Vec<JudgmentEntry> = Vec::new();
+
+        // ── Source 1: spec approvals & rejections ────────────────────────────
+        let want_approvals =
+            jt.is_none_or(|t| matches!(t, JudgmentType::SpecApproval | JudgmentType::SpecRejection));
+        if want_approvals {
+            let approvals = self.approvals.lock().await;
+            let wid_for_path: Vec<(String, Option<Id>)> = {
+                let ledger = self.spec_ledger.lock().await;
+                ledger
+                    .values()
+                    .map(|e| (e.path.clone(), e.workspace_id.as_ref().map(Id::new)))
+                    .collect()
+            };
+            for a in approvals.values().filter(|a| a.approver_id == approver_id) {
+                let wid = wid_for_path
+                    .iter()
+                    .find(|(p, _)| p == &a.spec_path)
+                    .and_then(|(_, w)| w.clone());
+                // Workspace filter: unknown-workspace entries are excluded.
+                if workspace_id.is_some() && wid.as_ref() != workspace_id {
+                    continue;
+                }
+                if a.approved_at < since.unwrap_or(0) {
+                    continue;
+                }
+                let rejected = a.revoked_at.is_some() || a.rejected_at.is_some();
+                let jtype = if rejected {
+                    JudgmentType::SpecRejection
+                } else {
+                    JudgmentType::SpecApproval
+                };
+                if jt.is_some_and(|f| f != jtype) {
+                    continue;
+                }
+                let detail = if rejected {
+                    a.revocation_reason.clone().or_else(|| a.rejected_reason.clone())
+                } else {
+                    None
+                };
+                entries.push(JudgmentEntry::new(
+                    jtype,
+                    a.spec_path.clone(),
+                    wid,
+                    a.approved_at,
+                    detail,
+                ));
+            }
+        }
+
+        // ── Source 2: audit-carried judgments (gate / trust / meta-spec) ─────
+        let want_audit = jt.is_none_or(|t| {
+            matches!(
+                t,
+                JudgmentType::GateOverride | JudgmentType::TrustGrant | JudgmentType::MetaSpec
+            )
+        });
+        if want_audit {
+            let audits = self.audits.lock().await;
+            for ev in audits.iter() {
+                if ev.user_id.as_ref().map(|u| u.as_str()) != Some(approver_id) {
+                    continue;
+                }
+                let jtype = match ev.event_type {
+                    AuditEventType::GateOverride => JudgmentType::GateOverride,
+                    AuditEventType::TrustChange => JudgmentType::TrustGrant,
+                    AuditEventType::MetaSpecPublish => JudgmentType::MetaSpec,
+                    _ => continue,
+                };
+                if jt.is_some_and(|f| f != jtype) {
+                    continue;
+                }
+                if workspace_id.is_some() && ev.workspace_id.as_ref() != workspace_id {
+                    continue;
+                }
+                if ev.timestamp < since.unwrap_or(0) {
+                    continue;
+                }
+                let str_field = |k: &str| -> Option<String> {
+                    ev.detail
+                        .get(k)
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                };
+                let rid = ev.resource_id.clone();
+                let (entity_ref, entry_detail) = match jtype {
+                    JudgmentType::GateOverride => (
+                        str_field("mr_id").or(rid).unwrap_or_default(),
+                        format!(
+                            "gate {} overridden: {} -> {}",
+                            str_field("gate_type").unwrap_or_else(|| "unknown".into()),
+                            str_field("from_status").unwrap_or_else(|| "failed".into()),
+                            str_field("to_status").unwrap_or_else(|| "overridden".into()),
+                        ),
+                    ),
+                    JudgmentType::TrustGrant => (
+                        str_field("workspace_id")
+                            .or_else(|| ev.workspace_id.as_ref().map(|w| w.as_str().to_string()))
+                            .unwrap_or_default(),
+                        format!(
+                            "trust {} -> {}",
+                            str_field("from").unwrap_or_default(),
+                            str_field("to").unwrap_or_default(),
+                        ),
+                    ),
+                    _ => (
+                        str_field("name").or(rid).unwrap_or_default(),
+                        format!(
+                            "{} v{}",
+                            str_field("kind").unwrap_or_default(),
+                            ev.detail
+                                .get("version")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0),
+                        ),
+                    ),
+                };
+                entries.push(JudgmentEntry::new(
+                    jtype,
+                    entity_ref,
+                    ev.workspace_id.clone(),
+                    ev.timestamp,
+                    Some(entry_detail),
+                ));
+            }
+        }
+
+        entries.sort_by(|a, b| {
+            b.timestamp
+                .cmp(&a.timestamp)
+                .then_with(|| b.entity_ref.cmp(&a.entity_ref))
+        });
+        Ok(entries
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect())
     }
 }
 

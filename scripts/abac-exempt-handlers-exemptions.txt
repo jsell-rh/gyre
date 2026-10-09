@@ -35,4 +35,3 @@ crates/gyre-server/src/api/llm_prompts.rs:65   # list_workspace_prompts: same cl
 crates/gyre-server/src/api/llm_prompts.rs:115  # upsert_workspace_prompt: same class (write path).
 crates/gyre-server/src/api/meta_specs.rs:964   # list_meta_specs_registry: registry-wide list with no containment. Fix: admin-role gate or tenant containment per spec.
 crates/gyre-server/src/api/meta_specs.rs:995   # create_meta_spec_registry: same class (write path).
-crates/gyre-server/src/api/meta_specs.rs:1107  # delete_meta_spec_registry: same class (delete path).

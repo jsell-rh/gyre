@@ -3000,7 +3000,7 @@ mod tests {
                 Some(&Id::new("ws-1")),
                 None,
                 None,
-                None,
+                None, &[],
                 100,
                 0,
             )
@@ -3153,7 +3153,7 @@ mod tests {
                 Some(&Id::new("ws-1")),
                 None,
                 None,
-                None,
+                None, &[],
                 100,
                 0,
             )
@@ -3553,7 +3553,7 @@ mod tests {
                 Some(&Id::new("ws-1")),
                 None,
                 None,
-                None,
+                None, &[],
                 100,
                 0,
             )
@@ -4263,7 +4263,7 @@ mod tests {
                 Some(&Id::new("ws-1")),
                 None,
                 None,
-                None,
+                None, &[],
                 100,
                 0,
             )
@@ -4285,7 +4285,7 @@ mod tests {
                 Some(&Id::new("ws-1")),
                 None,
                 None,
-                None,
+                None, &[],
                 100,
                 0,
             )
@@ -4543,7 +4543,7 @@ mod tests {
                 Some(&Id::new("ws-1")),
                 None,
                 None,
-                None,
+                None, &[],
                 100,
                 0,
             )
@@ -4593,7 +4593,7 @@ mod tests {
                 Some(&Id::new("ws-1")),
                 None,
                 None,
-                None,
+                None, &[],
                 100,
                 0,
             )
@@ -4617,7 +4617,7 @@ mod tests {
                 Some(&Id::new("ws-1")),
                 None,
                 None,
-                None,
+                None, &[],
                 100,
                 0,
             )
@@ -5453,7 +5453,7 @@ mod tests {
         // Merge-success notification was delivered to the author's spawner.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-recov"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .list_for_user(&Id::new("user-recov"), Some(&Id::new("ws-1")), None, None, None, &[], 100, 0)
             .await
             .unwrap();
         assert!(
@@ -5538,7 +5538,7 @@ mod tests {
         //    failed on the noop revert SHA) a MergeQueueEscalation.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-recov"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .list_for_user(&Id::new("user-recov"), Some(&Id::new("ws-1")), None, None, None, &[], 100, 0)
             .await
             .unwrap();
         let types: Vec<&NotificationType> = notifs.iter().map(|n| &n.notification_type).collect();
@@ -5624,7 +5624,7 @@ mod tests {
         // Merge-success notification delivered after resume.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-recov"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .list_for_user(&Id::new("user-recov"), Some(&Id::new("ws-1")), None, None, None, &[], 100, 0)
             .await
             .unwrap();
         assert!(
@@ -5658,7 +5658,7 @@ mod tests {
         // Merge succeeded → merge notification, but no recovery notifications.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-recov"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .list_for_user(&Id::new("user-recov"), Some(&Id::new("ws-1")), None, None, None, &[], 100, 0)
             .await
             .unwrap();
         assert!(
@@ -5748,7 +5748,7 @@ mod tests {
         // Paused queue must not notify anyone either — merge didn't happen.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-grp"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .list_for_user(&Id::new("user-grp"), Some(&Id::new("ws-1")), None, None, None, &[], 100, 0)
             .await
             .unwrap();
         assert!(
@@ -5842,7 +5842,7 @@ mod tests {
         for user in ["user-grpa", "user-grpb"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+                .list_for_user(&Id::new(user), Some(&Id::new("ws-1")), None, None, None, &[], 100, 0)
                 .await
                 .unwrap();
             assert!(

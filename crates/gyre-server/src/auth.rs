@@ -41,6 +41,11 @@ pub struct RemoteJwksEntry {
 /// TTL for cached remote JWKS (5 minutes).
 const REMOTE_JWKS_TTL_SECS: u64 = 300;
 
+/// Minimum interval between `last_login_at` writes per user (HSI §12).
+/// Bounding auth-bookkeeping writes to ≤1/minute/user keeps the JWT hot path
+/// cheap while keeping "last seen" fresh enough for the profile surface.
+const LOGIN_RECORD_DEBOUNCE_SECS: u64 = 60;
+
 // -- Agent JWT signing (Gyre as OIDC provider) --------------------------------
 
 /// Claims embedded in agent JWTs minted by Gyre's built-in OIDC provider.
@@ -784,9 +789,27 @@ async fn validate_jwt(
     .await
     .map_err(|e| format!("user resolution: {e}"))?;
 
+    // HSI §12: record auth-provider provenance (verified issuer + last login).
+    // Debounced adapter-side so high-frequency auth doesn't write per-request;
+    // a recording failure is a warning — authentication must not depend on
+    // bookkeeping.
+    let user_id = user.id.clone();
+    if let Err(e) = state
+        .users
+        .record_login(
+            &user_id,
+            &jwt_cfg.issuer,
+            crate::api::now_secs(),
+            LOGIN_RECORD_DEBOUNCE_SECS,
+        )
+        .await
+    {
+        tracing::warn!("failed to record login for user {user_id}: {e}");
+    }
+
     Ok(AuthenticatedAgent {
         agent_id: user.display_name.clone(),
-        user_id: Some(user.id),
+        user_id: Some(user_id),
         roles: user.roles,
         tenant_id,
         jwt_claims: raw_claims,
