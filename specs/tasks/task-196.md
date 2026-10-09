@@ -5,7 +5,7 @@ depends_on: []
 progress: not-started
 coverage_sections:
   - "human-system-interface.md §47"
-commits: ["8667fceed0a44c2f8ab2fd1776b00f0334b85ba0", "e71e96ee05c9283a72b89a244f2858d7133f505b", "11bafc3f850078eafec986d225f91bde1df98d66", "d5bc160911dc99a4d9920859cbe44349f55b0dec"]
+commits: ["e0523048b7382550b7228228d3bc28c7e1947357", "cfc3669e84e5473b7a2481d39b86a3ee2da88d22", "95efd42591226beb24761c08e6361916a72b29aa", "62a1b7b6e3ae6c946b1c65c11efd07c7bc3cbc66"]
 ---
 
 ## Spec Excerpt
