@@ -4080,7 +4080,7 @@ impl gyre_ports::SessionRepository for MemSessionRepository {
         let mut guard = self.sessions.write().await;
         if let Some(s) = guard
             .iter_mut()
-            .find(|s| &s.id == *id && &s.user_id == user_id)
+            .find(|s| s.id == *id && s.user_id == *user_id)
         {
             s.revoked = true;
         }
