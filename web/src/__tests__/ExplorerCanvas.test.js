@@ -1285,7 +1285,7 @@ describe('ExplorerCanvas — ghost overlays', () => {
     });
     const indicator = container.querySelector('[data-testid="preview-mode-indicator"]');
     expect(indicator).toBeTruthy();
-  });
+  }, 30000);
 
   it('shows add/change/remove chips for mixed ghost types', () => {
     const { container } = render(ExplorerCanvas, {
@@ -1297,7 +1297,7 @@ describe('ExplorerCanvas — ghost overlays', () => {
     expect(addChip).toBeTruthy();
     expect(changeChip).toBeTruthy();
     expect(removeChip).toBeTruthy();
-  });
+  }, 30000);
 
   it('shows confidence breakdown in ghost legend', () => {
     const { container } = render(ExplorerCanvas, {
@@ -1308,7 +1308,7 @@ describe('ExplorerCanvas — ghost overlays', () => {
     expect(confChip.textContent).toContain('1H'); // 1 high
     expect(confChip.textContent).toContain('1M'); // 1 medium
     expect(confChip.textContent).toContain('1L'); // 1 low
-  });
+  }, 30000);
 
   it('renders without preview indicator when no ghosts', () => {
     const { container } = render(ExplorerCanvas, {

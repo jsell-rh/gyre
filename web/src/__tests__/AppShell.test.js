@@ -343,15 +343,22 @@ describe('Mobile drawer section navigation (ui-navigation.md §8)', () => {
     });
   }
 
-  it('clicking Briefing navigates to workspace home Briefing section', async () => {
+  it('clicking Briefing in repo mode opens the repo-scope Briefing sub-tab', async () => {
+    // ui-navigation.md §3 "Sub-tabs in the control bar": Briefing at repo
+    // scope is the Architecture tab's Briefing sub-tab (?repo_id= narrative).
+    // The drawer must stay in the repo's scope, not escape to workspace home.
     window.history.pushState({}, '', '/workspaces/payments/r/core/specs');
     const { container } = render(App);
     // RepoMode is stubbed in jsdom; the document title proves repo mode.
     await waitFor(() => expect(document.title).toBe('core — Payments | Gyre'), { timeout: 3000 });
     await openDrawer(container);
     await fireEvent.click(container.querySelector('[data-testid="drawer-item-briefing"]'));
-    await waitFor(() => expect(window.location.pathname).toBe('/workspaces/payments'), { timeout: 3000 });
+    // Stays in repo mode on the Architecture tab (the Briefing sub-tab's
+    // parent tab), with the subTab deep-link param for ExplorerView.
+    await waitFor(() => expect(window.location.pathname).toBe('/workspaces/payments/r/core/architecture'), { timeout: 3000 });
+    await waitFor(() => expect(window.location.search).toBe('?subTab=briefing'), { timeout: 3000 });
   });
+
 
   it('clicking Agent Rules navigates to agent-rules page', async () => {
     window.history.pushState({}, '', '/workspaces/payments');

@@ -2789,7 +2789,7 @@ async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: 
             now_secs().saturating_sub(24 * 3600)
         };
         // Delegate to the same assembly logic the REST handler uses (HSI §11 parity).
-        match crate::api::graph::assemble_briefing(&state, workspace_id, since).await {
+        match crate::api::graph::assemble_briefing(&state, workspace_id, since, None).await {
             Ok(briefing) => {
                 let briefing_json = serde_json::to_value(&briefing)
                     .unwrap_or_else(|e| json!({"error": e.to_string()}));

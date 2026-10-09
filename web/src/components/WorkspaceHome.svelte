@@ -127,6 +127,12 @@
     return val !== key ? val : type;
   }
 
+  /** Meta-spec kind label (server sends "meta:persona" etc.) */
+  function kindLabel(kind) {
+    const key = `meta_specs.kind_labels.${kind}`;
+    const val = $t(key);
+    return val !== key ? val : kind;
+  }
   // SPEC_STATUS_ICONS, specStatusTooltip, taskStatusTooltip, mrStatusTooltip,
   // agentStatusTooltip are imported from ../lib/statusTooltips.js
 
@@ -136,6 +142,24 @@
   let notifications = $state([]);
   let actionStates = $state({});
   let showAllDecisions = $state(false);
+
+  // ── Stale-response guard (ui-navigation.md §4: "a delayed response from
+  //    the old scope must not overwrite the new scope's content") ─────────
+  // The workspace-change effect bumps the generation once; each loader
+  // captures that value and discards results when a newer scope started.
+  let wsLoadGen = 0;
+  /** Bump the generation once per workspace change (§4 stale-response
+   *  guard). Loaders capture the current value and discard results when it
+   *  advanced — concurrent loaders of the same scope must not invalidate
+   *  each other, so only the workspace-change effect bumps it. */
+  function nextLoadGen() {
+    return ++wsLoadGen;
+  }
+
+  /** True when the workspace changed while this load was in flight. */
+  function stale(gen) {
+    return gen !== wsLoadGen;
+  }
 
   // ── Repos state ────────────────────────────────────────────────────────
   let reposLoading = $state(true);
@@ -156,15 +180,19 @@
 
   async function loadArchGraph() {
     if (!workspace?.id) return;
+    const gen = wsLoadGen;
     archLoading = true;
     archError = null;
     try {
-      archGraph = await api.workspaceGraph(workspace.id);
+      const data = await api.workspaceGraph(workspace.id);
+      if (stale(gen)) return;
+      archGraph = data;
     } catch (e) {
+      if (stale(gen)) return;
       archError = e.message || 'Failed to load workspace graph';
       archGraph = { nodes: [], edges: [] };
     } finally {
-      archLoading = false;
+      if (!stale(gen)) archLoading = false;
     }
   }
 
@@ -174,12 +202,105 @@
       loadArchGraph();
     }
   }
-  let budgetLoading = $state(true);
-  let budgetData = $state(null); // { config, usage }
-  let costData = $state(null);   // cost summary
 
+  // ── Agent Rules state (ui-navigation.md §2 — full effective meta-spec set) ──
+  // Request generation: a load started for one workspace must never write
+  // state for another. Without this guard, a slow response for workspace A
+  // that settles after the user navigated to workspace B overwrites B's
+  // rules (or error) with A's — a cross-workspace leak in the cascade
+  // summary. Uses the shared wsLoadGen scope guard (§4 stale-response rule)
+  // so every loader of the superseded scope is discarded together.
+  let rulesLoading = $state(true);
+  let rulesError = $state(null);
+  let tenantRules = $state([]);
+  let workspaceRules = $state([]);
+
+  // A failed lookup must surface as an error, never as an empty successful
+  // rule set — the section summarizes the MANDATORY prompt set agents
+  // receive, and a masked failure understates it. Either scope failing
+  // fails the section (partial cascade data would mislead the same way).
+  async function loadRules() {
+    if (!workspace?.id) return;
+    const gen = wsLoadGen;
+    rulesLoading = true;
+    rulesError = null;
+    try {
+      // §2 Agent Rules data source: workspace meta-specs merged with ALL
+      // tenant (Global) meta-specs — optional tenant rules must be visible
+      // for spec-level binding selection, not just required ones.
+      const [wsList, tenantList] = await Promise.all([
+        api.getMetaSpecs({ scope: 'Workspace', scope_id: workspace.id }),
+        api.getMetaSpecs({ scope: 'Global' }),
+      ]);
+      if (stale(gen)) return; // a newer workspace load superseded this one
+      // Registry responses are a bare array (list_meta_specs_registry →
+      // Json<Vec<MetaSpec>>); tolerate {items:[...]} envelopes too.
+      workspaceRules = Array.isArray(wsList) ? wsList : (wsList?.items ?? []);
+      tenantRules = Array.isArray(tenantList) ? tenantList : (tenantList?.items ?? []);
+    } catch (e) {
+      if (stale(gen)) return; // a newer workspace load superseded this one
+      rulesError = e.message || 'Failed to load agent rules';
+      workspaceRules = [];
+      tenantRules = [];
+    } finally {
+      if (!stale(gen)) rulesLoading = false;
+    }
+  }
+
+  /** Combined effective set (tenant + workspace), grouped by kind. */
+  let rulesByKind = $derived.by(() => {
+    const groups = {};
+    for (const ms of [...tenantRules, ...workspaceRules]) {
+      const k = ms.kind ?? 'Other';
+      if (!groups[k]) groups[k] = [];
+      groups[k].push(ms);
+    }
+    return groups;
+  });
+
+  let rulesTotal = $derived(tenantRules.length + workspaceRules.length);
+  let rulesRequiredCount = $derived(
+    [...tenantRules, ...workspaceRules].filter(ms => ms.required).length
+  );
+
+  /** Reconciliation banner: required meta-specs updated recently. */
+  let rulesRecentlyUpdated = $derived.by(() => {
+    // MetaSpec.updated_at is u64 UNIX SECONDS (domain/meta_spec.rs), not
+    // milliseconds — toEpochSec handles seconds, ms, and ISO strings.
+    const cutoff = Date.now() / 1000 - 7 * 86400;
+    return [...tenantRules, ...workspaceRules].filter(ms => {
+      if (!ms.required) return false;
+      const ts = toEpochSec(ms.updated_at);
+      return ts != null && ts > cutoff;
+    }).length;
+  });
+
+  // ── Repos: load ────────────────────────────────────────────────────────
+  async function loadRepos() {
+    if (!workspace?.id) return;
+    const gen = wsLoadGen;
+    reposLoading = true;
+    reposError = null;
+    try {
+      const data = await api.workspaceRepos(workspace.id);
+      if (stale(gen)) return;
+      repos = Array.isArray(data) ? data : [];
+      repoMap = Object.fromEntries(repos.map(r => [r.id, r]));
+      seedRepoNames();
+    } catch (e) {
+      if (stale(gen)) return;
+      reposError = e.message || 'Failed to load repos';
+      repos = [];
+    } finally {
+      if (!stale(gen)) reposLoading = false;
+    }
+  }
   // ── Repo lookup map (id → repo) ────────────────────────────────────────
   let repoMap = $state({});
+  let budgetLoading = $state(true);
+
+  let budgetData = $state(null); // { config, usage }
+  let costData = $state(null);   // cost summary
 
   // ── Tasks state ────────────────────────────────────────────────────────
   let tasksLoading = $state(true);
@@ -251,13 +372,14 @@
     return path ? path.replace(/^specs\//, '') : path;
   }
 
-  // ── Decisions: load ────────────────────────────────────────────────────
   async function loadDecisions() {
     if (!workspace?.id) return;
+    const gen = wsLoadGen;
     decisionsLoading = true;
     decisionsError = null;
     try {
       let raw = await api.myNotifications();
+      if (stale(gen)) return; // a newer workspace load superseded this one
       let data = Array.isArray(raw) ? raw : (raw?.notifications ?? []);
       data = data.map(n => ({ ...n, notification_type: NOTIF_TYPE_NORM[n.notification_type] ?? n.notification_type }));
       data = data.filter(n => n.workspace_id === workspace.id);
@@ -266,99 +388,31 @@
       data.sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999));
       notifications = data;
     } catch (e) {
+      if (stale(gen)) return;
       decisionsError = e.message || 'Failed to load decisions';
       notifications = [];
     } finally {
-      decisionsLoading = false;
+      if (!stale(gen)) decisionsLoading = false;
     }
   }
-
-  // ── Repos: load ────────────────────────────────────────────────────────
-  async function loadRepos() {
-    if (!workspace?.id) return;
-    reposLoading = true;
-    reposError = null;
-    try {
-      const data = await api.workspaceRepos(workspace.id);
-      repos = Array.isArray(data) ? data : [];
-      repoMap = Object.fromEntries(repos.map(r => [r.id, r]));
-      seedRepoNames();
-    } catch (e) {
-      reposError = e.message || 'Failed to load repos';
-      repos = [];
-    } finally {
-      reposLoading = false;
-    }
-  }
-
   // ── Specs: load ────────────────────────────────────────────────────────
   async function loadSpecs() {
     if (!workspace?.id) return;
+    const gen = wsLoadGen;
     specsLoading = true;
     specsError = null;
     try {
       const data = await api.specsForWorkspace(workspace.id);
+      if (stale(gen)) return;
       specs = Array.isArray(data) ? data : [];
     } catch (e) {
+      if (stale(gen)) return;
       specsError = e.message || 'Failed to load specs';
       specs = [];
     } finally {
-      specsLoading = false;
+      if (!stale(gen)) specsLoading = false;
     }
   }
-
-  // ── Agent Rules state (ui-navigation.md §2 — meta-spec cascade) ───────
-  let rulesLoading = $state(true);
-  let rulesError = $state(null);
-  let workspaceMetaSpecs = $state([]);
-  let globalMetaSpecs = $state([]);
-  // Request generation: a load started for one workspace must never write
-  // state for another. Without this guard, a slow response for workspace A
-  // that settles after the user navigated to workspace B overwrites B's
-  // rules (or error) with A's — a cross-workspace leak in the cascade
-  // summary. Cleared/checked on every load so a late A success OR failure
-  // is dropped once B's load has started.
-  let rulesRequestSeq = 0;
-
-  // ── Agent Rules: load ──────────────────────────────────────────────────
-  // A failed lookup must surface as an error, never as an empty successful
-  // rule set — the section summarizes the MANDATORY prompt set agents
-  // receive, and a masked failure understates it. Either scope failing
-  // fails the section (partial cascade data would mislead the same way).
-  async function loadRules() {
-    if (!workspace?.id) return;
-    const request = ++rulesRequestSeq;
-    rulesLoading = true;
-    rulesError = null;
-    try {
-      const [wsData, globalData] = await Promise.all([
-        api.getMetaSpecs({ scope: 'Workspace', scope_id: workspace.id }),
-        api.getMetaSpecs({ scope: 'Global' }),
-      ]);
-      if (request !== rulesRequestSeq) return; // a newer load superseded this one
-      workspaceMetaSpecs = Array.isArray(wsData) ? wsData : [];
-      globalMetaSpecs = Array.isArray(globalData) ? globalData : [];
-    } catch (e) {
-      if (request !== rulesRequestSeq) return; // a newer load superseded this one
-      rulesError = e.message || 'Failed to load agent rules';
-    } finally {
-      if (request === rulesRequestSeq) rulesLoading = false;
-    }
-  }
-
-  // ── Derived: meta-spec aggregates ─────────────────────────────────────
-  let allMetaSpecs = $derived([...globalMetaSpecs, ...workspaceMetaSpecs]);
-  let requiredMetaSpecs = $derived(allMetaSpecs.filter(m => m.required));
-  let recentlyUpdated = $derived(
-    allMetaSpecs.filter(m => {
-      // MetaSpec.updated_at is u64 UNIX SECONDS (domain/meta_spec.rs), not
-      // milliseconds — new Date(updated_at) would misparse it as 1970-01.
-      const updated = toEpochSec(m.updated_at);
-      if (updated == null) return false;
-      const age = Date.now() / 1000 - updated;
-      return age < 7 * 24 * 3600; // within last 7 days
-    })
-  );
 
   // ── Spec navigation ────────────────────────────────────────────────────
   function navigateToSpec(spec) {
@@ -379,24 +433,28 @@
   // ── Tasks: load ────────────────────────────────────────────────────────
   async function loadTasks() {
     if (!workspace?.id) return;
+    const gen = wsLoadGen;
     tasksLoading = true;
     try {
       const data = await api.tasks({ workspaceId: workspace.id });
+      if (stale(gen)) return;
       wsTasks = Array.isArray(data) ? data : [];
       seedFromEntities('task', wsTasks);
     } catch {
+      if (stale(gen)) return;
       wsTasks = [];
     } finally {
-      tasksLoading = false;
+      if (!stale(gen)) tasksLoading = false;
     }
   }
-
   // ── MRs: load ─────────────────────────────────────────────────────────
   async function loadMrs() {
     if (!workspace?.id) return;
+    const gen = wsLoadGen;
     mrsLoading = true;
     try {
       const data = await api.mergeRequests({ workspace_id: workspace.id });
+      if (stale(gen)) return;
       const mrList = Array.isArray(data) ? data : [];
       // Enrich first 10 MRs with gate results (best-effort)
       // The API enriches gate_name, gate_type, required, command from definitions
@@ -445,18 +503,21 @@
         });
       }
     } catch {
+      if (stale(gen)) return;
       wsMrs = [];
     } finally {
-      mrsLoading = false;
+      if (!stale(gen)) mrsLoading = false;
     }
   }
 
   // ── Agents: load ──────────────────────────────────────────────────────
   async function loadAgents() {
     if (!workspace?.id) return;
+    const gen = wsLoadGen;
     agentsLoading = true;
     try {
       const data = await api.agents({ workspaceId: workspace.id });
+      if (stale(gen)) return;
       let agentList = Array.isArray(data) ? data : [];
       // Enrich agents that lack spec_path by resolving from their task (best-effort)
       const needsSpec = agentList.filter(a => !a.spec_path && (a.task_id ?? a.current_task_id));
@@ -474,28 +535,32 @@
       wsAgents = agentList;
       seedFromEntities('agent', wsAgents);
     } catch {
+      if (stale(gen)) return;
       wsAgents = [];
     } finally {
-      agentsLoading = false;
+      if (!stale(gen)) agentsLoading = false;
     }
   }
 
   // ── Budget/Cost: load ──────────────────────────────────────────────────
   async function loadBudget() {
     if (!workspace?.id) return;
+    const gen = wsLoadGen;
     budgetLoading = true;
     try {
       const [budget, costs] = await Promise.all([
         api.workspaceBudget(workspace.id).catch(() => null),
         api.costSummary().catch(() => null),
       ]);
+      if (stale(gen)) return;
       budgetData = budget;
       costData = costs;
     } catch {
+      if (stale(gen)) return;
       budgetData = null;
       costData = null;
     } finally {
-      budgetLoading = false;
+      if (!stale(gen)) budgetLoading = false;
     }
   }
 
@@ -508,9 +573,9 @@
   let depGraphScope = $state('workspace');
   let depGraphNodes = $state([]);
   let depGraphEdges = $state([]);
-
   async function loadDepHealth() {
     if (!workspace?.id) return;
+    const gen = wsLoadGen;
     depHealthLoading = true;
     try {
       const [graphData, staleEdges, breakingList] = await Promise.all([
@@ -518,6 +583,7 @@
         api.staleDependencies(workspace.id).catch(() => []),
         api.breakingChanges().catch(() => []),
       ]);
+      if (stale(gen)) return;
       const nodesWithEdges = new Set();
       for (const e of graphData.edges ?? []) {
         nodesWithEdges.add(e.source);
@@ -539,12 +605,13 @@
         breakingCount: filteredBreaking.length,
       };
     } catch {
+      if (stale(gen)) return;
       depHealthData = { totalWithDeps: 0, staleCount: 0, breakingCount: 0 };
       wsBreakingChanges = [];
       depGraphNodes = [];
       depGraphEdges = [];
     } finally {
-      depHealthLoading = false;
+      if (!stale(gen)) depHealthLoading = false;
     }
   }
 
@@ -847,12 +914,14 @@
   let mergeQueueView = $state('list');
 
   async function loadMergeQueue() {
+    const gen = wsLoadGen;
     mergeQueueLoading = true;
     try {
       const [all, graph] = await Promise.all([
         api.mergeQueue().catch(() => []),
         api.mergeQueueGraph().catch(() => ({ nodes: [], edges: [] })),
       ]);
+      if (stale(gen)) return;
       const allItems = Array.isArray(all) ? all : [];
       mergeQueueGraphNodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
       // Enrich queue items with MR details
@@ -892,12 +961,12 @@
             _blocks: blocks,
           };
         })
-        .sort((a, b) => (a.position ?? a.priority ?? 0) - (b.position ?? b.priority ?? 0));
     } catch {
+      if (stale(gen)) return;
       mergeQueueItems = [];
       mergeQueueGraphNodes = [];
     } finally {
-      mergeQueueLoading = false;
+      if (!stale(gen)) mergeQueueLoading = false;
     }
   }
 
@@ -906,9 +975,11 @@
   let activityEvents = $state([]);
 
   async function loadActivity() {
+    const gen = wsLoadGen;
     activityLoading = true;
     try {
       const data = await api.activity(30);
+      if (stale(gen)) return;
       const events = Array.isArray(data) ? data : [];
       if (events.length > 0) {
         // Sanitize: strip raw JSON from description fields — show human-readable text only
@@ -973,9 +1044,10 @@
         });
       }
     } catch {
+      if (stale(gen)) return;
       activityEvents = [];
     } finally {
-      activityLoading = false;
+      if (!stale(gen)) activityLoading = false;
     }
   }
 
@@ -1159,6 +1231,9 @@
 
   $effect(() => {
     void workspace?.id;
+    // One generation bump for the whole scope change: all loaders of this
+    // scope share it, and loads from the previous workspace are discarded.
+    nextLoadGen();
     loadDecisions();
     loadRepos();
     loadSpecs();
@@ -1556,8 +1631,8 @@
               {/if}
             </div>
           </section>
-
-          <!-- ── Agent Rules (ui-navigation.md §2 — meta-spec cascade summary) ── -->
+          <!-- ── Agent Rules (ui-navigation.md §2 — full effective meta-spec set:
+               tenant (inherited) + workspace rules merged) ────────────────── -->
           <section class="home-section" aria-labelledby="section-agent-rules" data-testid="section-agent-rules">
             <div class="section-header">
               <h2 class="section-title" id="section-agent-rules">{$t('workspace_home.sections.agent_rules')}</h2>
@@ -1570,43 +1645,45 @@
             <div class="section-body">
               {#if rulesLoading}
                 <div class="skeleton-row"></div>
+                <div class="skeleton-row"></div>
               {:else if rulesError}
                 <div class="error-row" role="alert">
                   <p class="error-text">{rulesError}</p>
-                  <button class="retry-btn" onclick={loadRules}>{$t('common.retry')}</button>
+                  <button class="retry-btn" onclick={loadRules} aria-label={$t('workspace_home.retry_loading_rules')}>{$t('common.retry') || 'Retry'}</button>
                 </div>
+              {:else if rulesTotal === 0}
+                <p class="empty-text" data-testid="rules-empty">{$t('workspace_home.rules_no_metaspecs')}</p>
               {:else}
                 <p class="rules-summary" data-testid="rules-summary">
-                  {allMetaSpecs.length} meta-spec{allMetaSpecs.length !== 1 ? 's' : ''} active
-                  {#if requiredMetaSpecs.length > 0}
-                    ({requiredMetaSpecs.length} required)
+                  {rulesTotal} meta-spec{rulesTotal !== 1 ? 's' : ''} active
+                  {#if rulesRequiredCount > 0}
+                    ({rulesRequiredCount} required)
                   {/if}
                 </p>
-
-                {#if recentlyUpdated.length > 0}
-                  <div class="recent-updates-status" role="status" data-testid="reconcile-status">
-                    {$t('workspace_home.rules_reconciling', { values: { count: recentlyUpdated.length } })}
-                  </div>
+                {#if rulesRecentlyUpdated > 0}
+                  <p class="rules-reconciling" role="status" data-testid="reconcile-status">
+                    {$t('workspace_home.rules_reconciling', { values: { count: rulesRecentlyUpdated } })}
+                  </p>
                 {/if}
-
-                {#if requiredMetaSpecs.length > 0}
-                  <ul class="rules-list" role="list" data-testid="rules-list">
-                    {#each requiredMetaSpecs as ms (ms.id)}
-                      <li class="rule-item" data-testid="rule-item">
-                        <span class="rule-lock" aria-label="Required" aria-hidden="true">🔒</span>
-                        <span class="rule-name">{ms.name}</span>
-                        {#if ms.kind}
-                          <span class="rule-kind">{ms.kind.replace('meta:', '')}</span>
-                        {/if}
-                        {#if ms.version}
+                {#each Object.entries(rulesByKind) as [kind, items] (kind)}
+                  <div class="rules-group">
+                    <h3 class="rules-group-title">{kindLabel(kind)} <span class="rules-count">({items.length})</span></h3>
+                    <ul class="rules-list" role="list">
+                      {#each items as ms (ms.id)}
+                        <li class="rule-item" data-testid="rule-item">
+                          <span class="rules-scope-badge" data-scope={ms.scope === 'Global' ? 'tenant' : 'workspace'}>
+                            {ms.scope === 'Global' ? $t('workspace_home.scope_tenant') : $t('workspace_home.scope_workspace')}
+                          </span>
+                          <span class="rule-name">{ms.name}</span>
+                          {#if ms.required}
+                            <span class="rule-lock" title={$t('workspace_home.rule_required_label')} aria-label={$t('workspace_home.rule_required_label')}>🔒</span>
+                          {/if}
                           <span class="rule-version">v{ms.version}</span>
-                        {/if}
-                      </li>
-                    {/each}
-                  </ul>
-                {:else if allMetaSpecs.length === 0}
-                  <p class="empty-text">{$t('workspace_home.rules_no_metaspecs')}</p>
-                {/if}
+                        </li>
+                      {/each}
+                    </ul>
+                  </div>
+                {/each}
               {/if}
             </div>
           </section>
@@ -5560,6 +5637,67 @@
     border-bottom: none;
   }
 
+  /* ── Agent Rules section (ui-navigation.md §2) ──────────────────────── */
+  .rules-summary {
+    margin: 0 0 var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+  }
+
+  .rules-reconciling {
+    margin: 0 0 var(--space-2);
+    padding: var(--space-2);
+    border-radius: var(--radius);
+    background: var(--color-warning-bg, rgba(234, 179, 8, 0.1));
+    color: var(--color-warning-text, #a16207);
+    font-size: var(--text-sm);
+  }
+
+  .rules-group { margin-bottom: var(--space-3); }
+  .rules-group:last-child { margin-bottom: 0; }
+
+  .rules-group-title {
+    margin: 0 0 var(--space-1);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .rules-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .rule-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) 0;
+    font-size: var(--text-sm);
+    color: var(--color-text);
+  }
+
+  .rule-lock {
+    flex-shrink: 0;
+    font-size: var(--text-xs);
+  }
+
+  .rule-name {
+    font-weight: 500;
+    color: var(--color-text);
+  }
+
+  .rules-version {
+    margin-left: auto;
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+
   .spec-repo {
     font-family: var(--font-mono);
     font-size: var(--text-xs);
@@ -6039,60 +6177,6 @@
     transition: background var(--transition-fast), border-color var(--transition-fast);
   }
 
-  /* ── Agent Rules section (ui-navigation.md §2) ────────────────────────── */
-  .rules-summary {
-    margin: 0;
-    font-size: var(--text-sm);
-    color: var(--color-text-secondary);
-  }
-
-  .recent-updates-status {
-    margin: var(--space-2) 0 0;
-    padding: var(--space-2) var(--space-3);
-    font-size: var(--text-xs);
-    color: var(--color-warning, #b8860b);
-    background: var(--color-surface-elevated);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-  }
-
-  .rules-list {
-    list-style: none;
-    margin: var(--space-2) 0 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-  }
-
-  .rule-item {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    font-size: var(--text-sm);
-    color: var(--color-text);
-  }
-
-  .rule-lock {
-    flex-shrink: 0;
-  }
-
-  .rule-name {
-    font-weight: 500;
-  }
-
-  .rule-kind {
-    font-size: var(--text-xs);
-    color: var(--color-text-secondary);
-    background: var(--color-surface-elevated);
-    border-radius: var(--radius);
-    padding: 1px var(--space-2);
-  }
-
-  .rule-version {
-    font-size: var(--text-xs);
-    color: var(--color-text-secondary);
-  }
 
   .decision-entity-link:hover {
     background: var(--color-surface-elevated);

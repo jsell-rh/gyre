@@ -282,7 +282,8 @@
     decisionsError = null;
     try {
       let data = await api.myNotifications();
-      data = Array.isArray(data) ? data : (data?.items ?? []);
+      // Server shape: { notifications: [...] } (users.rs get_my_notifications).
+      data = Array.isArray(data) ? data : (data?.notifications ?? []);
       // Exclude dismissed and resolved items
       data = data.filter(n => !n.dismissed_at && !n.resolved_at);
       data.sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999));

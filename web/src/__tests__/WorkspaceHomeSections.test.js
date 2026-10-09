@@ -871,12 +871,22 @@ describe('Agent Rules section (ui-navigation.md §2 — meta-spec cascade)', () 
     await waitFor(() => {
       const items = container.querySelectorAll('[data-testid="rule-item"]');
       expect(items.length).toBeGreaterThan(0);
-      // All shown items should have the lock span
-      items.forEach(item => {
-        expect(item.querySelector('.rule-lock')).toBeTruthy();
-      });
     });
+    // The section shows the FULL cascade (required + optional, tenant +
+    // workspace, ui-navigation.md §2). Every REQUIRED rule must carry the
+    // lock; optional ones must not — the lock is the required marker.
+    const required = ['conventional-commits', 'security'];
+    const optional = ['test-coverage'];
+    for (const item of container.querySelectorAll('[data-testid="rule-item"]')) {
+      const name = item.querySelector('.rule-name')?.textContent ?? '';
+      if (required.includes(name)) {
+        expect(item.querySelector('.rule-lock')).toBeTruthy();
+      } else if (optional.includes(name)) {
+        expect(item.querySelector('.rule-lock')).toBeNull();
+      }
+    }
   });
+
 
   it('shows required meta-spec names', async () => {
     const { getByText } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });

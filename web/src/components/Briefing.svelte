@@ -50,6 +50,10 @@
   let sinceLabel = $state('');
   let workspaceMap = $state({});
 
+  // Stale-response guard (ui-navigation.md §4): a load started for one
+  // scope/workspace must not overwrite state after scope/workspace changed.
+  let loadGen = 0;
+
   function sinceEpochForRange(range) {
     const now = Math.floor(Date.now() / 1000);
     switch (range) {
@@ -86,8 +90,8 @@
       !data.metrics
     );
   }
-
   async function load() {
+    const gen = ++loadGen;
     loading = true;
     error = null;
 
@@ -97,14 +101,28 @@
     try {
       if (scope === 'workspace' && workspaceId) {
         const raw = await api.getWorkspaceBriefing(workspaceId, since);
+        if (gen !== loadGen) return; // scope changed while loading
         briefing = isEmpty(raw) ? { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null } : raw;
+      } else if (scope === 'repo') {
+        // HSI §1.5 repo-scope Briefing row: same endpoint narrowed by
+        // ?repo_id= — every section only covers this repo. No workspace or
+        // repo id means the repo is unresolved: no fetch, empty state.
+        if (workspaceId && repoId) {
+          const raw = await api.getWorkspaceBriefing(workspaceId, since, repoId);
+          if (gen !== loadGen) return;
+          briefing = isEmpty(raw) ? { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null } : raw;
+        } else {
+          briefing = { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null };
+        }
       } else if (scope === 'tenant') {
         const workspaces = await api.workspaces();
+        if (gen !== loadGen) return;
         const wsList = workspaces || [];
         workspaceMap = Object.fromEntries(wsList.map(w => [w.id, w.name ?? w.id]));
         const results = await Promise.allSettled(
           wsList.map(w => api.getWorkspaceBriefing(w.id, since).then(b => ({ ...b, _wsId: w.id })))
         );
+        if (gen !== loadGen) return;
         const merged = {
           completed: [],
           in_progress: [],
@@ -139,10 +157,11 @@
         };
         briefing = isEmpty(merged) ? { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null } : merged;
       } else {
-        // Repo scope — no briefing endpoint yet; show empty state
+        // No workspace context and no repo scope — nothing to fetch.
         briefing = { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null };
       }
     } catch (e) {
+      if (gen !== loadGen) return;
       if (e.message && e.message.includes('404')) {
         // 404: no briefing data yet — show empty state
         briefing = { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null };
@@ -153,7 +172,7 @@
         if (e.message) error = e.message;
       }
     } finally {
-      loading = false;
+      if (gen === loadGen) loading = false;
     }
   }
 
@@ -205,7 +224,11 @@
     }
     const trimmedHistory = chatHistory.slice(-20);
     chatHistory = [...chatHistory, { role: 'user', content: question }];
-    return api.briefingAsk(workspaceId, { question, history: trimmedHistory });
+    // Repo scope narrows the Q&A to this repo (ui-navigation.md §2 Briefing
+    // sub-tab amends HSI §9: optional repo_id in the ask request body).
+    const body = { question, history: trimmedHistory };
+    if (scope === 'repo' && repoId) body.repo_id = repoId;
+    return api.briefingAsk(workspaceId, body);
   }
 
   // Reload when scope or workspaceId changes (not just on mount)
@@ -558,8 +581,9 @@
         />
       {/if}
 
-      <!-- Q&A Chat (bottom) — only available with a workspace context -->
-      {#if scope === 'workspace' && workspaceId}
+      <!-- Q&A Chat (bottom) — workspace and repo scopes (ui-navigation.md §2:
+           repo Briefing sub-tab has the same "Ask a question" Q&A). -->
+      {#if (scope === 'workspace' || scope === 'repo') && workspaceId}
         <div class="chat-section" data-testid="briefing-chat">
           <InlineChat
             recipient="this briefing"

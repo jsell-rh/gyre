@@ -33,6 +33,7 @@
     repo = null,
     activeTab = 'specs',
     onTabChange = undefined,
+    onArchSubTabChange = undefined,
     workspaceBudget = null,
   } = $props();
 
@@ -895,6 +896,7 @@
       <ExplorerView
         scope={{ type: 'repo', workspaceId: workspace?.id, repoId: repo?.id }}
         workspaceName={workspace?.name ?? null}
+        onArchSubTabChange={onArchSubTabChange}
       />
     {:else if activeTab === 'dependencies'}
       <RepoDependencies repoId={repo?.id} {workspace} />
