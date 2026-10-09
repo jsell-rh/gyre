@@ -98,6 +98,43 @@ class CrashTest(unittest.TestCase):
         self.assertEqual(updates, {})
         self.assertIsNone(self.store.task('task-001')['data'].get('candidate'))
 
+    def test_metadata_only_resubmission_does_not_resolve_a_real_review_finding(self):
+        root = self.store.directory / 'source-proof'
+        root.mkdir()
+        def git(*args):
+            return subprocess.check_output(['git', *args], cwd=root, text=True, stderr=subprocess.PIPE).strip()
+        git('init', '-q', '-b', 'main')
+        git('config', 'user.name', 'Test')
+        git('config', 'user.email', 'test@example.com')
+        git('config', 'commit.gpgsign', 'false')
+        git('config', 'core.hooksPath', '/dev/null')
+        body = '---\ntitle: Scope enforcement\nspec_ref: behavior.md\ndepends_on: []\nprogress: needs-revision\n---\n\n## Required behavior\nReject foreign tenants.\n'
+        task_path = root / 'specs/tasks/task-001.md'
+        task_path.parent.mkdir(parents=True)
+        task_path.write_text(body)
+        (root / 'production.rs').write_text('pub fn allowed() -> bool { true }\n')
+        git('add', '.'); git('commit', '-qm', 'unrepaired candidate')
+        base = git('rev-parse', 'HEAD')
+        revised = body.replace('needs-revision', 'ready-for-review') + '\n## Shipped\n\n- Claimed to fix scope.\n'
+        task_path.write_text(revised)
+        git('add', '.'); git('commit', '-qm', 'notes only')
+        head = git('rev-parse', 'HEAD')
+        origin = self.store.directory / 'source-origin.git'
+        subprocess.run(['git', 'clone', '--quiet', '--bare', str(root), str(origin)], check=True)
+        git('remote', 'add', 'origin', str(origin))
+        repair = {'category': 'review', 'source': base, 'id': 'finding', 'detail': 'Scope enforcement is absent.'}
+        self.store.put_task('task-001', 'g', body, {'dependencies': [], 'candidate': base, 'candidate_base': base, 'repair': repair})
+        execution = Execution(self.store, self.claim)
+        execution.claim['input'] = {'base': base, 'candidate': base, 'repair': repair}
+        receipt = {'task_body': revised, 'valid': True, 'head': head, 'base': base, 'branch': 'private', 'agent_exit': 0}
+        with patch('pipeline.stages.prompt', return_value='assignment'), patch.object(execution, 'cloud_step', return_value=receipt), patch('pipeline.stages.checkout', return_value=root):
+            from pipeline.execution import Retry
+            with self.assertRaises(Retry) as raised:
+                implement(execution, self.store.task('task-001'))
+        self.assertTrue(raised.exception.fresh_model)
+        self.assertEqual(self.store.task('task-001')['data']['repair'], repair)
+        self.assertEqual(self.store.task('task-001')['data']['candidate'], base)
+
 
 if __name__ == '__main__':
     unittest.main()

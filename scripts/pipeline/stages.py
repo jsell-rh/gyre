@@ -76,6 +76,18 @@ def implement(execution, task):
         # An implementer cannot approve its own weaker desired requirements.
         # Retain its source for repair while keeping the assigned contract.
         result['task_body'] = task['body']
+    repair = task['data'].get('repair') or {}
+    requires_fix = (repair.get('category') in ('review', 'verification', 'ci', 'contract') and
+                    execution.claim['input']['base'] == task['data'].get('candidate_base'))
+    if not contract_changed and (not complete or requires_fix):
+        path = checkout(execution, result['head'])
+        seed = execution.claim['input'].get('candidate') or execution.claim['input']['base']
+        execution.command('git', 'fetch', '--quiet', 'origin', seed, cwd=path, timeout=180)
+        changed = execution.command('git', 'diff', '--name-only', seed, result['head'], cwd=path).stdout.splitlines()
+        substantive = [name for name in changed if name != f"specs/tasks/{task['name']}.md"
+                       and not name.startswith(('web/dist/', 'specs/reviews/'))]
+        if not substantive:
+            raise Retry('Implementation did not change source relevant to its unfinished assignment or repair. Resume the same task and address its findings; changing progress or notes alone does not resolve them.', fresh_model=True)
     updates = {'candidate': result['head'], 'candidate_base': result.get('base', execution.claim['input']['base']),
                'branch': result['branch'], 'task_override': result['task_body'],
                'review': None, 'verified': None,
