@@ -96,11 +96,14 @@ pub trait LlmPort: Send + Sync {
     /// Structured prediction: returns the LLM response parsed as JSON.
     ///
     /// Implementations append "Respond with valid JSON only, no markdown
-    /// code fences." to the system prompt.
+    /// code fences." to the system prompt. `max_tokens` bounds the output
+    /// exactly like `complete` — structured endpoints (explorer generate)
+    /// are subject to the same token limits as free-text ones.
     async fn predict_json(
         &self,
         system_prompt: &str,
         user_prompt: &str,
+        max_tokens: Option<u32>,
     ) -> Result<serde_json::Value>;
 
     /// Token-level streaming completion.

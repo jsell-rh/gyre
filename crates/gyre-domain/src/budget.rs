@@ -39,5 +39,10 @@ pub struct BudgetCallRecord {
     pub output_tokens: u64,
     pub cost_usd: f64,
     pub model: String,
+    /// Git SHA of the prompt template version used for this call
+    /// (ui-layout.md §2: "prompt template version (git SHA) recorded in
+    /// cost entries"). None when the template came from a DB override or
+    /// the hardcoded default — those have no git provenance.
+    pub prompt_template_sha: Option<String>,
     pub timestamp: u64,
 }

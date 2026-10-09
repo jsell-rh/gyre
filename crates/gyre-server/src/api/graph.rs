@@ -1462,7 +1462,7 @@ pub async fn predict_graph(
         crate::llm_helpers::resolve_llm_model(&state, &workspace_id, "graph-predict").await;
     let result = factory
         .for_model(&model)
-        .predict_json(&system_prompt, &user_prompt)
+        .predict_json(&system_prompt, &user_prompt, None)
         .await
         .map_err(ApiError::Internal)?;
 

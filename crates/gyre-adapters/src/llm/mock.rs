@@ -64,6 +64,7 @@ impl LlmPort for MockLlmAdapter {
         &self,
         _system_prompt: &str,
         user_prompt: &str,
+        _max_tokens: Option<u32>,
     ) -> Result<serde_json::Value> {
         if self.response == "__echo__" {
             Ok(serde_json::json!([{
@@ -168,14 +169,14 @@ mod tests {
     async fn mock_predict_json_returns_valid_json() {
         let expected = serde_json::json!({"key": "value"});
         let adapter = MockLlmAdapter::json_response(expected.clone());
-        let result = adapter.predict_json("sys", "user").await.unwrap();
+        let result = adapter.predict_json("sys", "user", None).await.unwrap();
         assert_eq!(result, expected);
     }
 
     #[tokio::test]
     async fn mock_predict_json_echo_returns_structured_response() {
         let adapter = MockLlmAdapter::echo();
-        let result = adapter.predict_json("sys", "my question").await.unwrap();
+        let result = adapter.predict_json("sys", "my question", None).await.unwrap();
         assert!(result.is_array());
         let arr = result.as_array().unwrap();
         assert_eq!(arr.len(), 1);

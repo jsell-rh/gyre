@@ -524,12 +524,17 @@ impl LlmPort for RigVertexAiAdapter {
         }
     }
 
-    async fn predict_json(&self, system_prompt: &str, user_prompt: &str) -> Result<Value> {
+    async fn predict_json(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        max_tokens: Option<u32>,
+    ) -> Result<Value> {
         let json_system = format!(
             "{}\nRespond with valid JSON only, no markdown code fences.",
             system_prompt
         );
-        let text = self.complete(&json_system, user_prompt, None).await?;
+        let text = self.complete(&json_system, user_prompt, max_tokens).await?;
         serde_json::from_str(&text).map_err(|e| {
             anyhow::anyhow!(
                 "Failed to parse Vertex AI response as JSON: {}: {:?}",
