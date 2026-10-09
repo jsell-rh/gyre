@@ -118,6 +118,17 @@ pub struct CreatedApiKey {
 pub struct SpawnOrchestratorResponse {
     /// Flattened agent summary (id, name, orchestrator_type, ...).
     pub agent: SpawnOrchestratorAgent,
+    /// Truthful process-launch outcome (task-099 F3): "running" or
+    /// "launch_failed". A persisted agent row is not a running orchestrator.
+    #[serde(default = "default_launch_status")]
+    pub launch_status: String,
+    /// Failure reason when launch_status == "launch_failed".
+    #[serde(default)]
+    pub launch_detail: Option<String>,
+}
+
+fn default_launch_status() -> String {
+    "unknown".to_string()
 }
 
 #[derive(Deserialize, Debug, Clone)]

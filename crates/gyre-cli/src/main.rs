@@ -1814,6 +1814,21 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
     {
         Ok(client::SpawnRepoOrchestratorOutcome::Spawned(spawned)) => {
             summary.orchestrator_agent_id = Some(spawned.agent.id.clone());
+            // F3: record the truthful process-launch outcome so the summary
+            // cannot claim "running" for a row whose process never started.
+            summary.orchestrator_launch_status = Some(spawned.launch_status.clone());
+            summary.orchestrator_launch_detail = spawned.launch_detail.clone();
+            if spawned.launch_status == "launch_failed" {
+                println!(
+                    "  WARNING: orchestrator process failed to launch{} - \
+                     auto-restart will retry",
+                    spawned
+                        .launch_detail
+                        .as_deref()
+                        .map(|d| format!(": {d}"))
+                        .unwrap_or_default()
+                );
+            }
         }
         Ok(client::SpawnRepoOrchestratorOutcome::AlreadyLive) => {
             println!("  A repo orchestrator is already active for this repo - keeping it");

@@ -732,7 +732,7 @@ async fn handle_create_task(state: &AppState, args: &Value) -> Value {
 /// gyre_spawn_repo_orchestrator (task-093): workspace-orchestrator only.
 /// Target repo must belong to the caller's workspace.
 async fn handle_spawn_repo_orchestrator(
-    state: &AppState,
+    state: &Arc<AppState>,
     args: &Value,
     auth: &AuthenticatedAgent,
 ) -> Value {
@@ -4636,8 +4636,12 @@ mod tests {
         );
         st.workspaces.create(&ws).await.unwrap();
 
-        // Create user + API key so auth.user_id is Some.
-        let user = User::new(Id::new("u-seen"), "ext-seen", "tester", 1000);
+        // Create user + API key so auth.user_id is Some. The user MUST carry
+        // a tenant binding (task-099 F1): the API-key path of the auth
+        // extractor fail-closes on users without one, so this test would
+        // get a 403 instead of a briefing without it.
+        let mut user = User::new(Id::new("u-seen"), "ext-seen", "tester", 1000);
+        user.tenant_id = Some(Id::new("default"));
         st.users.create(&user).await.unwrap();
         let raw_key = "gyre_test_briefing_key";
         st.api_keys

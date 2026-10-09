@@ -139,6 +139,18 @@ pub fn write_starter_kit(root: &Path) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+/// Repo-relative paths the starter kit owns. `push_and_sync_specs` commits
+/// exactly these when a `--starter-kit` run leaves them uncommitted — the
+/// push would otherwise send HEAD without them and the spec ledger would
+/// stay empty while bootstrap reports success.
+pub const STARTER_KIT_PATHS: &[&str] = &[
+    "specs/manifest.yaml",
+    "specs/index.md",
+    "specs/system/design-principles.md",
+    "AGENTS.md",
+    ".prek.yaml",
+];
+
 // ─── Spec registration (§8 step 6) ───────────────────────────────────────────
 
 /// Push the local repo checkout to the server's bare repo, then trigger the
@@ -154,9 +166,60 @@ pub async fn push_and_sync_specs(
     repo_path: &Path,
     repo_id: &str,
     clone_url: &str,
-) -> Result<usize> {
-    // Push the current branch to the server's bare repo (all specs; the
-    // server's post-receive hook also handles default-branch pushes).
+) -> anyhow::Result<usize> {
+    // Uncommitted starter-kit files must land in a commit or the push below
+    // sends HEAD without them and the ledger stays empty while the CLI
+    // reports success (spec §8 step 6 + starter-kit branch). Commit only
+    // paths the starter kit owns; leave the user's own staging untouched.
+    let status = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["status", "--porcelain", "--"])
+        .args(STARTER_KIT_PATHS)
+        .output()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to run git status: {e}"))?;
+    if !status.status.success() {
+        return Err(anyhow::anyhow!(
+            "git status failed: {}",
+            String::from_utf8_lossy(&status.stderr).trim()
+        ));
+    }
+    if !status.stdout.is_empty() {
+        let add = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["add", "--"])
+            .args(STARTER_KIT_PATHS)
+            .output()
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to run git add: {e}"))?;
+        if !add.status.success() {
+            return Err(anyhow::anyhow!(
+                "git add failed: {}",
+                String::from_utf8_lossy(&add.stderr).trim()
+            ));
+        }
+        let commit = tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_path)
+            .args(["commit", "-m", "chore(specs): add gyre starter kit"])
+            .output()
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to run git commit: {e}"))?;
+        if !commit.status.success() {
+            return Err(anyhow::anyhow!(
+                "git commit failed: {}",
+                String::from_utf8_lossy(&commit.stderr).trim()
+            ));
+        }
+    }
+
+    // Push the current branch to the server's bare repo. The server seeds
+    // `main` with an empty initial commit at repo creation, but bare repos
+    // accept non-fast-forward pushes by default (init_bare sets no
+    // receive.denyNonFastForwards), so the first bootstrap push of a local
+    // history that predates the server-side seed simply replaces it.
     let push = tokio::process::Command::new("git")
         .arg("-C")
         .arg(repo_path)
@@ -180,6 +243,14 @@ pub async fn push_and_sync_specs(
         .sync_specs(repo_id)
         .await
         .map_err(|e| anyhow::anyhow!("spec sync call failed: {e}"))?;
+    // The ledger count and the HEAD it synced against are both meaningful:
+    // a zero count against a known HEAD distinguishes "manifest parsed but
+    // no specs" from "sync never ran".
+    tracing::debug!(
+        head_sha = %synced.head_sha,
+        registered = synced.registered,
+        "bootstrap: spec ledger synced"
+    );
     Ok(synced.registered)
 }
 
@@ -279,10 +350,18 @@ pub struct BootstrapSummary {
     pub api_key: Option<String>,
     pub server_url: String,
     pub clone_url: Option<String>,
+    /// Repo orchestrator process-launch outcome (None before step 8).
     pub orchestrator_agent_id: Option<String>,
     /// Specs registered in the platform ledger during step 6.
     pub specs_registered: usize,
+    /// Truthful process-launch status of the repo orchestrator: "running",
+    /// "launch_failed", or None when a live one already existed (409 resume).
+    pub orchestrator_launch_status: Option<String>,
+    /// Failure reason when the orchestrator process failed to launch.
+    pub orchestrator_launch_detail: Option<String>,
+    /// Gate names configured in step 7.
     pub gates_configured: Vec<String>,
+    /// Persona slugs registered (and pre-approved) in step 5.
     pub personas_registered: Vec<String>,
 }
 
@@ -317,12 +396,39 @@ impl BootstrapSummary {
         if let Some(clone) = &self.clone_url {
             out.push_str(&format!("  Clone URL:  {clone}\n"));
         }
-        if let Some(agent) = &self.orchestrator_agent_id {
-            out.push_str(&format!(
-                "\nYour repo orchestrator is running (agent {agent}).\n"
-            ));
-        } else {
-            out.push_str("\nYour repo orchestrator is running.\n");
+        // F3: the orchestrator status claim must match what actually
+        // happened at launch — a persisted row is not "running".
+        match (&self.orchestrator_agent_id, self.orchestrator_launch_status.as_deref()) {
+            (Some(agent), Some("running")) => {
+                out.push_str(&format!(
+                    "\nYour repo orchestrator is running (agent {agent}).\n"
+                ));
+            }
+            (Some(agent), Some("launch_failed")) => {
+                out.push_str(&format!(
+                    "\nYour repo orchestrator was registered (agent {agent}) \
+                     but its process failed to launch"
+                ));
+                if let Some(detail) = &self.orchestrator_launch_detail {
+                    out.push_str(&format!(": {detail}"));
+                }
+                out.push_str(
+                    ".\nAuto-restart is enabled; the stale detector retries once its \
+                     heartbeat times out, or configure a compute target with a valid \
+                     command (GYRE_ORCHESTRATOR_COMMAND).\n",
+                );
+            }
+            (Some(agent), _) => {
+                out.push_str(&format!(
+                    "\nYour repo orchestrator agent is registered (agent {agent}); \
+                     launch status unknown.\n"
+                ));
+            }
+            (None, _) => {
+                out.push_str(
+                    "\nA repo orchestrator was already active for this repo - kept as-is.\n",
+                );
+            }
         }
         out.push_str(&format!(
             "Visit {} for the dashboard.\n",
@@ -483,8 +589,10 @@ mod tests {
             server_url: "http://localhost:3000".into(),
             clone_url: Some("http://localhost:3000/git/platform-team/gyre".into()),
             orchestrator_agent_id: Some("a1".into()),
+            orchestrator_launch_status: Some("running".into()),
             gates_configured: vec!["cargo-test".into()],
-            personas_registered: vec!["repo-orchestrator".into()],
+            specs_registered: 1,
+            ..Default::default()
         };
         let text = s.render();
         assert!(text.contains("t1"));
@@ -511,5 +619,50 @@ mod tests {
         };
         let text = s.render();
         assert!(!text.contains("API key"));
+    }
+
+    #[test]
+    fn summary_does_not_claim_running_when_launch_failed() {
+        // task-099 F3: a persisted agent row whose process failed to launch
+        // is NOT a running orchestrator. The summary must say what happened.
+        let s = BootstrapSummary {
+            tenant_id: "t".into(),
+            tenant_name: "dev".into(),
+            workspace_id: "w".into(),
+            workspace_name: "default".into(),
+            repo_id: "r".into(),
+            repo_name: "repo".into(),
+            server_url: "http://localhost:3000".into(),
+            orchestrator_agent_id: Some("a1".into()),
+            orchestrator_launch_status: Some("launch_failed".into()),
+            orchestrator_launch_detail: Some("No such file or directory (os error 2)".into()),
+            ..Default::default()
+        };
+        let text = s.render();
+        assert!(
+            !text.contains("orchestrator is running"),
+            "launch_failed must not be reported as running: {text}"
+        );
+        assert!(text.contains("failed to launch"));
+        assert!(text.contains("No such file or directory"));
+    }
+
+    #[test]
+    fn summary_reports_already_live_kept_as_is() {
+        // 409 resume path: bootstrap keeps the existing live orchestrator;
+        // the summary must not claim it spawned a new one.
+        let s = BootstrapSummary {
+            tenant_id: "t".into(),
+            tenant_name: "dev".into(),
+            workspace_id: "w".into(),
+            workspace_name: "default".into(),
+            repo_id: "r".into(),
+            repo_name: "repo".into(),
+            server_url: "http://localhost:3000".into(),
+            ..Default::default()
+        };
+        let text = s.render();
+        assert!(text.contains("already active"));
+        assert!(!text.contains("is running"));
     }
 }

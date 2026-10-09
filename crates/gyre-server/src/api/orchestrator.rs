@@ -23,6 +23,7 @@ use std::sync::Arc;
 /// Response for orchestrator spawn: agent summary + scoped JWT. Orchestrators
 /// have no worktree/branch/clone URL, so those fields are omitted entirely
 /// rather than defaulted (task-093).
+#[derive(Serialize)]
 pub struct SpawnOrchestratorResponse {
     pub agent: super::spawn::OrchestratorAgentResponse,
     pub token: String,
@@ -115,7 +116,7 @@ async fn resolve_orchestrator_persona(
 
 /// Launch outcome for an orchestrator process (F3: a persisted row is not
 /// "running" -- the spawn response must report what actually happened).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct LaunchOutcome {
     /// "running" or "launch_failed" (mirrors spawn.rs best-effort launch).
     pub launch_status: String,
@@ -136,21 +137,19 @@ pub(crate) struct LaunchOutcome {
 /// launch-failed orchestrator keeps restart_on_failure=true; the stale
 /// detector replaces it once its heartbeat times out.
 pub(crate) async fn launch_orchestrator_process(
-    state: &AppState,
+    state: &Arc<AppState>,
     agent: &gyre_domain::Agent,
     workspace: &gyre_domain::Workspace,
     token: &str,
 ) -> LaunchOutcome {
     // Compute-target priority: workspace assignment -> tenant default -> local.
-    let target_config: Option<super::compute::ComputeTargetConfig> = workspace
-        .compute_target_id
-        .as_ref()
-        .and_then(|ct_id| state.compute_targets.get_by_id(ct_id).await.ok().flatten())
-        .or_else(|| {
-            // Tenant default resolved synchronously is not possible here;
-            // handled below via get_default_for_tenant.
-            None
-        })
+    // (The workspace lookup needs .await, which cannot sit inside the sync
+    // and_then closure, so resolve it at statement level first.)
+    let workspace_target = match workspace.compute_target_id.as_ref() {
+        Some(ct_id) => state.compute_targets.get_by_id(ct_id).await.ok().flatten(),
+        None => None,
+    };
+    let target_config: Option<super::compute::ComputeTargetConfig> = workspace_target
         .map(|e| super::compute::ComputeTargetConfig {
             id: e.id.to_string(),
             name: e.name.clone(),
@@ -299,7 +298,7 @@ pub(crate) async fn launch_orchestrator_process(
 /// bump budgets, track analytics.
 #[allow(clippy::too_many_arguments)]
 async fn spawn_orchestrator(
-    state: &AppState,
+    state: &Arc<AppState>,
     workspace_id: &Id,
     repo_id: Option<&Id>,
     orchestrator_type: OrchestratorType,
@@ -392,7 +391,7 @@ async fn spawn_orchestrator(
 
 /// Shared core of POST /api/v1/workspaces/:id/orchestrator/spawn (task-093).
 pub(crate) async fn spawn_workspace_orchestrator_core(
-    state: &AppState,
+    state: &Arc<AppState>,
     workspace_id: &str,
     req: SpawnOrchestratorRequest,
     auth_agent_id: &str,
@@ -498,7 +497,7 @@ pub(crate) async fn list_repo_orchestrators_core(
 /// Caller must already be authorized for the target repo (REST: ABAC check;
 /// MCP: workspace-tier JWT + same-workspace repo check).
 pub(crate) async fn spawn_repo_orchestrator_core(
-    state: &AppState,
+    state: &Arc<AppState>,
     repo_id: &str,
     req: SpawnOrchestratorRequest,
     auth_agent_id: &str,
@@ -634,7 +633,7 @@ mod tests {
         let state = test_state();
         seed(&state).await;
 
-        let (agent, token) = spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1")
+        let (agent, token, _launch) = spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1")
             .await
             .unwrap();
 
@@ -701,7 +700,7 @@ mod tests {
         let state = test_state();
         seed(&state).await;
 
-        let (agent, token) =
+        let (agent, token, _launch) =
             spawn_repo_orchestrator_core(&state, "r-1", req(Some("repo-orch-1")), "user-1")
                 .await
                 .unwrap();
@@ -743,7 +742,7 @@ mod tests {
         // could not parse the spawn response at all.
         let state = test_state();
         seed(&state).await;
-        let (agent, _token) =
+        let (agent, _token, _launch) =
             spawn_repo_orchestrator_core(&state, "r-1", req(Some("dup-check")), "user-1")
                 .await
                 .unwrap();
@@ -765,7 +764,7 @@ mod tests {
         let state = test_state();
         seed(&state).await;
 
-        let (agent, _token) =
+        let (agent, _token, _launch) =
             spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1")
                 .await
                 .unwrap();
@@ -819,11 +818,11 @@ mod tests {
         let state = test_state();
         seed(&state).await;
 
-        let (ws_orch, _t1) =
+        let (ws_orch, _t1, _l1) =
             spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1")
                 .await
                 .unwrap();
-        let (repo_orch, _t2) =
+        let (repo_orch, _t2, _l2) =
             spawn_repo_orchestrator_core(&state, "r-1", req(Some("repo-orch")), "user-1")
                 .await
                 .unwrap();
@@ -849,5 +848,48 @@ mod tests {
                 .any(|m| m.kind == gyre_common::message::MessageKind::Escalation),
             "expected an Escalation message in the workspace orchestrator inbox"
         );
+    }
+
+    #[tokio::test]
+    async fn spawn_reports_truthful_launch_outcome() {
+        // task-099 F3: the spawn response must report what actually
+        // happened at launch. The test state has no compute target and no
+        // GYRE_ORCHESTRATOR_COMMAND, so the default command
+        // /gyre/entrypoint.sh does not exist on this machine and the launch
+        // must be reported as launch_failed — never as "running" for a row
+        // whose process never started.
+        let state = test_state();
+        seed(&state).await;
+
+        let (_agent, _token, launch) =
+            spawn_repo_orchestrator_core(&state, "r-1", req(Some("truthful")), "user-1")
+                .await
+                .unwrap();
+        assert!(
+            launch.launch_status == "running" || launch.launch_status == "launch_failed",
+            "launch_status must be a known value, got: {}",
+            launch.launch_status
+        );
+        if launch.launch_status == "launch_failed" {
+            assert!(
+                launch.launch_detail.is_some(),
+                "launch_failed must carry a reason"
+            );
+        }
+
+        // The REST response serializes the same fields (what the CLI parses).
+        let resp = SpawnOrchestratorResponse {
+            agent: super::super::spawn::orchestrator_response(
+                state.agents.find_by_name("truthful").await.unwrap().unwrap(),
+            ),
+            token: String::new(),
+            launch_status: launch.launch_status.clone(),
+            launch_detail: launch.launch_detail.clone(),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["launch_status"], launch.launch_status);
+        if launch.launch_detail.is_some() {
+            assert!(json["launch_detail"].is_string());
+        }
     }
 }
