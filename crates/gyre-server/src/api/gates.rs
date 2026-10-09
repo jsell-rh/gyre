@@ -638,7 +638,10 @@ mod tests {
             .expect("entry exists");
 
         // GET /api/v1/specs/approvals returns full ledger data with derived status.
-        let resp = app()
+        // Build the router over the SAME state we seeded — a fresh `app()`
+        // would have its own empty ledger.
+        let app = crate::api::api_router().with_state(state);
+        let resp = app
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/specs/approvals")
