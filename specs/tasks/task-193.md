@@ -2,7 +2,7 @@
 title: "Mode-based spec approval status resolution with attestation/stack_hash validity"
 spec_ref: "spec-registry.md §9 Approval Status Resolution"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "spec-registry.md §9"
 commits: ["1e55eef5973023193199d136a844f072d25f1b36", "b1ead356c8c96561b8b88374922312ca82831824", "5d4ebb171e2f01c7d5fdd6898c5c008f854ac74a", "e42c374d89663ff8bac7990edb2853942534fdf2", "0e6c1b88e05e10e2ab8c40eb958d28e27579a6d6", "56b51b3fa52d5d978ec8ca9519884ddc31bf58a9"]
