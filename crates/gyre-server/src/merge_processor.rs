@@ -1006,11 +1006,24 @@ async fn rollback_atomic_group(
     })
     .to_string();
 
-    for user_id in &author_ids {
+    for author_id in &author_ids {
+        // The author is an AGENT; notifications live in HUMAN inboxes. Resolve
+        // the agent's spawning user (falling back to the agent id itself when
+        // no human is recorded) — same rule as notify_gate_failure /
+        // notify_mr_merged. Addressing the raw agent id delivers to a user
+        // that does not exist, so no human ever sees the failure notice.
+        let author = Id::new(author_id);
+        let user_id = match state.agents.find_by_id(&author).await {
+            Ok(Some(agent)) => match &agent.spawned_by {
+                Some(sb) => Id::new(sb.clone()),
+                None => author.clone(),
+            },
+            _ => author.clone(),
+        };
         crate::notifications::notify_rich(
             state,
             ws_id.clone(),
-            Id::new(user_id),
+            user_id,
             gyre_common::NotificationType::AtomicGroupFailure,
             format!(
                 "Atomic group '{}' failed: {} — all members rolled back and requeued",
