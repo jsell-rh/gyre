@@ -160,6 +160,32 @@ enum Commands {
         #[arg(long)]
         workspace: Option<String>,
     },
+
+    /// Full-text search across all entities (specs, tasks, MRs, commits, agents)
+    Search {
+        /// Search query — supports quoted phrases and facet:value syntax
+        /// (e.g. "merge queue" type:spec status:approved)
+        query: Option<String>,
+        /// Filter by entity type (spec, task, mr, commit, agent)
+        #[arg(long, short = 't')]
+        r#type: Option<String>,
+        /// Filter by status
+        #[arg(long)]
+        status: Option<String>,
+        /// Filter by workspace slug
+        #[arg(long, short = 'w')]
+        workspace: Option<String>,
+        /// Only results since this time (e.g., 7d, 2026-03-01)
+        #[arg(long)]
+        since: Option<String>,
+        /// Autocomplete mode — return suggestions for the given prefix
+        #[arg(long)]
+        suggest: Option<String>,
+        /// Maximum results to return
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
+
     /// Show system trace for a merge request
     Trace {
         /// Merge request ID
@@ -937,6 +963,58 @@ async fn main() -> Result<()> {
                     let confidence = n["spec_confidence"].as_str().unwrap_or("None");
                     let spec = n["spec_path"].as_str().unwrap_or("-");
                     println!("{ntype:<12} {name:<30} {qname:<50} {confidence:<10} {spec}");
+                }
+            }
+        }
+
+        Commands::Search {
+            query,
+            r#type,
+            status,
+            workspace,
+            since,
+            suggest,
+            limit,
+        } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+
+            let q = build_search_query(
+                query.as_deref(),
+                r#type.as_deref(),
+                status.as_deref(),
+                since.as_deref(),
+            );
+
+            // Autocomplete: the dedicated /search/suggest endpoint
+            // (search.md §API) is not implemented yet; fall back to a regular
+            // prefix search over titles via the main endpoint.
+            let prefix = suggest.as_deref().map(str::trim);
+            let q = match prefix {
+                Some(p) if !p.is_empty() => p.to_string(),
+                _ => q,
+            };
+
+            if q.is_empty() && suggest.is_none() {
+                println!("No search query given. Usage: gyre search <query> [--type spec] [--status approved] [--workspace slug] [--since 7d] [--suggest prefix]");
+            } else {
+                let workspace_id = match &workspace {
+                    Some(slug) => Some(api.resolve_workspace_slug(slug).await?),
+                    None => None,
+                };
+                // `--type` is also passed as the entity_type param: it filters
+                // even on servers whose query parser ignores facets, and the
+                // workspace filter needs the resolved ID in any case.
+                let entity_type = r#type.as_deref().map(str::trim).filter(|t| !t.is_empty());
+                let response = api
+                    .search(&q, entity_type, workspace_id.as_deref(), limit)
+                    .await?;
+
+                if let Some(prefix) = suggest.as_deref() {
+                    print_search_suggestions(prefix, &response);
+                } else {
+                    print_search_results(&response);
                 }
             }
         }
@@ -2184,6 +2262,85 @@ fn print_spec_links_table(links: &[serde_json::Value]) {
     }
 }
 
+/// Render search results as a readable table (search.md §CLI):
+/// one line per result with entity type, title, id, and snippet.
+fn print_search_results(results: &client::SearchResponse) {
+    if results.results.is_empty() {
+        println!("No results for '{}'.", results.query);
+        return;
+    }
+    println!(
+        "Search results for '{}' ({} shown of {} total):",
+        results.query,
+        results.results.len(),
+        results.total
+    );
+    println!("{}", "-".repeat(80));
+    for r in &results.results {
+        let snippet = r.snippet.replace(['\n', '\r'], " ");
+        println!("[{}] {} ({})", r.entity_type, r.title, r.entity_id);
+        if !snippet.is_empty() {
+            println!("      {snippet}");
+        }
+    }
+}
+
+/// Fold the search filter flags into the query string using the server's
+/// query language (facet:value tokens, search.md §Query Language).
+/// The flags are sugar: `--type spec` == `type:spec` in the query.
+/// Empty/whitespace-only flag values are ignored.
+fn build_search_query(
+    query: Option<&str>,
+    entity_type: Option<&str>,
+    status: Option<&str>,
+    since: Option<&str>,
+) -> String {
+    let mut q = query.unwrap_or_default().trim().to_string();
+    for facet in [
+        entity_type.map(|v| ("type", v)),
+        status.map(|v| ("status", v)),
+        since.map(|v| ("since", v)),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let v = facet.1.trim();
+        if !v.is_empty() {
+            q = format!("{q} {}:{}", facet.0, v);
+        }
+    }
+    q.trim().to_string()
+}
+
+/// Collect autocomplete suggestions for `prefix`: results whose title starts
+/// with the prefix (case-insensitive). The server's search endpoint matches
+/// by substring anywhere in the title or body, so the prefix filter for
+/// autocomplete is applied client-side.
+fn collect_suggestions<'a>(
+    prefix: &str,
+    results: &'a client::SearchResponse,
+) -> Vec<(&'a str, &'a str, &'a str)> {
+    let p = prefix.to_lowercase();
+    results
+        .results
+        .iter()
+        .filter(|r| r.title.to_lowercase().starts_with(&p))
+        .map(|r| (r.entity_type.as_str(), r.title.as_str(), r.entity_id.as_str()))
+        .collect()
+}
+
+/// Render autocomplete suggestions for `prefix` in `type  title  (id)` form.
+fn print_search_suggestions(prefix: &str, results: &client::SearchResponse) {
+    let matches = collect_suggestions(prefix, results);
+    if matches.is_empty() {
+        println!("No suggestions for '{}'.", prefix);
+        return;
+    }
+    for (entity_type, title, entity_id) in &matches {
+        println!("{entity_type}    {title}    ({entity_id})");
+    }
+}
+
 /// Print a SpecGraphResponse as a text summary.
 fn print_spec_graph_text(graph: &serde_json::Value) {
     let nodes = graph["nodes"].as_array();
@@ -2958,6 +3115,200 @@ mod tests {
         } else {
             panic!("Expected Explore");
         }
+    }
+
+    // ── Search command tests ────────────────────────────────────────────────
+
+    #[test]
+    fn cli_search_parses() {
+        let args = Cli::try_parse_from(["gyre", "search", "identity security"]);
+        assert!(args.is_ok());
+        if let Commands::Search {
+            query,
+            r#type,
+            status,
+            workspace,
+            since,
+            suggest,
+            limit,
+        } = args.unwrap().command
+        {
+            assert_eq!(query.as_deref(), Some("identity security"));
+            assert!(r#type.is_none());
+            assert!(status.is_none());
+            assert!(workspace.is_none());
+            assert!(since.is_none());
+            assert!(suggest.is_none());
+            assert_eq!(limit, 20);
+        } else {
+            panic!("Expected Search");
+        }
+    }
+
+    #[test]
+    fn cli_search_faceted_parses() {
+        let args = Cli::try_parse_from([
+            "gyre",
+            "search",
+            "--type",
+            "spec",
+            "--status",
+            "approved",
+            "--workspace",
+            "platform-team",
+            "--since",
+            "7d",
+            "--limit",
+            "5",
+            "ABAC",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Search {
+            query,
+            r#type,
+            status,
+            workspace,
+            since,
+            suggest,
+            limit,
+        } = args.unwrap().command
+        {
+            assert_eq!(query.as_deref(), Some("ABAC"));
+            assert_eq!(r#type.as_deref(), Some("spec"));
+            assert_eq!(status.as_deref(), Some("approved"));
+            assert_eq!(workspace.as_deref(), Some("platform-team"));
+            assert_eq!(since.as_deref(), Some("7d"));
+            assert!(suggest.is_none());
+            assert_eq!(limit, 5);
+        } else {
+            panic!("Expected Search");
+        }
+    }
+
+    #[test]
+    fn cli_search_suggest_parses() {
+        let args = Cli::try_parse_from(["gyre", "search", "--suggest", "iden"]);
+        assert!(args.is_ok());
+        if let Commands::Search {
+            query,
+            suggest,
+            ..
+        } = args.unwrap().command
+        {
+            assert!(query.is_none());
+            assert_eq!(suggest.as_deref(), Some("iden"));
+        } else {
+            panic!("Expected Search");
+        }
+    }
+
+    #[test]
+    fn build_search_query_folds_facets() {
+        let q = build_search_query(Some("merge queue"), Some("spec"), None, None);
+        assert_eq!(q, "merge queue type:spec");
+    }
+
+    #[test]
+    fn build_search_query_all_facets() {
+        let q = build_search_query(Some("ABAC"), Some("spec"), Some("approved"), Some("7d"));
+        assert_eq!(q, "ABAC type:spec status:approved since:7d");
+    }
+
+    #[test]
+    fn build_search_query_ignores_empty_facets() {
+        let q = build_search_query(Some("auth"), Some("  "), Some(""), None);
+        assert_eq!(q, "auth");
+    }
+
+    #[test]
+    fn build_search_query_no_query_no_facets() {
+        let q = build_search_query(None, None, None, None);
+        assert_eq!(q, "");
+    }
+
+    #[test]
+    fn build_search_query_facets_only() {
+        let q = build_search_query(None, Some("spec"), None, None);
+        assert_eq!(q, "type:spec");
+    }
+
+    #[test]
+    fn suggest_filters_to_title_prefix() {
+        let results = client::SearchResponse {
+            query: "iden".into(),
+            total: 3,
+            results: vec![
+                client::SearchResult {
+                    entity_type: "spec".into(),
+                    entity_id: "system/identity-security.md".into(),
+                    title: "Identity & Security".into(),
+                    snippet: String::new(),
+                    score: 3.0,
+                    facets: Default::default(),
+                },
+                client::SearchResult {
+                    entity_type: "task".into(),
+                    entity_id: "task-042".into(),
+                    title: "Coincidental iden-tifier cleanup".into(),
+                    snippet: String::new(),
+                    score: 1.0,
+                    facets: Default::default(),
+                },
+                client::SearchResult {
+                    entity_type: "spec".into(),
+                    entity_id: "system/identity.md".into(),
+                    title: "identity model".into(),
+                    snippet: String::new(),
+                    score: 2.0,
+                    facets: Default::default(),
+                },
+            ],
+        };
+        let suggestions = collect_suggestions("iden", &results);
+        assert_eq!(
+            suggestions,
+            vec![
+                ("spec", "Identity & Security", "system/identity-security.md"),
+                ("spec", "identity model", "system/identity.md"),
+            ]
+        );
+    }
+
+    #[test]
+    fn suggest_prefix_is_case_insensitive() {
+        let results = client::SearchResponse {
+            query: "IDEN".into(),
+            total: 1,
+            results: vec![client::SearchResult {
+                entity_type: "spec".into(),
+                entity_id: "system/identity.md".into(),
+                title: "identity model".into(),
+                snippet: String::new(),
+                score: 2.0,
+                facets: Default::default(),
+            }],
+        };
+        assert_eq!(
+            collect_suggestions("IDEN", &results),
+            vec![("spec", "identity model", "system/identity.md")]
+        );
+    }
+
+    #[test]
+    fn suggest_no_prefix_match_reports_none() {
+        let results = client::SearchResponse {
+            query: "xyz".into(),
+            total: 1,
+            results: vec![client::SearchResult {
+                entity_type: "task".into(),
+                entity_id: "task-001".into(),
+                title: "unrelated".into(),
+                snippet: String::new(),
+                score: 1.0,
+                facets: Default::default(),
+            }],
+        };
+        assert!(collect_suggestions("xyz", &results).is_empty());
     }
 
     // ── Trace command tests ─────────────────────────────────────────────────
