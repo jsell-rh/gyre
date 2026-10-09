@@ -442,8 +442,8 @@ tests, so the sandbox checker typechecks every Rust target with Clippy and runs
 the static and frontend build gates there. Performance tests also need stable
 host resources. Before promotion, the controller runs `cargo test --all` and the
 full frontend suite in an isolated host worktree at the exact verified merge SHA.
-Its result is recorded in `attempts/<id>/host-tests.log`; a failure blocks the
-push to `main`. The host gate runs as a separate recorded process, so the
+Its result is recorded in `attempts/<id>/host-tests.log`; a failure blocks PR
+publication and merging. The host gate runs as a separate recorded process, so the
 controller continues scheduling, reaping, and deleting sandboxes while it runs.
 
 Every finished sandbox is deleted, including failed attempts. The controller

@@ -237,9 +237,12 @@ Publication now creates an idempotent GitHub PR for the verified integration
 ref **after** independent cloud review and host suites pass. Its body describes
 shipped behavior, exact head/base SHAs, gate results and the frozen bundle.
 GitHub must confirm the exact head and expected base before publication is
-accepted. Default mode then pushes that exact merge to main. `--publication pr`
-leaves the verified PR open; returning to default mode resumes promotion with
-the normal base/generation checks. Publication failures retain the verification
+accepted. Both modes reconcile GitHub checks on that exact head. Default mode
+requests a GitHub merge with the shipped description and an exact-head guard;
+`--publication pr` leaves passing PRs open. Required checks and merge policy
+are enforced without an administrator bypass. The current upstream also
+requires the PR to be up to date with main. Returning to default mode resumes
+promotion with the normal base/generation checks. Publication failures retain the verification
 and back off. PR URLs are immediately available in the cockpit ledger.
 
 ### Practical limits still requiring observation
