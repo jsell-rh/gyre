@@ -129,11 +129,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/status", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/queue/pause", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/queue/resume", "repo", Some("write")),
-                RouteResourceMapping::api(
-                    "/api/v1/repos/:id/revert/:mr_id",
-                    "repo",
-                    Some("write"),
-                ),
+                RouteResourceMapping::api("/api/v1/repos/:id/revert/:mr_id", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/post-merge-gates", "gate", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/stack-policy", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/spec-policy", "repo", None),
@@ -149,11 +145,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/jj/squash", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/jj/undo", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/jj/bookmark", "repo", Some("write")),
-                RouteResourceMapping::api(
-                    "/api/v1/repos/:id/commits/:sha/signature",
-                    "repo",
-                    None,
-                ),
+                RouteResourceMapping::api("/api/v1/repos/:id/commits/:sha/signature", "repo", None),
                 RouteResourceMapping::api(
                     "/api/v1/repos/:id/orchestrator/spawn",
                     "repo",

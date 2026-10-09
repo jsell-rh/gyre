@@ -713,12 +713,14 @@ mod tests {
         }
 
         // Nothing was spawned.
-        let agents = state.agents.list_by_workspace(&Id::new("ws-1")).await.unwrap();
-        assert!(
-            agents
-                .iter()
-                .all(|a| a.orchestrator_type != OrchestratorType::WorkspaceOrchestrator)
-        );
+        let agents = state
+            .agents
+            .list_by_workspace(&Id::new("ws-1"))
+            .await
+            .unwrap();
+        assert!(agents
+            .iter()
+            .all(|a| a.orchestrator_type != OrchestratorType::WorkspaceOrchestrator));
     }
 
     #[tokio::test]
@@ -735,7 +737,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(code, StatusCode::CREATED);
-        assert_eq!(body.agent.orchestrator_type, "repo_orchestrator".to_string());
+        assert_eq!(
+            body.agent.orchestrator_type,
+            "repo_orchestrator".to_string()
+        );
     }
 
     #[tokio::test]
@@ -755,14 +760,12 @@ mod tests {
             Err(other) => panic!("expected Forbidden, got: {other}"),
             Ok(_) => panic!("cross-tenant spawn must be Forbidden"),
         }
-        assert!(
-            state
-                .agents
-                .find_by_name("repo-orch-evil")
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(state
+            .agents
+            .find_by_name("repo-orch-evil")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -1005,12 +1008,10 @@ mod tests {
                 .await
                 .unwrap();
 
-        let code = crate::api::spawn::fail_agent(
-            State(state.clone()),
-            Path(repo_orch.id.to_string()),
-        )
-        .await
-        .unwrap();
+        let code =
+            crate::api::spawn::fail_agent(State(state.clone()), Path(repo_orch.id.to_string()))
+                .await
+                .unwrap();
         assert_eq!(code, StatusCode::OK);
 
         let replacement = state
@@ -1049,12 +1050,9 @@ mod tests {
                 .await
                 .unwrap();
 
-        let code = crate::api::spawn::stop_agent(
-            State(state.clone()),
-            Path(agent.id.to_string()),
-        )
-        .await
-        .unwrap();
+        let code = crate::api::spawn::stop_agent(State(state.clone()), Path(agent.id.to_string()))
+            .await
+            .unwrap();
         assert_eq!(code, StatusCode::OK);
 
         let stopped = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();

@@ -1513,7 +1513,6 @@ pub async fn stop_agent(
         return Ok(StatusCode::OK);
     }
 
-
     agent
         .transition_status(AgentStatus::Stopped)
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;

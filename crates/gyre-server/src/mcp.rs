@@ -5245,12 +5245,7 @@ mod tests {
 
         // ReadOnly user + API key (auth.rs API-key path: roles come from the
         // user record; User::new defaults to [ReadOnly]).
-        let user = gyre_domain::User::new(
-            gyre_common::Id::new("ro-user"),
-            "ro-ext",
-            "ro-user",
-            0,
-        );
+        let user = gyre_domain::User::new(gyre_common::Id::new("ro-user"), "ro-ext", "ro-user", 0);
         state.users.create(&user).await.unwrap();
         let raw_key = "ro-test-api-key";
         let hashed = crate::auth::hash_api_key(raw_key);
@@ -5287,7 +5282,10 @@ mod tests {
             .list_unacked(&gyre_common::Id::new("orch-ro-target"), 100)
             .await
             .unwrap();
-        assert!(msgs.is_empty(), "no message may be stored for a denied send");
+        assert!(
+            msgs.is_empty(),
+            "no message may be stored for a denied send"
+        );
     }
 
     #[tokio::test]

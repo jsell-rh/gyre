@@ -41,11 +41,8 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                 // counts against the workspace concurrency limit. Runs for
                 // every aborted agent, not just orchestrators, because the
                 // budget tracks all active agents.
-                crate::api::budget::decrement_active_agents(
-                    state,
-                    &agent.workspace_id.to_string(),
-                )
-                .await;
+                crate::api::budget::decrement_active_agents(state, &agent.workspace_id.to_string())
+                    .await;
 
                 // Clean up worktrees
                 if let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await {
