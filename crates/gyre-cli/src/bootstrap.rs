@@ -7,53 +7,12 @@
 use std::path::Path;
 
 // ─── Persona prompts ──────────────────────────────────────────────────────────
-
-pub const WORKSPACE_ORCHESTRATOR_PROMPT: &str =
-    include_str!("bootstrap/personas/workspace-orchestrator.md");
-pub const REPO_ORCHESTRATOR_PROMPT: &str = include_str!("bootstrap/personas/repo-orchestrator.md");
-pub const ACCOUNTABILITY_PROMPT: &str = include_str!("bootstrap/personas/accountability.md");
-pub const SECURITY_PROMPT: &str = include_str!("bootstrap/personas/security.md");
-
-/// A built-in persona to register during bootstrap (platform-model.md §2).
-pub struct BuiltinPersona {
-    pub name: &'static str,
-    pub slug: &'static str,
-    pub prompt: &'static str,
-    pub capabilities: &'static [&'static str],
-    pub protocols: &'static [&'static str],
-}
-
-/// The four built-in personas, all pre-approved at Tenant scope (spec §8 step 5).
-pub const BUILTIN_PERSONAS: &[BuiltinPersona] = &[
-    BuiltinPersona {
-        name: "Workspace Orchestrator",
-        slug: "workspace-orchestrator",
-        prompt: WORKSPACE_ORCHESTRATOR_PROMPT,
-        capabilities: &["task.create", "spec.read", "cross-repo-analysis"],
-        protocols: &["mcp", "escalation", "handoff"],
-    },
-    BuiltinPersona {
-        name: "Repo Orchestrator",
-        slug: "repo-orchestrator",
-        prompt: REPO_ORCHESTRATOR_PROMPT,
-        capabilities: &["task.create", "task.decompose", "agent.dispatch", "merge.queue"],
-        protocols: &["mcp", "ralph-loop", "escalation", "handoff"],
-    },
-    BuiltinPersona {
-        name: "Accountability Agent",
-        slug: "accountability",
-        prompt: ACCOUNTABILITY_PROMPT,
-        capabilities: &["spec.read", "code.read", "drift.report"],
-        protocols: &["mcp", "patrol"],
-    },
-    BuiltinPersona {
-        name: "Security Agent",
-        slug: "security",
-        prompt: SECURITY_PROMPT,
-        capabilities: &["code.read", "threat.report", "dependency.audit"],
-        protocols: &["mcp", "patrol", "escalation"],
-    },
-];
+// Single source of truth: `gyre_domain::BUILTIN_PERSONA_DEFS`, the same
+// definitions the server seeds from (platform-model.md §2). task-140
+// consolidated the CLI's private copies here — two independent embeds of
+// the four personas could drift, restoring different prompts on
+// re-registration than a server restart re-seeds.
+pub use gyre_domain::BUILTIN_PERSONA_DEFS as BUILTIN_PERSONAS;
 
 // ─── Slug derivation ──────────────────────────────────────────────────────────
 
@@ -304,12 +263,34 @@ mod tests {
     fn builtin_persona_prompts_are_substantive() {
         for p in BUILTIN_PERSONAS {
             assert!(
-                p.prompt.len() > 500,
+                p.system_prompt.len() > 500,
                 "persona {} prompt too short: {} bytes",
                 p.slug,
-                p.prompt.len()
+                p.system_prompt.len()
             );
             assert!(!p.capabilities.is_empty(), "persona {} needs capabilities", p.slug);
+        }
+    }
+
+    /// Single source of truth for the §2 table: the CLI registers exactly
+    /// the same definitions the server seeds — `gyre_domain::BUILTIN_PERSONA_DEFS`
+    /// re-exported as `BUILTIN_PERSONAS`. Before task-140's consolidation the
+    /// CLI embedded private copies under `bootstrap/personas/`; byte-identity
+    /// with `specs/personas/*.md` was only ever hand-verified, so the two
+    /// registration paths could silently drift. This now fails to compile
+    /// any other way: there is no second definition to drift.
+    #[test]
+    fn builtin_personas_are_the_domain_seed_definitions() {
+        assert_eq!(
+            BUILTIN_PERSONAS.as_ptr() as *const (),
+            gyre_domain::BUILTIN_PERSONA_DEFS.as_ptr() as *const ()
+        );
+        // The domain test suite independently asserts slug order, tenant
+        // scope, pre-approval, and SHA-256 content hashes for these same
+        // definitions; here we assert the registration surface is identical
+        // (name/slug/prompt/capabilities/protocols), not just co-located.
+        for p in BUILTIN_PERSONAS {
+            assert!(p.system_prompt.starts_with('#'), "spec-file prompt for {}", p.slug);
         }
     }
 
