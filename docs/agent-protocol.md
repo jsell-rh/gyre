@@ -132,6 +132,7 @@ When the merge queue executes an `AgentReview` or `AgentValidation` gate, it spa
 | `GYRE_DIFF_URL` | URL to fetch the MR diff |
 | `GYRE_SPEC_REF` | Spec reference bound to the MR (if any) |
 | `GYRE_PERSONA` | Persona file path for the gate |
+| `GYRE_VALIDATION_TYPE` | AgentValidation only: domain-specific check identifier from the gate config (empty string when unset) |
 
 **`AgentReview` protocol:** exit with any code; server checks for an Approved/ChangesRequested review submitted by `GYRE_GATE_AGENT_ID` after the process exits.
 

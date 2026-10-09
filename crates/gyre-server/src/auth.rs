@@ -282,6 +282,52 @@ impl AgentSigningKey {
         jsonwebtoken::encode(&header, &claims, &self.encoding_key)
             .map_err(|e| format!("JWT mint error: {e}"))
     }
+
+    /// Mint a scoped agent JWT (task-134 review-agent protocol).
+    ///
+    /// Gate agents are ephemeral, single-purpose identities: an AgentReview
+    /// gate's reviewer may submit its verdict and read MR context, nothing
+    /// else. The `scope` claim carries an explicit capability string (e.g.
+    /// `review:submit`) that `git_http` (push denial), the ABAC middleware
+    /// (route allow-list), and `submit_review` (reviewer identity binding)
+    /// all enforce. `task_id` carries the gate id so the token is traceable
+    /// to the gate run that minted it.
+    pub fn mint_scoped(
+        &self,
+        agent_id: &str,
+        task_id: &str,
+        spawned_by: &str,
+        issuer: &str,
+        ttl_secs: u64,
+        scope: &str,
+    ) -> Result<String, String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let claims = AgentJwtClaims {
+            sub: agent_id.to_string(),
+            iss: issuer.to_string(),
+            iat: now,
+            exp: now + ttl_secs,
+            scope: scope.to_string(),
+            task_id: task_id.to_string(),
+            spawned_by: spawned_by.to_string(),
+            workspace_id: None,
+            repo_id: None,
+            orchestrator_type: None,
+            wl_pid: None,
+            wl_hostname: None,
+            wl_compute_target: None,
+            wl_stack_hash: None,
+            wl_container_id: None,
+            wl_image_hash: None,
+        };
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+        header.kid = Some(self.kid.clone());
+        jsonwebtoken::encode(&header, &claims, &self.encoding_key)
+            .map_err(|e| format!("JWT mint error: {e}"))
+    }
 }
 
 // -- Security helpers ---------------------------------------------------------
