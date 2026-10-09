@@ -4114,7 +4114,7 @@ mod tests {
             .unwrap()
             .path
             .clone();
-        super::process_spec_lifecycle(&state, &repo_id, &repo_path, "main", &updates).await;
+        super::process_spec_lifecycle(&state, &repo_id, &repo_path, "main", &Id::new("ws-test"), &updates).await;
 
         let tasks = state.tasks.list().await.unwrap();
         assert!(
@@ -4157,7 +4157,7 @@ mod tests {
             .unwrap()
             .path
             .clone();
-        super::process_spec_lifecycle(&state, &repo_id, &repo_path, "main", &updates).await;
+        super::process_spec_lifecycle(&state, &repo_id, &repo_path, "main", &Id::new("ws-test"), &updates).await;
 
         let tasks = state.tasks.list().await.unwrap();
         let created: Vec<&gyre_domain::Task> = tasks
