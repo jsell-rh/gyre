@@ -2,7 +2,7 @@
 title: "Repair verified failure on main cd1c5f044e49"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 commits: ["8f8d0c7e57f76c160857fc42ffaf10ae2ac80600", "b81124fa79691ed26bb92eb1963b055ea9984b68", "c1772d5bb2ae3f1d407d890d3aa76b350380e374", "d2c087fa871476c86fadc597e8ecaaf390918d61", "1270b4c4132bbad5d7219cd1fa327ec624690816"]
 ---
 
@@ -1165,3 +1165,53 @@ suites remain the controller's host/GitHub gates on the exact merge SHA.
 - specs/tasks/task-107.md
 
 Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
+
+## Repair record (2026-10-09, round 10 — scope restoration preserved, ready for review)
+
+Merge-base vs origin/main this round: `b6b6f0e` (main advanced past `e7929ef`
+with `93ca2ee` and `b6b6f0e` — dev-loop process fixes only, no product
+overlap with this task's 18-file diff).
+
+### Root scope restorations — preserved and checkpointed
+
+`git diff origin/main -- scripts/check-task-commit-attribution.sh
+specs/tasks/task-072.md task-077/087/092/106/107` is empty: root's
+restorations of the seven reviewer-authored paths are intact in the working
+tree and committed. The rejected reachability gate and historical frontmatter
+rewrites are not reintroduced anywhere in the diff. Working tree clean.
+
+### Commit attribution — verified with the refreshed chain
+
+The `commits:` frontmatter now lists this attempt's product chain
+(`8f8d0c7`, `b81124f`, `c1772d5`, `d2c087f`, `1270b4c`) — all five exist and
+were confirmed by `git show`. These five product commits fully cover the
+18-file task diff (walked `b6b6f0e..HEAD` per file; no product commit is
+unlisted). `scripts/check-task-commit-attribution.sh` → OK, exit 0.
+
+### Focused verification on the current tree (this session)
+
+- `CARGO_TARGET_DIR=/tmp/task210-target` (fresh this session, used only by
+  this checkout — probe worktrees/targets were removed after round 9):
+  `cargo test -p gyre-server --lib admin::tests` → **32 passed, 0 failed**,
+  including all four tenant-scope tests
+  (`admin_seed_rejects_caller_from_foreign_tenant`,
+  `admin_seed_rejects_when_workspace_id_already_owned_by_foreign_tenant`,
+  `admin_seed_inconsistent_repo_without_workspace_is_conflict`,
+  `admin_seed_workspace_visible_to_calling_tenant`).
+- Frontend (`web/`, installed deps): WorkspaceHome rules suites → 40 passed /
+  41 pre-existing skipped; shell suites (AppShell, NoSidebar,
+  WorkspaceDrawerSectionNav) → 78/78 passed.
+
+### Gates on the current merge-base range (`b6b6f0e..HEAD`)
+
+- `git diff --check b6b6f0e` → clean.
+- `python3 scripts/check-rustfmt-diff.py b6b6f0e` → "changed lines clean".
+- `python3 scripts/check-clippy-diff.py b6b6f0e` → "changed lines clean
+  (1 Rust files, 1145 existing warnings outside changes)", exit 0.
+- `scripts/check-arch.sh` → passed; `scripts/check-relative-path-defaults.sh`
+  → OK; `scripts/check-task-commit-attribution.sh` → OK.
+
+### Unresolved
+
+None within sandbox scope. Full Playwright E2E, full vitest, and full Rust
+suites remain the controller's host/GitHub gates on the exact merge SHA.
