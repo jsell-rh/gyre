@@ -375,7 +375,7 @@ pub async fn enforce_push_constraints(
         .await;
         return Err(format!(
             "push rejected: attestation context binding failed — {}",
-            binding_result.message
+            failed_binding_summary(&binding_result)
         ));
     }
 
@@ -634,7 +634,7 @@ pub async fn enforce_merge_constraints(
         .await;
         return Err(format!(
             "merge blocked: attestation context binding failed — {}",
-            binding_result.message
+            failed_binding_summary(&binding_result)
         ));
     }
 
@@ -1009,6 +1009,28 @@ pub async fn evaluate_merge_constraints(
             "merge",
         )
         .await;
+    }
+}
+
+/// Human-readable summary of the failed §2.4 context bindings for the
+/// rejection error — names each failing binding (repo_id, workspace_id,
+/// spec_sha, expected_generation) so the operator knows exactly which
+/// comparison rejected the push/merge.
+fn failed_binding_summary(result: &VerificationResult) -> String {
+    let failed: Vec<&str> = result
+        .children
+        .iter()
+        .filter(|c| !c.valid)
+        .map(|c| c.label.as_str())
+        .collect();
+    if failed.is_empty() {
+        result.message.clone()
+    } else {
+        format!(
+            "{} (failing bindings: {})",
+            result.message,
+            failed.join(", ")
+        )
     }
 }
 
@@ -3408,7 +3430,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_task_api_reassignment_bumps_generation() {
-        // Full API-level proof: PATCH /tasks/:id with a different assignee
+        // Full API-level proof: PUT /tasks/:id with a different assignee
         // increments generation; the SignedInput pinned to the old
         // generation then fails the binding check.
         use axum::body::Body;
@@ -3424,7 +3446,7 @@ mod tests {
         let resp = app
             .oneshot(
                 http::Request::builder()
-                    .method("PATCH")
+                    .method("PUT")
                     .uri("/api/v1/tasks/task-api-gen")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
