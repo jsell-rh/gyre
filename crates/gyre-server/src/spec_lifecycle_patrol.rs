@@ -439,7 +439,7 @@ mod tests {
     use gyre_domain::spec_ledger::{ApprovalStatus, SpecLedgerEntry};
     use gyre_domain::TaskPriority;
 
-    const NOW: u64 = 2_000_000;
+    const NOW: u64 = 1_000_000_000;
     const DRIFT_MAX: u64 = 86_400; // 24h
     const BACKLOG_MAX: u64 = 604_800; // 7d
 
