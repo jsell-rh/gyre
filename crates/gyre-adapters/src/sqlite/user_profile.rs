@@ -652,4 +652,207 @@ mod tests {
             "token should still exist after wrong-user delete"
         );
     }
+
+    // ── SessionRepository (user-management.md §Session Management) ─────────
+
+    fn make_session(id: &str, user_id: &Id, token_hash: &str, expires_at: u64) -> UserSession {
+        UserSession::new(
+            Id::new(id),
+            user_id.clone(),
+            token_hash,
+            "127.0.0.1",
+            "gyre-test/1.0",
+            1_000,
+            expires_at,
+        )
+    }
+
+    #[tokio::test]
+    async fn session_create_find_roundtrip() {
+        let (_tmp, s) = setup();
+        let u = make_user("s-u1");
+        UserRepository::create(&s, &u).await.unwrap();
+
+        let sess = make_session("sess-1", &u.id, "hash-1", 2_000);
+        SessionRepository::create(&s, &sess).await.unwrap();
+
+        let found = SessionRepository::find_by_id(&s, &Id::new("sess-1"))
+            .await
+            .unwrap()
+            .expect("session must be findable by id");
+        assert_eq!(found.token_hash, "hash-1");
+        assert_eq!(found.user_agent, "gyre-test/1.0");
+        assert_eq!(found.ip_address, "127.0.0.1");
+        assert!(!found.revoked);
+
+        let by_hash = SessionRepository::find_by_token_hash(&s, "hash-1")
+            .await
+            .unwrap()
+            .expect("session must be findable by token hash");
+        assert_eq!(by_hash.id, Id::new("sess-1"));
+    }
+
+    #[tokio::test]
+    async fn session_create_duplicate_id_fails() {
+        let (_tmp, s) = setup();
+        let u = make_user("s-u2");
+        UserRepository::create(&s, &u).await.unwrap();
+
+        let sess = make_session("sess-dup", &u.id, "hash-dup", 2_000);
+        SessionRepository::create(&s, &sess).await.unwrap();
+        // Port contract: create fails if a session with the same id exists.
+        assert!(
+            SessionRepository::create(&s, &sess).await.is_err(),
+            "duplicate session id must fail (PRIMARY KEY guard)"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_find_by_credential_and_device_matches_all_four() {
+        let (_tmp, s) = setup();
+        let u = make_user("s-u3");
+        UserRepository::create(&s, &u).await.unwrap();
+
+        let sess = make_session("sess-dev", &u.id, "cred-hash", 2_000);
+        SessionRepository::create(&s, &sess).await.unwrap();
+
+        // Exact (user, credential, ip, user-agent) → found.
+        let found = SessionRepository::find_by_credential_and_device(
+            &s, &u.id, "cred-hash", "127.0.0.1", "gyre-test/1.0",
+        )
+        .await
+        .unwrap()
+        .expect("exact device tuple must match");
+        assert_eq!(found.id, Id::new("sess-dev"));
+
+        // Any differing component (different device) → not found; it is a
+        // new session, not the same one.
+        assert!(
+            SessionRepository::find_by_credential_and_device(
+                &s, &u.id, "cred-hash", "10.0.0.1", "gyre-test/1.0",
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "different ip must not match the session"
+        );
+        assert!(
+            SessionRepository::find_by_credential_and_device(
+                &s, &u.id, "cred-hash", "127.0.0.1", "other-agent/9",
+            )
+            .await
+            .unwrap()
+            .is_none(),
+            "different user-agent must not match the session"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_touch_updates_last_active() {
+        let (_tmp, s) = setup();
+        let u = make_user("s-u4");
+        UserRepository::create(&s, &u).await.unwrap();
+
+        let sess = make_session("sess-touch", &u.id, "hash-touch", 2_000);
+        SessionRepository::create(&s, &sess).await.unwrap();
+
+        SessionRepository::touch(&s, &Id::new("sess-touch"), 1_500)
+            .await
+            .unwrap();
+        let after = SessionRepository::find_by_id(&s, &Id::new("sess-touch"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.last_active_at, 1_500,
+            "touch must persist last_active_at"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_revoke_is_scoped_to_owner() {
+        let (_tmp, s) = setup();
+        let u1 = make_user("s-u5");
+        let u2 = make_user("s-u6");
+        UserRepository::create(&s, &u1).await.unwrap();
+        UserRepository::create(&s, &u2).await.unwrap();
+
+        let sess = make_session("sess-rev", &u1.id, "hash-rev", 2_000);
+        SessionRepository::create(&s, &sess).await.unwrap();
+
+        // Wrong owner: revoke is a no-op (scoped), not an error.
+        SessionRepository::revoke(&s, &Id::new("sess-rev"), &u2.id)
+            .await
+            .unwrap();
+        let still = SessionRepository::find_by_id(&s, &Id::new("sess-rev"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!still.revoked, "wrong-owner revoke must not revoke");
+
+        // Right owner: revoked.
+        SessionRepository::revoke(&s, &Id::new("sess-rev"), &u1.id)
+            .await
+            .unwrap();
+        let revoked = SessionRepository::find_by_id(&s, &Id::new("sess-rev"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(revoked.revoked, "owner revoke must revoke");
+
+        // Idempotent: re-revoke succeeds.
+        SessionRepository::revoke(&s, &Id::new("sess-rev"), &u1.id)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_revoke_all_and_delete_expired() {
+        let (_tmp, s) = setup();
+        let u = make_user("s-u7");
+        UserRepository::create(&s, &u).await.unwrap();
+        let other = make_user("s-u8");
+        UserRepository::create(&s, &other).await.unwrap();
+
+        let s1 = make_session("sess-a1", &u.id, "h-a1", 2_000);
+        let s2 = make_session("sess-a2", &u.id, "h-a2", 9_000);
+        let keep = make_session("sess-b1", &other.id, "h-b1", 2_000);
+        SessionRepository::create(&s, &s1).await.unwrap();
+        SessionRepository::create(&s, &s2).await.unwrap();
+        SessionRepository::create(&s, &keep).await.unwrap();
+
+        // Revoke-all touches only the target user's sessions.
+        SessionRepository::revoke_all_for_user(&s, &u.id)
+            .await
+            .unwrap();
+        let mine = SessionRepository::list_for_user(&s, &u.id).await.unwrap();
+        assert!(
+            mine.iter().all(|x| x.revoked),
+            "revoke-all must revoke every session of the user"
+        );
+        let others = SessionRepository::list_for_user(&s, &other.id)
+            .await
+            .unwrap();
+        assert!(
+            others.iter().all(|x| !x.revoked),
+            "revoke-all must not touch other users' sessions"
+        );
+
+        // Retention cleanup deletes only sessions expired before cutoff.
+        let deleted = SessionRepository::delete_expired_before(&s, 5_000)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 2, "expired rows (sess-a1, sess-b1) must be deleted");
+        let remaining: Vec<_> = SessionRepository::list_for_user(&s, &u.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .chain(SessionRepository::list_for_user(&s, &other.id).await.unwrap())
+            .collect();
+        assert!(
+            remaining.iter().all(|x| x.expires_at >= 5_000),
+            "no row expired before the cutoff may survive"
+        );
+        assert_eq!(remaining.len(), 1, "only the unexpired session remains");
+    }
 }
