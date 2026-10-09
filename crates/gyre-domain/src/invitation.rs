@@ -79,6 +79,12 @@ impl TenantInvitation {
     pub fn is_expired(&self, now: u64) -> bool {
         self.status == InvitationStatus::Pending && now >= self.expires_at
     }
+
+    /// Canonical string form of the granted global role ("TenantAdmin" or
+    /// "Member").
+    pub fn role_as_str(&self) -> &'static str {
+        self.role.as_str()
+    }
 }
 
 /// Invitation for an existing tenant user to join a workspace
