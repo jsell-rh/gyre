@@ -38,7 +38,11 @@ flowchart TD
   I --> G[Formatting, Clippy, static invariants, web build]
   G --> A[Independent integration review]
   A --> H[Full Rust and frontend suites on host]
-  H --> P[Push exact verified merge SHA to upstream main]
+  H --> P[Publish PR with exact verified head]
+  P --> CI[Reconcile GitHub checks and merge policy]
+  CI -->|passing| M[GitHub merge with shipped description]
+  CI -->|candidate failure| F
+  CI -->|proven upstream failure| BR[Scoped prerequisite repair]
   G -->|code failure| F[Durable repair findings and rejected seed]
   A -->|rejected| F
   H -->|test failure| F
@@ -58,7 +62,8 @@ A checker creates a two-parent merge onto an explicit base, runs
 `dev-check.sh`, and requests a separate integration review. Its verified ref
 identifies the merge commit. The controller validates the base and candidate
 ancestry, runs the full Rust and frontend suites on that exact tree locally,
-and pushes that SHA to `main` without force. A moving upstream base causes
+and publishes a PR, reconciles GitHub checks, then requests a GitHub merge with
+an exact-head guard and no administrator bypass. A moving upstream base causes
 rechecking. The merge message includes the task, spec, candidate, and shipped
 behavior from the task file (`dev-merge-message.py`).
 
@@ -293,12 +298,19 @@ fixtures cover generations, launch intent, ownership inventory, deletion debt,
 retained pending sandboxes, baseline classification, bounded auditing, evidence
 validation, candidate backpressure and idempotent PR publication.
 
-Local results: 72 Python tests passed; shell syntax, cockpit JavaScript syntax,
+Local results: 84 Python tests passed; shell syntax, cockpit JavaScript syntax,
 and `git diff --check` passed. The Node relay test now passes with network/filesystem restrictions removed,
 including text, incremental tool output, prompt/thinking omission and verdict
 assertions. The earlier restricted session had rejected nested Node execution
 with `EPERM`.
-CI execution itself has not been observed from this shell.
+Tooling CI on `cd1c5f04` passed. A real model worker produced task-200 candidate
+`0ad98e85`, cloud review/checks and exact-tree host suites passed, and the
+controller published [PR #632](https://github.com/jsell-rh/gyre/pull/632).
+Its GitHub CI passed except E2E: the same 37 failed tests also fail on its
+exact upstream base `cd1c5f04`. This exposed the missing GitHub reconciliation
+step; publication alone was insufficient evidence of delivery. The new CI
+observer was exercised against those actual runs and classified the base
+failure. A passing PR and completed merge remain to be observed.
 
 Normal commit hooks also ran. `response-consumption` and `dead-components`
 failed on untouched Rust CLI/server and product Svelte files. Both checks were
@@ -315,7 +327,7 @@ production behavior, or remote gateway operation. A live acceptance run still
 needs a real task, real model calls, real sandbox checks and host suites, and
 confirmation that GitHub contains the merge and its shipped description.
 
-Changes in this audit are local working-tree changes. Running controllers
+The original loop fixes were committed and pushed. Running controllers
 and already staged sandboxes do not automatically reload them. Preserve the
 ledger and let existing attempt processes be adopted on restart:
 

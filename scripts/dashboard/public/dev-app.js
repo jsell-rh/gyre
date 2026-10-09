@@ -208,6 +208,8 @@ function renderOverview() {
     e("p", { class: "muted", text: s.resources?.inventory_ready ? `Remote resource inventory current · ${s.resources.used} charged · ${s.resources.deletion_pending} awaiting deletion` : "Admission waits for a complete remote sandbox inventory." }),
     gate.inventory_error ? e("p", { class: "muted", text: `Inventory: ${gate.inventory_error}` }) : null,
     e("p", { class: "muted", text: `${(s.metrics?.deliveries_per_hour || 0).toFixed(2)} recorded deliveries/hour · ${s.metrics?.candidate_backlog || 0} candidates awaiting delivery · ${s.metrics?.automatic_repairs || 0} automatic repairs` }),
+    s.dispatch?.only_task ? e("p", { text: `Dispatch restricted to ${s.dispatch.only_task}. Eligible counts include tasks excluded by this restriction.` }) : null,
+    s.dispatch?.publication === "pr" ? e("p", { class: "muted", text: "PR review mode: checks reconcile automatically; passing PRs wait for merge mode." }) : null,
     e("p", { class: "muted", text: /^(MissingProviders:|ProviderCheckUnavailable:)/.test(gate.condition || "") ? "Admission paused: required gateway providers are missing or unavailable. Setup is checked again each cycle." : gate.condition === "ConfigurationInvalid" ? "Admission paused: repair gateway configuration, then retry the failed task." : gate.retry_at > Date.now() / 1000 ? `Gateway backoff: next admission probe in ${until(gate.retry_at)} · ${gate.failures} consecutive infrastructure failures` : gate.failures ? `Gateway capacity probe ${gate.effective_slots > s.running ? "due on next cycle" : "running"} · existing sandboxes continue working` : `Gateway admission: ${gate.effective_slots ?? 0} of ${s.slots ?? 0} desired slots · expands as sandboxes become Ready` }),
     e("p", { class: "muted", text: "Set sandboxes to 0 to drain. Active attempts finish and keep their checkpoints." }),
     e("div", { class: "dev-control-line", text: `${(s.attempts || []).filter((a) => a.state === "running" && a.kind === "worker").length} implementing · ${(s.attempts || []).filter((a) => a.state === "running" && a.kind === "check").length} checking · ${s.slots ?? "—"} slots` }));
@@ -215,7 +217,7 @@ function renderOverview() {
     active.length ? active.map((task) => {
       const a = latestAttempt(task.name);
       return taskButton(task, a ? `${a.phase || a.kind} · ${a.reason || task.condition || ""} · ${ago(a.started)} · ${a.branch || a.sha?.slice(0, 12) || ""}` : "starting");
-    }) : e("p", { class: "muted", text: s.online ? "No attempt is active. Eligible work starts on the next controller cycle." : "Controller is offline." }));
+    }) : e("p", { class: "muted", text: s.online ? s.dispatch?.only_task ? `No worker active for ${s.dispatch.only_task}. Other eligible tasks are excluded by the dispatch restriction.` : "No attempt is active. Dispatch waits for admission, prerequisites, or candidate backlog capacity." : "Controller is offline." }));
   const attention = e("section", { class: "dev-panel" },
     e("div", { class: "dev-panel-heading" }, e("h2", { text: `Needs attention · ${failed.length}` }),
       failed.length ? e("button", { class: "dev-action", onclick: retryAll,
@@ -230,8 +232,8 @@ function renderOverview() {
     e("div", { class: "dev-overview-grid" }, e("div", {}, control, live, waiting), attention),
     blocked.length ? e("section", { class: "dev-panel" }, e("h2", { text: `Blocked delivery · ${blocked.length}` }),
       blocked.map((task) => taskButton(task, task.condition || "Waiting for prerequisite repair"))) : null,
-    published.length ? e("section", { class: "dev-panel" }, e("h2", { text: `Pull requests ready · ${published.length}` }),
-      published.map((task) => e("div", {}, taskButton(task, "Verified and published for review"), prLinks(task)))) : null,
+    published.length ? e("section", { class: "dev-panel" }, e("h2", { text: `Pull requests under reconciliation · ${published.length}` }),
+      published.map((task) => e("div", {}, taskButton(task, task.condition || "Waiting for GitHub checks"), prLinks(task)))) : null,
     e("section", { class: "dev-panel" }, e("h2", { text: `Waiting candidates · ${candidate.length}` }),
       candidate.length ? candidate.slice(0, 10).map((task) => taskButton(task, `candidate ${task.candidate?.slice(0, 12) || ""}`))
         : e("p", { class: "muted", text: "No candidate waiting for verification." })));

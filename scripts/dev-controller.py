@@ -25,6 +25,7 @@ DEP_RE = re.compile(r"task-\d+")
 HOST_GATE_PROCESSES = {}
 GATEWAY_PROCESSES = {}
 MAX_REPAIRS = 3
+DISPATCH_TASK = None
 PUBLICATION_MODE = os.environ.get("GYRE_DEV_PUBLICATION", "merge")
 contract_spec = importlib.util.spec_from_file_location("dev_contract", Path(__file__).with_name("dev-contract.py"))
 contract = importlib.util.module_from_spec(contract_spec)
@@ -32,6 +33,9 @@ contract_spec.loader.exec_module(contract)
 coverage_spec = importlib.util.spec_from_file_location("dev_coverage", Path(__file__).with_name("dev-coverage.py"))
 coverage = importlib.util.module_from_spec(coverage_spec)
 coverage_spec.loader.exec_module(coverage)
+ci_spec = importlib.util.spec_from_file_location("dev_ci", Path(__file__).with_name("dev-ci.py"))
+ci = importlib.util.module_from_spec(ci_spec)
+ci_spec.loader.exec_module(ci)
 
 
 class SourceUnavailable(RuntimeError):
@@ -787,10 +791,8 @@ def gc_sandboxes(db):
 
 
 def promote(db):
-    if PUBLICATION_MODE == 'merge':
-        # Returning from PR-only review resumes the same recorded verification;
-        # moved main/spec generations still trigger the ordinary recheck path.
-        db.execute("UPDATE tasks SET state='promoting',condition=NULL WHERE state='published'")
+    # Published PRs remain under reconciliation in both publication modes.
+    db.execute("UPDATE tasks SET state='promoting' WHERE state='published'")
     merged = {row["name"] for row in db.execute("SELECT name FROM tasks WHERE state='merged'")}
     for task in db.execute("SELECT * FROM tasks WHERE state='promoting' ORDER BY name").fetchall():
         if task['retry_at'] > time.time():
@@ -890,25 +892,85 @@ def promote(db):
                 event(db, task["name"], f"host gate unavailable (exit={result}); inspect host-tests.log")
             continue
         pr = ensure_pull_request(db, task, check, merge_sha)
+        if not reconcile_pr_checks(db, task, check, merge_sha, pr):
+            continue
         if PUBLICATION_MODE == "pr":
-            db.execute("UPDATE tasks SET state='published',condition='PullRequestReady' WHERE name=?", (task["name"],))
-            event(db, task["name"], f"published verified pull request {pr['url']} head={merge_sha}")
+            db.execute("UPDATE tasks SET state='published',condition='PullRequestChecksPassed',retry_at=? WHERE name=?",
+                       (int(time.time()) + 30, task['name']))
+            db.commit()
             continue
         try:
-            push = run("git", "push", "origin", f"{merge_sha}:refs/heads/main", check=False, timeout=90)
-        except subprocess.TimeoutExpired as exc:
-            # The push may have reached GitHub before the response timed out.
-            # Leave this task promoting; the next fetch resolves the exact SHA.
-            defer_promotion(db, task, 'PublicationUnavailable')
-            raise SourceUnavailable("main push timed out; checking remote state after backoff") from exc
-        if push.returncode:
-            # Authentication/transport failures do not invalidate a checked
-            # tree. Refresh main next cycle before deciding whether to recheck.
-            defer_promotion(db, task, 'PublicationUnavailable')
-            raise SourceUnavailable(f"main push failed; retaining verified merge: {push.stderr or push.stdout}")
+            landed = merge_pull_request(pr, merge_sha)
+        except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            defer_promotion(db, task, 'GitHubMergeUnavailable')
+            event(db, task['name'], f'GitHub merge will reconcile after backoff: {exc}')
+            continue
+        if landed:
+            source()
+            if run('git', 'merge-base', '--is-ancestor', landed, 'origin/main', check=False).returncode:
+                defer_promotion(db, task, 'MergeNotObservedUpstream')
+                continue
+            db.execute("UPDATE tasks SET state='merged',observed_generation=generation,condition=NULL,retry_at=0 WHERE name=?", (task['name'],))
+            event(db, task['name'], f'merged {landed}')
         else:
-            db.execute("UPDATE tasks SET state='merged',observed_generation=generation WHERE name=?", (task["name"],))
-            event(db, task["name"], f"merged {merge_sha}")
+            defer_promotion(db, task, 'GitHubMergePending')
+
+
+def reconcile_pr_checks(db, task, check, merge_sha, pr):
+    directory = STATE / 'attempts' / check['id']
+    try:
+        result = ci.observe(run, pr['url'], merge_sha, check['base'], directory)
+        status = result['status']
+        if status == 'baseline_failed':
+            repair = propose_baseline_repair(db, check, result)
+            db.execute("UPDATE tasks SET state='blocked',blocked_base=?,condition=? WHERE name=?",
+                       (check['base'], f'MainCIFailed: repair {repair}', task['name']))
+            event(db, task['name'], f'GitHub checks reproduce on exact main base; prerequisite {repair}')
+        elif status == 'candidate_failed':
+            queue_repair(db, task, check, 'github-checks.log')
+        elif status == 'closed':
+            db.execute("UPDATE tasks SET state='failed',condition='PullRequestClosed' WHERE name=?", (task['name'],))
+        elif status == 'infrastructure':
+            # Retry Actions on this same head, without allocating a sandbox or
+            # spending implementation repair budget. Attempts persist over restart.
+            retry_path = directory / 'github-retries.json'
+            retries = json.loads(retry_path.read_text()) if retry_path.exists() else {}
+            for ident in result['runs']:
+                key = str(ident)
+                if ident is None or retries.get(key, 0) >= 3:
+                    db.execute("UPDATE tasks SET state='failed',condition='GitHubInfrastructureRetryLimit' WHERE name=?", (task['name'],))
+                    break
+                retries[key] = retries.get(key, 0) + 1
+                retry_path.write_text(json.dumps(retries))
+                run('gh', 'run', 'rerun', str(ident), '--repo', pr['url'].split('/pull/')[0].replace('https://github.com/', ''), '--failed', timeout=30)
+            else:
+                defer_promotion(db, task, 'GitHubInfrastructureBackoff')
+        elif status in ('passed', 'merged'):
+            db.execute("UPDATE tasks SET reconcile_failures=0,retry_at=0,condition='GitHubChecksPassed' WHERE name=?", (task['name'],))
+            db.commit()
+            return True
+        else:
+            db.execute("UPDATE tasks SET state='published',condition=?,retry_at=? WHERE name=?",
+                       ('GitHubChecksPending' if status == 'pending' else 'GitHubPolicyPending', int(time.time()) + 30, task['name']))
+        db.commit()
+    except (RuntimeError, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
+        defer_promotion(db, task, 'GitHubChecksUnavailable')
+        event(db, task['name'], f'GitHub checks unavailable; retaining verified tree: {exc}')
+    return False
+
+
+def merge_pull_request(pr, merge_sha):
+    message = git('show', '-s', '--format=%B', merge_sha)
+    directory = STATE / 'publication'
+    directory.mkdir(parents=True, exist_ok=True)
+    body = directory / f"pr-{pr['number']}.md"
+    body.write_text(message)
+    run('gh', 'pr', 'merge', pr['url'], '--merge', '--match-head-commit', merge_sha,
+        '--subject', message.splitlines()[0], '--body-file', str(body), timeout=30)
+    actual = json.loads(run('gh', 'pr', 'view', pr['url'], '--json', 'state,headRefOid,mergeCommit', timeout=30).stdout)
+    if actual['headRefOid'] != merge_sha:
+        raise RuntimeError('merged PR head does not match verified commit')
+    return actual['mergeCommit']['oid'] if actual['state'] == 'MERGED' else None
 
 
 def defer_promotion(db, task, reason):
@@ -928,6 +990,25 @@ def ensure_pull_request(db, task, check, merge_sha):
         raise SourceUnavailable("pull request publication requires a GitHub upstream or GYRE_DEV_GITHUB_REPO")
     head = f"devloop/verified/{check['id']}"
     try:
+        # Keep the task's PR through repair/rechecks. The newly checked branch
+        # remains immutable; only the associated PR branch advances with a lease.
+        if task['pr_url']:
+            previous = json.loads(run('gh', 'pr', 'view', task['pr_url'], '--repo', repo,
+                                      '--json', 'headRefName,headRefOid,state', timeout=30).stdout)
+            if previous['state'] == 'OPEN' and previous['headRefOid'] != merge_sha:
+                old = previous['headRefOid']
+                if not db.execute("SELECT 1 FROM attempts WHERE task=? AND merge_sha=? AND kind='check'", (task['name'], old)).fetchone():
+                    raise RuntimeError('associated PR head is not a recorded verified tree')
+                branch = previous['headRefName']
+                if not branch.startswith('devloop/'):
+                    raise RuntimeError('associated PR branch is not owned by the controller')
+                git('push', 'origin', f'--force-with-lease=refs/heads/{branch}:{old}', f'{merge_sha}:refs/heads/{branch}', timeout=90)
+                message = git('show', '-s', '--format=%B', merge_sha)
+                body = STATE / 'attempts' / check['id'] / 'pull-request.md'
+                body.write_text(message + f'\n\nVerified integration head: `{merge_sha}`. Cloud gates, independent review and host suites passed. GitHub checks remain required.\n')
+                run('gh', 'pr', 'edit', task['pr_url'], '--repo', repo, '--title', message.splitlines()[0][:240], '--body-file', str(body), timeout=30)
+            if previous['state'] == 'OPEN':
+                head = previous['headRefName']
         listed = run("gh", "pr", "list", "--repo", repo, "--head", head, "--state", "all",
                      "--json", "number,url,state,headRefOid,baseRefName", timeout=30)
         items = json.loads(listed.stdout)
@@ -1321,6 +1402,10 @@ def status_snapshot(db):
     running = sum(a["state"] == "running" for a in attempts)
     gate["effective_slots"] = effective_admission(db, configured_slots() or 0, running)
     gate["effective_slots"] = min(gate["effective_slots"], max(0, (configured_slots() or 0) - (resource_usage(db) - running))) if inventory_ready(db) else running
+    dispatch_path = STATE / 'controller.json'
+    dispatch = json.loads(dispatch_path.read_text()) if dispatch_path.exists() else {}
+    if not alive(dispatch.get('pid')):
+        dispatch = {}
     started = db.execute("SELECT min(started) FROM attempts").fetchone()[0]
     hours = max(1 / 60, (time.time() - started) / 3600) if started else 0
     check_counts = dict(db.execute("SELECT state,count(*) FROM attempts WHERE kind='check' GROUP BY state"))
@@ -1330,6 +1415,7 @@ def status_snapshot(db):
     repairs = db.execute("SELECT count(*) FROM events WHERE message LIKE '%queued implementation repair %'").fetchone()[0]
     return {"tasks": tasks, "attempts": attempts, "events": events,
             "counts": counts, "eligible": eligible,
+            "dispatch": dispatch,
             "confirmed_merges": sum(task["merge_sha"] is not None and not task['audit_contract'] for task in tasks),
             "confirmed_audits": sum(task["merge_sha"] is not None and bool(task['audit_contract']) for task in tasks),
             "resources": {"used": resource_usage(db), "inventory_ready": inventory_ready(db),
@@ -1368,7 +1454,7 @@ def retry_failed_task(db, task):
 
 
 def main():
-    global PUBLICATION_MODE
+    global PUBLICATION_MODE, DISPATCH_TASK
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("sync", "status", "run", "retry", "retry-all", "host-gate"))
     parser.add_argument("task", nargs="?", help="task name for retry")
@@ -1386,6 +1472,7 @@ def main():
     parser.add_argument("--check-id", help=argparse.SUPPRESS)
     args = parser.parse_args()
     PUBLICATION_MODE = args.publication
+    DISPATCH_TASK = args.only_task
     if args.slots < 0 or args.interval < 1 or args.max_attempts < 1 or args.launch_burst < 1:
         parser.error("slots must be nonnegative; interval, max-attempts, and launch-burst must be positive")
     if args.only_task and not re.fullmatch(r"task-\d+", args.only_task):
@@ -1440,6 +1527,8 @@ def main():
     lock.truncate()
     lock.write(str(os.getpid()) + "\n")
     lock.flush()
+    (STATE / 'controller.json').write_text(json.dumps({'pid': os.getpid(), 'only_task': args.only_task,
+                                                       'publication': PUBLICATION_MODE}))
     if not (STATE / "slots").exists():
         (STATE / "slots").write_text(str(args.slots) + "\n")
     source_error = None

@@ -471,12 +471,24 @@ runs the full Rust and frontend suites on that exact merge SHA on the host and
 blocks promotion if either fails. It creates a GitHub PR for the verified ref,
 with the shipped summary, exact head/base, gates and bundle digest, and confirms
 GitHub has that exact head. The cockpit links it immediately. `gh` must be
-installed and authenticated in the controller environment. Default publication
-then pushes the exact merge to main. `--publication pr` leaves it open for human
-review; returning to default mode resumes promotion with the usual rechecks.
+installed and authenticated in the controller environment. Default publication waits for GitHub checks on that exact head and uses
+`gh pr merge --merge --match-head-commit` without an administrator bypass.
+The GitHub merge commit retains the shipped description; its parents include
+the verified integration tree. `--publication pr` still reconciles failed CI,
+but leaves passing PRs open for human review.
+
+Pending checks and review/rule requirements hold publication. API outages
+back off on the same tree. Cancelled/timed-out Actions jobs are rerun at most
+three times without allocating another sandbox. Failed checks preserve logs
+and queue implementation repair. When the exact upstream base failed the
+same workflow with the same named E2E failures, a scoped prerequisite repair
+is proposed instead; additional or unclassified failures return to the feature
+worker. Repair/rechecking updates the task's existing PR with a force-with-lease
+on its controller-owned branch; the newly verified branch remains unchanged.
+The cockpit reports PR conditions and any `--only-task` dispatch restriction.
 Publication retries preserve the verified commit and use exponential backoff.
 The controller checks the candidate
-and base SHAs again before a non-force push to `main`; if `main` moved, it
+and base SHAs again before requesting the GitHub merge; if `main` moved, it
 checks again on the new base. An attempt whose process exits while the
 controller is down is recovered from its recorded exit status and remote branch
 on restart.

@@ -111,6 +111,15 @@ class ControllerGitTest(unittest.TestCase):
         self.db = controller.db_open()
         self.addCleanup(self.db.close)
         publisher = patch.object(controller, "ensure_pull_request", return_value={"url": "https://github.com/example/gyre/pull/1", "number": 1})
+        ci_gate = patch.object(controller.ci, 'observe', return_value={'status': 'passed'})
+        ci_gate.start()
+        self.addCleanup(ci_gate.stop)
+        def fixture_merge(pr, sha):
+            git(controller.SOURCE, 'push', 'origin', f'{sha}:refs/heads/main')
+            return sha
+        merger = patch.object(controller, 'merge_pull_request', side_effect=fixture_merge)
+        merger.start()
+        self.addCleanup(merger.stop)
         publisher.start()
         self.addCleanup(publisher.stop)
         host_gate = patch.object(controller, "host_test_verified", return_value=True)
@@ -510,6 +519,7 @@ class ControllerGitTest(unittest.TestCase):
         self.assertEqual(self.db.execute('SELECT state FROM tasks').fetchone()[0], 'published')
         controller.sync(self.db)
         self.assertEqual(self.db.execute('SELECT state FROM tasks').fetchone()[0], 'published')
+        self.db.execute('UPDATE tasks SET retry_at=0'); self.db.commit()
         controller.promote(self.db)
         self.assertEqual(self.db.execute('SELECT state FROM tasks').fetchone()[0], 'merged')
         self.assertEqual(git(self.remote, 'rev-parse', 'main'), merge)
@@ -651,6 +661,50 @@ elif 'delete' in args:
         self.assertEqual(tuple(self.db.execute("SELECT state,condition FROM tasks WHERE name='task-001'").fetchone()),
                          ("candidate", "DependenciesPending"))
         self.host_gate.assert_not_called()
+
+    def verified_pr_fixture(self):
+        sha = self.candidate()
+        controller.sync(self.db)
+        base = git(self.work, 'rev-parse', 'main')
+        git(self.work, 'checkout', 'main')
+        git(self.work, 'merge', '--no-ff', '--no-edit', 'worker/task-001')
+        merged = git(self.work, 'rev-parse', 'HEAD')
+        git(self.work, 'push', 'origin', f'{merged}:refs/heads/devloop/verified/ci-check')
+        self.db.execute("INSERT INTO attempts(id,task,kind,sha,base,merge_sha,state,started) VALUES('ci-check','task-001','check',?,?,?,'done',1)", (sha, base, merged))
+        self.db.execute("UPDATE tasks SET state='promoting' WHERE name='task-001'")
+        self.db.commit()
+        controller.promote(self.db)  # host verification completes in fixture
+        return base, sha, merged
+
+    def test_github_pending_checks_prevent_upstream_merge_then_resume(self):
+        base, sha, merged = self.verified_pr_fixture()
+        with patch.object(controller.ci, 'observe', return_value={'status': 'pending'}):
+            controller.promote(self.db)
+        self.assertEqual(git(self.remote, 'rev-parse', 'main'), base)
+        self.assertEqual(tuple(self.db.execute('SELECT state,condition FROM tasks').fetchone()), ('published', 'GitHubChecksPending'))
+        self.db.execute('UPDATE tasks SET retry_at=0'); self.db.commit()
+        controller.promote(self.db)
+        self.assertEqual(git(self.remote, 'rev-parse', 'main'), merged)
+
+    def test_failed_pr_checks_feed_implementation_without_publishing(self):
+        base, sha, merged = self.verified_pr_fixture()
+        log = controller.STATE / 'attempts/ci-check/github-checks.log'
+        log.write_text('actual required CI assertion: wrong payload accepted')
+        with patch.object(controller.ci, 'observe', return_value={'status': 'candidate_failed'}):
+            controller.promote(self.db)
+        task = self.db.execute('SELECT * FROM tasks').fetchone()
+        self.assertEqual(git(self.remote, 'rev-parse', 'main'), base)
+        self.assertEqual((task['state'], task['seed'], task['repairs']), ('ready', sha, 1))
+        self.assertIn('wrong payload accepted', Path(task['feedback']).read_text())
+
+    def test_github_outage_preserves_checked_tree_without_code_repair(self):
+        base, sha, merged = self.verified_pr_fixture()
+        with patch.object(controller.ci, 'observe', side_effect=RuntimeError('API unavailable')):
+            controller.promote(self.db)
+        task = self.db.execute('SELECT * FROM tasks').fetchone()
+        self.assertEqual((task['candidate'], task['repairs'], task['condition']), (sha, 0, 'GitHubChecksUnavailable'))
+        self.assertGreater(task['retry_at'], time.time())
+        self.assertEqual(git(self.remote, 'rev-parse', 'main'), base)
 
     def test_promotes_only_the_verified_merge_commit(self):
         sha = self.candidate()
@@ -929,17 +983,9 @@ elif 'delete' in args:
                            VALUES('check1','task-001','check',?,?,'done',1)""", (sha, base))
         self.db.execute("UPDATE tasks SET state='promoting' WHERE name='task-001'")
         self.db.commit()
-        real_run = controller.run
-
-        def timeout_push(*args, **kwargs):
-            if args[:2] == ("git", "push"):
-                raise subprocess.TimeoutExpired(args, 90)
-            return real_run(*args, **kwargs)
-
-        with patch.object(controller, "run", side_effect=timeout_push):
+        with patch.object(controller, "merge_pull_request", side_effect=subprocess.TimeoutExpired('gh pr merge', 30)):
             controller.promote(self.db)
-            with self.assertRaises(controller.SourceUnavailable):
-                controller.promote(self.db)
+            controller.promote(self.db)
         self.assertEqual(self.db.execute("SELECT state FROM tasks WHERE name='task-001'").fetchone()[0], "promoting")
         self.assertEqual(self.db.execute("SELECT merge_sha FROM attempts WHERE id='check1'").fetchone()[0], merge)
         git(self.work, "push", "origin", f"{merge}:refs/heads/main")
