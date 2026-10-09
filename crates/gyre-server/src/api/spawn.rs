@@ -1979,7 +1979,9 @@ async fn create_derived_input_for_agent(
 
 #[cfg(test)]
 mod tests {
-    use crate::mem::test_state_with_jj_ops;
+    use super::spawn_agent_core;
+    use crate::mem::{test_state, test_state_with_jj_ops};
+    use gyre_common::Id;
     use axum::{body::Body, Router};
     use http::{Request, StatusCode};
     use tower::ServiceExt;
