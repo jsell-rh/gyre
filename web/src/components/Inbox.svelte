@@ -144,6 +144,51 @@
 
   function toggleExpand(id) {
     expandedId = expandedId === id ? null : id;
+    // HSI §8 P2: expanding a spec_approval card loads the spec diff from the
+    // spec-edit/* MR branch so the human can review the change inline before
+    // approving.
+    if (expandedId === id) void loadSpecDiff(id);
+  }
+
+  // Diff rows per notification id — converted from the MR's structured hunks.
+  let specDiffs = $state({});
+
+  // Convert structured MR hunks into SpecDiffView rows ({op, text}).
+  function hunksToDiffRows(hunks) {
+    const rows = [];
+    for (const hunk of hunks ?? []) {
+      for (const line of hunk.lines ?? []) {
+        if (line.type === 'add') rows.push({ op: 'add', text: line.content ?? '' });
+        else if (line.type === 'delete') rows.push({ op: 'remove', text: line.content ?? '' });
+        else rows.push({ op: 'context', text: line.content ?? '' });
+      }
+    }
+    return rows;
+  }
+
+  async function loadSpecDiff(notifId) {
+    const n = notifications.find(x => x.id === notifId);
+    if (!n || n.notification_type !== 'spec_approval') return;
+    if (specDiffs[notifId] !== undefined) return; // already loaded
+    const body = getBody(n);
+    if (!body.mr_id) return;
+    try {
+      const diff = await api.mrDiff(body.mr_id);
+      // Pick the spec file this notification is about; fall back to the only
+      // changed file when there is exactly one, else the first .md file.
+      const files = diff?.files ?? [];
+      const file =
+        files.find(f => f.path === body.spec_path) ??
+        (files.length === 1 ? files[0] : files.find(f => f.path?.endsWith('.md')));
+      if (!file || !file.hunks?.length) {
+        specDiffs = { ...specDiffs, [notifId]: [] };
+        return;
+      }
+      specDiffs = { ...specDiffs, [notifId]: hunksToDiffRows(file.hunks) };
+    } catch {
+      // Diff is best-effort context — approve/reject still work without it.
+      specDiffs = { ...specDiffs, [notifId]: [] };
+    }
   }
 
   function openDetail(entity) {
@@ -678,6 +723,17 @@
                 {/if}
                 {#if body.output}
                   <pre class="card-output">{body.output}</pre>
+                {/if}
+
+                {#if n.notification_type === 'spec_approval' && Array.isArray(specDiffs[n.id]) && specDiffs[n.id].length > 0}
+                  <!-- HSI §8 P2: review the spec-edit/* branch diff inline before approving -->
+                  <div class="spec-approval-diff">
+                    <SpecDiffView
+                      diff={specDiffs[n.id]}
+                      currentLabel={$t('decisions.spec_diff_current')}
+                      yoursLabel={$t('decisions.spec_diff_proposed')}
+                    />
+                  </div>
                 {/if}
 
                 {#if Array.isArray(body.conflicting_nodes) && body.conflicting_nodes.length > 0}

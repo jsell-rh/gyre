@@ -33,6 +33,9 @@ const specApprovalNotif = makeNotification({
     spec_path: 'specs/system/api-conventions.md',
     spec_sha: 'abc123def456abc123def456abc123def456abc1',
     diff_summary: '+45 lines',
+    mr_id: 'mr-uuid-42',
+    mr_title: 'Spec edit: specs/system/api-conventions.md',
+    repo_id: 'repo-1',
   }),
   entity_ref: 'specs/system/api-conventions.md',
 });
@@ -65,13 +68,32 @@ vi.mock('../lib/api.js', () => ({
   api: {
     myNotifications: vi.fn().mockResolvedValue([]),
     getSpec: vi.fn().mockResolvedValue({ path: 'system/api-conventions.md', current_sha: 'fetchedsha000000000000000000000000000000' }),
+    approveSpec: vi.fn().mockResolvedValue({}),
     revokeSpec: vi.fn().mockResolvedValue({}),
     enqueue: vi.fn().mockResolvedValue({}),
     markNotificationRead: vi.fn().mockResolvedValue({}),
     resolveNotification: vi.fn().mockResolvedValue({}),
     agent: vi.fn().mockResolvedValue({ name: 'test-agent' }),
     task: vi.fn().mockResolvedValue({ title: 'test-task' }),
-    mergeRequest: vi.fn().mockResolvedValue({ title: 'test-mr' }),
+    mrDiff: vi.fn().mockResolvedValue({
+      files: [
+        {
+          path: 'specs/system/api-conventions.md',
+          status: 'modified',
+          hunks: [
+            {
+              header: '@@ -1,3 +1,4 @@',
+              lines: [
+                { type: 'context', content: '# API Conventions' },
+                { type: 'delete', content: 'Old rule text' },
+                { type: 'add', content: 'New rule text' },
+              ],
+            },
+          ],
+        },
+      ],
+    }),
+    workspaces: vi.fn().mockResolvedValue([]),
     mrStatus: vi.fn().mockResolvedValue({ status: 'closed' }),
     submitReview: vi.fn().mockResolvedValue({}),
     pauseMergeQueue: vi.fn().mockResolvedValue({ queue_paused: true }),
@@ -225,7 +247,7 @@ describe('Inbox', () => {
     });
   });
 
-  it('spec_approval: shows Approve, Reject, Open Spec when expanded', async () => {
+  it('spec_approval: shows Approve, Reject, View Full Spec when expanded', async () => {
     api.myNotifications.mockResolvedValue([specApprovalNotif]);
     const { findByRole } = render(Inbox);
     const header = await findByRole('button', { name: /Expand: Spec pending approval/ });
@@ -233,8 +255,20 @@ describe('Inbox', () => {
     await waitFor(() => {
       expect(document.body.textContent).toContain('Approve');
       expect(document.body.textContent).toContain('Reject');
-      expect(document.body.textContent).toContain('Open Spec');
+      expect(document.body.textContent).toContain('View Full Spec');
     });
+  });
+
+  // ui-layout.md §7 Item Structure: at tenant scope each card shows the
+  // workspace name so the human knows where the decision belongs.
+  it('shows workspace name badge on cards at tenant scope (ui-layout §7)', async () => {
+    api.workspaces = vi.fn().mockResolvedValue([{ id: 'ws-1', name: 'Payments' }]);
+    api.myNotifications.mockResolvedValue([specApprovalNotif]);
+    const { findByText } = render(Inbox, { props: { scope: 'tenant' } });
+    await waitFor(() => {
+      expect(api.workspaces).toHaveBeenCalled();
+    });
+    expect(await findByText('Payments')).toBeTruthy();
   });
 
   it('gate_failure: shows View Diff, View Output, Retry Gate, Override, Close MR when expanded (HSI §8 P3)', async () => {
@@ -451,6 +485,172 @@ describe('Inbox', () => {
     );
   });
 
+  // ── HSI §8 remaining priority types ──────────────────────────────────────
+
+  it('cross_workspace_change: shows Review Changes and Dismiss when expanded (HSI §8 P4)', async () => {
+    api.myNotifications.mockResolvedValue([
+      makeNotification({
+        id: 'notif-xw',
+        notification_type: 'cross_workspace_change',
+        priority: 4,
+        title: 'Cross-workspace change',
+        body: JSON.stringify({
+          message: 'platform-core updated idempotent-api.md',
+          spec_path: 'specs/system/idempotent-api.md',
+          change_summary: 'Your payment-retry.md depends on it.',
+        }),
+        entity_ref: 'specs/system/idempotent-api.md',
+      }),
+    ]);
+    const { findByRole } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Cross-workspace change/ });
+    await fireEvent.click(header);
+    await waitFor(() => {
+      expect(document.body.textContent).toContain('Review Changes');
+      expect(document.body.textContent).toContain('Dismiss');
+    });
+    expect(document.body.textContent).not.toContain('coming soon');
+  });
+
+  it('meta_spec_drift: shows View Results and Adjust Meta-spec when expanded (HSI §8 P6)', async () => {
+    api.myNotifications.mockResolvedValue([
+      makeNotification({
+        id: 'notif-drift',
+        notification_type: 'meta_spec_drift',
+        priority: 6,
+        title: 'Meta-spec drift detected',
+        body: JSON.stringify({
+          message: 'Implementation drift on meta-spec.',
+          meta_spec_path: 'meta/testing-standards.md',
+        }),
+        entity_ref: 'meta/testing-standards.md',
+      }),
+    ]);
+    const { findByRole } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Meta-spec drift detected/ });
+    await fireEvent.click(header);
+    await waitFor(() => {
+      expect(document.body.textContent).toContain('View Results');
+      expect(document.body.textContent).toContain('Adjust Meta-spec');
+    });
+  });
+
+  it('meta_spec_drift: Adjust Meta-spec navigates to agent rules', async () => {
+    api.myNotifications.mockResolvedValue([
+      makeNotification({
+        id: 'notif-drift-nav',
+        notification_type: 'meta_spec_drift',
+        priority: 6,
+        title: 'Meta-spec drift detected',
+        body: JSON.stringify({
+          message: 'Implementation drift on meta-spec.',
+          meta_spec_path: 'meta/testing-standards.md',
+        }),
+        entity_ref: 'meta/testing-standards.md',
+      }),
+    ]);
+    const goToAgentRules = vi.fn();
+    const { findByRole, findByText } = render(Inbox, {
+      context: new Map([['goToAgentRules', goToAgentRules]]),
+    });
+    const header = await findByRole('button', { name: /Expand: Meta-spec drift detected/ });
+    await fireEvent.click(header);
+    await fireEvent.click(await findByText('Adjust Meta-spec'));
+    expect(goToAgentRules).toHaveBeenCalledTimes(1);
+  });
+
+  it('spec_assertion_failure: shows View Code and Update Spec when expanded (HSI §8 P9)', async () => {
+    api.myNotifications.mockResolvedValue([
+      makeNotification({
+        id: 'notif-assert',
+        notification_type: 'spec_assertion_failure',
+        priority: 9,
+        title: 'Spec assertion failure',
+        body: JSON.stringify({
+          message: 'Code no longer matches spec assertion.',
+          repo_id: 'repo-1',
+          spec_path: 'specs/system/payments.md',
+        }),
+        entity_ref: 'repo-1',
+      }),
+    ]);
+    const { findByRole } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Spec assertion failure/ });
+    await fireEvent.click(header);
+    await waitFor(() => {
+      expect(document.body.textContent).toContain('View Code');
+      expect(document.body.textContent).toContain('Update Spec');
+    });
+  });
+
+  it('spec_assertion_failure: View Code opens the repo detail panel', async () => {
+    const openDetailPanel = vi.fn();
+    api.myNotifications.mockResolvedValue([
+      makeNotification({
+        id: 'notif-assert-nav',
+        notification_type: 'spec_assertion_failure',
+        priority: 9,
+        title: 'Spec assertion failure',
+        body: JSON.stringify({
+          message: 'Code no longer matches spec assertion.',
+          repo_id: 'repo-1',
+          spec_path: 'specs/system/payments.md',
+        }),
+        entity_ref: 'repo-1',
+      }),
+    ]);
+    const { findByRole, findByText } = render(Inbox, {
+      context: new Map([['openDetailPanel', openDetailPanel]]),
+    });
+    const header = await findByRole('button', { name: /Expand: Spec assertion failure/ });
+    await fireEvent.click(header);
+    await fireEvent.click(await findByText('View Code'));
+    expect(openDetailPanel).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'repo', id: 'repo-1' })
+    );
+  });
+
+  it('suggested_link: shows Confirm and Dismiss when expanded (HSI §8 P10)', async () => {
+    api.myNotifications.mockResolvedValue([
+      makeNotification({
+        id: 'notif-link',
+        notification_type: 'suggested_link',
+        priority: 10,
+        title: 'Suggested spec link',
+        body: JSON.stringify({ message: 'payment-retry may depend on idempotent-api.' }),
+        entity_ref: 'specs/system/payment-retry.md',
+      }),
+    ]);
+    const { findByRole } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Suggested spec link/ });
+    await fireEvent.click(header);
+    await waitFor(() => {
+      expect(document.body.textContent).toContain('Confirm');
+      expect(document.body.textContent).toContain('Dismiss');
+    });
+    expect(document.body.textContent).not.toContain('coming soon');
+  });
+
+  it('suggested_link: Confirm resolves the notification', async () => {
+    api.myNotifications.mockResolvedValue([
+      makeNotification({
+        id: 'notif-link-confirm',
+        notification_type: 'suggested_link',
+        priority: 10,
+        title: 'Suggested spec link',
+        body: JSON.stringify({ message: 'payment-retry may depend on idempotent-api.' }),
+        entity_ref: 'specs/system/payment-retry.md',
+      }),
+    ]);
+    const { findByRole, findByText } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Suggested spec link/ });
+    await fireEvent.click(header);
+    await fireEvent.click(await findByText('Confirm'));
+    await waitFor(() => {
+      expect(api.resolveNotification).toHaveBeenCalledWith('notif-link-confirm');
+    });
+  });
+
   it('shows Approved feedback after successful approve', async () => {
     api.myNotifications.mockResolvedValue([specApprovalNotif]);
     const { findByRole, findByText } = render(Inbox);
@@ -617,6 +817,39 @@ describe('Inbox', () => {
     await waitFor(() => {
       expect(api.revertMr).toHaveBeenCalledWith('repo-1', 'mr-b');
     });
+  });
+
+  // HSI §8 P2: the expanded spec_approval accordion shows the spec-edit/*
+  // branch diff inline so the human can review before approving.
+  it('spec_approval: expanding fetches the MR diff and renders it inline (HSI §8 P2)', async () => {
+    api.myNotifications.mockResolvedValue([specApprovalNotif]);
+    const { findByRole, container } = render(Inbox);
+    const header = await findByRole('button', { name: /Expand: Spec pending approval/ });
+    await fireEvent.click(header);
+    await waitFor(() => {
+      expect(api.mrDiff).toHaveBeenCalledWith('mr-uuid-42');
+    });
+    await waitFor(() => {
+      const view = container.querySelector('[data-testid="spec-diff-view"]');
+      expect(view).not.toBeNull();
+      // SpecDiffView renders side-by-side rows — the changed lines must appear
+      expect(view.textContent).toContain('Old rule text');
+      expect(view.textContent).toContain('New rule text');
+    });
+  });
+
+  it('spec_approval: View Full Spec opens the detail panel Content tab', async () => {
+    const openDetailPanel = vi.fn();
+    api.myNotifications.mockResolvedValue([specApprovalNotif]);
+    const { findByRole, findByText } = render(Inbox, {
+      context: new Map([['openDetailPanel', openDetailPanel]]),
+    });
+    const header = await findByRole('button', { name: /Expand: Spec pending approval/ });
+    await fireEvent.click(header);
+    await fireEvent.click(await findByText('View Full Spec'));
+    expect(openDetailPanel).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'spec', id: 'system/api-conventions.md' })
+    );
   });
 
   it('Pick shows a targeted error when the losing commit has no merged MR', async () => {
