@@ -1828,6 +1828,17 @@ pub(crate) async fn pause_merge_queue(state: &AppState, repo: &gyre_domain::Repo
             })),
         )
         .await;
+
+    // user-management.md §Who Gets Notified — "Merge queue paused" notifies
+    // all workspace Admins/Owners. Event above reaches the orchestrator; this
+    // reaches the humans.
+    crate::notification_dispatcher::notify_merge_queue_paused(
+        state,
+        &repo.workspace_id,
+        repo,
+        reason,
+    )
+    .await;
 }
 
 /// Resume the merge queue for this repo: clear the pause state and emit
@@ -1989,29 +2000,17 @@ pub(crate) async fn apply_revert_side_effects(
             )
             .await;
 
-        // Persisted notification for the spawning user (falls back to the
-        // agent id itself when no spawning user exists).
-        let spawned_by = state
-            .agents
-            .find_by_id(author_agent_id)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|a| a.spawned_by);
-        let user_id = match &spawned_by {
-            Some(sb) => Id::new(sb.clone()),
-            None => author_agent_id.clone(),
-        };
-        crate::notifications::notify_rich(
+        // Persisted notification per user-management.md §Who Gets Notified
+        // ("MR reverted" → MR author + workspace Admins). The author's
+        // spawning user is the author recipient; falls back to no
+        // notification when there is no human behind the agent (the
+        // MrReverted event above already reached the agent itself).
+        crate::notifications::notify_mr_reverted(
             state,
-            updated.workspace_id.clone(),
-            user_id,
-            gyre_common::NotificationType::MrReverted,
-            format!("MR '{}' reverted on {}: post-merge validation failed", updated.title, repo.name),
-            "default",
-            Some(payload.to_string()),
-            Some(updated.id.to_string()),
-            Some(repo.id.to_string()),
+            author_agent_id,
+            &updated.workspace_id,
+            updated.id.as_str(),
+            failure_reason,
         )
         .await;
     }
@@ -5404,8 +5403,17 @@ mod tests {
     /// human), MR, queue entry, and a passing pre-merge gate result so the
     /// MR is mergeable.
     async fn setup_recovery_mr(state: &AppState) -> (Repository, gyre_domain::MergeRequest) {
+        // Seed the workspace record: the MR-reverted notification resolves
+        // the tenant from it (never fabricating a "default" tenant).
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-1"),
+            Id::new("tenant-recov"),
+            "ws-1",
+            "ws-1",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
         let repo = create_repo_in_workspace(state, "recovery-repo", "ws-1").await;
-
         let mut agent = gyre_domain::Agent::new(Id::new("agent-recov"), "agent-recov", 1000);
         agent.spawned_by = Some("user-recov".to_string());
         agent.workspace_id = Id::new("ws-1");
@@ -5467,6 +5475,22 @@ mod tests {
     async fn post_merge_fail_runs_full_recovery_protocol() {
         let state = test_state();
         let (repo, mr) = setup_recovery_mr(&state).await;
+
+        // Workspace Admin — per user-management.md §Who Gets Notified, "MR
+        // reverted" fans out to the author AND the workspace Admins.
+        let membership = gyre_domain::WorkspaceMembership::new(
+            Id::new("member-recovery-admin"),
+            Id::new("admin-recov"),
+            Id::new("ws-1"),
+            gyre_domain::WorkspaceRole::Admin,
+            Id::new("admin"),
+            1000,
+        );
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
 
         // `false` always exits non-zero → required post-merge gate fails,
         // and re-running on the reverted HEAD fails again → escalation path.
@@ -5549,6 +5573,22 @@ mod tests {
         assert!(
             types.contains(&&NotificationType::MergeQueueEscalation),
             "re-run failure should escalate to human, got {types:?}"
+        );
+
+        // 4b. Workspace Admin also got the MrReverted notification
+        //     (user-management.md §Who Gets Notified: "MR reverted" →
+        //     MR author + workspace Admin).
+        let admin_notifs = state
+            .notifications
+            .list_for_user(&Id::new("admin-recov"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .await
+            .unwrap();
+        assert!(
+            admin_notifs
+                .iter()
+                .any(|n| n.notification_type == NotificationType::MrReverted),
+            "workspace Admin should receive MrReverted notification, got {:?}",
+            admin_notifs.iter().map(|n| &n.notification_type).collect::<Vec<_>>()
         );
 
         // 5. Remediation task created with the failure reason.

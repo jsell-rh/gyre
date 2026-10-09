@@ -107,6 +107,7 @@ pub use search::{SearchDocument, SearchPort, SearchQuery, SearchResult};
 pub use secret::SecretRepository;
 pub use spawn_log::{SpawnLogEntry, SpawnLogRepository};
 pub use spec_approval::SpecApprovalRepository;
+pub use user_profile::UserChannelPreferenceRepository;
 pub use spec_approval_event_repo::SpecApprovalEventRepository;
 pub use spec_ledger_repo::SpecLedgerRepository;
 pub use spec_policy_repo::SpecPolicyRepository;

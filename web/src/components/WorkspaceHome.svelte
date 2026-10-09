@@ -119,6 +119,9 @@
     BudgetWarning: 'budget_warning',
     SpecChanged: 'spec_changed',
     MetaSpecDrift: 'meta_spec_drift',
+    PersonaApprovalRequested: 'persona_approval_requested',
+    MergeQueuePaused: 'merge_queue_paused',
+    BudgetExhausted: 'budget_exhausted',
   };
 
   function typeLabel(type) {

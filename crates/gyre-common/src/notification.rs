@@ -61,7 +61,21 @@ pub enum NotificationType {
     /// Priority 1 — post-merge revert re-validation failed on the reverted
     /// HEAD; queue stays paused until a human intervenes (platform-model.md §6).
     MergeQueueEscalation,
-}
+    /// Priority 3 — a persona was created pending approval and its owner
+    /// must approve it (user-management.md §Who Gets Notified).
+    PersonaApprovalRequested,
+    /// Priority 3 — the merge queue for a repo was paused (post-merge
+    /// validation failed); all workspace Admins/Owners are notified
+    /// (user-management.md §Who Gets Notified).
+    MergeQueuePaused,
+    /// Priority 2 — agent budget is exhausted; spawner + workspace Owner
+    /// are notified (user-management.md §Who Gets Notified).
+    BudgetExhausted,
+    /// Priority 3 — a Critical/High security finding was detected; the
+    /// workspace Owner and tenant Admin are notified
+    /// (user-management.md §Who Gets Notified).
+    SecurityFinding,
+ }
 
 impl NotificationType {
     /// Returns the canonical string used for DB storage.
@@ -89,6 +103,10 @@ impl NotificationType {
             Self::SpecConflict => "SpecConflict",
             Self::MrReverted => "MrReverted",
             Self::MergeQueueEscalation => "MergeQueueEscalation",
+            Self::PersonaApprovalRequested => "PersonaApprovalRequested",
+            Self::MergeQueuePaused => "MergeQueuePaused",
+            Self::BudgetExhausted => "BudgetExhausted",
+            Self::SecurityFinding => "SecurityFinding",
         }
     }
 
@@ -117,6 +135,10 @@ impl NotificationType {
             "SpecConflict" => Some(Self::SpecConflict),
             "MrReverted" => Some(Self::MrReverted),
             "MergeQueueEscalation" => Some(Self::MergeQueueEscalation),
+            "PersonaApprovalRequested" => Some(Self::PersonaApprovalRequested),
+            "MergeQueuePaused" => Some(Self::MergeQueuePaused),
+            "BudgetExhausted" => Some(Self::BudgetExhausted),
+            "SecurityFinding" => Some(Self::SecurityFinding),
             _ => None,
         }
     }
@@ -146,6 +168,10 @@ impl NotificationType {
             Self::SpecConflict => 2,
             Self::MrReverted => 2,
             Self::MergeQueueEscalation => 1,
+            Self::PersonaApprovalRequested => 2,
+            Self::MergeQueuePaused => 3,
+            Self::BudgetExhausted => 2,
+            Self::SecurityFinding => 3,
         }
     }
 }
@@ -206,6 +232,12 @@ impl Notification {
         }
     }
 
+    /// Builder: override the type-derived priority (HSI §8).
+    pub fn with_priority(mut self, priority: u8) -> Self {
+        self.priority = priority;
+        self
+    }
+
     /// Returns true if this notification is active (not resolved or dismissed).
     pub fn is_active(&self) -> bool {
         self.resolved_at.is_none() && self.dismissed_at.is_none()
@@ -258,6 +290,10 @@ mod tests {
             NotificationType::SpecConflict,
             NotificationType::MrReverted,
             NotificationType::MergeQueueEscalation,
+            NotificationType::PersonaApprovalRequested,
+            NotificationType::MergeQueuePaused,
+            NotificationType::BudgetExhausted,
+            NotificationType::SecurityFinding,
         ];
         for v in &variants {
             assert_eq!(NotificationType::parse(v.as_str()).as_ref(), Some(v));

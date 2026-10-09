@@ -31,7 +31,9 @@ pub async fn notify(
 
     if let Err(e) = state.notifications.create(&notif).await {
         tracing::warn!("Failed to create notification: {e}");
+        return;
     }
+    crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
 }
 
 /// Create and persist a notification with structured body and entity references.
@@ -65,10 +67,13 @@ pub async fn notify_rich(
     notif.body = body;
     notif.entity_ref = entity_ref;
     notif.repo_id = repo_id;
-
     if let Err(e) = state.notifications.create(&notif).await {
         tracing::warn!("Failed to create notification: {e}");
+        return;
     }
+    // Fan out to the recipient's configured channels (email/webhook/slack)
+    // per user-management.md §Delivery Channels.
+    crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
 }
 
 /// Notify the spawning user that a gate failed on their MR.
@@ -190,6 +195,21 @@ pub async fn notify_mr_reverted(
     mr_id: &str,
     reason: &str,
 ) {
+    // Resolve the tenant from the workspace record — never fabricate a
+    // "default" scope identity on lookup failure (see
+    // scripts/check-fabricated-scope-defaults.sh).
+    let tenant_id = match state.workspaces.find_by_id(workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        _ => {
+            tracing::warn!(
+                mr_id,
+                workspace_id = %workspace_id,
+                "notify_mr_reverted: cannot resolve tenant for workspace — skipping notifications"
+            );
+            return;
+        }
+    };
+
     let spawned_by = state
         .agents
         .find_by_id(author_agent_id)
@@ -211,7 +231,7 @@ pub async fn notify_mr_reverted(
         .ok()
         .flatten()
         .map(|mr| format!("'{}'", mr.title))
-        .unwrap_or_else(|| mr_id[..8.min(mr_id.len())].to_string());
+        .unwrap_or_else(|| mr_id.chars().take(8).collect());
 
     let body_json = serde_json::json!({
         "mr_id": mr_id,
@@ -223,13 +243,41 @@ pub async fn notify_mr_reverted(
     notify_rich(
         state,
         workspace_id.clone(),
-        user_id,
+        user_id.clone(),
         NotificationType::MrReverted,
         format!("MR {mr_label} was reverted: {reason}"),
-        "default",
-        Some(body_json),
+        tenant_id.clone(),
+        Some(body_json.clone()),
         Some(mr_id.to_string()),
         None,
     )
     .await;
+
+    // user-management.md §Who Gets Notified — "MR reverted" also notifies the
+    // workspace Admins.
+    let admin_members = state
+        .workspace_memberships
+        .list_by_workspace(workspace_id)
+        .await
+        .unwrap_or_default();
+    for member in admin_members {
+        if !matches!(member.role, gyre_domain::WorkspaceRole::Admin) {
+            continue;
+        }
+        if member.user_id == user_id {
+            continue; // already notified above
+        }
+        notify_rich(
+            state,
+            workspace_id.clone(),
+            member.user_id.clone(),
+            NotificationType::MrReverted,
+            format!("MR {mr_label} was reverted: {reason}"),
+            tenant_id.clone(),
+            Some(body_json.clone()),
+            Some(mr_id.to_string()),
+            None,
+        )
+        .await;
+    }
 }

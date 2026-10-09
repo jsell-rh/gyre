@@ -12,7 +12,7 @@ use axum::{
     Json,
 };
 use futures_util::{stream, StreamExt as _};
-use gyre_common::{Id, Notification, NotificationType};
+use gyre_common::{Id, NotificationType};
 use gyre_domain::{CostEntry, MergeRequest, MrStatus};
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
@@ -227,7 +227,6 @@ async fn spec_conflict_response(
         }
     }
 
-    let now = now_secs();
     // Persist the full line diff (and summary) in the notification body so BOTH
     // editors get a diff view in their Inbox (HSI §7 item 3) — not just the
     // second editor who receives the transient 409 response. `to_value` borrows
@@ -244,21 +243,18 @@ async fn spec_conflict_response(
     .to_string();
 
     for uid in &recipients {
-        let mut notif = Notification::new(
-            new_id(),
+        crate::notifications::notify_rich(
+            state,
             repo.workspace_id.clone(),
-            Id::new(uid),
+            Id::new(uid.clone()),
             NotificationType::SpecConflict,
             format!("Spec edit conflict: {spec_path}"),
             &tenant_id,
-            now as i64,
-        );
-        notif.body = Some(body.clone());
-        notif.entity_ref = Some(spec_path.to_string());
-        notif.repo_id = Some(repo.id.to_string());
-        if let Err(e) = state.notifications.create(&notif).await {
-            tracing::warn!(spec_path = %spec_path, recipient = %uid, "Failed to create spec-conflict notification: {e}");
-        }
+            Some(body.clone()),
+            Some(spec_path.to_string()),
+            Some(repo.id.to_string()),
+        )
+        .await;
     }
 
     (
@@ -678,22 +674,61 @@ pub async fn save_spec(
     };
 
     // Priority-2 "Spec pending approval" notification (HSI §2 + §8).
-    // user_id is "system" — real per-user fan-out requires workspace membership
-    // which is outside this task's scope.
-    let notif_id = new_id();
-    let mut notif = Notification::new(
-        notif_id,
-        repo.workspace_id.clone(),
-        Id::new("system"),
-        NotificationType::SpecPendingApproval,
-        format!("Spec pending approval: {}", req.spec_path),
-        &tenant_id,
-        now as i64,
-    );
-    notif.entity_ref = Some(mr_id.to_string());
-    // Non-fatal — MR is created even if notification fails.
-    if let Err(e) = state.notifications.create(&notif).await {
-        tracing::warn!(mr_id = %mr_id, "Failed to create spec-pending-approval notification: {e}");
+    // Recipients per user-management.md §Who Gets Notified: the spec's
+    // `approvers` from the manifest (falling back to the spec owner; both
+    // carry the "user:<name>" identity form). A recipient id with no
+    // registered user maps to the "system" inbox so the request is still
+    // visible rather than dropped.
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let manifest_yaml = crate::spec_registry::read_git_file(
+        &git_bin,
+        &repo.path,
+        "HEAD",
+        "specs/manifest.yaml",
+    )
+    .await;
+    let mut approval_recipients: Vec<Id> = Vec::new();
+    let spec_rel_path = req
+        .spec_path
+        .strip_prefix("specs/")
+        .unwrap_or(&req.spec_path)
+        .to_string();
+    if let Some(yaml) = manifest_yaml {
+        if let Ok(manifest) = crate::spec_registry::parse_manifest(&yaml) {
+            if let Some(entry) = manifest.specs.iter().find(|e| e.path == spec_rel_path) {
+                let mut ids: Vec<String> = entry
+                    .approval
+                    .as_ref()
+                    .map(|a| a.human_approvers.clone())
+                    .unwrap_or_default();
+                if ids.is_empty() {
+                    ids.push(entry.owner.clone());
+                }
+                approval_recipients = ids
+                    .into_iter()
+                    .map(|a| a.strip_prefix("user:").unwrap_or(&a).to_string())
+                    .map(Id::new)
+                    .collect();
+            }
+        }
+    }
+    if approval_recipients.is_empty() {
+        approval_recipients.push(Id::new("system"));
+    }
+
+    for recipient in approval_recipients {
+        crate::notifications::notify_rich(
+            state.as_ref(),
+            repo.workspace_id.clone(),
+            recipient,
+            NotificationType::SpecPendingApproval,
+            format!("Spec pending approval: {}", req.spec_path),
+            &tenant_id,
+            None,
+            Some(mr_id.to_string()),
+            None,
+        )
+        .await;
     }
 
     Ok((
