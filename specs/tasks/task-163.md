@@ -2,7 +2,7 @@
 title: "Dependency graph — persistent storage for breaking changes and policies"
 spec_ref: "dependency-graph.md §Enforcement Policies"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "dependency-graph.md §Enforcement Policies"
   - "dependency-graph.md §Cascade Testing"
@@ -50,12 +50,31 @@ When `require_cascade_tests` is true, a breaking change in repo A triggers test 
 
 ## Acceptance Criteria
 
-- [ ] `BreakingChangeRepository` port trait exists with SQLite adapter
-- [ ] `DependencyPolicyRepository` port trait exists with SQLite adapter
-- [ ] DB migration creates `breaking_changes` and `dependency_policies` tables
-- [ ] In-memory adapters replaced with persistent ones in AppState
-- [ ] Cascade test tasks auto-created when `require_cascade_tests` is true
+- [x] `BreakingChangeRepository` port trait exists with SQLite adapter
+- [x] `DependencyPolicyRepository` port trait exists with SQLite adapter
+- [x] DB migration creates `breaking_changes` and `dependency_policies` tables
+- [x] In-memory adapters replaced with persistent ones in AppState
+- [x] Cascade test tasks auto-created when `require_cascade_tests` is true
 - [ ] `cargo test --all` passes
+
+## Verification (implementation round, sandbox-executed)
+
+- `cargo test -p gyre-server --test task163_dependency_persistence` — 2/2 pass
+  (`breaking_changes_persist_across_state_rebuilds`,
+  `dependency_policies_persist_across_state_rebuilds`).
+- `cargo test -p gyre-adapters --lib sqlite::tests::migrations_create_tables` —
+  1/1 pass; asserts `breaking_changes` and `dependency_policies` exist after
+  migrations run (migration `2026-10-08-000056`).
+- `cargo test -p gyre-server --lib -- merge_processor::tests::trigger_cascade
+  merge_processor::tests::report_cascade` — 11/11 pass (task creation per
+  dependent, policy-disabled skip, no-dependents noop, dependent-workspace
+  resolution and opt-out, member notification, follow-up task on failure,
+  default-policy enable).
+- Full `cargo test --all` deferred to the controller's integrated gate — the
+  sandbox cannot run the loopback-listener server suite.
+- Postgres adapters implemented alongside SQLite
+  (`postgres/breaking_change.rs`, `postgres/dependency_policy.rs`) following
+  the existing dual-backend pattern.
 
 ## Agent Instructions
 
