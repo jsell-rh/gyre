@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["c0544edb4132e41c5f809df56a3a79671d541971", "d609ff3e038b2fbed4b355a5f09e038640c4191c", "849d92b4a8a17234c950c8ed1fc059fb6b951288", "1424af6b298c6751091b082f01618571dd3198fe", "680fc90ee579dd0e71c1df587561425c2e866e76", "33e3e35c8368cddb9d293e9e3c860cafc068e245"]
+commits: ["96d3a874fb40acd86de904408097247be1948a19", "1e15cbf071a4a7a3b7b33855df77a08440071193", "4a5626b2126fe3e6f4a448f98d0bb5b06c7852e1", "9814c162fbf953eaf0cf99371987169faa908a36", "607fedea953197c8fbf5a9363312c57451a4150b", "acda21a9f61ba808dfdb4bca09d934e51f253665"]
 ---
 
 ## Spec Excerpt
