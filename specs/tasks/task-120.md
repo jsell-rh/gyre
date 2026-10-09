@@ -102,57 +102,48 @@ Read `specs/system/user-management.md` §User Entity through §User Preferences 
 
 ## Shipped
 
-This is a resume of retained source `c0dd943c` (attempt-12 branch): the full
+Checkpoint round (recovered assignment, tree `7f00472c` → this head): the full
 task-120 implementation — all six product commits, the Round-1 F1/F2/F3 repairs,
-and the Round-2 integration-rejection bookkeeping repair — is preserved on this
-tree byte-identically (merge `be1223b9` with the newer base `4b9d61c4` touched
-no task-120 product surface; verified by empty `git diff c0dd943 HEAD --
-crates/gyre-domain/src/user.rs crates/gyre-adapters/ ...` over all six commit
-paths). This round's work: re-verification on the merged tree plus truthful
-progress/bookkeeping restoration for fresh independent review.
+and the Round-2 integration-rejection bookkeeping repair — was preserved by the
+interrupted-assignment checkpoint and is byte-identical on this tree (verified:
+`git diff 0dfba43..HEAD -- <all task-120 crate paths>` → empty; `0dfba43` is the
+newest of the six frontmatter product commits, the others are its ancestors via
+`0170f28`). This round's work: re-verification of the checkpointed product
+surface with fresh evidence, plus one pre-existing attribution-drift repair.
 
-- `User` entity (`gyre-domain/src/user.rs`) carries every spec profile field
-  (username, display_name, avatar_url, timezone, locale, preferences,
-  last_login_at, updated_at) with `UserPreferences` (Theme/UiDensity/DiffView/
-  FeedScope) stored server-side as JSON; migration 000056 adds the columns,
-  backfills defaults (UTC/en-US), and sanitizes legacy rows to unique URL-safe
-  handles via 38 depth-1 portable-SQL UPDATEs (no parser overflow on SQLite).
-- Username contract enforced across the chain: unique (index + create checks),
-  URL-safe (`validate_username`/`sanitize_username`), immutable after creation
-  (adapter guards in sqlite/postgres/mem; SCIM update ignores rename attempts;
-  SCIM create sanitizes with external-id fallback and 400/409 on unusable/
-  duplicate handles). First login derives the handle from SSO
-  `preferred_username` (sub fallback) and stamps `last_login_at`.
-- `PUT /api/v1/users/me` implements genuine partial-update semantics
-  (`UserPreferencesPatch` merge — omitted fields keep stored values), returned
-  via `GET /users/me`; malformed preferences → 400 with nothing applied.
-- Port `find_by_username` implemented in sqlite/postgres/mem with parity
-  contract guards.
+### Resume verification (2026-10-09, checkpoint tree, evidence under
+`/tmp/stage/review-evidence/task-120-checkpoint/`)
 
-### Resume verification (2026-10-09, merged tree `be1223b9`)
-
-Product surface identity: `git diff c0dd943..be1223b9 -- crates/gyre-domain/src/user.rs
-crates/gyre-adapters/src/sqlite/ crates/gyre-adapters/src/postgres/user.rs
-crates/gyre-adapters/migrations/2026-10-08-000056_user_entity_profile_fields/
-crates/gyre-server/src/api/users.rs crates/gyre-server/src/api/scim.rs
-crates/gyre-server/src/auth.rs` → empty (byte-identical). Focused probes
-re-run on the merged tree, evidence persisted under
-`/tmp/stage/review-evidence/task-120-resume/`:
-
-- `cargo test -p gyre-adapters --lib` → 349 passed, 0 failed (includes the
-  SQLite-boot path the F1 parser overflow broke and
-  `migration_000056_backfills_unique_url_safe_usernames`).
-- `cargo test -p gyre-server --lib api::scim` → 9 passed; `api::users` → 14
-  passed; `auth::` → 39 passed (username derivation, last_login_at stamping,
-  SCIM cutover, partial-update preferences).
-- `cargo test -p gyre-domain --lib user` → 11 passed.
-- Mechanical gates re-run on the merged tree: migration versions, SQL
-  portability, mem-port contracts, arch, ABAC route registry, commit
-  attribution (with the six product commits restored in frontmatter), scope
-  guards — all OK.
+- Product surface identity: `git diff 0dfba43..HEAD -- crates/gyre-domain/src/user.rs
+  crates/gyre-ports/src/user.rs crates/gyre-adapters/src/sqlite/ crates/gyre-adapters/src/postgres/user.rs
+  crates/gyre-adapters/src/schema.rs crates/gyre-adapters/src/migrations/
+  crates/gyre-server/src/api/users.rs crates/gyre-server/src/api/scim.rs
+  crates/gyre-server/src/auth.rs crates/gyre-server/src/mem.rs` → empty.
+- `cargo test -p gyre-adapters --lib` → **349 passed, 0 failed** (12 ignored;
+  includes the SQLite-boot path the F1 parser overflow broke and
+  `migration_000056_backfills_unique_url_safe_usernames`) —
+  `adapters-lib.txt`.
+- `cargo test -p gyre-server --lib api::scim` → **9 passed**; `api::users` →
+  **14 passed** — `scim-users.txt`.
+- `cargo test -p gyre-server --lib auth::` → **39 passed** (username
+  derivation, last_login_at stamping, SCIM cutover, partial-update
+  preferences).
+- `cargo test -p gyre-domain --lib user` → **11 passed**.
+- Mechanical gates re-run on this tree: migration versions, SQL portability,
+  mem-port contracts, arch, ABAC route registry, ABAC exempt handlers,
+  forwarded-header trust, in-memory-state stores, unbounded external HTTP,
+  fail-open ref resolution, relative path defaults, byte-slice truncation,
+  MCP write tools, dead message kinds, fabricated/scope-literal defaults,
+  inert enforcement, lossy secret conversion, forged scope fields — all OK.
+  Commit attribution initially failed on **pre-existing drift from upstream
+  main** (task-210 commit `a781ede2` absent from `specs/tasks/task-210.md`
+  frontmatter though it is an ancestor of the assignment base `8c2d1775`);
+  repaired on this branch by recording the SHA in the frontmatter
+  (commit `4dd13430`), matching the same fix already shipped on sibling
+  pipeline branches (`63d66b46`). Gate now OK.
 
 Transport note (recorded per assignment): this sandbox's listener probe
-(`accept`) is not supported (errno 95) — server-boot smoke over HTTP cannot run
-here; the SQLite migration-boot path is instead proven by every
-`SqliteStorage::new`-constructing adapter test (349/349). Host-side checks:
-`cargo test --all` + GitHub CI on this exact head.
+(`accept`) is not supported (errno 95, `capabilities.json`) — server-boot smoke
+over HTTP cannot run here; the SQLite migration-boot path is instead proven by
+every `SqliteStorage::new`-constructing adapter test (349/349). Host-side
+checks: `cargo test --all` + GitHub CI on this exact head.
