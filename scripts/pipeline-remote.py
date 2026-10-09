@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import shutil
+import socket
 import sys
 import time
 
@@ -31,6 +32,33 @@ def reattach_candidate(branch, checkout):
     if not git('branch', '--show-current') and git('rev-parse', 'HEAD') == git('rev-parse', branch):
         if not (checkout / '.git/rebase-merge').exists() and not (checkout / '.git/rebase-apply').exists():
             run('git', 'symbolic-ref', 'HEAD', 'refs/heads/' + branch)
+
+
+def capabilities():
+    browser = Path('/usr/local/share/gyre-playwright/chromium_headless_shell-1208/chrome-headless-shell-linux64/chrome-headless-shell')
+    result = {'chromium': {'path': str(browser), 'installed': browser.is_file() and os.access(browser, os.X_OK)}}
+    operation = 'socket'
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            operation = 'bind'
+            listener.bind(('127.0.0.1', 0))
+            operation = 'listen'
+            listener.listen(1)
+            listener.settimeout(1)
+            operation = 'getsockname'
+            address = listener.getsockname()
+            operation = 'loopback_connect'
+            # An empty nonblocking accept can report EAGAIN even when actual
+            # peer acceptance is unsupported. Exercise a real connection.
+            with socket.create_connection(address, timeout=1):
+                operation = 'accept'
+                connection, _ = listener.accept()
+                connection.close()
+        result['tcp_listener_probe'] = {'supported': True, 'operation': operation}
+    except OSError as exc:
+        result['tcp_listener_probe'] = {'supported': False, 'operation': operation,
+                                        'errno': exc.errno, 'error': str(exc)}
+    return result
 
 
 def main():
@@ -104,6 +132,17 @@ def main():
     if role in ('review', 'triage'):
         run('python3', str(STAGE / 'dev-review-guard.py'), 'snapshot', str(before), '--task', task)
     prompt = (STAGE / 'prompt.md').read_text()
+    measured = capabilities()
+    (STAGE / 'capabilities.json').write_text(json.dumps(measured))
+    prompt += ('\n\nMeasured sandbox capabilities: ' + json.dumps(measured) +
+               '\nRead /tmp/stage/capabilities.json before expensive server or browser probes. '
+               'An unsupported listener probe is an infrastructure limitation; record the exact HTTP checks for host verification and required GitHub CI. Do not perform a cold server build when this runtime cannot execute its transport probe.\n')
+    for kind, fields in (
+            ('tool_start', {'text': 'Measure sandbox capabilities'}),
+            ('tool_output', {'text': json.dumps(measured)}),
+            ('tool_end', {'error': False})):
+        print('GYRE_AGENT_EVENT ' + json.dumps({'at': int(time.time() * 1000), 'role': role,
+              'type': kind, 'id': 'runtime-capabilities', 'name': 'runtime capabilities', **fields}), flush=True)
     agent = subprocess.Popen(['omp', '-p', '--model', job['model'], '--no-session',
                               '--mode=json', '--approval-mode', 'yolo'],
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE)

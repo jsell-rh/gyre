@@ -353,7 +353,7 @@ if p.exists():
                     code = """import base64,io,pathlib,tarfile
 root=pathlib.Path('/tmp/stage'); output=io.BytesIO(); total=0
 with tarfile.open(fileobj=output,mode='w:gz') as archive:
- for relative in ('outcome.json','response.txt','verdict.json','review-evidence'):
+ for relative in ('outcome.json','response.txt','verdict.json','capabilities.json','review-evidence'):
   path=root/relative
   paths=path.rglob('*') if path.is_dir() else [path]
   for item in paths:

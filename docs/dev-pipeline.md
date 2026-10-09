@@ -70,6 +70,11 @@ probes still need to check the sandbox's actual process and network capabilities
 Remote Chromium probes may need `--no-zygote` and `--disable-dev-shm-usage` because
 the sandbox restricts process credentials and system shared-memory writes. These
 are probe runtime options; repository tests and GitHub assertions stay intact.
+Before inference, the executor measures browser installation and accepts a real
+loopback peer with a bounded socket probe. It records the exact failing operation
+and errno, gives the report to the model, and streams it in the cockpit. Merely
+binding a socket or accepting an empty nonblocking queue is insufficient proof
+of working server transport.
 The npm registry policy permits encoded slashes for scoped package metadata
 (`@scope%2fpackage`); registry requests remain read-only and restricted to the
 listed binaries. Blocking those paths prevents ordinary dependency installs.
