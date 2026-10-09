@@ -140,6 +140,14 @@ impl ContainerTarget {
 
 #[async_trait]
 impl ComputeTarget for ContainerTarget {
+    fn name(&self) -> &str {
+        "container"
+    }
+
+    fn target_type(&self) -> &'static str {
+        "container"
+    }
+
     async fn spawn_process(&self, config: &SpawnConfig) -> Result<ProcessHandle> {
         let runtime = self.resolve_runtime().await?;
         let bin = runtime.binary();
