@@ -14,7 +14,7 @@
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import { entityName, shortId, formatId, seedEntityName, seedFromEntities } from '../lib/entityNames.svelte.js';
-  import { relativeTime, formatDuration } from '../lib/timeFormat.js';
+  import { relativeTime, formatDuration, toEpochSec } from '../lib/timeFormat.js';
   import { specStatusTooltip, taskStatusTooltip, mrStatusTooltip, agentStatusTooltip, SPEC_STATUS_ICONS } from '../lib/statusTooltips.js';
   import RepoCard from './RepoCard.svelte';
   import DependencyHealthCard from './DependencyHealthCard.svelte';
@@ -204,11 +204,21 @@
   }
 
   // ── Agent Rules state (ui-navigation.md §2 — full effective meta-spec set) ──
+  // Request generation: a load started for one workspace must never write
+  // state for another. Without this guard, a slow response for workspace A
+  // that settles after the user navigated to workspace B overwrites B's
+  // rules (or error) with A's — a cross-workspace leak in the cascade
+  // summary. Uses the shared wsLoadGen scope guard (§4 stale-response rule)
+  // so every loader of the superseded scope is discarded together.
   let rulesLoading = $state(true);
   let rulesError = $state(null);
   let tenantRules = $state([]);
   let workspaceRules = $state([]);
 
+  // A failed lookup must surface as an error, never as an empty successful
+  // rule set — the section summarizes the MANDATORY prompt set agents
+  // receive, and a masked failure understates it. Either scope failing
+  // fails the section (partial cascade data would mislead the same way).
   async function loadRules() {
     if (!workspace?.id) return;
     const gen = wsLoadGen;
@@ -222,11 +232,13 @@
         api.getMetaSpecs({ scope: 'Workspace', scope_id: workspace.id }),
         api.getMetaSpecs({ scope: 'Global' }),
       ]);
-      if (stale(gen)) return;
+      if (stale(gen)) return; // a newer workspace load superseded this one
+      // Registry responses are a bare array (list_meta_specs_registry →
+      // Json<Vec<MetaSpec>>); tolerate {items:[...]} envelopes too.
       workspaceRules = Array.isArray(wsList) ? wsList : (wsList?.items ?? []);
       tenantRules = Array.isArray(tenantList) ? tenantList : (tenantList?.items ?? []);
     } catch (e) {
-      if (stale(gen)) return;
+      if (stale(gen)) return; // a newer workspace load superseded this one
       rulesError = e.message || 'Failed to load agent rules';
       workspaceRules = [];
       tenantRules = [];
@@ -253,15 +265,16 @@
 
   /** Reconciliation banner: required meta-specs updated recently. */
   let rulesRecentlyUpdated = $derived.by(() => {
+    // MetaSpec.updated_at is u64 UNIX SECONDS (domain/meta_spec.rs), not
+    // milliseconds — toEpochSec handles seconds, ms, and ISO strings.
     const cutoff = Date.now() / 1000 - 7 * 86400;
     return [...tenantRules, ...workspaceRules].filter(ms => {
       if (!ms.required) return false;
-      const updated = ms.updated_at ?? 0;
-      // Handle both epoch-seconds and ms timestamps
-      const ts = updated > 1e12 ? updated / 1000 : updated;
-      return ts > cutoff;
+      const ts = toEpochSec(ms.updated_at);
+      return ts != null && ts > cutoff;
     }).length;
   });
+
   // ── Repos: load ────────────────────────────────────────────────────────
   async function loadRepos() {
     if (!workspace?.id) return;
@@ -1216,7 +1229,6 @@
     return Math.min(100, Math.round((used / maxTokens) * 100));
   });
 
-  // ── Load all data when workspace changes ───────────────────────────────
   $effect(() => {
     void workspace?.id;
     // One generation bump for the whole scope change: all loaders of this
@@ -1225,6 +1237,7 @@
     loadDecisions();
     loadRepos();
     loadSpecs();
+    loadRules();
     loadTasks();
     loadMrs();
     loadAgents();
@@ -1233,7 +1246,6 @@
     loadMergeQueue();
     loadDepHealth();
     loadArchGraph();
-    loadRules();
   });
 
   // ── Explorer sidebar click → expand Architecture (HSI §1.3) ───────────
@@ -1619,6 +1631,62 @@
               {/if}
             </div>
           </section>
+          <!-- ── Agent Rules (ui-navigation.md §2 — full effective meta-spec set:
+               tenant (inherited) + workspace rules merged) ────────────────── -->
+          <section class="home-section" aria-labelledby="section-agent-rules" data-testid="section-agent-rules">
+            <div class="section-header">
+              <h2 class="section-title" id="section-agent-rules">{$t('workspace_home.sections.agent_rules')}</h2>
+              <button
+                class="section-action"
+                data-testid="manage-rules-link"
+                onclick={() => goToAgentRules?.()}
+              >{$t('workspace_home.manage_rules')}</button>
+            </div>
+            <div class="section-body">
+              {#if rulesLoading}
+                <div class="skeleton-row"></div>
+                <div class="skeleton-row"></div>
+              {:else if rulesError}
+                <div class="error-row" role="alert">
+                  <p class="error-text">{rulesError}</p>
+                  <button class="retry-btn" onclick={loadRules} aria-label={$t('workspace_home.retry_loading_rules')}>{$t('common.retry') || 'Retry'}</button>
+                </div>
+              {:else if rulesTotal === 0}
+                <p class="empty-text" data-testid="rules-empty">{$t('workspace_home.rules_no_metaspecs')}</p>
+              {:else}
+                <p class="rules-summary" data-testid="rules-summary">
+                  {rulesTotal} meta-spec{rulesTotal !== 1 ? 's' : ''} active
+                  {#if rulesRequiredCount > 0}
+                    ({rulesRequiredCount} required)
+                  {/if}
+                </p>
+                {#if rulesRecentlyUpdated > 0}
+                  <p class="rules-reconciling" role="status" data-testid="reconcile-status">
+                    {$t('workspace_home.rules_reconciling', { values: { count: rulesRecentlyUpdated } })}
+                  </p>
+                {/if}
+                {#each Object.entries(rulesByKind) as [kind, items] (kind)}
+                  <div class="rules-group">
+                    <h3 class="rules-group-title">{kindLabel(kind)} <span class="rules-count">({items.length})</span></h3>
+                    <ul class="rules-list" role="list">
+                      {#each items as ms (ms.id)}
+                        <li class="rule-item" data-testid="rule-item">
+                          <span class="rules-scope-badge" data-scope={ms.scope === 'Global' ? 'tenant' : 'workspace'}>
+                            {ms.scope === 'Global' ? $t('workspace_home.scope_tenant') : $t('workspace_home.scope_workspace')}
+                          </span>
+                          <span class="rule-name">{ms.name}</span>
+                          {#if ms.required}
+                            <span class="rule-lock" title={$t('workspace_home.rule_required_label')} aria-label={$t('workspace_home.rule_required_label')}>🔒</span>
+                          {/if}
+                          <span class="rule-version">v{ms.version}</span>
+                        </li>
+                      {/each}
+                    </ul>
+                  </div>
+                {/each}
+              {/if}
+            </div>
+          </section>
 
           <!-- ── Architecture (HSI §1.3 — realized architecture, collapsed by default per ui-navigation.md §2) ── -->
           <section class="home-section" aria-labelledby="section-architecture" data-testid="section-architecture">
@@ -1656,64 +1724,6 @@
             {/if}
           </section>
 
-          <!-- ── Agent Rules (ui-navigation.md §2 — full effective meta-spec set:
-               tenant (inherited) + workspace rules merged) ────────────────── -->
-          <section class="home-section" aria-labelledby="section-agent-rules" data-testid="section-agent-rules">
-            <div class="section-header">
-              <h2 class="section-title" id="section-agent-rules">{$t('workspace_home.sections.agent_rules')}</h2>
-              <div class="header-controls">
-                <button
-                  class="section-btn"
-                  onclick={() => goToAgentRules?.()}
-                  data-testid="manage-rules-btn"
-                >{$t('workspace_home.manage_rules')}</button>
-              </div>
-            </div>
-            <div class="section-body">
-              {#if rulesLoading}
-                <div class="skeleton-row"></div>
-                <div class="skeleton-row"></div>
-              {:else if rulesError}
-                <div class="error-row" role="alert">
-                  <p class="error-text">{rulesError}</p>
-                  <button class="retry-btn" onclick={loadRules} aria-label={$t('workspace_home.retry_loading_rules')}>{$t('common.retry') || 'Retry'}</button>
-                </div>
-              {:else if rulesTotal === 0}
-                <p class="empty-text" data-testid="rules-empty">{$t('workspace_home.rules_no_metaspecs')}</p>
-              {:else}
-                <p class="rules-summary">
-                  {$t('workspace_home.rules_summary', { values: { count: rulesTotal } })}
-                  {#if rulesRequiredCount > 0}
-                    {$t('workspace_home.rules_summary_required', { values: { count: rulesRequiredCount } })}
-                  {/if}
-                </p>
-                {#if rulesRecentlyUpdated > 0}
-                  <p class="rules-reconciling" data-testid="rules-reconciling">
-                    {$t('workspace_home.rules_reconciling', { values: { count: rulesRecentlyUpdated } })}
-                  </p>
-                {/if}
-                {#each Object.entries(rulesByKind) as [kind, items] (kind)}
-                  <div class="rules-group">
-                    <h3 class="rules-group-title">{kindLabel(kind)} <span class="rules-count">({items.length})</span></h3>
-                    <ul class="rules-list" role="list">
-                      {#each items as ms (ms.id)}
-                        <li class="rules-item" data-testid="rules-item">
-                          <span class="rules-scope-badge" data-scope={ms.scope === 'Global' ? 'tenant' : 'workspace'}>
-                            {ms.scope === 'Global' ? $t('workspace_home.scope_tenant') : $t('workspace_home.scope_workspace')}
-                          </span>
-                          <span class="rules-name">{ms.name}</span>
-                          {#if ms.required}
-                            <span class="rules-required-badge" title={$t('workspace_home.rule_required_label')}>🔒</span>
-                          {/if}
-                          <span class="rules-version">v{ms.version}</span>
-                        </li>
-                      {/each}
-                    </ul>
-                  </div>
-                {/each}
-              {/if}
-            </div>
-          </section>
           <!-- Repos (primary content — the main thing users interact with) -->
           <section class="repos-section" data-testid="section-repos">
             <div class="section-header-row">
@@ -5661,35 +5671,23 @@
     padding: 0;
   }
 
-  .rules-item {
+  .rule-item {
     display: flex;
     align-items: center;
     gap: var(--space-2);
     padding: var(--space-1) 0;
     font-size: var(--text-sm);
-  }
-
-  .rules-scope-badge {
-    flex-shrink: 0;
-    padding: 1px var(--space-2);
-    border-radius: 999px;
-    border: 1px solid var(--color-border);
-    font-size: var(--text-xs);
-    color: var(--color-text-muted);
-  }
-
-  .rules-scope-badge[data-scope='tenant'] {
-    border-color: var(--color-primary);
-    color: var(--color-primary);
-  }
-
-  .rules-name {
-    font-weight: 500;
     color: var(--color-text);
   }
 
-  .rules-required-badge {
+  .rule-lock {
+    flex-shrink: 0;
     font-size: var(--text-xs);
+  }
+
+  .rule-name {
+    font-weight: 500;
+    color: var(--color-text);
   }
 
   .rules-version {
@@ -5698,6 +5696,7 @@
     color: var(--color-text-muted);
     font-variant-numeric: tabular-nums;
   }
+
 
   .spec-repo {
     font-family: var(--font-mono);
@@ -6177,6 +6176,7 @@
     text-align: left;
     transition: background var(--transition-fast), border-color var(--transition-fast);
   }
+
 
   .decision-entity-link:hover {
     background: var(--color-surface-elevated);

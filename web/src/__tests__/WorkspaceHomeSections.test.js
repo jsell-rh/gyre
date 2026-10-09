@@ -830,7 +830,7 @@ describe('Specs section (HSI §1.3 — workspace-scope scroll target)', () => {
 
 // ── Agent Rules section ───────────────────────────────────────────────────────
 
-describe.skip('Agent Rules section (old layout — needs update)', () => {
+describe('Agent Rules section (ui-navigation.md §2 — meta-spec cascade)', () => {
   it('calls api.getMetaSpecs for Workspace scope', async () => {
     render(WorkspaceHome, { props: { workspace: WORKSPACE } });
     await waitFor(() => {
@@ -871,12 +871,22 @@ describe.skip('Agent Rules section (old layout — needs update)', () => {
     await waitFor(() => {
       const items = container.querySelectorAll('[data-testid="rule-item"]');
       expect(items.length).toBeGreaterThan(0);
-      // All shown items should have the lock span
-      items.forEach(item => {
-        expect(item.querySelector('.rule-lock')).toBeTruthy();
-      });
     });
+    // The section shows the FULL cascade (required + optional, tenant +
+    // workspace, ui-navigation.md §2). Every REQUIRED rule must carry the
+    // lock; optional ones must not — the lock is the required marker.
+    const required = ['conventional-commits', 'security'];
+    const optional = ['test-coverage'];
+    for (const item of container.querySelectorAll('[data-testid="rule-item"]')) {
+      const name = item.querySelector('.rule-name')?.textContent ?? '';
+      if (required.includes(name)) {
+        expect(item.querySelector('.rule-lock')).toBeTruthy();
+      } else if (optional.includes(name)) {
+        expect(item.querySelector('.rule-lock')).toBeNull();
+      }
+    }
   });
+
 
   it('shows required meta-spec names', async () => {
     const { getByText } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
@@ -911,6 +921,44 @@ describe.skip('Agent Rules section (old layout — needs update)', () => {
     await waitFor(() => {
       expect(getByTestId('reconcile-status')).toBeTruthy();
     });
+  });
+
+  it('treats meta-spec updated_at as epoch seconds, not milliseconds', async () => {
+    // MetaSpec.updated_at is u64 UNIX SECONDS (crates/gyre-domain/src/meta_spec.rs,
+    // stored as i64 in both adapters). A fresh server record is a small number
+    // like 1.7e9; parsing it as milliseconds would place it in Jan 1970 and
+    // wrongly hide the recently-updated status.
+    const recentSecs = {
+      id: 'm-recent-secs',
+      name: 'fresh-rule-secs',
+      kind: 'meta:principle',
+      required: true,
+      version: 2,
+      scope: 'Workspace',
+      updated_at: Math.floor(Date.now() / 1000) - 3600, // 1h ago, in seconds
+    };
+    api.getMetaSpecs.mockImplementation((params) => {
+      if (params?.scope === 'Workspace') return Promise.resolve([recentSecs]);
+      return Promise.resolve([]);
+    });
+    const { getByTestId, queryByTestId } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+    await waitFor(() => {
+      expect(getByTestId('rules-summary').textContent).toContain('1 meta-spec');
+    });
+    // 1h ago in SECONDS must count as recent
+    expect(queryByTestId('reconcile-status')).toBeTruthy();
+
+    // And an old record (seconds, > 7 days) must NOT count as recent
+    const oldSecs = { ...recentSecs, id: 'm-old-secs', updated_at: Math.floor(Date.now() / 1000) - 30 * 86400 };
+    api.getMetaSpecs.mockImplementation((params) => {
+      if (params?.scope === 'Workspace') return Promise.resolve([oldSecs]);
+      return Promise.resolve([]);
+    });
+    const { container } = render(WorkspaceHome, { props: { workspace: WORKSPACE } });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="rules-summary"]')).toBeTruthy();
+    });
+    expect(container.querySelector('[data-testid="reconcile-status"]')).toBeFalsy();
   });
 
   it('does not show reconcile status when no recent updates', async () => {
