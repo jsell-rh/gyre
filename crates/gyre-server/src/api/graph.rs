@@ -1330,47 +1330,11 @@ pub async fn get_workspace_graph_concept(
     State(state): State<Arc<AppState>>,
     Path((id, concept_name)): Path<(String, String)>,
 ) -> Result<Json<KnowledgeGraphResponse>, ApiError> {
-    require_workspace(&state, &id).await?;
-
-    let repos = state
-        .repos
-        .list_by_workspace(&Id::new(&id))
-        .await
-        .map_err(ApiError::Internal)?;
-
-    let mut matched_nodes: Vec<GraphNodeResponse> = Vec::new();
-    let mut matched_edges: Vec<GraphEdgeResponse> = Vec::new();
-
-    for repo in &repos {
-        let Some(concept) = resolve_concept_view(repo, &concept_name).await else {
-            continue; // repo does not define this concept
-        };
-        let nodes = state
-            .graph_store
-            .list_nodes(&repo.id, None)
-            .await
-            .map_err(ApiError::Internal)?;
-        let edges = state
-            .graph_store
-            .list_edges(&repo.id, None)
-            .await
-            .map_err(ApiError::Internal)?;
-
-        let (mn, me) = concept.project(nodes.iter(), edges.iter());
-        matched_nodes.extend(mn.into_iter().map(Into::into));
-        matched_edges.extend(me.into_iter().map(Into::into));
-    }
-
-    Ok(Json(KnowledgeGraphResponse {
-        repo_id: if repos.len() == 1 {
-            repos[0].id.to_string()
-        } else {
-            "multi-repo".to_string()
-        },
-        nodes: matched_nodes,
-        edges: matched_edges,
-        warnings: vec![],
-    }))
+    // Delegate to the same assembly logic the MCP workspace_graph_concept
+    // tool uses (HSI §11 parity).
+    Ok(Json(
+        assemble_workspace_concept_projection(&state, &Id::new(&id), &concept_name).await?,
+    ))
 }
 
 /// Request body for structural prediction.
