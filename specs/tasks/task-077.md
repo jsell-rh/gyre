@@ -10,7 +10,7 @@ coverage_sections:
   - "human-system-interface.md §11 Trust Levels"
   - "human-system-interface.md §12 What Each Level Controls"
   - "human-system-interface.md §13 Mechanical Implementation"
-commits: ["3372f2c3e498d1968bd3ef97cd05853280807ccb", "1b07c83be8904c63ad97e8b5d59abf50b8f59878", "ed36c1b6832b0242340a5de9a623d49fcb5a50d5", "545e986f231d1ceed0a5e537ec156c78a9d48d79", "7d0019ae23a5fbe336b29b2cbe4c317be4cb394c", "4cd20f3b4c25b260443ad5a3814e974c038d2e4a", "85830fa44abb6bb2305318f46a4cad4c20e00e33", "2db3f1efe11140eadb6dbe704eda86ba94d2e1b0"]
+commits: ["3372f2c3e498d1968bd3ef97cd05853280807ccb", "1b07c83be8904c63ad97e8b5d59abf50b8f59878", "ed36c1b6832b0242340a5de9a623d49fcb5a50d5", "545e986f231d1ceed0a5e537ec156c78a9d48d79", "7d0019ae23a5fbe336b29b2cbe4c317be4cb394c", "4cd20f3b4c25b260443ad5a3814e974c038d2e4a", "85830fa44abb6bb2305318f46a4cad4c20e00e33", "2db3f1efe11140eadb6dbe704eda86ba94d2e1b0", "6bbefbc5"]
 ---
 
 ## Spec Excerpt
@@ -96,13 +96,15 @@ Revision round (F5–F8 from `specs/reviews/task-077.md` R2), completing the che
 - **F7 — Custom transition directions tested:** `trust_transition_preset_to_custom_preserves_trust_policies` (Supervised → Custom preserves `trust:` policies) and `trust_transition_custom_to_preset_deletes_and_reseeds` (Custom → Guided deletes ALL `trust:` policies for the workspace, including operator-created `trust:`-prefixed ones, reseeds nothing for Guided, and a non-trust user policy survives).
 - **F8 — field-level generator assertions + `from_db_str` fallback:** `trust_policies_for_level_supervised_generates_merge_hold_deny` asserts every field the F5 gate consumes (name, effect Deny, priority 150 in the 100–199 band, actions `[merge]`, resource_types `[mr]`, `subject.type == "system"` Equals condition, Workspace scope/scope_id, enabled, non-immutable, non-builtin, created_by); Guided/Autonomous/Custom assert empty sets. `from_db_str_parses_all_four_levels` and `from_db_str_unknown_falls_back_to_supervised` cover the changed fallback.
 - **CI repair:** `check-task-commit-attribution` failed on inherited main (task-189's landed merge commit `f4acb4eb` missing from its frontmatter) — added the SHA to `specs/tasks/task-189.md` `commits:`; check now green. `cargo fmt --all` drift in the two touched test files fixed.
+- **Checkpoint repair (this round, commit `6bbefbc5`):** the interrupted-agent checkpoint `3372f2c3` reverted `scripts/check-non-atomic-creation.sh` from the python3 port (`8adb857b`) back to the gawk-only awk version and deleted its exemptions baseline — the awk version aborts on mawk hosts (rc=2, gawk-only 3-arg `match()`), a red gate regardless of code. Restored the python3 port and re-baselined `scripts/non-atomic-creation-exemptions.txt` at 5 entries; `invite_member` is not re-exempted because the checkpoint genuinely fixed it (notification routed through `notify_rich`, no second `state.<repo>.create()` remains). Negative probe confirmed the restored gate still detects planted violations (rc=1) while passing clean on HEAD (rc=0).
 
-**Test evidence** (logs under `/tmp/stage/review-evidence/`):
 - `cargo test -p gyre-server --lib api::workspaces` — 16 passed (incl. both F7 Custom-direction tests, the 409 rollback test, the invalid-`trust_level` 400 test).
 - `cargo test -p gyre-server --lib merge_processor` — 55 passed (incl. `supervised_workspace_open_mr_merge_is_held_and_requeued`, `supervised_workspace_approved_mr_merges`, `guided_workspace_open_mr_merges`, `supervised_trust_denies_atomic_group_member_rolls_back_group`, and the two startup-seeded-builtin regression tests).
 - `cargo test -p gyre-server --lib policy_engine` — 19 passed.
 - `cargo test -p gyre-server --lib api::spawn::tests::create_interrogation_policies` — 1 passed (F6 fail-closed).
 - `cargo test -p gyre-domain --lib policy` — 4 passed; `--lib from_db_str` — 3 passed (F8).
 - `cargo fmt --all --check` clean; all 17 `scripts/check-*.sh` mechanical gates pass.
+
+Repair-round verification (post-merge HEAD `696040ee` + `6bbefbc5`; evidence: `/tmp/stage/review-evidence/verifier-restoration.md`): `merge_processor` 55 passed, `api::workspaces` 16, `api::meta_specs` 15 (incl. `registry_endpoints_reject_non_admin` from the checkpoint), `policy_engine` 19, `create_interrogation_policies` 1, `gyre-domain --lib` 371, `api::users` 9; `cargo fmt --all --check` clean; all 8 checkpoint-touched mechanical gates plus the restored `check-non-atomic-creation.sh` pass, with a negative probe confirming the gate still detects planted violations.
 
 Full-workspace suites, all-target Clippy, and GitHub CI remain owned by verification/publication per the assignment.
