@@ -575,4 +575,85 @@ mod tests {
             "expected an Escalation message in the workspace orchestrator inbox"
         );
     }
+
+    /// Review finding F3 regression (task-115): server-driven
+    /// orchestrators (spawned_by="system", created by the signal chain)
+    /// have no external process to heartbeat. The stale-agent detector
+    /// must refresh their heartbeat instead of killing them — the
+    /// pre-fix behavior marked each one Dead, restarted an Active
+    /// replacement that equally never heartbeated, and churned
+    /// spawn/kill/restart forever while leaking budget slots.
+    #[tokio::test]
+    async fn stale_detector_refreshes_system_orchestrator_instead_of_churning() {
+        let state = test_state();
+        seed(&state).await;
+
+        // System-spawned workspace orchestrator (as the signal chain does).
+        let (agent, _token) = spawn_workspace_orchestrator_core(
+            &state,
+            "ws-1",
+            req(Some("system-ws-orch")),
+            "system",
+        )
+        .await
+        .unwrap();
+
+        // Age it past the heartbeat timeout — no process will ever
+        // heartbeat for it.
+        let mut aged = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        aged.spawned_at = aged.spawned_at.saturating_sub(10_000);
+        aged.last_heartbeat = None;
+        state.agents.update(&aged).await.unwrap();
+
+        crate::stale_agents::run_once(&state).await.unwrap();
+
+        // The SAME agent is refreshed and stays Active — not Dead, and no
+        // restart replacement was spawned.
+        let refreshed = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        assert_eq!(
+            refreshed.status,
+            AgentStatus::Active,
+            "system orchestrator must be refreshed, not marked Dead"
+        );
+        assert!(
+            refreshed.last_heartbeat.is_some(),
+            "detector stamped a fresh heartbeat on the system orchestrator"
+        );
+
+        let peers = state.agents.list_by_workspace(&Id::new("ws-1")).await.unwrap();
+        assert!(
+            !peers.iter().any(|a| a.name.starts_with("system-ws-orch-restart")),
+            "no restart replacement spawned for a system orchestrator"
+        );
+        assert_eq!(
+            peers
+                .iter()
+                .filter(|a| a.orchestrator_type == OrchestratorType::WorkspaceOrchestrator)
+                .count(),
+            1,
+            "exactly one live workspace orchestrator (no churn)"
+        );
+
+        // A second cycle must keep refreshing the same agent — the churn
+        // loop the finding describes is spawn→kill→restart→…, so prove
+        // two consecutive detector cycles never grow the orchestrator set.
+        crate::stale_agents::run_once(&state).await.unwrap();
+        let after = state
+            .agents
+            .list_by_workspace(&Id::new("ws-1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            after
+                .iter()
+                .filter(|a| a.orchestrator_type == OrchestratorType::WorkspaceOrchestrator)
+                .count(),
+            1,
+            "still exactly one live workspace orchestrator after a second cycle"
+        );
+        assert_eq!(
+            state.agents.find_by_id(&agent.id).await.unwrap().unwrap().status,
+            AgentStatus::Active
+        );
+    }
 }

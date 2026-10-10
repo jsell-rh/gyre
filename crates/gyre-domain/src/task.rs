@@ -98,12 +98,13 @@ impl Task {
             spec_ref: None,
             workspace_id: Id::new("default"),
             repo_id: Id::new(""),
-            spec_path: None,
             cancelled_at: None,
             cancelled_reason: None,
             task_type: None,
             order: None,
             depends_on: Vec::new(),
+            created_at,
+            updated_at: created_at,
         }
     }
 

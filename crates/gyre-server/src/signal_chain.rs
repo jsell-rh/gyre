@@ -1497,4 +1497,108 @@ mod tests {
             .expect("task survives");
         assert_eq!(after.status, TaskStatus::Backlog, "untyped task untouched");
     }
+
+    /// Review finding F2 regression (task-115): a repo-orchestrator run
+    /// failure must RELEASE the claim so a later cycle retries. The
+    /// pre-fix code attempted InProgress→Backlog (an invalid domain
+    /// transition) and discarded the Err, stranding the task InProgress
+    /// forever. The fix releases to Blocked (valid) which the scheduler
+    /// scan re-selects. Failure is injected deterministically: the
+    /// workspace budget is capped at max_concurrent_agents=0 so the repo
+    /// orchestrator spawn fails; raising the cap makes the retry succeed.
+    #[tokio::test]
+    async fn scheduler_failure_releases_claim_and_retries() {
+        let state = chain_state().await;
+
+        // Run the chain once to create the Delegation task for r-1.
+        on_spec_approved(&state, &approved_payload()).await;
+        let delegation = state
+            .tasks
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.task_type == Some(TaskType::Delegation))
+            .expect("delegation task created");
+        assert_eq!(delegation.status, TaskStatus::Backlog);
+
+        // Cap the workspace budget: no concurrent agents allowed, so the
+        // repo-orchestrator spawn inside run_repo_orchestrator fails.
+        state
+            .budget_configs
+            .set_config(
+                "workspace:ws-1",
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: None,
+                    max_cost_per_day: None,
+                    max_concurrent_agents: Some(0),
+                    max_agent_lifetime_secs: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Cycle 1: claim + run fails + release. The task must NOT be
+        // stranded InProgress (the pre-fix bug).
+        scheduler_run_once(&state).await.unwrap();
+        let after_fail = state
+            .tasks
+            .find_by_id(&delegation.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            after_fail.status,
+            TaskStatus::InProgress,
+            "failed run must not leave the task stranded InProgress (review F2)"
+        );
+        assert_eq!(
+            after_fail.status,
+            TaskStatus::Blocked,
+            "failed run releases the claim to Blocked for retry"
+        );
+
+        // Cycle 2 with the same budget: the Blocked task is re-selected
+        // and retried (still failing, still released — no stranding).
+        scheduler_run_once(&state).await.unwrap();
+        let retried = state
+            .tasks
+            .find_by_id(&delegation.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retried.status,
+            TaskStatus::Blocked,
+            "Blocked task is re-selected by the scan and retried"
+        );
+
+        // Lift the cap: the next cycle's retry now spawns the repo
+        // orchestrator and completes the delegation task.
+        state
+            .budget_configs
+            .set_config(
+                "workspace:ws-1",
+                &gyre_domain::BudgetConfig {
+                    max_tokens_per_day: None,
+                    max_cost_per_day: None,
+                    max_concurrent_agents: Some(10),
+                    max_agent_lifetime_secs: None,
+                },
+            )
+            .await
+            .unwrap();
+        scheduler_run_once(&state).await.unwrap();
+        let done = state
+            .tasks
+            .find_by_id(&delegation.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            done.status,
+            TaskStatus::Done,
+            "retry after transient failure completes the delegation task"
+        );
+    }
 }

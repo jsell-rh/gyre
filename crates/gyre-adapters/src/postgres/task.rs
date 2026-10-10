@@ -88,6 +88,7 @@ struct TaskRow {
     tenant_id: String,
     workspace_id: String,
     spec_path: Option<String>,
+    spec_ref: Option<String>,
     repo_id: String,
     cancelled_at: Option<i64>,
     cancelled_reason: Option<String>,

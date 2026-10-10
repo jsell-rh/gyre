@@ -2277,6 +2277,136 @@ mod tests {
         );
     }
 
+    /// Review finding F1 regression (task-115): chain-created tasks must
+    /// remain reachable by spec-rejection cancellation. The chain pins the
+    /// approved blob in `spec_ref` ("path@sha") and stores the BARE path in
+    /// `spec_path`, because `reject_spec` cancels via
+    /// `list_by_spec_path` exact bare-path match. If the chain ever stores
+    /// "path@sha" in `spec_path` again, approval→rejection leaves the
+    /// delegation task in-flight forever against a rejected spec (and it
+    /// stays eligible for worker spawning).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_spec_cancels_chain_created_delegation_task() {
+        let state = test_state();
+
+        // Same seed as the approve chain test: workspace, repo, Pending
+        // spec entry so approval triggers the signal chain.
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let ws = gyre_domain::Workspace::new(
+                    gyre_common::Id::new("ws-10"),
+                    gyre_common::Id::new("t1"),
+                    "Ws",
+                    "ws",
+                    0,
+                );
+                state.workspaces.create(&ws).await.unwrap();
+                let repo = gyre_domain::Repository::new(
+                    gyre_common::Id::new("r-10"),
+                    gyre_common::Id::new("ws-10"),
+                    "r-10",
+                    "/tmp/gyre-r-10",
+                    0,
+                );
+                state.repos.create(&repo).await.unwrap();
+                state
+                    .spec_ledger
+                    .save(&SpecLedgerEntry {
+                        path: "system/auth.md".to_string(),
+                        title: "Auth".to_string(),
+                        owner: "user:jsell".to_string(),
+                        kind: None,
+                        current_sha: "c".repeat(40),
+                        approval_mode: "human_only".to_string(),
+                        approval_status: ApprovalStatus::Pending,
+                        linked_tasks: vec![],
+                        linked_mrs: vec![],
+                        drift_status: "unknown".to_string(),
+                        created_at: 1700000000,
+                        updated_at: 1700000000,
+                        repo_id: Some("r-10".to_string()),
+                        workspace_id: Some("ws-10".to_string()),
+                    })
+                    .await
+                    .unwrap();
+            })
+        });
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // 1. Approve — the chain runs synchronously in the handler and
+        //    creates the Delegation task for the spec's repo.
+        let sha = "c".repeat(40);
+        let body = serde_json::json!({ "sha": sha });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fauth.md/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let delegation = state
+            .tasks
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.task_type == Some(gyre_domain::TaskType::Delegation))
+            .expect("chain created the delegation task");
+        // The pre-fix bug this test kills: spec_path carried "path@sha".
+        assert_eq!(
+            delegation.spec_path.as_deref(),
+            Some("system/auth.md"),
+            "spec_path must be the bare path for list_by_spec_path consumers"
+        );
+        assert_eq!(
+            delegation.spec_ref.as_deref(),
+            Some(format!("system/auth.md@{sha}")).as_deref()
+        );
+        assert_eq!(delegation.status, gyre_domain::TaskStatus::Backlog);
+
+        // 2. Reject the same spec — mid-flight cancellation must reach the
+        //    delegation task via its bare spec_path.
+        let reject_body = serde_json::json!({ "reason": "requirements changed" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fauth.md/reject")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&reject_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let after = state
+            .tasks
+            .find_by_id(&delegation.id)
+            .await
+            .unwrap()
+            .expect("delegation task survives rejection");
+        assert_eq!(
+            after.status,
+            gyre_domain::TaskStatus::Cancelled,
+            "chain-created delegation task must be cancelled when its spec is rejected"
+        );
+        assert!(after
+            .cancelled_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("spec rejected"));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn approve_then_revoke() {
         let (app, state) = app_with_spec();

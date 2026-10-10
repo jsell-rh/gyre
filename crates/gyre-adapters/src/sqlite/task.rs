@@ -116,6 +116,7 @@ impl TaskRow {
             workspace_id: Id::new(self.workspace_id),
             spec_path: self.spec_path,
             spec_ref: self.spec_ref,
+            repo_id: Id::new(self.repo_id),
             cancelled_at: self.cancelled_at.map(|v| v as u64),
             cancelled_reason: self.cancelled_reason,
             task_type: self
