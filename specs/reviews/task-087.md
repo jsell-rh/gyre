@@ -66,3 +66,46 @@ Independently re-checked each Round 1 finding against the current diff. All thre
 ## Verdict
 
 All Round 1 findings (F1, F2, F3) are repaired with real enforcement and hard regression tests; the handoff's two open questions are verified consistent. **progress: complete.**
+
+## Round 3 — recovery verification (base 8c2d1775 → candidate ac2306bc)
+
+Independent review of the recovered checkpoint. The candidate is three commits over the base: `71707120` (checkpoint: recover interrupted pipeline source — the full task-087 feature delta), `16b918b5` and `ac2306bc` (task.md bookkeeping only). The prior assignment's review model did not complete; this round re-ran the full probe set from scratch.
+
+### Source identity
+
+All trace-critical sources at `ac2306bc` are blob-SHA identical to the round-2-verified sources `998a3518`/`dd17bb74` (`gyre-common/src/trace.rs`, `api/traces.rs`, `otlp_receiver.rs`, `mem.rs`, `sqlite/trace.rs`, `postgres/trace.rs`, `ports/trace.rs`; `gate_executor.rs` and both SQL adapters are even identical to the review base itself). The base..candidate diff introduces no production logic beyond what Round 2 verified. Task frontmatter `commits: [71707120, 998a3518]` matches the actual branch commits; `check-task-commit-attribution.sh` passes.
+
+### Focused probes (candidate HEAD, clean tree)
+
+- `cargo test -p gyre-common --lib trace` — 5/5 ok.
+- `cargo test -p gyre-server --lib api::traces` — 6/6 ok.
+- `cargo test -p gyre-server --lib mem::trace_contract_tests` — 3/3 ok.
+- `cargo test -p gyre-server --lib otlp_receiver -- --skip grpc_receiver_accepts_export` — 9/9 ok.
+- `cargo test -p gyre-server --lib gate_executor::tests::trace_capture` — 7/7 ok.
+- `cargo test -p gyre-adapters --lib sqlite::trace` — 7/7 ok.
+- `cargo test -p gyre-server --lib mcp` — 71/71 ok (trace:// resource shares `assemble_gate_trace`).
+- `cargo test -p gyre-server --lib merging_mr_promotes_gate_trace` — 1/1 ok.
+- `cd web && npm ci && npx vitest run DetailPanel.test.js FlowRenderer.test.js` — 68/68 ok on the locked vitest.
+- check-arch, check-abac-route-registry, check-abac-exempt-handlers (89 handlers, no task exemptions), check-unwritten-store-fields, check-task-commit-attribution, check-mcp-write-tools, check-migration-versions — all pass.
+
+### Mutation probes (each reverted immediately; tree clean after)
+
+1. Cross-tenant guard removed from `get_span_payload` → `span_payload_forbids_cross_tenant_access` FAILS (guard is load-bearing enforcement).
+2. Mem `store()` stops writing payload rows → both mem contract payload tests FAIL (Round-1 F2 regression tests kill the original bug).
+3. `resolve_graph_linkage` disabled → `resolve_graph_linkage_resolves_http_function_db_spans` FAILS.
+4. `SpanKind::Server.as_str()` reverted to lowercase → `span_kind_as_str_matches_spec_casing` FAILS (Round-1 F3 pinned).
+5. Redundant-line control: removing the `guard.retain(mr_id != new)` line leaves behavior unchanged (the map insert overwrites the same `mr_id` key; the payload cascade is independently enforced via `replaced_gate_run_ids`) — tests passing on this mutation is correct, not a weak-test defect.
+
+### Infrastructure notes
+
+- `grpc_receiver_accepts_export` (real tonic client round-trip) requires a loopback TCP listener; this sandbox cannot `accept` (capabilities.json errno 95). The test compiles at candidate HEAD; non-listener probes cover ingest, lifecycle (port-0 receiver spawn inside `run_trace_capture`), env injection, and linkage. Host/GitHub CI must run it to close the transport-level check — a sandbox restriction, not a code defect.
+- check-self-confirming/mirrored-logic/assertionless-tests exit 2 in this sandbox on BOTH base and candidate: mawk 1.3.4 lacks gawk's 3-arg `match()`. Script content is identical at base and candidate. Verified via mawk-compatible shim copies (`substr`/`RSTART` rewrite) saved under `/tmp/stage/review-evidence/`: all three pass with zero violations on the candidate tree.
+
+### Non-blocking observations (pre-existing at round-2-verified sources, no spec violation)
+
+- `run_trace_capture`'s test command has no timeout (`QualityGate.timeout_secs` is not plumbed into the TraceCapture path, unlike `run_command_in_dir`'s 300s default). The gate is observational, but a hung test command hangs the gate task. HSI §3a does not specc a timeout; hardening candidate for a future task.
+- `get_span_payload` scans all MRs' traces per request (O(MRs)) — correct given one-trace-per-MR and compound span ids, unindexed. Acceptable at specced scale.
+
+## Round 3 verdict
+
+Candidate `ac2306bc` restores the round-2-verified implementation byte-identically, with intact bookkeeping and every acceptance criterion independently re-probed (including four mutation tests proving the enforcement and regression tests are load-bearing). **Approved.** Evidence: `/tmp/stage/review-evidence/task-087-independent-review.md`.
