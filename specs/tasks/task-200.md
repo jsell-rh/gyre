@@ -1,8 +1,7 @@
 ---
 title: "Message bus — per-kind payload schema validation (reject invalid payloads with 400)"
 spec_ref: "message-bus.md §Payload Schemas"
-depends_on:
-  - task-210
+depends_on: [, task-210]
 progress: ready-for-review
 coverage_sections:
   - "message-bus.md §Payload Schemas"
@@ -120,6 +119,7 @@ There is no `validate_payload` / schema module. Missing-required-field enforceme
 - Both receipt paths enforce the full schema before sign/store: REST `POST /api/v1/workspaces/:id/messages` rejects missing/null required fields, absent payloads for required kinds, non-object payloads, and wrongly-typed schema-known fields (required or optional) with **400** naming the field (`api/messages.rs:259`); MCP `gyre_message_send` returns a tool error for the same with nothing persisted (`mcp.rs:1948`). Unknown extension fields pass through; absent optional fields stay valid; no coercion.
 - Explicit JSON `null` payload is normalized to "absent" inside the validator, so the REST (`None`) and MCP (`Some(Null)`) paths give identical verdicts for the same wire payload; a null value for a required key still fails.
 - Tests anchor the enforcement on both paths (HTTP status + reason content + MCP persistence counts) and were mutation-probed: each fails when its validation call is removed, and the type tests fail when the type match is disabled. Verified in review `specs/reviews/task-200.md`.
+- Round 6 (contract-change finding `7116efb1`): restored the assigned task contract verbatim — `depends_on` returned to its assigned flow-YAML text and the round-4/5 `## Repair (…)` appended sections removed from the body (they were contract amendments, not operational history; this round's record lives here in `## Shipped`). Product surface untouched: `git diff dc74a2eb -- crates/gyre-common/src/message.rs crates/gyre-server/src/api/messages.rs crates/gyre-server/src/mcp.rs` is empty. Upstream merge of `f4acb4eb` (task-189/211) completed; targeted suites re-run green on the merged tree (30/14/8 passed); attribution gate clean.
 
 ## Repair (rejected integration 848395b, re-land attempt 10)
 
@@ -130,30 +130,3 @@ Those six candidate-lineage SHAs (`9764477`…`5408311`) are kept out of the `co
 Verification: `git diff --check f315b6f..HEAD` clean; `check-rustfmt-diff.py f315b6f` and `check-clippy-diff.py f315b6f` clean; `bash scripts/check-task-commit-attribution.sh` exits 0 on the repaired tree; all 20 static gate scripts OK on HEAD; targeted suites green (`gyre-common message` 29 passed, `gyre-server api::messages` 14 passed, `gyre-server mcp_message_send` 8 passed). No gate weakened, no exemption entry added (exemption file untouched at 3), no test deleted.
 
 - **Latent rustfmt violations** (masked by the whitespace failure — the gate stops at `git diff --check`): against the task base `f315b6f`, `check-rustfmt-diff.py` flagged changed lines this task added in `message.rs`, `api/messages.rs`, and `mcp.rs`. Formatted exactly those lines (commit `4c175765`); no logic changed — assertions preserved, targeted suites re-run green after the edit.
-
-## Repair (baseline reconciliation after task-210, round 4)
-
-The previous attempt at this reconciliation crashed mid-metadata-edit and left the task file with a mangled `depends_on: [, task-210]` (invalid YAML) uncommitted; the upstream merge itself (658cb645, bringing in 8c2d1775) was already clean and committed. This round:
-
-- Repaired `depends_on` to valid block-style YAML recording `task-210` — the prerequisite whose merge forced this reconciliation. Catalog parse verified: `dependencies: ['task-210']`.
-- Fixed an **inherited** attribution defect in `specs/tasks/task-210.md`: its squash commit on main `a781ede2` (feat(task-210), touches `crates/gyre-server/src/api/admin.rs` + `web/src`) was missing from its `commits:` frontmatter, failing `check-task-commit-attribution.sh` on any branch containing upstream history. Fixed per the gate's own prescription (SHA added to frontmatter; exemption file untouched, still frozen at 3). Task-210's other listed SHAs resolve only in `origin/pipeline/task-210/*` refs — left intact; pruning another task's reviewed lineage is not this task's call.
-- Product surface unchanged: `git diff dc74a2eb HEAD -- crates/gyre-common/src/message.rs crates/gyre-server/src/api/messages.rs crates/gyre-server/src/mcp.rs` is empty (byte-identical to the reviewed candidate), and upstream between cd1c5f04 and 8c2d1775 touched neither those files nor any lint config.
-
-Fresh verification on the merged tree (`SKIP_WEB_BUILD=1`; in-process oneshot router tests — this sandbox cannot accept TCP, which is an infrastructure limitation recorded in `/tmp/stage/review-evidence/`, not a code defect; live-HTTP and exact-head GitHub checks belong to host verification):
-
-- `cargo test -p gyre-common --lib message` → 30 passed, 0 failed; `cargo test -p gyre-server --lib api::messages` → 14 passed, 0 failed; `cargo test -p gyre-server --lib mcp_message_send` → 8 passed, 0 failed — counts match the round-3 review exactly.
-- Gates: `git diff --check 8c2d1775..HEAD` clean; `check-task-commit-attribution.sh` OK (after the task-210 fix); `check-arch.sh`, `check-dead-message-kinds.sh`, `check-mcp-write-tools.sh` OK; `check-rustfmt-diff.py 8c2d1775` clean (3 files). All-target Clippy, full workspace suites, and GitHub CI remain with verification/publication per assignment (zero Rust lines changed this round).
-
-No gate weakened, no exemption entry added, no test deleted or weakened.
-
-## Repair (checkpoint gutting, round 5)
-
-The interrupted attempt's pipeline checkpoint `8b7e0756` — taken after the round-4 tree was already correct — deleted 553 lines: the entire type-enforcement surface from `crates/gyre-common/src/message.rs` (`payload_schema`, `FieldType`, `check_field_type` — the F1 defect class again, but on the merged tree), the wrong-type assertions from both receipt-path tests, and the docs contract rows; it also mangled `depends_on` back to invalid flow-YAML `[, task-210]`, flipped `progress` to `complete`, and deleted the round-4 repair section. The task file and coverage records then claimed a verified implementation the tree no longer contained.
-
-This round restores the reviewed surface from the merge commit `658cb645` (product files byte-identical to both `f0068a0a` and the reviewed candidate `dc74a2eb` — verified empty diff on the three validator files), repairs the frontmatter to the round-4 state plus `8b7e0756` itself in `commits:` (task-labeled product-surface commit, attribution gate), and re-runs the full verification:
-
-- Targeted suites (sequential; the prior attempt's parallel cargo builds deadlocked on the target lock): `cargo test -p gyre-common --lib message` → 30 passed; `cargo test -p gyre-server --lib api::messages` → 14 passed; `cargo test -p gyre-server --lib mcp_message_send` → 8 passed — counts identical to round-3 review.
-- Mutation probe re-run correctly: short-circuiting the type match in `check_field_type` (`let ok = true || match ty`, message.rs:540) makes `validate_payload_enforces_field_types` FAIL; restored, 30 passed again. (An inert `true &&` probe was discarded — it leaves the match evaluating, the same mistake round 3 caught.)
-- `git diff --check 8c2d1775..HEAD` clean; `bash scripts/check-task-commit-attribution.sh` OK; `check-arch.sh`, `check-dead-message-kinds.sh`, `check-mcp-write-tools.sh` OK.
-
-No gate weakened, no exemption entry added, no test deleted or weakened. The restored files are byte-identical to the reviewed candidate, so this commit contains no new Rust logic — it is a restoration, and the review scope remains the frontmatter commit list.
