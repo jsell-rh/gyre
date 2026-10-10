@@ -1373,10 +1373,7 @@ async fn process_spec_lifecycle(
         .get_for_repo(repo_id)
         .await
         .unwrap_or_default();
-    if !config.enabled {
-        info!(repo_id, "spec-lifecycle: disabled for repo, skipping");
-        return;
-    }
+    let _ = config.enabled; // MUTATION: gate disabled
 
     let default_ref = format!("refs/heads/{default_branch}");
     let relevant_updates: Vec<&RefUpdate> = ref_updates
