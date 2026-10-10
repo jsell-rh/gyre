@@ -3,7 +3,7 @@ title: "Repair verified failure on main f4acb4ebcaf9"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
 progress: ready-for-review
-commits: []
+commits: ["96d2a28c8a1a1e8759934284382743a9e591f91a"]
 ---
 
 ## Required behavior
