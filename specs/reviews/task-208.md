@@ -51,3 +51,21 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 14 (2026-10-10, repair round 13 successor) — attribution clobber 17, product green
+
+Assigned candidate `d8b14cf2` (base `e77537fa`). The tip commit itself performed the 17th checkpoint-attribution clobber: it rewrote `commits:` from the fully-attributed three-SHA list (present at parent `bf03932f`, the clobber-16 repair) back to `["98fd096e..."]`, dropping `ad1121c5093cd2f1f2b3824ed88352ac4e181fd9` (build(web): regenerate dist without my-stuff profile tabs — the F1 fix; task-labeled, verified ancestor) and `ea006d52bb42e96e6f176b02b5390b6cb56a3116` (build(web): exempt generated dist bundles from whitespace gate; task-labeled, verified ancestor). Same documented class and gate blind spot (`scripts/check-task-commit-attribution.sh:114` product-surface regex excludes `web/dist/` and root `.gitattributes`; in-repo gate exit 0 at the candidate, re-verified). Repair is mechanical: restore the three-SHA list at the tip.
+
+Product surfaces re-verified green at this exact candidate with fresh probes:
+
+- **Rust:** `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib api::users::tests::my_stuff_endpoints_are_removed` → 1 passed (404 on all three URIs through the real router).
+- **Web:** `npm ci` then `npx vitest run src/__tests__/UserProfile.test.js` → 23/23, including the exact-six-tab guard (`toEqual(['info','tokens','memberships','ledger','notif-prefs','notifications'])` — full-list equality, fails on any reintroduced tab).
+- **Greps:** dead-code (`get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs` over `crates/` + `web/src/`) → zero; route/ABAC registrations → zero; residual `users/me/{agents,tasks,mrs}` strings in `crates/` are only the regression test's own URI array (`users.rs:950-952`); committed dist (`index-KSqzVjd3.js` via `index.html`) → zero forbidden identifiers, kept surfaces present (`users/me/tokens` ×3, `notif-prefs` ×2, `users/me/judgments` ×1). An independent rebuild (unintentionally triggered via `build.rs` during a `cargo test` without `SKIP_WEB_BUILD`) also produced a bundle with zero forbidden identifiers — recorded as evidence, working tree then restored to the committed dist (`git status` clean).
+- **Gates:** `check-abac-route-registry.sh` exit 0, `check-abac-exempt-handlers.sh` exit 0 (89 handlers), `git diff --check` clean over the base→candidate range (with the `.gitattributes` `web/dist/** -whitespace` exemption), attribution gate exit 0.
+- **No product drift since `ad1121c5`** on any task-208 surface (users.rs, api/mod.rs, abac_middleware.rs, api.js, UserProfile.svelte, UserProfile.test.js, web/dist); the only `web/src` drift on the branch is other tasks' merges (task-196/210, sidebar removal), none touching task-208 surfaces.
+- **Spec/coverage:** user-management.md amendment intact (§"My Stuff" supersession, §UI Pages strike, M22.8 Removed row at line 652); coverage user-management row 22 `n/a`, HSI row 54 `implemented`, 0 `not-started` rows in both governed specs; M22 milestone rows annotated.
+- **i18n:** `user_profile.tabs.*` holds exactly the kept tabs' keys; removed tabs used hardcoded labels, not i18n keys. No orphans.
+
+Sandbox note: TCP accept is blocked (`EOPNOTSUPP`), so live HTTP probes are impossible here — same as every prior round; the in-process router test covers the 404 contract without sockets.
+
+Verdict: **needs-revision** (attribution only). All acceptance criteria hold on product code; the finding is the frontmatter clobber, mechanical repair as in rounds 3–13.
