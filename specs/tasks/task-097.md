@@ -2,7 +2,7 @@
 title: "Platform Model Secrets Domain Types + Port"
 spec_ref: "platform-model.md §7 Secrets Delivery"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "platform-model.md §7 Secrets Delivery"
   - "platform-model.md §7 Principle"
@@ -149,3 +149,11 @@ spawn 34) were run green by the implementation agent and the round-3 reviewer on
 trees whose crates/ bytes are identical to HEAD (git diff on the four task-owned
 product files vs both trees is empty; this continuation's time budget did not allow
 another cold gyre-server build). Probe logs under /tmp/stage/review-evidence.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-adapters/src/sqlite/secret.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.

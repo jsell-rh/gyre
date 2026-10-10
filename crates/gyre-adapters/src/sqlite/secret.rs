@@ -82,11 +82,8 @@ fn encrypt_value(key: &LessSafeKey, plaintext: &[u8]) -> Result<(Vec<u8>, Vec<u8
     rng.fill(&mut nonce_bytes)
         .map_err(|_| anyhow::anyhow!("system RNG failure generating secret nonce"))?;
     let nonce = Nonce::assume_unique_for_key(nonce_bytes);
-    let mut in_out = plaintext.to_vec();
-    let tag = key
-        .seal_in_place_separate_tag(nonce, Aad::empty(), &mut in_out)
-        .map_err(|_| anyhow::anyhow!("AES-256-GCM encryption failed"))?;
-    in_out.extend_from_slice(tag.as_ref());
+    // MUTANT E1: identity "encryption" — plaintext stored at rest
+    let in_out = plaintext.to_vec();
     Ok((in_out, nonce_bytes.to_vec()))
 }
 
