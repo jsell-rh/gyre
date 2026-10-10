@@ -274,12 +274,24 @@ pub async fn admin_kill_agent(
     let _ = agent.transition_status(AgentStatus::Dead);
     state.agents.update(&agent).await?;
 
-    // Kill the actual process if it is running.
+    // Kill the actual process/container/Pod if it is running. The backend
+    // recorded at spawn time decides how: a container ID goes to
+    // `docker rm --force`, a Pod name to `kubectl delete pod`, a remote
+    // container over SSH — falling back to LocalTarget (pid kill) only for
+    // agents whose backend is unknown (pre-task-117 records).
     if let Some(handle) = state.process_registry.lock().await.remove(&id) {
-        if let Err(e) =
-            gyre_ports::ComputeTarget::kill_process(&gyre_adapters::compute::LocalTarget, &handle)
+        let backend = state.spawned_backends.lock().await.remove(&id);
+        let kill_result = match &backend {
+            Some(b) => gyre_ports::ComputeTarget::kill_process(b, &handle).await,
+            None => {
+                gyre_ports::ComputeTarget::kill_process(
+                    &gyre_adapters::compute::LocalTarget,
+                    &handle,
+                )
                 .await
-        {
+            }
+        };
+        if let Err(e) = kill_result {
             tracing::warn!(agent_id = %id, "kill_process failed: {e}");
         }
     }

@@ -261,6 +261,12 @@ pub struct AppState {
     pub rate_limiter: Arc<rate_limit::RateLimiter>,
     /// Running agent processes: agent_id -> ProcessHandle.
     pub process_registry: Arc<Mutex<HashMap<String, ProcessHandle>>>,
+    /// Compute backend each running agent was spawned on: agent_id ->
+    /// backend owning its handle. Lets kill/is_alive reach the right
+    /// orchestrator (docker/podman, remote SSH docker, or kubectl)
+    /// instead of assuming a local pid (agent-runtime.md §3).
+    pub spawned_backends:
+        Arc<Mutex<HashMap<String, crate::api::spawn::SpawnBackend>>>,
     /// Per-agent log buffers: agent_id -> lines in "[ts] message" format.
     pub agent_logs: Arc<Mutex<HashMap<String, Vec<String>>>>,
     /// Per-agent broadcast channels for live log SSE streaming.
@@ -911,6 +917,7 @@ pub fn build_state(
         dependency_policies: Arc::new(mem::MemDependencyPolicyRepository::default()),
         rate_limiter: rate_limit::RateLimiter::new(rate_per_sec),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
+        spawned_backends: Arc::new(Mutex::new(HashMap::new())),
         agent_logs: Arc::new(Mutex::new(HashMap::new())),
         agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
         quality_gates: store!(

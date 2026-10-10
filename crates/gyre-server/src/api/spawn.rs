@@ -980,48 +980,14 @@ pub(crate) async fn spawn_agent_core(
                                 spawned_pid = handle.pid;
                                 spawned_container_id = Some(handle.id.clone());
                                 spawned_container_image = Some(image.clone());
-                                let agent_id_str = agent.id.to_string();
-                                state
-                                    .process_registry
-                                    .lock()
-                                    .await
-                                    .insert(agent_id_str.clone(), handle.clone());
-
-                                // Background monitor: watch for container exit.
-                                let state_mon = std::sync::Arc::clone(state);
-                                tokio::spawn(async move {
-                                    loop {
-                                        tokio::time::sleep(tokio::time::Duration::from_secs(5))
-                                            .await;
-                                        let alive =
-                                            gyre_ports::ComputeTarget::is_alive(&ct, &handle)
-                                                .await
-                                                .unwrap_or(false);
-                                        if !alive {
-                                            state_mon
-                                                .process_registry
-                                                .lock()
-                                                .await
-                                                .remove(&agent_id_str);
-                                            container_audit::capture_exit_audit(
-                                                state_mon.container_audits.as_ref(),
-                                                &agent_id_str,
-                                            )
-                                            .await;
-                                            if let Ok(Some(mut a)) = state_mon
-                                                .agents
-                                                .find_by_id(&Id::new(&agent_id_str))
-                                                .await
-                                            {
-                                                if a.status == AgentStatus::Active {
-                                                    let _ = a.transition_status(AgentStatus::Idle);
-                                                    let _ = state_mon.agents.update(&a).await;
-                                                }
-                                            }
-                                            break;
-                                        }
-                                    }
-                                });
+                                register_spawned_agent(
+                                    state,
+                                    &agent,
+                                    handle.clone(),
+                                    SpawnBackend::Container(ct),
+                                    &resolved_target_config,
+                                )
+                                .await;
                             }
                             Err(e) => {
                                 spawned_pid = None;
@@ -1043,40 +1009,14 @@ pub(crate) async fn spawn_agent_core(
                                 spawned_pid = handle.pid;
                                 spawned_container_id = None;
                                 spawned_container_image = None;
-                                let agent_id_str = agent.id.to_string();
-                                state
-                                    .process_registry
-                                    .lock()
-                                    .await
-                                    .insert(agent_id_str.clone(), handle.clone());
-                                let state_mon = std::sync::Arc::clone(state);
-                                tokio::spawn(async move {
-                                    loop {
-                                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                                        let alive = gyre_ports::ComputeTarget::is_alive(
-                                            &gyre_adapters::compute::LocalTarget,
-                                            &handle,
-                                        )
-                                        .await
-                                        .unwrap_or(false);
-                                        if !alive {
-                                            state_mon
-                                                .process_registry
-                                                .lock()
-                                                .await
-                                                .remove(&agent_id_str);
-                                            if let Ok(Some(mut a)) =
-                                                state_mon.agents.find_by_id(&Id::new(&agent_id_str)).await
-                                            {
-                                                if a.status == AgentStatus::Active {
-                                                    let _ = a.transition_status(AgentStatus::Idle);
-                                                    let _ = state_mon.agents.update(&a).await;
-                                                }
-                                            }
-                                            break;
-                                        }
-                                    }
-                                });
+                                register_spawned_agent(
+                                    state,
+                                    &agent,
+                                    handle.clone(),
+                                    SpawnBackend::Local,
+                                    &resolved_target_config,
+                                )
+                                .await;
                             }
                             Err(e) => {
                                 spawned_pid = None;
@@ -1178,10 +1118,221 @@ pub(crate) async fn spawn_agent_core(
     })
 }
 
+// ── Spawned-agent registration (agent-runtime.md §3) ─────────────────────────
+
+/// The concrete compute backend a running agent was spawned on.
+///
+/// Kept per-agent so lifecycle operations (admin kill, stale detection,
+/// exit monitoring) reach the agent on the backend that owns it: a
+/// container ID must go to `docker rm --force`, a Pod name to
+/// `kubectl delete pod`, a remote container to SSH — a pid-based
+/// [`gyre_adapters::compute::LocalTarget`] kill is a silent no-op for all
+/// of those (it only works when `handle.pid` is set, which container and
+/// Pod handles never are).
+pub enum SpawnBackend {
+    Container(gyre_adapters::compute::ContainerTarget),
+    /// SSH compute target running `docker run` on the remote host
+    /// (agent-runtime.md §3 Supported Backends — SSH, spec default).
+    SshDocker(gyre_adapters::compute::SshDockerTarget),
+    /// Legacy bare remote-process SSH mode (`container_mode: false`).
+    SshBare(gyre_adapters::compute::SshTarget),
+    Kubernetes(gyre_adapters::compute::KubernetesTarget),
+    Local,
+}
+
+impl SpawnBackend {
+    fn target_type(&self) -> &'static str {
+        match self {
+            SpawnBackend::Container(_) => "container",
+            SpawnBackend::SshDocker(_) | SpawnBackend::SshBare(_) => "ssh",
+            SpawnBackend::Kubernetes(_) => "kubernetes",
+            SpawnBackend::Local => "local",
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl gyre_ports::ComputeTarget for SpawnBackend {
+    fn name(&self) -> &str {
+        match self {
+            SpawnBackend::Container(t) => t.name(),
+            SpawnBackend::SshDocker(t) => t.name(),
+            SpawnBackend::SshBare(t) => t.name(),
+            SpawnBackend::Kubernetes(t) => t.name(),
+            SpawnBackend::Local => gyre_adapters::compute::LocalTarget.name(),
+        }
+    }
+
+    fn target_type(&self) -> &'static str {
+        self.target_type()
+    }
+
+    async fn spawn_process(
+        &self,
+        _config: &gyre_ports::SpawnConfig,
+    ) -> anyhow::Result<gyre_ports::ProcessHandle> {
+        // Registration-only handle: spawning already happened before the
+        // backend was wrapped here. Reaching this is a programming error.
+        Err(anyhow::anyhow!(
+            "SpawnBackend is a lifecycle handle; call the concrete target to spawn"
+        ))
+    }
+
+    async fn kill_process(&self, handle: &gyre_ports::ProcessHandle) -> anyhow::Result<()> {
+        match self {
+            SpawnBackend::Container(t) => t.kill_process(handle).await,
+            SpawnBackend::SshDocker(t) => t.kill_process(handle).await,
+            SpawnBackend::SshBare(t) => t.kill_process(handle).await,
+            SpawnBackend::Kubernetes(t) => t.kill_process(handle).await,
+            SpawnBackend::Local => {
+                gyre_adapters::compute::LocalTarget.kill_process(handle).await
+            }
+        }
+    }
+
+    async fn is_alive(&self, handle: &gyre_ports::ProcessHandle) -> anyhow::Result<bool> {
+        match self {
+            SpawnBackend::Container(t) => t.is_alive(handle).await,
+            SpawnBackend::SshDocker(t) => t.is_alive(handle).await,
+            SpawnBackend::SshBare(t) => t.is_alive(handle).await,
+            SpawnBackend::Kubernetes(t) => t.is_alive(handle).await,
+            SpawnBackend::Local => {
+                gyre_adapters::compute::LocalTarget.is_alive(handle).await
+            }
+        }
+    }
+}
+
+/// How the exit monitor probes the agent's backend, and how long it waits
+/// between probes. Split out so tests can drive one iteration without a
+/// real sleep.
+const EXIT_MONITOR_POLL_SECS: u64 = 5;
+
+/// Register a freshly spawned agent for lifecycle management:
+///
+/// 1. Records the process handle in `state.process_registry` (admin kill,
+///    stale detection, /agents/{id} status display).
+/// 2. Records the backend that owns the handle in
+///    `state.spawned_backends` so `kill_process` / `is_alive` reach the
+///    right orchestrator instead of assuming `LocalTarget` (which is a
+///    no-op for container/Pod/remote-container handles).
+/// 3. Starts a background monitor that polls the backend until the agent
+///    exits, then updates the agent record (Active → Idle), captures the
+///    container exit audit (M19.3), and emits the container_stopped audit
+///    event (M23).
+///
+/// This is the single registration path for every backend dispatch arm in
+/// [`spawn_agent_core`]; before the task-117 consolidation each arm
+/// hand-rolled its own registry insert + monitor with subtly different
+/// cleanup (the container arm was the only one capturing exit audits).
+async fn register_spawned_agent(
+    state: &Arc<AppState>,
+    agent: &Agent,
+    handle: gyre_ports::ProcessHandle,
+    backend: SpawnBackend,
+    resolved_target_config: &Option<super::compute::ComputeTargetConfig>,
+) {
+    let agent_id_str = agent.id.to_string();
+    state
+        .process_registry
+        .lock()
+        .await
+        .insert(agent_id_str.clone(), handle.clone());
+    state
+        .spawned_backends
+        .lock()
+        .await
+        .insert(agent_id_str.clone(), backend);
+
+    // Background monitor: watch for process/container/Pod exit and update
+    // agent status. Cloning the Arc'd state keeps the loop running after
+    // the spawn response returns.
+    let state_mon = std::sync::Arc::clone(state);
+    tokio::spawn(async move {
+        monitor_spawned_agent_exit(state_mon, agent_id_str).await;
+    });
+    let _ = resolved_target_config; // reserved for future per-target policy
+}
+
+/// One background task per spawned agent: poll the backend that owns its
+/// handle until it reports not-alive, then run exit bookkeeping.
+async fn monitor_spawned_agent_exit(state: Arc<AppState>, agent_id: String) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(EXIT_MONITOR_POLL_SECS)).await;
+
+        let handle = {
+            let registry = state.process_registry.lock().await;
+            match registry.get(&agent_id) {
+                Some(h) => h.clone(),
+                // Already unregistered (killed, or another monitor iteration
+                // finished first) — nothing left to watch.
+                None => break,
+            }
+        };
+
+        // Probe the backend that owns this handle. Holding the backends
+        // lock across the await is fine: it is only ever taken briefly by
+        // registration (spawn) and unregistration (kill / monitor exit),
+        // never by another probe.
+        let alive = {
+            let backends = state.spawned_backends.lock().await;
+            match backends.get(&agent_id) {
+                Some(b) => {
+                    gyre_ports::ComputeTarget::is_alive(b, &handle)
+                        .await
+                        .unwrap_or(false)
+                }
+                None => break,
+            }
+        };
+
+        if !alive {
+            state.process_registry.lock().await.remove(&agent_id);
+            state.spawned_backends.lock().await.remove(&agent_id);
+
+            // M19.3: Update the audit record on container exit. No-op when
+            // no audit record exists (local/SSH-bare spawns) —
+            // `capture_exit_audit` returns early on missing records.
+            container_audit::capture_exit_audit(state.container_audits.as_ref(), &agent_id).await;
+
+            // M23: Emit container_stopped audit event (best-effort).
+            {
+                let audit_rec = state
+                    .container_audits
+                    .find_by_agent_id(&agent_id)
+                    .await
+                    .ok()
+                    .flatten();
+                let exit_code = audit_rec.as_ref().and_then(|r| r.exit_code);
+                let ctx = crate::container_audit::AuditCtx {
+                    audit: state.audit.as_ref(),
+                    broadcast_tx: &state.audit_broadcast_tx,
+                };
+                let container_id_for_evt =
+                    audit_rec.map(|r| r.container_id).unwrap_or_default();
+                crate::container_audit::emit_stopped(
+                    &ctx,
+                    &agent_id,
+                    &container_id_for_evt,
+                    exit_code,
+                )
+                .await;
+            }
+
+            if let Ok(Some(mut a)) = state.agents.find_by_id(&Id::new(&agent_id)).await {
+                if a.status == AgentStatus::Active {
+                    let _ = a.transition_status(AgentStatus::Idle);
+                    let _ = state.agents.update(&a).await;
+                }
+            }
+            break;
+        }
+    }
+}
+
 /// POST /api/v1/agents/spawn
 ///
 /// Orchestrated agent provisioning in one call (see spawn_agent_core for
-/// the flow). Thin wrapper: ABAC + budget checks run inside the core so the
 /// MCP tool gyre_spawn_worker shares them.
 pub async fn spawn_agent(
     State(state): State<Arc<AppState>>,
@@ -2961,5 +3112,121 @@ mod tests {
             StatusCode::CREATED,
             "interrogation agents should bypass task_type filtering"
         );
+    }
+
+    // ── Backend-aware lifecycle tests (agent-runtime.md §3) ──────────────
+
+    /// `register_spawned_agent` must record BOTH the handle and the backend
+    /// that owns it. The backend record is what makes admin kill reach the
+    /// right orchestrator (docker rm / kubectl delete / ssh docker rm)
+    /// instead of falling through to a pid-based LocalTarget kill, which is
+    /// a silent no-op for container and Pod handles (their `pid` is None).
+    #[tokio::test]
+    async fn register_spawned_agent_records_backend_owning_handle() {
+        let state = test_state();
+        let agent = gyre_domain::Agent::new(gyre_common::Id::new("agt-backend-1"), "b1", 100);
+        let handle = gyre_ports::ProcessHandle {
+            id: "fake-container-id".to_string(),
+            target_type: "container".to_string(),
+            pid: None,
+        };
+        register_spawned_agent(
+            &state,
+            &agent,
+            handle.clone(),
+            SpawnBackend::Container(gyre_adapters::compute::ContainerTarget::new(
+                "gyre-agent:latest",
+            )),
+            &None,
+        )
+        .await;
+
+        assert!(
+            state.process_registry.lock().await.contains_key("agt-backend-1"),
+            "handle must be registered for admin kill"
+        );
+        assert!(
+            state.spawned_backends.lock().await.contains_key("agt-backend-1"),
+            "backend must be registered so kill routes to docker, not LocalTarget"
+        );
+        // Unregister so the background monitor's first poll breaks cleanly
+        // (it observes the missing entry and exits without touching state).
+        state.process_registry.lock().await.remove("agt-backend-1");
+        state.spawned_backends.lock().await.remove("agt-backend-1");
+    }
+
+    /// End-to-end kill contract: an agent registered with a Local backend
+    /// (real spawned process) must actually die when admin-killed. This
+    /// fails if admin kill forgets to consult `spawned_backends` or if the
+    /// registry wiring drops the handle. Uses a real short-lived process —
+    /// no container runtime required.
+    #[tokio::test]
+    async fn admin_kill_terminates_process_via_registered_backend() {
+        let state = test_state();
+
+        // Spawn a real process via the local backend.
+        let spawn_cfg = gyre_ports::SpawnConfig {
+            name: "kill-test-proc".to_string(),
+            command: "sleep".to_string(),
+            args: vec!["60".to_string()],
+            env: std::collections::HashMap::new(),
+            work_dir: "/tmp".to_string(),
+        };
+        let handle = gyre_adapters::compute::LocalTarget
+            .spawn_process(&spawn_cfg)
+            .await
+            .expect("spawning sleep should work on linux");
+        let pid = handle.pid.expect("local spawn sets pid");
+
+        // Register agent + backend exactly as spawn_agent_core does.
+        let mut agent = gyre_domain::Agent::new(gyre_common::Id::new("agt-kill-1"), "k1", 100);
+        agent.transition_status(gyre_domain::AgentStatus::Active).unwrap();
+        state.agents.create(&agent).await.unwrap();
+        register_spawned_agent(&state, &agent, handle, SpawnBackend::Local, &None).await;
+
+        // Admin-kill through the real handler (full router path).
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/agents/agt-kill-1/kill")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NO_CONTENT,
+            "admin kill should succeed"
+        );
+
+        // The process must actually be dead — the whole point of the
+        // backend-aware kill. Give SIGTERM a moment to land.
+        let mut dead = false;
+        for _ in 0..20 {
+            let alive = gyre_ports::ComputeTarget::is_alive(
+                &gyre_adapters::compute::LocalTarget,
+                &gyre_ports::ProcessHandle {
+                    id: pid.to_string(),
+                    target_type: "local".to_string(),
+                    pid: Some(pid),
+                },
+            )
+            .await
+            .unwrap_or(false);
+            if !alive {
+                dead = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(dead, "admin kill must terminate the spawned process (pid {pid})");
+
+        // Registry cleanup happened.
+        assert!(!state.process_registry.lock().await.contains_key("agt-kill-1"));
+        assert!(!state.spawned_backends.lock().await.contains_key("agt-kill-1"));
     }
 }
