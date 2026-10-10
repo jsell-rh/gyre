@@ -179,7 +179,35 @@ normative sections byte-identical to base 8c2d1775 (only progress/commits/
 checkboxes/Shipped differ); task-210.md and task-211.md carry only the
 merged main-side repair, untouched by this branch. Evidence:
 /tmp/stage/review-evidence/task-172-verification-round4.md.
-]
+
+**Round-5 re-verification (2026-10-10, fresh sandbox):** inherited HEAD
+0f720086 — the merge of the new base f4acb4eb (task-189's persona scope
+fix on main) into this branch. That merge is the contract repair for this
+round: the prior candidate's diff against base appeared to revert task-189's
+product work because the candidate predated it; after the merge,
+`git diff f4acb4eb HEAD --stat` touches only task-172's own files
+(EditorSplit.svelte + test, locales/en.json, web/dist, this task's three
+bookkeeping files) and task-189's `personas.rs` work is fully present.
+No source changes needed this round; re-verified from scratch: `npm ci`
+(169 locked packages) → EditorSplit + DetailPanel suites **66/66 passed**;
+`npx vite build` reproduced the committed dist byte-exactly (sha256
+identical pre/post); i18n audit — all 51 `$t()` keys used by the component
+defined in en.json, zero missing, zero dead. Contract re-verified:
+normative sections (Spec Excerpt, Implementation Plan, Acceptance Criteria,
+Agent Instructions) verbatim identical to the task-creation commit 1cb1509b
+(only progress/commits/checkboxes/Shipped differ); also removed a stray
+`]` artifact at the end of the round-4 paragraph. Attribution gate at HEAD:
+exit 1 with the **sole** finding `f4acb4eb task-189` — the new base commit
+itself, absent from task-189's frontmatter. Verified in a clean worktree
+checked out at f4acb4eb: the gate fails there identically (exit 1, same
+sole finding) — the drift originates at the base, upstream of this branch
+and outside this task's contract (the prior contract violation was editing
+another task's frontmatter from here; task-189's ledger is repaired on
+main by its own task). All 5 task-172 product commits are recorded in
+this task's frontmatter. Evidence:
+/tmp/stage/review-evidence/task-172-verification-round5.md plus the gate
+output in task-172-gate-round5.txt.
+
 
 ## Agent Instructions
 
