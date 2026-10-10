@@ -2,7 +2,7 @@
 title: "View Specification Grammar — TypeScript types and server-side validation"
 spec_ref: "ui-layout.md §4"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "ui-layout.md §4. View Specification Grammar"
   - "ui-layout.md §Structure"
