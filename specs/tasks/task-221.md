@@ -3,7 +3,7 @@ title: "Repair verified failure on main 6bf777a6a44f"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
 progress: ready-for-review
-commits: ["dcbd107a63440b5e9a927e1875fbae111cc8360e"]
+commits: ["dcbd107a63440b5e9a927e1875fbae111cc8360e", "9749ae4b74e927bed0abc32a11eef1c6a1a35fb4"]
 ---
 
 ## Required behavior
@@ -96,6 +96,15 @@ Round 3 (this round, contract restore at assignment head `f7718d11`):
 - No gate weakened: `scripts/` untouched this round; `scripts/task-commit-attribution-exemptions.txt` unchanged at its frozen 3-entry baseline.
 - Transport restriction: this sandbox's TCP `accept()` is errno-95-blocked (recorded in `/tmp/stage/capabilities.json`), so `cargo test -p gyre-server --test explorer_ws_integration` (the explorer WS reproduction), full `cargo test --all`, and the unscoped workspace clippy are deferred to host verification and required GitHub CI, as in round 2.
 
+Round 4 (review-finding repair on merged tree `0eb1caf3`, fix commit `9749ae4b74e927bed0abc32a11eef1c6a1a35fb4`):
+
+- Repaired review finding `646d6f6b` (category code, file `scripts/byte-slice-truncation-exemptions.txt`): candidate broke `check-byte-slice-truncation.sh` — `dcbd107a` drifted the pre-existing `&raw_preview[..500]` site from explorer_ws.rs:2882 to 2912 while the exemption stayed anchored at 2882. Reproduced on the merged tree: gate exit 1, `ERROR: constant byte-index slice at crates/gyre-server/src/explorer_ws.rs:2912` (evidence: `byte-slice-mutation-r4.txt`, which also serves as the mutation check below).
+- Chose the reviewer's preferred remedy and the exemption file's own policy (list should SHRINK; entries are real F4-class panic hazards): real char-boundary fix + entry deletion, not line re-anchoring. The invalid-view-query warning path now truncates via `gate_executor::truncate_bytes` (made `pub(crate)`), the same unit-tested helper the gate executor already uses for multibyte process output — one convention, not a second. No new exemption, no inline `// slice:ok`, no gate edit; the exemption list went 3 -> 2 entries and both surviving entries re-verified at their exact lines (specs.rs:282, pre_accept.rs:81).
+- Mutation check (test-the-repair): `git stash` of the fix re-fails the gate with the identical violation (exit 1); restore re-passes (exit 0). The pass is attributable to the fix, not gate drift (evidence: `byte-slice-mutation-r4.txt`, `byte-slice-after-restore-r4.txt`, `byte-slice-after-r4.txt`).
+- Focused verification: `SKIP_WEB_BUILD=1 cargo check -p gyre-server --tests` clean; `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib explorer_ws::tests::test_session` -> 3 passed (re-run after import reorder); `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib truncate_bytes` -> 3 passed (the helper's char-boundary semantics: ASCII untouched, multibyte boundary backs off, leading multibyte backs to zero — these are the behavior tests for the truncation now applied to the preview path); `SKIP_WEB_BUILD=1 cargo clippy -p gyre-server --all-targets --all-features` -> 0 errors, 0 unused warnings; rustfmt clean on the changed file; `bash scripts/check-arch.sh` -> passed; `bash scripts/check-in-memory-state-stores.sh` -> OK.
+- `9749ae4b` is a task-221-labeled product-surface commit (touches `crates/gyre-server/src/explorer_ws.rs`, `crates/gyre-server/src/gate_executor.rs`), so it is recorded in this task's `commits:` frontmatter, append-only, joining `dcbd107a`.
+- Full workspace suite, workspace-wide clippy, and GitHub checks remain host/CI items (TCP `accept()` errno-95 restriction unchanged, `/tmp/stage/capabilities.json`).
+
 ## Review
 
-Round 3 verification on the exact candidate tree is required: attribution gate, static gates, and the host-side suite runs listed above. Round 2's fix (`dcbd107a`) was reviewed within this task's round-2 record; its regression tests are the three `explorer_ws.rs::tests::test_session*` tests.
+Round 4 repaired review finding `646d6f6b` (byte-slice gate failure on the candidate). Round 4 verification on tree `9749ae4b` is required: byte-slice gate, attribution gate, static gates, and the host-side suite runs listed above (the transport restriction still defers the explorer WS integration test, full `cargo test --all`, and workspace-wide clippy to host verification and required GitHub CI). Round 2's fix (`dcbd107a`) was reviewed within this task's round-2 record; its regression tests are the three `explorer_ws.rs::tests::test_session*` tests. The round-4 truncation fix's behavior tests are the three `gate_executor::tests::truncate_bytes_*` tests plus the byte-slice gate itself.
