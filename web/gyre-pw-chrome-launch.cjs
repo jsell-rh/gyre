@@ -4,7 +4,7 @@ const { chromium } = require('playwright-core');
   try {
     const browser = await chromium.launch({
       executablePath: '/usr/local/share/gyre-playwright/chromium_headless_shell-1208/chrome-headless-shell-linux64/chrome-headless-shell',
-      args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
+      args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--no-zygote'],
     });
     const page = await browser.newPage();
     await page.goto('http://localhost:2222/');
