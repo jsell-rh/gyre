@@ -202,3 +202,49 @@ mandatory for the host.
 Out of scope, noted for main: `web/dist` committed on main is stale relative to `web/src` (missing
 `briefing-since` markup, still shipping `sidebar-badge` markup deleted 2026-03-28) — a main-side
 regeneration is a separate task.
+
+- **Round 5 (this round) — verification-repair for the `bbe4d456` finding**: the verification
+  merge (base `918f16bf` + candidate `494128e0`) failed `tools/checks.sh` with exit 1. Root cause
+  reproduced locally against the identical merge tree (`git merge-tree` output `cd75303f`,
+  byte-equal to the sandbox HEAD): two diff-gates failed on candidate changed lines while passing
+  at base —
+  `python3 scripts/check-rustfmt-diff.py 918f16bf` (exit 1: changed lines needing formatting in
+  `narrative.rs` ×12 line groups, `api/graph.rs` ×13, `graph_extraction.rs` ×5; base files verified
+  rustfmt-clean, so the candidate introduced every violation) and
+  `python3 scripts/check-clippy-diff.py 918f16bf` (exit 1: `clippy::map_entry` at
+  `api/graph.rs:835` — `contains_key` followed by `insert`). The visible log tail showed only the
+  successful `npm run build` plus the `web/dist` restore/cleanup, because `dev-check.sh` collects
+  `FAILED=1` and runs every remaining gate before exiting 1.
+
+  Repairs (commit `0c2fe361`): (a) `rustfmt --edition 2021 --config skip_children=true` applied to
+  the three narrative files — formatting-only; (b) the `map_entry` site rewritten to the repo's
+  `Entry` convention with the async-safe form
+  `if let std::collections::hash_map::Entry::Vacant(slot) = groundings.entry(key) { ... slot.insert(g) }`
+  — a plain `.or_insert_with(...)` closure cannot hold the `load_narrative_grounding(...).await`,
+  so the `Vacant`-slot pattern preserves exactly one async grounding load per repo (the await runs
+  inside the `Vacant` arm; a concurrent duplicate key is impossible in this sequential loop) and
+  keeps the warn-log fallback semantics, with `slot.key()` now naming the repo in the message.
+  No behavior change, no gate weakened, no exemptions added.
+
+  Post-repair probes (this sandbox, `CARGO_HOME=/tmp/cargo`, `CARGO_TARGET_DIR=/tmp/gyre-target`,
+  evidence under `/tmp/stage/review-evidence/`): `check-rustfmt-diff.py 918f16bf` → exit 0
+  ("changed lines clean (6 Rust files checked)"); `check-clippy-diff.py 918f16bf` → exit 0
+  ("changed lines clean (6 Rust files, 1145 existing warnings outside changes)");
+  `cargo test -p gyre-domain --lib narrative` → **15 passed, 0 failed**;
+  `cargo test -p gyre-server --lib -- narrative briefing` → **20 passed, 0 failed**;
+  `cargo test -p gyre-server --lib graph_extraction` → **20 passed, 0 failed**.
+  All 21 `dev-check.sh` static gates re-run PASS on the repaired tree (arch, hierarchy, abac-route,
+  abac-exempt, mcp-write-tools, migration-versions, migration-sql-portability, dead-message-kinds,
+  byte-slice-truncation, relative-path-defaults, fail-open-ref-resolution,
+  task-commit-attribution, mem-port-contracts, fabricated-scope-defaults,
+  lossy-secret-conversion, scope-literal-defaults, inert-enforcement, forged-scope-fields,
+  forwarded-header-trust, in-memory-state-stores, unbounded-external-http).
+
+  Nota bene for the reviewer: `check-template-substitution.sh` is pre-commit-only (not in
+  `dev-check.sh`'s gate list, not in `.github/workflows/ci.yml`); running main's base version on
+  this tree still reports the 8 known doc-block-bleed false positives documented in review round 2
+  (`specs/reviews/task-152.md`), fixed by this branch's gate repair — the candidate-side version
+  passes. That gate did not contribute to the verification exit code.
+
+  Attribution: `dev-attribution.py task-152` recorded repair commit `0c2fe361` (full SHA
+  `0c2fe361cce879052a33f7d8be0d54fe9d625710`) in `commits:` (commit `a0331bb6`).
