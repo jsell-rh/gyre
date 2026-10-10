@@ -1873,7 +1873,7 @@ pub fn dry_run(
     let total_matched = result_set.len();
     let matched_node_names: Vec<String> = result_set
         .iter()
-        .filter_map(|id| node_map.get(id).map(|n| n.qualified_name.clone()))
+        .filter_map(|id| node_map.get(id).map(|n| n.name.clone()))
         .take(50)
         .collect();
     if total_matched > 50 {
@@ -2470,10 +2470,86 @@ pub fn compute_graph_summary(
     }
 }
 
+// ── Graph full-text search (explorer-implementation.md §9 `search` tool) ─────
+
+/// A node hit returned by [`search_graph_nodes`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphSearchHit {
+    pub id: String,
+    pub name: String,
+    pub qualified_name: String,
+    pub node_type: String,
+    pub file_path: String,
+    pub spec_path: Option<String>,
+    /// Doc comment, truncated to 100 chars (char-boundary safe) so tool
+    /// payloads stay small.
+    pub doc_comment: Option<String>,
+}
+
+/// Case-insensitive substring search across the knowledge graph (§9 `search`):
+/// node name, qualified_name, file path, doc comment and spec path.
+/// Soft-deleted nodes are excluded. Hits are ranked most-relevant-first
+/// (exact name → name prefix → name substring → qualified_name → other field)
+/// and capped at `limit`.
+pub fn search_graph_nodes(query: &str, nodes: &[GraphNode], limit: usize) -> Vec<GraphSearchHit> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let mut hits: Vec<(u8, GraphSearchHit)> = nodes
+        .iter()
+        .filter(|n| n.deleted_at.is_none())
+        .filter_map(|n| {
+            let name = n.name.to_lowercase();
+            let qname = n.qualified_name.to_lowercase();
+            let rank = if name == needle {
+                0
+            } else if name.starts_with(&needle) {
+                1
+            } else if name.contains(&needle) {
+                2
+            } else if qname.contains(&needle) {
+                3
+            } else if n.file_path.to_lowercase().contains(&needle)
+                || n.spec_path
+                    .as_ref()
+                    .is_some_and(|s| s.to_lowercase().contains(&needle))
+                || n.doc_comment
+                    .as_ref()
+                    .is_some_and(|d| d.to_lowercase().contains(&needle))
+            {
+                4
+            } else {
+                return None;
+            };
+            Some((
+                rank,
+                GraphSearchHit {
+                    id: n.id.to_string(),
+                    name: n.name.clone(),
+                    qualified_name: n.qualified_name.clone(),
+                    node_type: node_type_str(&n.node_type).to_string(),
+                    file_path: n.file_path.clone(),
+                    spec_path: n.spec_path.clone(),
+                    doc_comment: n
+                        .doc_comment
+                        .as_ref()
+                        .map(|d| d.chars().take(100).collect::<String>()),
+                },
+            ))
+        })
+        .collect();
+    // Stable sort preserves store order within a relevance tier.
+    hits.sort_by_key(|(rank, _)| *rank);
+    hits.truncate(limit);
+    hits.into_iter().map(|(_, h)| h).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gyre_common::graph::*;
+    use gyre_common::view_query::{NarrativeStep, ViewCallout, ViewGroup};
     use gyre_common::Id;
 
     fn make_node(id: &str, name: &str, node_type: NodeType) -> GraphNode {
@@ -5490,6 +5566,266 @@ mod tests {
             errors.is_empty(),
             "Valid node_type='function' should pass, got: {:?}",
             errors
+        );
+    }
+
+    // ── §9 `search`: graph full-text search ─────────────────────────────────
+
+    #[test]
+    fn test_search_graph_nodes_matches_all_fields_excludes_deleted() {
+        let by_name = make_node("s1", "AuthService", NodeType::Type);
+        let mut by_doc = make_node("s2", "CacheLayer", NodeType::Type);
+        by_doc.doc_comment = Some("Handles token auth refresh".to_string());
+        let mut by_spec = make_node("s3", "LogWriter", NodeType::Function);
+        by_spec.spec_path = Some("specs/system/auth-lifecycle.md".to_string());
+        let mut by_file = make_node("s4", "Runner", NodeType::Function);
+        by_file.file_path = "src/auth/runner.rs".to_string();
+        let mut deleted = make_node("s5", "auth_removed", NodeType::Type);
+        deleted.deleted_at = Some(2000);
+
+        let nodes = vec![
+            by_doc.clone(),
+            by_spec.clone(),
+            by_file.clone(),
+            deleted,
+            by_name.clone(),
+        ];
+
+        let hits = search_graph_nodes("auth", &nodes, 10);
+        let names: Vec<&str> = hits.iter().map(|h| h.name.as_str()).collect();
+        assert!(
+            !names.contains(&"auth_removed"),
+            "soft-deleted nodes must not be searchable, got {names:?}"
+        );
+        assert_eq!(
+            names,
+            vec!["AuthService", "CacheLayer", "LogWriter", "Runner"],
+            "name match must outrank doc/spec/file matches"
+        );
+        // The name-ranked hit carries the node's own metadata.
+        let auth = hits.iter().find(|h| h.name == "AuthService").unwrap();
+        assert_eq!(auth.node_type, "type");
+        assert_eq!(auth.qualified_name, "pkg.AuthService");
+        let doc_hit = hits.iter().find(|h| h.name == "CacheLayer").unwrap();
+        assert!(doc_hit.doc_comment.as_deref().unwrap().contains("auth"));
+    }
+
+    #[test]
+    fn test_search_graph_nodes_limit_and_empty_query() {
+        let nodes: Vec<GraphNode> = (0..20)
+            .map(|i| {
+                make_node(
+                    &format!("t{i}"),
+                    &format!("auth_handler_{i}"),
+                    NodeType::Function,
+                )
+            })
+            .collect();
+        assert_eq!(search_graph_nodes("auth", &nodes, 5).len(), 5);
+        assert!(search_graph_nodes("   ", &nodes, 10).is_empty());
+        assert!(search_graph_nodes("nothing-matches-this", &nodes, 10).is_empty());
+    }
+
+    // ── §23 dry-run warnings (spec: empty scope, cluttered scope, broad groups,
+    // unresolved callouts/narrative) ──────────────────────────────────────────
+
+    fn base_query() -> ViewQuery {
+        ViewQuery {
+            scope: Scope::All,
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        }
+    }
+
+    #[test]
+    fn test_dry_run_warns_on_empty_scope() {
+        // Filter scope that matches nothing (name pattern not present).
+        let nodes = vec![make_node("n1", "Foo", NodeType::Type)];
+        let mut query = base_query();
+        query.scope = Scope::Filter {
+            node_types: vec![],
+            computed: None,
+            name_pattern: Some("does-not-exist".to_string()),
+        };
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.matched_nodes, 0);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Scope matched 0 nodes")),
+            "expected empty-scope warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_dry_run_warns_on_cluttered_scope() {
+        // Spec: scope >200 nodes warns "may be cluttered". Boundary: 200 is
+        // fine, 201 warns.
+        fn run(n: usize) -> DryRunResult {
+            let nodes: Vec<GraphNode> = (0..n)
+                .map(|i| make_node(&format!("n{i}"), &format!("node_{i}"), NodeType::Function))
+                .collect();
+            let query = base_query(); // Scope::All matches everything
+            dry_run(&query, &nodes, &[], None)
+        }
+        let at_limit = run(200);
+        assert_eq!(at_limit.matched_nodes, 200);
+        assert!(
+            !at_limit
+                .warnings
+                .iter()
+                .any(|w| w.contains("may be cluttered")),
+            "200 nodes is at the limit, must not warn, got: {:?}",
+            at_limit.warnings
+        );
+        let over_limit = run(201);
+        assert_eq!(over_limit.matched_nodes, 201);
+        assert!(
+            over_limit
+                .warnings
+                .iter()
+                .any(|w| w.contains("Scope matched 201 nodes - may be cluttered")),
+            "201 nodes must warn about clutter, got: {:?}",
+            over_limit.warnings
+        );
+    }
+
+    #[test]
+    fn test_dry_run_warns_on_broad_group() {
+        // Group pattern "n" matches 25 node names via substring fallback —
+        // over the 20-node breadth threshold.
+        let nodes: Vec<GraphNode> = (0..25)
+            .map(|i| make_node(&format!("n{i}"), &format!("node_{i}"), NodeType::Function))
+            .collect();
+        let mut query = base_query();
+        query.groups = vec![ViewGroup {
+            name: "Persistence".to_string(),
+            nodes: vec!["node".to_string()],
+            color: None,
+            label: None,
+        }];
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.matched_nodes, 25);
+        assert_eq!(result.groups_resolved.len(), 1);
+        assert_eq!(result.groups_resolved[0].matched, 25);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Group 'Persistence' matched 25 nodes - too broad")),
+            "expected too-broad-group warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_dry_run_no_warning_for_small_group() {
+        let nodes: Vec<GraphNode> = (0..5)
+            .map(|i| make_node(&format!("n{i}"), &format!("node_{i}"), NodeType::Function))
+            .collect();
+        let mut query = base_query();
+        query.groups = vec![ViewGroup {
+            name: "Core".to_string(),
+            nodes: vec!["node".to_string()],
+            color: None,
+            label: None,
+        }];
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.groups_resolved[0].matched, 5);
+        assert!(
+            !result.warnings.iter().any(|w| w.contains("too broad")),
+            "small group must not warn, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_dry_run_reports_unresolved_callouts() {
+        let nodes = vec![
+            make_node("n1", "RealService", NodeType::Type),
+            make_node("n2", "OtherType", NodeType::Type),
+        ];
+        let mut query = base_query();
+        query.callouts = vec![
+            ViewCallout {
+                node: "RealService".to_string(),
+                text: "annotated".to_string(),
+                color: None,
+            },
+            ViewCallout {
+                node: "GhostNode".to_string(),
+                text: "missing".to_string(),
+                color: None,
+            },
+        ];
+        query.narrative = vec![
+            NarrativeStep {
+                node: "RealService".to_string(),
+                text: "starts here".to_string(),
+                order: None,
+            },
+            NarrativeStep {
+                node: "AlsoGhost".to_string(),
+                text: "never found".to_string(),
+                order: Some(1),
+            },
+        ];
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.callouts_resolved, 1);
+        assert_eq!(result.callouts_unresolved, vec!["GhostNode"]);
+        assert_eq!(result.narrative_resolved, 1);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Unresolved callouts: GhostNode")),
+            "expected unresolved-callout warning, got: {:?}",
+            result.warnings
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Unresolved narrative steps: AlsoGhost")),
+            "expected unresolved-narrative warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_graph_summary_top_functions_by_calls() {
+        let nodes = vec![
+            make_node("n1", "caller_a", NodeType::Function),
+            make_node("n2", "caller_b", NodeType::Function),
+            make_node("n3", "hot_fn", NodeType::Function),
+            make_node("n4", "cold_fn", NodeType::Function),
+        ];
+        let edges = vec![
+            make_edge("e1", "n1", "n3", EdgeType::Calls),
+            make_edge("e2", "n2", "n3", EdgeType::Calls),
+            make_edge("e3", "n1", "n4", EdgeType::Calls),
+        ];
+        let summary = compute_graph_summary("repo1", &nodes, &edges);
+        assert!(!summary.top_functions_by_calls.is_empty());
+        assert!(
+            summary.top_functions_by_calls[0].contains("hot_fn (2)"),
+            "hot_fn with 2 incoming calls should rank first, got: {:?}",
+            summary.top_functions_by_calls
+        );
+        assert!(
+            summary
+                .top_functions_by_calls
+                .iter()
+                .any(|f| f.contains("cold_fn (1)")),
+            "cold_fn should appear in top functions, got: {:?}",
+            summary.top_functions_by_calls
         );
     }
 }
