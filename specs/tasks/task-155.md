@@ -142,7 +142,7 @@ Commit `2b6f3372` (branch `pipeline/task-155/a4ff485562464770a5a49734c603bfb8-1`
   fields match the server's Serialize structs. E2E against a real
   server + GitHub CI remain for the verification/publication stage.
 
-## Shipped — baseline repair (commit 4c0df440)
+### Baseline repair (commit 4c0df440)
 
 Repaired the two failures the baseline gate run raised against
 `f4acb4eb` (the attribution failure in that run was already fixed
@@ -164,3 +164,21 @@ conn-refused=1, `--since` validation exit codes incl. multibyte),
 `tcp-accept-errno95.txt` (sandbox cannot `accept()`; live E2E HTTP
 against a real server deferred to host verification + GitHub CI).
 `cargo test -p gyre-cli --bin gyre` → 110 passed, 0 failed.
+
+### Contract repair (this round)
+
+The contract finding `d1fac5b9591d43488b8305e4d1de94ad` fired because this
+file's baseline-repair section used a non-canonical heading (`## Shipped —
+baseline repair (commit 4c0df440)`), which `requirement_parts` does not
+strip from normative prose — so the assigned contract (frontmatter
+`depends_on: [task-218]` + prose) no longer matched this file. Repaired by
+reverting the interrupted attempt's working-tree drift (which had also
+dropped `4c0df440` from `commits:`, breaking the attribution gate) and
+demoting the heading to `### Baseline repair (commit 4c0df440)` inside the
+canonical `## Shipped` section. No product code changed this round:
+`git diff --stat acbf9609 212321a7 -- crates/ web/` is empty — the search
+CLI implementation is the candidate's. Verified on this head:
+`requirement_parts(assigned job body) == requirement_parts(this file)`
+(front + prose), `check-task-commit-attribution.sh` OK (exit 0), and the
+full focused suite `cargo test -p gyre-cli --bin gyre` (see below for
+counts).
