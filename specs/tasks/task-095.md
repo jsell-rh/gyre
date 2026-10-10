@@ -9,7 +9,7 @@ coverage_sections:
   - "platform-model.md §6 Post-Merge Validation"
   - "platform-model.md §6 Recovery Protocol"
   - "platform-model.md §6 Agent Behavior During Recovery"
-commits: ["15a1e31db3369f61808160a4440c237b86710549", "9cceb83b8ce751791142659cca70ef7b45c313a8", "bc3413de4a99e9592c6f8dac967d331f836adc71", "3113b002e7cde69fb24170b616c1d43af71d26a2", "6e1d8b145880443672c1a0055db2939d38e13985", "34b6a7845b143faea5ae12c26363d184b2e06e9a", "178e442ab02987424c99818762b12143ade4d725", "3a9b11f69c57cb576d2e3914ff7af7e54941b518", "5aaded213193d1af1cec693e729ac2872893b10b", "86c7d382312fae4fb52ae4effe40e021330f3ac2", "7c723298b41ee761067b15ae426651aa280fb75e"]
+commits: ["15a1e31db3369f61808160a4440c237b86710549", "9cceb83b8ce751791142659cca70ef7b45c313a8", "bc3413de4a99e9592c6f8dac967d331f836adc71", "3113b002e7cde69fb24170b616c1d43af71d26a2", "6e1d8b145880443672c1a0055db2939d38e13985", "34b6a7845b143faea5ae12c26363d184b2e06e9a", "178e442ab02987424c99818762b12143ade4d725", "3a9b11f69c57cb576d2e3914ff7af7e54941b518", "5aaded213193d1af1cec693e729ac2872893b10b", "86c7d382312fae4fb52ae4effe40e021330f3ac2", "7c723298b41ee761067b15ae426651aa280fb75e", "e6a6db47dbd8b988c8367a1965db50fd77d5abe7", "c2e1ee93a88b96f84a22b3ee468a99e75e94b6c6"]
 ---
 
 ## Spec Excerpt
@@ -133,25 +133,55 @@ closed in product code on this branch:
   only (Circuit Breaker + CLI/REST recorded as delivered under
   task-095); all task-labeled commits recorded in this file's
   `commits:` frontmatter.
-- **R4 (found during this round):** `rollback_atomic_group` addressed
-  AtomicGroupFailure notifications to the raw author AGENT id — a user
-  that does not exist — so no human ever saw a group-failure notice.
-  Now resolves the agent's spawning user (agent-id fallback), matching
-  `notify_gate_failure`/`notify_mr_merged` (commit `9cceb83b`).
+- **R4 (found during the Round-3 revision):** `rollback_atomic_group`
+  addressed AtomicGroupFailure notifications to the raw author AGENT
+  id — a user that does not exist — so no human ever saw a
+  group-failure notice. Now resolves the agent's spawning user
+  (agent-id fallback), matching `notify_gate_failure`/`notify_mr_merged`
+  (commit `9cceb83b`).
+- **R4-F1 (non-tip revert destroyed later merges — Round-4 major):**
+  `Git2OpsAdapter::revert_commit` now implements true `git revert -m 1`
+  semantics instead of snapshot semantics: a three-way merge of
+  `tree(M^1)` against the current branch tip with `tree(M)` as the
+  merge base, so only the reverted merge's own changes are undone and
+  every later merge survives (the pre-fix code restored M's parent
+  tree wholesale, wiping all later merges while reporting success).
+  When the inverse patch collides with later changes on the same file,
+  the port returns `RevertResult::Conflict` and leaves the branch
+  untouched; all three callers handle it without falling back to
+  anything destructive — the manual REST endpoint surfaces 409 with no
+  side effects, and both automatic recovery paths (single MR and
+  atomic group) stay paused and escalate to a human instead of
+  recording a revert that never happened. The port contract
+  (`gyre-ports/src/git_ops.rs`) documents the semantics. Real-git
+  regression tests: `test_revert_commit_non_tip_preserves_later_merges`
+  (two sequential merges; reverting A leaves B's file intact),
+  `test_revert_commit_conflict_leaves_branch_untouched` (same-file
+  collision → Conflict, branch unchanged). Automatic-path conflict
+  handling is covered by
+  `post_merge_recovery_revert_conflict_stays_paused_without_side_effects`
+  and
+  `atomic_group_recovery_revert_conflict_stops_group_reverts`
+  (pause holds, MR(s) stay Merged with no revert recorded, escalation
+  to the author's spawner, no remediation task), plus the REST-level
+  `manual_revert_conflict_is_409_without_side_effects`.
 
-**Test evidence** (focused probes, CARGO_TARGET_DIR-shared with the
-workspace; logs under `/tmp/stage/review-evidence/`):
-`cargo test -p gyre-server --lib merge_processor` → 52 passed / 0
-failed (includes all six post-merge/recovery tests, the R3-F1/F2
-breaker and revert tests, and the R4 group test);
-`api::recovery` → 5 passed; `api::merge_queue` → 8 passed;
-`gyre-adapters` → 344 passed / 12 ignored (real-git revert + no-FF
-merge + migration round-trip); `gyre-domain` → 363 passed;
-`gyre-common` → 94 passed. Check scripts green:
+**Test evidence** (focused probes on this branch head; logs under
+`/tmp/stage/review-evidence/`):
+`cargo test -p gyre-adapters --lib git2_ops` → 31 passed / 0 failed
+(real-git three-way-merge revert, non-tip preservation, conflict
+untouched-branch); `cargo test -p gyre-server --lib merge_processor` →
+54 passed (includes the six post-merge/recovery protocol tests, the
+R3-F1/F2 breaker and revert tests, and the two new R4-F1
+revert-conflict tests); `cargo test -p gyre-server --lib api::recovery`
+→ 6 passed; `cargo test -p gyre-server --lib api::merge_queue` → 8
+passed. Check scripts green at head:
+`check-task-commit-attribution` (after recording `a11ba8d3` in
+task-068's frontmatter — the base commit that entered this branch via
+the recovery merge, same R3-F4 drift class),
 `check-fail-open-ref-resolution`, `check-abac-route-registry`,
 `check-migration-versions`, `check-byte-slice-truncation`,
-`check-dead-message-kinds`, `check-arch`,
-`check-task-commit-attribution`, `check-inert-enforcement`,
+`check-dead-message-kinds`, `check-arch`, `check-inert-enforcement`,
 `check-mem-port-contracts`.
 
 Sandbox limitation recorded: the TCP listener probe is unsupported in
