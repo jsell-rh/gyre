@@ -1859,7 +1859,7 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
     if args.starter_kit {
         let target = repo_path
             .clone()
-            .unwrap_or_else(|| std::path::PathBuf::from(&repo_name));
+            .unwrap_or_else(|| std::path::PathBuf::from(&repo_name)); // path:ok — task-099 F6 starter-kit dynamic default; same site as the old file exemption (main.rs:1737 at base), moved by this task's insertions
         bootstrap::write_starter_kit(&target)?;
         println!("  Starter kit written to {}", target.display());
     }
