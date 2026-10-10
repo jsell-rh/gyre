@@ -112,6 +112,69 @@ base `19d65446` is this file's own lifecycle fields.
   and extends the grammar's accepted names in lockstep;
   `MoldableView.svelte` drives tabs and renderer dispatch through it.
 
+**Re-verification at merged head `fa3d6c9e` (base `a11ba8d3`, round
+continuation of interrupted checkpoint `1b600c7c`):** the prior
+assignment died on an LLM-stream timeout while waiting for the server
+test compile — no work was lost. Implementation files are
+byte-identical to checkpoint source `d7e234d4` (diff over all five
+task-170 files vs HEAD: 0 lines; the merge brought in task-068 only,
+a node-search refactor with no intersection with view-spec
+validation). Probes re-run fresh at HEAD (evidence:
+`/tmp/stage/review-evidence/task-170-head-fa3d6c9e.txt`):
+gyre-server `api::explorer_views` 16/16 (cold build 17m under
+concurrent compile), gyre-common `view_spec` 13/13, vitest
+task-scoped 32/32 (view-spec 17, viewEvents 9, MoldableViewListView,
+MoldableViewNodeTypeFilter), and the finding-470a534c repair
+`394ac741` verified at the failing step itself: ExplorerCanvas +
+ExplorerCanvas-performance 147/147 (the gate's only red component).
+rustfmt-diff vs base clean (4 files); task-commit-attribution exit 0;
+twelve mechanical static checks exit 0. Full web suite (1552 passed,
+41 skipped, exit 0 ×2) and vite build with byte-identical dist
+hashes were captured by the interrupted round at this same tree.
+
+**Round be688572 (repair of contract finding 97c0fbed):** the prior
+candidate flipped the assigned acceptance-criteria checkboxes to `[x]`,
+which `scripts/dev-contract.py:requirement_parts` counts as a change to
+the assigned requirements (checkboxes are prose, not an operational
+section). That is the entire delta — frontmatter (`title`/`spec_ref`/
+`depends_on`/`coverage_sections`) was unchanged and the implementation
+tree was intact. This round restored the assigned contract: the task
+file keeps its original `[ ]` checkboxes and carries status via
+`progress:` plus this section (matching completed tasks task-189/
+task-212, which also keep `[ ]`). Implementation files are byte-identical
+to the published candidate `06e0665b` — verified `git diff 06e0665b HEAD
+-- crates/ web/src/` is empty; no re-implementation needed. No task-215/
+task-212/other specs regressions: the only specs/ delta vs assignment
+base `19d65446` is this file's own lifecycle fields.
+
+**Implementation (ui-layout.md §4, all four grammar layers):**
+- `web/src/lib/types/view-spec.ts` — `ViewSpec`/`DataLayer`/`LayoutType`/
+  `EncodingLayer`/`HighlightLayer`/`SubViewSpec` typedefs matching the §4
+  JSON examples (kebab-case layout names, all eight layouts);
+  `validateViewSpec` client-side mirror (name required, known layout,
+  flow⇒trace_source, spec_path⇒repo_id, side-by-side requires left+right,
+  max nesting depth 1, sub-view field whitelist, no field inheritance,
+  orphan left/right rejected); `isViewSpec` guard; `registerLayoutName`
+  extension point keeping client validation in sync with the registry.
+  `ViewEvent` per §10 ships in `web/src/lib/viewEvents.js`.
+- `crates/gyre-common/src/view_spec.rs` — serde structs
+  (`#[serde(rename_all = "kebab-case")]` layout enum;
+  `deny_unknown_fields` on `SubViewSpec` enforcing data/layout/encoding
+  only at parse time) + `validate_view_spec`/`validate_sub_view`.
+- `crates/gyre-server/src/api/explorer_views.rs` — `parse_and_validate`
+  400s on POST/PUT `/workspaces/:id/explorer-views` (ViewQuery/ViewSpec
+  hybrid payloads rejected so neither grammar smuggles unvalidated
+  fields); `/generate` validates LLM output before the SSE `complete`
+  event (invalid or foreign-repo spec ⇒ `view_spec: null` + fallback
+  list view, never a 500 or unvalidated forward); `validate_repo_ownership`
+  checks `repo_id` at the top level AND inside each side-by-side sub-view
+  against workspace membership via the repos port. ABAC
+  `RouteResourceMapping` entries for all three routes.
+- `web/src/lib/layoutRegistry.js` — `registerLayout`/`getLayout`/
+  `listLayouts`; duplicate registration no-ops (closed for modification)
+  and extends the grammar's accepted names in lockstep;
+  `MoldableView.svelte` drives tabs and renderer dispatch through it.
+
 **Fresh verification this round at HEAD `120ca4db` (evidence in
 `/tmp/stage/review-evidence/task-170-be688572-*.txt`):**
 - `cargo test -p gyre-common --lib view_spec` — 13/13 (spec §4 example
