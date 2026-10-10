@@ -1223,6 +1223,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1260,6 +1261,7 @@ mod tests {
                     .method("POST")
                     .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1284,6 +1286,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/merge-requests/{mr_id}/reviews"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -1343,6 +1346,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/merge-requests/no-such/reviews")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
