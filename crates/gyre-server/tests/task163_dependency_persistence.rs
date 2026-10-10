@@ -30,7 +30,10 @@ fn sqlite_state() -> (TempDir, Arc<AppState>) {
             format!("sqlite://{}", db_path.display()),
         );
     }
-    (dir, build_state("task163-token", "http://localhost:0", None))
+    (
+        dir,
+        build_state("task163-token", "http://localhost:0", None),
+    )
 }
 
 fn rebuild_state(dir: &TempDir) -> Arc<AppState> {
@@ -75,13 +78,11 @@ async fn breaking_changes_persist_across_state_rebuilds() {
     assert_eq!(unacked[0].id.as_str(), "bc-wire-1");
 
     // Acknowledgment through the second instance is durable in the DB file.
-    assert!(
-        state2
-            .breaking_changes
-            .acknowledge(&Id::new("bc-wire-1"), "user-1", 2000)
-            .await
-            .unwrap()
-    );
+    assert!(state2
+        .breaking_changes
+        .acknowledge(&Id::new("bc-wire-1"), "user-1", 2000)
+        .await
+        .unwrap());
 
     let state3 = rebuild_state(&dir);
     assert!(

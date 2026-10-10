@@ -271,12 +271,10 @@ mod tests {
         assert!(found.acknowledged);
         assert_eq!(found.acknowledged_by.as_deref(), Some("user-1"));
         assert_eq!(found.acknowledged_at, Some(2500));
-        assert!(
-            BreakingChangeRepository::list_unacknowledged(&s)
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(BreakingChangeRepository::list_unacknowledged(&s)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -296,7 +294,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(for_b.len(), 2);
-        assert!(for_b.iter().all(|bc| bc.source_repo_id.as_str() == "repo-b"));
+        assert!(for_b
+            .iter()
+            .all(|bc| bc.source_repo_id.as_str() == "repo-b"));
 
         let for_c = BreakingChangeRepository::list_by_source_repo(&s, &Id::new("repo-c"))
             .await
