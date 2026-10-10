@@ -84,27 +84,26 @@ system-explorer.md §9 defines executable spec assertions — HTML comments embe
 Read `system-explorer.md` §9 "Executable Spec Assertions" for the full specification. The knowledge graph API is in `crates/gyre-server/src/api/graph.rs` — check how nodes and edges are queried. The spec content is retrieved via `GET /api/v1/specs/:path?repo_id=` — check `crates/gyre-server/src/api/specs.rs`. For Inbox notifications, check the existing notification creation pattern in `crates/gyre-domain/` (search for priority levels and notification types). The new endpoint should be registered in `crates/gyre-server/src/api/mod.rs`. Verify the route path matches this task before implementing: `GET /api/v1/repos/:id/specs/:path/assertions`.
 
 
+
 ## Shipped
 
-Repair round for the `contract` finding (candidate `2f6cc2dc`): the earlier
-rounds marked the Acceptance Criteria checkboxes `[x]`, which the pipeline's
-contract checker reads as a change to the assigned requirements
-(`scripts/pipeline/stages.py` hashes the prose including checkbox state; only
-`## Shipped`/`## Review` sections and `progress:` are excluded). This round
-restores the assigned contract verbatim (checkboxes untouched) and completes
-it with a substantive repair to the §9 implementation itself.
+Checkpoint-recovery round (assignment `0fa761223b6f4f0e8a7b5e2e920ca466`,
+interrupted at exit 130 after fixing an E0195 compile regression and passing
+compile + clippy, but before any test run completed). This round merged the
+base (`19d65446` → `ddc37bbc`; merge delta touches only unrelated
+specs/tasks files), left the checkpoint's product code byte-identical, and
+completed the interrupted verification with real runs.
 
-Contract-state acceptance criteria are satisfied by production code (independ
-ently reviewed at `51f29e95`, verdict `complete`, mutation-verified in
-`specs/reviews/task-180.md`): the `<!-- gyre:assert ... -->` parser and
+Contract-state acceptance criteria are satisfied by production code
+(independently reviewed at `51f29e95`, verdict `complete`, mutation-verified
+in `specs/reviews/task-180.md`): the `<!-- gyre:assert ... -->` parser and
 evaluator (`gyre-domain/src/spec_assertions.rs`), post-push checking on all
-three push paths with persistence via the
-`SpecAssertionResultRepository` port (SQLite + PostgreSQL + mem),
-priority-9 `SpecAssertionFailure` Inbox notifications,
-`GET /api/v1/repos/:id/specs/:path/assertions`, and the ExplorerView inline
-✔/✘ rendering.
+three push paths with persistence via the `SpecAssertionResultRepository`
+port (SQLite + PostgreSQL + mem), priority-9 `SpecAssertionFailure` Inbox
+notifications, `GET /api/v1/repos/:id/specs/:path/assertions`, and the
+ExplorerView inline ✔/✘ rendering.
 
-Defects found and fixed this round:
+Defects found and fixed across the repair rounds since that review:
 
 1. **Fenced examples parsed as live assertions.** `parse_assertions` had no
    code-fence awareness, so the `gyre:assert` examples inside fenced blocks —
@@ -122,24 +121,45 @@ Defects found and fixed this round:
    files without assertions — so a spec whose assertions were removed (or a
    deleted spec file) kept serving its old rows through
    `GET .../assertions` as the "latest push's check", exactly what the
-   `save_results` delete-then-insert transaction and the migration's
-   comment promise cannot happen. The port gained `delete_by_spec` and
+   `save_results` delete-then-insert transaction and the migration's comment
+   promise cannot happen. The port gained `delete_by_spec` and
    `list_spec_paths`; the push check now clears rows for specs that no
    longer carry assertions and sweeps stored paths absent from the pushed
    tree (deleted/renamed specs). Present-path registration happens before
    the content read so an unreadable-but-present spec is never swept.
 
-Test evidence (CARGO_TARGET_DIR=/tmp/gyre-target, this round):
+3. **E0195 compile regression (interrupted round).** An edit had replaced
+   the port's `#[async_trait]` attribute instead of adding alongside it,
+   desugaring the impls' lifetimes away from the trait declaration. Both
+   attributes restored; `cargo check -p gyre-server` clean, clippy
+   changed-lines clean at checkpoint `f89aa156`.
 
-- `cargo test -p gyre-domain --lib spec_assertions` — includes new
-  `parse_skips_assertions_inside_fenced_code_blocks`,
+Test evidence (this round, HEAD `ddc37bbc`, CARGO_TARGET_DIR=/tmp/gyre-target,
+exact commands/counts in `/tmp/stage/review-evidence/task180-recovery-round.md`):
+
+- `cargo test -p gyre-domain --lib spec_assertions` — **51 passed, 0 failed**
+  (includes `parse_skips_assertions_inside_fenced_code_blocks`,
   `parse_skips_assertions_inside_tilde_fences`,
-  `parse_fence_line_numbers_stay_absolute`.
-- `cargo test -p gyre-server --lib push_check` — includes new
-  `push_check_sweeps_stale_results_when_assertions_or_specs_vanish`
-  (emptied spec, deleted spec, unchanged spec).
-- Exact counts recorded in `/tmp/stage/review-evidence/`.
+  `parse_fence_line_numbers_stay_absolute`).
+- `cargo test -p gyre-server --lib push_check` — **3 passed, 0 failed**
+  (includes `push_check_sweeps_stale_results_when_assertions_or_specs_vanish`
+  — emptied spec, deleted spec, unchanged spec).
+- `cargo test -p gyre-server --lib spec_assertions` — **6 passed, 0 failed**
+  (GET endpoint: stored rows, empty set, unknown-repo 404; live check).
+- `cd web && npx vitest run src/__tests__/Inbox.test.js` — **28 passed**.
+- Invariant gates, all exit 0: check-arch, check-mem-port-contracts
+  (validates the two new port methods), check-abac-route-registry,
+  check-migration-versions, check-migration-sql-portability,
+  check-in-memory-state-stores, check-dead-message-kinds,
+  check-fabricated-scope-defaults, check-task-commit-attribution.
 
-Task contract integrity: `dev-contract.py::generation` of this file equals
-the assigned contract's generation (verified before commit; boxes stay
-unchecked — completion is reported through `progress:` and this section).
+Sandbox transport limitation (recorded, not a code defect): this runtime
+cannot open a TCP listener (`accept` → EOPNOTSUPP), so live HTTP exercise of
+`GET /api/v1/repos/:id/specs/:path/assertions` against a running server is
+deferred to host verification / GitHub CI; the endpoint is covered
+in-process by the five handler tests above.
+
+Task contract integrity: the assigned contract prose (including Acceptance
+Criteria checkboxes) is untouched; completion is reported through
+`progress:` and this section. Attribution lists all 12 product-surface
+commits on the branch (verified against `origin/main..HEAD`).
