@@ -824,18 +824,26 @@ async fn find_or_create_user(
     }
 
     // Derive the URL-safe username from the SSO preferred_username. When
-    // sanitization leaves nothing usable, fall back to the subject (the
-    // migration's backfill does the same for legacy rows). sanitize_username
-    // is lossy — distinct IdP handles ("Jordan Sell" / "Jordan_Sell") can
-    // derive the same URL-safe username — and usernames are globally unique
-    // (idx_users_username + the create() port contract), so the first login
-    // of a second user whose derived handle collides resolves it with the
-    // migration's deterministic suffix scheme (base, base-2, base-3, ...)
-    // instead of failing the login (a 401 that would repeat forever:
-    // find_by_external_id keeps missing, and the username is immutable).
-    let base_username =
-        User::sanitize_username(preferred_username).unwrap_or_else(|| external_id.to_string());
+    // sanitization leaves nothing usable, fall back to the subject — but
+    // sanitized like any other handle: the subject is an opaque IdP
+    // identifier (RFC 7519 StringOrURI; Auth0 subjects contain '|'), not a
+    // URL-safe string, and the handle contract (validate_username) must hold
+    // for every persisted username. When neither sanitizes (e.g. a purely
+    // numeric-keypad subject), use migration 000056's escape hatch for
+    // unsanitizable names: "u-<row id>", URL-safe and unique by the freshly
+    // generated primary key.
+    // sanitize_username is lossy — distinct IdP handles ("Jordan Sell" /
+    // "Jordan_Sell") can derive the same URL-safe username — and usernames
+    // are globally unique (idx_users_username + the create() port
+    // contract), so the first login of a second user whose derived handle
+    // collides resolves it with the migration's deterministic suffix
+    // scheme (base, base-2, base-3, ...) instead of failing the login
+    // (a 401 that would repeat forever: find_by_external_id keeps
+    // missing, and the username is immutable).
     let id = Id::new(uuid::Uuid::new_v4().to_string());
+    let base_username = User::sanitize_username(preferred_username)
+        .or_else(|| User::sanitize_username(external_id))
+        .unwrap_or_else(|| format!("u-{}", id.as_str()));
     let username = match resolve_unique_username(state, &base_username).await {
         Ok(handle) => handle,
         Err(e) => {
@@ -1680,6 +1688,53 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(user.username, "opaque-sub-42");
+    }
+
+    #[tokio::test]
+    async fn unsanitizable_preferred_username_falls_back_to_url_safe_handle() {
+        use gyre_domain::User;
+
+        // The subject is an opaque IdP identifier (RFC 7519 StringOrURI):
+        // "auth0|12345" is a real Auth0 sub shape and is NOT URL-safe. The
+        // fallback handle must still satisfy the URL-safe username contract
+        // (validate_username) — the migration's sanitize pass renames such
+        // rows to "u-<row id>", and the runtime provisioning path must not
+        // persist what the migration would have repaired.
+        let state = make_test_state_with_jwt();
+        let claims = serde_json::json!({
+            "sub": "auth0|12345",
+            "preferred_username": "!!!"
+        });
+        let token = sign_test_jwt(&claims, 3600);
+        let app: Router = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let user = state
+            .users
+            .find_by_external_id("auth0|12345")
+            .await
+            .unwrap()
+            .expect("user provisioned");
+        assert!(
+            User::validate_username(&user.username).is_ok(),
+            "fallback username {:?} must satisfy the URL-safe handle contract",
+            user.username
+        );
+        assert!(
+            !user.username.contains('|'),
+            "the raw subject must not leak into the username verbatim"
+        );
     }
 
     #[tokio::test]
