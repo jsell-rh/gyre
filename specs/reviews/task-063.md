@@ -257,3 +257,59 @@ No new findings. F1/F2/F3 remain repaired (verified R2, unchanged by rebase), th
 coverage rows are implementer-authored and accurate, and the committed dist matches
 the fixed source. The task meets spec §4–9 on every verifiable surface.
 Setting `progress: complete`.
+
+## Round 11 (fresh independent review — recovered/rebased candidate)
+
+Comparison base `73a31e0b`, candidate `a8f7cde5`. The candidate is the R4-approved
+implementation recovered through interruptions (checkpoint `322b2973`) and rebased onto the
+new base (`22c614f8` merge, r10 conflict in task-200.md resolved to the valid SHA). The
+task-063 product surface is byte-identical to the R4-verified commit `656c1281`
+(`git diff 656c1281 a8f7cde5 -- web/src/lib/ExplorerCanvas.svelte
+web/src/__tests__/ExplorerCanvas.test.js crates/gyre-domain/ crates/gyre-common/src/view_query.rs`
+= 0 bytes); zero Rust lines differ from base; `web/dist` unchanged from base (task branches
+ship no dist rebuilds — documented policy, integration gate rebuilds from source).
+
+Independently verified this round (evidence: `/tmp/stage/review-evidence/task-063-r11/`):
+
+- **All 6 scope types are real implementations on both surfaces.** Rust resolver
+  `view_query_resolver.rs:524-884` (real BFS with adjacency maps, real `GraphNode` field
+  reads, `deleted_at` filtering, per-type warnings); client `ExplorerCanvas.svelte:1936-2076`
+  reads exactly the fields `GraphNodeResponse` serializes (`api/graph.rs:59-63`). Diff
+  semantics match line-for-line between the two (`~epoch` half-open temporal, ≥7-char
+  SHA-prefix guard, from-exclusion when both shas match from).
+- **Mutation matrix on the candidate's own changes — all killed:**
+  all-branch deletion → "all scope: {{count}}…" fails; diff dead-field reversion
+  (`last_commit_sha`) → component diff-count test fails; highlight-label disable → label
+  test fails; diff from-exclusion removal → component diff-count test fails;
+  `{{group_count}}` removal → all-scope test fails; `{{count}}` removal (via M1/M2) →
+  both count tests fail. Each mutation is killed by exactly the test designed for it.
+- **Mutation matrix on pre-existing primitives — survived, triaged as out of scope:**
+  dim_unmatched, tiered_colors, heat, badges template, edge result-set restriction, zoom
+  directives, `$clicked` re-run, and `$name` substitution each have no killing test (139/139
+  still pass with the primitive disabled). All are pre-existing code shipped by earlier
+  work (task-062 / `d7940e85`), outside this diff; the goal explicitly excludes "new tests
+  for already-working behavior". Residual note for the prospective
+  frontend-resolver-unification task. The Rust Diff from-exclusion sub-clause likewise has
+  no Rust-side test (M4 survived 116 tests), but the equivalent client behavior is
+  mutation-defended at the component level, and Diff has three Rust tests (temporal,
+  prefix-min-length, same-commit).
+- **Focused suites:** `cargo test -p gyre-domain --lib view_query_resolver` → 116 passed,
+  0 failed. `npm ci` (locked deps, rc=0) then `npx vitest run
+  src/__tests__/ExplorerCanvas.test.js` → 139 passed, 0 failed (three consecutive runs).
+- **Full `npm test`:** 1539-1540 passed, 1-2 failed — performance-timing timeouts in
+  `ExplorerCanvas-performance.test.js` (different tests per run; the suite never sets
+  `activeQuery`, so it cannot exercise this diff). **A/B verified pre-existing:** the same
+  full suite at base `73a31e0b` fails the same perf test; the perf file in isolation passes
+  15/15 on both trees. Environmental load flakes, not candidate defects.
+- **`cargo test --all`:** the candidate changes zero Rust lines vs base
+  (`git diff base..candidate -- crates/` = 0), so its outcome is fully determined by the
+  base; the task's Rust surface (resolver, 116 tests) is green.
+- **Process checks:** all 6 frontmatter SHAs resolve; `check-task-commit-attribution.sh`
+  OK (rc=0); `git diff --check` clean; dist diff empty; committed dist's pre-fix bundle
+  (`last_commit_sha` present) is unchanged-from-base stale-at-rest, defused by the
+  documented integration-gate rebuild (r2/r9 `18811787` policy).
+
+No structural defects, missing enforcement, fake implementations, or hollow sections found
+in the diff. The diff's changes are real and each is defended by a mutation-killing test;
+the surviving mutations are on pre-existing already-working behavior explicitly excluded
+from new-test scope by the goal. Approving.
