@@ -95,3 +95,42 @@ needs-revision — F6/F7 are wrong-or-missing `Calls` edges in realistic Go layo
 ### Verdict
 
 complete — all R1/R2 findings are fixed by real product code verified at this HEAD; the one R3 finding (F9, attribution gate) is fixed in this round and the gate is green. The task's own scope (Go Pass 2 pipeline) is done: port + adapter + pipeline + resolution policy + lifecycle, each with tests that fail on the bugs they guard against.
+
+---
+
+## Round: R4 (independent review, candidate a7cf8ef1)
+
+**Reviewer:** Verifier
+**Date:** 2026-10-10
+**Base:** 770785f7 · **Candidate:** a7cf8ef16c216e2ce4aa293326e1534548f61f6c
+**Spec ref:** lsp-call-graph.md §1–6, §10 Phase 1, §11
+
+### What this candidate adds over base
+
+The core pipeline (port, adapter, Pass 2 spawn, resolution) pre-dates this candidate (base 770785f7 already had it). This round's delta: (a) Go qualified names rebuilt on the import-path rule in `go_extractor.rs` (package clause never used — F6), (b) the single ambiguity policy (`select` closure, boundary-aware `node_in_pkg`/`path_contains_segment`) in `call_graph_resolve.rs` (F7), (c) content-derived edge ids + `sweep_stale_edges` Calls exemption + Pass 2 self-reconcile (F8), (d) mem-adapter upsert parity with SQLite `ON CONFLICT(id)` semantics (`parking_lot`, immutable `first_seen_at`), (e) Dockerfile Go toolchain + `GO_CALLGRAPH_BIN` for §11, (f) adapter happy-path test with `ENV_LOCK`, (g) contract/frontmatter restoration and commit re-attribution.
+
+### Independent evidence (probes under /tmp/stage/review-evidence/)
+
+- **Kill-test (decisive):** candidate test module spliced onto BASE production code (worktree at 770785f7, only `call_graph_resolve.rs` tests replaced) → 4 tests FAIL exactly on the R2 bugs: `calls_edge_ids_are_content_derived` (F8: random UUID ids at base), `resolve_go_prefix_similar_package_is_not_guessed`, `resolve_go_refuses_ambiguous_method_candidates`, `resolve_go_vendored_prefix_similar_path_is_not_guessed` (F7: `candidates[0]` guessing + substring hint matching). Same 16 tests at candidate: all pass. The tests are not self-confirming — they kill the base bugs they claim to guard.
+- Clean rebuild (after `cargo clean -p gyre-domain` to purge a stale shared-target test binary): `gyre-domain --lib` 381/381 ok; `call_graph_resolve` 16/16; `go_extractor` 13/13 (incl. `qualified_name_uses_import_path_not_package_clause`, the F6 producer-side regression); `gyre-adapters call_graph` 3/3 (incl. the new `env_override_binary_output_is_parsed_into_edges` happy path); `gyre-server --lib graph_extraction` 22/22 (all seven Pass 2 lifecycle tests: sync→persist, dedup, id stability, sweep exemption, stale reconcile, toolchain-unavailable skip, legacy-row collapse). `cargo build -p gyre-server` succeeds.
+- **Go binary probe:** `./scripts/go-callgraph/go-callgraph` executes on a real two-package fixture (`/tmp/gofixture`) and fails only at `packages.Load` with `go command required, not found` — the sandbox has no Go toolchain; adapter then degrades to `Ok(vec![])` per the port contract. Binary embeds `go1.24.4`, matching the Dockerfile `golang:1.24-bookworm-slim` runtime toolchain. Not a code defect; recorded as a sandbox limitation.
+- **Gates:** check-arch, check-task-commit-attribution (10/10 attributed SHAs resolve; `17c81d5a` correctly retained via frontmatter after the exemption shrink 3→2), mem-port-contracts, byte-slice-truncation, inert-enforcement, relative-path-defaults, fail-open-ref-resolution, scope-literal-defaults, fabricated-scope-defaults, lossy-secret-conversion, forged-scope-fields, forwarded-header-trust, in-memory-state-stores, unbounded-external-http, abac-route-registry, abac-exempt-handlers, dead-message-kinds, migration-versions, migration-sql-portability, mcp-write-tools — all exit 0.
+- **rustfmt:** the 4 FAIL results on branch-touched files (`mem_graph.rs`, `ports graph.rs`, `graph_extraction.rs` hunks) are byte-identical hunks that fire at BASE with this sandbox's rustfmt 1.10.0 (verified in a base worktree: same hunks, same file set) — pre-existing drift signature, not candidate-introduced. `call_graph_resolve.rs` and `go_extractor.rs` (the files this round actually rewrote) are clean.
+- **web/dist / .done:** net diff vs base is 0 lines (in-range rebuild churn fully reverted); worktree clean at review end.
+
+### Verification limitations (sandbox, not code defects)
+
+- No Docker daemon: Dockerfile §11 wiring verified statically (COPY source/tag match with the binary's embedded go1.24.4; `ENV GO_CALLGRAPH_BIN` matches the adapter's documented search order). CI does not build the image.
+- No Go toolchain: end-to-end CHA extraction cannot run here (binary probe above). Name-format alignment between binary (`pkg.Pkg.Path()` + `Type.Method`) and extractor (module + directory) verified statically on both sides.
+- No loopback TCP (`tcp_listener_probe.supported=false`): HTTP-bound `graph_integration` (incl. `test_push_triggers_graph_extraction`) and `git_integration` cannot run. Required host/CI checks recorded in `/tmp/stage/review-evidence/transport-restricted-checks.txt`.
+
+### Findings
+
+None blocking. Two scoped observations for later phases, explicitly documented in-code and outside Phase 1 scope:
+
+- `sweep_stale_edges` exempts ALL `Calls` edges, so Pass 1-emitted Calls edges from the Rust/TS syntax extractors are no longer swept when stale — removal now waits for Pass 2 reconcile, which is only wired/validated for Go. Documented tradeoff at `graph_extraction.rs:622-631`; the alternative (unconditional sweep) reintroduces the F8 writer race.
+- Consecutive pushes can overlap two Pass 2 tasks; the later run's reconcile may soft-delete a row the earlier writer then re-upserts (fresh `first_seen_at`). Content-derived ids bound the damage to tombstone churn on a still-true edge. Spec requires only non-blocking background merge; not a Phase 1 contract breach.
+
+### Verdict
+
+**approved** — the task contract (§1–6, §10 Phase 1, §11 Go scope) is satisfied by real production code; the R2 defects (F6/F7/F8) are fixed in product code with regression tests proven (via base-splice kill-test) to fail on the pre-fix code; this round's repair claims (contract restoration, attribution, §11 Dockerfile, happy-path adapter test, web/dist revert) each verify. Approval is conditional on the transport-restricted CI checks recorded above, which the pipeline's deterministic gates must run (they are the repo's standard `cargo test --all` plus the integration suites).
