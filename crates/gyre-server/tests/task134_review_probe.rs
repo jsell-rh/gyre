@@ -177,8 +177,8 @@ async fn scoped_review_token_cannot_push() {
         "scoped review token push must be 403, got {status}: {text}"
     );
     assert!(
-        text.contains("review-scoped"),
-        "expected review-scoped denial message, got: {text}"
+        text.contains("gate-agent scoped tokens are read-only"),
+        "expected scoped-token denial message, got: {text}"
     );
 }
 
@@ -329,6 +329,7 @@ async fn validation_scoped_token_can_read_mr_context() {
         format!("/api/v1/merge-requests/{}/diff", mr_id.as_str()),
     ] {
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("GET")
@@ -393,6 +394,7 @@ async fn lookalike_scope_does_not_inherit_review_capability() {
             "body": format!("lookalike probe {lookalike}")
         });
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -414,7 +416,7 @@ async fn lookalike_scope_does_not_inherit_review_capability() {
         let reviews = state.reviews.list_reviews(&mr_id).await.unwrap();
         let stored = reviews
             .iter()
-            .find(|r| r.body == format!("lookalike probe {lookalike}"))
+            .find(|r| r.body.as_deref() == Some(&format!("lookalike probe {lookalike}")))
             .unwrap_or_else(|| panic!("lookalike scope request failed: {status} {text}"));
         assert_eq!(
             stored.reviewer_agent_id, "some-other-reviewer",
