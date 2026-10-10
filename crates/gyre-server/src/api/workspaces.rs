@@ -1133,8 +1133,7 @@ mod tests {
 
         // Guided workspace (explicit, so the assertions below pin a state
         // that differs from both the fallback and the typo's target).
-        let body =
-            serde_json::json!({ "tenant_id": "t1", "name": "W", "slug": "w", "trust_level": "Guided" });
+        let body = serde_json::json!({ "tenant_id": "t1", "name": "W", "slug": "w", "trust_level": "Guided" });
         let create_resp = app
             .clone()
             .oneshot(
@@ -1198,8 +1197,7 @@ mod tests {
         let state = crate::mem::test_state();
         let app = crate::api::api_router().with_state(state.clone());
 
-        let body =
-            serde_json::json!({ "tenant_id": "t1", "name": "W", "slug": "w", "trust_level": "autonomous" });
+        let body = serde_json::json!({ "tenant_id": "t1", "name": "W", "slug": "w", "trust_level": "autonomous" });
         let resp = app
             .oneshot(
                 Request::builder()

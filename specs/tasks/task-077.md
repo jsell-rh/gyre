@@ -2,7 +2,7 @@
 title: "HSI Trust Gradient — Trust Levels, Enforcement & Mechanical Implementation"
 spec_ref: "human-system-interface.md §9–13"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 review: specs/reviews/task-077.md
 coverage_sections:
   - "human-system-interface.md §9 2. Trust Gradient"
@@ -86,3 +86,23 @@ Trust is a **workspace-level setting** (`trust_level: TrustLevel` enum: `Supervi
 ## Agent Instructions
 
 Read `specs/system/human-system-interface.md` §9–13 (Trust Gradient) carefully — the mechanical implementation section has precise details about policy naming, priorities, and transaction behavior. Also read `specs/system/abac-policy-engine.md` for the existing ABAC engine design. The key amendment is adding `immutable` flag support to the ABAC evaluation engine. Check `crates/gyre-domain/src/` for existing ABAC evaluation code and `crates/gyre-adapters/migrations/` for migration numbering (currently at 000046+). The workspace entity is in `gyre-common` — grep for `Workspace` struct.
+
+## Shipped
+
+Revision round (F5–F8 from `specs/reviews/task-077.md` R2), completing the checkpointed implementation:
+
+- **F5 — merge-time ABAC enforcement:** `merge_processor.rs` now evaluates ABAC with the processor's internal service identity (`subject.type "system"`, `subject.id "merge-processor"`) before every single-entry merge and every atomic-group member merge. An explicit Deny match (`matched_policy.is_some()`, e.g. `trust:require-human-mr-review` in a Supervised workspace) HOLDS the merge — single entries are requeued (not failed) with a "supervised trust" reason so the human-approval path stays live; group members roll the whole group back to Queued. The human-approval escape is `mr.status == Approved` (set only via the MR status endpoint, never by the processor before the gate). The pipeline catch-all `builtin-default-deny` is excluded from this evaluation scope: it is an HTTP-pipeline statement, and leaving it in scope would make Guided/Autonomous (the spec's "processor is NOT blocked" state) unrepresentable. Cross-workspace Deny policies are filtered by scope_id.
+- **F6 — fail-closed interrogation policy creation:** `create_interrogation_policies` propagates creation errors (`?`) instead of warn-and-continue; the spawn handler rolls back the agent record and token before returning the error, so an interrogation agent can never run with a subset of its restriction policies. Exemption entries for both former discard sites are deleted (`scripts/inert-enforcement-exemptions.txt`, `scripts/warn-continue-creation-exemptions.txt`); both checks run green with zero task-077-owned entries.
+- **F7 — Custom transition directions tested:** `trust_transition_preset_to_custom_preserves_trust_policies` (Supervised → Custom preserves `trust:` policies) and `trust_transition_custom_to_preset_deletes_and_reseeds` (Custom → Guided deletes ALL `trust:` policies for the workspace, including operator-created `trust:`-prefixed ones, reseeds nothing for Guided, and a non-trust user policy survives).
+- **F8 — field-level generator assertions + `from_db_str` fallback:** `trust_policies_for_level_supervised_generates_merge_hold_deny` asserts every field the F5 gate consumes (name, effect Deny, priority 150 in the 100–199 band, actions `[merge]`, resource_types `[mr]`, `subject.type == "system"` Equals condition, Workspace scope/scope_id, enabled, non-immutable, non-builtin, created_by); Guided/Autonomous/Custom assert empty sets. `from_db_str_parses_all_four_levels` and `from_db_str_unknown_falls_back_to_supervised` cover the changed fallback.
+- **CI repair:** `check-task-commit-attribution` failed on inherited main (task-189's landed merge commit `f4acb4eb` missing from its frontmatter) — added the SHA to `specs/tasks/task-189.md` `commits:`; check now green. `cargo fmt --all` drift in the two touched test files fixed.
+
+**Test evidence** (logs under `/tmp/stage/review-evidence/`):
+- `cargo test -p gyre-server --lib api::workspaces` — 16 passed (incl. both F7 Custom-direction tests, the 409 rollback test, the invalid-`trust_level` 400 test).
+- `cargo test -p gyre-server --lib merge_processor` — 55 passed (incl. `supervised_workspace_open_mr_merge_is_held_and_requeued`, `supervised_workspace_approved_mr_merges`, `guided_workspace_open_mr_merges`, `supervised_trust_denies_atomic_group_member_rolls_back_group`, and the two startup-seeded-builtin regression tests).
+- `cargo test -p gyre-server --lib policy_engine` — 19 passed.
+- `cargo test -p gyre-server --lib api::spawn::tests::create_interrogation_policies` — 1 passed (F6 fail-closed).
+- `cargo test -p gyre-domain --lib policy` — 4 passed; `--lib from_db_str` — 3 passed (F8).
+- `cargo fmt --all --check` clean; all 17 `scripts/check-*.sh` mechanical gates pass.
+
+Full-workspace suites, all-target Clippy, and GitHub CI remain owned by verification/publication per the assignment.

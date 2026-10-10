@@ -267,9 +267,15 @@ mod tests {
 
     #[test]
     fn parse_accepts_exactly_the_four_spec_levels() {
-        assert_eq!(TrustLevel::parse("Supervised"), Some(TrustLevel::Supervised));
+        assert_eq!(
+            TrustLevel::parse("Supervised"),
+            Some(TrustLevel::Supervised)
+        );
         assert_eq!(TrustLevel::parse("Guided"), Some(TrustLevel::Guided));
-        assert_eq!(TrustLevel::parse("Autonomous"), Some(TrustLevel::Autonomous));
+        assert_eq!(
+            TrustLevel::parse("Autonomous"),
+            Some(TrustLevel::Autonomous)
+        );
         assert_eq!(TrustLevel::parse("Custom"), Some(TrustLevel::Custom));
     }
 
