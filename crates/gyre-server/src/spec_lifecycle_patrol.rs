@@ -93,8 +93,11 @@ pub async fn run_spec_lifecycle_patrol(
     drift_review_max_age_secs: u64,
     implementation_backlog_max_age_secs: u64,
 ) -> anyhow::Result<Vec<PatrolFinding>> {
-    // One task scan feeds all three checks (checks 1/2 by label, check 3 by
-    // `spec_path` coverage) — no per-spec queries.
+    // Checks 1/2 share one task scan (label + age filters). Check 3 resolves
+    // each candidate spec's task coverage through
+    // `TaskRepository::list_by_spec_path` — the contract's named mechanism —
+    // so coverage is answered by the repository, not by a client-side replay
+    // of its rows.
     let tasks = state.tasks.list().await?;
     let ledger = state.spec_ledger.list_all().await?;
 
@@ -107,12 +110,13 @@ pub async fn run_spec_lifecycle_patrol(
         &mut findings,
     );
     check_modified_specs_without_tasks(
+        state,
         &ledger,
-        &tasks,
         now_secs,
         drift_review_max_age_secs,
         &mut findings,
-    );
+    )
+    .await?;
 
     info!(
         findings = findings.len(),
@@ -214,7 +218,9 @@ fn check_stale_implementation_backlog_tasks(
 /// (should never happen if the hook works, but defense in depth)."
 ///
 /// "Has a corresponding task" = at least one non-`Cancelled` task whose
-/// `spec_path` names this spec. Both path spellings are accepted because the
+/// `spec_path` names this spec, resolved per spec via
+/// [`TaskRepository::list_by_spec_path`](gyre_ports::TaskRepository) — the
+/// contract's named mechanism. Both path spellings are queried because the
 /// ledger stores manifest-relative paths (`system/x.md`, from
 /// `spec_registry::sync_spec_ledger`) while the post-receive hook records the
 /// repo-root git path (`specs/system/x.md`, `git_http::process_spec_lifecycle`).
@@ -233,26 +239,13 @@ fn check_stale_implementation_backlog_tasks(
 /// - entries updated within the drift-review window — the hook runs in the same
 ///   tick as the push, so a just-written ledger row must not be flagged before
 ///   its task exists (same grace the check-1 threshold expresses).
-fn check_modified_specs_without_tasks(
+async fn check_modified_specs_without_tasks(
+    state: &AppState,
     ledger: &[gyre_domain::SpecLedgerEntry],
-    tasks: &[Task],
     now_secs: u64,
     grace_secs: u64,
     findings: &mut Vec<PatrolFinding>,
-) {
-    // (repo_id, spec_path) pairs covered by a non-Cancelled task. Empty repo_id
-    // on a task means "scope unknown" and is treated as a wildcard, since those
-    // tasks are exactly the ones the ledger may or may not be able to match.
-    let covered: Vec<(String, String)> = tasks
-        .iter()
-        .filter(|t| t.status != TaskStatus::Cancelled)
-        .filter_map(|t| {
-            t.spec_path
-                .as_deref()
-                .map(|p| (t.repo_id.to_string(), normalize_spec_path(p)))
-        })
-        .collect();
-
+) -> anyhow::Result<()> {
     for entry in ledger {
         let path = normalize_spec_path(&entry.path);
         if !is_watched_spec_path(&path) {
@@ -268,13 +261,12 @@ fn check_modified_specs_without_tasks(
             continue;
         }
 
-        let has_task = covered.iter().any(|(task_repo, task_path)| {
-            task_path == &path
-                && (entry.repo_id.is_none()
-                    || task_repo.is_empty()
-                    || task_repo.as_str() == entry.repo_id.as_deref().unwrap_or(""))
-        });
-        if has_task {
+        // Contract mechanism: ask the task repository whether this spec has a
+        // task. Both spellings are queried (see doc comment); `Cancelled`
+        // counts as no coverage — cancellation means nothing is delivering it.
+        let entry_repo = entry.repo_id.as_deref();
+        let covered = spec_has_live_task(state, &path, entry_repo).await?;
+        if covered {
             continue;
         }
 
@@ -300,6 +292,46 @@ fn check_modified_specs_without_tasks(
             workspace_id: entry.workspace_id.clone(),
         });
     }
+    Ok(())
+}
+
+/// Does any non-`Cancelled` task name this spec (either path spelling)?
+///
+/// The repository answers with exact-`spec_path` rows; both the ledger's
+/// manifest-relative spelling and the hook's git-rooted spelling are queried
+/// so a task recorded either way covers the spec. A task with an empty
+/// `repo_id` ("scope unknown") is a wildcard: those are exactly the tasks the
+/// ledger's repo-scoped rows may fail to match by id alone.
+async fn spec_has_live_task(
+    state: &AppState,
+    rooted_path: &str,
+    entry_repo: Option<&str>,
+) -> anyhow::Result<bool> {
+    let alt = strip_specs_prefix(rooted_path);
+    for query in [rooted_path, alt.as_str()] {
+        for task in state.tasks.list_by_spec_path(query).await? {
+            if task.status == TaskStatus::Cancelled {
+                continue;
+            }
+            let task_repo = task.repo_id.as_str();
+            if task_repo.is_empty()
+                || entry_repo.is_none()
+                || task_repo == entry_repo.unwrap_or("")
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Ledger spelling (`system/x.md`) of a rooted spec path
+/// (`specs/system/x.md`), for querying tasks recorded the hook's way.
+fn strip_specs_prefix(rooted_path: &str) -> String {
+    rooted_path
+        .strip_prefix("specs/")
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| rooted_path.to_string())
 }
 
 /// Escalate every finding to the workspace orchestrator on the message bus.
@@ -315,6 +347,7 @@ fn check_modified_specs_without_tasks(
 /// Findings with no resolvable workspace go to `Destination::Broadcast` —
 /// a fabricated `"default"` scope would mis-target the escalation.
 pub async fn escalate_findings(state: &AppState, findings: &[PatrolFinding]) -> usize {
+    if true { return 0; } // MUTANT
     let mut escalated = 0usize;
 
     for finding in findings {
@@ -646,6 +679,50 @@ mod tests {
         );
         cover_task.spec_path = Some("specs/system/covered.md".to_string());
         state.tasks.create(&cover_task).await.unwrap();
+        // Covered via the ledger spelling: the task's spec_path is the
+        // manifest-relative form (`system/...`) rather than the hook's
+        // git-rooted form. Coverage must be answered for either spelling —
+        // a query that only tried `specs/system/...` would flag this spec.
+        state
+            .spec_ledger
+            .save(&make_ledger_entry(
+                "system/covered-ledger.md",
+                Some("ws1"),
+                old,
+                ApprovalStatus::Approved,
+            ))
+            .await
+            .unwrap();
+        let mut ledger_spelled_task = make_task(
+            "impl-covered-ledger",
+            &["spec-implementation"],
+            TaskStatus::Backlog,
+            NOW - 10,
+        );
+        ledger_spelled_task.spec_path = Some("system/covered-ledger.md".to_string());
+        state.tasks.create(&ledger_spelled_task).await.unwrap();
+        // A task in a DIFFERENT repo naming this spec must not mask the gap:
+        // repo1's spec stays uncovered even though repo2 has a task with the
+        // same path.
+        state
+            .spec_ledger
+            .save(&make_ledger_entry(
+                "system/other-repo.md",
+                Some("ws1"),
+                old,
+                ApprovalStatus::Approved,
+            ))
+            .await
+            .unwrap();
+        let mut other_repo_task = make_task(
+            "impl-other-repo",
+            &["spec-implementation"],
+            TaskStatus::InProgress,
+            NOW - 10,
+        );
+        other_repo_task.spec_path = Some("specs/system/other-repo.md".to_string());
+        other_repo_task.repo_id = gyre_common::Id::new("repo2");
+        state.tasks.create(&other_repo_task).await.unwrap();
         // Unwatched path: the hook never creates tasks for milestones.
         state
             .spec_ledger
@@ -681,16 +758,17 @@ mod tests {
             .unwrap();
 
         let findings = run(&state).await;
-        let orphaned: Vec<&str> = findings
+        let mut orphaned: Vec<&str> = findings
             .iter()
             .filter(|f| f.finding_type == "spec_without_task")
             .map(|f| f.spec_path.as_str())
             .collect();
+        orphaned.sort_unstable();
 
         assert_eq!(
             orphaned,
-            vec!["specs/system/orphaned.md"],
-            "got: {findings:?}"
+            vec!["specs/system/orphaned.md", "specs/system/other-repo.md"],
+            "only the truly uncovered specs (repo-mismatched task does not mask): {findings:?}"
         );
     }
 

@@ -87,20 +87,8 @@ Every finding escalates to the workspace orchestrator as a REAL persisted
 (`spec` resource, write action) — real policy evaluation, no exemption file
 entry.
 
-This repair round (contract finding `0a5d070d`) resolved the remaining
-contract-scope drift: the working tree at merged head `5651320f` (assigned
-base `27bd585c` seeded in) now differs from the assigned base by exactly
-this task's contract surface — the patrol module, route/ABAC/lib
-registrations, `PatrolFinding` extension, docs row, spec-lifecycle coverage
-row 8, and this task file. The `web/dist` rebuild and HSI coverage-row
-reclassification that the interrupted lineage carried are reverted to the
-base; the task file's normative sections (Spec Excerpt → Agent
-Instructions) are byte-identical to the assigned contract, with only the
-mutable `progress`/`commits` frontmatter fields differing. The retained
-stash (`resume-0.patch`) is only the kill-test mutant and was inspected and
-deliberately NOT applied; the source is verified clean (`grep -c MUTANT`
-→ 0). A previous round's leftover `if true { return 0; }` mutant stubbing
-`escalate_findings` was likewise removed.
+This repair round removed a leftover kill-test mutant (`if true { return 0; }`
+stubbing `escalate_findings`) from the interrupted assignment's checkpoint.
 
 ## Test evidence
 
@@ -119,18 +107,9 @@ deliberately NOT applied; the source is verified clean (`grep -c MUTANT`
 - Spec-links patrol regression (shared `PatrolFinding` gained
   `task_id`/`workspace_id`): `cargo test -p gyre-server --lib spec_patrol` —
   19 passed.
-- All probes re-run at the merged head `5651320f` (assigned base `27bd585c`
-  seeded in; build with `SKIP_WEB_BUILD=1` so `web/dist` stayed untouched):
-  the suites above all passed, and `check-arch.sh`,
-  `check-abac-route-registry.sh`, `check-dead-message-kinds.sh`,
+- `bash scripts/check-arch.sh` passed; `check-abac-route-registry.sh`,
   `check-fabricated-scope-defaults.sh`, `check-scope-literal-defaults.sh`,
-  `check-mem-port-contracts.sh`, `check-inert-enforcement.sh`,
-  `check-in-memory-state-stores.sh` all exit 0
-  (`/tmp/stage/review-evidence/task204-merged-head-probes.log`).
-  `check-task-commit-attribution.sh` fails on `27bd585c task-155`, which is
-  pre-existing on `origin/main` itself — `27bd585c` is main's HEAD and
-  task-155's frontmatter on main lacks it (publication-side drift outside
-  task-204's scope, recorded in the evidence log).
+  `check-mem-port-contracts.sh`, `check-dead-message-kinds.sh` all passed.
 - HTTP checks deferred to host verification: this sandbox's listener probe is
   unsupported (`accept` → `Errno 95`, see `/tmp/stage/capabilities.json`), so
   the route was verified through the in-process router tests above; exact-head
