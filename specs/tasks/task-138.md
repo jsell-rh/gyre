@@ -176,7 +176,9 @@ checklist: e2e test, `cargo test --all`, GitHub CI on the exact head.
 
 This run resolved the interrupted checkpoint (exit 130) and triaged the
 verification finding; no production code needed changing — every focused
-suite passes on the merged tree at `103db0c3`.
+suite passes on the merged tree. Final head `466b6e72` (merged current
+origin/main for the task-196 attribution repair; zero code delta from
+verified `103db0c3`).
 
 - Resolved active merge conflict in `specs/tasks/task-068.md` (identical
   10-SHA `commits:` lists, different order; kept HEAD ordering), committed
@@ -194,6 +196,9 @@ suite passes on the merged tree at `103db0c3`.
   GitHub CI) fails identically but worse (11 vs 8) in this CPU-starved
   sandbox; isolated run of the failing file passes 15/15. No branch
   regression; host checklist: full `npm test` + GitHub CI on exact head.
+- Merged current origin/main (`18c44f1a`, task-227's attribution repair for
+  task-196) so the attribution gate is green on this branch too; that merge
+  is task-markdown-only — zero code delta from the verified tree.
 
 Evidence: `/tmp/stage/review-evidence/task-138-repair.md` (this run),
 `web-full-suite.log`, `web-base-e96d25ab.log`.
