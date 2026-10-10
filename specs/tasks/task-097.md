@@ -10,7 +10,7 @@ coverage_sections:
   - "platform-model.md §7 Secret Scoping"
   - "platform-model.md §7 Secret Types"
   - "platform-model.md §7 Storage Backend"
-commits: ["5b50e3a6c5cf88147c42cd481cc82ab85983190c", "86c11e375ba89eed09e22b5c20aa18943e792388", "c0f6f042df285973fcf1cb8e7e60ddff75ba2fde", "bb331e32e73b28eed81ad05793b5baa282795bf9", "5206b8750328f39c1c76294044f25dbe989a8178", "d18ace22aa87aaec1818eadad6532259fe8f9b55", "9072ac62ed0e94612fefd1d908cc034fd47548d5", "3953d31ee5ebdf23b980165530e2612fcc1a11b3", "70e9cc03f58af6a7e6f453cf14eded17b7f3f338", "d60e8d0efe9f8be5c312f946804942503c83105b", "a3fde958cd56d6f760d5e59b84927601ba708f17", "a38170c9c866a05033b23238398660b35e333eee", "01493c8864dda8a8c82b46d0aff141df0b017aad", "3a5be015d2fa96ef14a55109098fe869cf56ae13"]
+commits: ["86c11e375ba89eed09e22b5c20aa18943e792388", "c0f6f042df285973fcf1cb8e7e60ddff75ba2fde", "bb331e32e73b28eed81ad05793b5baa282795bf9", "5206b8750328f39c1c76294044f25dbe989a8178", "d18ace22aa87aaec1818eadad6532259fe8f9b55", "9072ac62ed0e94612fefd1d908cc034fd47548d5", "3953d31ee5ebdf23b980165530e2612fcc1a11b3", "70e9cc03f58af6a7e6f453cf14eded17b7f3f338", "d60e8d0efe9f8be5c312f946804942503c83105b", "a3fde958cd56d6f760d5e59b84927601ba708f17", "a38170c9c866a05033b23238398660b35e333eee", "01493c8864dda8a8c82b46d0aff141df0b017aad", "3a5be015d2fa96ef14a55109098fe869cf56ae13", "5b50e3a6c5cf88147c42cd481cc82ab85983190c"]
 review: specs/reviews/task-097.md
 ---
 
@@ -150,25 +150,33 @@ trees whose crates/ bytes are identical to HEAD (git diff on the four task-owned
 product files vs both trees is empty; this continuation's time budget did not allow
 another cold gyre-server build). Probe logs under /tmp/stage/review-evidence.
 
-## Verification repair (attempt 562bef39, exit 1 on checks.sh)
+### Contract repair (attempt 78c6b2ee, contract violation)
 
-Root cause: the verification exemption-freeze gate (`dev-check.sh`, "The candidate
-must not grant itself new exemptions, including replacement entries") compares
-whole-line strings. The task's mem.rs secret-adapter insertions shifted the
-pre-existing task-087 F2 exemption entry (`MemTraceRepository.payloads`, mem.rs
-3504 -> 3558) and the candidate renumbered that entry to keep it accurate; a
-renumbered entry is a replacement entry, so the gate failed ("new verification
-exemptions forbidden: scripts/unwritten-store-fields-exemptions.txt"). The web
-build in the log tail succeeded; the exit-1 came from this earlier gate.
+The prior continuation drifted the task contract: it prepended the pipeline
+checkpoint `5b50e3a6` to the `commits:` frontmatter and added a top-level
+`## Verification repair` section, which `requirement_parts` does not strip, so
+the stage rejected the tree with a contract-category repair (agent exit 130).
+This round restores the contract: the 13 assigned task-097 SHAs are unchanged,
+`5b50e3a6` is retained at the end of the list (it carries the task-087 F2 mem
+payload repair in `crates/gyre-server/src/mem.rs`, product-identical to the
+reviewed candidate `653de113` on those files), and the repair record lives
+under `## Shipped`, which the contract comparison strips as operational. The
+underlying task-097 and task-087 F2 source fixes are unchanged; only the task
+file's operational record was re-normalized.
 
-Repair (prescribes by the exemption file itself): fix the underlying task-087 F2
-site instead of keeping the exemption -- `MemTraceRepository.store()` now
-populates `payloads` from each span's input/output summaries mirroring the SQLite
-adapter's `build_payload_blob` (both-absent -> no payload entry; empty-summary ->
-None on read, matching `decode_payload_blob`), a replacement capture drops the
-previous run's payloads (SQLite: delete + cascade to trace_spans), and
-`delete_by_mr` removes the deleted MR's payloads while promoted traces keep
-theirs. Six round-trip tests added (`mem::trace_payload_tests`); the exemption
-entry is deleted (pure removal, passes the freeze gate in both script
-orientations). check-unwritten-store-fields green with both candidate and base
-script versions against the repaired tree.
+Live gate state on this tree, probed this round: arch, migration-versions,
+unwritten-store-fields, mem-port-contracts, fabricated-scope-defaults,
+lossy-secret-conversion, scope-literal-defaults, inert-enforcement,
+forged-scope-fields, forwarded-header-trust, in-memory-state-stores,
+unbounded-external-http, migration-sql-portability all exit 0.
+check-task-commit-attribution exits 1 with one finding: `6bf777a6 task-200`
+— the base commit itself, task-200's own landing commit, which is absent
+from specs/tasks/task-200.md's `commits:` frontmatter on origin/main and
+fails the pristine base identically (probe:
+/tmp/stage/review-evidence/attrib-base.txt). That finding is upstream debt
+on main, out of task-097's scope: the dedicated repair task-220 (commit
+4635b533 on origin/pipeline/task-220/*) records the SHA in task-200's
+frontmatter; it is not yet merged to main. The attribution gate is
+baseline-compared by dev-static-gate.py, which classifies a base-failing
+gate as exit 81 (main baseline) rather than candidate repair, so this
+branch carries no obligation to duplicate task-220's owned repair.
