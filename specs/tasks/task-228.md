@@ -110,3 +110,30 @@ identical `(front, prose)` — the restoration round changed nothing normative;
 the prior round's contract finding (dropped `spec_ref`) is repaired. Full
 command and output:
 `/tmp/stage/review-evidence/task-228-r2-contract-hash-proof.txt`.
+
+### Recovery round (finding 8eef17b4, category=checkpoint)
+
+Recovered interrupted assignment at candidate `0e8e1e68` (tree clean, HEAD =
+published checkpoint). No product source changed this round either:
+`git diff 05709c242509b89214876339b3c463ede3a31b60 HEAD -- scripts/ crates/
+web/src/ web/dist/` is empty; the branch delta vs base remains exactly
+`specs/tasks/task-196.md` (1 line) + this task file. Fresh verification on the
+recovered tree:
+
+- `bash scripts/check-task-commit-attribution.sh` — exit 0.
+  Evidence: `/tmp/stage/review-evidence/task-228-r3-attribution-restored.txt`.
+- Mutation check re-run: repair removed (sed) → identical FAIL exit 1
+  (`05709c24 task-196 ...`); repair restored → exit 0. Evidence:
+  `/tmp/stage/review-evidence/task-228-r3-attribution-repro.txt` (mutated)
+  and `task-228-r3-attribution-restored.txt` (restored).
+- `scripts/task-commit-attribution-exemptions.txt` frozen at the 3-entry
+  baseline; `git diff <base> HEAD -- scripts/task-commit-attribution-exemptions.txt`
+  is empty (no new exemptions).
+- `python3 scripts/dev-attribution.py task-228` — empty list, exit 0
+  (specs-only branch; `commits: []` remains attribution-canonical).
+- Contract integrity at `0e8e1e68`: `requirement_parts()` front equals the
+  assigned contract frontmatter byte-for-byte (title/spec_ref/depends_on),
+  prose retains Required behavior + Base + fingerprint.
+  Evidence: `/tmp/stage/review-evidence/task-228-r3-contract-hash-proof.txt`.
+- `## Shipped` is an operational heading (excluded from the contract hash),
+  so this section cannot shift the requirement generation.
