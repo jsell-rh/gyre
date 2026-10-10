@@ -3402,8 +3402,7 @@ async fn execute_tool(
                 .input
                 .get("query")
                 .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_lowercase();
+                .unwrap_or("");
             let limit = tool_call
                 .input
                 .get("limit")
@@ -3411,33 +3410,7 @@ async fn execute_tool(
                 .unwrap_or(30)
                 .min(50) as usize; // Cap at 50 to limit conversation history bloat
 
-            let results: Vec<serde_json::Value> = nodes
-                .iter()
-                .filter(|n| n.deleted_at.is_none())
-                .filter(|n| {
-                    n.name.to_lowercase().contains(&query)
-                        || n.qualified_name.to_lowercase().contains(&query)
-                        || n.file_path.to_lowercase().contains(&query)
-                        || n.doc_comment
-                            .as_ref()
-                            .map_or(false, |d| d.to_lowercase().contains(&query))
-                        || n.spec_path
-                            .as_ref()
-                            .map_or(false, |s| s.to_lowercase().contains(&query))
-                })
-                .take(limit)
-                .map(|n| {
-                    json!({
-                        "id": n.id.to_string(),
-                        "name": n.name,
-                        "qualified_name": n.qualified_name,
-                        "node_type": format!("{:?}", n.node_type).to_lowercase(),
-                        "file_path": n.file_path,
-                        "spec_path": n.spec_path,
-                        "doc_comment": n.doc_comment.as_deref().map(|d| if d.len() > 100 { &d[..100] } else { d }),
-                    })
-                })
-                .collect();
+            let results = gyre_domain::view_query_resolver::search_graph_nodes(query, nodes, limit);
 
             format!(
                 "{} results:\n{}",
