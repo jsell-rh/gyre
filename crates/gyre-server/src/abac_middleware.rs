@@ -603,7 +603,7 @@ pub fn m34_builtin_policies() -> Vec<Policy> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let by = "system".to_string();
+    let by = Id::new("system");
 
     vec![
         // Priority 900: Admin role → allow everything.
@@ -1551,7 +1551,7 @@ pub mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "system".to_string(),
+                created_by: Id::new("system"),
                 created_at: 0,
                 updated_at: 0,
             })
@@ -1620,7 +1620,7 @@ pub mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "system".to_string(),
+                created_by: Id::new("system"),
                 created_at: 0,
                 updated_at: 0,
             })
@@ -1689,7 +1689,7 @@ pub mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "system".to_string(),
+                created_by: Id::new("system"),
                 created_at: 0,
                 updated_at: 0,
             })
@@ -1794,7 +1794,7 @@ pub mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "system".to_string(),
+                created_by: Id::new("system"),
                 created_at: 0,
                 updated_at: 0,
             })
@@ -1892,7 +1892,7 @@ pub mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "system".to_string(),
+                created_by: Id::new("system"),
                 created_at: 0,
                 updated_at: 0,
             })
@@ -1917,7 +1917,7 @@ pub mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "system".to_string(),
+                created_by: Id::new("system"),
                 created_at: 0,
                 updated_at: 0,
             })
@@ -2041,7 +2041,7 @@ pub mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "system".to_string(),
+                created_by: Id::new("system"),
                 created_at: 0,
                 updated_at: 0,
             })
@@ -2070,7 +2070,7 @@ pub mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "system".to_string(),
+                created_by: Id::new("system"),
                 created_at: 0,
                 updated_at: 0,
             })
@@ -2177,7 +2177,7 @@ pub mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "system".to_string(),
+                created_by: Id::new("system"),
                 created_at: 0,
                 updated_at: 0,
             })
@@ -2272,7 +2272,7 @@ pub mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "system".to_string(),
+                created_by: Id::new("system"),
                 created_at: 0,
                 updated_at: 0,
             })
@@ -2374,7 +2374,7 @@ pub mod tests {
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: "system".to_string(),
+                created_by: Id::new("system"),
                 created_at: 0,
                 updated_at: 0,
             })

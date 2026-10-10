@@ -412,7 +412,7 @@ mod tests {
             enabled: true,
             built_in: false,
             immutable: false,
-            created_by: "system".to_string(),
+            created_by: Id::new("system"),
             created_at: 0,
             updated_at: 0,
         }
@@ -654,7 +654,7 @@ mod tests {
             enabled: true,
             built_in: false,
             immutable: false,
-            created_by: "test".to_string(),
+            created_by: Id::new("test"),
             created_at: 0,
             updated_at: 0,
         };
