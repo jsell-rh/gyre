@@ -126,3 +126,103 @@ The R2 scope note ("Circuit Breaker, CLI, UI are not implemented on main, assign
 ### Verdict
 
 **Needs-revision.** R3-F1 is a functional correctness defect in the headline §6 CLI feature (manual revert of a specific MR) with zero test coverage; R3-F2 means the circuit breaker — the other headline feature of `5aaded21` — cannot fire in the workflow the recovery protocol itself prescribes; R3-F3 is a fail-open health signal on the human decision path; R3-F4 must be corrected so the review record matches what actually landed. The R1/R2 findings themselves remain fixed on integrated main.
+## Round 5 — independent review of candidate `d19e77d9` (base `a11ba8d3`)
+
+Review target: the R4 revision branch (all six recorded `commits:` frontmatter
+SHAs verified ancestors of the candidate; `check-task-commit-attribution` green
+at head). Scope: the R4-F1 fix (non-tip revert destroying later merges) and its
+conflict arm, plus re-verification of R3-F1/F2/F3 and the R3-F4 process
+corrections.
+
+### R4-F1 verification — FIXED
+
+`Git2OpsAdapter::revert_commit` (`git2_ops.rs:641-733`) now implements true
+`git revert -m 1` semantics: `merge_trees(ancestor = tree(M), ours =
+tree(branch tip), theirs = tree(M^1))` — the inverse patch of the reverted
+merge's first-parent diff applied on the current tip. Real-git regression
+tests confirm both arms: `test_revert_commit_non_tip_preserves_later_merges`
+(after merging A then B, reverting A removes fileA and **preserves fileB** —
+the pre-fix snapshot semantics destroyed it) and
+`test_revert_commit_conflict_leaves_branch_untouched` (same-file collision →
+`RevertResult::Conflict` naming the path, branch byte-identical to pre-revert
+tip). The commit is created only after `write_tree_to` on a conflict-free
+index, so the conflict path cannot mutate the branch.
+
+All three `revert_commit` callers handle `Conflict` without destructive
+fallback: the manual REST endpoint returns 409 with zero side effects
+(`api/recovery.rs:297-314`, test `manual_revert_conflict_is_409_without_side_effects`),
+and both automatic recovery paths (single MR `merge_processor.rs:2030-2042`,
+atomic group `:2266-2298`) stay paused, record no revert, and escalate to the
+author's spawning user (tests
+`post_merge_recovery_revert_conflict_stays_paused_without_side_effects`,
+`atomic_group_recovery_revert_conflict_stops_group_reverts`). The port
+contract (`gyre-ports/src/git_ops.rs:114-124`) documents the semantics and the
+Conflict guarantee.
+
+### Prior-round findings — all hold at the candidate
+
+- **R3-F1:** `merge_commit_sha` persisted at merge time on both paths
+  (migration `2026-09-30-000056`, sqlite+postgres adapters, schema.rs);
+  `revert_mr` reverts the MR's own recorded SHA, 409s on a missing SHA, 403s
+  on foreign-repo MRs. `merge_commit_sha` is server-derived only — no
+  Deserialize DTO carries it (`CreateMrRequest` has no such field;
+  `MrResponse` is Serialize-only and maps `None` unless enriched from
+  attestation server-side), so it is not caller-forgeable. Breaker counting
+  now includes manual reverts (`recovery.rs:319-330`).
+- **R3-F2:** breaker keyed on `revert_breaker_key` (`spec:<spec_ref>` /
+  `mr:<id>`), trip cancels every same-key MR's queue entries, remediation
+  task instructs same-spec rebinding, and non-mergeable MRs are rejected at
+  enqueue (`api/merge_queue.rs:73-84`), at the selection loop (4b'',
+  `merge_processor.rs:1153-1179`), and at atomic-group fetch-time
+  re-validation (`:694-746`). `increment_revert_count` runs only after a
+  successful revert on all three paths.
+- **R3-F3:** `repo_status` main_green fails closed on unresolvable HEAD;
+  both recovery.rs entries removed from the fail-open exemption file
+  (check green).
+- **R3-F4:** ABAC duplicate resolver entries removed (single first-match
+  block; `post-merge-gates` maps to `gate`), duplicate baseline 22 → 17;
+  task-096 rescoped to the remaining §6 UI only; attribution checks green
+  at head.
+
+### Test evidence (focused in-process probes; logs under /tmp/stage/review-evidence/)
+
+`cargo test -p gyre-adapters --lib git2_ops` → 31/0; `cargo test -p
+gyre-server --lib merge_processor` → 54/0; `api::recovery` → 6/0;
+`api::merge_queue` → 8/0; `api::merge_requests` → 21/0; `gyre-domain --lib` →
+371/0; `sqlite::merge_request` → 13/0. Check scripts green at head:
+attribution, fail-open-ref-resolution, abac-route-registry,
+migration-versions, migration-sql-portability, byte-slice-truncation,
+dead-message-kinds, arch, inert-enforcement, mem-port-contracts,
+forged-scope-fields, in-memory-state-stores, lossy-secret-conversion,
+relative-path-defaults, unbounded-external-http, forwarded-header-trust,
+fabricated-scope-defaults, scope-literal-defaults, mcp-write-tools,
+abac-exempt-handlers, dead-parameters, conditional-test-guards,
+concurrent-shared-write. Three scripts (`check-crypto-verify`,
+`check-early-return-side-effects`, `check-assertionless-tests`) abort under
+this sandbox's mawk 1.3.4 (gawk-only syntax) — verified identical failure at
+the base commit, i.e. environment, not candidate regression. TCP listener
+probe unsupported here (errno 95); host/CI must run `cargo test --all` on the
+branch head as the transport-level check.
+
+### Non-blocking observations (no revision required)
+
+1. **Breaker key is not repo-scoped.** `revert_breaker_key` yields
+   `spec:<spec_ref>` with no repo component, so two repos whose MRs carry
+   byte-identical spec_ref strings share one counter; a trip cancels entries
+   in both. Failure direction is conservative (over-cancel + human
+   escalation; a cancelled entry's MR stays Open and is re-enqueueable).
+   Noting for a future hardening pass, not a §6 contract violation.
+2. **Mid-sequence group-revert conflict.** In
+   `recover_atomic_group_from_post_merge_failure`, if revert N succeeds and
+   revert N−1 conflicts, the branch carries one revert commit while all
+   members stay `Merged` (the "no revert recorded" invariant holds per-MR,
+   not per-branch). Reachable only when an out-of-band push lands between the
+   group merge and recovery; the state is escalated and the queue stays
+   paused, so a human resolves it. Acceptable for the failure mode.
+
+### Verdict
+
+**Approved.** The R4-F1 major is genuinely fixed with real-git regression
+coverage on both arms; every prior-round finding holds at the candidate with
+hard tests; the mechanical guards are green. The two observations above are
+recorded for future hardening and do not violate the task contract.
