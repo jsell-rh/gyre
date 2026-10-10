@@ -143,7 +143,6 @@ impl AuditRepository for SqliteStorage {
         .await?
     }
 
-
     async fn stats_by_type(&self) -> Result<Vec<(String, u64)>> {
         let pool = Arc::clone(&self.pool);
         tokio::task::spawn_blocking(move || -> Result<Vec<(String, u64)>> {
@@ -190,16 +189,10 @@ impl AuditRepository for SqliteStorage {
     }
 }
 
-type BoxedAuditQuery = diesel::dsl::IntoBoxed<
-    'static,
-    crate::schema::audit_events::table,
-    diesel::sqlite::Sqlite,
->;
+type BoxedAuditQuery =
+    diesel::dsl::IntoBoxed<'static, crate::schema::audit_events::table, diesel::sqlite::Sqlite>;
 
-fn apply_filters(
-    mut query: BoxedAuditQuery,
-    filter: &AuditQueryFilter,
-) -> BoxedAuditQuery {
+fn apply_filters(mut query: BoxedAuditQuery, filter: &AuditQueryFilter) -> BoxedAuditQuery {
     if let Some(s) = filter.since {
         query = query.filter(audit_events::timestamp.ge(s as i64));
     }
@@ -233,7 +226,7 @@ mod tests {
     use gyre_domain::AuditEventType;
     use tempfile::NamedTempFile;
 
-fn setup() -> (NamedTempFile, SqliteStorage) {
+    fn setup() -> (NamedTempFile, SqliteStorage) {
         let tmp = NamedTempFile::new().unwrap();
         let s = SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap();
         (tmp, s)
@@ -272,8 +265,16 @@ fn setup() -> (NamedTempFile, SqliteStorage) {
     #[tokio::test]
     async fn audit_record_and_query_all() {
         let (_tmp, s) = setup();
-        record(&s, &make_event("e1", "agent-1", AuditEventType::FileAccess, 100)).await;
-        record(&s, &make_event("e2", "agent-1", AuditEventType::NetworkConnect, 200)).await;
+        record(
+            &s,
+            &make_event("e1", "agent-1", AuditEventType::FileAccess, 100),
+        )
+        .await;
+        record(
+            &s,
+            &make_event("e2", "agent-1", AuditEventType::NetworkConnect, 200),
+        )
+        .await;
         let results = AuditRepository::query(&s, &all()).await.unwrap();
         assert_eq!(results.len(), 2);
     }
@@ -281,8 +282,16 @@ fn setup() -> (NamedTempFile, SqliteStorage) {
     #[tokio::test]
     async fn audit_query_by_agent() {
         let (_tmp, s) = setup();
-        record(&s, &make_event("e1", "agent-1", AuditEventType::FileAccess, 100)).await;
-        record(&s, &make_event("e2", "agent-2", AuditEventType::ProcessExec, 200)).await;
+        record(
+            &s,
+            &make_event("e1", "agent-1", AuditEventType::FileAccess, 100),
+        )
+        .await;
+        record(
+            &s,
+            &make_event("e2", "agent-2", AuditEventType::ProcessExec, 200),
+        )
+        .await;
         let results = AuditRepository::query(
             &s,
             &AuditQueryFilter {
@@ -299,8 +308,16 @@ fn setup() -> (NamedTempFile, SqliteStorage) {
     #[tokio::test]
     async fn audit_query_by_event_type() {
         let (_tmp, s) = setup();
-        record(&s, &make_event("e1", "agent-1", AuditEventType::FileAccess, 100)).await;
-        record(&s, &make_event("e2", "agent-1", AuditEventType::NetworkConnect, 200)).await;
+        record(
+            &s,
+            &make_event("e1", "agent-1", AuditEventType::FileAccess, 100),
+        )
+        .await;
+        record(
+            &s,
+            &make_event("e2", "agent-1", AuditEventType::NetworkConnect, 200),
+        )
+        .await;
         let results = AuditRepository::query(
             &s,
             &AuditQueryFilter {
@@ -415,7 +432,12 @@ fn setup() -> (NamedTempFile, SqliteStorage) {
         for i in 1u64..=5 {
             record(
                 &s,
-                &make_event(&format!("e{}", i), "agent-1", AuditEventType::Syscall, i * 100),
+                &make_event(
+                    &format!("e{}", i),
+                    "agent-1",
+                    AuditEventType::Syscall,
+                    i * 100,
+                ),
             )
             .await;
         }
@@ -438,8 +460,16 @@ fn setup() -> (NamedTempFile, SqliteStorage) {
     #[tokio::test]
     async fn audit_count() {
         let (_tmp, s) = setup();
-        record(&s, &make_event("e1", "agent-1", AuditEventType::FileAccess, 100)).await;
-        record(&s, &make_event("e2", "agent-1", AuditEventType::Syscall, 200)).await;
+        record(
+            &s,
+            &make_event("e1", "agent-1", AuditEventType::FileAccess, 100),
+        )
+        .await;
+        record(
+            &s,
+            &make_event("e2", "agent-1", AuditEventType::Syscall, 200),
+        )
+        .await;
         let count = AuditRepository::count(&s).await.unwrap();
         assert_eq!(count, 2);
     }
@@ -449,7 +479,11 @@ fn setup() -> (NamedTempFile, SqliteStorage) {
         let (_tmp, s) = setup();
         record(&s, &make_event("e1", "a1", AuditEventType::FileAccess, 100)).await;
         record(&s, &make_event("e2", "a1", AuditEventType::FileAccess, 200)).await;
-        record(&s, &make_event("e3", "a1", AuditEventType::NetworkConnect, 300)).await;
+        record(
+            &s,
+            &make_event("e3", "a1", AuditEventType::NetworkConnect, 300),
+        )
+        .await;
         let stats = AuditRepository::stats_by_type(&s).await.unwrap();
         let fa = stats.iter().find(|(t, _)| t == "file_access").unwrap();
         assert_eq!(fa.1, 2);
@@ -504,8 +538,16 @@ fn setup() -> (NamedTempFile, SqliteStorage) {
     #[tokio::test]
     async fn audit_delete_older_than_purges_old_keeps_new() {
         let (_tmp, s) = setup();
-        record(&s, &make_event("old", "agent-1", AuditEventType::FileAccess, 100)).await;
-        record(&s, &make_event("new", "agent-1", AuditEventType::FileAccess, 200)).await;
+        record(
+            &s,
+            &make_event("old", "agent-1", AuditEventType::FileAccess, 100),
+        )
+        .await;
+        record(
+            &s,
+            &make_event("new", "agent-1", AuditEventType::FileAccess, 200),
+        )
+        .await;
 
         let deleted = AuditRepository::delete_older_than(&s, 150).await.unwrap();
         assert_eq!(deleted, 1);
@@ -515,6 +557,9 @@ fn setup() -> (NamedTempFile, SqliteStorage) {
         assert_eq!(results[0].id, Id::new("new"));
 
         // Second run is idempotent.
-        assert_eq!(AuditRepository::delete_older_than(&s, 150).await.unwrap(), 0);
+        assert_eq!(
+            AuditRepository::delete_older_than(&s, 150).await.unwrap(),
+            0
+        );
     }
 }

@@ -32,15 +32,27 @@ impl std::fmt::Display for TrustLevel {
 }
 
 impl TrustLevel {
+    /// Strictly parse a caller-supplied trust level string (API input).
+    ///
+    /// Unlike [`from_db_str`], unknown strings are NOT coerced to
+    /// `Supervised` — a typo like `"Autonomus"` must be rejected by the
+    /// caller (400), not silently transition the workspace to Supervised
+    /// and rewrite its trust policies. Mirrors
+    /// `ComputeTargetType::from_db_str`'s Option contract.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "Supervised" => Some(TrustLevel::Supervised),
+            "Guided" => Some(TrustLevel::Guided),
+            "Autonomous" => Some(TrustLevel::Autonomous),
+            "Custom" => Some(TrustLevel::Custom),
+            _ => None,
+        }
+    }
+
     /// Parse a stored trust level string. Unknown/legacy values fall back to
     /// `Supervised` (HSI §2 default — safest level on ambiguity).
     pub fn from_db_str(s: &str) -> Self {
-        match s {
-            "Guided" => TrustLevel::Guided,
-            "Autonomous" => TrustLevel::Autonomous,
-            "Custom" => TrustLevel::Custom,
-            _ => TrustLevel::Supervised,
-        }
+        Self::parse(s).unwrap_or_default()
     }
 }
 
@@ -220,5 +232,53 @@ mod tests {
         let b = BudgetConfig::default();
         assert!(b.max_tokens_per_day.is_none());
         assert!(b.max_cost_per_day.is_none());
+    }
+
+    // ── TASK-077 (F8): TrustLevel::from_db_str round-trips and fallback ──
+
+    #[test]
+    fn from_db_str_parses_all_four_levels() {
+        assert_eq!(
+            TrustLevel::from_db_str("Supervised"),
+            TrustLevel::Supervised
+        );
+        assert_eq!(TrustLevel::from_db_str("Guided"), TrustLevel::Guided);
+        assert_eq!(
+            TrustLevel::from_db_str("Autonomous"),
+            TrustLevel::Autonomous
+        );
+        assert_eq!(TrustLevel::from_db_str("Custom"), TrustLevel::Custom);
+    }
+
+    #[test]
+    fn from_db_str_unknown_falls_back_to_supervised() {
+        // Unknown/legacy values must fall back to Supervised (HSI §2 —
+        // safest level on ambiguity).
+        assert_eq!(TrustLevel::from_db_str("bogus"), TrustLevel::Supervised);
+        assert_eq!(TrustLevel::from_db_str(""), TrustLevel::Supervised);
+        // Case-sensitive: "supervised" is not a stored value.
+        assert_eq!(
+            TrustLevel::from_db_str("supervised"),
+            TrustLevel::Supervised
+        );
+    }
+
+    // ── TASK-077 revision: strict parse for caller-supplied API input ──
+
+    #[test]
+    fn parse_accepts_exactly_the_four_spec_levels() {
+        assert_eq!(TrustLevel::parse("Supervised"), Some(TrustLevel::Supervised));
+        assert_eq!(TrustLevel::parse("Guided"), Some(TrustLevel::Guided));
+        assert_eq!(TrustLevel::parse("Autonomous"), Some(TrustLevel::Autonomous));
+        assert_eq!(TrustLevel::parse("Custom"), Some(TrustLevel::Custom));
+    }
+
+    #[test]
+    fn parse_rejects_typos_case_and_empty() {
+        // Typos, wrong case, and empty must NOT coerce to a level — the
+        // API layer 400s on `None` instead of silently transitioning.
+        assert_eq!(TrustLevel::parse("Autonomus"), None);
+        assert_eq!(TrustLevel::parse("autonomous"), None);
+        assert_eq!(TrustLevel::parse(""), None);
     }
 }

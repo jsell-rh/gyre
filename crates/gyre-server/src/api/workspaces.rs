@@ -124,7 +124,15 @@ pub async fn create_workspace(
     ws.max_repos = req.max_repos;
     ws.max_agents_per_repo = req.max_agents_per_repo;
     if let Some(tl) = req.trust_level {
-        ws.trust_level = TrustLevel::from_db_str(&tl);
+        // Strict parse of caller input: a typo must 400, not silently
+        // coerce to the Supervised default (which would seed trust
+        // policies the caller never asked for). `from_db_str`'s
+        // fallback is for stored rows only.
+        ws.trust_level = TrustLevel::parse(&tl).ok_or_else(|| {
+            ApiError::InvalidInput(format!(
+                "invalid trust_level '{tl}'; must be Supervised, Guided, Autonomous, or Custom"
+            ))
+        })?;
     }
     ws.llm_model = req.llm_model;
     // Seed the trust preset ABAC policies atomically with the workspace row so a
@@ -221,7 +229,15 @@ pub async fn update_workspace(
         ws.max_agents_per_repo = Some(max_agents);
     }
     let trust_changed = if let Some(tl) = req.trust_level {
-        let new_trust = TrustLevel::from_db_str(&tl);
+        // Strict parse of caller input (400 on typo) — a misspelled level
+        // must not fall through to `from_db_str`'s Supervised fallback,
+        // which would silently transition the workspace and rewrite its
+        // trust: policies while returning 200.
+        let new_trust = TrustLevel::parse(&tl).ok_or_else(|| {
+            ApiError::InvalidInput(format!(
+                "invalid trust_level '{tl}'; must be Supervised, Guided, Autonomous, or Custom"
+            ))
+        })?;
         let changed = new_trust != ws.trust_level;
         ws.trust_level = new_trust;
         changed
@@ -255,9 +271,9 @@ pub async fn update_workspace(
             .apply_trust_transition(&ws, !is_now_custom, &new_policies)
             .await
             .map_err(|_| {
+                // Verbatim HSI §2 message — the UI surfaces this string.
                 ApiError::Conflict(
-                    "Trust level transition failed and was rolled back; no changes were applied"
-                        .to_string(),
+                    "Trust level transition failed — policies could not be created".to_string(),
                 )
             })?;
     } else {
@@ -933,6 +949,280 @@ mod tests {
         assert!(
             !policies.iter().any(|p| p.name.starts_with("trust:")),
             "Guided preset must not seed trust: policies"
+        );
+    }
+
+    /// TASK-077 (F7): Preset → Custom must PRESERVE the existing trust:
+    /// policies (Custom means "operator manages policies manually").
+    #[tokio::test]
+    async fn trust_transition_preset_to_custom_preserves_trust_policies() {
+        let state = crate::mem::test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Create with the entity-default Supervised level (seeds
+        // trust:require-human-mr-review).
+        let body = serde_json::json!({ "tenant_id": "t1", "name": "W", "slug": "w" });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let ws_id = body_json(create_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Sanity: the Supervised trust policy exists after create.
+        let seeded = state.policies.list().await.unwrap();
+        assert!(
+            seeded
+                .iter()
+                .any(|p| p.name == "trust:require-human-mr-review"),
+            "default Supervised create must seed trust:require-human-mr-review"
+        );
+
+        // Transition Supervised → Custom: trust policies must be preserved.
+        let update = serde_json::json!({ "trust_level": "Custom" });
+        let update_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update_resp.status(), StatusCode::OK);
+        let updated = body_json(update_resp).await;
+        assert_eq!(updated["trust_level"], "Custom");
+
+        let policies = state.policies.list().await.unwrap();
+        assert!(
+            policies
+                .iter()
+                .any(|p| p.name == "trust:require-human-mr-review"),
+            "Custom transition must PRESERVE existing trust: policies"
+        );
+    }
+
+    /// TASK-077 (F7): Custom → preset must DELETE all trust: policies for the
+    /// workspace and reseed the preset's policies. A non-trust user policy
+    /// (no `trust:` prefix) must survive the transition.
+    #[tokio::test]
+    async fn trust_transition_custom_to_preset_deletes_and_reseeds() {
+        let state = crate::mem::test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Create Supervised (default) then transition to Custom.
+        let body = serde_json::json!({ "tenant_id": "t1", "name": "W2", "slug": "w2" });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let ws_id = body_json(create_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let to_custom = serde_json::json!({ "trust_level": "Custom" });
+        let custom_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&to_custom).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(custom_resp.status(), StatusCode::OK);
+
+        // In Custom mode the operator adds their own policies — including
+        // custom trust-prefixed ones and unrelated user policies.
+        let base = gyre_domain::trust_policies_for_level(
+            &gyre_domain::TrustLevel::Supervised,
+            &ws_id,
+            "operator",
+        )
+        .into_iter()
+        .next()
+        .unwrap();
+        let custom_trust = gyre_domain::Policy {
+            id: gyre_common::Id::new("trust-operator-custom-rule"),
+            name: "trust:operator-custom-rule".to_string(),
+            ..base.clone()
+        };
+        state.policies.create(&custom_trust).await.unwrap();
+
+        let user_policy = gyre_domain::Policy {
+            id: gyre_common::Id::new("user-no-trust-prefix"),
+            name: "user:custom-policy".to_string(),
+            ..base
+        };
+        state.policies.create(&user_policy).await.unwrap();
+
+        // Transition Custom → Guided: all trust: policies for this workspace
+        // must be deleted (including the operator's custom trust policy and
+        // the seeded require-human-mr-review); the user policy survives and
+        // Guided reseeds nothing.
+        let to_guided = serde_json::json!({ "trust_level": "Guided" });
+        let guided_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&to_guided).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(guided_resp.status(), StatusCode::OK);
+        let updated = body_json(guided_resp).await;
+        assert_eq!(updated["trust_level"], "Guided");
+
+        let policies = state.policies.list().await.unwrap();
+        assert!(
+            !policies.iter().any(|p| p.name.starts_with("trust:")),
+            "Custom → preset must DELETE all trust: policies for the workspace"
+        );
+        assert!(
+            policies.iter().any(|p| p.name == "user:custom-policy"),
+            "non-trust user policies must survive the Custom → preset transition"
+        );
+    }
+
+    /// A misspelled trust_level in the update body must 400 — NOT silently
+    /// coerce to the Supervised fallback. Without strict parsing, a typo
+    /// like "Autonomus" on a Guided workspace returned 200 and rewrote the
+    /// workspace + its trust: policies to Supervised while the caller
+    /// believed they had selected Autonomous (a trust downgrade via typo —
+    /// strictly more human review, but still an unintended policy rewrite
+    /// the caller cannot distinguish from success).
+    #[tokio::test]
+    async fn update_workspace_invalid_trust_level_returns_400_and_leaves_state() {
+        let state = crate::mem::test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Guided workspace (explicit, so the assertions below pin a state
+        // that differs from both the fallback and the typo's target).
+        let body =
+            serde_json::json!({ "tenant_id": "t1", "name": "W", "slug": "w", "trust_level": "Guided" });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let ws_id = body_json(create_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let update = serde_json::json!({ "trust_level": "Autonomus" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // State untouched: still Guided, no trust: policies seeded.
+        let ws_after = state
+            .workspaces
+            .find_by_id(&gyre_common::Id::new(&ws_id))
+            .await
+            .unwrap()
+            .expect("workspace still exists");
+        assert_eq!(
+            ws_after.trust_level,
+            gyre_domain::TrustLevel::Guided,
+            "rejected trust_level must not change the stored level"
+        );
+        let policies = state.policies.list().await.unwrap();
+        assert!(
+            !policies
+                .iter()
+                .any(|p| p.name.starts_with("trust:") && p.scope_id.as_deref() == Some(&ws_id)),
+            "rejected trust_level must not seed trust: policies"
+        );
+    }
+
+    /// Same contract on create: a typo'd trust_level must 400 instead of
+    /// creating a Supervised workspace the caller cannot distinguish from
+    /// the level they asked for.
+    #[tokio::test]
+    async fn create_workspace_invalid_trust_level_returns_400() {
+        let state = crate::mem::test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let body =
+            serde_json::json!({ "tenant_id": "t1", "name": "W", "slug": "w", "trust_level": "autonomous" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // No workspace row leaked through the rejected create.
+        let workspaces = state
+            .workspaces
+            .list_by_tenant(&gyre_common::Id::new("t1"))
+            .await
+            .unwrap();
+        assert!(
+            workspaces.is_empty(),
+            "rejected create must not persist a workspace"
         );
     }
 }

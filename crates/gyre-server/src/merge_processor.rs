@@ -57,7 +57,6 @@ async fn increment_revert_count(state: &AppState, mr_id: &str) -> anyhow::Result
     Ok(next)
 }
 
-
 /// Circuit breaker tripped: cancel the MR's queue entries permanently and
 /// escalate to a human (platform-model.md §6 Circuit Breaker).
 async fn trip_circuit_breaker(
@@ -661,6 +660,46 @@ async fn merge_atomic_group(
             return Ok(());
         }
 
+        // TASK-077 / HSI §2 (F5): merge-time ABAC gate for the merge
+        // processor's internal service identity — same gate as the
+        // single-entry path; without it the atomic group path would be a
+        // Supervised bypass. Human-approval escape: an MR already Approved
+        // (by a human, via the status endpoint) proceeds.
+        // Hold only on an EXPLICIT Deny match (matched_policy set): the
+        // engine's default-deny (no policy governs system merge/mr) is the
+        // Guided/Autonomous state per HSI §2 — "The merge processor is NOT
+        // blocked — no trust:require-human-mr-review policy exists".
+        if mr.status != MrStatus::Approved {
+            let result = evaluate_merge_abac(state, &mr, &repo).await;
+            if result.effect == gyre_domain::policy::PolicyEffect::Deny
+                && result.matched_policy.is_some()
+            {
+                warn!(
+                    group = %group_name,
+                    mr_id = %mr.id,
+                    workspace_id = %mr.workspace_id,
+                    matched_policy = ?result.matched_policy,
+                    "supervised trust: holding atomic group for human MR approval"
+                );
+                rollback_atomic_group(
+                    state,
+                    group_name,
+                    &repo,
+                    target_branch,
+                    pre_group_sha.as_deref(),
+                    &merged_entries,
+                    &group_entries,
+                    &format!(
+                        "supervised trust: human MR approval required for MR {}",
+                        mr.id
+                    ),
+                    &mr.id,
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+
         // Attempt the merge for this member.
         let result = state
             .git_ops
@@ -779,7 +818,6 @@ async fn merge_atomic_group(
             .await;
         }
     }
-
 
     info!(
         group = %group_name,
@@ -1436,6 +1474,46 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
         }
     }
 
+    // TASK-077 / HSI §2 (F5): merge-time ABAC enforcement for the merge
+    // processor's internal service identity. In a Supervised workspace the
+    // `trust:require-human-mr-review` Deny matches (subject.type "system",
+    // subject.id "merge-processor") and the merge is HELD — not failed —
+    // until a human approves the MR via the status endpoint. The processor's
+    // own Open → Approved transition happens only after this gate, so it
+    // cannot self-satisfy the escape.
+    // Hold only on an EXPLICIT Deny match (matched_policy set): the engine's
+    // default-deny (no policy governs system merge/mr) is precisely the
+    // Guided/Autonomous state per HSI §2 — "The merge processor is NOT
+    // blocked — no trust:require-human-mr-review policy exists". Holding on
+    // default-deny would stall every Guided/Autonomous merge.
+    if mr.status != MrStatus::Approved {
+        let result = evaluate_merge_abac(state, &mr, &repo).await;
+        if result.effect == gyre_domain::policy::PolicyEffect::Deny
+            && result.matched_policy.is_some()
+        {
+            warn!(
+                entry_id = %entry.id,
+                mr_id = %mr.id,
+                workspace_id = %mr.workspace_id,
+                matched_policy = ?result.matched_policy,
+                "supervised trust: holding merge for human MR approval"
+            );
+            // Requeue (not Failed): Failed is terminal and would permanently
+            // block the human-approval path. Queued entries are retried on the
+            // next cycle; once a human sets the MR to Approved, the gate
+            // passes and the merge proceeds.
+            state
+                .merge_queue
+                .update_status(
+                    &entry.id,
+                    MergeQueueEntryStatus::Queued,
+                    Some("supervised trust: human MR approval required".to_string()),
+                )
+                .await?;
+            return Ok(());
+        }
+    }
+
     // TASK-061 (§7.2): Populate attestation chain ABAC subject attributes
     // and evaluate policies with action=merge, resource_type=attestation.
     // Audit-only — logged but not enforced (merge proceeds regardless).
@@ -1444,27 +1522,38 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
         let mut chain_found = false;
 
         // Try by source branch head commit first.
-        if let Some(ref source_sha) =
+        if let Some(source_sha) =
             crate::git_refs::resolve_ref(&repo.path, &format!("refs/heads/{}", mr.source_branch))
                 .await
         {
-            if let Ok(Some(chain_att)) = state.chain_attestations.find_by_commit(source_sha).await {
+            if let Ok(Some(chain_att)) = state.chain_attestations.find_by_commit(&source_sha).await
+            {
                 let chain = state
                     .chain_attestations
                     .load_chain(&chain_att.id)
                     .await
                     .unwrap_or_default();
-                evaluate_attestation_abac(state, &chain, &chain_att, &mr, &entry, &repo, "merge")
-                    .await;
+                let attestation_eval = evaluate_attestation_abac(
+                    state, &chain, &chain_att, &mr, &entry, &repo, "merge",
+                )
+                .await;
+                if attestation_eval.effect == gyre_domain::policy::PolicyEffect::Deny {
+                    warn!(
+                        entry_id = %entry.id,
+                        mr_id = %mr.id,
+                        matched_policy = ?attestation_eval.matched_policy,
+                        "attestation ABAC denied merge (audit-only, enforcement-mode:ok per authorization-provenance coverage row 35)"
+                    );
+                }
                 chain_found = true;
             }
         }
 
         // Fallback: look up via agent's current task.
         if !chain_found {
-            if let Some(ref author_id) = mr.author_agent_id {
+            if let Some(author_id) = &mr.author_agent_id {
                 if let Ok(Some(agent)) = state.agents.find_by_id(author_id).await {
-                    if let Some(ref task_id) = agent.current_task_id {
+                    if let Some(task_id) = &agent.current_task_id {
                         if let Ok(atts) = state
                             .chain_attestations
                             .find_by_task(task_id.as_str())
@@ -1476,10 +1565,20 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                                     .load_chain(&leaf.id)
                                     .await
                                     .unwrap_or_default();
-                                evaluate_attestation_abac(
+                                let attestation_eval = evaluate_attestation_abac(
                                     state, &chain, leaf, &mr, &entry, &repo, "merge",
                                 )
                                 .await;
+                                if attestation_eval.effect
+                                    == gyre_domain::policy::PolicyEffect::Deny
+                                {
+                                    warn!(
+                                        entry_id = %entry.id,
+                                        mr_id = %mr.id,
+                                        matched_policy = ?attestation_eval.matched_policy,
+                                        "attestation ABAC denied merge (audit-only, enforcement-mode:ok per authorization-provenance coverage row 35)"
+                                    );
+                                }
                             }
                         }
                     }
@@ -1796,7 +1895,11 @@ const MERGE_QUEUE_PAUSE_NS: &str = "merge_queue_pause";
 
 /// Is the merge queue paused for this repo?
 async fn merge_queue_paused(state: &AppState, repo_id: &Id) -> bool {
-    match state.kv_store.kv_get(MERGE_QUEUE_PAUSE_NS, repo_id.as_str()).await {
+    match state
+        .kv_store
+        .kv_get(MERGE_QUEUE_PAUSE_NS, repo_id.as_str())
+        .await
+    {
         Ok(Some(v)) => serde_json::from_str::<serde_json::Value>(&v)
             .ok()
             .and_then(|j| j.get("paused").and_then(|p| p.as_bool()))
@@ -1808,7 +1911,11 @@ async fn merge_queue_paused(state: &AppState, repo_id: &Id) -> bool {
 /// Pause the merge queue for this repo (no more merges until main is green).
 /// Persists the pause state and emits a `MergeQueuePaused` event so the
 /// Workspace Orchestrator can reprioritize work (platform-model.md §6).
-pub(crate) async fn pause_merge_queue(state: &AppState, repo: &gyre_domain::Repository, reason: &str) {
+pub(crate) async fn pause_merge_queue(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+    reason: &str,
+) {
     let payload = serde_json::json!({ "paused": true, "reason": reason }).to_string();
     if let Err(e) = state
         .kv_store
@@ -1870,7 +1977,6 @@ async fn recover_from_post_merge_failure(
     merge_commit_sha: &str,
     failure_reason: &str,
 ) {
-
     // Step 1: pause the merge queue.
     pause_merge_queue(state, repo, failure_reason).await;
 
@@ -1889,9 +1995,12 @@ async fn recover_from_post_merge_failure(
                 "revert commit creation failed — queue stays paused, escalating"
             );
             // Cannot revert: escalate immediately, stay paused.
-            notify_escalation(state, repo, mr, &format!(
-                "revert of merge commit {merge_commit_sha} failed: {e}"
-            ))
+            notify_escalation(
+                state,
+                repo,
+                mr,
+                &format!("revert of merge commit {merge_commit_sha} failed: {e}"),
+            )
             .await;
             return;
         }
@@ -1934,8 +2043,15 @@ async fn recover_from_post_merge_failure(
 
     // Steps 4–7: per-MR side effects (mark Reverted, notify, remediation
     // task, invalidate gate results).
-    apply_revert_side_effects(state, repo, mr, merge_commit_sha, &revert_sha, failure_reason)
-        .await;
+    apply_revert_side_effects(
+        state,
+        repo,
+        mr,
+        merge_commit_sha,
+        &revert_sha,
+        failure_reason,
+    )
+    .await;
 }
 
 /// Per-MR recovery side effects (platform-model.md §6 steps 4–7): mark the
@@ -2007,7 +2123,10 @@ pub(crate) async fn apply_revert_side_effects(
             updated.workspace_id.clone(),
             user_id,
             gyre_common::NotificationType::MrReverted,
-            format!("MR '{}' reverted on {}: post-merge validation failed", updated.title, repo.name),
+            format!(
+                "MR '{}' reverted on {}: post-merge validation failed",
+                updated.title, repo.name
+            ),
             "default",
             Some(payload.to_string()),
             Some(updated.id.to_string()),
@@ -2031,11 +2150,7 @@ pub(crate) async fn apply_revert_side_effects(
         "MR '{}' ({}) was merged to {} but failed post-merge validation: {}. \
          The merge was reverted via commit {}. Re-do the work on a fresh branch \
          and re-open a merge request.",
-        updated.title,
-        updated.id,
-        repo.default_branch,
-        failure_reason,
-        revert_sha,
+        updated.title, updated.id, repo.default_branch, failure_reason, revert_sha,
     ));
     if let Err(e) = state.tasks.create(&task).await {
         error!(task_id = %task.id, error = %e, "failed to persist remediation task");
@@ -2083,7 +2198,11 @@ async fn recover_atomic_group_from_post_merge_failure(
     // Step 2: revert every group merge commit, newest first.
     let mut final_revert_sha: Option<String> = None;
     for sha in group_merge_shas.iter().rev() {
-        match state.git_ops.revert_commit(&repo.path, &repo.default_branch, sha).await {
+        match state
+            .git_ops
+            .revert_commit(&repo.path, &repo.default_branch, sha)
+            .await
+        {
             Ok(revert_sha) => final_revert_sha = Some(revert_sha),
             Err(e) => {
                 error!(
@@ -2187,12 +2306,14 @@ async fn notify_escalation(
         gyre_common::NotificationType::MergeQueueEscalation,
         format!("Merge queue escalation on {}", repo.name),
         "default",
-        Some(serde_json::json!({
-            "repo_id": repo.id.to_string(),
-            "mr_id": mr.id.to_string(),
-            "message": message,
-        })
-        .to_string()),
+        Some(
+            serde_json::json!({
+                "repo_id": repo.id.to_string(),
+                "mr_id": mr.id.to_string(),
+                "message": message,
+            })
+            .to_string(),
+        ),
         Some(mr.id.to_string()),
         Some(repo.id.to_string()),
     )
@@ -2486,6 +2607,70 @@ pub(crate) async fn report_cascade_test_result(
             "cascade test failed, follow-up task created"
         );
     }
+}
+
+/// TASK-077 / HSI §2 (F5): Evaluate merge-time ABAC for the merge processor's
+/// internal service identity.
+///
+/// The merge processor does NOT use the global `GYRE_AUTH_TOKEN` — ABAC bypass
+/// is checked by identity (`subject.id == "gyre-system-token"`), and the
+/// processor's subject id is "merge-processor", so it IS subject to the
+/// Supervised trust policy (`trust:require-human-mr-review`, a Deny on
+/// `subject.type == "system"` for merge/mr). On an EXPLICIT Deny match the
+/// merge is held until a human approves the MR (see the callers — the
+/// human-approval escape is `mr.status == MrStatus::Approved`, set by a human
+/// via the MR status endpoint, never by the processor before the gate).
+/// The engine's default-deny result (`matched_policy: None` — no policy
+/// governs system merge/mr) is NOT a hold: it is the Guided/Autonomous state
+/// per HSI §2 ("The merge processor is NOT blocked — no
+/// trust:require-human-mr-review policy exists"). Callers must gate on
+/// `matched_policy.is_some()` — which requires the request-pipeline catch-all
+/// `default-deny` policy to be EXCLUDED from this evaluation (below): it is
+/// seeded as a built-in at startup and matches every action unconditionally,
+/// so leaving it in scope would make the Guided/Autonomous state
+/// unrepresentable — every autonomous merge would return an explicit
+/// `Some(default-deny)` Deny and be held forever. The catch-all exists for
+/// the HTTP middleware pipeline (abac-policy-engine.md §Request Pipeline);
+/// the merge processor is an internal service whose merge authority is
+/// governed by trust-preset and user Denies, not the pipeline catch-all.
+///
+/// Workspace-scoped policies from OTHER workspaces are filtered out: the
+/// engine's `evaluate` does not check scope_id, and one workspace's trust Deny
+/// must not hold another workspace's merges.
+async fn evaluate_merge_abac(
+    state: &AppState,
+    mr: &MergeRequest,
+    repo: &gyre_domain::Repository,
+) -> crate::policy_engine::EvalResult {
+    // Resolve tenant_id from repo → workspace (same pattern as
+    // evaluate_attestation_abac; subject.tenant_id is required context parity).
+    let tenant_id = match state.workspaces.find_by_id(&repo.workspace_id).await {
+        Ok(ws) => ws.map(|w| w.tenant_id.to_string()),
+        Err(_) => None,
+    };
+
+    let mut ctx = crate::policy_engine::AttributeContext::default();
+    ctx.set("subject.type", "system");
+    ctx.set("subject.id", "merge-processor");
+    if let Some(tid) = &tenant_id {
+        ctx.set("subject.tenant_id", tid);
+    }
+    ctx.set("resource.type", "mr");
+    ctx.set("resource.repo_id", repo.id.as_str());
+    ctx.set("resource.workspace_id", mr.workspace_id.as_str());
+
+    let policies = state.policies.list().await.unwrap_or_default();
+    let policies: Vec<_> = policies
+        .into_iter()
+        .filter(|p| {
+            // Pipeline catch-all: unconditional deny for HTTP subjects — not a
+            // statement about system merge authority (see doc comment above).
+            p.id.as_str() != crate::abac_middleware::DEFAULT_DENY_POLICY_ID
+                && (p.scope != gyre_domain::policy::PolicyScope::Workspace
+                    || p.scope_id.as_deref() == Some(mr.workspace_id.as_str()))
+        })
+        .collect();
+    crate::policy_engine::evaluate(policies, &ctx, "merge", "mr")
 }
 
 /// TASK-061 (§7.2): Evaluate ABAC policies with attestation chain subject attributes.
@@ -3772,17 +3957,17 @@ mod tests {
 
         // Create a required quality gate.
         let gate = QualityGate {
-          id: Id::new("gate-1"),
-          repo_id: repo.id.clone(),
-          name: "unit-tests".to_string(),
-          gate_type: GateType::TestCommand,
-          command: Some("cargo test".to_string()),
-          required_approvals: None,
-          persona: None,
-          required: true,
-          gate_phase: Default::default(),
-          timeout_secs: None,
-          created_at: 1000,
+            id: Id::new("gate-1"),
+            repo_id: repo.id.clone(),
+            name: "unit-tests".to_string(),
+            gate_type: GateType::TestCommand,
+            command: Some("cargo test".to_string()),
+            required_approvals: None,
+            persona: None,
+            required: true,
+            gate_phase: Default::default(),
+            timeout_secs: None,
+            created_at: 1000,
         };
         state.quality_gates.save(&gate).await.unwrap();
 
@@ -3896,17 +4081,17 @@ mod tests {
 
         // Create a required gate and a failed result for mr-a.
         let gate = QualityGate {
-          id: Id::new("gate-1"),
-          repo_id: repo.id.clone(),
-          name: "unit-tests".to_string(),
-          gate_type: GateType::TestCommand,
-          command: Some("cargo test".to_string()),
-          required_approvals: None,
-          persona: None,
-          required: true,
-          gate_phase: Default::default(),
-          timeout_secs: None,
-          created_at: 1000,
+            id: Id::new("gate-1"),
+            repo_id: repo.id.clone(),
+            name: "unit-tests".to_string(),
+            gate_type: GateType::TestCommand,
+            command: Some("cargo test".to_string()),
+            required_approvals: None,
+            persona: None,
+            required: true,
+            gate_phase: Default::default(),
+            timeout_secs: None,
+            created_at: 1000,
         };
         state.quality_gates.save(&gate).await.unwrap();
 
@@ -4010,17 +4195,17 @@ mod tests {
         // This makes atomic_group_ready("bundle", "mr-a") return Ok(false)
         // because group member mr-c has a pending required gate.
         let gate = QualityGate {
-          id: Id::new("gate-1"),
-          repo_id: repo.id.clone(),
-          name: "unit-tests".to_string(),
-          gate_type: GateType::TestCommand,
-          command: Some("cargo test".to_string()),
-          required_approvals: None,
-          persona: None,
-          required: true,
-          gate_phase: Default::default(),
-          timeout_secs: None,
-          created_at: 1000,
+            id: Id::new("gate-1"),
+            repo_id: repo.id.clone(),
+            name: "unit-tests".to_string(),
+            gate_type: GateType::TestCommand,
+            command: Some("cargo test".to_string()),
+            required_approvals: None,
+            persona: None,
+            required: true,
+            gate_phase: Default::default(),
+            timeout_secs: None,
+            created_at: 1000,
         };
         state.quality_gates.save(&gate).await.unwrap();
 
@@ -5373,17 +5558,12 @@ mod tests {
 
     // ── TASK-095: post-merge validation + recovery protocol ─────────────
 
-    use gyre_domain::{GatePhase, MrStatus};
     use gyre_common::message::MessageKind;
     use gyre_common::NotificationType;
+    use gyre_domain::{GatePhase, MrStatus};
 
     /// Create a post-merge TestCommand gate for a repo.
-    async fn create_post_merge_gate(
-        state: &AppState,
-        repo_id: &Id,
-        command: &str,
-        required: bool,
-    ) {
+    async fn create_post_merge_gate(state: &AppState, repo_id: &Id, command: &str, required: bool) {
         let gate = gyre_domain::QualityGate {
             id: Id::new("gate-pm-1"),
             repo_id: repo_id.clone(),
@@ -5453,13 +5633,26 @@ mod tests {
         // Merge-success notification was delivered to the author's spawner.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-recov"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .list_for_user(
+                &Id::new("user-recov"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                100,
+                0,
+            )
             .await
             .unwrap();
         assert!(
-            notifs.iter().any(|n| n.notification_type == NotificationType::SuggestedSpecLink),
+            notifs
+                .iter()
+                .any(|n| n.notification_type == NotificationType::SuggestedSpecLink),
             "author spawner should receive the merge notification, got {:?}",
-            notifs.iter().map(|n| &n.notification_type).collect::<Vec<_>>()
+            notifs
+                .iter()
+                .map(|n| &n.notification_type)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -5489,7 +5682,10 @@ mod tests {
 
         // 1. Queue is paused with the failure reason.
         let paused = merge_queue_paused(&state, &repo.id).await;
-        assert!(paused, "merge queue should be paused after post-merge failure");
+        assert!(
+            paused,
+            "merge queue should be paused after post-merge failure"
+        );
         let raw = state
             .kv_store
             .kv_get("merge_queue_pause", repo.id.as_str())
@@ -5499,7 +5695,10 @@ mod tests {
         let pause_json: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(pause_json["paused"], true);
         assert!(
-            pause_json["reason"].as_str().unwrap().contains("post-merge-tests"),
+            pause_json["reason"]
+                .as_str()
+                .unwrap()
+                .contains("post-merge-tests"),
             "pause reason should name the failed gate: {}",
             pause_json["reason"]
         );
@@ -5538,7 +5737,15 @@ mod tests {
         //    failed on the noop revert SHA) a MergeQueueEscalation.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-recov"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .list_for_user(
+                &Id::new("user-recov"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                100,
+                0,
+            )
             .await
             .unwrap();
         let types: Vec<&NotificationType> = notifs.iter().map(|n| &n.notification_type).collect();
@@ -5563,7 +5770,11 @@ mod tests {
         assert_eq!(reverted_task.workspace_id.as_str(), "ws-1");
 
         // 6. Gate results invalidated → back to Pending.
-        let results = state.gate_results.list_by_mr_id(mr.id.as_str()).await.unwrap();
+        let results = state
+            .gate_results
+            .list_by_mr_id(mr.id.as_str())
+            .await
+            .unwrap();
         assert!(
             results.iter().all(|r| r.status == GateStatus::Pending),
             "gate results should be invalidated to Pending"
@@ -5618,19 +5829,36 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(updated.status, MrStatus::Merged, "resumed queue should merge the entry");
+        assert_eq!(
+            updated.status,
+            MrStatus::Merged,
+            "resumed queue should merge the entry"
+        );
         assert!(!merge_queue_paused(&state, &repo.id).await);
 
         // Merge-success notification delivered after resume.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-recov"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .list_for_user(
+                &Id::new("user-recov"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                100,
+                0,
+            )
             .await
             .unwrap();
         assert!(
-            notifs.iter().any(|n| n.notification_type == NotificationType::SuggestedSpecLink),
+            notifs
+                .iter()
+                .any(|n| n.notification_type == NotificationType::SuggestedSpecLink),
             "author spawner should receive the merge notification, got {:?}",
-            notifs.iter().map(|n| &n.notification_type).collect::<Vec<_>>()
+            notifs
+                .iter()
+                .map(|n| &n.notification_type)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -5652,23 +5880,44 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(updated.status, MrStatus::Merged);
-        assert!(!merge_queue_paused(&state, &repo.id).await, "advisory failure must not pause");
-        assert!(rx.try_recv().is_err(), "no recovery events for advisory failure");
+        assert!(
+            !merge_queue_paused(&state, &repo.id).await,
+            "advisory failure must not pause"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no recovery events for advisory failure"
+        );
 
         // Merge succeeded → merge notification, but no recovery notifications.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-recov"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .list_for_user(
+                &Id::new("user-recov"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                100,
+                0,
+            )
             .await
             .unwrap();
         assert!(
-            notifs.iter().any(|n| n.notification_type == NotificationType::SuggestedSpecLink),
+            notifs
+                .iter()
+                .any(|n| n.notification_type == NotificationType::SuggestedSpecLink),
             "author spawner should receive the merge notification, got {:?}",
-            notifs.iter().map(|n| &n.notification_type).collect::<Vec<_>>()
+            notifs
+                .iter()
+                .map(|n| &n.notification_type)
+                .collect::<Vec<_>>()
         );
         assert!(
-            !notifs.iter().any(|n| n.notification_type == NotificationType::MrReverted
-                || n.notification_type == NotificationType::MergeQueueEscalation),
+            !notifs
+                .iter()
+                .any(|n| n.notification_type == NotificationType::MrReverted
+                    || n.notification_type == NotificationType::MergeQueueEscalation),
             "advisory failure must not produce recovery notifications"
         );
     }
@@ -5724,7 +5973,10 @@ mod tests {
         process_next(&state).await.unwrap();
 
         // Entries stay Queued and MRs stay Open — no group merge while paused.
-        for (entry_id, mr_id) in [("entry-mr-grp-a", "mr-grp-a"), ("entry-mr-grp-b", "mr-grp-b")] {
+        for (entry_id, mr_id) in [
+            ("entry-mr-grp-a", "mr-grp-a"),
+            ("entry-mr-grp-b", "mr-grp-b"),
+        ] {
             let entry = state
                 .merge_queue
                 .find_by_id(&Id::new(entry_id))
@@ -5742,19 +5994,34 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(updated.status, MrStatus::Open, "{mr_id} should stay open while paused");
+            assert_eq!(
+                updated.status,
+                MrStatus::Open,
+                "{mr_id} should stay open while paused"
+            );
         }
         assert!(rx.try_recv().is_err(), "no events expected while paused");
         // Paused queue must not notify anyone either — merge didn't happen.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-grp"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .list_for_user(
+                &Id::new("user-grp"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                100,
+                0,
+            )
             .await
             .unwrap();
         assert!(
             notifs.is_empty(),
             "no notifications expected while paused, got {:?}",
-            notifs.iter().map(|n| &n.notification_type).collect::<Vec<_>>()
+            notifs
+                .iter()
+                .map(|n| &n.notification_type)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -5817,7 +6084,11 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(updated.status, MrStatus::Reverted, "{mr_id} should be Reverted");
+            assert_eq!(
+                updated.status,
+                MrStatus::Reverted,
+                "{mr_id} should be Reverted"
+            );
             assert!(updated.reverted_at.is_some());
             assert!(updated.revert_commit_sha.is_some());
         }
@@ -5842,13 +6113,26 @@ mod tests {
         for user in ["user-grpa", "user-grpb"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+                .list_for_user(
+                    &Id::new(user),
+                    Some(&Id::new("ws-1")),
+                    None,
+                    None,
+                    None,
+                    100,
+                    0,
+                )
                 .await
                 .unwrap();
             assert!(
-                notifs.iter().any(|n| n.notification_type == NotificationType::MrReverted),
+                notifs
+                    .iter()
+                    .any(|n| n.notification_type == NotificationType::MrReverted),
                 "{user} should receive a MrReverted notification, got {:?}",
-                notifs.iter().map(|n| &n.notification_type).collect::<Vec<_>>()
+                notifs
+                    .iter()
+                    .map(|n| &n.notification_type)
+                    .collect::<Vec<_>>()
             );
         }
 
@@ -5861,7 +6145,11 @@ mod tests {
         assert_eq!(reverted_tasks.len(), 2, "one remediation task per member");
         for t in &reverted_tasks {
             assert_eq!(t.priority, TaskPriority::High);
-            assert!(t.title.contains("post-merge-tests"), "task title: {}", t.title);
+            assert!(
+                t.title.contains("post-merge-tests"),
+                "task title: {}",
+                t.title
+            );
         }
 
         // 6. Escalation branch: the noop adapter's revert SHA fails the
@@ -6002,6 +6290,393 @@ mod tests {
             worktrees,
             vec![repo_path.to_str().unwrap().to_string()],
             "gate worktree should be removed"
+        );
+    }
+
+    // ── TASK-077 / HSI §2 (F5): merge-time ABAC enforcement tests ─────────
+    //
+    // The merge processor evaluates ABAC with its internal service identity
+    // (subject.type "system", subject.id "merge-processor"). In a Supervised
+    // workspace the `trust:require-human-mr-review` Deny matches and the
+    // merge is held (requeued with a reason, NOT failed) until a human
+    // approves the MR via the status endpoint.
+
+    /// Seed a workspace with the trust policies for the given level.
+    async fn seed_workspace_with_trust(
+        state: &AppState,
+        ws_id: &str,
+        name: &str,
+        level: gyre_domain::TrustLevel,
+    ) {
+        let ws = gyre_domain::Workspace::new(
+            Id::new(ws_id),
+            Id::new("tenant-1"),
+            name,
+            name.to_lowercase(),
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        for p in gyre_domain::trust_policies_for_level(&level, ws_id, "test") {
+            state.policies.create(&p).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn supervised_workspace_open_mr_merge_is_held_and_requeued() {
+        let state = test_state();
+
+        seed_workspace_with_trust(
+            &state,
+            "ws-sup",
+            "Supervised WS",
+            gyre_domain::TrustLevel::Supervised,
+        )
+        .await;
+        let repo = create_repo_in_workspace(&state, "sup-repo", "ws-sup").await;
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-sup"),
+            repo.id.clone(),
+            "MR in supervised workspace",
+            "feat/sup",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-sup");
+        state.merge_requests.create(&mr).await.unwrap();
+        enqueue_mr(&state, "mr-sup", 50, 1000).await;
+
+        // Run a merge-processor cycle.
+        process_next(&state).await.unwrap();
+
+        // The MR must NOT have been merged.
+        let updated = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-sup"))
+            .await
+            .unwrap()
+            .expect("mr should exist");
+        assert_eq!(
+            updated.status,
+            MrStatus::Open,
+            "supervised trust Deny must hold the merge — MR stays Open"
+        );
+
+        // The queue entry must be requeued (not failed, not merged) with a
+        // reason naming the supervised trust hold.
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-sup"))
+            .await
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(
+            entry.status,
+            MergeQueueEntryStatus::Queued,
+            "held entry must be requeued so the human-approval path stays live"
+        );
+        let reason = entry
+            .error_message
+            .as_deref()
+            .unwrap_or_else(|| panic!("requeued entry must carry a hold reason"));
+        assert!(
+            reason.contains("supervised trust"),
+            "hold reason must name supervised trust, got: {reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn supervised_workspace_approved_mr_merges() {
+        let state = test_state();
+
+        seed_workspace_with_trust(
+            &state,
+            "ws-sup2",
+            "Supervised WS 2",
+            gyre_domain::TrustLevel::Supervised,
+        )
+        .await;
+        let repo = create_repo_in_workspace(&state, "sup-repo-2", "ws-sup2").await;
+
+        // A human has approved the MR via the status endpoint
+        // (Open → Approved is the only path that sets Approved before merge).
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-sup-approved"),
+            repo.id.clone(),
+            "Approved MR in supervised workspace",
+            "feat/sup-approved",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-sup2");
+        mr.transition_status(MrStatus::Approved).unwrap();
+        state.merge_requests.create(&mr).await.unwrap();
+        enqueue_mr(&state, "mr-sup-approved", 50, 1000).await;
+
+        process_next(&state).await.unwrap();
+
+        let updated = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-sup-approved"))
+            .await
+            .unwrap()
+            .expect("mr should exist");
+        assert_eq!(
+            updated.status,
+            MrStatus::Merged,
+            "human-approved MR must merge in a Supervised workspace"
+        );
+
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-sup-approved"))
+            .await
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(
+            entry.status,
+            MergeQueueEntryStatus::Merged,
+            "approved MR's queue entry must be Merged"
+        );
+    }
+
+    #[tokio::test]
+    async fn guided_workspace_open_mr_merges() {
+        let state = test_state();
+
+        // Guided seeds no trust Deny policies — the merge processor's
+        // system identity must pass the ABAC gate.
+        seed_workspace_with_trust(
+            &state,
+            "ws-guided",
+            "Guided WS",
+            gyre_domain::TrustLevel::Guided,
+        )
+        .await;
+        let repo = create_repo_in_workspace(&state, "guided-repo", "ws-guided").await;
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-guided"),
+            repo.id.clone(),
+            "MR in guided workspace",
+            "feat/guided",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-guided");
+        state.merge_requests.create(&mr).await.unwrap();
+        enqueue_mr(&state, "mr-guided", 50, 1000).await;
+
+        process_next(&state).await.unwrap();
+
+        let updated = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-guided"))
+            .await
+            .unwrap()
+            .expect("mr should exist");
+        assert_eq!(
+            updated.status,
+            MrStatus::Merged,
+            "Guided workspace (no trust Deny) must not hold the merge"
+        );
+    }
+
+    #[tokio::test]
+    async fn supervised_trust_denies_atomic_group_member_rolls_back_group() {
+        let state = test_state();
+
+        seed_workspace_with_trust(
+            &state,
+            "ws-sup3",
+            "Supervised WS 3",
+            gyre_domain::TrustLevel::Supervised,
+        )
+        .await;
+        let repo = create_repo_in_workspace(&state, "sup-repo-3", "ws-sup3").await;
+
+        create_mr_in_group(
+            &state,
+            "mr-group-a",
+            &repo.id,
+            "ws-sup3",
+            "bundle-sup",
+            "feat/group-a",
+            Some("agent-1"),
+        )
+        .await;
+        create_mr_in_group(
+            &state,
+            "mr-group-b",
+            &repo.id,
+            "ws-sup3",
+            "bundle-sup",
+            "feat/group-b",
+            Some("agent-1"),
+        )
+        .await;
+
+        enqueue_mr(&state, "mr-group-a", 50, 1000).await;
+        enqueue_mr(&state, "mr-group-b", 50, 1001).await;
+
+        process_next(&state).await.unwrap();
+
+        // No member may merge: the group is held and rolled back to Queued.
+        for mr_id in ["mr-group-a", "mr-group-b"] {
+            let updated = state
+                .merge_requests
+                .find_by_id(&Id::new(mr_id))
+                .await
+                .unwrap()
+                .expect("mr should exist");
+            assert_eq!(
+                updated.status,
+                MrStatus::Open,
+                "atomic group member {mr_id} must stay Open under supervised trust"
+            );
+
+            let entry = state
+                .merge_queue
+                .find_by_id(&Id::new(format!("entry-{mr_id}")))
+                .await
+                .unwrap()
+                .expect("entry should exist");
+            assert_eq!(
+                entry.status,
+                MergeQueueEntryStatus::Queued,
+                "atomic group member {mr_id} must be requeued after rollback"
+            );
+            let reason = entry
+                .error_message
+                .as_deref()
+                .unwrap_or_else(|| panic!("requeued entry {mr_id} must carry a rollback reason"));
+            assert!(
+                reason.contains("supervised trust"),
+                "rollback reason must name supervised trust, got: {reason}"
+            );
+        }
+    }
+
+    // ── Production-seed regression (task-077 revision): the merge gate must
+    // evaluate against the SAME policy set a deployed server has after
+    // `seed_builtin_policies` — including the tenant-scope catch-all
+    // `builtin-default-deny`, which matches every action unconditionally.
+    // If the catch-all is left in the gate's evaluation scope, the Guided
+    // state (no trust Deny) returns an EXPLICIT Deny match and every
+    // autonomous merge is held forever — while empty-store tests stay green.
+
+    #[tokio::test]
+    async fn guided_workspace_merge_proceeds_with_startup_seeded_builtins() {
+        let state = test_state();
+        // Exactly what main.rs does at startup (fail-closed).
+        crate::abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed built-in policies");
+
+        seed_workspace_with_trust(
+            &state,
+            "ws-guided-seeded",
+            "Guided Seeded WS",
+            gyre_domain::TrustLevel::Guided,
+        )
+        .await;
+        let repo = create_repo_in_workspace(&state, "guided-seeded-repo", "ws-guided-seeded").await;
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-guided-seeded"),
+            repo.id.clone(),
+            "MR in seeded guided workspace",
+            "feat/guided-seeded",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-guided-seeded");
+        state.merge_requests.create(&mr).await.unwrap();
+        enqueue_mr(&state, "mr-guided-seeded", 50, 1000).await;
+
+        process_next(&state).await.unwrap();
+
+        let updated = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-guided-seeded"))
+            .await
+            .unwrap()
+            .expect("mr should exist");
+        assert_eq!(
+            updated.status,
+            MrStatus::Merged,
+            "pipeline catch-all default-deny must NOT hold Guided autonomous \
+             merges (HSI §2: Guided = no trust Deny → processor proceeds)"
+        );
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-guided-seeded"))
+            .await
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(
+            entry.status,
+            MergeQueueEntryStatus::Merged,
+            "queue entry must be Merged, not requeued on the catch-all"
+        );
+    }
+
+    #[tokio::test]
+    async fn supervised_hold_survives_startup_seeded_builtins() {
+        let state = test_state();
+        crate::abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed built-in policies");
+
+        seed_workspace_with_trust(
+            &state,
+            "ws-sup-seeded",
+            "Supervised Seeded WS",
+            gyre_domain::TrustLevel::Supervised,
+        )
+        .await;
+        let repo = create_repo_in_workspace(&state, "sup-seeded-repo", "ws-sup-seeded").await;
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-sup-seeded"),
+            repo.id.clone(),
+            "MR in seeded supervised workspace",
+            "feat/sup-seeded",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-sup-seeded");
+        state.merge_requests.create(&mr).await.unwrap();
+        enqueue_mr(&state, "mr-sup-seeded", 50, 1000).await;
+
+        process_next(&state).await.unwrap();
+
+        let updated = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-sup-seeded"))
+            .await
+            .unwrap()
+            .expect("mr should exist");
+        assert_eq!(
+            updated.status,
+            MrStatus::Open,
+            "excluding the catch-all must not weaken the trust:require-human-mr-review Deny"
+        );
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-sup-seeded"))
+            .await
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(entry.status, MergeQueueEntryStatus::Queued);
+        assert!(
+            entry
+                .error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("supervised trust"),
+            "hold must name supervised trust, got: {:?}",
+            entry.error_message
         );
     }
 }

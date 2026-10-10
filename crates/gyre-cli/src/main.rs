@@ -1547,7 +1547,9 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
             );
         }
         if args.admin_user.is_some() {
-            anyhow::bail!("--dev cannot be combined with --admin-user (dev mode uses static tokens)");
+            anyhow::bail!(
+                "--dev cannot be combined with --admin-user (dev mode uses static tokens)"
+            );
         }
         if args.oidc_issuer.is_some() {
             anyhow::bail!("--dev cannot be combined with --oidc-issuer (dev mode skips OIDC)");
@@ -1558,7 +1560,10 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
 
     let repo_name = args.repo.clone().unwrap_or_else(|| "main".to_string());
     let tenant_name = args.tenant.clone().unwrap_or_else(|| "dev".to_string());
-    let workspace_name = args.workspace.clone().unwrap_or_else(|| "default".to_string());
+    let workspace_name = args
+        .workspace
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
     let repo_path = args.repo_path.as_deref().map(std::path::PathBuf::from);
 
     let api = client::GyreClient::new(args.server.clone(), args.token.clone());
@@ -1576,7 +1581,10 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
     if health["status"].as_str() != Some("ok") {
         anyhow::bail!("server health check returned unexpected status: {health}");
     }
-    println!("  Server healthy (version {}).", health["version"].as_str().unwrap_or("?"));
+    println!(
+        "  Server healthy (version {}).",
+        health["version"].as_str().unwrap_or("?")
+    );
 
     let mut step = StepTracker::new("create tenant");
 
@@ -1592,7 +1600,10 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
         }
         Err(create_err) => match api.find_tenant_by_slug(&tenant_slug).await {
             Ok(Some(existing)) => {
-                println!("  Tenant '{}' already exists ({}) - reusing", existing.name, existing.id);
+                println!(
+                    "  Tenant '{}' already exists ({}) - reusing",
+                    existing.name, existing.id
+                );
                 existing
             }
             _ => return Err(step.fail(create_err)),
@@ -1617,9 +1628,11 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
                     agent_name: Some(created.user.username.clone()),
                 };
                 cfg.save()?;
-                println!("  Admin user '{}' created; credentials saved to {}",
+                println!(
+                    "  Admin user '{}' created; credentials saved to {}",
                     created.user.username,
-                    config::Config::path().display());
+                    config::Config::path().display()
+                );
                 // Continue authenticating as the new admin via its API key.
                 client_api =
                     client::GyreClient::new(args.server.clone(), created.api_key.key.clone());
@@ -1634,7 +1647,9 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
                     .filter(|t| !t.is_empty());
                 match reuse {
                     Some(token) => {
-                        println!("  Admin user '{username}' already exists - reusing saved credentials");
+                        println!(
+                            "  Admin user '{username}' already exists - reusing saved credentials"
+                        );
                         summary.admin_username = Some(username.to_string());
                         client_api = client::GyreClient::new(args.server.clone(), token);
                     }
@@ -1674,7 +1689,10 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
     step.advance("register repo");
 
     // ── Step 4: add repo (resume: reuse existing by name) ──
-    let repo = match client_api.create_repo(&summary.workspace_id, &repo_name).await {
+    let repo = match client_api
+        .create_repo(&summary.workspace_id, &repo_name)
+        .await
+    {
         Ok(r) => {
             println!("  Repo '{}' created ({})", r.name, r.id);
             r
@@ -1684,7 +1702,10 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
             .await
         {
             Ok(Some(existing)) => {
-                println!("  Repo '{}' already exists ({}) - reusing", existing.name, existing.id);
+                println!(
+                    "  Repo '{}' already exists ({}) - reusing",
+                    existing.name, existing.id
+                );
                 existing
             }
             _ => return Err(step.fail(create_err)),
@@ -1712,7 +1733,10 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
                     )
                     .await
                     .map_err(|e| step.fail(e))?;
-                client_api.approve_persona(&created.id).await.map_err(|e| step.fail(e))?;
+                client_api
+                    .approve_persona(&created.id)
+                    .await
+                    .map_err(|e| step.fail(e))?;
             }
         }
         summary.personas_registered.push(persona.slug.to_string());
@@ -1726,10 +1750,14 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
     // ── Step 6: spec registry (report-only; sync happens on push) ──
     match &repo_path {
         Some(path) if path.join("specs").join("manifest.yaml").exists() => {
-            println!("  Spec manifest found at {} - ledger syncs on push to the default branch",
-                path.join("specs").join("manifest.yaml").display());
+            println!(
+                "  Spec manifest found at {} - ledger syncs on push to the default branch",
+                path.join("specs").join("manifest.yaml").display()
+            );
         }
-        _ => println!("  No spec manifest found - spec registry stays empty until specs are pushed"),
+        _ => {
+            println!("  No spec manifest found - spec registry stays empty until specs are pushed")
+        }
     }
     if args.starter_kit {
         let target = repo_path
@@ -1753,7 +1781,10 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
     if summary.gates_configured.is_empty() {
         println!("  No default gates detected (no Cargo.toml or check-arch.sh in repo path)");
     } else {
-        println!("  Gates configured: {}", summary.gates_configured.join(", "));
+        println!(
+            "  Gates configured: {}",
+            summary.gates_configured.join(", ")
+        );
     }
     step.advance("spawn repo orchestrator");
 

@@ -1327,7 +1327,6 @@ mod tests {
         assert_eq!(c.base_url, "http://localhost:3333");
     }
 
-
     #[test]
     fn spawn_orchestrator_response_parses() {
         // Exact shape from POST /api/v1/repos/:id/orchestrator/spawn after
@@ -1351,7 +1350,10 @@ mod tests {
         }"#;
         let parsed: SpawnOrchestratorResponse = serde_json::from_str(body).unwrap();
         assert_eq!(parsed.agent.id, "0eea0f49-8faa-4b16-a020-6ec24913c197");
-        assert_eq!(parsed.agent.orchestrator_type.as_deref(), Some("repo_orchestrator"));
+        assert_eq!(
+            parsed.agent.orchestrator_type.as_deref(),
+            Some("repo_orchestrator")
+        );
         assert_eq!(parsed.agent.repo_id.as_deref(), Some("repo"));
         assert_eq!(parsed.agent.restart_on_failure, Some(true));
     }

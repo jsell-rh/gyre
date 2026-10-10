@@ -15,6 +15,8 @@ use tracing::{info, instrument};
 
 use crate::AppState;
 
+use crate::auth::AuthenticatedAgent;
+
 use super::error::ApiError;
 use super::{new_id, now_secs};
 
@@ -586,9 +588,10 @@ pub async fn get_mr(
     Ok(Json(resp))
 }
 
-#[instrument(skip(state, req), fields(mr_id = %id, new_status = %req.status))]
+#[instrument(skip(state, req, auth), fields(mr_id = %id, new_status = %req.status))]
 pub async fn transition_mr_status(
     State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
     Path(id): Path<String>,
     Json(req): Json<TransitionStatusRequest>,
 ) -> Result<Json<MrResponse>, ApiError> {
@@ -598,6 +601,22 @@ pub async fn transition_mr_status(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
     let new_status = parse_mr_status(&req.status)?;
+    // TASK-077 (HSI §2): `Approved` is the human-approval escape from the
+    // Supervised trust gate — the merge processor holds a merge when ABAC
+    // denies system subjects (`trust:require-human-mr-review`) unless
+    // `mr.status == Approved`. An agent setting its own MR to Approved would
+    // self-satisfy that escape and render the Deny inert. Mirror the
+    // `builtin:require-human-spec-approval` semantics (deny non-user
+    // subjects): the Agent role may not set `approved`. Role-based check
+    // matches abac_middleware's subject.type derivation.
+    if matches!(new_status, MrStatus::Approved)
+        && auth.roles.contains(&gyre_domain::UserRole::Agent)
+    {
+        return Err(ApiError::Forbidden(
+            "MR approval requires a human — agents may not set status 'approved' (supervised trust)"
+                .to_string(),
+        ));
+    }
     let is_merge = matches!(new_status, MrStatus::Merged);
     let is_close = matches!(new_status, MrStatus::Closed);
     mr.transition_status(new_status)
@@ -972,6 +991,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/merge-requests/{id}/status"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -987,13 +1007,13 @@ mod tests {
     async fn mr_status_transition_invalid() {
         let app = app();
         let (app, id) = create_test_mr(app, "Invalid trans").await;
-
         let body = serde_json::json!({ "status": "merged" });
         let resp = app
             .oneshot(
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/merge-requests/{id}/status"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -1035,6 +1055,7 @@ mod tests {
                 Request::builder()
                     .method("PUT")
                     .uri(format!("/api/v1/merge-requests/{mr_id}/status"))
+                    .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
@@ -1052,6 +1073,65 @@ mod tests {
                 .is_none(),
             "closed MR's trace must be deleted (close-without-merge)"
         );
+    }
+
+    /// TASK-077 (HSI §2, review R2-F5): the merge processor's human-approval
+    /// escape (`mr.status == Approved`) must only be satisfiable by a human.
+    /// An Agent-role caller setting its own MR to "approved" would
+    /// self-satisfy the Supervised trust gate (`trust:require-human-mr-review`
+    /// Denies system merges; the processor holds on Deny). The endpoint must
+    /// reject agent callers with 403 and leave the MR Open.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_cannot_approve_mr_status_supervised_escape() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+
+        let state = make_test_state_with_jwt();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, id) = create_test_mr(app, "Self-approve attempt").await;
+
+        let agent_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "self-approving-agent",
+                "preferred_username": "self-approving-agent",
+                "realm_access": { "roles": ["agent"] }
+            }),
+            3600,
+        );
+
+        let body = serde_json::json!({ "status": "approved" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/merge-requests/{id}/status"))
+                    .header("authorization", format!("Bearer {agent_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "Agent role must not set MR status 'approved' — it is the \
+             human-approval escape from the supervised trust gate"
+        );
+
+        // The MR must remain Open (no partial application).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/merge-requests/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(json["status"], "open");
     }
 
     #[tokio::test]
