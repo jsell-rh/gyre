@@ -7,7 +7,7 @@ coverage_sections:
   - "repo-lifecycle.md §Admin → Workspace Scope → Repos Tab"
   - "repo-lifecycle.md §Gates (Admin → Repo Scope → Gates)"
   - "repo-lifecycle.md §API Summary"
-commits: ["df5b32464a082ce008236a2732536755538ebe03", "9ebec6c2713ce824aa5ca9f14df74dcecb074437", "904586888416cb5c5aec355a70875b271e005a90", "b657692571ca3e6f53528afeec1578dfb46c9e7a", "06e11cbcf59b1fdd0247411c5e8910c4c6190714", "1da8dd39d018de0a101f550198ce224d077329f6", "4c11b2644f2435a87e60a38b8b8f356722562f14", "4b5d96563755dec7fbd825880c23661c604f7a8d", "5d5e4046f0af0cf074348b584d632e36f3f6b570", "0a2df7c6a80141bc885937dc3543e13055bf8ee3", "568d27f2cc4ca542ebe3b138872b710dd693a5e0", "68805172e3c0abb0315928d7f24d3ba2aaa16673"]
+commits: ["9ebec6c2713ce824aa5ca9f14df74dcecb074437", "904586888416cb5c5aec355a70875b271e005a90", "b657692571ca3e6f53528afeec1578dfb46c9e7a", "06e11cbcf59b1fdd0247411c5e8910c4c6190714", "1da8dd39d018de0a101f550198ce224d077329f6", "4c11b2644f2435a87e60a38b8b8f356722562f14", "4b5d96563755dec7fbd825880c23661c604f7a8d", "5d5e4046f0af0cf074348b584d632e36f3f6b570", "0a2df7c6a80141bc885937dc3543e13055bf8ee3", "568d27f2cc4ca542ebe3b138872b710dd693a5e0", "68805172e3c0abb0315928d7f24d3ba2aaa16673", "df5b32464a082ce008236a2732536755538ebe03"]
 ---
 
 ## Spec Excerpt
@@ -60,55 +60,12 @@ Read `specs/system/repo-lifecycle.md` §"1. Where Repo Management Lives", §"3. 
 
 ## Shipped
 
-Repair of durable finding fe40c4fb (contract). The prior candidates carried a
-drive-by normative change outside this task's contract: `process_spec_lifecycle`
-lost its repo-store workspace lookup to a threaded `push_workspace_id`
-parameter, and the `check-fabricated-scope-defaults` verifier was edited
-(FROZEN_EXEMPTION_COUNT 7→6, one legacy exemption entry deleted) to
-accommodate it. That spec-lifecycle scoping change requires its own spec
-review, so this session reverted it to the base behavior (the legacy
-exempted site remains, line pin updated 1495→1510 only because the in-scope
-archive check added 15 lines above it; same statement, exemption count
-unchanged at 7) and restored the verifier/exemptions to base values. No
-verifier was weakened: the check passes with every site present.
+All three coverage sections are closed with production code on head (verified this session on the merged base `a11ba8d3` via merge `317718f8`; no production changes were needed in this session — the repair audit confirmed the tree satisfies the contract end-to-end).
 
-The assigned requirements were already implemented on this branch and are
-re-verified here on the repaired tree:
+1. **Archive push rejection (§API Summary, §4 step 5)** — `git_receive_pack` in `crates/gyre-server/src/git_http.rs` checks `resolved.is_archived()` (real `Repository` domain method) immediately after `resolve_repo_by_slug()` and returns `403` with "push rejected: repository is archived" before the packfile is processed; a `warn!` records agent/workspace/repo context. Unit test `receive_pack_archived_repo_returns_403` archives the repo through the store and asserts the 403 + message; integration test `push_to_archived_repo_rejected` (git_integration.rs Test 13) drives a real `git push` over HTTP.
+2. **Admin Repos tab (§Admin → Workspace Scope → Repos Tab)** — `WorkspaceSettings.svelte` gains a `repos` tab listing every workspace repo (name, Active/Archived status badge, active-agent count, last-activity timestamp), with "+ New Repo" and "Import Repo" buttons opening real forms backed by `api.createRepo` / `api.createMirrorRepo`; clicking a repo navigates to repo scope via the `goToRepo` context wired in App.svelte.
+3. **Gate configuration UI (§Gates)** — `RepoSettings.svelte` gates panel now has: enabled/disabled toggle (PUT `{required}`), per-gate configuration form with type-specific fields (command for test/lint gates, required-approvals, reviewer persona, timeout), and drag-to-reorder persisting 1-based `position` values via PUT with a server reload on failure. Backing API: real `update_gate` PUT handler (`api/gates.rs`) with per-type field validation and repo-ownership enforcement; `QualityGate.position` + migration `2026-10-08-000056_gate_position`; mem adapter ordering parity (position, created_at). Add Gate with type selector and delete existed at base.
 
-1. **Archive push rejection** (§API Summary): `git_receive_pack` rejects
-   pushes to archived repos with 403 "push rejected: repository is archived"
-   after `resolve_repo_by_slug()` and before packfile processing. Unit test
-   `receive_pack_archived_repo_returns_403` archives through the real store;
-   `push_to_archived_repo_rejected` in `tests/git_integration.rs` drives a
-   real `git push` through the full stack (host CI only — this sandbox cannot
-   `accept()` TCP, errno 95).
+**Test evidence (this session, on the final tree):** `git_http` unit suite 37/38 — the single failure `git_clone_empty_repo_via_smart_http` is the documented sandbox TCP-accept restriction (errno 95 `getpeername()`, capabilities.json; identical failure reproduced at pristine base in the prior session) and is unrelated to the archive guard, which passes (`receive_pack_archived_repo_returns_403` ok). `api::gates` 11/11, `merge_processor` 49/49, `gate_executor` 24/24, `mr_timeline` 13/13, `recovery` 3/3, `gyre-domain` 371/371. Web: RepoSettings + WorkspaceSettings vitest 114/114 (after `npm ci`). Mechanical checks all OK: attribution (after recording `df5b3246` here and base `a11ba8d3` in task-068's list — the merge makes that task-068-labeled commit reachable, so its attribution is required), abac-route-registry, fabricated-scope-defaults, migration-versions, migration-sql-portability, mem-port-contracts, arch, inert-enforcement, lossy-secret-conversion, scope-literal-defaults, in-memory-state-stores, dead-message-kinds, byte-slice-truncation, relative-path-defaults, mcp-write-tools. `web/dist` rebuilt with all new surfaces present. Full evidence: `/tmp/stage/review-evidence/task-168/evidence.md`.
 
-2. **Admin Repos tab** (§Admin → Workspace Scope → Repos Tab): "Repos" tab in
-   `WorkspaceSettings.svelte` listing all workspace repos with name,
-   Active/Archived status badge, active-agent count, and last-activity
-   timestamp; "+ New Repo" and "Import Repo" inline forms calling
-   `api.createRepo` / `api.createMirrorRepo`; click-through to repo scope via
-   the `goToRepo` context in `App.svelte`.
-
-3. **Gate configuration UI** (§Gates): gates panel in `RepoSettings.svelte` —
-   per-gate enabled/disabled toggle, per-gate Configure form (name,
-   type-specific command / required-approvals / persona field, timeout),
-   HTML5 drag-to-reorder persisting positions through
-   `PUT /api/v1/repos/:id/gates/:gate_id` (`api.updateRepoGate`). Backend
-   `update_gate` performs partial updates with per-type validation (e.g.
-   `command` on an `agent_review` gate → 400); the `position` column is
-   portable migration 000056 shared by SQLite/PG/mem adapters with the
-   `(position, created_at)` ordering contract; gate execution consumes that
-   order.
-
-**Test evidence (this session, repaired tree; evidence at
-`/tmp/stage/review-evidence/task-168/evidence.md`):** `api::gates` and
-`git_http` suites, the suites touched by the `position` field
-(`merge_processor`, `gate_executor`, `mr_timeline`, `recovery`), and
-WorkspaceSettings/RepoSettings vitest suites — exact counts recorded in the
-evidence file; `check-fabricated-scope-defaults.sh` green on the repaired
-tree with base exemption values.
-
-Host verification still required: full `git_integration` suite incl.
-`push_to_archived_repo_rejected`, full `cargo test --all`, all-target Clippy,
-and GitHub CI on the branch head.
+**Left to host CI (listener-dependent / full-suite, owned by verification):** `git_integration` including `push_to_archived_repo_rejected`, full `cargo test --all`, Clippy, full web suite, GitHub checks on the pushed head.
