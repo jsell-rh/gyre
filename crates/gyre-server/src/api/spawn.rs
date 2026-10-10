@@ -434,27 +434,39 @@ pub(crate) async fn spawn_agent_core(
     // §1 Token Scoping: the hierarchy claims come from the spawn context —
     // repo → workspace → tenant. A worker agent's token is scoped to its
     // repo (`repo:{name}:write`).
-    let tenant_id = workspace
-        .as_ref()
-        .map(|ws| ws.tenant_id.to_string())
-        .unwrap_or_else(|| "default".to_string());
-    let token = state
-        .agent_signing_key
-        .mint(
-            &agent.id.to_string(),
-            &req.task_id,
-            &auth.agent_id,
-            &state.base_url,
-            jwt_ttl,
-            &tenant_id,
-            &repo.workspace_id.to_string(),
-            &req.repo_id,
-            &repo.name,
-        )
-        .unwrap_or_else(|e| {
-            tracing::error!("JWT pre-mint failed, falling back to UUID token: {e}");
+    let tenant_id = workspace.as_ref().map(|ws| ws.tenant_id.to_string());
+    let token = match tenant_id.as_deref() {
+        // Tenant scope determined: mint the scoped worker JWT.
+        Some(tenant) => state
+            .agent_signing_key
+            .mint(
+                &agent.id.to_string(),
+                &req.task_id,
+                &auth.agent_id,
+                &state.base_url,
+                jwt_ttl,
+                tenant,
+                &repo.workspace_id.to_string(),
+                &req.repo_id,
+                &repo.name,
+            )
+            .unwrap_or_else(|e| {
+                tracing::error!("JWT pre-mint failed, falling back to UUID token: {e}");
+                uuid::Uuid::new_v4().to_string()
+            }),
+        // Workspace unresolvable — the tenant scope cannot be determined.
+        // Mint fails closed (UUID fallback) rather than carrying a
+        // fabricated tenant identity (task-097 F3 class).
+        None => {
+            tracing::error!(
+                workspace_id = %repo.workspace_id,
+                "JWT pre-mint skipped: workspace unresolvable, tenant scope cannot be determined; \
+                 falling back to UUID token for agent {}",
+                agent.id
+            );
             uuid::Uuid::new_v4().to_string()
-        });
+        }
+    };
     // Store now so the container can authenticate immediately upon start.
     let _ = state
         .kv_store
@@ -653,30 +665,40 @@ pub(crate) async fn spawn_agent_core(
         // Failure is logged and skipped: a missing/undecryptable secret must
         // not block spawning the agent itself.
         // tenant_id was resolved above at mint time (§1 Token Scoping).
-        match state
-            .secrets
-            .resolve_for_agent(
-                &tenant_id,
-                &repo.workspace_id.to_string(),
-                &req.repo_id,
-                Some(&req.task_id),
-            )
-            .await
-        {
-            Ok(resolved) => {
-                for (name, value) in resolved {
-                    container_env.insert(
-                        format!("GYRE_CRED_{name}"),
-                        String::from_utf8_lossy(&value).into_owned(),
+        // An unresolvable workspace means the tenant scope cannot be
+        // determined — skip the tenant-scoped secret resolution and log
+        // rather than fabricating a "default" tenant identity (task-097 F3).
+        match tenant_id.as_deref() {
+            Some(tenant) => match state
+                .secrets
+                .resolve_for_agent(
+                    tenant,
+                    &repo.workspace_id.to_string(),
+                    &req.repo_id,
+                    Some(&req.task_id),
+                )
+                .await
+            {
+                Ok(resolved) => {
+                    for (name, value) in resolved {
+                        container_env.insert(
+                            format!("GYRE_CRED_{name}"),
+                            String::from_utf8_lossy(&value).into_owned(),
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        agent_id = %agent.id,
+                        "secret resolution failed; continuing without GYRE_CRED_* env vars: {e:#}"
                     );
                 }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    agent_id = %agent.id,
-                    "secret resolution failed; continuing without GYRE_CRED_* env vars: {e:#}"
-                );
-            }
+            },
+            None => tracing::warn!(
+                agent_id = %agent.id,
+                workspace_id = %repo.workspace_id,
+                "secret resolution skipped: workspace unresolvable, tenant scope cannot be determined"
+            ),
         }
 
         // M27: cred-proxy addresses for credential routing.

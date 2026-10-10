@@ -51,20 +51,32 @@ fn is_live(a: &gyre_domain::Agent) -> bool {
     )
 }
 
-/// Soft persona validation (§3.1): warn and continue when the seeded persona
-/// meta-spec is missing or unapproved - never block the spawn path on it.
-async fn validate_persona(state: &AppState, name: &str) {
+/// Soft persona validation (§3.1): reports whether the seeded persona
+/// meta-spec is present AND approved. Callers log a warning and continue
+/// when it is not — the spawn path is never blocked on persona seeding —
+/// but the decision is made from the returned value, not discarded
+/// (check-inert-enforcement: a `validate_*` result in statement position
+/// gates nothing).
+async fn validate_persona(state: &AppState, name: &str) -> bool {
     let filter = MetaSpecFilter {
         kind: Some(MetaSpecKind::Persona),
         ..Default::default()
     };
-    if let Ok(personas) = state.meta_specs.list(&filter).await {
-        match personas.iter().find(|p| p.name == name) {
-            None => tracing::warn!(persona = name, "persona meta-spec not found"),
-            Some(p) if !matches!(p.approval_status, MetaSpecApprovalStatus::Approved) => {
-                tracing::warn!(persona = name, "persona meta-spec not approved")
+    match state.meta_specs.list(&filter).await {
+        Ok(personas) => match personas.iter().find(|p| p.name == name) {
+            None => {
+                tracing::warn!(persona = name, "persona meta-spec not found");
+                false
             }
-            _ => {}
+            Some(p) if !matches!(p.approval_status, MetaSpecApprovalStatus::Approved) => {
+                tracing::warn!(persona = name, "persona meta-spec not approved");
+                false
+            }
+            _ => true,
+        },
+        Err(e) => {
+            tracing::warn!(persona = name, "persona meta-spec lookup failed: {e}");
+            false
         }
     }
 }
@@ -115,15 +127,22 @@ async fn spawn_orchestrator(
     // §1 Token Scoping: resolve tenant (workspace → tenant) and repo name
     // so the scope list is minted from real hierarchy context — workspace
     // tier `workspace:{id}:read|spawn`, repo tier `repo:{name}:write|spawn`.
-    let workspace_entity = state
+    // An unresolvable workspace means the tenant scope cannot be determined —
+    // fail the spawn rather than minting a fabricated tenant identity
+    // (task-097 F3 class): the orchestrator's scope IS its identity.
+    let tenant_id = state
         .workspaces
         .find_by_id(workspace_id)
         .await
         .ok()
-        .flatten();
-    let tenant_id = workspace_entity
+        .flatten()
         .map(|ws| ws.tenant_id.to_string())
-        .unwrap_or_else(|| "default".to_string());
+        .ok_or_else(|| {
+            ApiError::Internal(anyhow::anyhow!(
+                "orchestrator spawn: workspace {workspace_id} unresolvable, \
+                 tenant scope cannot be determined"
+            ))
+        })?;
     let repo_name = match repo_id {
         Some(rid) => state
             .repos
@@ -209,7 +228,15 @@ pub(crate) async fn spawn_workspace_orchestrator_core(
         .await
         .map_err(ApiError::TooManyRequests)?;
 
-    validate_persona(state, "workspace-orchestrator").await;
+    // §3.1 soft validation: log-and-continue, but the decision comes from
+    // the returned finding (never a discarded validate_* result).
+    let persona_ok = validate_persona(state, "workspace-orchestrator").await;
+    if !persona_ok {
+        tracing::warn!(
+            workspace_id = %workspace.id,
+            "continuing workspace-orchestrator spawn without an approved persona meta-spec"
+        );
+    }
 
     let name = req
         .name
@@ -305,7 +332,15 @@ pub(crate) async fn spawn_repo_orchestrator_core(
         .await
         .map_err(ApiError::TooManyRequests)?;
 
-    validate_persona(state, "repo-orchestrator").await;
+    // §3.1 soft validation: log-and-continue, but the decision comes from
+    // the returned finding (never a discarded validate_* result).
+    let persona_ok = validate_persona(state, "repo-orchestrator").await;
+    if !persona_ok {
+        tracing::warn!(
+            repo_id = %repo.id,
+            "continuing repo-orchestrator spawn without an approved persona meta-spec"
+        );
+    }
 
     let name = req
         .name

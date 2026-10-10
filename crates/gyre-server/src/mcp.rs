@@ -5318,14 +5318,16 @@ mod tests {
         state.agents.create(&agent).await.unwrap();
 
         // §1 Token Scoping test helper: tenant and repo name mirror the
-        // seeded orch_state hierarchy.
+        // seeded orch_state hierarchy. The workspace was seeded by
+        // orch_state() — a missing row or store error is a broken fixture,
+        // not a "default" tenant (task-097 F3 class).
         let tenant_id = state
             .workspaces
             .find_by_id(&gyre_common::Id::new(workspace_id))
             .await
             .unwrap()
             .map(|ws| ws.tenant_id.to_string())
-            .unwrap_or_else(|| "default".to_string());
+            .expect("orch fixture: seeded workspace must resolve with a tenant");
         let repo_name = if let Some(rid) = repo_id {
             state
                 .repos
@@ -5621,15 +5623,14 @@ mod tests {
             &format!("/tmp/worktrees/{agent_id}"),
             0,
         );
-        state.worktrees.create(&wt).await.unwrap();
-
         let tenant_id = state
             .workspaces
             .find_by_id(&repo.workspace_id)
             .await
             .unwrap()
             .map(|ws| ws.tenant_id.to_string())
-            .unwrap_or_else(|| "default".to_string());
+            .expect("worker fixture: seeded workspace must resolve with a tenant");
+
         let token = state
             .agent_signing_key
             .mint(

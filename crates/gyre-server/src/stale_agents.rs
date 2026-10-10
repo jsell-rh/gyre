@@ -172,14 +172,28 @@ async fn restart_orchestrator(state: &AppState, dead: &gyre_domain::Agent, now: 
     // Scoped JWT for the replacement (same tier and scope as the dead one).
     // §1 Token Scoping: tenant and repo name resolved from the live stores
     // so the replacement's scope list is minted from real hierarchy context.
-    let tenant_id = state
+    // An unresolvable workspace means the tenant scope cannot be determined —
+    // skip the re-mint (the replacement cannot authenticate until a token
+    // exists) and log, rather than fabricating a "default" tenant identity
+    // (task-097 F3 class).
+    let tenant_id = match state
         .workspaces
         .find_by_id(&dead.workspace_id)
         .await
         .ok()
         .flatten()
-        .map(|ws| ws.tenant_id.to_string())
-        .unwrap_or_else(|| "default".to_string());
+    {
+        Some(ws) => ws.tenant_id.to_string(),
+        None => {
+            warn!(
+                agent_id = %replacement.id,
+                workspace_id = %dead.workspace_id,
+                "restart: tenant scope cannot be determined (workspace unresolvable); \
+                 skipping orchestrator JWT re-mint"
+            );
+            return;
+        }
+    };
     let repo_name = if let Some(rid) = dead.repo_id.as_ref() {
         state
             .repos
