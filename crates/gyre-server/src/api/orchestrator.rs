@@ -1307,4 +1307,48 @@ mod tests {
             "stale-abort decrement + replacement increment must stay net one"
         );
     }
+
+    #[tokio::test]
+    async fn double_death_handling_entry_yields_one_live_orchestrator() {
+        // Backstop probe (task-093 review): the fail/stop handlers gate on
+        // terminal status, but handle_orchestrator_death's exactly-once
+        // CONTRACT is caller-side ("callers must invoke this only on the
+        // FIRST terminal transition"). A caller that violates it — e.g. two
+        // concurrent terminal requests interleaving between the read and the
+        // update — re-enters the shared death handling on the same corpse.
+        // restart_orchestrator's own one-live-per-scope gate is what holds
+        // §3.2 there; this test pins it so it cannot be removed as dead code.
+        let state = test_state();
+        seed(&state).await;
+
+        let (agent, _t) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1")
+                .await
+                .unwrap();
+
+        // First entry: legit death → replacement minted.
+        crate::stale_agents::handle_orchestrator_death(&state, &agent, 1_000, "test").await;
+
+        // Contract-violating second entry on the same corpse (the handler
+        // guards cannot see this path at all).
+        crate::stale_agents::handle_orchestrator_death(&state, &agent, 1_000, "test").await;
+
+        let peers = state
+            .agents
+            .list_by_workspace(&Id::new("ws-1"))
+            .await
+            .unwrap();
+        let live: Vec<_> = peers
+            .iter()
+            .filter(|a| {
+                a.orchestrator_type == OrchestratorType::WorkspaceOrchestrator && is_live(a)
+            })
+            .collect();
+        assert_eq!(
+            live.len(),
+            1,
+            "second death-handling entry on a corpse must not mint a second live orchestrator; live: {:?}",
+            live.iter().map(|a| a.name.clone()).collect::<Vec<_>>()
+        );
+    }
 }
