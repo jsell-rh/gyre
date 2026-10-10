@@ -962,4 +962,256 @@ mod tests {
         let result = evaluate(vec![allow_policy(10, vec![cond])], &ctx, "delete", "repo");
         assert_eq!(result.effect, PolicyEffect::Allow);
     }
+
+    // --- Spec §Policy Examples: each documented example, verbatim ------------
+
+    /// Helper: build a policy mirroring the spec's YAML example shape.
+    fn spec_example(
+        name: &str,
+        scope: PolicyScope,
+        priority: u32,
+        effect: PolicyEffect,
+        actions: &[&str],
+        resource_types: &[&str],
+        conditions: Vec<Condition>,
+    ) -> Policy {
+        Policy {
+            id: Id::new(format!("spec-{name}")),
+            name: name.to_string(),
+            description: String::new(),
+            scope,
+            scope_id: None,
+            priority,
+            effect,
+            conditions,
+            actions: actions.iter().map(|s| s.to_string()).collect(),
+            resource_types: resource_types.iter().map(|s| s.to_string()).collect(),
+            enabled: true,
+            built_in: false,
+            immutable: false,
+            created_by: Id::new("spec"),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// Tenant-level example: "agents can only access their scoped repo" —
+    /// Deny when `subject.type == agent` AND `subject.repo_scope !=
+    /// $resource.repo_id`. The dynamic reference is the example's core
+    /// mechanism; both the scoped agent (no deny) and the out-of-scope agent
+    /// (deny) must evaluate correctly.
+    #[test]
+    fn spec_example_agent_repo_scope() {
+        let p = spec_example(
+            "agent-repo-scope",
+            PolicyScope::Tenant,
+            100,
+            PolicyEffect::Deny,
+            &["*"],
+            &["*"],
+            vec![
+                Condition {
+                    attribute: "subject.type".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("agent".to_string()),
+                },
+                Condition {
+                    attribute: "subject.repo_scope".to_string(),
+                    operator: ConditionOp::NotEquals,
+                    value: ConditionValue::String("$resource.repo_id".to_string()),
+                },
+            ],
+        );
+
+        // Agent acting inside its scoped repo: repo_scope == resource.repo_id,
+        // the NotEquals condition fails, the Deny does not match. The paired
+        // Allow at priority 50 grants.
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.type", "agent");
+        ctx.set("subject.repo_scope", "repo-gyre-server");
+        ctx.set("resource.repo_id", "repo-gyre-server");
+        let allow = allow_policy(50, vec![]);
+        let result = evaluate(vec![p.clone(), allow.clone()], &ctx, "read", "repo");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+
+        // Agent acting outside its scoped repo: repo_scope != resource.repo_id
+        // → the Deny matches at priority 100 and wins over the Allow at 50.
+        ctx.set("resource.repo_id", "repo-other");
+        let result = evaluate(vec![p, allow], &ctx, "read", "repo");
+        assert_eq!(result.effect, PolicyEffect::Deny);
+
+        // A user is untouched by this policy: only the Allow applies.
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.type", "user");
+        let result = evaluate(
+            vec![spec_example(
+                "agent-repo-scope",
+                PolicyScope::Tenant,
+                100,
+                PolicyEffect::Deny,
+                &["*"],
+                &["*"],
+                vec![
+                    Condition {
+                        attribute: "subject.type".to_string(),
+                        operator: ConditionOp::Equals,
+                        value: ConditionValue::String("agent".to_string()),
+                    },
+                    Condition {
+                        attribute: "subject.repo_scope".to_string(),
+                        operator: ConditionOp::NotEquals,
+                        value: ConditionValue::String("$resource.repo_id".to_string()),
+                    },
+                ],
+            )],
+            &ctx,
+            "read",
+            "repo",
+        );
+        // No Allow in this set → default deny, but the important part is the
+        // deny is NOT the example policy (its subject.type condition failed).
+        assert_eq!(result.effect, PolicyEffect::Deny);
+        assert_eq!(result.matched_policy, None);
+    }
+
+    /// Workspace-level example: "only Owner/Admin can manage personas" —
+    /// Deny write/delete on persona when workspace_role not_in [Owner, Admin].
+    #[test]
+    fn spec_example_persona_management() {
+        let p = spec_example(
+            "persona-management",
+            PolicyScope::Workspace,
+            90,
+            PolicyEffect::Deny,
+            &["write", "delete"],
+            &["persona"],
+            vec![Condition {
+                attribute: "subject.workspace_role".to_string(),
+                operator: ConditionOp::NotIn,
+                value: ConditionValue::StringList(vec![
+                    "Owner".to_string(),
+                    "Admin".to_string(),
+                ]),
+            }],
+        );
+        let allow = allow_policy(50, vec![]);
+
+        // Developer managing a persona: not in [Owner, Admin] → deny.
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.workspace_role", "Developer");
+        let result = evaluate(vec![p.clone(), allow.clone()], &ctx, "write", "persona");
+        assert_eq!(result.effect, PolicyEffect::Deny);
+
+        // Admin managing a persona: NotIn fails → allow.
+        ctx.set("subject.workspace_role", "Admin");
+        let result = evaluate(vec![p.clone(), allow.clone()], &ctx, "write", "persona");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+
+        // Owner: allowed.
+        ctx.set("subject.workspace_role", "Owner");
+        let result = evaluate(vec![p.clone(), allow.clone()], &ctx, "delete", "persona");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+
+        // Resource-type filter: the policy only applies to personas — a
+        // Developer task write is unaffected by it.
+        let result = evaluate(vec![p, allow], &ctx, "write", "task");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+    }
+
+    /// Workspace-level example: "viewers can't spawn agents" — Deny spawn on
+    /// agent when workspace_role == Viewer.
+    #[test]
+    fn spec_example_viewer_no_spawn() {
+        let p = spec_example(
+            "viewer-no-spawn",
+            PolicyScope::Workspace,
+            90,
+            PolicyEffect::Deny,
+            &["spawn"],
+            &["agent"],
+            vec![Condition {
+                attribute: "subject.workspace_role".to_string(),
+                operator: ConditionOp::Equals,
+                value: ConditionValue::String("Viewer".to_string()),
+            }],
+        );
+        let allow = allow_policy(50, vec![]);
+
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.workspace_role", "Viewer");
+        let result = evaluate(vec![p.clone(), allow.clone()], &ctx, "spawn", "agent");
+        assert_eq!(result.effect, PolicyEffect::Deny);
+
+        ctx.set("subject.workspace_role", "Developer");
+        let result = evaluate(vec![p, allow], &ctx, "spawn", "agent");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+    }
+
+    /// Repo-level example: "only approved personas can be used as gate
+    /// agents" — Deny gate_review on mr when subject.type == agent AND
+    /// subject.attestation_level < 3.
+    #[test]
+    fn spec_example_gate_approved_persona() {
+        let p = spec_example(
+            "gate-approved-persona",
+            PolicyScope::Repo,
+            80,
+            PolicyEffect::Deny,
+            &["gate_review"],
+            &["mr"],
+            vec![
+                Condition {
+                    attribute: "subject.type".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("agent".to_string()),
+                },
+                Condition {
+                    attribute: "subject.attestation_level".to_string(),
+                    operator: ConditionOp::LessThan,
+                    value: ConditionValue::Number(3),
+                },
+            ],
+        );
+        let allow = allow_policy(50, vec![]);
+
+        // Level-2 agent reviewing a gate: < 3 → deny.
+        let mut ctx = AttributeContext::default();
+        ctx.set("subject.type", "agent");
+        ctx.set_number("subject.attestation_level", 2);
+        let result = evaluate(vec![p.clone(), allow.clone()], &ctx, "gate_review", "mr");
+        assert_eq!(result.effect, PolicyEffect::Deny);
+
+        // Level-3 agent: not < 3 → allow.
+        ctx.set_number("subject.attestation_level", 3);
+        let result = evaluate(vec![p, allow], &ctx, "gate_review", "mr");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+    }
+
+    /// Tenant-level example: "deny all by default" — priority 0, no
+    /// conditions, always matches. With only an Allow present, the higher
+    /// priority Allow wins; with no Allow, the default-deny policy is the
+    /// match (matched_policy set, distinct from no-match default deny).
+    #[test]
+    fn spec_example_default_deny() {
+        let p = spec_example(
+            "default-deny",
+            PolicyScope::Tenant,
+            0,
+            PolicyEffect::Deny,
+            &["*"],
+            &["*"],
+            vec![],
+        );
+
+        // No other policy: the default-deny example matches.
+        let ctx = AttributeContext::default();
+        let result = evaluate(vec![p.clone()], &ctx, "read", "repo");
+        assert_eq!(result.effect, PolicyEffect::Deny);
+        assert_eq!(result.matched_policy.as_deref(), Some("spec-default-deny"));
+
+        // An explicit Allow outranks the priority-0 default deny.
+        let allow = allow_policy(10, vec![]);
+        let result = evaluate(vec![p, allow], &ctx, "read", "repo");
+        assert_eq!(result.effect, PolicyEffect::Allow);
+    }
 }
