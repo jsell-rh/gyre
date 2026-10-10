@@ -112,3 +112,43 @@ passes.
 Review history: rounds 1–4 in `specs/reviews/task-160.md` (round-3 findings
 F1 dead exemptions / F2 read-name blind spot fixed in 06df8bfb and verified
 complete in round 4).
+
+## Shipped — checkpoint round (fresh review candidate)
+
+Assignment recovered from interrupted source `1ee8221e` (checkpoint), merged
+with base `f4acb4eb` (task-189, disjoint surface) at HEAD `ddb11da9`. Task-owned
+surface (three scripts, scope-literal-defaults script + exemptions file,
+adapters `src/`, `tenant_isolation.rs`, pre-commit + CI wiring) is
+**byte-identical to the round-4 verified candidate `13ff2a51`** — empty diff
+on all task-owned paths; the only intervening content changes are task-189 /
+task-211 / pipeline files outside this task's surface.
+
+**Re-verification at `ddb11da9`** (evidence:
+`/tmp/stage/review-evidence/task-160-checkpoint/`):
+
+- Clean runs: `check-hierarchy.sh` exit 0; `check-tenant-filter.sh` exit 0
+  (111 checked / 0 violations); `check-api-auth.sh` exit 0 (3 checks OK);
+  `check-scope-literal-defaults.sh crates` OK.
+- Mutation kills re-proven at this HEAD (isolated worktree
+  `/tmp/stage/task160-checkpoint-mutate`, restored after each):
+  `Task.workspace_id → Option<Id>` → hierarchy exit 1 naming
+  `task.rs:60`; stripping the tenant predicate from
+  `sqlite/secret.rs::resolve_for_agent` → tenant-filter exit 1 naming
+  `secret.rs:293`; deleting the `RouteResourceMapping` for `/api/v1/activity`
+  → api-auth exit 1 (route-registry violation).
+- `cargo test -p gyre-adapters --test tenant_isolation` at `ddb11da9`:
+  **2 passed / 0 failed** (cold build, private target dir, ~15 min).
+
+**task-189 attribution drift (pre-existing at the merge base, fixed here as
+the lint prescribes, commit `660f4f79`):** `f4acb4eb` is a task-189-labeled
+product-surface commit on this branch but was absent from
+`specs/tasks/task-189.md` frontmatter, failing
+`check-task-commit-attribution.sh`. Recorded the SHA in the task file's
+`commits:` list; no exemption added, frozen exemption file untouched. Gate
+passes (exit 0).
+
+The original 7 `commits:` frontmatter entries pre-date the checkpoint squash
+(`1ee8221e` "checkpoint: recover interrupted pipeline source" carries the
+task surface); they remain on remote recovery branches and are listed for
+review-scoping history. The checkpoint/merge commits carrying this task's
+surface are `1ee8221e` and `ddb11da9`.
