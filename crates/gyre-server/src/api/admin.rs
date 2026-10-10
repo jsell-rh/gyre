@@ -1281,11 +1281,19 @@ mod tests {
         let policies = state.retention_store.list();
         assert_eq!(policies.len(), 7);
         assert_eq!(
-            policies.iter().find(|p| p.data_type == "activity_events").unwrap().max_age_days,
+            policies
+                .iter()
+                .find(|p| p.data_type == "activity_events")
+                .unwrap()
+                .max_age_days,
             30
         );
         assert_eq!(
-            policies.iter().find(|p| p.data_type == "agent_logs").unwrap().max_age_days,
+            policies
+                .iter()
+                .find(|p| p.data_type == "agent_logs")
+                .unwrap()
+                .max_age_days,
             14
         );
     }

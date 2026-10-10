@@ -1512,7 +1512,10 @@ mod tests {
 
         // Both directions: old gone, new kept.
         let remaining = buf.list_all_since(0, 100);
-        let ids: Vec<String> = remaining.iter().map(|m| m.id.as_str().to_string()).collect();
+        let ids: Vec<String> = remaining
+            .iter()
+            .map(|m| m.id.as_str().to_string())
+            .collect();
         assert_eq!(ids, vec!["a-new".to_string()]);
         // The emptied ws-b buffer is dropped entirely.
         assert_eq!(buf.list_since(&ws_b, 0, 100).len(), 0);

@@ -154,7 +154,9 @@ impl RetentionStore {
     pub fn new() -> Self {
         Self {
             policies: Arc::new(RwLock::new(default_policies())),
-            kv: Arc::new(RwLock::new(Arc::new(crate::mem::MemKvStore::default()) as Arc<dyn KvJsonStore>)),
+            kv: Arc::new(RwLock::new(
+                Arc::new(crate::mem::MemKvStore::default()) as Arc<dyn KvJsonStore>
+            )),
         }
     }
 
@@ -574,11 +576,13 @@ fn snapshot_tier_deletions(
 
 #[cfg(test)]
 mod tests {
-    use crate::jobs::next_daily_run_secs;
     use super::*;
+    use crate::jobs::next_daily_run_secs;
     use crate::mem::test_state;
     use gyre_common::{Id, Notification, NotificationType};
-    use gyre_domain::{AnalyticsEvent, AttestationBundle, AuditEvent, AuditEventType, MergeAttestation};
+    use gyre_domain::{
+        AnalyticsEvent, AttestationBundle, AuditEvent, AuditEventType, MergeAttestation,
+    };
     use std::sync::Arc;
 
     const DAY: u64 = 86_400;
@@ -606,12 +610,19 @@ mod tests {
         // No cost_entries policy — spec lists exactly these 7 types.
         assert!(!types.contains(&"cost_entries"));
         // Notifications: 365d unread / 90d read split (§5).
-        let notif = policies.iter().find(|p| p.data_type == "notifications").unwrap();
+        let notif = policies
+            .iter()
+            .find(|p| p.data_type == "notifications")
+            .unwrap();
         assert_eq!(notif.max_age_days, 365);
         assert_eq!(notif.max_age_days_read, Some(90));
         // Attestations and snapshots are never age-purged.
         assert_eq!(
-            policies.iter().find(|p| p.data_type == "attestations").unwrap().max_age_days,
+            policies
+                .iter()
+                .find(|p| p.data_type == "attestations")
+                .unwrap()
+                .max_age_days,
             u64::MAX
         );
         // Snapshots carry the spec tier defaults 24h×24 + 7d×7 + 4w×4.
@@ -641,7 +652,11 @@ mod tests {
     fn set_existing_policy() {
         let store = RetentionStore::new();
         store.set_policy("audit_events", 30);
-        let p = store.list().into_iter().find(|p| p.data_type == "audit_events").unwrap();
+        let p = store
+            .list()
+            .into_iter()
+            .find(|p| p.data_type == "audit_events")
+            .unwrap();
         assert_eq!(p.max_age_days, 30);
     }
 
@@ -649,7 +664,11 @@ mod tests {
     fn set_new_policy() {
         let store = RetentionStore::new();
         store.set_policy("custom_type", 7);
-        let p = store.list().into_iter().find(|p| p.data_type == "custom_type").unwrap();
+        let p = store
+            .list()
+            .into_iter()
+            .find(|p| p.data_type == "custom_type")
+            .unwrap();
         assert_eq!(p.max_age_days, 7);
     }
 
@@ -684,7 +703,9 @@ mod tests {
     #[async_trait::async_trait]
     impl KvJsonStore for FailingReadKv {
         async fn kv_set(&self, ns: &str, key: &str, value: String) -> Result<()> {
-            self.writes.lock().push((ns.to_string(), key.to_string(), value));
+            self.writes
+                .lock()
+                .push((ns.to_string(), key.to_string(), value));
             Ok(())
         }
         async fn kv_get(&self, _ns: &str, _key: &str) -> Result<Option<String>> {
@@ -709,7 +730,9 @@ mod tests {
     #[async_trait::async_trait]
     impl KvJsonStore for RecordingKv {
         async fn kv_set(&self, ns: &str, key: &str, value: String) -> Result<()> {
-            self.writes.lock().push((ns.to_string(), key.to_string(), value));
+            self.writes
+                .lock()
+                .push((ns.to_string(), key.to_string(), value));
             Ok(())
         }
         async fn kv_get(&self, _ns: &str, _key: &str) -> Result<Option<String>> {
@@ -804,7 +827,11 @@ mod tests {
             }
         }
         readable
-            .kv_set(KV_NAMESPACE, KV_KEY, serde_json::to_string(&policies).unwrap())
+            .kv_set(
+                KV_NAMESPACE,
+                KV_KEY,
+                serde_json::to_string(&policies).unwrap(),
+            )
             .await
             .unwrap();
 
@@ -960,7 +987,11 @@ mod tests {
             signing_key_id: "kid".to_string(),
             deprecation_notice: None,
         };
-        state.attestation_store.save("mr-ancient", &bundle).await.unwrap();
+        state
+            .attestation_store
+            .save("mr-ancient", &bundle)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -971,20 +1002,28 @@ mod tests {
         state.retention_store.run_cleanup(&state).await.unwrap();
 
         // audit: old gone, new kept.
-        let audit = gyre_ports::AuditRepository::query(&*state.audit, &gyre_ports::AuditQueryFilter { limit: 100, ..Default::default() })
-            .await
-            .unwrap();
+        let audit = gyre_ports::AuditRepository::query(
+            &*state.audit,
+            &gyre_ports::AuditQueryFilter {
+                limit: 100,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         let ids: Vec<&str> = audit.iter().map(|e| e.id.as_str()).collect();
         assert!(!ids.contains(&"a-old"), "old audit event must be purged");
         assert!(ids.contains(&"a-new"), "new audit event must be kept");
 
         // analytics: old gone, new kept.
-        let analytics =
-            gyre_ports::AnalyticsRepository::query(&*state.analytics, None, None, 100)
-                .await
-                .unwrap();
+        let analytics = gyre_ports::AnalyticsRepository::query(&*state.analytics, None, None, 100)
+            .await
+            .unwrap();
         let ids: Vec<&str> = analytics.iter().map(|e| e.id.as_str()).collect();
-        assert!(!ids.contains(&"an-old"), "old analytics event must be purged");
+        assert!(
+            !ids.contains(&"an-old"),
+            "old analytics event must be purged"
+        );
         assert!(ids.contains(&"an-new"), "new analytics event must be kept");
 
         // notifications: old-read and old-unread purged; both new kept.
@@ -992,22 +1031,43 @@ mod tests {
             .await
             .unwrap();
         let ids: Vec<&str> = notifs.iter().map(|n| n.id.as_str()).collect();
-        assert!(!ids.contains(&"n-old-read"), "old read notification must be purged");
-        assert!(!ids.contains(&"n-old-unread"), "old unread notification must be purged");
-        assert!(ids.contains(&"n-new-read"), "recent read notification must be kept");
-        assert!(ids.contains(&"n-new-unread"), "recent unread notification must be kept");
+        assert!(
+            !ids.contains(&"n-old-read"),
+            "old read notification must be purged"
+        );
+        assert!(
+            !ids.contains(&"n-old-unread"),
+            "old unread notification must be purged"
+        );
+        assert!(
+            ids.contains(&"n-new-read"),
+            "recent read notification must be kept"
+        );
+        assert!(
+            ids.contains(&"n-new-unread"),
+            "recent unread notification must be kept"
+        );
 
         // agent_logs: old line drained; new line and unprefixed line kept.
         let logs = state.agent_logs.lock().await;
         let lines = logs.get("agent-1").unwrap();
-        assert_eq!(lines.len(), 2, "old log line must be purged, others kept: {lines:?}");
+        assert_eq!(
+            lines.len(),
+            2,
+            "old log line must be purged, others kept: {lines:?}"
+        );
         assert!(lines.iter().any(|l| l.contains("new line")));
         assert!(lines.iter().any(|l| l.contains("no prefix line")));
         drop(logs);
 
         // attestation: ancient bundle survives (never purged).
         assert!(
-            state.attestation_store.find_by_mr_id("mr-ancient").await.unwrap().is_some(),
+            state
+                .attestation_store
+                .find_by_mr_id("mr-ancient")
+                .await
+                .unwrap()
+                .is_some(),
             "attestations must never be purged"
         );
     }
@@ -1018,25 +1078,39 @@ mod tests {
         seed_state(&state).await;
 
         state.retention_store.run_cleanup(&state).await.unwrap();
-        let after_first = gyre_ports::NotificationRepository::list_recent(&*state.notifications, 100)
-            .await
-            .unwrap()
-            .len();
-        let audit_first = gyre_ports::AuditRepository::query(&*state.audit, &gyre_ports::AuditQueryFilter { limit: 100, ..Default::default() })
-            .await
-            .unwrap()
-            .len();
+        let after_first =
+            gyre_ports::NotificationRepository::list_recent(&*state.notifications, 100)
+                .await
+                .unwrap()
+                .len();
+        let audit_first = gyre_ports::AuditRepository::query(
+            &*state.audit,
+            &gyre_ports::AuditQueryFilter {
+                limit: 100,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .len();
 
         // Second consecutive run must not delete anything new.
         state.retention_store.run_cleanup(&state).await.unwrap();
-        let after_second = gyre_ports::NotificationRepository::list_recent(&*state.notifications, 100)
-            .await
-            .unwrap()
-            .len();
-        let audit_second = gyre_ports::AuditRepository::query(&*state.audit, &gyre_ports::AuditQueryFilter { limit: 100, ..Default::default() })
-            .await
-            .unwrap()
-            .len();
+        let after_second =
+            gyre_ports::NotificationRepository::list_recent(&*state.notifications, 100)
+                .await
+                .unwrap()
+                .len();
+        let audit_second = gyre_ports::AuditRepository::query(
+            &*state.audit,
+            &gyre_ports::AuditQueryFilter {
+                limit: 100,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .len();
         assert_eq!(after_first, after_second);
         assert_eq!(audit_first, audit_second);
     }
@@ -1045,10 +1119,19 @@ mod tests {
     fn agent_log_line_is_old_boundaries() {
         let cutoff = 1000;
         assert!(agent_log_line_is_old("[999] x", cutoff));
-        assert!(!agent_log_line_is_old("[1000] x", cutoff), "cutoff is exclusive");
+        assert!(
+            !agent_log_line_is_old("[1000] x", cutoff),
+            "cutoff is exclusive"
+        );
         assert!(!agent_log_line_is_old("[1001] x", cutoff));
-        assert!(!agent_log_line_is_old("no prefix", cutoff), "unparseable prefix kept");
-        assert!(!agent_log_line_is_old("[abc] x", cutoff), "non-numeric ts kept");
+        assert!(
+            !agent_log_line_is_old("no prefix", cutoff),
+            "unparseable prefix kept"
+        );
+        assert!(
+            !agent_log_line_is_old("[abc] x", cutoff),
+            "non-numeric ts kept"
+        );
         assert!(!agent_log_line_is_old("", cutoff));
     }
 
@@ -1092,10 +1175,16 @@ mod tests {
             );
         }
         for i in 7..10 {
-            assert!(deletions.contains(&format!("d-{i}")), "d-{i} should be deleted");
+            assert!(
+                deletions.contains(&format!("d-{i}")),
+                "d-{i} should be deleted"
+            );
         }
         for name in ["w-4", "w-5"] {
-            assert!(deletions.contains(&name.to_string()), "{name} should be deleted");
+            assert!(
+                deletions.contains(&name.to_string()),
+                "{name} should be deleted"
+            );
         }
         for i in 0..3 {
             assert!(deletions.contains(&format!("ancient-{i}")));
@@ -1117,21 +1206,30 @@ mod tests {
         // 24h old is in the 24h band, exactly 7d in the 7d band, exactly
         // 28d in the 4w band.
         let now = 1_000 * DAY;
-        let tiers = SnapshotTiers { keep_24h: 1, keep_7d: 1, keep_4w: 1 };
+        let tiers = SnapshotTiers {
+            keep_24h: 1,
+            keep_7d: 1,
+            keep_4w: 1,
+        };
         let files = vec![
-            ("a".to_string(), now),             // 0h  — 24h band
-            ("b".to_string(), now - DAY),       // exactly 24h — 24h band
-            ("c".to_string(), now - 2 * DAY),   // 7d band
-            ("d".to_string(), now - 7 * DAY),   // exactly 7d — 7d band
-            ("e".to_string(), now - 8 * DAY),   // 4w band
-            ("f".to_string(), now - 28 * DAY),  // exactly 28d — 4w band
-            ("g".to_string(), now - 29 * DAY),  // older than 4w — deleted
+            ("a".to_string(), now),            // 0h  — 24h band
+            ("b".to_string(), now - DAY),      // exactly 24h — 24h band
+            ("c".to_string(), now - 2 * DAY),  // 7d band
+            ("d".to_string(), now - 7 * DAY),  // exactly 7d — 7d band
+            ("e".to_string(), now - 8 * DAY),  // 4w band
+            ("f".to_string(), now - 28 * DAY), // exactly 28d — 4w band
+            ("g".to_string(), now - 29 * DAY), // older than 4w — deleted
         ];
         let deletions = snapshot_tier_deletions(now, &files, tiers);
         // Each band keeps only its newest ("a", "c", "e"); "g" is past 4w.
         assert_eq!(
             deletions,
-            vec!["b".to_string(), "d".to_string(), "f".to_string(), "g".to_string()]
+            vec![
+                "b".to_string(),
+                "d".to_string(),
+                "f".to_string(),
+                "g".to_string()
+            ]
         );
     }
 
@@ -1146,7 +1244,11 @@ mod tests {
         for i in 0..10 {
             files.push((format!("recent-{i}"), now - i * 3_600));
         }
-        let tiers = SnapshotTiers { keep_24h: 2, keep_7d: 7, keep_4w: 4 };
+        let tiers = SnapshotTiers {
+            keep_24h: 2,
+            keep_7d: 7,
+            keep_4w: 4,
+        };
         let deletions = snapshot_tier_deletions(now, &files, tiers);
 
         // Hard window-cap invariant: at most keep_24h snapshots from the
@@ -1171,9 +1273,7 @@ mod tests {
         assert!(snapshot_tier_deletions(0, &[], SnapshotTiers::spec_default()).is_empty());
         // A handful of recent files — all kept.
         let files: Vec<(String, u64)> = (0..5).map(|i| (format!("f{i}"), 100 - i)).collect();
-        assert!(
-            snapshot_tier_deletions(100, &files, SnapshotTiers::spec_default()).is_empty()
-        );
+        assert!(snapshot_tier_deletions(100, &files, SnapshotTiers::spec_default()).is_empty());
     }
 
     #[test]
@@ -1187,7 +1287,11 @@ mod tests {
         for i in 0..10 {
             files.push((format!("recent-{i}"), now - i * 3_600));
         }
-        let tiers = SnapshotTiers { keep_24h: 2, keep_7d: 7, keep_4w: 4 };
+        let tiers = SnapshotTiers {
+            keep_24h: 2,
+            keep_7d: 7,
+            keep_4w: 4,
+        };
         let deletions = snapshot_tier_deletions(now, &files, tiers);
         assert_eq!(deletions.len(), 8, "deleted: {deletions:?}");
         assert!(!deletions.contains(&"recent-0".to_string()));
@@ -1254,20 +1358,34 @@ mod tests {
             make_file(&dir, &format!("{}.json", now - i * DAY), now - i * DAY);
         }
         for i in 0..6u64 {
-            make_file(&dir, &format!("{}.json", now - (15 + 2 * i) * DAY), now - (15 + 2 * i) * DAY);
+            make_file(
+                &dir,
+                &format!("{}.json", now - (15 + 2 * i) * DAY),
+                now - (15 + 2 * i) * DAY,
+            );
         }
         for i in 0..3u64 {
-            make_file(&dir, &format!("{}.json", now - (40 + i) * DAY), now - (40 + i) * DAY);
+            make_file(
+                &dir,
+                &format!("{}.json", now - (40 + i) * DAY),
+                now - (40 + i) * DAY,
+            );
         }
         make_file(&dir, "README.txt", now - 99 * DAY);
 
         let purged = purge_snapshots_in(dir.clone(), SnapshotTiers::spec_default()).await;
-        assert_eq!(purged, 11, "recent-24..29 (surplus) + month-4..5 + ancient-0..2 deleted");
+        assert_eq!(
+            purged, 11,
+            "recent-24..29 (surplus) + month-4..5 + ancient-0..2 deleted"
+        );
 
         let left = remaining_names(&dir);
         // 32 survivors = 24 + 4 + 4 snapshot bands + README.txt.
         assert_eq!(left.len(), 33, "survivors: {left:?}");
-        assert!(left.contains(&"README.txt".to_string()), "non-json files survive");
+        assert!(
+            left.contains(&"README.txt".to_string()),
+            "non-json files survive"
+        );
         // Hour-band surplus (files 24..29 of the 30 seeded, i.e. aged
         // 12.5h..15.5h — the 6 oldest of the band) did NOT spill into
         // deeper bands — deleted on disk.
@@ -1275,7 +1393,8 @@ mod tests {
             let age = 1_800 + i * 1_800;
             assert!(
                 !left.contains(&format!("{}.json", now - age)),
-                "hour-band surplus file (aged {}s) must be deleted", age
+                "hour-band surplus file (aged {}s) must be deleted",
+                age
             );
         }
         for i in [4u64, 5] {
@@ -1312,7 +1431,10 @@ mod tests {
     async fn purge_snapshots_on_disk_missing_dir_is_noop() {
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("does-not-exist");
-        assert_eq!(purge_snapshots_in(missing, SnapshotTiers::spec_default()).await, 0);
+        assert_eq!(
+            purge_snapshots_in(missing, SnapshotTiers::spec_default()).await,
+            0
+        );
     }
 
     #[tokio::test]
@@ -1327,7 +1449,11 @@ mod tests {
         }
         let purged = purge_snapshots_in(
             dir.clone(),
-            SnapshotTiers { keep_24h: 2, keep_7d: 7, keep_4w: 4 },
+            SnapshotTiers {
+                keep_24h: 2,
+                keep_7d: 7,
+                keep_4w: 4,
+            },
         )
         .await;
         assert_eq!(purged, 8);
@@ -1424,8 +1550,7 @@ mod tests {
     #[test]
     fn validate_policies_rejects_missing_and_unknown_types() {
         // (a) partial list — omission silently disables enforcement.
-        let partial: Vec<RetentionPolicy> =
-            default_policies().into_iter().take(1).collect();
+        let partial: Vec<RetentionPolicy> = default_policies().into_iter().take(1).collect();
         let err = validate_policies(&partial).unwrap_err();
         assert!(err.contains("missing required data_type"), "{err}");
 
@@ -1452,7 +1577,10 @@ mod tests {
 
         // attestations must stay forever.
         let mut not_forever = default_policies();
-        if let Some(p) = not_forever.iter_mut().find(|p| p.data_type == "attestations") {
+        if let Some(p) = not_forever
+            .iter_mut()
+            .find(|p| p.data_type == "attestations")
+        {
             p.max_age_days = 365;
         }
         let err = validate_policies(&not_forever).unwrap_err();
@@ -1483,7 +1611,11 @@ mod tests {
         assert!(err.contains("snapshot_tiers"), "{err}");
         let mut zero_tier = default_policies();
         if let Some(p) = zero_tier.iter_mut().find(|p| p.data_type == "snapshots") {
-            p.snapshot_tiers = Some(SnapshotTiers { keep_24h: 0, keep_7d: 7, keep_4w: 4 });
+            p.snapshot_tiers = Some(SnapshotTiers {
+                keep_24h: 0,
+                keep_7d: 7,
+                keep_4w: 4,
+            });
         }
         let err = validate_policies(&zero_tier).unwrap_err();
         assert!(err.contains("tier counts must each be >= 1"), "{err}");
