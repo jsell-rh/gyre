@@ -3,7 +3,7 @@ title: "Repair verified failure on main f4acb4ebcaf9"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
 progress: ready-for-review
-commits: ["c3cba0a64c71a53f1f708beda365e4a68dff881a"]
+commits: ["c3cba0a64c71a53f1f708beda365e4a68dff881a", "e2cefb81125970f6157874338258c1254fc7177f"]
 ---
 
 ## Required behavior
@@ -72,3 +72,14 @@ Assignment base: `653a696f` (candidate `1a64c45e` exited 130 mid-verification; c
 - **Changed-line gates vs assignment base `653a696f`** (diff = the round-2 production fix, 4 Rust files: `explorer_ws.rs`, `lib.rs`, `mem.rs`, `middleware.rs`): `check-rustfmt-diff.py` → changed lines clean, exit 0 (`rustfmt-diff-at-head.txt`); `check-clippy-diff.py` → changed lines clean, exit 0 (`clippy-diff-at-head.txt`). Standalone gates: `check-arch.sh`, `check-in-memory-state-stores.sh`, `check-task-commit-attribution.sh` all exit 0 (`gates-at-head.txt`).
 - **Transport restriction unchanged (recorded, not a code defect):** the 9 skipped tests and the `explorer_ws_integration` binary (7 tests) require `accept(2)`, which this sandbox's `tcp_listener_probe` reports unsupported (errno 95). The durable CI log remains their passing evidence: 1194 lib tests passed on the host (the 9 skipped here minus `explorer_ws` overlap = the 1194 vs 1191+4 count difference is the filtered-out non-explorer listener tests), and only `explorer_ws_delete_view` failed there — the bug fixed by `c3cba0a6`. **Host verification must still run:** `cargo test -p gyre-server --test explorer_ws_integration` (expects 7/7) and `cargo test --all`.
 - **This round's own attribution:** no product-surface commits added (docs-only continuation); `commits:` frontmatter remains `["c3cba0a64c71a53f1f708beda365e4a68dff881a"]`.
+
+### Round 4 (review repair, attempt `85da3c9b`)
+
+Assignment base: `7c6ac232` (candidate `e84f7c12` — the round-3 ship HEAD — reviewed at checkpoint `79a9111a`; one review finding, category `test`). The merge brought task-155/224/227/228/231/196 work touching other files; `git diff e84f7c12 HEAD -- crates/gyre-server/src/explorer_ws.rs` shows only an upstream `execute_tool` search-filter change (~line 3457) — the round-2 registry production code is untouched.
+
+- **Review finding (valid, reproduced):** `session_registry_is_per_instance_not_process_global` asserted only `live_count()==3` on two registries and discarded the returned shutdown `Notify` handles. Under a process-global slot map — the exact base flaw — registry B's registrations evict A's slots for the same user while the shared map still holds exactly `max` slots, so both count assertions hold and the test passed with the flaw re-introduced. The reviewer's mutation probe demonstrated this directly; the round-2 claim "the regression, now pinned by test" was unsupported.
+- **Fix (`e2cefb81`, test-only, 42+/10-):** the test now keeps reg_a's three shutdown handles and asserts they are never signalled while reg_b fills to the same cap for the same user and evicts its own oldest (4th registration). A positive control asserts reg_b's own evicted session WAS signalled (`notify_one()` stores a permit), proving the negative probe detects real signals — so its passes mean "no signal", not "broken probe". Production code unchanged: the per-instance `ExplorerSessionRegistry` from `c3cba0a6` is correct; only the test was hollow.
+- **Mutation re-verified against the fixed test:** routing `register`/`release`/`live_count` through a process-global static (`MUTATION_SESSIONS: Mutex<Option<HashMap<…>>>`) makes the test FAIL at the regression assertion ("registry B must not signal registry A's sessions") in both default-parallel and `--test-threads=1` modes; reverting the mutation and re-applying only the test fix restores 39/39. Evidence: `mutation2-analysis.md`, `mutation2-single-threaded-result.txt` under `/tmp/stage/review-evidence/`.
+- **Verification at ship HEAD `e2cefb81`:** `cargo test --offline -p gyre-server --lib explorer_ws` → **39/39 pass, exit 0**. Changed-line gates vs review base `e84f7c12`: `check-rustfmt-diff.py` clean, `check-clippy-diff.py` clean (7 Rust files, 1141 existing warnings outside changes). Standalone gates: `check-arch.sh`, `check-in-memory-state-stores.sh`, `check-task-commit-attribution.sh` all exit 0. Evidence: `gates-at-ship.txt`, `head-commit.txt`.
+- **Transport restriction unchanged (recorded, not a code defect):** sandbox `tcp_listener_probe` still reports `accept(2)` ENOTSUP (errno 95), so the integration binary cannot run here. **Host verification must run:** `cargo test -p gyre-server --test explorer_ws_integration` (expects 7/7) and `cargo test --all`.
+- **Attribution:** product-surface commit `e2cefb81` appended to `commits:` frontmatter; check exit 0 at ship HEAD.
