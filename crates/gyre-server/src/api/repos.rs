@@ -611,10 +611,13 @@ pub async fn sync_specs(
         .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
 
     // Per-handler authorization: the repo must belong to a workspace in the
-    // caller's tenant. The global system token (agent_id "system") bypasses —
-    // its tenant_id resolves to the system principal's tenant ("default"),
-    // which is a principal identity, not a real tenant scope (see
-    // hierarchy-enforcement.md §Bootstrap Behavior).
+    // caller's tenant. The genuine system principal (global dev/system
+    // token) bypasses — its tenant_id resolves to the system principal's
+    // tenant ("default"), which is a principal identity, not a real tenant
+    // scope (see hierarchy-enforcement.md §Bootstrap Behavior). The check
+    // uses `is_system_principal()`, NOT an agent_id string match: API-key
+    // auth sets agent_id from the user's display_name, so a user *named*
+    // "system" would otherwise spoof the bypass.
     let workspace = state
         .workspaces
         .find_by_id(&repo.workspace_id)
@@ -625,7 +628,7 @@ pub async fn sync_specs(
                 repo.workspace_id
             ))
         })?;
-    if auth.agent_id != "system" && auth.tenant_id != workspace.tenant_id.to_string() {
+    if !auth.is_system_principal() && auth.tenant_id != workspace.tenant_id.to_string() {
         return Err(ApiError::Forbidden(
             "repo does not belong to the caller's tenant".to_string(),
         ));
@@ -691,6 +694,159 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// Seed tenant t-1 + workspace ws-1 (tenant t-1) with a git repo, and
+    /// create an admin user named "system" (bound to a DIFFERENT tenant t-2)
+    /// whose API key authenticates with agent_id "system" — the spoof shape
+    /// the task-099 containment gates must reject.
+    async fn seed_cross_tenant_fixture(
+        state: &std::sync::Arc<crate::AppState>,
+    ) -> (String, String) {
+        // Tenant t-1 with workspace ws-1 holding repo gyre-demo.
+        let t1 = gyre_domain::Tenant::new(gyre_common::Id::new("t-1"), "Acme", "acme", 0);
+        state.tenants.create(&t1).await.unwrap();
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-1"),
+            gyre_common::Id::new("t-1"),
+            "Platform",
+            "platform",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        // A real bare git repo so sync_specs' rev-parse can resolve a HEAD.
+        let dir = tempfile::tempdir().unwrap();
+        let repo_path = dir.path().join("demo.git");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        let ok = std::process::Command::new("git")
+            .args(["init", "--bare", "-b", "main"])
+            .arg(&repo_path)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git init --bare failed");
+        // One commit on main: without a HEAD, rev-parse fails and the test
+        // would exercise the wrong branch.
+        let work = tempfile::tempdir().unwrap();
+        let ok = std::process::Command::new("git")
+            .args(["-C", work.path().to_str().unwrap(), "init", "-b", "main"])
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git init failed");
+        let ok = std::process::Command::new("git")
+            .args([
+                "-C",
+                work.path().to_str().unwrap(),
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git commit failed");
+        let url = repo_path.to_str().unwrap().to_string();
+        let ok = std::process::Command::new("git")
+            .args(["-C", work.path().to_str().unwrap(), "push", &url, "HEAD:refs/heads/main"])
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git push failed");
+        // Hold the tempdirs alive for the test's duration.
+        std::mem::forget(dir);
+        std::mem::forget(work);
+
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-demo"),
+            gyre_common::Id::new("ws-1"),
+            "gyre-demo",
+            repo_path.to_str().unwrap(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        // Admin user named "system" in a different tenant (t-2): the API-key
+        // path sets agent_id from display_name, so a bare agent_id string
+        // match would treat this principal as the system token.
+        let t2 = gyre_domain::Tenant::new(gyre_common::Id::new("t-2"), "Other", "other", 0);
+        state.tenants.create(&t2).await.unwrap();
+        let mut user = gyre_domain::User::new(
+            gyre_common::Id::new("u-sys"),
+            "local:system",
+            "system",
+            0,
+        );
+        user.roles = vec![gyre_domain::UserRole::Admin];
+        user.tenant_id = Some(gyre_common::Id::new("t-2"));
+        state.users.create(&user).await.unwrap();
+        let raw_key = "gyre_test_spoof_key";
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(raw_key), &user.id, "test")
+            .await
+            .unwrap();
+
+        (repo.id.to_string(), raw_key.to_string())
+    }
+
+    #[tokio::test]
+    async fn sync_specs_rejects_api_key_user_named_system_from_other_tenant() {
+        // Task-099 revision: the containment gates must key on
+        // is_system_principal() (global token: agent_id "system" AND
+        // user_id None), not an agent_id string match — API-key auth sets
+        // agent_id from display_name, so an admin-created user NAMED
+        // "system" would otherwise spoof the system bypass.
+        let state = test_state();
+        let (repo_id, raw_key) = seed_cross_tenant_fixture(&state).await;
+        let app = crate::api::api_router().with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/sync-specs"))
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // The user's tenant (t-2) does not own the repo's workspace tenant
+        // (t-1): Forbidden, not the system bypass.
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn sync_specs_allows_global_system_token_cross_tenant() {
+        // The genuine system principal (global token) is the bootstrap
+        // principal: it may sync a repo whose workspace lives in any tenant
+        // (gyre bootstrap --dev creates tenant "dev" while the system
+        // principal's tenant is "default").
+        let state = test_state();
+        let (repo_id, _key) = seed_cross_tenant_fixture(&state).await;
+        let app = crate::api::api_router().with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/sync-specs"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["head_sha"].as_str().is_some_and(|s| !s.is_empty()));
     }
 
     #[tokio::test]

@@ -329,12 +329,26 @@ pub struct AuthenticatedAgent {
     ///   default tenant (`system_principal_tenant`).
     pub tenant_id: String,
     /// Raw JWT claims for ABAC evaluation (G6).
-    /// - JWT auth (Keycloak or agent JWT): populated with the full claims object.
     /// - Global token or API key: `None` — ABAC checks are bypassed for these.
+    /// - JWT auth (Keycloak or agent JWT): populated with the full claims object.
     pub jwt_claims: Option<serde_json::Value>,
     /// True when auth was performed via the deprecated `?token=` query parameter.
     /// Used by WebSocket handlers to send a deprecation warning to the client.
     pub deprecated_token_auth: bool,
+}
+
+impl AuthenticatedAgent {
+    /// True only for the genuine system principal: the global dev/system
+    /// token. NOT a plain `agent_id == "system"` string match — API-key and
+    /// Keycloak-JWT paths set `agent_id` from `user.display_name` /
+    /// `preferred_username`, so a user *named* "system" would spoof every
+    /// call site that gates on that string (abac_middleware's ABAC bypass,
+    /// the task-099 tenant-containment gates). The system principal has no
+    /// backing user row: `user_id.is_none()` is the discriminator an
+    /// attacker cannot forge (their key/JWT resolves to their own user id).
+    pub fn is_system_principal(&self) -> bool {
+        self.agent_id == "system" && self.user_id.is_none()
+    }
 }
 
 // -- JWT claim types ----------------------------------------------------------
@@ -1253,7 +1267,7 @@ mod tests {
     use std::sync::Arc;
     use tower::ServiceExt;
 
-    use super::{test_helpers::*, AuthenticatedAgent, WsTicketStore};
+    use super::{system_principal_tenant, test_helpers::*, AuthenticatedAgent, WsTicketStore};
     use gyre_domain::UserRole;
 
     async fn authenticated_handler(
@@ -2231,5 +2245,47 @@ mod tests {
         // Ticket is a UUID, not a Bearer token or API key
         assert!(ticket.len() == 36, "Ticket should be a UUID format");
         assert!(!ticket.starts_with("ey"), "Ticket must not be a JWT");
+    }
+
+    #[test]
+    fn is_system_principal_discriminates_spoof_shapes() {
+        // Task-099 revision: API-key and Keycloak-JWT paths set agent_id
+        // from user.display_name / preferred_username, so a user NAMED
+        // "system" would spoof every `agent_id == "system"` gate (ABAC
+        // bypass, tenant-containment bypasses) if the check were a plain
+        // string match. `user_id.is_none()` is the discriminator a
+        // spoofing user cannot forge: their key/JWT resolves to their own
+        // user id.
+        let global_token = AuthenticatedAgent {
+            agent_id: "system".to_string(),
+            user_id: None,
+            roles: vec![UserRole::Admin],
+            tenant_id: system_principal_tenant(),
+            jwt_claims: None,
+            deprecated_token_auth: false,
+        };
+        assert!(global_token.is_system_principal());
+
+        // API-key user named "system": agent_id matches, user_id doesn't.
+        let spoofed = AuthenticatedAgent {
+            agent_id: "system".to_string(),
+            user_id: Some(gyre_common::Id::new("u-sys")),
+            roles: vec![UserRole::Admin],
+            tenant_id: "t-2".to_string(),
+            jwt_claims: None,
+            deprecated_token_auth: false,
+        };
+        assert!(!spoofed.is_system_principal());
+
+        // Ordinary user: neither field matches.
+        let ordinary = AuthenticatedAgent {
+            agent_id: "jsell".to_string(),
+            user_id: Some(gyre_common::Id::new("u-1")),
+            roles: vec![UserRole::Admin],
+            tenant_id: "t-1".to_string(),
+            jwt_claims: None,
+            deprecated_token_auth: false,
+        };
+        assert!(!ordinary.is_system_principal());
     }
 }

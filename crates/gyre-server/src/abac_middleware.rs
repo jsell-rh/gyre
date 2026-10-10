@@ -807,8 +807,11 @@ pub async fn abac_middleware(
 
     let req = Request::from_parts(parts, body);
 
-    // System token bypasses ABAC entirely.
-    if auth.agent_id == "system" {
+    // System token bypasses ABAC entirely. `is_system_principal()` (not an
+    // agent_id string match): API-key/JWT auth sets agent_id from the user's
+    // display_name, so a user named "system" would otherwise spoof this
+    // bypass (task-099 F1 revision).
+    if auth.is_system_principal() {
         return next.run(req).await;
     }
 

@@ -582,7 +582,7 @@ pub async fn spawn_workspace_orchestrator(
         .find_by_id(&ws_id)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("workspace {workspace_id} not found")))?;
-    if auth.agent_id != "system" && auth.tenant_id != workspace.tenant_id.to_string() {
+    if !auth.is_system_principal() && auth.tenant_id != workspace.tenant_id.to_string() {
         return Err(ApiError::Forbidden(
             "workspace does not belong to the caller's tenant".to_string(),
         ));
@@ -710,7 +710,7 @@ pub async fn spawn_repo_orchestrator(
         .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
     let workspace = state.workspaces.find_by_id(&repo.workspace_id).await?;
     if let Some(ws) = workspace {
-        if auth.agent_id != "system" && auth.tenant_id != ws.tenant_id.to_string() {
+        if !auth.is_system_principal() && auth.tenant_id != ws.tenant_id.to_string() {
             return Err(ApiError::Forbidden(
                 "repo does not belong to the caller's tenant".to_string(),
             ));

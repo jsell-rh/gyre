@@ -73,21 +73,45 @@ fn service_header(service: &str) -> Vec<u8> {
 ///
 /// Resolution steps:
 ///   1. Look up the workspace by slug under the caller's tenant.
+///      For the genuine system principal (the global dev/system token —
+///      `is_system_principal()`, never a bare agent_id string match), a
+///      tenant-scoped miss falls back to a slug-only lookup: the system
+///      principal is the bootstrap principal that created the tenant and
+///      workspace (gyre bootstrap --dev creates tenant "dev" while the
+///      system principal's tenant_id stays "default"), so a strict filter
+///      would 404 the bootstrap flow's own push. The fallback grants
+///      nothing the token lacks elsewhere (it bypasses ABAC on REST), and
+///      the repo is still resolved inside the workspace the slug names.
 ///   2. Look up the repo by name within that workspace.
 async fn resolve_repo_by_slug(
     state: &Arc<AppState>,
-    tenant_id: &str,
+    auth: &crate::auth::AuthenticatedAgent,
     workspace_slug: &str,
     repo_name: &str,
 ) -> Result<gyre_domain::Repository, Response> {
     let repo_name = repo_name.strip_suffix(".git").unwrap_or(repo_name);
-    let tid = Id::new(tenant_id);
 
-    let workspace = state
+    let mut workspace = state
         .workspaces
-        .find_by_slug(&tid, workspace_slug)
+        .find_by_slug(&Id::new(&auth.tenant_id), workspace_slug)
         .await
-        .map_err(|e| git_err(format!("db error: {e}")))?
+        .map_err(|e| git_err(format!("db error: {e}")))?;
+    if workspace.is_none() && auth.is_system_principal() {
+        // System-principal fallback (see doc comment). `find_by_slug` is
+        // tenant-scoped, so the fallback scans by slug alone. The system
+        // principal is the bootstrap principal that created the tenant and
+        // workspace; a strict tenant filter would 404 the bootstrap flow's
+        // own push (gyre bootstrap --dev creates tenant "dev" while the
+        // system principal's tenant_id stays "default").
+        workspace = state
+            .workspaces
+            .list()
+            .await
+            .map_err(|e| git_err(format!("db error: {e}")))?
+            .into_iter()
+            .find(|ws| ws.slug == workspace_slug);
+    }
+    let workspace = workspace
         .ok_or_else(|| not_found(format!("workspace '{workspace_slug}' not found")))?;
 
     state
@@ -105,11 +129,11 @@ async fn resolve_repo_by_slug(
 /// Resolve to just the filesystem path (convenience wrapper).
 async fn resolve_repo_path_by_slug(
     state: &Arc<AppState>,
-    tenant_id: &str,
+    auth: &crate::auth::AuthenticatedAgent,
     workspace_slug: &str,
     repo_name: &str,
 ) -> Result<String, Response> {
-    resolve_repo_by_slug(state, tenant_id, workspace_slug, repo_name)
+    resolve_repo_by_slug(state, auth, workspace_slug, repo_name)
         .await
         .map(|r| r.path)
 }
@@ -132,7 +156,6 @@ pub struct GitPath {
 pub struct InfoRefsQuery {
     service: String,
 }
-
 pub async fn git_info_refs(
     State(state): State<Arc<AppState>>,
     Path(GitPath {
@@ -152,12 +175,11 @@ pub async fn git_info_refs(
 
     let content_type = format!("application/x-{service}-advertisement");
 
-    let repo_path =
-        match resolve_repo_path_by_slug(&state, &auth.tenant_id, &workspace_slug, &repo_name).await
-        {
-            Ok(p) => p,
-            Err(r) => return r,
-        };
+    let repo_path = match resolve_repo_path_by_slug(&state, &auth, &workspace_slug, &repo_name).await
+    {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
 
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
 
@@ -206,12 +228,11 @@ pub async fn git_upload_pack(
     auth: AuthenticatedAgent,
     req: Request,
 ) -> Response {
-    let repo_path =
-        match resolve_repo_path_by_slug(&state, &auth.tenant_id, &workspace_slug, &repo_name).await
-        {
-            Ok(p) => p,
-            Err(r) => return r,
-        };
+    let repo_path = match resolve_repo_path_by_slug(&state, &auth, &workspace_slug, &repo_name).await
+    {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
 
     let body_bytes = match axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024).await {
         Ok(b) => b,
@@ -245,11 +266,10 @@ pub async fn git_receive_pack(
     auth: AuthenticatedAgent,
     req: Request,
 ) -> Response {
-    let resolved =
-        match resolve_repo_by_slug(&state, &auth.tenant_id, &workspace_slug, &repo_name).await {
-            Ok(r) => r,
-            Err(r) => return r,
-        };
+    let resolved = match resolve_repo_by_slug(&state, &auth, &workspace_slug, &repo_name).await {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
     if resolved.is_mirror {
         warn!(
             agent_id = %auth.agent_id,
@@ -3486,6 +3506,115 @@ mod tests {
             TEST_REPO_NAME.to_string(),
             repo_path_str,
         )
+    }
+
+    #[tokio::test]
+    async fn system_token_resolves_workspace_in_foreign_tenant() {
+        // Dev-mode bootstrap shape (task-099): `gyre bootstrap --dev`
+        // creates tenant "dev" and a workspace under it, but the global
+        // system token's tenant_id is "default". The git smart-HTTP push
+        // the bootstrap flow performs must still resolve the workspace —
+        // via the system-principal slug-only fallback — or the dev-mode
+        // spec-registry step 404s forever while reporting success-ish
+        // output. Non-system principals keep the strict tenant filter.
+        let state = test_state();
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("dev-demo.git");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        let ok = std::process::Command::new("git")
+            .args(["init", "--bare", "-b", "main"])
+            .arg(&repo_path)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git init --bare failed");
+
+        // Workspace under a NON-"default" tenant — the dev-mode topology.
+        let ws = Workspace {
+            id: Id::new("ws-dev"),
+            tenant_id: Id::new("t-dev"),
+            name: "Default".to_string(),
+            slug: "default".to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Guided,
+            llm_model: None,
+            created_at: 0,
+            compute_target_id: None,
+        };
+        state.workspaces.create(&ws).await.unwrap();
+        let repo = Repository::new(
+            Id::new("repo-dev"),
+            Id::new("ws-dev"),
+            "gyre-demo",
+            repo_path.to_str().unwrap(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        let app = Router::new()
+            .route(
+                "/git/:workspace_slug/:repo_name/info/refs",
+                get(git_info_refs),
+            )
+            .with_state(state.clone());
+
+        // System token (tenant "default") resolves the foreign-tenant
+        // workspace via the fallback.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/git/default/gyre-demo/info/refs?service=git-upload-pack"
+                    ))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "system token must resolve the dev-mode (foreign-tenant) workspace"
+        );
+
+        // A user principal from an unrelated tenant is still contained.
+        // (agent token path: Agent role, tenant "default".)
+        let mut user = gyre_domain::User::new(
+            Id::new("u-x"),
+            "ext-x",
+            "someone",
+            0,
+        );
+        user.tenant_id = Some(Id::new("t-other"));
+        state.users.create(&user).await.unwrap();
+        let raw_key = "gyre_test_git_foreign_key";
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(raw_key), &user.id, "test")
+            .await
+            .unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/git/default/gyre-demo/info/refs?service=git-upload-pack"
+                    ))
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "non-system principals must keep the strict tenant filter"
+        );
     }
 
     fn auth_header() -> &'static str {
