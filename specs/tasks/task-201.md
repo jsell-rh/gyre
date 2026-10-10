@@ -7,7 +7,7 @@ coverage_sections:
   - "search.md §Search Index"
   - "search.md §Technology"
   - "search.md §Index Schema"
-commits: ["a1e4f6b8847d594bbd052f691cbb755dbf2c3cb2", "519eb1366d4ec18ead1edefec7ea09eebda1370f", "a970c75633d707e30e04fb8b6b6d176c9feeda32", "88c715dae50edc514db3beef6f57034c25416f52", "f154a73cae223f5f1ff5d315d52ca66830ec4fdd", "4b2a7b0730aed3a341aff3fd59ac70e4f31dd9d9", "06149be2c21de14e8a3c310cbe9dc6251e49bdfd", "a550da3739d298561cde9eaace74ae7d6fdd0097", "88ab2a656b4477456b83c1788ff22b6e2d91b2ec", "e4cf94f49c2222cda5030e4bd52270c7e721a068", "4319f2bb63eb94de4fc819ebdeaeb9ca6d30e4e8", "0c980dda5cfdd9cebe56cdabe4c1a0db74da56e0"]
+commits: ["a1e4f6b8847d594bbd052f691cbb755dbf2c3cb2", "519eb1366d4ec18ead1edefec7ea09eebda1370f", "a970c75633d707e30e04fb8b6b6d176c9feeda32", "88c715dae50edc514db3beef6f57034c25416f52", "f154a73cae223f5f1ff5d315d52ca66830ec4fdd", "4b2a7b0730aed3a341aff3fd59ac70e4f31dd9d9", "06149be2c21de14e8a3c310cbe9dc6251e49bdfd", "a550da3739d298561cde9eaace74ae7d6fdd0097", "88ab2a656b4477456b83c1788ff22b6e2d91b2ec", "e4cf94f49c2222cda5030e4bd52270c7e721a068", "4319f2bb63eb94de4fc819ebdeaeb9ca6d30e4e8", "0c980dda5cfdd9cebe56cdabe4c1a0db74da56e0", "3b3fb0c7cd36d2d1d9e6cf58592bddbcd2ce3326"]
 ---
 
 ## Spec Excerpt
@@ -114,10 +114,9 @@ filter/limit/upsert semantics. Zero external search dependencies.
 (tasks.rs, merge_requests.rs, agents.rs) are unchanged and now exercise the
 durable backend under `GYRE_DATABASE_URL=sqlite://…`.
 
-**Test evidence** — re-verified at the recovered-and-merged head (base
-`f4acb4eb` merged via `8ee82dd9`; logs:
-`/tmp/stage/review-evidence/task-201-recovered-verification.txt`,
-`task-201-wiring-verification.txt`):
+**Test evidence** — re-verified at this recovery's head (base `6bf777a6`
+merged via `207e9c6a`, gate repair `3b3fb0c7`; evidence:
+`/tmp/stage/review-evidence/task-201-clippy-gate.txt`):
 - `cargo test -p gyre-adapters --lib sqlite::search` — 8 passed. Includes
   schema assertion against `sqlite_master` (exact columns + tokenizer), porter
   stemming (`running` matches `runs` — fails under any substring/LIKE
@@ -129,16 +128,25 @@ durable backend under `GYRE_DATABASE_URL=sqlite://…`.
   that the real POST /api/v1/tasks → GET /api/v1/search flow returns stemmed
   matches with snippet markers, positive score, and facet round-trip. Uses
   `tower::ServiceExt::oneshot` so it stays valid where loopback TCP is
-  unavailable. This suite also exercises `gyre-server` (incl. the
-  `personas.rs` code the base merge brought in) building clean with the
-  search backend.
+  unavailable.
+- `python3 scripts/check-clippy-diff.py 6bf777a6` — exit 0, changed lines
+  clean. This recovery repaired a real gate failure: the previous
+  struct-level `#[allow(clippy::redundant_field_names)]` on the
+  `QueryableByName` row carriers does NOT suppress the lint —
+  diesel_derives 2.3.7 generates `Self { field: field }` in a dummy module
+  that does not inherit the item's lint level, so 34 warnings fired on the
+  new files (reproduced in isolation; struct-, field-, and statement-level
+  allows all fail; diesel_derives 2.3.10 is lint-clean but the repo lock
+  pins 2.3.7). Fixed with a module-scoped `#![allow]` in each search.rs,
+  commented with the derive origin.
+- `python3 scripts/check-rustfmt-diff.py 6bf777a6` — exit 0.
 - `bash scripts/check-arch.sh` — pass. Mechanical invariants all pass:
   `check-migration-sql-portability`, `check-migration-versions`,
   `check-in-memory-state-stores`, `check-relative-path-defaults`,
   `check-fail-open-ref-resolution`, `check-lossy-secret-conversion`,
   `check-inert-enforcement`, `check-task-commit-attribution` (the last after
-  recording base commit `f4acb4eb` in task-189's frontmatter — the commit is
-  task-189-labeled but was missing from that task's `commits:` list on the
+  recording base commit `6bf777a6` in task-200's frontmatter — the commit is
+  task-200-labeled but was missing from that task's `commits:` list on the
   pristine base; pre-existing drift, fixed in the same change).
 
 **Host-verification note (sandbox transport restriction):** this sandbox
@@ -147,7 +155,8 @@ binding `api_integration` suite cannot run here. Required on a listener-capable
 host / GitHub CI: `cargo test --all` and
 `cargo test -p gyre-server --test api_integration`.
 
-Commits: this is the second recovery of the task-201 branch. Implementation
+Commits: this is the third recovery of the task-201 branch. Implementation
 lives in the `wip(task-201)`/checkpoint SHAs recorded in this file's
-`commits:` frontmatter; base `f4acb4eb` merged via `8ee82dd9`; the
-task-189 attribution fix and this evidence refresh are the recovery commit.
+`commits:` frontmatter; base `6bf777a6` merged via `207e9c6a`; the clippy
+gate repair, the task-200 attribution fix, and this evidence refresh are
+commit `3b3fb0c7`.
