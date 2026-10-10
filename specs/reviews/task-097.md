@@ -110,3 +110,34 @@ The task meets the spec section as scoped (Principle, Architecture, Secret Scopi
 **progress: complete**
 
 — Reviewer, 2026-10-09
+
+## Round 4 (independent review, fresh model)
+
+Assignment: base `8c2d1775` → candidate `83f24867`. Worktree verified clean and identical to the candidate before probing; all 13 frontmatter commits confirmed ancestors of the candidate. Diff vs base touches only the four task-owned product files plus drain-down-only exemption/gate files and specs — nothing else.
+
+### Independent verification (fresh `CARGO_TARGET_DIR=/tmp/gyre-review-target`, `SKIP_WEB_BUILD=1`)
+
+- `cargo test -p gyre-common --lib secret` → **5 passed**.
+- `cargo test -p gyre-adapters --lib sqlite::secret` → **17 passed** (encrypted-at-rest with ciphertext≠plaintext and no plaintext-byte substring; tampered-ciphertext and wrong-key both fail; hex/passphrase key derivation; auto-key persists across reopen; tenant isolation; scope cascade with nearest-wins and expiry exclusion).
+- `cargo test -p gyre-server --lib mem::secret_contract_tests` → **4 passed**.
+- `cargo test -p gyre-server --lib api::spawn::tests` → **34 passed**, including all five secret-delivery tests by name (all-scopes delivery through a real spawned child process, nearest-scope-wins, unresolvable-workspace skip with the LEAK-secret negative assertion, non-UTF-8 skip with sibling delivery, resolve-error-continue).
+
+### Mutation probes (repeated independently this round; logs and mutant sources under `/tmp/stage/review-evidence/`)
+
+- **F3 mutant** (reintroduced `"default"` tenant fabrication on the `None` arm): `spawn_unresolvable_workspace_skips_secret_resolution` **FAILED**, panic message shows `GYRE_CRED_LEAK=leaked` reached the child env — the exact leak scenario is pinned.
+- **F4 mutant** (`String::from_utf8_lossy` in place of the fallible conversion): `spawn_non_utf8_secret_skipped_others_delivered` **FAILED**.
+- **F1 mutant** (mem duplicate guard deleted): both reject-tests **FAILED**, both allow-tests still pass — the guard is exactly what the contract tests pin.
+
+All mutants restored byte-identical (md5-verified); `git status --porcelain` empty and `git diff --quiet` clean vs HEAD afterward; mem contract suite re-run green on the restored tree.
+
+### Gates
+
+All 19 mechanical `scripts/check-*.sh` gates run this round → OK, including the three whose frozen counts this task lowered (mem-port-contracts 1→0, lossy-secret-conversion 1→0, fabricated-scope-defaults 8→6 — pure drain-downs, no check weakened). `check-rustfmt-diff.py` vs base `8c2d1775` → OK.
+
+### Verdict
+
+The six §7 coverage sections are backed by real production behavior: domain types without a value field, a six-method port with an enforced duplicate contract, AES-256-GCM at rest with authenticated-decryption failure coverage, a correctly-numbered indexed migration, and a spawn path that resolves scoped secrets with cascade/nearest-wins/expiry/tenant-isolation semantics and no fabricated tenant, no lossy secret mangling, and no hardcoded credential injection. Tests kill the bugs they claim to pin. No findings.
+
+**approved** (verdict at `/tmp/stage/verdict.json`)
+
+— Reviewer, 2026-10-10
