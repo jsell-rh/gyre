@@ -1,7 +1,8 @@
 ---
 title: "Repair verified failure on main 05709c242509"
-progress: ready-for-review
+spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
+progress: ready-for-review
 commits: []
 ---
 
@@ -58,15 +59,54 @@ GYRE_BASELINE_FAILURE_JSON {"base": "05709c242509b89214876339b3c463ede3a31b60", 
 
 ```
 
-
 ## Shipped
 
-**Reproduction at assignment HEAD** (tree = base `05709c242509b89214876339b3c463ede3a31b60` + untracked task file): `bash scripts/check-task-commit-attribution.sh` exited 1 listing `05709c24 task-196 feat(task-196): Ground Briefing Q&A in real briefing data with sources and history validation` — a product-surface commit (touches `crates/gyre-server/src/api/graph.rs`, `web/src/components/Briefing.svelte`, `web/src/lib/InlineChat.svelte`, `web/src/__tests__/Briefing.test.js`) missing from `specs/tasks/task-196.md`'s `commits:` frontmatter. Root cause is the squash-drift class recorded by tasks 213/219/222/224: the squashed landing commit cannot contain its own SHA, so the task's recorded list stayed one entry short and the landing surface was invisible to review scoping (task-095 R3-F4 flaw class). Evidence: `task-228-attribution-after.txt` (failure block quoted verbatim in the baseline log above).
+**Contract restoration (this round, finding 46fad40e, category=contract):** the
+prior round's checkpointed task file dropped the assigned contract's
+`spec_ref: "GOAL.md — real implementations and meaningful verification"`
+frontmatter line, changing the requirement generation (dev-contract.py hashes
+`title`/`spec_ref`/`depends_on`/`coverage_sections` + non-operational prose).
+The contract is restored byte-for-byte (verified below); `progress: not-started`
+→ `ready-for-review` and this `## Shipped` section are the only operational
+additions. Product-source repair from the prior round is preserved untouched:
+`git diff 05709c242509b89214876339b3c463ede3a31b60 HEAD -- scripts/ crates/
+web/src/` is empty; the branch delta vs base is exactly `specs/tasks/task-196.md`
+(1 line) + this task file.
 
-**Repair**: appended the full SHA `05709c242509b89214876339b3c463ede3a31b60` to `specs/tasks/task-196.md`'s `commits:` frontmatter, joining the 3 SHAs already recorded from the task's branch (`3b90956c`, `abcfff04`, `88b57180`). This is the check's own documented remedy — same repair shape as task-224's `a11ba8d3` for the task-068 drift and task-219's `e96d25ab` for the task-200 drift: the landing SHA is appended, preserving the branch SHAs so review scoping never shrinks. No exemptions added; `scripts/task-commit-attribution-exemptions.txt` untouched at its frozen 3-entry baseline (`01493c88 task-097`, `17c81d5a task-072`, `a8d036f4 task-091`); no check, skip, or gate weakened; no Rust/JS source changed (`git diff 05709c242509b89214876339b3c463ede3a31b60 -- . ':(exclude)specs/tasks/task-228.md'` touches only `specs/tasks/task-196.md`, 1 line).
+**Reproduction:** with the repair removed (task-196 frontmatter SHA stripped via
+sed mutation), `bash scripts/check-task-commit-attribution.sh` exits 1 with the
+identical violation: `05709c24 task-196 feat(task-196): Ground Briefing Q&A in
+real briefing data with sources and history validation`. Evidence:
+`/tmp/stage/review-evidence/task-228-r2-attribution-repro.txt`.
 
-**Probe after repair**: exit 0 — `OK: every task-labeled product-surface commit is recorded in its task's commits: frontmatter (or exempted legacy drift).` Evidence: `task-228-attribution-after.txt`.
+**Repair (1 line, `specs/tasks/task-196.md:8`):** appended the full SHA
+`05709c242509b89214876339b3c463ede3a31b60` to the existing `commits:` list,
+preserving the 3 branch SHAs (`3b90956c`, `abcfff04`, `88b57180`). The check's
+own documented remedy — same repair shape as task-224's `a11ba8d3` (task-068
+drift) and task-219's `e96d25ab` (task-200 drift): the squashed landing commit
+cannot contain its own SHA, so the recorded list stayed one entry short and the
+landing surface was invisible to review scoping (task-095 R3-F4 flaw class).
+No exemptions added — `scripts/task-commit-attribution-exemptions.txt` frozen at
+its 3-entry baseline (`01493c88 task-097`, `17c81d5a task-072`, `a8d036f4
+task-091`); no gate/skip/check weakened; no Rust/JS source changed.
 
-**Mutation check (test-the-repair)**: with the repair present, removing the SHA via `git stash` re-fails the gate with the identical violation (exit 1), and restoring it re-passes (exit 0) — the pass is attributable to the recorded SHA, not gate drift. Evidence: `task-228-mutation-check.txt`.
+**Probe after repair:** exit 0 — `OK: every task-labeled product-surface commit
+is recorded in its task's commits: frontmatter (or exempted legacy drift).`
+Evidence: `/tmp/stage/review-evidence/task-228-r2-attribution-after-repair.txt`.
 
-**Attribution for this task**: `python3 scripts/dev-attribution.py task-228` produces no change, so `commits: []` is correct: this repair round adds only task records (`specs/tasks/task-196.md`, `specs/tasks/task-228.md`), no product surface.
+**Mutation check (test-the-repair):** repair present → exit 0; SHA removed
+(mutated out via sed) → identical FAIL exit 1; repair restored → exit 0 again.
+The pass is attributable to the recorded SHA, not gate drift. Evidence: both
+files above (repro = mutated state, after-repair = restored state).
+
+**Attribution for this task:** `python3 scripts/dev-attribution.py task-228`
+derives an empty list — the branch's only commit (`edb132c3`, pipeline
+checkpoint) touches only `specs/tasks/`, no product surface — so `commits: []`
+is attribution-canonical for this specs-only repair round.
+
+**Contract-hash invariance proof:** `dev-contract.py requirement_parts()` maps
+this task file (before vs after this round's operational additions) to
+identical `(front, prose)` — the restoration round changed nothing normative;
+the prior round's contract finding (dropped `spec_ref`) is repaired. Full
+command and output:
+`/tmp/stage/review-evidence/task-228-r2-contract-hash-proof.txt`.
