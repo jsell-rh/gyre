@@ -365,10 +365,13 @@ pub async fn admin_reassign_agent(
     let tasks = state.tasks.list_by_assignee(&agent.id).await?;
     let now = now_secs();
     for mut task in tasks {
+        // §2.4 replay prevention: only a real reassignment (different
+        // assignee) bumps the deployment generation — a no-op reassign to
+        // the same agent must not invalidate valid SignedInputs.
+        if task.assigned_to.as_ref() != Some(&target.id) {
+            task.generation = task.generation.saturating_add(1);
+        }
         task.assigned_to = Some(target.id.clone());
-        // §2.4 replay prevention: reassignment bumps the deployment generation,
-        // invalidating SignedInputs pinned to the previous generation.
-        task.generation = task.generation.saturating_add(1);
         task.updated_at = now;
         state.tasks.update(&task).await?;
     }
