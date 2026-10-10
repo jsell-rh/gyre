@@ -70,89 +70,76 @@ system-explorer.md §9 defines executable spec assertions — HTML comments embe
 
 ## Acceptance Criteria
 
-- [x] `<!-- gyre:assert -->` comments parsed from spec markdown
-- [x] `no_dependency` assertion validates against knowledge graph
-- [x] `implements` assertion validates against knowledge graph
-- [x] `all_have` assertion validates against knowledge graph
-- [x] Failed assertions create priority-9 Inbox notifications
-- [x] `GET /repos/:id/specs/:path/assertions` returns assertion results
-- [x] Assertion results shown in spec inline view (green ✓ / red ✗)
-- [x] Tests pass
+- [ ] `<!-- gyre:assert -->` comments parsed from spec markdown
+- [ ] `no_dependency` assertion validates against knowledge graph
+- [ ] `implements` assertion validates against knowledge graph
+- [ ] `all_have` assertion validates against knowledge graph
+- [ ] Failed assertions create priority-9 Inbox notifications
+- [ ] `GET /repos/:id/specs/:path/assertions` returns assertion results
+- [ ] Assertion results shown in spec inline view (green ✓ / red ✗)
+- [ ] Tests pass
 
 ## Agent Instructions
 
 Read `system-explorer.md` §9 "Executable Spec Assertions" for the full specification. The knowledge graph API is in `crates/gyre-server/src/api/graph.rs` — check how nodes and edges are queried. The spec content is retrieved via `GET /api/v1/specs/:path?repo_id=` — check `crates/gyre-server/src/api/specs.rs`. For Inbox notifications, check the existing notification creation pattern in `crates/gyre-domain/` (search for priority levels and notification types). The new endpoint should be registered in `crates/gyre-server/src/api/mod.rs`. Verify the route path matches this task before implementing: `GET /api/v1/repos/:id/specs/:path/assertions`.
 
+
 ## Shipped
 
-Recovered interrupted checkpoint (assignment exited 130 mid-test-run; the
-recovery checkpoint had reset progress to `not-started`). Implementation was
-already complete and independently reviewed at `51f29e95` (verdict `complete`,
-mutation-verified — specs/reviews/task-180.md); core product files are
-byte-identical to that reviewed HEAD. This round verified the post-review
-drift and completed the interrupted test runs on current HEAD `3cd87b88`.
+Repair round for the `contract` finding (candidate `2f6cc2dc`): the earlier
+rounds marked the Acceptance Criteria checkboxes `[x]`, which the pipeline's
+contract checker reads as a change to the assigned requirements
+(`scripts/pipeline/stages.py` hashes the prose including checkbox state; only
+`## Shipped`/`## Review` sections and `progress:` are excluded). This round
+restores the assigned contract verbatim (checkboxes untouched) and completes
+it with a substantive repair to the §9 implementation itself.
 
-Actual behavior (production code, no stubs):
+Contract-state acceptance criteria are satisfied by production code (independ
+ently reviewed at `51f29e95`, verdict `complete`, mutation-verified in
+`specs/reviews/task-180.md`): the `<!-- gyre:assert ... -->` parser and
+evaluator (`gyre-domain/src/spec_assertions.rs`), post-push checking on all
+three push paths with persistence via the
+`SpecAssertionResultRepository` port (SQLite + PostgreSQL + mem),
+priority-9 `SpecAssertionFailure` Inbox notifications,
+`GET /api/v1/repos/:id/specs/:path/assertions`, and the ExplorerView inline
+✔/✘ rendering.
 
-- **Parser** (`gyre-domain/src/spec_assertions.rs`): `parse_assertions`
-  extracts `<!-- gyre:assert ... -->` comments from spec markdown; attribute
-  form covers all three §9 types (`no_dependency`, `implements`, `all_have`),
-  plus the richer predicate form. Malformed assertions are skipped, not
-  silently passed.
-- **Evaluator**: real graph queries over `GraphNode`/`GraphEdge` —
-  `no_dependency` fails on any DependsOn edge `from→to`; `implements` fails
-  when no `Implements` edge `subject→trait` exists; `all_have` fails when any
-  node of `node_type` lacks the property and fails closed on zero subject
-  nodes (no vacuous pass) or unknown property.
-- **Push integration**: `check_spec_assertions_on_push` runs after knowledge
-  graph extraction on all three push paths (git HTTP receive-pack, mirror
-  sync, initial mirror clone), persists full pass+fail result sets keyed by
-  `(repo_id, spec_path, line, commit_sha)` via the
-  `SpecAssertionResultRepository` port (SQLite + PostgreSQL adapters,
-  migration 000056, mem adapter with identical replace semantics), and
-  suppresses duplicate notifications for same-commit re-extraction.
-- **Inbox notifications**: each failed assertion creates priority-9
-  `SpecAssertionFailure` notifications for Admin/Developer/Owner workspace
-  members, with `entity_ref` linking the first failing spec so Inbox
-  "Update Spec" opens it.
-- **API**: `GET /api/v1/repos/:id/specs/:path/assertions` returns persisted
-  last-push results (URL-encoded path, unknown repo 404s);
-  `POST /api/v1/repos/:id/spec-assertions/check` performs a live check. Both
-  ABAC-resolver mapped (the check route was moved OUT of the frozen exemption
-  file — count 53→52).
-- **Inline view**: ExplorerView.svelte renders per-assertion `✔`/`✘` with
-  pass/fail styling and an `N failing, M passing` summary; live check falls
-  back to persisted GET results.
+Defects found and fixed this round:
 
-Post-review drift, verified this round (checkpoint commit `7b182b57`):
+1. **Fenced examples parsed as live assertions.** `parse_assertions` had no
+   code-fence awareness, so the `gyre:assert` examples inside fenced blocks —
+   including system-explorer.md §9's own documentation block and
+   specs/tasks/task-014.md's excerpt — were evaluated against the knowledge
+   graph on every push. Those examples reference entities that do not exist
+   (`SearchService`/`FullTextPort`, `all_have Endpoint auth_middleware`), so
+   any repo documenting the feature would generate failing assertions and
+   priority-9 notifications forever. The parser now tracks ``` / ~~~ fences
+   and only extracts assertions from prose. (Reported line numbers remain
+   absolute across fences.)
 
-- `git_http.rs::process_spec_lifecycle` no longer fabricates
-  `ws_id = "default"` when the repo lookup fails — it warns and skips the
-  workspace-scoped emission (task-097 F3 class). The matching exemption entry
-  was removed from `fabricated-scope-defaults-exemptions.txt` (frozen count
-  7→6) and the gate passes.
-- `cargo fmt` normalization applied to the two task-touched files
-  (`git_http.rs`, `graph_extraction.rs`); both are rustfmt-clean now.
+2. **Stale rows contradicted the port's replace contract.** All three
+   adapters early-returned on an empty batch, and the push check skipped
+   files without assertions — so a spec whose assertions were removed (or a
+   deleted spec file) kept serving its old rows through
+   `GET .../assertions` as the "latest push's check", exactly what the
+   `save_results` delete-then-insert transaction and the migration's
+   comment promise cannot happen. The port gained `delete_by_spec` and
+   `list_spec_paths`; the push check now clears rows for specs that no
+   longer carry assertions and sweeps stored paths absent from the pushed
+   tree (deleted/renamed specs). Present-path registration happens before
+   the content read so an unreadable-but-present spec is never swept.
 
-Test evidence (this round, HEAD `3cd87b88`, CARGO_TARGET_DIR=/tmp/gyre-target):
+Test evidence (CARGO_TARGET_DIR=/tmp/gyre-target, this round):
 
-- `cargo test -p gyre-domain --lib spec_assertions` — 48 passed, 0 failed.
-- `cargo test -p gyre-server --lib spec_assertions` — 6 passed, 0 failed.
-- `cargo test -p gyre-server --lib push_check` — 2 passed, 0 failed
-  (priority-9 notification creation + persistence through the push path).
-- `cargo test -p gyre-server --lib delete_repo_removes` — 1 passed, 0 failed
-  (repo delete cleans orphaned assertion rows).
-- `cargo test -p gyre-server --lib git_http` — 36 passed, 1 failed:
-  `git_clone_empty_repo_via_smart_http` panics with
-  `getpeername() errno 95: Operation not supported` — the documented sandbox
-  TCP-listener restriction (/tmp/stage/capabilities.json), not a code defect;
-  neither checkpoint change touches the clone path. Recorded for host
-  verification; exact-head GitHub checks remain with verification/publication.
-- `cd web && npm ci && npx vitest run src/__tests__/Inbox.test.js` —
-  28 passed, 0 failed.
-- Invariant gates pass: check-arch, check-mem-port-contracts,
-  check-abac-route-registry, check-migration-versions,
-  check-migration-sql-portability, check-dead-message-kinds,
-  check-in-memory-state-stores, check-inert-enforcement,
-  check-fabricated-scope-defaults.
-- Evidence: `/tmp/stage/review-evidence/task180-final-round-verification.md`.
+- `cargo test -p gyre-domain --lib spec_assertions` — includes new
+  `parse_skips_assertions_inside_fenced_code_blocks`,
+  `parse_skips_assertions_inside_tilde_fences`,
+  `parse_fence_line_numbers_stay_absolute`.
+- `cargo test -p gyre-server --lib push_check` — includes new
+  `push_check_sweeps_stale_results_when_assertions_or_specs_vanish`
+  (emptied spec, deleted spec, unchanged spec).
+- Exact counts recorded in `/tmp/stage/review-evidence/`.
+
+Task contract integrity: `dev-contract.py::generation` of this file equals
+the assigned contract's generation (verified before commit; boxes stay
+unchecked — completion is reported through `progress:` and this section).

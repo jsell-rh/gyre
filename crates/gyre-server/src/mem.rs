@@ -2722,6 +2722,13 @@ impl gyre_ports::SpecAssertionResultRepository for MemSpecAssertionResultReposit
         Ok(())
     }
 
+    async fn delete_by_spec(&self, repo_id: &str, spec_path: &str) -> Result<()> {
+        self.store.lock().await.retain(|r| {
+            !(r.repo_id == repo_id && r.spec_path == spec_path)
+        });
+        Ok(())
+    }
+
     async fn list_by_spec(
         &self,
         repo_id: &str,
@@ -2737,6 +2744,20 @@ impl gyre_ports::SpecAssertionResultRepository for MemSpecAssertionResultReposit
             .collect();
         rows.sort_by_key(|r| r.line);
         Ok(rows)
+    }
+
+    async fn list_spec_paths(&self, repo_id: &str) -> Result<Vec<String>> {
+        let mut paths: Vec<String> = self
+            .store
+            .lock()
+            .await
+            .iter()
+            .filter(|r| r.repo_id == repo_id)
+            .map(|r| r.spec_path.clone())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
     }
 
     async fn delete_by_repo(&self, repo_id: &str) -> Result<()> {

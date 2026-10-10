@@ -917,21 +917,18 @@ async fn check_spec_assertions_on_push(
     let mut md_files = Vec::new();
     walk_md_files(&specs_dir, &mut md_files);
 
+    // Spec paths present in the pushed tree (whether or not they still carry
+    // assertions) — the complement of stored rows is swept below so deleted
+    // or renamed specs do not keep serving stale results.
+    let mut present_spec_paths: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
     for md_path in &md_files {
-        let content = match std::fs::read_to_string(md_path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        // Quick check: skip files without assertion comments.
-        if !content.contains("gyre:assert") {
-            continue;
-        }
-
         // Canonical spec identity: path relative to `specs/` (no `specs/`
         // prefix) — the same form the spec ledger, `GET /api/v1/specs/:path`,
         // and the assertion-results endpoint use. `md_path` always starts at
-        // `repo_root/specs/`, so strip both.
+        // `repo_root/specs/`, so strip both. Registered before the read so
+        // an unreadable-but-present spec is never swept as deleted.
         let relative_path = md_path
             .strip_prefix(repo_root)
             .unwrap_or(md_path)
@@ -941,9 +938,29 @@ async fn check_spec_assertions_on_push(
             .strip_prefix("specs/")
             .unwrap_or(&relative_path)
             .to_string();
+        present_spec_paths.insert(spec_path.clone());
+
+        let content = match std::fs::read_to_string(md_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
 
         let parsed = spec_assertions::parse_assertions(&content);
         if parsed.is_empty() {
+            // The spec no longer carries assertions (they were removed since
+            // the last push, or the marker string only appears inside fenced
+            // documentation examples). Replace semantics require the stored
+            // set to reflect this: drop any prior rows for the spec.
+            if let Err(e) = results_repo
+                .delete_by_spec(repo_id.as_str(), &spec_path)
+                .await
+            {
+                warn!(
+                    %repo_id,
+                    spec_path = %spec_path,
+                    "failed to clear stale spec assertion results: {e}"
+                );
+            }
             continue;
         }
 
@@ -1005,6 +1022,24 @@ async fn check_spec_assertions_on_push(
             !prior_results.is_empty() && prior_results.iter().all(|r| r.commit_sha == commit_sha);
         if already_recorded_for_commit {
             specs_already_notified.insert(spec_path);
+        }
+    }
+
+    // Replace semantics for specs that no longer exist in the pushed tree:
+    // a deleted or renamed spec file leaves stored rows that the GET
+    // endpoint would keep serving as the spec's "latest check". Sweep them.
+    if let Ok(stored_paths) = results_repo.list_spec_paths(repo_id.as_str()).await {
+        for stale in stored_paths {
+            if present_spec_paths.contains(&stale) {
+                continue;
+            }
+            if let Err(e) = results_repo.delete_by_spec(repo_id.as_str(), &stale).await {
+                warn!(
+                    %repo_id,
+                    spec_path = %stale,
+                    "failed to sweep stale spec assertion results: {e}"
+                );
+            }
         }
     }
 
@@ -1528,6 +1563,126 @@ mod tests {
         );
         assert_eq!(replaced[0].assertion_type, "all_have");
         assert_eq!(replaced[0].commit_sha, "deadbeef2");
+    }
+
+    #[tokio::test]
+    async fn push_check_sweeps_stale_results_when_assertions_or_specs_vanish() {
+        use crate::mem::MemSpecAssertionResultRepository;
+        use gyre_common::graph::{SpecConfidence, Visibility};
+        use gyre_ports::SpecAssertionResultRepository as _;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let specs_dir = dir.path().join("specs").join("system");
+        std::fs::create_dir_all(&specs_dir).unwrap();
+        std::fs::write(
+            specs_dir.join("kept.md"),
+            "<!-- gyre:assert type=\"no_dependency\" from=\"gyre-domain\" to=\"gyre-adapters\" -->\n",
+        )
+        .unwrap();
+        std::fs::write(
+            specs_dir.join("emptied.md"),
+            "<!-- gyre:assert type=\"no_dependency\" from=\"gyre-domain\" to=\"gyre-adapters\" -->\n",
+        )
+        .unwrap();
+        std::fs::write(
+            specs_dir.join("doomed.md"),
+            "<!-- gyre:assert type=\"no_dependency\" from=\"gyre-domain\" to=\"gyre-adapters\" -->\n",
+        )
+        .unwrap();
+
+        let repo_id = Id::new("repo-sweep");
+        let mk_node = |id: &str, name: &str| GraphNode {
+            id: Id::new(id),
+            repo_id: repo_id.clone(),
+            node_type: NodeType::Module,
+            name: name.to_string(),
+            qualified_name: name.to_string(),
+            file_path: format!("crates/{name}/src/lib.rs"),
+            line_start: 1,
+            line_end: 10,
+            visibility: Visibility::Public,
+            doc_comment: None,
+            spec_path: None,
+            spec_paths: vec![],
+            spec_confidence: SpecConfidence::None,
+            last_modified_sha: "abc".to_string(),
+            last_modified_by: None,
+            last_modified_at: 0,
+            created_sha: "abc".to_string(),
+            created_at: 0,
+            complexity: None,
+            churn_count_30d: 0,
+            test_coverage: None,
+            first_seen_at: 0,
+            last_seen_at: 0,
+            deleted_at: None,
+            test_node: false,
+            spec_approved_at: None,
+            milestone_completed_at: None,
+        };
+        let nodes = vec![mk_node("nd", "gyre-domain"), mk_node("na", "gyre-adapters")];
+
+        let results_repo = MemSpecAssertionResultRepository::default();
+        check_spec_assertions_on_push(
+            dir.path(),
+            &nodes,
+            &[],
+            &repo_id,
+            "sha1",
+            None,
+            None,
+            &results_repo,
+        )
+        .await
+        .unwrap();
+
+        for path in ["system/kept.md", "system/emptied.md", "system/doomed.md"] {
+            let stored = results_repo.list_by_spec(repo_id.as_str(), path).await.unwrap();
+            assert_eq!(stored.len(), 1, "{path} seeded with one result");
+        }
+
+        // Next push: `emptied.md` keeps its file but loses its assertions;
+        // `doomed.md` is deleted entirely; `kept.md` is unchanged.
+        std::fs::write(specs_dir.join("emptied.md"), "# Emptied\n\nNo assertions remain.\n").unwrap();
+        std::fs::remove_file(specs_dir.join("doomed.md")).unwrap();
+
+        check_spec_assertions_on_push(
+            dir.path(),
+            &nodes,
+            &[],
+            &repo_id,
+            "sha2",
+            None,
+            None,
+            &results_repo,
+        )
+        .await
+        .unwrap();
+
+        let kept = results_repo
+            .list_by_spec(repo_id.as_str(), "system/kept.md")
+            .await
+            .unwrap();
+        assert_eq!(kept.len(), 1, "unchanged spec keeps its results");
+        assert_eq!(kept[0].commit_sha, "sha2", "unchanged spec is re-checked");
+
+        let emptied = results_repo
+            .list_by_spec(repo_id.as_str(), "system/emptied.md")
+            .await
+            .unwrap();
+        assert!(
+            emptied.is_empty(),
+            "spec whose assertions were all removed must not keep stale rows"
+        );
+
+        let doomed = results_repo
+            .list_by_spec(repo_id.as_str(), "system/doomed.md")
+            .await
+            .unwrap();
+        assert!(
+            doomed.is_empty(),
+            "deleted spec file must not keep stale rows"
+        );
     }
 
     #[tokio::test]

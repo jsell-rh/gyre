@@ -243,14 +243,35 @@ pub struct SpecAssertionResult {
 // ── Parsing ─────────────────────────────────────────────────────────────────
 
 /// Parse all `<!-- gyre:assert ... -->` comments from markdown content.
+///
+/// Comments inside fenced code blocks (``` or ~~~) are documentation
+/// examples, not live assertions — the §9 spec text itself demonstrates the
+/// syntax inside a fence, and evaluating examples against the knowledge
+/// graph would fail every push that documents the feature. Only comments in
+/// prose are assertions.
 pub fn parse_assertions(content: &str) -> Vec<ParsedAssertion> {
     let mut results = Vec::new();
+    let mut in_fence = false;
 
     for (line_idx, line) in content.lines().enumerate() {
-        let trimmed = line.trim();
+        // Track fenced code blocks: a line starting with three or more
+        // backticks or tildes toggles fence state (CommonMark simplified —
+        // fences are never nested in spec markdown and are always closed).
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            // Any fence line toggles fence state: openers may carry an info
+            // string ("```markdown"), closers are bare fence characters. A
+            // spec that documents the gyre:assert syntax inside a fence
+            // (§9's own example) must not have its examples evaluated.
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
 
         // Look for <!-- gyre:assert ... -->
-        if let Some(rest) = strip_assertion_comment(trimmed) {
+        if let Some(rest) = strip_assertion_comment(trimmed.trim()) {
             if let Some(assertion) = parse_single_assertion(rest, line_idx + 1) {
                 results.push(assertion);
             }
@@ -1146,6 +1167,47 @@ Some explanation.
 "#;
         let assertions = parse_assertions(content);
         assert_eq!(assertions.len(), 1);
+    }
+
+    #[test]
+    fn parse_skips_assertions_inside_fenced_code_blocks() {
+        // §9 documents the syntax inside a fenced block; those examples are
+        // documentation, not live assertions — evaluating them would fail
+        // every push of a repo that merely documents the feature.
+        let content = r#"## Invariants
+
+```markdown
+<!-- gyre:assert type="no_dependency" from="gyre-domain" to="gyre-adapters" -->
+<!-- gyre:assert type="implements" subject="SearchService" trait="FullTextPort" -->
+```
+
+<!-- gyre:assert type="all_have" node_type="Endpoint" property="auth_middleware" -->
+"#;
+        let assertions = parse_assertions(content);
+        assert_eq!(assertions.len(), 1, "only the unfenced assertion is live");
+        assert_eq!(
+            assertions[0].subject,
+            Subject::NodesOfType(NodeType::Endpoint)
+        );
+        assert_eq!(assertions[0].line, 8);
+    }
+
+    #[test]
+    fn parse_skips_assertions_inside_tilde_fences() {
+        let content = "~~~\n<!-- gyre:assert type=\"no_dependency\" from=\"a\" to=\"b\" -->\n~~~\n<!-- gyre:assert type=\"implements\" subject=\"S\" trait=\"T\" -->\n";
+        let assertions = parse_assertions(content);
+        assert_eq!(assertions.len(), 1, "tilde fence hides its contents");
+        assert_eq!(assertions[0].subject, Subject::Type("S".to_string()));
+    }
+
+    #[test]
+    fn parse_fence_line_numbers_stay_absolute() {
+        // Lines inside fences still count toward line numbering, so a live
+        // assertion after a fenced block reports its true line.
+        let content = "```markdown\n<!-- gyre:assert type=\"implements\" subject=\"X\" trait=\"Y\" -->\n```\n\n<!-- gyre:assert type=\"implements\" subject=\"S\" trait=\"T\" -->\n";
+        let assertions = parse_assertions(content);
+        assert_eq!(assertions.len(), 1);
+        assert_eq!(assertions[0].line, 5);
     }
 
     #[test]

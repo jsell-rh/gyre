@@ -109,6 +109,24 @@ impl SpecAssertionResultRepository for PgStorage {
         .await?
     }
 
+    async fn delete_by_spec(&self, repo_id: &str, spec_path: &str) -> Result<()> {
+        let pool = Arc::clone(&self.pool);
+        let repo_id = repo_id.to_string();
+        let spec_path = spec_path.to_string();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut conn = pool.get().context("get db connection")?;
+            diesel::delete(
+                spec_assertion_results::table
+                    .filter(spec_assertion_results::repo_id.eq(&repo_id))
+                    .filter(spec_assertion_results::spec_path.eq(&spec_path)),
+            )
+            .execute(&mut conn)
+            .context("delete stale spec assertion results by spec")?;
+            Ok(())
+        })
+        .await?
+    }
+
     async fn list_by_spec(&self, repo_id: &str, spec_path: &str) -> Result<Vec<SpecAssertionResult>> {
         let pool = Arc::clone(&self.pool);
         let repo_id = repo_id.to_string();
@@ -122,6 +140,23 @@ impl SpecAssertionResultRepository for PgStorage {
                 .load::<SpecAssertionResultRow>(&mut conn)
                 .context("list spec assertion results by spec")?;
             Ok(rows.into_iter().map(SpecAssertionResultRow::into_record).collect())
+        })
+        .await?
+    }
+
+    async fn list_spec_paths(&self, repo_id: &str) -> Result<Vec<String>> {
+        use diesel::dsl::Distinct;
+        let pool = Arc::clone(&self.pool);
+        let repo_id = repo_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
+            let mut conn = pool.get().context("get db connection")?;
+            let paths = spec_assertion_results::table
+                .filter(spec_assertion_results::repo_id.eq(&repo_id))
+                .select(Distinct(spec_assertion_results::spec_path))
+                .order(spec_assertion_results::spec_path.asc())
+                .load::<String>(&mut conn)
+                .context("list spec assertion result spec paths")?;
+            Ok(paths)
         })
         .await?
     }
