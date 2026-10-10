@@ -92,11 +92,15 @@ stubbing `escalate_findings`) from the interrupted assignment's checkpoint.
 
 ## Test evidence
 
-- Kill-test (mutant in place, `escalate_findings` no-op): 3 tests fail with
-  `every finding must be escalated, not merely logged` /
-  `one escalation per finding` / `escalation must be emitted, not skipped` —
-  `spec_lifecycle_patrol` + endpoint tests detect skipped escalation
-  (`/tmp/stage/review-evidence/task204-killtest-mutant.log`, exit 101).
+- Kill-test (mutant in place, `escalate_findings` no-op): 3 tests fail —
+  `flags_and_escalates_only_the_accountability_gaps`
+  (`every finding must be escalated, not merely logged`),
+  `spec_lifecycle_patrol_endpoint_flags_and_escalates`
+  (`one escalation per finding`), and `workspaceless_finding_broadcasts`
+  (timeout guard `workspaceless finding must still dispatch an escalation
+  (within 5s)`) — `spec_lifecycle_patrol` + endpoint tests detect skipped
+  escalation, exit 101
+  (`/tmp/stage/review-evidence/task204-killtest-mutant.log`).
 - Clean run: `cargo test -p gyre-server --lib spec_lifecycle_patrol` — 11
   passed, 0 failed (incl. stale/fresh, Backlog/non-Backlog, orphaned/covered,
   cancelled-task coverage, threshold-override, broadcast routing tests).
@@ -109,8 +113,16 @@ stubbing `escalate_findings`) from the interrupted assignment's checkpoint.
   19 passed.
 - `bash scripts/check-arch.sh` passed; `check-abac-route-registry.sh`,
   `check-fabricated-scope-defaults.sh`, `check-scope-literal-defaults.sh`,
-  `check-mem-port-contracts.sh`, `check-dead-message-kinds.sh` all passed.
+  `check-mem-port-contracts.sh`, `check-dead-message-kinds.sh`,
+  `check-task-commit-attribution.sh` (full history available) all passed.
 - HTTP checks deferred to host verification: this sandbox's listener probe is
   unsupported (`accept` → `Errno 95`, see `/tmp/stage/capabilities.json`), so
   the route was verified through the in-process router tests above; exact-head
   GitHub CI checks remain mandatory for the deployed transport check.
+- Re-verified at the merged head `c33058b5` (base `653a696f` + candidate
+  `f5e093a8`; the base merge touched no `crates/` code, so the
+  previously-passing clippy-diff gate result carries over unchanged): all
+  probes above re-run clean on the cold build, kill-test re-applied from the
+  retained stash and reverted — evidence regenerated under
+  `/tmp/stage/review-evidence/` (module/endpoint/regression logs,
+  per-check-script exit codes).
