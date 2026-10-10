@@ -75,7 +75,7 @@ pub enum NotificationType {
     /// workspace Owner and tenant Admin are notified
     /// (user-management.md §Who Gets Notified).
     SecurityFinding,
- }
+}
 
 impl NotificationType {
     /// Returns the canonical string used for DB storage.
