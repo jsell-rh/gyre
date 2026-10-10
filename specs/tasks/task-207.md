@@ -5,8 +5,8 @@ depends_on: []
 progress: needs-revision
 coverage_sections:
   - "business-continuity.md §5. Data Retention Policies"
-commits: ["e57cbd2c13b1f4470940769ffdbf6d693d9066f1", "16e7c07affb1d27f3732c6208501607fb446957b", "5f58013e398a726ecb2d583e1e3294f042c353bf", "2b1fa2ae823dfc912d85cbd41d4e9069a9cc02b4", "3a3c727b1df1480c95b3c0929cc3297d2e5ae161", "d69ef5baf6ccae0700b4aaf74499189080333f17", "dbc06219e0500d33c08b0c578f6c9e3679f7bc88", "6a908460b4d37971938a6f9cc4bfca182fefd592"]
-review: specs/reviews/task-207.md
+commits: ["e57cbd2c13b1f4470940769ffdbf6d693d9066f1", "16e7c07affb1d27f3732c6208501607fb446957b", "5f58013e398a726ecb2d583e1e3294f042c353bf", "2b1fa2ae823dfc912d85cbd41d4e9069a9cc02b4", "3a3c727b1df1480c95b3c0929cc3297d2e5ae161", "d69ef5baf6ccae0700b4aaf74499189080333f17", "dbc06219e0500d33c08b0c578f6c9e3679f7bc88", "6a908460b4d37971938a6f9cc4bfca182fefd592", "d365e47f8a4b8e2a0f7a77c953e0ab89f67ee7b1"]
+progress: ready-for-review
 ---
 
 ## Spec Excerpt
@@ -95,3 +95,59 @@ No new tests for already-working behavior (endpoint CRUD shape, job registration
 - Investigate actual persistence for activity_events and agent_logs before assuming; if `activity_events` truly live only in the bounded `TelemetryBuffer` ring, that boundedness is the enforcement — document it in code and the coverage note rather than inventing a fake purge.
 - Do not soften the spec: `02:00 UTC` nightly, all 7 data types, read/unread notification split, tiered snapshot policy are all mandatory. If any piece is genuinely infeasible, stop and flag `needs-revision` with specifics rather than shipping a hollow implementation.
 - On completion: run `cargo test --all`, update this file's frontmatter (`progress: ready-for-review`, `commits`), update the coverage row, and run `bash scripts/update-coverage-summary.sh`.
+
+## Shipped
+
+Revision round closing review findings F1–F4 (spec round 1) on top of the
+original 8 commits; all seven data types from business-continuity.md §5 are
+now genuinely enforced.
+
+- **F1 — activity_events (90d)**: enforced by `TelemetryBuffer::purge_older_than`
+  (gyre-common/src/message.rs:471), a hard age eviction across all workspace
+  buffers, driven from `run_cleanup` with the policy cutoff (epoch-ms). The
+  previously-dead `ActivityRepository` port and its SQLite/Postgres adapters
+  were removed — the activity_events table has no writer; live activity data
+  is the telemetry ring, so the ring is where the purge belongs. The
+  `unwired-port-methods` exemption entry was retired.
+- **F2 — snapshot tiers configurable**: tier counts now live on the
+  `snapshots` policy row (`SnapshotTiers { keep_24h, keep_7d, keep_4w }`) and
+  flow from `PUT /admin/retention` into `purge_snapshots`; band membership is
+  age-fixed (≤24h / 1–7d / 7–28d) with no spillover, so the per-window caps
+  cannot be defeated by cascade.
+- **F3 — disk-level tests**: `purge_snapshots_on_disk_both_directions`
+  (real tempdir, real mtimes, exact survivor set), idempotency,
+  missing-dir no-op, and configured-tiers end-to-end.
+- **F4 — PUT validation**: `validate_policies` requires exactly the 7 spec
+  types each exactly once, `max_age_days >= 1`, the notifications read/unread
+  split (read ≤ unread), snapshot tier counts ≥ 1, and attestations
+  `u64::MAX`; invalid lists are rejected 400 with policies untouched.
+- Also shipped in this round: corrupt-blob warn + self-heal, KV read-failure
+  never overwrites the stored blob, durable `update()` (write completes
+  before the 204), and the byte-slice-truncation guard fix
+  (`take(1)` instead of `Vec::truncate`).
+
+**Test evidence (this sandbox, SKIP_WEB_BUILD=1, isolated target dir):**
+
+- `cargo test -p gyre-server retention` → **29 passed, 0 failed**
+  (retention.rs unit tests incl. all F1–F4 tests + admin.rs endpoint oneshot
+  tests: defaults / update / reject-incomplete / RBAC).
+- `cargo test -p gyre-adapters delete_older_than` → **3 passed, 0 failed**
+  (SQLite audit/analytics/notification both-direction purges).
+- `cargo test -p gyre-common telemetry_buffer_purge` → **1 passed, 0 failed**
+  (both directions).
+- `scripts/check-arch.sh`, `check-unwired-port-methods.sh`,
+  `check-byte-slice-truncation.sh`, `check-in-memory-state-stores.sh`,
+  `check-dead-message-kinds.sh`, `check-mem-port-contracts.sh`,
+  `check-lossy-secret-conversion.sh`, `check-inert-enforcement.sh`,
+  `check-fail-open-ref-resolution.sh` → all OK.
+
+**Transport restriction (not a code defect):** the HTTP integration test
+`admin_retention_list_and_update` spawns a loopback TCP listener
+(`Ctx::new`, api_integration.rs:48). This sandbox cannot `accept()` on TCP
+sockets (errno 95, per /tmp/stage/capabilities.json) — every test in that
+file fails identically regardless of the code under test, including
+unrelated endpoints. The endpoint contract is covered by the in-process
+oneshot tests above; the listener-based test must run on host/CI
+(`cargo test -p gyre-server --test api_integration
+admin_retention_list_and_update`). Recorded in
+/tmp/stage/review-evidence/task-207-transport-restriction.md.
