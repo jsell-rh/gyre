@@ -3,7 +3,7 @@ title: "Canonical Navigation — Scope-Aware Content Routing"
 spec_ref: "ui-navigation.md §2, §3, §7, §10"
 depends_on:
   - task-082
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "ui-navigation.md §2 Workspace Home"
   - "ui-navigation.md §3 Repo Mode"
@@ -181,3 +181,11 @@ checkboxes in this file, which the pipeline's `requirement_parts` treats as
 contract prose and flags as a contract change. The assigned text is restored
 byte-for-byte here; only `progress:`, `commits:`, and this `## Shipped`
 section (an operational section) differ from the assignment.
+
+## Review
+
+### Review changed source code
+
+- web/src/__tests__/__review_probe_CWH_envelope.test.js
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
