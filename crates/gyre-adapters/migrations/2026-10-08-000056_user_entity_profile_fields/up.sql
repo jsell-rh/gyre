@@ -20,7 +20,7 @@
 ALTER TABLE users ADD COLUMN username TEXT;
 ALTER TABLE users ADD COLUMN avatar_url TEXT;
 ALTER TABLE users ADD COLUMN preferences TEXT;
-ALTER TABLE users ADD COLUMN last_login_at INTEGER;
+ALTER TABLE users ADD COLUMN last_login_at BIGINT;
 ALTER TABLE users ADD COLUMN tenant_id TEXT;
 ALTER TABLE users ADD COLUMN global_role TEXT NOT NULL DEFAULT 'Member';
 
