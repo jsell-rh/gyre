@@ -208,6 +208,44 @@ this task's frontmatter. Evidence:
 /tmp/stage/review-evidence/task-172-verification-round5.md plus the gate
 output in task-172-gate-round5.txt.
 
+**Round-6 contract repair (2026-10-10, fresh sandbox):** repaired the
+contract finding e1fc94a929a244d884da6711bf3d93b4. Root cause: the prior
+candidate's `dd9a7159` regenerated SUMMARY.md wholesale with
+`scripts/update-coverage-summary.sh`, which recomputed every row from the
+matrix files — including two rows belonging to other tasks' contracts whose
+matrix state had drifted ahead of the stale 2026-10-05 summary on main
+(business-continuity 1 assigned/4 implemented → 0/5; human-system-interface
+19 n/a/20 assigned → 20/19). Editing another task's coverage/assignment
+rows from the task-172 branch is what changed assigned requirements
+outside this task. Repair: restored both out-of-scope rows to their base
+values; TOTAL now reflects only this task's in-scope ui-layout delta
+(assigned 314→313, implemented 108→109); `Last updated` advanced to
+2026-10-10. The working tree held the fresh-assignment reset of this task
+file and was restored from HEAD (recovering the 471563d7 attribution).
+No source changes were needed or made: EditorSplit.svelte, its test,
+locales/en.json, and web/dist are byte-identical to the inherited head.
+Re-verified from scratch in this sandbox: `npm ci` (169 locked packages) →
+EditorSplit + DetailPanel suites **66/66 passed** (note: bare `npx vitest`
+resolves an unrelated global vite and fails to transform — the locked
+local `./node_modules/.bin/vitest` must be used); `npx vite build` — more
+precisely `./node_modules/.bin/vite build` — reproduced the committed dist
+byte-exactly (sha256 of every dist file identical pre/post); i18n audit —
+all 51 `$t()` keys used by the component are defined in en.json
+(nested-JSON), zero missing, zero dead. Contract re-verified: task-172.md
+normative sections (Spec Excerpt, Implementation Plan, Acceptance
+Criteria, Agent Instructions) byte-identical to base f4acb4eb (the file is
+unchanged between creation 1cb1509b and base); `git diff f4acb4eb
+--name-only` touches only this task's own files. Attribution gate at HEAD:
+exit 1 with the sole finding `f4acb4eb task-189` — identical failure in a
+clean worktree checked out at f4acb4eb; the drift originates at the base
+on main, outside this task's contract (the prior contract violation was
+editing another task's frontmatter from here; task-189's ledger is
+repaired on main by its own task). All 5 task-172 product commits remain
+recorded in this task's frontmatter. Evidence:
+/tmp/stage/review-evidence/task-172-verification-round6.md, plus gate
+outputs (task-172-gate-round6.txt, task-172-gate-base-round6.txt) and
+test/dist-hash artifacts.
+
 
 ## Agent Instructions
 
