@@ -4366,26 +4366,58 @@ Attempt 2:
         let _ = s2;
     }
 
-    #[test]
-    fn session_registry_is_per_instance_not_process_global() {
+    #[tokio::test]
+    async fn session_registry_is_per_instance_not_process_global() {
         // Two independent registries (one per AppState / test server) must not
         // evict each other's sessions: this is the regression the integration
         // binary caught (all 7 tests share the `default:system` user; a
-        // process-global map evicted live sessions across servers).
+        // process-global map evicted live sessions across servers). The
+        // eviction signal — the observable that closes the socket — is what
+        // must be pinned, not just slot counts: with a process-global map,
+        // registry B's registrations evict A's slots for the same user while
+        // the shared map still holds exactly `max` slots, so count-only
+        // assertions pass either way.
         let reg_a = ExplorerSessionRegistry::new();
         let reg_b = ExplorerSessionRegistry::new();
         let user = "default:system";
 
-        // Both registries fill to the cap concurrently.
-        reg_a.register(user, 3);
-        reg_a.register(user, 3);
-        reg_a.register(user, 3);
-        reg_b.register(user, 3);
-        reg_b.register(user, 3);
-        reg_b.register(user, 3);
+        // Registry A fills to the cap; keep the shutdown handles — the
+        // observables that fire when a session is evicted.
+        let (_id_a0, s_a0) = reg_a.register(user, 3);
+        let (_id_a1, s_a1) = reg_a.register(user, 3);
+        let (_id_a2, s_a2) = reg_a.register(user, 3);
+
+        // Registry B fills to the same cap for the same user and then evicts
+        // its own oldest: B's eviction machinery fires while A is at cap.
+        // Under the base flaw (a process-global slot map), these very
+        // registrations are what signalled A's live sessions.
+        let (_id_b0, s_b0) = reg_b.register(user, 3);
+        let (_id_b1, _s_b1) = reg_b.register(user, 3);
+        let (_id_b2, _s_b2) = reg_b.register(user, 3);
+        let (_id_b3, _s_b3) = reg_b.register(user, 3); // evicts B's oldest
 
         assert_eq!(reg_a.live_count(user), 3, "registry A keeps its sessions");
         assert_eq!(reg_b.live_count(user), 3, "registry B keeps its sessions");
+
+        // Positive control: B's own eviction signalled its oldest session —
+        // notify_one() stores a permit, so a signalled handle's notified()
+        // resolves immediately. This proves the probe below detects a real
+        // eviction signal, so its passes mean "no signal", not "broken probe".
+        tokio::time::timeout(std::time::Duration::from_secs(1), s_b0.notified())
+            .await
+            .expect("registry B's own eviction must signal its oldest session");
+
+        // The regression: none of A's sessions may be signalled by B's
+        // registrations. An un-signalled handle's notified() never resolves,
+        // so the timeout elapses.
+        for s in [&s_a0, &s_a1, &s_a2] {
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(50), s.notified())
+                    .await
+                    .is_err(),
+                "registry B must not signal registry A's sessions (per-instance, not process-global)"
+            );
+        }
     }
 
     #[tokio::test]
