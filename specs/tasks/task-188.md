@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "authorization-provenance.md §2.4 Context Binding (Replay Prevention)"
-commits: ["dce5c6a5eef16c506409ed9bde3f12f8373800a6", "add4ba14aa2190356f82ed2de95d2bdcd21ed974"]
+commits: ["add4ba14aa2190356f82ed2de95d2bdcd21ed974"]
 ---
 
 ## Spec Excerpt
@@ -135,29 +135,3 @@ is not exposed in the `ApproveSpecRequest` API. Enforcement (comparison
 against the persisted `Task.generation`) is fully implemented and
 mutation-tested; exposing a signer-side pin would extend the request
 contract and was not part of this task's enumerated scope.
-
-## Recovered-run verification (dce5c6a5)
-
-The prior assignment (interrupted, agent_exit 130) completed the
-implementation and both mutation proofs but never observed the final full
-suite. This run re-verified everything at head dce5c6a5 (= merge of base
-6bf777a6 + one warning fix):
-
-- `cargo test -p gyre-server --lib -- constraint_check` → **40 passed /
-  0 failed**, all binding tests green (repo_id, workspace_id, spec_sha,
-  expected_generation rejections; matching-context pass-throughs; unit
-  matrix; generation bump port + PUT API tests).
-- `cargo test -p gyre-domain -p gyre-adapters` → 344 + 363 passed /
-  0 failed.
-- `check-arch.sh` → EXIT 0.
-- dce5c6a5: dropped an unused `ring::signature::KeyPair` import in the
-  binding test helper (fresh full compile surfaced the warning; no
-  behavior change; suite re-run green after).
-- CI repair: `check-task-commit-attribution.sh` failed at the base commit
-  itself — upstream `feat(task-200)` commit 6bf777a6 never recorded its own
-  SHA in task-200's frontmatter (verified identically failing in a temp
-  worktree at base). Fixed by the script's prescribed remedy: appended the
-  full SHA to `specs/tasks/task-200.md` (13→14 SHAs, one-line diff). No
-  exemption entries added; no check weakened.
-
-Full evidence: `/tmp/stage/review-evidence/test-results.md`.
