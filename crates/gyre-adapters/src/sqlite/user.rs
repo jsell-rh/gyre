@@ -19,6 +19,16 @@ fn json_to_roles(s: &str) -> Vec<UserRole> {
     strs.iter().filter_map(|s| UserRole::from_str(s)).collect()
 }
 
+fn parse_global_role(s: &str) -> gyre_domain::GlobalRole {
+    use gyre_domain::GlobalRole;
+    match s {
+        "TenantAdmin" => GlobalRole::TenantAdmin,
+        // Unknown or legacy values (including the pre-migration default)
+        // read back as Member — the safe scope, never a silent escalation.
+        _ => GlobalRole::Member,
+    }
+}
+
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = users)]
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
@@ -33,6 +43,8 @@ struct UserRow {
     display_name: Option<String>,
     timezone: Option<String>,
     locale: Option<String>,
+    tenant_id: Option<String>,
+    global_role: String,
 }
 
 impl From<UserRow> for User {
@@ -55,6 +67,8 @@ impl From<UserRow> for User {
         if let Some(loc) = r.locale {
             u.locale = loc;
         }
+        u.tenant_id = r.tenant_id.map(Id::new);
+        u.global_role = parse_global_role(&r.global_role);
         u
     }
 }
@@ -72,6 +86,8 @@ struct UserRecord<'a> {
     display_name: Option<&'a str>,
     timezone: Option<&'a str>,
     locale: Option<&'a str>,
+    tenant_id: Option<&'a str>,
+    global_role: &'a str,
 }
 
 #[derive(Insertable)]
@@ -102,6 +118,8 @@ impl UserRepository for SqliteStorage {
                 display_name: Some(u.display_name.as_str()),
                 timezone: Some(u.timezone.as_str()),
                 locale: Some(u.locale.as_str()),
+                tenant_id: u.tenant_id.as_ref().map(|t| t.as_str()),
+                global_role: u.global_role.as_str(),
             };
             diesel::insert_into(users::table)
                 .values(&record)
@@ -171,6 +189,8 @@ impl UserRepository for SqliteStorage {
                     users::display_name.eq(Some(u.display_name.as_str())),
                     users::timezone.eq(Some(u.timezone.as_str())),
                     users::locale.eq(Some(u.locale.as_str())),
+                    users::tenant_id.eq(u.tenant_id.as_ref().map(|t| t.as_str())),
+                    users::global_role.eq(u.global_role.as_str()),
                 ))
                 .execute(&mut *conn)
                 .context("update user")?;
@@ -280,6 +300,50 @@ mod tests {
             .unwrap();
         assert_eq!(found.display_name, "alice");
         assert_eq!(found.external_id, "ext-1");
+    }
+
+    #[tokio::test]
+    async fn tenant_scope_and_global_role_round_trip() {
+        // TASK-110 repair F1: tenant_id and global_role were silently
+        // dropped by the DB adapters (no columns). The workspace
+        // invitation flow keys tenant containment on user.tenant_id, so
+        // a DB-backed deployment rejected every invitee. This kills that
+        // regression: create → read back through real SQLite.
+        let (_tmp, s) = setup();
+        let mut u = make_user("u-tenant", "tenant:acme:email:a@x.com", "alice");
+        u.tenant_id = Some(Id::new("acme"));
+        u.global_role = gyre_domain::GlobalRole::TenantAdmin;
+        UserRepository::create(&s, &u).await.unwrap();
+        let found = s
+            .find_by_external_id("tenant:acme:email:a@x.com")
+            .await
+            .unwrap()
+            .expect("user persisted");
+        assert_eq!(found.tenant_id, Some(Id::new("acme")));
+        assert_eq!(found.global_role, gyre_domain::GlobalRole::TenantAdmin);
+
+        // Update path also persists both fields.
+        let mut reloaded = UserRepository::find_by_id(&s, &u.id)
+            .await
+            .unwrap()
+            .unwrap();
+        reloaded.tenant_id = Some(Id::new("acme2"));
+        reloaded.global_role = gyre_domain::GlobalRole::Member;
+        UserRepository::update(&s, &reloaded).await.unwrap();
+        let after = UserRepository::find_by_id(&s, &u.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.tenant_id, Some(Id::new("acme2")));
+        assert_eq!(after.global_role, gyre_domain::GlobalRole::Member);
+
+        // A legacy tenant-less user still reads back as Member with no
+        // tenant (pre-migration rows get the column defaults).
+        let legacy = make_user("u-legacy", "local:legacy", "legacy");
+        UserRepository::create(&s, &legacy).await.unwrap();
+        let found_legacy = s.find_by_external_id("local:legacy").await.unwrap().unwrap();
+        assert_eq!(found_legacy.tenant_id, None);
+        assert_eq!(found_legacy.global_role, gyre_domain::GlobalRole::Member);
     }
 
     #[tokio::test]

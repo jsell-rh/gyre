@@ -180,6 +180,8 @@ diesel::table! {
         display_name -> Nullable<Text>,
         timezone -> Nullable<Text>,
         locale -> Nullable<Text>,
+        tenant_id -> Nullable<Text>,
+        global_role -> Text,
     }
 }
 

@@ -433,6 +433,80 @@ pub async fn revoke_tenant_invitation(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// ─── Per-tenant invitation policy ─────────────────────────────────────────────
+
+/// GET /api/v1/tenant/invitations/policy
+///
+/// TenantAdmin-only. Returns the caller's tenant's invitation policy
+/// (spec §Invitation Expiry: tenant_invite_expiry_days,
+/// workspace_invite_expiry_days, max_pending_invitations,
+/// allow_re_invite). Unset fields report the spec defaults.
+pub async fn get_invitation_policy(
+    auth: AuthenticatedAgent,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<InvitationPolicy>, ApiError> {
+    require_tenant_admin(&auth)?;
+    let policy = load_policy(&state, &auth.tenant_id).await;
+    Ok(Json(policy))
+}
+
+#[derive(Deserialize, Default)]
+pub struct UpdateInvitationPolicyRequest {
+    pub tenant_invite_expiry_days: Option<u32>,
+    pub workspace_invite_expiry_days: Option<u32>,
+    pub max_pending_invitations: Option<u32>,
+    pub allow_re_invite: Option<bool>,
+}
+
+/// PUT /api/v1/tenant/invitations/policy
+///
+/// TenantAdmin-only. Partial update: omitted fields keep their current
+/// value (defaults for a tenant that never set a policy). The stored
+/// policy takes effect on every subsequent invitation creation.
+pub async fn update_invitation_policy(
+    auth: AuthenticatedAgent,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateInvitationPolicyRequest>,
+) -> Result<Json<InvitationPolicy>, ApiError> {
+    require_tenant_admin(&auth)?;
+
+    // Load-merge-persist: omitted fields keep their current value.
+    let mut policy = load_policy(&state, &auth.tenant_id).await;
+    if let Some(d) = req.tenant_invite_expiry_days {
+        policy.tenant_invite_expiry_days = d;
+    }
+    if let Some(d) = req.workspace_invite_expiry_days {
+        policy.workspace_invite_expiry_days = d;
+    }
+    if let Some(m) = req.max_pending_invitations {
+        policy.max_pending_invitations = m;
+    }
+    if let Some(r) = req.allow_re_invite {
+        policy.allow_re_invite = r;
+    }
+
+    if policy.tenant_invite_expiry_days == 0 || policy.workspace_invite_expiry_days == 0 {
+        return Err(ApiError::InvalidInput(
+            "expiry days must be at least 1".to_string(),
+        ));
+    }
+
+    let json = serde_json::to_string(&policy)
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("serialize policy: {e}")))?;
+    state
+        .kv_store
+        .kv_set(POLICY_KV_NAMESPACE, &auth.tenant_id, json)
+        .await
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("store invitation policy: {e}")))?;
+
+    tracing::info!(
+        tenant_id = %auth.tenant_id,
+        "invitation policy updated: {}",
+        serde_json::to_string(&policy).unwrap_or_default()
+    );
+    Ok(Json(policy))
+}
+
 // ─── Tenant invitation acceptance (magic link) ───────────────────────────────
 
 #[derive(Deserialize, Default)]
@@ -469,8 +543,10 @@ pub struct AcceptInviteResponse {
 ///   the same email can exist in different tenants)
 /// - SSO mode: if a user with the invitation email already exists in the
 ///   tenant, link (activate pre-assigned memberships); otherwise create a
-///   local-mode account now — it will merge with the SSO subject on first
-///   login via the existing find_or_create_user path only if emails match.
+///   local-mode account now — on first SSO login, the verified email
+///   link in auth.rs `find_or_create_user_tenant` claims this account
+///   (re-points its external_id at the Keycloak subject) when the emails
+///   match within the same tenant.
 /// - Activate pre-assigned workspace memberships.
 pub async fn accept_tenant_invitation(
     Path(token): Path<String>,
@@ -1152,6 +1228,10 @@ mod tests {
             .route("/api/v1/tenant/invite/bulk", post(bulk_invite_to_tenant))
             .route("/api/v1/tenant/invitations", get(list_tenant_invitations))
             .route(
+                "/api/v1/tenant/invitations/policy",
+                get(get_invitation_policy).put(update_invitation_policy),
+            )
+            .route(
                 "/api/v1/tenant/invitations/:id",
                 delete(revoke_tenant_invitation),
             )
@@ -1745,6 +1825,125 @@ mod tests {
         assert_eq!(
             hash_token("abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    /// task-110 repair F3: per-tenant InvitationPolicy configurability
+    /// was unreachable (the kv namespace had zero writers). The policy
+    /// endpoints are the writer; an invitation created after the update
+    /// must pick up the configured expiry, not the hardcoded default.
+    #[tokio::test]
+    async fn invitation_policy_is_configurable_and_applies() {
+        let state = test_state();
+        let app = Router::new()
+            .route(
+                "/api/v1/tenant/invitations/policy",
+                get(get_invitation_policy).put(update_invitation_policy),
+            )
+            .route("/api/v1/tenant/invite", post(invite_to_tenant))
+            .with_state(state.clone());
+
+        // Defaults before any write.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/tenant/invitations/policy")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["tenant_invite_expiry_days"], 7, "spec default");
+        assert_eq!(json["workspace_invite_expiry_days"], 7);
+        assert_eq!(json["max_pending_invitations"], 50);
+
+        // Partial update: only tenant expiry changes, the rest keep
+        // their values.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/tenant/invitations/policy")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"tenant_invite_expiry_days": 30}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["tenant_invite_expiry_days"], 30);
+        assert_eq!(json["workspace_invite_expiry_days"], 7, "omitted kept");
+
+        // Zero-day expiry is rejected (would create instantly-expired
+        // invitations).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/tenant/invitations/policy")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"tenant_invite_expiry_days": 0}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // The configured policy drives real invitation creation: a
+        // fresh invitation expires in 30 days, not 7.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tenant/invite")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"email": "policy@example.com"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let inv_id = Id::new(json["id"].as_str().unwrap().to_string());
+        let stored = state
+            .tenant_invitations
+            .find_by_id(&inv_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let day = 86_400u64;
+        let age = stored.expires_at.saturating_sub(stored.created_at);
+        assert!(
+            age >= 29 * day && age <= 31 * day,
+            "expiry driven by configured policy, got {age}s (~{} days)",
+            age / day
         );
     }
 }

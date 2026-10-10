@@ -418,6 +418,11 @@ impl ResourceResolver {
                 ),
                 RouteResourceMapping::api("/api/v1/tenant/invitations", "tenant", None),
                 RouteResourceMapping::api(
+                    "/api/v1/tenant/invitations/policy",
+                    "tenant",
+                    None,
+                ),
+                RouteResourceMapping::api(
                     "/api/v1/tenant/invitations/:id",
                     "tenant",
                     Some("delete"),

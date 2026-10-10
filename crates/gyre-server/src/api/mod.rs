@@ -75,8 +75,9 @@ use compute::{
     list_compute_targets, list_tunnels, open_tunnel,
 };
 use invitations::{
-    bulk_invite_to_tenant, invite_to_tenant, invite_to_workspace, list_tenant_invitations,
-    list_workspace_invitations, revoke_tenant_invitation, revoke_workspace_invitation,
+    bulk_invite_to_tenant, get_invitation_policy, invite_to_tenant, invite_to_workspace,
+    list_tenant_invitations, list_workspace_invitations, revoke_tenant_invitation,
+    revoke_workspace_invitation, update_invitation_policy,
 };
 use discover::{discover_agents, get_agent_card, update_agent_card};
 use gyre_common::Id;
@@ -846,6 +847,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/tenant/invitations",
             get(list_tenant_invitations),
+        )
+        .route(
+            "/api/v1/tenant/invitations/policy",
+            get(get_invitation_policy).put(update_invitation_policy),
         )
         .route(
             "/api/v1/tenant/invitations/:id",
