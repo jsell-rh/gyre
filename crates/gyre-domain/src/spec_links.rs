@@ -77,3 +77,31 @@ pub struct SpecLinkEntry {
     pub created_at: u64,
     pub stale_since: Option<u64>,
 }
+
+/// Build the primary key for a `spec_links` row (spec-links.md
+/// §Forge-Maintained Spec Graph: `id TEXT PRIMARY KEY`).
+///
+/// The id is scoped by the declaring repo so that two repos may carry the
+/// same spec path declaring the same link — each repo owns its own row.
+/// This matches the `(source_repo_id, source_path)` scoping every store
+/// (in-memory cache, SQL adapters, Mem adapter) uses for
+/// `replace_for_source`/`delete_by_source_repo`, so a push from one repo can
+/// never collide with (and silently drop) another repo's durable row.
+///
+/// `source_repo_id: None` means the legacy unscoped bucket (no repo
+/// context); it renders as the empty scope `""` — the same value the
+/// adapters store in the NOT NULL `source_repo_id` column.
+pub fn spec_link_id(
+    source_repo_id: Option<&str>,
+    source_path: &str,
+    link_type: &SpecLinkType,
+    target: &str,
+) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        source_repo_id.unwrap_or(""),
+        source_path,
+        link_type,
+        target
+    )
+}

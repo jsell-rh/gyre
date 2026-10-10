@@ -2823,7 +2823,12 @@ specs:
             for entry in &manifest.specs {
                 for link in &entry.links {
                     new_links.push(crate::spec_registry::SpecLinkEntry {
-                        id: format!("{}-{}-{}", entry.path, link.link_type, link.target),
+                        id: gyre_domain::spec_links::spec_link_id(
+                            None,
+                            &entry.path,
+                            &link.link_type,
+                            &link.target,
+                        ),
                         source_path: entry.path.clone(),
                         source_repo_id: None,
                         source_sha: "src-sha".to_string(),

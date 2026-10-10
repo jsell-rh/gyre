@@ -410,7 +410,12 @@ pub async fn sync_spec_ledger(
         let mut new_links: Vec<SpecLinkEntry> = Vec::new();
         for entry in &manifest.specs {
             for link in &entry.links {
-                let id = format!("{}-{}-{}", entry.path, link.link_type, link.target);
+                let id = gyre_domain::spec_links::spec_link_id(
+                    source_repo_id,
+                    &entry.path,
+                    &link.link_type,
+                    &link.target,
+                );
                 let parsed = parse_cross_workspace_target(&link.target);
 
                 let (target_path, target_repo_id, target_display, status) = match &parsed {
@@ -2406,25 +2411,29 @@ specs:
     /// (loaded-from-disk) graph as it would right after the push — the graph
     /// consumers (staleness, gates, patrol) must not silently degrade to an
     /// empty graph across a restart.
-    #[tokio::test]
     async fn staleness_query_parity_after_restart() {
         use crate::mem::{MemRepoRepository, MemSpecLedgerRepository, MemWorkspaceRepository};
 
+        // The link is pinned to the target's CURRENT ledger SHA at push time,
+        // so it is active after the push. The staleness verdict is then
+        // re-derived AFTER a restart, once the target spec has drifted —
+        // the checker must compare the persisted pinned SHA against the
+        // ledger's current SHA and mark the link stale on the restarted
+        // graph, exactly as it would right after the push.
         let manifest = r#"version: 1
 specs:
-  - path: system/parent.md
-    title: Parent
-    owner: user:test
   - path: system/child.md
     title: Child
     owner: user:test
     links:
       - type: depends_on
         target: system/parent.md
-        target_sha: old_pinned_sha"#;
-        let (dir, sha) =
-            make_test_repo(&[("specs/manifest.yaml", manifest), ("specs/system/parent.md", "# P"), ("specs/system/child.md", "# C")])
-                .await;
+        target_sha: sha_v1"#;
+        let (dir, sha) = make_test_repo(&[
+            ("specs/manifest.yaml", manifest),
+            ("specs/system/child.md", "# C"),
+        ])
+        .await;
 
         let db = tempfile::NamedTempFile::new().unwrap();
         let db_path = db.path().to_str().unwrap().to_string();
@@ -2436,8 +2445,11 @@ specs:
             Arc::new(MemSpecLedgerRepository::default());
         let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
 
-        let parent = make_test_ledger_entry("system/parent.md", "new_current_sha", ApprovalStatus::Approved);
-        ledger.save(&parent).await.unwrap();
+        // Target spec is in the ledger at the pinned SHA — the link is
+        // healthy at push time.
+        let parent_v1 =
+            make_test_ledger_entry("system/parent.md", "sha_v1", ApprovalStatus::Approved);
+        ledger.save(&parent_v1).await.unwrap();
 
         let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
             Arc::new(MemWorkspaceRepository::default());
@@ -2459,38 +2471,61 @@ specs:
         )
         .await;
 
-        // Answer right after the push: the link's pinned SHA
-        // ("old_pinned_sha") differs from the ledger's current SHA
-        // ("new_current_sha"), so sync already marked it stale.
+        // Right after the push: pinned SHA matches the ledger — the link is
+        // active, not stale.
         let post_push: Vec<SpecLinkEntry> = links_store.lock().await.clone();
-        let pushed = &post_push[0];
-        assert_eq!(pushed.status, "stale", "SHA mismatch must be detected at push time");
-        assert!(pushed.stale_since.is_some());
+        assert_eq!(post_push.len(), 1);
+        assert_eq!(
+            post_push[0].status, "active",
+            "pinned SHA matches the ledger at push time — link must be active"
+        );
+        assert_eq!(post_push[0].target_sha.as_deref(), Some("sha_v1"));
 
-        // Restart: fresh store loaded from the durable repo.
+        // ── Restart: fresh store loaded from the durable repo. ──
         let restarted_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
         crate::load_spec_links_into_store(&link_repo, &restarted_store);
         let after_restart: Vec<SpecLinkEntry> = restarted_store.lock().await.clone();
+        assert_eq!(
+            after_restart, post_push,
+            "restarted graph must be identical to the post-push graph"
+        );
 
-        // Same staleness answer post-restart: the entry keeps its stale
-        // status and timestamp — not reset to active/None by an empty graph.
-        assert_eq!(after_restart.len(), 1);
-        let reloaded = &after_restart[0];
-        assert_eq!(reloaded.status, "stale", "stale verdict must survive the restart");
-        assert_eq!(reloaded.stale_since, pushed.stale_since);
+        // ── The target spec now drifts (ledger SHA advances). ──
+        let parent_v2 =
+            make_test_ledger_entry("system/parent.md", "sha_v2", ApprovalStatus::Approved);
+        ledger.save(&parent_v2).await.unwrap();
 
-        // And the staleness checker itself, run against the restarted graph
-        // with the ledger's current SHA, must keep the link stale (not
-        // re-resolve it to active): a stale/broken link is skipped by
-        // run_once, so status must be unchanged.
-        let still_stale = {
-            let store = restarted_store.lock().await;
-            store
-                .iter()
-                .find(|l| l.target_path == "system/parent.md")
-                .map(|l| (l.status.clone(), l.stale_since))
-        };
-        assert_eq!(still_stale, Some(("stale".to_string(), pushed.stale_since)));
+        // ── Run the REAL staleness checker against the restarted graph. ──
+        // The verdict must be re-derived from the persisted pinned SHA vs
+        // the ledger's current SHA — two independent sources. Against the
+        // pre-task empty-init behavior this fails: an empty restarted graph
+        // gives the checker nothing to mark stale.
+        let base = crate::mem::test_state();
+        let state = Arc::new(crate::AppState {
+            spec_links_store: restarted_store.clone(),
+            spec_link_repo: link_repo.clone(),
+            spec_ledger: ledger.clone(),
+            ..(*base).clone()
+        });
+        crate::spec_link_staleness::run_once(&state).await.unwrap();
+
+        let rechecked: Vec<SpecLinkEntry> = restarted_store.lock().await.clone();
+        assert_eq!(rechecked.len(), 1, "checker must see the restarted graph");
+        assert_eq!(
+            rechecked[0].status, "stale",
+            "checker must re-derive 'stale' from ledger SHA vs persisted pinned SHA"
+        );
+        assert!(
+            rechecked[0].stale_since.is_some(),
+            "checker must stamp stale_since on the restarted graph"
+        );
+
+        // The checker's verdict is written through to the durable table —
+        // the next restart loads the stale verdict, not a reset one.
+        let persisted: Vec<SpecLinkEntry> = link_repo.list_all().await.unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].status, "stale");
+        assert_eq!(persisted[0].stale_since, rechecked[0].stale_since);
     }
 
     /// Regression (task-198): two repos may carry the same spec path. A push
@@ -2501,6 +2536,12 @@ specs:
     async fn sync_replaces_links_scoped_to_source_repo() {
         use crate::mem::{MemRepoRepository, MemSpecLedgerRepository, MemWorkspaceRepository};
 
+        // The IDENTICAL manifest pushed by both repos — same spec path, same
+        // link type, same target. Under an id format without repo scope the
+        // two links collapse to one id, repo B's replace_for_source INSERT
+        // hits repo A's row's PRIMARY KEY, the transaction rolls back, and
+        // the swallowed error silently loses one repo's durable row (after a
+        // restart that repo's link is gone from the tenant-wide graph).
         let manifest = r#"version: 1
 specs:
   - path: system/shared.md
@@ -2525,32 +2566,13 @@ specs:
             Arc::new(MemSpecLedgerRepository::default());
         let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
 
-        // Pre-seed repo A's link for the SAME spec path directly in the store
-        // and the durable table, as a prior repo-A push would have.
-        let repo_a_link = SpecLinkEntry {
-            id: "system/shared.md-depends_on-@repo-a/system/target.md".to_string(),
-            source_path: "system/shared.md".to_string(),
-            source_repo_id: Some("repo-a".to_string()),
-            source_sha: "repo-a-src-sha".to_string(),
-            link_type: SpecLinkType::DependsOn,
-            target_path: "system/target.md".to_string(),
-            target_repo_id: None,
-            target_display: Some("@repo-a/system/target.md".to_string()),
-            target_sha: None,
-            reason: None,
-            status: "active".to_string(),
-            created_at: 1_000,
-            stale_since: None,
-        };
-        links_store.lock().await.push(repo_a_link.clone());
-        link_repo.save(&repo_a_link).await.unwrap();
-
         let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
             Arc::new(MemWorkspaceRepository::default());
         let repos_ctx: Arc<dyn gyre_ports::RepoRepository> =
             Arc::new(MemRepoRepository::default());
 
-        // Push from repo B (same spec path, different repo).
+        // Real push from repo A, then a real push from repo B with the same
+        // manifest (both use the production id construction).
         sync_spec_ledger(
             &ledger,
             &links_store,
@@ -2558,6 +2580,21 @@ specs:
             dir.path().to_str().unwrap(),
             &sha,
             1_700_000_000,
+            Some("repo-a"),
+            Some("ws-1"),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
+            None,
+            None,
+        )
+        .await;
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            &link_repo,
+            dir.path().to_str().unwrap(),
+            &sha,
+            1_700_000_500,
             Some("repo-b"),
             Some("ws-1"),
             Some(&ws_ctx),
@@ -2567,7 +2604,7 @@ specs:
         )
         .await;
 
-        // Cache: repo A's link survives, repo B's link present.
+        // Cache: both repos' links present with distinct ids.
         let cache: Vec<SpecLinkEntry> = links_store.lock().await.clone();
         assert_eq!(cache.len(), 2, "both repos' links must be in the cache");
         assert!(
@@ -2578,15 +2615,42 @@ specs:
             cache.iter().any(|l| l.source_repo_id.as_deref() == Some("repo-b")),
             "repo B's new link must be present"
         );
+        let distinct_ids: std::collections::HashSet<&str> =
+            cache.iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(
+            distinct_ids.len(),
+            2,
+            "same-path links from different repos must have distinct ids"
+        );
 
         // Durable table must match the cache exactly (the invariant the
-        // boot-load path relies on).
+        // boot-load path relies on) — a third boot from the same file sees
+        // both links without any re-push.
         let persisted: Vec<SpecLinkEntry> = link_repo.list_all().await.unwrap();
         assert_eq!(persisted.len(), 2, "both repos' rows must be in the table");
-        assert!(persisted
+        let mut sorted_cache: Vec<SpecLinkEntry> = cache.clone();
+        sorted_cache.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut sorted_persisted = persisted.clone();
+        sorted_persisted.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(
+            sorted_persisted, sorted_cache,
+            "durable table must match the cache (collision must not drop a repo's row)"
+        );
+
+        // Restart: a fresh store over the same durable table must contain
+        // BOTH repos' links — the collision previously left only one.
+        let restarted_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
+        crate::load_spec_links_into_store(&link_repo, &restarted_store);
+        let after_restart: Vec<SpecLinkEntry> = restarted_store.lock().await.clone();
+        assert_eq!(
+            after_restart.len(),
+            2,
+            "restart must rebuild BOTH repos' links (id collision previously dropped one)"
+        );
+        assert!(after_restart
             .iter()
             .any(|l| l.source_repo_id.as_deref() == Some("repo-a")));
-        assert!(persisted
+        assert!(after_restart
             .iter()
             .any(|l| l.source_repo_id.as_deref() == Some("repo-b")));
     }
