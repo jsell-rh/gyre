@@ -7,7 +7,7 @@ coverage_sections:
   - "hierarchy-enforcement.md §Invariant Enforcement"
   - "hierarchy-enforcement.md §Enforcement"
   - "hierarchy-enforcement.md §New Scripts"
-commits: ["ba78ab2a5e1a2147a04cf7e148f53e6c0abb34e3"]
+commits: ["1ee8221e90fb3ebe2061d25a69988d8c3cfdadb9"]
 ---
 
 ## Spec Excerpt
@@ -108,29 +108,6 @@ base) but was absent from `specs/tasks/task-210.md` frontmatter, failing
 `check-task-commit-attribution.sh`. Recorded the SHA in the task file's
 `commits:` list; no exemption added, frozen exemption file untouched. Gate
 passes.
-
-## Shipped (2026-10-10 refresh at merged HEAD)
-
-Checkpoint-recovery verification of the unchanged task surface (diff
-candidate ba78ab2a → HEAD ad701b2d on scripts/adapters/wiring: empty):
-
-- Clean gates at HEAD: `check-hierarchy.sh` exit 0;
-  `check-tenant-filter.sh` exit 0 (111 read methods on tenant-column
-  tables / 0 violations); `check-api-auth.sh` exit 0 (3 checks incl.
-  delegated frozen-baseline route-registry cross-reference);
-  `check-scope-literal-defaults.sh crates` OK; attribution OK.
-- Fresh mutation kills (isolated worktree /tmp/stage/task160-verify,
-  restored after each; evidence /tmp/stage/review-evidence/task-160-refresh/):
-  `Task.workspace_id → Option<Id>` → hierarchy exit 1 naming task.rs:60;
-  deleting the tenant predicate from `sqlite/secret.rs::resolve_for_agent`
-  → tenant-filter exit 1 with file:line; deleting the RouteResourceMapping
-  for `/api/v1/activity` → api-auth exit 1.
-- `cargo test -p gyre-adapters --test tenant_isolation` at HEAD: 2 passed /
-  0 failed (private target dir, cold build ~17 min).
-- Coverage matrix: `specs/coverage/system/hierarchy-enforcement.md` rows
-  10 (Invariant Enforcement) / 14 (Enforcement) / 27 (New Scripts)
-  task-assigned → implemented with evidence notes; summary 12/18 → 15/18.
-  Committed as c492b171 (docs-only, recorded in frontmatter).
 
 Review history: rounds 1–4 in `specs/reviews/task-160.md` (round-3 findings
 F1 dead exemptions / F2 read-name blind spot fixed in 06df8bfb and verified
