@@ -88,7 +88,27 @@ Two repairs shipped on this branch (commits `96d2a28c` + the task-record commits
 - **Gates at HEAD `ca93dfde`:** `check-task-commit-attribution.sh` OK, `check-rustfmt-diff.py 653a696f` clean (4 files), `check-in-memory-state-stores.sh` OK. Evidence: `gates-at-head.txt`.
 - **Transport restriction (recorded, not a code defect):** this sandbox cannot run the WS integration binary — `accept(2)` returns `ENOTSUP` (errno 95; `/tmp/stage/capabilities.json` `tcp_listener_probe`, and the integration harness binds a real `TcpListener` in `WsCtx::new`). Reproduction here is the durable CI log plus code-path analysis. **Host verification must run:** `cargo test -p gyre-server --test explorer_ws_integration` (expects 7/7) and `cargo test --all`.
 
+### 3. Repair round (checkpoint continuation) — task-155 attribution drift re-introduced by the base merge
+
+The interrupted run (checkpoint `8f40d956`, agent exit 130) was recovered; the durable failures were re-verified at the new branch state before any new work:
+
+- **New failure at session-start HEAD `02dc4b2f`:** the assignment's base merge brought in `27bd585c` (feat(task-155): Implement gyre search CLI command — squash-merge onto main, +975 lines across `crates/gyre-cli/src/main.rs`, `crates/gyre-cli/src/client.rs`, docs) without recording it in task-155's `commits:` frontmatter — the identical task-095 R3-F4 drift class this task repairs, failing `scripts/check-task-commit-attribution.sh` (exit 1). Reproduced at the pre-fix tree in a worktree: `/tmp/stage/review-evidence/attribution-before.txt` (exit 1, lists `27bd585c task-155`).
+- **Repair `d1872f67` (this round, product-of-record):** appended the full SHA `27bd585ca7eb429905ccbded1f48b4d0167c0c20` to `specs/tasks/task-155.md`'s `commits:` frontmatter, preserving the seven existing SHAs byte-for-byte (append-not-replace, same form as the `0828c0bf` task-189 repair). No exemptions added; `scripts/task-commit-attribution-exemptions.txt` frozen at its 3-entry baseline.
+- **Post-fix probe:** `bash scripts/check-task-commit-attribution.sh` → `OK: ... (or exempted legacy drift).` exit 0 at `d1872f67`. Evidence: `attribution-after.txt`.
+- **Frozen-gate suite at `d1872f67`:** `check-byte-slice-truncation.sh`, `check-in-memory-state-stores.sh`, `check-relative-path-defaults.sh` — all OK; `check-rustfmt-diff.py 27bd585c` clean (5 Rust files). Evidence: `gates-at-head.txt`.
+
+### 4. Evidence regeneration (prior round's files were wiped)
+
+All evidence files under `/tmp/stage/review-evidence/` were regenerated truthfully this round:
+
+- `attribution-f4acb4eb-before.txt` — original baseline failure reproduced at assignment base `f4acb4eb` (exit 1, task-189 unlisted).
+- `byteslice-e5995bcb-before.txt` — durable verification finding `e24468c2` reproduced at its source tree `e5995bcb` (exit 1: `&raw_preview[..500]` at explorer_ws.rs:2937 and `&d[..100]` at :3492, both off their frozen exemption lines after the session-cap fix shifted them). The fix at HEAD routes both sites through `truncate_invalid_query_preview` → `gate_executor::truncate_bytes` (char-boundary-safe via `char_indices`); `check-byte-slice-truncation.sh` OK at HEAD.
+- `cargo-test-explorer-ws.txt` — `cargo test -p gyre-server --lib explorer_ws::` at `d1872f67`: **42 passed, 0 failed** (1170 filtered), including the corrected multibyte truncation test (backs off to byte 498, the real char boundary for 3-byte chars under a 500 cap) and all 4 `ExplorerSessionRegistry` tests (per-instance isolation — the pinned regression — oldest-first eviction, idempotent release, zero-cap admission).
+
+Transport restriction (unchanged, not a code defect): this sandbox cannot run the WS integration binary — `accept(2)` returns ENOTSUP (errno 95; `/tmp/stage/capabilities.json`). Host verification must still run `cargo test -p gyre-server --test explorer_ws_integration` (expects 7/7) and `cargo test --all`.
+
 ### Attribution for this task
 
 - Product-surface commit `96d2a28c` recorded in `commits:` frontmatter (full SHA, corrected by checkpoint commit `2bbc4f8e` after a truncated SHA was recorded in the interrupted run). Docs-only commits (`1f7876ab`, `2bbc4f8e`) touch `specs/` only, outside the check's scope.
 - Independent review, full deterministic gates, and GitHub checks remain required before merge (per assignment); no full-suite rerun performed here per the smallest-relevant-probe constraint.
+
