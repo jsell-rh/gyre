@@ -119,12 +119,20 @@ byte-for-byte against the sibling pattern, confirmed the adapters/migration pre-
 at base, mutation-proved the test (reverting to the old `Arc::new(mem::…)` literal fails
 at the restart assertion), and passed mem-mode regression (72) and `check-arch.sh`.
 
-The code at this branch's HEAD is byte-identical to the reviewed commit `dff6ee4c`
-(verified: empty diff on lib.rs and dependency_persistence.rs).
+The product surface at the current branch head is byte-identical to the reviewed commit
+`dff6ee4c` (verified: empty diff on lib.rs and dependency_persistence.rs), carrying
+forward through merges to the repair revision.
 
-Contract-repair note for findings `945c3524…`/`02877ee2…` (category: contract): earlier
-attempts flipped the four Acceptance Criteria checkboxes from `- [ ]` to `- [x]`, which
-changes the requirement generation hash — completion markers are reviewer/verifier
-record, not implementer mutations (task-201 precedent: `ready-for-review` with all boxes
-unchecked). This attempt applies only hash-excluded mutations: `progress`, `commits`, and
-this `## Shipped` section. Acceptance Criteria text is byte-identical to base.
+Contract-repair note for findings `945c3524…`/`02877ee2…`/`092c0a73…` (category:
+contract): earlier attempts (a) flipped the four Acceptance Criteria checkboxes from
+`- [ ]` to `- [x]`, and (b) appended a `## Repair attempt …` evidence section that is not
+in the hash-excluded set (`scripts/dev-contract.py` excludes only `Shipped`,
+`Implementation Notes`, `Implementation Log`, `Review`). Both change the requirement
+generation hash — completion markers and non-excluded sections are contract mutations,
+not implementer record. This repair removes the extra section; requirement prose and
+frontmatter (title/spec_ref/depends_on/coverage_sections) are byte-identical to base
+`918f16bf` (generation hash re-verified equal after the repair). Only `progress`,
+`commits`, and this `## Shipped` section differ from base. Fresh evidence for this
+repair lives under `/tmp/stage/review-evidence/task-199/` (good run 1 passed, mutation
+probe FAILED at the restart assertion, post-restore green, mem-mode 72 passed,
+`check-arch.sh` + attribution gate OK, all at repair revision `d0896842`).
