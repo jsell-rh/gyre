@@ -11,8 +11,13 @@
 //!   (review task-107 F1), so we send the PEM-encoded public key exactly like
 //!   sigstore-go's reference client.
 //! - The response wraps the issued certificate chain in a
-//!   `signedCertificateEmbeddedSct.chain.certificates` array (base64 DER),
-//!   plus an `X-Signature`/`X-Certificate` SCT header pair we ignore
+//!   `signedCertificateEmbeddedSct.chain.certificates` array. Upstream
+//!   Fulcio's proto declares that field `repeated string` ("The PEM-encoded
+//!   certificate chain, ordered from leaf to intermediate to root") and the
+//!   server PEM-marshals every element (`Certificates: append([]string
+//!   {finalPEM}, finalChainPEM...)`); we accept PEM text and raw DER (for
+//!   protojson `bytes`-encoded variants), never base64(DER). The response
+//!   also carries an `X-Signature`/`X-Certificate` SCT header pair we ignore
 //!   (inclusion is Rekor's job here).
 //! - Rekor `POST /api/v1/log/entries` with a hashedrekord type body:
 //!   `{"kind": "hashedrekord", "apiVersion": "0.0.1", "spec": {"data":
@@ -95,19 +100,26 @@ struct SignedCertificateDetachedSct {
     chain: Option<FulcioChain>,
 }
 
-/// `Chain` carries `certificates` as repeated `bytes` — in protojson each is
-/// base64 of the DER certificate. Element 0 is the leaf; the rest are
-/// intermediates and the root.
+/// `Chain` carries `certificates` as a repeated field. Upstream Fulcio's
+/// proto declares it `repeated string` and the server fills it with PEM text
+/// (leaf first, then intermediates and the root); protojson clients built
+/// against a `bytes` field deliver base64(DER). Both encodings decode to the
+/// same DER certificate, so `chain_element_der` accepts PEM text, raw DER,
+/// and base64(DER) — a PEM string's leading `-` is not a base64 symbol, and
+/// DER bytes are not PEM text, so the three are unambiguous.
 #[derive(Deserialize)]
 struct FulcioChain {
     #[serde(default)]
     certificates: Vec<String>,
 }
 
-/// Fulcio v2 trust bundle: `{"chains": [[<base64 DER cert>, ...], ...]}`.
-/// `chains` is repeated precisely so an instance can serve multiple
-/// concurrent CA chains (rotation windows, multi-CA deployments) — verification
-/// must try every chain, not just the first (review F11).
+/// Fulcio v2 trust bundle: `{"chains": [[<cert>, ...], ...]}` where each
+/// element is a certificate in the same encoding as the chain field above
+/// (upstream serves PEM strings). `chains` is repeated precisely so an
+/// instance can serve multiple concurrent CA chains (rotation windows,
+/// multi-CA deployments) — verification must try every chain, not just the
+/// first (review F11).
+
 #[derive(Deserialize)]
 struct TrustBundleResponse {
     #[serde(default)]
@@ -394,14 +406,16 @@ pub async fn sign_commit_keyless(
         return Err(anyhow!("fulcio returned an empty certificate chain"));
     }
 
-    // Rebuild the chain as PEM: leaf first, then intermediates/root.
+    // Rebuild the chain as PEM: leaf first, then intermediates/root. The
+    // elements arrive as upstream Fulcio sends them — PEM strings
+    // (`repeated string`, CertPEM()/ChainPEM()) — with base64(DER) and raw
+    // DER accepted for robustness; `chain_element_der` rejects anything
+    // else rather than mis-decoding a real instance's response.
     let chain_pem = chain
         .certificates
         .iter()
-        .map(|b64| {
-            let der = BASE64
-                .decode(b64)
-                .with_context(|| "fulcio chain element is not base64 DER")?;
+        .map(|element| {
+            let der = chain_element_der(element)?;
             Ok(pem_encode_certificate(&der))
         })
         .collect::<Result<Vec<String>>>()?;
@@ -657,15 +671,14 @@ fn check_chain_all_bundles(
 
     // The root must be one of the roots in the configured bundle's chains,
     // compared as full DER encodings (a trust bundle element is the complete
-    // certificate, not just its TBS section).
+    // certificate, not just its TBS section). Bundle elements arrive as
+    // upstream Fulcio serves them — PEM strings — with base64(DER)/raw DER
+    // accepted; an undecodable element matches nothing (fail closed).
     let root_der = root.der_bytes();
     bundle_chains.iter().any(|chain| {
-        chain.iter().any(|b64| {
-            BASE64
-                .decode(b64)
-                .map(|der| der == root_der)
-                .unwrap_or(false)
-        })
+        chain
+            .iter()
+            .any(|element| chain_element_der(element).is_ok_and(|der| der == root_der))
     })
 }
 
@@ -896,6 +909,32 @@ fn pem_encode_certificate(der: &[u8]) -> String {
     pem::encode(&pem::Pem::new("CERTIFICATE", der.to_vec()))
 }
 
+/// Decode one Fulcio wire-format chain/trust-bundle certificate element to
+/// DER bytes.
+///
+/// Upstream Fulcio's proto declares `Chain.certificates` `repeated string`
+/// and the server fills it with PEM text (`Certificates: append([]string
+/// {finalPEM}, finalChainPEM...)` — grpc_server.go, CertPEM()/ChainPEM());
+/// the v2 trust-bundle endpoint serves the same PEM strings. A protojson
+/// response built against a `bytes` field instead carries base64(DER). The
+/// three encodings are mutually unambiguous — a PEM string's leading `-` is
+/// not a base64 symbol, raw DER bytes never contain a PEM BEGIN marker, and
+/// base64(DER) ASCII never starts with `-` — so try, in order: PEM text,
+/// raw DER, base64(DER).
+fn chain_element_der(element: &str) -> Result<Vec<u8>> {
+    if element.contains("-----BEGIN ") {
+        return pem_to_der(element);
+    }
+    // Raw DER: a certificate is a SEQUENCE tag followed by a length. Cheap
+    // structural check before the full x509 parse happens downstream.
+    if element.as_bytes().first() == Some(&0x30) {
+        return Ok(element.as_bytes().to_vec());
+    }
+    BASE64
+        .decode(element)
+        .map_err(|e| anyhow!("fulcio chain element is neither PEM nor DER nor base64: {e}"))
+}
+
 /// Parse a concatenated PEM chain (one cert per block) into parsed certs,
 /// leaf first. Empty when the input has no parseable block.
 fn parse_pem_chain(chain_pem: &str) -> Vec<ParsedCertificate> {
@@ -1017,6 +1056,12 @@ mod tests {
     // implementation's behavior:
     // - `publicKey.content` is PEM text (what Fulcio's ParsePublicKey
     //   accepts); the mock REJECTS base64(DER) with 400, like real Fulcio.
+    // - response chain elements and trust-bundle chain elements are PEM
+    //   strings, exactly as upstream serves them (`repeated string` filled
+    //   with CertPEM()/ChainPEM()) — NOT base64(DER). This is the axis the
+    //   review probe caught self-confirming: a mock that encodes the same
+    //   misunderstanding as the production decoder passes every test while
+    //   every real deployment falls back to local signing.
     // - `proofOfPossession` is base64 DER ECDSA over the JWT `sub`; the mock
     //   VERIFIES it against the presented public key — a client that signs
     //   the wrong preimage or encodes the key wrong gets no certificate.
@@ -1117,9 +1162,12 @@ mod tests {
             }
         }
 
+        /// Upstream wire contract: trust-bundle chain elements are PEM
+        /// strings (grpc_server.go serves CertPEM()/ChainPEM() output), NOT
+        /// base64(DER).
         fn trust_bundle_json(&self) -> String {
-            let chain1 = [BASE64.encode(self.trusted_ca.cert.der().as_ref())];
-            let chain2 = [BASE64.encode(self.second_trusted_ca.cert.der().as_ref())];
+            let chain1 = [self.trusted_ca.cert.pem()];
+            let chain2 = [self.second_trusted_ca.cert.pem()];
             serde_json::json!({ "chains": [chain1, chain2] }).to_string()
         }
     }
@@ -1187,11 +1235,9 @@ mod tests {
                 )
             };
             let leaf_pem = issuer.issue_leaf(pk_pem, &san, not_before, not_after);
-            let leaf_der = pem_to_der(&leaf_pem)?;
-            let chain = vec![
-                BASE64.encode(leaf_der),
-                BASE64.encode(issuer.cert.der().as_ref()),
-            ];
+            // Upstream wire contract: chain elements are PEM strings —
+            // `Certificates: append([]string{finalPEM}, finalChainPEM...)`.
+            let chain = vec![leaf_pem, issuer.cert.pem()];
             Ok(serde_json::json!({
                 "signedCertificateEmbeddedSct": { "chain": { "certificates": chain } }
             })
@@ -1311,16 +1357,16 @@ mod tests {
         let mut stack = MockSigningStack::new();
         // Make the rogue CA the issuer but ALSO serve it as a third trusted
         // chain — the leaf must verify because SOME served chain roots it.
-        let mut knobs = MockKnobs::default();
-        knobs.untrusted_ca = true;
-        stack.knobs = knobs;
-        // Serve the rogue CA in the bundle too.
-        let rogue_der = BASE64.encode(stack.untrusted_ca.cert.der().as_ref());
+        stack.knobs.untrusted_ca = true;
+        // Serve the rogue CA in the bundle too — as PEM strings, the
+        // upstream encoding (this is the multi-chain F11 case; the bundle
+        // here is hand-built, so it must encode the SAME upstream contract
+        // the mock's own trust_bundle_json does).
         let bundle = serde_json::json!({
             "chains": [
-                [BASE64.encode(stack.trusted_ca.cert.der().as_ref())],
-                [BASE64.encode(stack.second_trusted_ca.cert.der().as_ref())],
-                [rogue_der],
+                [stack.trusted_ca.cert.pem()],
+                [stack.second_trusted_ca.cert.pem()],
+                [stack.untrusted_ca.cert.pem()],
             ]
         });
         let record = sign(&stack, "chain2sha").await;
