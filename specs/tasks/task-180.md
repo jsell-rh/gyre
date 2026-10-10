@@ -87,12 +87,9 @@ Read `system-explorer.md` §9 "Executable Spec Assertions" for the full specific
 
 ## Shipped
 
-Checkpoint-recovery round (assignment `0fa761223b6f4f0e8a7b5e2e920ca466`,
-interrupted at exit 130 after fixing an E0195 compile regression and passing
-compile + clippy, but before any test run completed). This round merged the
-base (`19d65446` → `ddc37bbc`; merge delta touches only unrelated
-specs/tasks files), left the checkpoint's product code byte-identical, and
-completed the interrupted verification with real runs.
+Verification-repair round (assignments `3ed85f66`/`b6833db7`; this round
+repairs durable verification finding `fc532b04` — checks.sh exit 1 on the
+verify merge of candidate `bc905bea` into base `c9b0a6f9`).
 
 Contract-state acceptance criteria are satisfied by production code
 (independently reviewed at `51f29e95`, verdict `complete`, mutation-verified
@@ -134,24 +131,45 @@ Defects found and fixed across the repair rounds since that review:
    attributes restored; `cargo check -p gyre-server` clean, clippy
    changed-lines clean at checkpoint `f89aa156`.
 
-Test evidence (this round, HEAD `ddc37bbc`, CARGO_TARGET_DIR=/tmp/gyre-target,
-exact commands/counts in `/tmp/stage/review-evidence/task180-recovery-round.md`):
+4. **Verification failure fc532b04 (this round): checkpoint-swept dist regen.**
+   `dev-check.sh:8` runs `git diff --check HEAD^1 HEAD` on the verify merge
+   (candidate merged into the assigned base). Checkpoint `f89aa156`'s
+   `git add -A` swept in a full `npm run build` output (build.rs rebuilds the
+   SPA on any cargo build without `SKIP_WEB_BUILD=1`), renaming every
+   content-hashed asset — so the diff presented the whole bundle as added
+   lines, including a dependency-sourced trailing-whitespace byte pair
+   (`" \t"` inside a svelte-runtime template literal, present byte-identical
+   in the base bundle too). `git diff --check c9b0a6f9..fca7596a` reproduces
+   exit 2. Fixed by reverting `web/dist` to the base state (`420e961e`) —
+   committed dist regen is not required (verify itself rebuilds and then
+   reverts dist, dev-check.sh:85-86; main's dist is 5 web/src commits
+   behind; no code references bundle hashes). Product code unchanged.
 
-- `cargo test -p gyre-domain --lib spec_assertions` — **51 passed, 0 failed**
-  (includes `parse_skips_assertions_inside_fenced_code_blocks`,
-  `parse_skips_assertions_inside_tilde_fences`,
-  `parse_fence_line_numbers_stay_absolute`).
-- `cargo test -p gyre-server --lib push_check` — **3 passed, 0 failed**
-  (includes `push_check_sweeps_stale_results_when_assertions_or_specs_vanish`
-  — emptied spec, deleted spec, unchanged spec).
-- `cargo test -p gyre-server --lib spec_assertions` — **6 passed, 0 failed**
-  (GET endpoint: stored rows, empty set, unknown-repo 404; live check).
-- `cd web && npx vitest run src/__tests__/Inbox.test.js` — **28 passed**.
-- Invariant gates, all exit 0: check-arch, check-mem-port-contracts
-  (validates the two new port methods), check-abac-route-registry,
-  check-migration-versions, check-migration-sql-portability,
-  check-in-memory-state-stores, check-dead-message-kinds,
-  check-fabricated-scope-defaults, check-task-commit-attribution.
+5. **Attribution drift on the verify merge (this round).** Base `6bf777a6`'s
+   tree predates main's `e96d25ab` (task-219), which appended `6bf777a6` to
+   `specs/tasks/task-200.md`'s `commits:` list. Since the verify merge keeps
+   the base's task-200.md unless the candidate carries the fix, the
+   attribution gate would fail on the merge and identically on the base
+   baseline probe (exit 81 → baseline detour). Fixed by carrying main's
+   exact one-line fix (`0c4a767e`, byte-identical copy of origin/main's
+   task-200.md; `git diff 6bf777a6 HEAD -- specs/tasks/task-200.md` matches
+   `git diff 6bf777a6 origin/main` exactly).
+
+Test evidence (this round, final HEAD `738f8c3f`, CARGO_TARGET_DIR=/tmp/gyre-target,
+exact commands/counts in `/tmp/stage/review-evidence/task180-verify-repair-round.md`):
+
+- `git diff --check 6bf777a6..738f8c3f` — **exit 0** (the failing gate's
+  condition on this assignment's base).
+- Verification-merge shape reproduced locally: checkout base `6bf777a6`,
+  `merge --no-ff` the candidate → `git diff --check HEAD^1 HEAD` —
+  **exit 0** (the exact probe that failed as finding `fc532b04`; earlier
+  probe merge `9251ddff`, re-verified at the final head).
+- `bash scripts/check-task-commit-attribution.sh` — **exit 0** (OK).
+- `cargo test -p gyre-domain --lib spec_assertions` — **51 passed, 0 failed**.
+- `cargo test -p gyre-server --lib push_check` — **3 passed, 0 failed**.
+- `cargo test -p gyre-server --lib spec_assertions` — **6 passed, 0 failed**.
+- `cd web && npx ci`-installed deps; `npx vitest run
+  src/__tests__/Inbox.test.js` — **28 passed, 0 failed** (3.72s).
 
 Sandbox transport limitation (recorded, not a code defect): this runtime
 cannot open a TCP listener (`accept` → EOPNOTSUPP), so live HTTP exercise of
@@ -162,4 +180,6 @@ in-process by the five handler tests above.
 Task contract integrity: the assigned contract prose (including Acceptance
 Criteria checkboxes) is untouched; completion is reported through
 `progress:` and this section. Attribution lists all 12 product-surface
-commits on the branch (verified against `origin/main..HEAD`).
+commits on the branch; this round's two commits touch only `web/dist/` and
+`specs/tasks/task-200.md` (both outside the attribution gate's product
+surface and the review-stage `invalid`-change allowlist, stages.py:115-117).
