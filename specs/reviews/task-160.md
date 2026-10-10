@@ -57,3 +57,71 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+---
+
+## Round 5 — baseline-repair verification (candidate `5218b93d`, base `e77537fa`)
+
+Verdict: **approved with one low-severity finding** (S1 below — a
+pre-existing blind spot in `check-api-auth.sh` Check 2 that this candidate
+did not introduce and does not worsen; no live violation exists at HEAD).
+
+Assignment context: `status: baseline_failed` — the baseline run at base
+`27bd585c` failed `check-task-commit-attribution.sh` (task-155 commit
+missing from its task frontmatter). Verified resolved: the drift was
+repaired base-side by `7c6ac232` (task-231) and the candidate merges the
+verified base `e77537fa` via `afd7379d`; at candidate HEAD
+`check-task-commit-attribution.sh` exits 0. Task surface (scripts/,
+crates/gyre-adapters/, CI wiring) is byte-identical to the attributed
+commit `ba78ab2a` and to the round-4-reviewed candidate `13ff2a51`
+(empty `git diff` on those paths) — this round is fresh independent
+verification, not a code change.
+
+### Independent verification (evidence: /tmp/stage/review-evidence/task-160-r5/)
+
+Clean gates at candidate HEAD: `check-hierarchy.sh` 0;
+`check-tenant-filter.sh` 0 (111 read methods on tenant-column tables /
+0 violations; 145 backlog reads on tenant-less tables reported
+non-failing); `check-api-auth.sh` 0; `check-arch.sh` 0;
+`check-scope-literal-defaults.sh crates` 0 (frozen count 12, matching the
+12 live entries); `check-task-commit-attribution.sh` 0;
+`check-abac-route-registry.sh` 0 standalone. Pre-commit (hierarchy,
+tenant-filter, api-auth entries, `pass_filenames: false`) and CI (all
+three blocking, `|| true` removed) wiring intact; all three scripts
+executable with usage comments.
+
+`cargo test -p gyre-adapters --test tenant_isolation` at candidate HEAD:
+**2 passed / 0 failed** (run record `tenant-isolation.txt`).
+
+Fresh mutation kills in isolated worktree `/tmp/stage/task160-r5-mut`
+(restored after each; worktree removed after) — full matrix in
+`mutation-matrix.txt`: `Task.workspace_id → Option<Id>` → hierarchy
+exit 1 naming `task.rs:60`; `Task.workspace_id` deleted → hierarchy
+exit 1; `Agent.workspace_id` + `Workspace.tenant_id` → Option →
+hierarchy exit 1 naming both; tenant predicate stripped from sqlite
+`secret.rs::resolve_for_agent` → tenant-filter exit 1 ("1 violation(s)
+out of 111", file:line); tenant predicate stripped from **postgres**
+`notification.rs::get` → tenant-filter exit 1 (proves `src/postgres` is
+really scanned); raw-SQL `AND tenant_id = ?` stripped from
+`analytics.rs::aggregate_by_day` → tenant-filter exit 1 (raw-SQL reads
+covered); resolver entry renamed without the route → api-auth exit 1
+via delegated registry; route registered without resolver entry →
+api-auth exit 1; `last_seen_middleware` renamed in the api section →
+api-auth exit 1 (Check 1); auth extractor removed from
+`git_upload_pack`/`git_receive_pack`/`mcp_handler` → api-auth exit 1
+AUTH VIOLATION each (Check 2).
+
+### S1 (low severity, pre-existing — record, no live violation)
+
+`check-api-auth.sh` Check 2 uses `grep -A 15 "async fn <handler>"` as its
+signature window. `explorer_ws.rs::issue_ws_ticket` is a 7-line function
+whose successor fn (`explorer_ws`, line 179) carries its own
+`AuthenticatedAgent` (line 181) inside that window — so removing the
+extractor from `issue_ws_ticket` alone keeps the gate green (probed:
+mutant with the param removed and body rewritten passes, "4 non-ABAC
+handlers checked ... All have auth extractors"). The route is on the
+outer router (lib.rs:667), so per-handler auth is its only enforcement
+layer. The window originates at `76b6de65` and is unchanged by this
+task; the three other non-ABAC mutating handlers are individually
+kill-proven. No action required for task-160 approval; worth a follow-up
+to bound the window at the handler's closing signature line.
