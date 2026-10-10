@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use gyre_domain::SpecAssertionResult;
 
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait SpecAssertionResultRepository: Send + Sync {
     /// Persist a batch of results for one spec. Any prior rows for the same
     /// (repo_id, spec_path) are replaced, so the stored set always reflects
@@ -24,7 +25,11 @@ pub trait SpecAssertionResultRepository: Send + Sync {
     async fn delete_by_spec(&self, repo_id: &str, spec_path: &str) -> Result<()>;
 
     /// List the stored results for one spec in a repo, ordered by line.
-    async fn list_by_spec(&self, repo_id: &str, spec_path: &str) -> Result<Vec<SpecAssertionResult>>;
+    async fn list_by_spec(
+        &self,
+        repo_id: &str,
+        spec_path: &str,
+    ) -> Result<Vec<SpecAssertionResult>>;
 
     /// List the distinct spec paths with stored results for a repo. Used by
     /// the post-push check to sweep results for specs that no longer exist

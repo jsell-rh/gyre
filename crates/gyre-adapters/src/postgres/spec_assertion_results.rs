@@ -127,7 +127,11 @@ impl SpecAssertionResultRepository for PgStorage {
         .await?
     }
 
-    async fn list_by_spec(&self, repo_id: &str, spec_path: &str) -> Result<Vec<SpecAssertionResult>> {
+    async fn list_by_spec(
+        &self,
+        repo_id: &str,
+        spec_path: &str,
+    ) -> Result<Vec<SpecAssertionResult>> {
         let pool = Arc::clone(&self.pool);
         let repo_id = repo_id.to_string();
         let spec_path = spec_path.to_string();
@@ -139,20 +143,23 @@ impl SpecAssertionResultRepository for PgStorage {
                 .order(spec_assertion_results::line.asc())
                 .load::<SpecAssertionResultRow>(&mut conn)
                 .context("list spec assertion results by spec")?;
-            Ok(rows.into_iter().map(SpecAssertionResultRow::into_record).collect())
+            Ok(rows
+                .into_iter()
+                .map(SpecAssertionResultRow::into_record)
+                .collect())
         })
         .await?
     }
 
     async fn list_spec_paths(&self, repo_id: &str) -> Result<Vec<String>> {
-        use diesel::dsl::Distinct;
         let pool = Arc::clone(&self.pool);
         let repo_id = repo_id.to_string();
         tokio::task::spawn_blocking(move || -> Result<Vec<String>> {
             let mut conn = pool.get().context("get db connection")?;
             let paths = spec_assertion_results::table
                 .filter(spec_assertion_results::repo_id.eq(&repo_id))
-                .select(Distinct(spec_assertion_results::spec_path))
+                .select(spec_assertion_results::spec_path)
+                .distinct()
                 .order(spec_assertion_results::spec_path.asc())
                 .load::<String>(&mut conn)
                 .context("list spec assertion result spec paths")?;

@@ -347,18 +347,27 @@ fn parse_attribute_assertion(text: &str, line: usize) -> Option<ParsedAssertion>
             let to = attrs.get("to")?;
             // `from` names a module/package crate; `to` the dependency that
             // must not exist.
-            (Subject::Module(from.clone()), Predicate::NotDependsOn(to.clone()))
+            (
+                Subject::Module(from.clone()),
+                Predicate::NotDependsOn(to.clone()),
+            )
         }
         "implements" => {
             let subject_name = attrs.get("subject")?;
             let trait_name = attrs.get("trait")?;
-            (Subject::Type(subject_name.clone()), Predicate::Implements(trait_name.clone()))
+            (
+                Subject::Type(subject_name.clone()),
+                Predicate::Implements(trait_name.clone()),
+            )
         }
         "all_have" => {
             let node_type = attrs.get("node_type")?;
             let property = attrs.get("property")?;
-            let node_type = NodeType::from_str_name(&node_type)?;
-            (Subject::NodesOfType(node_type), Predicate::HasProperty(property.clone()))
+            let node_type = NodeType::from_str_name(node_type)?;
+            (
+                Subject::NodesOfType(node_type),
+                Predicate::HasProperty(property.clone()),
+            )
         }
         _ => return None,
     };
@@ -579,9 +588,7 @@ fn evaluate_one(
         Predicate::Implements(trait_name) => {
             eval_implements(&subject_nodes, trait_name, nodes, edges, base)
         }
-        Predicate::HasProperty(property) => {
-            eval_has_property(&subject_nodes, property, base)
-        }
+        Predicate::HasProperty(property) => eval_has_property(&subject_nodes, property, base),
         Predicate::DependsOn(target) => {
             eval_depends_on(&subject_nodes, target, nodes, edges, base, false)
         }
@@ -666,10 +673,9 @@ fn find_subject_nodes<'a>(subject: &Subject, nodes: &'a [GraphNode]) -> Vec<&'a 
                 n.node_type == NodeType::Function && (n.name == *name || n.qualified_name == *name)
             })
             .collect(),
-        Subject::NodesOfType(node_type) => nodes
-            .iter()
-            .filter(|n| n.node_type == *node_type)
-            .collect(),
+        Subject::NodesOfType(node_type) => {
+            nodes.iter().filter(|n| n.node_type == *node_type).collect()
+        }
     }
 }
 
@@ -1678,13 +1684,15 @@ Some explanation.
 
     #[test]
     fn parse_attribute_implements() {
-        let content =
-            r#"<!-- gyre:assert type="implements" subject="SearchService" trait="FullTextPort" -->"#;
+        let content = r#"<!-- gyre:assert type="implements" subject="SearchService" trait="FullTextPort" -->"#;
         let assertions = parse_assertions(content);
         assert_eq!(assertions.len(), 1);
         let a = &assertions[0];
         assert_eq!(a.subject, Subject::Type("SearchService".to_string()));
-        assert_eq!(a.predicate, Predicate::Implements("FullTextPort".to_string()));
+        assert_eq!(
+            a.predicate,
+            Predicate::Implements("FullTextPort".to_string())
+        );
     }
 
     #[test]
@@ -1705,7 +1713,10 @@ Some explanation.
             r#"<!-- gyre:assert type="all_have" node_type="endpoint" property="spec_path" -->"#;
         let assertions = parse_assertions(content);
         assert_eq!(assertions.len(), 1);
-        assert_eq!(assertions[0].subject, Subject::NodesOfType(NodeType::Endpoint));
+        assert_eq!(
+            assertions[0].subject,
+            Subject::NodesOfType(NodeType::Endpoint)
+        );
     }
 
     #[test]
@@ -1716,22 +1727,25 @@ Some explanation.
 
     #[test]
     fn parse_attribute_all_have_unknown_node_type_is_skipped() {
-        let content =
-            r#"<!-- gyre:assert type="all_have" node_type="NotAType" property="p" -->"#;
+        let content = r#"<!-- gyre:assert type="all_have" node_type="NotAType" property="p" -->"#;
         assert!(parse_assertions(content).is_empty());
     }
 
     #[test]
     fn parse_attribute_missing_required_params_is_skipped() {
         // no_dependency requires both from and to.
-        assert!(parse_assertions(r#"<!-- gyre:assert type="no_dependency" from="a" -->"#)
-            .is_empty());
+        assert!(
+            parse_assertions(r#"<!-- gyre:assert type="no_dependency" from="a" -->"#).is_empty()
+        );
         // implements requires both subject and trait.
-        assert!(parse_assertions(r#"<!-- gyre:assert type="implements" subject="S" -->"#)
-            .is_empty());
+        assert!(
+            parse_assertions(r#"<!-- gyre:assert type="implements" subject="S" -->"#).is_empty()
+        );
         // all_have requires both node_type and property.
-        assert!(parse_assertions(r#"<!-- gyre:assert type="all_have" node_type="Endpoint" -->"#)
-            .is_empty());
+        assert!(
+            parse_assertions(r#"<!-- gyre:assert type="all_have" node_type="Endpoint" -->"#)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1759,7 +1773,10 @@ Some explanation.
             assertions[1].subject,
             Subject::Type("SearchService".to_string())
         );
-        assert_eq!(assertions[2].subject, Subject::NodesOfType(NodeType::Endpoint));
+        assert_eq!(
+            assertions[2].subject,
+            Subject::NodesOfType(NodeType::Endpoint)
+        );
     }
 
     #[test]
@@ -1791,8 +1808,7 @@ Some explanation.
             make_node("s1", "SearchService", NodeType::Type),
             make_node("t1", "FullTextPort", NodeType::Interface),
         ];
-        let content =
-            r#"<!-- gyre:assert type="implements" subject="SearchService" trait="FullTextPort" -->"#;
+        let content = r#"<!-- gyre:assert type="implements" subject="SearchService" trait="FullTextPort" -->"#;
         let assertions = parse_assertions(content);
         assert_eq!(assertions.len(), 1);
 
@@ -1852,8 +1868,7 @@ Some explanation.
     #[test]
     fn eval_attribute_all_have_unknown_property_fails() {
         let nodes = vec![make_node("e1", "/api/v1/specs", NodeType::Endpoint)];
-        let content =
-            r#"<!-- gyre:assert type="all_have" node_type="Endpoint" property="auth_middleware" -->"#;
+        let content = r#"<!-- gyre:assert type="all_have" node_type="Endpoint" property="auth_middleware" -->"#;
         let assertions = parse_assertions(content);
         let results = evaluate_assertions(&assertions, &nodes, &[]);
         assert_eq!(results.len(), 1);
@@ -1869,10 +1884,7 @@ Some explanation.
 "#;
         let assertions = parse_assertions(content);
         assert_eq!(assertions.len(), 2);
-        assert_eq!(
-            assertions[0].subject,
-            Subject::Module("a".to_string())
-        );
+        assert_eq!(assertions[0].subject, Subject::Module("a".to_string()));
         assert_eq!(
             assertions[1].predicate,
             Predicate::NotDependsOn("b".to_string())

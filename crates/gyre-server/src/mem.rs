@@ -2723,9 +2723,10 @@ impl gyre_ports::SpecAssertionResultRepository for MemSpecAssertionResultReposit
     }
 
     async fn delete_by_spec(&self, repo_id: &str, spec_path: &str) -> Result<()> {
-        self.store.lock().await.retain(|r| {
-            !(r.repo_id == repo_id && r.spec_path == spec_path)
-        });
+        self.store
+            .lock()
+            .await
+            .retain(|r| !(r.repo_id == repo_id && r.spec_path == spec_path));
         Ok(())
     }
 

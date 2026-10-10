@@ -78,11 +78,10 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                                 tenant_id: tenant_id.to_string(),
                             }
                         });
-                        let divergence_ports =
-                            Some(crate::graph_extraction::DivergencePorts {
-                                notification_repo: state.notifications.as_ref(),
-                                membership_repo: state.workspace_memberships.as_ref(),
-                            });
+                        let divergence_ports = Some(crate::graph_extraction::DivergencePorts {
+                            notification_repo: state.notifications.as_ref(),
+                            membership_repo: state.workspace_memberships.as_ref(),
+                        });
                         crate::graph_extraction::extract_and_store_graph(
                             &repo.path,
                             &repo_id_str,

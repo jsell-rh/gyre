@@ -363,7 +363,11 @@ pub async fn delete_repo(
 
     // Remove persisted spec assertion results so a deleted repo leaves no
     // orphaned rows behind.
-    if let Err(e) = state.spec_assertion_results.delete_by_repo(&repo.id.as_str()).await {
+    if let Err(e) = state
+        .spec_assertion_results
+        .delete_by_repo(repo.id.as_str())
+        .await
+    {
         tracing::warn!(repo_id = %id, "failed to delete spec assertion results on repo delete: {e}");
     }
 
@@ -509,11 +513,10 @@ pub async fn create_mirror_repo(
             {
                 if output.status.success() {
                     let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    let divergence_ports =
-                        Some(crate::graph_extraction::DivergencePorts {
-                            notification_repo: state_for_extract.notifications.as_ref(),
-                            membership_repo: state_for_extract.workspace_memberships.as_ref(),
-                        });
+                    let divergence_ports = Some(crate::graph_extraction::DivergencePorts {
+                        notification_repo: state_for_extract.notifications.as_ref(),
+                        membership_repo: state_for_extract.workspace_memberships.as_ref(),
+                    });
                     crate::graph_extraction::extract_and_store_graph(
                         &extract_path,
                         &extract_repo_id,

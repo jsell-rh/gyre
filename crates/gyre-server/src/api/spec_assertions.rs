@@ -95,7 +95,6 @@ pub async fn check_spec_assertions(
         })
         .collect();
 
-
     Ok((StatusCode::OK, Json(CheckAssertionsResponse { assertions })))
 }
 /// A stored assertion result in the GET response.
@@ -513,7 +512,9 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!("/api/v1/repos/{repo_id}/specs/never%2Fchecked.md/assertions"))
+                    .uri(format!(
+                        "/api/v1/repos/{repo_id}/specs/never%2Fchecked.md/assertions"
+                    ))
                     .header("Authorization", auth())
                     .body(Body::empty())
                     .unwrap(),

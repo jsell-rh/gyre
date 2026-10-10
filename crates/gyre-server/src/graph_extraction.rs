@@ -87,6 +87,7 @@ pub struct DivergenceScope<'a> {
 /// notifications also fire for user and mirror pushes.
 ///
 /// All errors are logged and swallowed — extraction must never fail a push.
+#[allow(clippy::too_many_arguments)]
 pub async fn extract_and_store_graph(
     repo_path: &str,
     repo_id: &str,
@@ -115,6 +116,7 @@ pub async fn extract_and_store_graph(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn do_extract(
     repo_path: &str,
     repo_id: &str,
@@ -873,6 +875,7 @@ pub async fn extract_and_persist_call_graph(
 /// NOT by agent context — every push type (agent, user CLI, mirror sync)
 /// notifies. Failures already recorded for the same commit are not
 /// re-notified (mirror-sync cycles re-extract unchanged SHAs).
+#[allow(clippy::too_many_arguments)]
 async fn check_spec_assertions_on_push(
     repo_root: &Path,
     nodes: &[GraphNode],
@@ -1637,13 +1640,20 @@ mod tests {
         .unwrap();
 
         for path in ["system/kept.md", "system/emptied.md", "system/doomed.md"] {
-            let stored = results_repo.list_by_spec(repo_id.as_str(), path).await.unwrap();
+            let stored = results_repo
+                .list_by_spec(repo_id.as_str(), path)
+                .await
+                .unwrap();
             assert_eq!(stored.len(), 1, "{path} seeded with one result");
         }
 
         // Next push: `emptied.md` keeps its file but loses its assertions;
         // `doomed.md` is deleted entirely; `kept.md` is unchanged.
-        std::fs::write(specs_dir.join("emptied.md"), "# Emptied\n\nNo assertions remain.\n").unwrap();
+        std::fs::write(
+            specs_dir.join("emptied.md"),
+            "# Emptied\n\nNo assertions remain.\n",
+        )
+        .unwrap();
         std::fs::remove_file(specs_dir.join("doomed.md")).unwrap();
 
         check_spec_assertions_on_push(
