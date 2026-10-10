@@ -232,6 +232,38 @@ Re-verification at repaired HEAD (`2076ba76`):
   above); the exact commands are recorded in the evidence file for host
   verification and GitHub CI.
 
+## Repair round (review-owned coverage-row edits, 8fcbf518)
+
+The R1 review round itself edited `specs/coverage/system/realized-model.md`
+(row 7 §4 flip task-assigned → implemented); the review guard preserved
+those edits and required implementation to own them within task scope. The
+preserved edits were substantively correct but cited the sibling pipeline's
+checkpoint SHA (`cd4ffd09`) and its `/tmp/stage` evidence, neither reachable
+from this branch's run. Repaired in `8fcbf518`:
+
+- Row 7 and the audit header re-anchored to this branch's HEAD `1c2ee5d7`.
+  Justification verified first: `git diff d75afe7c..HEAD -- crates/` is
+  empty — the code at HEAD is byte-identical to the mutation-probed sibling
+  checkpoint — and every code anchor cited in the row was re-confirmed at
+  HEAD (ConceptDef spec_registry.rs:39, ConceptInclude :50, From :63,
+  project graph.rs:287, matches_node :353, glob_match :218, unit tests
+  spec_registry.rs:1176/:1185/:1249, resolve_concept_view api/graph.rs:672,
+  get_graph_concept :695, workspace :1329, mod.rs:879/:910, substring
+  surface :368-393, rust_extractor.rs:474-507 route-path convention).
+- Mutation probe re-run at HEAD in an isolated worktree (private target
+  dir): substring-revert mutant fails all 3 projection guards, exit 101;
+  baseline (mutant reverted) green. Evidence:
+  `/tmp/stage/review-evidence/task205-head-reverification-1c2ee5d7.txt`
+  (also re-confirms the accept(2) sandbox restriction with this round's
+  capabilities snapshot alongside).
+- Re-verification at HEAD: `cargo build --all` OK;
+  `cargo test -p gyre-server --lib -- api::graph::tests mcp::tests
+  spec_registry::tests` → 142 passed;
+  `cargo test -p gyre-common --lib` → 98 passed;
+  `scripts/check-task-commit-attribution.sh` OK.
+- No source, test, verifier, or exemption changes — this round touches only
+  the coverage-matrix citations and this task file.
+
 ## Review
 
 ### Review changed source code
