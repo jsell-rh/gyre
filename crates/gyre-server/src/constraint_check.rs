@@ -3016,7 +3016,7 @@ mod tests {
     }
 
     fn make_binding_keypair() -> ring::signature::Ed25519KeyPair {
-        use ring::signature::KeyPair;
+
         let rng = ring::rand::SystemRandom::new();
         let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
         ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap()
