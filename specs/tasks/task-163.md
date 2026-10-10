@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "dependency-graph.md §Enforcement Policies"
   - "dependency-graph.md §Cascade Testing"
-commits: ["9f9f4340398d1f6fbe3ec08cc81150ad9fb9dac4", "bb92174675e04d96023125d9f70aab20dd3cc6a5"]
+commits: ["71e25bb8c1b92e52babd309d383dc4de864794b8"]
 ---
 
 ## Spec Excerpt
