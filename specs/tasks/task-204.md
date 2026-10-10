@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "spec-lifecycle.md §Accountability Integration"
-commits: ["61a6f222207f4671676682c6404c893983a239e8", "951880b6ba36750f8a4d58489dc20267b42ba03e", "def75ba6b2fa61e6a33661e0e9223bc3455e9562", "ead1d669b2f5743d2813b45e649b7e94163881cd", "56e77ec4ecd3588ab0b9ce6f355466f3c3ad5c4d", "40ded0602516a013f795654772898954c715d06a", "5147d645704a4445cb589f2b73a86cce70076d36", "91110a37bb67c2763763c405cad897058fcd81ec"]
+commits: ["61a6f222207f4671676682c6404c893983a239e8", "951880b6ba36750f8a4d58489dc20267b42ba03e", "def75ba6b2fa61e6a33661e0e9223bc3455e9562", "ead1d669b2f5743d2813b45e649b7e94163881cd", "56e77ec4ecd3588ab0b9ce6f355466f3c3ad5c4d", "40ded0602516a013f795654772898954c715d06a", "5147d645704a4445cb589f2b73a86cce70076d36", "91110a37bb67c2763763c405cad897058fcd81ec", "d3b3c63a79898a1a7c73f9447d595ab93f76cf17"]
 ---
 
 ## Spec Excerpt
@@ -87,19 +87,35 @@ Every finding escalates to the workspace orchestrator as a REAL persisted
 (`spec` resource, write action) — real policy evaluation, no exemption file
 entry.
 
-This repair round removed a leftover kill-test mutant (`if true { return 0; }`
-stubbing `escalate_findings`) from the interrupted assignment's checkpoint.
+This round (continuing interrupted finding `aaec3179`) removed the kill-test
+mutant that the interrupted assignment's checkpoint (`61a6f222`) had committed
+into `escalate_findings` — the shipped tree stubbed escalation to `return 0`,
+which is exactly the hollow implementation this task forbids. The committed
+mutant's removal is recorded as its own fix commit, and both kill-tests were
+re-run to completion against the restored source.
 
 ## Test evidence
 
-- Kill-test (mutant in place, `escalate_findings` no-op): 3 tests fail with
-  `every finding must be escalated, not merely logged` /
-  `one escalation per finding` / `escalation must be emitted, not skipped` —
-  `spec_lifecycle_patrol` + endpoint tests detect skipped escalation
-  (`/tmp/stage/review-evidence/task204-killtest-mutant.log`, exit 101).
-- Clean run: `cargo test -p gyre-server --lib spec_lifecycle_patrol` — 11
-  passed, 0 failed (incl. stale/fresh, Backlog/non-Backlog, orphaned/covered,
-  cancelled-task coverage, threshold-override, broadcast routing tests).
+- Kill-test A (mutant in place, `escalate_findings` no-op): 3 tests fail —
+  `flags_and_escalates_only_the_accountability_gaps`,
+  `workspaceless_finding_broadcasts`, and
+  `spec_lifecycle_patrol_endpoint_flags_and_escalates` — with `every finding
+  must be escalated, not merely logged` / `escalation must be emitted, not
+  skipped` assertions; exit 101
+  (`/tmp/stage/review-evidence/task204-killtest-mutantA-escalation-skip.log`).
+- Kill-test B (check-3 single-spelling query: `spec_has_live_task` reverted to
+  querying only `specs/system/...`): `flags_watched_specs_without_tasks` fails
+  on the ledger-spelling covered task (`system/covered-ledger.md` with a
+  Backlog task referencing it that way) — the both-spelling coverage query is
+  load-bearing, not decorative; exit 101
+  (`/tmp/stage/review-evidence/task204-killtest-mutantB-single-spelling.log`).
+- Clean run (mutant removed): `cargo test -p gyre-server --lib
+  spec_lifecycle_patrol` — 11 passed, 0 failed (incl. stale/fresh,
+  Backlog/non-Backlog, orphaned/covered incl. ledger-spelling and
+  repo-mismatch coverage, cancelled-task coverage, threshold-override,
+  broadcast routing tests)
+  (`/tmp/stage/review-evidence/task204-repair-clean-run.log`, HEAD
+  `98ee491d` + 1-file dirty state = the restored tree).
 - Endpoint tests: `cargo test -p gyre-server --lib api::specs::tests` — 53
   passed (incl. `spec_lifecycle_patrol_endpoint_flags_and_escalates` and
   `..._honours_thresholds`, which assert persisted escalations via the real
