@@ -1554,7 +1554,6 @@ mod registry_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn two_step_edit_then_approve_triggers_reconciliation() {
         use crate::mem::test_state;
-        use gyre_ports::TaskRepository;
 
         let state = test_state();
         let app: Router = crate::api::api_router().with_state(state.clone());
@@ -1714,7 +1713,7 @@ mod registry_tests {
         // Step 2 of the UI flow: handleApprove PUTs only
         // {approval_status: Approved} — no prompt in the request. This is
         // the request the old trigger condition missed.
-        let approve2 = app
+        let approve2 = app.clone()
             .oneshot(
                 Request::builder()
                     .method("PUT")
