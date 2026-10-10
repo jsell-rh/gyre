@@ -48,6 +48,33 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - **F1 fixed.** `web/dist/index.html` now references `index-KSqzVjd3.js` (+ `index-DGYWpzy3.css`); the old `index-fzyK9GaC.js` and old CSS are deleted. F1 acceptance grep over `web/dist/assets/*.js` for `my-agents|my-tasks|my-mrs|myAgents|myTasks|myMrs|users/me/agents|users/me/tasks|users/me/mrs` → **zero matches**. The compiled bundle's tab array is exactly `{info, tokens, memberships, ledger, notif-prefs, notifications}` and its `Promise.allSettled` holds only the four kept fetches (`me`, `myNotifications`, `myJudgments`, `workspaces`) — the six-tab UI ships on the Rust-only `SKIP_WEB_BUILD=1` path. Kept-surface identifiers present in the bundle (`users/me/tokens` ×3, `users/me/judgments`, `notif-prefs` ×2). No source drift since `98fd096` (`git diff 98fd096..HEAD --stat -- web/src/ crates/ specs/system/user-management.md` empty).
 - **M22 annotation landed** (`6bc4189`): the three endpoint rows in `specs/milestones/m22-platform-entities.md` are struck with a removal pointer at HSI §12 / task-208; the historical "12 REST endpoints" count preserved as an M22-era record — exactly the optional treatment round 1 suggested.
 - **Scoping gap found and fixed this round (F2, process):** `ad1121c` was missing from the task's `commits:` frontmatter. The attribution gate passed only because its product-surface regex `^(crates/|web/src|web/tests)` does not cover `web/dist/` — a task-labeled dist-only commit escapes both the gate and review scoping, even though `web/dist` is the shipped artifact on the Rust-only build path. Round 1's repair path explicitly required recording the SHA; the implementer's `6bc4189` ("record dist regen commit") only touched the M22 milestone. Fixed here: `ad1121c5093cd2f1f2b3824ed88352ac4e181fd9` appended to the frontmatter; exemption file untouched (3 frozen entries, none referencing task-208). Residual: the gate's `web/dist/` blind spot is a process-script gap out of this task's product scope — flagged for a process-task owner (regex extension `web/dist/`, plus deciding whether dist-regen commits must always be task-attributed).
-- Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
-Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+Verdict (round 2): **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 3 (2026-10-10) — candidate 6eba6bae: product verified green; clobber 16 at the tip, needs-revision
+
+Assigned candidate `6eba6bae` against base `27bd585c`. All probes were re-run fresh at this exact tree (both caches had been wiped; full cold cargo build).
+
+Probes run (this round, at `6eba6bae`):
+
+- `cargo test -p gyre-server --lib api::users::tests::my_stuff_endpoints_are_removed` → **ok, 1 passed, exit 0** (cold build, ~24 min).
+- `cd web && npm ci` (clean) → `npx vitest run src/__tests__/UserProfile.test.js` → **23/23 passed, exit 0**, including the exact-six-tab guard (`[role="tab"]` data-id `toEqual(['info','tokens','memberships','ledger','notif-prefs','notifications'])` — verified `Tabs.svelte` really renders `role="tab"` + `data-id`, so the guard binds to real DOM).
+- `bash scripts/check-task-commit-attribution.sh` → OK (exit 0 — see blind-spot note below).
+- `bash scripts/check-abac-route-registry.sh` / `check-abac-exempt-handlers.sh` → exit 0.
+- `git diff --check 27bd585c..6eba6bae` → exit 0 (`.gitattributes` `web/dist/** -whitespace` exemption intact).
+- Dead-code grep `get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs` over `crates/` + `web/src/` → zero matches. Forbidden-identifier grep over committed `web/dist/assets/index-KSqzVjd3.js` → zero; kept surfaces (`users/me/tokens`, `users/me/judgments`, `users/me/notifications`, `notif-prefs`) present.
+- Fresh `npm run build` from candidate `web/src` → zero forbidden identifiers in the rebuilt bundle (rebuild artifacts removed, committed dist restored byte-identical, tree clean).
+- Zero product drift since the round-12 probe tree: `git diff --stat 3854045c..6eba6bae -- crates/gyre-server web/src web/dist .gitattributes` → empty. The only post-3854045c changes (gyre-cli, docs/cli.md, task files) all arrived via the assigned base merge `0f198fa5` / upstream `06d70009` — not candidate work.
+
+Verified working (no code findings): the full HSI §12 cutover stands — handlers/routes/ABAC mappings/api-client/tabs/tests deleted, 404 regression test green, spec amendment + both coverage matrices intact (HSI row 54 `implemented`, user-management row 22 `n/a`), M22 rows struck, `e2e-flow.sh` asserts 404 on all three URIs.
+
+Findings:
+
+- [-] **F3 (process, blocking): the candidate tip itself is the 16th checkpoint-attribution clobber.** `6eba6bae` ("process: record task-208 branch commits") rewrote `commits:` from the fully-attributed three-SHA list (present at parent `0c30237e`) back to `["98fd096e..."]`, dropping `ad1121c5` (dist regen — the F1 fix, task-labeled product-surface commit, verified ancestor of the candidate) and `ea006d52` (.gitattributes whitespace exemption, task-labeled, verified ancestor). At this candidate the F1 fix is unscoped for the verifier. The in-repo gate passes only because its product-surface regex `^(crates/|web/src|web/tests)` excludes `web/dist/` and root `.gitattributes` — the documented blind spot from 15 prior rounds. Repair is mechanical, product untouched: restore `commits: ["98fd096e3972e7a6d1df78b700b63ea1dee15fe5", "ad1121c5093cd2f1f2b3824ed88352ac4e181fd9", "ea006d52bb42e96e6f176b02b5390b6cb56a3116"]` at the tip. Evidence: `/tmp/stage/review-evidence/task-208-round13-clobber16.txt`.
+
+Non-findings recorded for the verifier:
+
+- The committed dist (`index-KSqzVjd3.js`) does not contain upstream web/src content merged in after the `ad1121c5` regen (e.g. `manage-rules-link` from `a781ede2`/`05709c24` via the assigned base). This is **base-inherited mainline staleness**, not candidate-caused: the base's own dist (`index-fzyK9GaC.js` at `27bd585c`) also lacks those strings while base src has them. Task-208-relevant content (my-stuff removal) is correctly in the committed dist. Out of task-208 scope; the general source↔bundle freshness oracle remains an open process gap (round-2 note).
+- Live HTTP serving probes remain impossible in this sandbox (TCP `accept` blocked, EOPNOTSUPP — `/tmp/stage/capabilities.json`). Host verification / GitHub CI must run `.github/workflows/e2e.yml` (which exercises `scripts/e2e-flow.sh`'s new 404 assertions) live.
+
+Verdict: **needs-revision** (attribution only — zero product defects at this candidate).
