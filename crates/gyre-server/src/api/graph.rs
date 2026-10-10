@@ -703,7 +703,9 @@ async fn load_narrative_grounding(
         .list_edges(repo_id, None)
         .await
         .map_err(ApiError::Internal)?;
-    Ok(gyre_domain::narrative::NarrativeGrounding::from_graph(&nodes, &edges))
+    Ok(gyre_domain::narrative::NarrativeGrounding::from_graph(
+        &nodes, &edges,
+    ))
 }
 
 /// Resolve a delta's provenance attribution label from its stored `agent_id`:
@@ -828,22 +830,26 @@ async fn collect_architecture_narratives(
     recent.truncate(BRIEFING_NARRATIVE_MAX_DELTAS); // slice:ok — Vec<ArchitecturalDelta> length trim, index-typed not string bytes
 
     // One graph-grounding load per repo touched by the window.
-    let mut groundings: std::collections::HashMap<String, gyre_domain::narrative::NarrativeGrounding> =
-        std::collections::HashMap::new();
+    let mut groundings: std::collections::HashMap<
+        String,
+        gyre_domain::narrative::NarrativeGrounding,
+    > = std::collections::HashMap::new();
     for d in &recent {
         let key = d.repo_id.to_string();
-        if !groundings.contains_key(&key) {
+        // One async load per repo; `Vacant` holds the write slot across the await.
+        if let std::collections::hash_map::Entry::Vacant(slot) = groundings.entry(key) {
             let g = match load_narrative_grounding(state, &d.repo_id).await {
                 Ok(g) => g,
                 Err(e) => {
                     tracing::warn!(
-                        "briefing narrative: graph grounding failed for repo {key}, \
-                         rendering from delta facts only: {e:?}"
+                        "briefing narrative: graph grounding failed for repo {}, \
+                         rendering from delta facts only: {e:?}",
+                        slot.key()
                     );
                     gyre_domain::narrative::NarrativeGrounding::default()
                 }
             };
-            groundings.insert(key, g);
+            slot.insert(g);
         }
     }
 
@@ -895,7 +901,11 @@ pub async fn get_graph_timeline(
     let mut out = Vec::with_capacity(deltas.len());
     for d in deltas {
         let attribution = delta_attribution(&state, &d, &mut attribution_cache).await;
-        out.push(DeltaResponse::from_delta(d, &grounding, attribution.as_deref()));
+        out.push(DeltaResponse::from_delta(
+            d,
+            &grounding,
+            attribution.as_deref(),
+        ));
     }
     Ok(Json(out))
 }
@@ -976,7 +986,11 @@ pub async fn get_graph_diff(
     let mut delta_responses = Vec::with_capacity(deltas.len());
     for d in deltas {
         let attribution = delta_attribution(&state, &d, &mut attribution_cache).await;
-        delta_responses.push(DeltaResponse::from_delta(d, &grounding, attribution.as_deref()));
+        delta_responses.push(DeltaResponse::from_delta(
+            d,
+            &grounding,
+            attribution.as_deref(),
+        ));
     }
 
     Ok(Json(GraphDiffResponse {
@@ -1336,8 +1350,7 @@ pub async fn assemble_briefing(
         match facts {
             Some(facts) => {
                 let fallback = template_narratives.join(" ");
-                let narrative =
-                    llm_architecture_narrative(state, &ws_id, &facts, fallback).await;
+                let narrative = llm_architecture_narrative(state, &ws_id, &facts, fallback).await;
                 if narrative.is_empty() {
                     summary
                 } else {
@@ -2598,12 +2611,7 @@ mod tests {
             .unwrap();
         state
             .graph_store
-            .create_edge(_new_edge(
-                "repo-1",
-                &ty.id,
-                &trt.id,
-                EdgeType::Implements,
-            ))
+            .create_edge(_new_edge("repo-1", &ty.id, &trt.id, EdgeType::Implements))
             .await
             .unwrap();
         format!(
@@ -2651,7 +2659,10 @@ mod tests {
             narrative.contains("New type `VectorIndex` added to module `qualified::search`."),
             "{narrative}"
         );
-        assert!(narrative.contains("Implements trait `FullTextPort`."), "{narrative}");
+        assert!(
+            narrative.contains("Implements trait `FullTextPort`."),
+            "{narrative}"
+        );
         assert!(
             narrative.contains("Governed by spec: specs/billing/indexing.md."),
             "{narrative}"
@@ -2660,7 +2671,10 @@ mod tests {
             narrative.contains("Produced by agent worker-9 under persona backend-dev."),
             "{narrative}"
         );
-        assert!(narrative.contains("1 new relationship established."), "{narrative}");
+        assert!(
+            narrative.contains("1 new relationship established."),
+            "{narrative}"
+        );
     }
 
     /// Delta with no graph seeding: template still renders from the delta's
@@ -2679,17 +2693,25 @@ mod tests {
         s.llm = None;
         let state = std::sync::Arc::new(s);
         let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
-        state.graph_store.record_delta(narrative_delta()).await.unwrap();
+        state
+            .graph_store
+            .record_delta(narrative_delta())
+            .await
+            .unwrap();
 
         let briefing = assemble_briefing(&state, &ws_id, 1500)
             .await
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
-        assert!(briefing.summary.contains("MRs merged"), "{}", briefing.summary);
         assert!(
-            briefing
-                .summary
-                .contains("Architecture: New type `VectorIndex` added to module `billing::search`."),
+            briefing.summary.contains("MRs merged"),
+            "{}",
+            briefing.summary
+        );
+        assert!(
+            briefing.summary.contains(
+                "Architecture: New type `VectorIndex` added to module `billing::search`."
+            ),
             "{}",
             briefing.summary
         );
@@ -2701,13 +2723,21 @@ mod tests {
         // user prompt, which only appears if the LLM path actually ran.
         let state = test_state();
         let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
-        state.graph_store.record_delta(narrative_delta()).await.unwrap();
+        state
+            .graph_store
+            .record_delta(narrative_delta())
+            .await
+            .unwrap();
 
         let briefing = assemble_briefing(&state, &ws_id, 1500)
             .await
             .map_err(|_| "assemble_briefing failed")
             .unwrap();
-        assert!(briefing.summary.contains("MRs merged"), "{}", briefing.summary);
+        assert!(
+            briefing.summary.contains("MRs merged"),
+            "{}",
+            briefing.summary
+        );
         assert!(
             briefing
                 .summary

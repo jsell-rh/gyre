@@ -1079,7 +1079,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn edge_entry_resolves_qualified_names() {
         let qn_by_id: HashMap<&str, &str> = [("n-1", "crate::Foo"), ("n-2", "crate::Bar")]
@@ -1443,13 +1442,17 @@ mod tests {
         .unwrap();
 
         // Commit 1: two public functions → two Contains edges (module → fn).
-        std::fs::write(
-            work.join("lib.rs"),
-            "pub fn find() {}\npub fn index() {}\n",
-        )
-        .unwrap();
+        std::fs::write(work.join("lib.rs"), "pub fn find() {}\npub fn index() {}\n").unwrap();
         git(&["add", "."]);
-        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "one"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-m",
+            "one",
+        ]);
         let sha1 = String::from_utf8_lossy(&git(&["rev-parse", "HEAD"]).stdout)
             .trim()
             .to_string();
@@ -1467,11 +1470,7 @@ mod tests {
         )
         .await;
 
-        let edges_after_first = store
-            .list_edges(&repo_id, None)
-            .await
-            .unwrap()
-            .len();
+        let edges_after_first = store.list_edges(&repo_id, None).await.unwrap().len();
         assert!(
             edges_after_first >= 2,
             "commit 1 must extract two Contains edges, got {edges_after_first}"
@@ -1480,11 +1479,18 @@ mod tests {
         // Commit 2: drop one function → its Contains edge disappears.
         std::fs::write(work.join("lib.rs"), "pub fn find() {}\n").unwrap();
         git(&["add", "."]);
-        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "two"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-m",
+            "two",
+        ]);
         let sha2 = String::from_utf8_lossy(&git(&["rev-parse", "HEAD"]).stdout)
             .trim()
             .to_string();
-
 
         extract_and_store_graph(
             work.to_str().unwrap(),

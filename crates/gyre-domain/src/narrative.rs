@@ -275,10 +275,7 @@ fn parse_delta_facts(delta_json: &str) -> DeltaFacts {
 
 /// Parse one `edges_*` field: detail array (current format, agent context)
 /// or bare count (legacy/compact format).
-fn parse_edges(
-    value: Option<&serde_json::Value>,
-    count_only: &mut Option<u64>,
-) -> Vec<EdgeFact> {
+fn parse_edges(value: Option<&serde_json::Value>, count_only: &mut Option<u64>) -> Vec<EdgeFact> {
     match value {
         Some(serde_json::Value::Array(arr)) => arr
             .iter()
@@ -299,7 +296,10 @@ fn parse_edges(
 }
 
 fn name_of(qualified_name: &str) -> &str {
-    qualified_name.rsplit_once("::").map(|(_, n)| n).unwrap_or(qualified_name)
+    qualified_name
+        .rsplit_once("::")
+        .map(|(_, n)| n)
+        .unwrap_or(qualified_name)
 }
 
 fn plural(type_name: &str) -> String {
@@ -343,7 +343,10 @@ fn facts_json(
     attribution: Option<&str>,
 ) -> serde_json::Value {
     let f = parse_delta_facts(&delta.delta_json);
-    let spec_ref = delta.spec_ref.as_deref().map(|s| s.split('@').next().unwrap_or(s));
+    let spec_ref = delta
+        .spec_ref
+        .as_deref()
+        .map(|s| s.split('@').next().unwrap_or(s));
 
     let added: Vec<serde_json::Value> = f
         .added
@@ -499,7 +502,11 @@ pub fn generate_template_narrative(
                 .or_default() += 1;
         }
         for ((module, node_type), n) in groups {
-            let type_word = plural(if node_type.is_empty() { "node" } else { &node_type });
+            let type_word = plural(if node_type.is_empty() {
+                "node"
+            } else {
+                &node_type
+            });
             match module {
                 Some(m) => sentences.push(format!("{} {type_word} added to module `{m}`.", n)),
                 None => sentences.push(format!("{} {type_word} added.", n)),
@@ -520,7 +527,10 @@ pub fn generate_template_narrative(
                 if !traits.is_empty() {
                     let quoted: Vec<String> = traits.iter().map(|t| format!("`{t}`")).collect();
                     let word = if traits.len() == 1 { "trait" } else { "traits" };
-                    s.push_str(&format!(" Implements {word} {}.", join_list(&quoted, "and")));
+                    s.push_str(&format!(
+                        " Implements {word} {}.",
+                        join_list(&quoted, "and")
+                    ));
                 }
             }
             if let Some(fields) = grounding.fields.get(&a.qualified_name) {
@@ -585,7 +595,12 @@ pub fn generate_template_narrative(
             .map(|fc| {
                 let old = fc.old_value.as_deref().unwrap_or("unset");
                 let new = fc.new_value.as_deref().unwrap_or("unset");
-                format!("{}: {} → {}", fc.field, truncate_value(old), truncate_value(new))
+                format!(
+                    "{}: {} → {}",
+                    fc.field,
+                    truncate_value(old),
+                    truncate_value(new)
+                )
             })
             .collect();
         sentences.push(format!("{head} — {}.", changes.join("; ")));
@@ -637,10 +652,7 @@ pub fn generate_template_narrative(
                 ));
             }
         } else {
-            sentences.push(format!(
-                "{} relationships removed.",
-                f.edges_removed.len()
-            ));
+            sentences.push(format!("{} relationships removed.", f.edges_removed.len()));
         }
     } else if let Some(n) = f.edges_removed_count_only {
         if n > 0 {
@@ -753,7 +765,12 @@ mod tests {
     fn grounding_vector_index() -> NarrativeGrounding {
         // Module gyre_domain::search contains type VectorIndex implementing
         // FullTextPort, with 3 fields, governed by search.md.
-        let module = node("n-module", NodeType::Module, "search", "gyre_domain::search");
+        let module = node(
+            "n-module",
+            NodeType::Module,
+            "search",
+            "gyre_domain::search",
+        );
         let mut ty = node(
             "n-type",
             NodeType::Type,
@@ -792,10 +809,7 @@ mod tests {
             edge("e4", EdgeType::FieldOf, "n-f2", "n-type"),
             edge("e5", EdgeType::FieldOf, "n-f3", "n-type"),
         ];
-        NarrativeGrounding::from_graph(
-            &[module, ty, trt, f1, f2, f3],
-            &edges,
-        )
+        NarrativeGrounding::from_graph(&[module, ty, trt, f1, f2, f3], &edges)
     }
 
     #[test]
@@ -805,13 +819,19 @@ mod tests {
             r#"{"nodes_added":[{"name":"VectorIndex","node_type":"type","qualified_name":"gyre_domain::search::VectorIndex"}]}"#,
         );
         let n = generate_template_narrative(&d, &g, None);
-        assert!(n.contains("New type `VectorIndex` added to module `gyre_domain::search`."), "{n}");
+        assert!(
+            n.contains("New type `VectorIndex` added to module `gyre_domain::search`."),
+            "{n}"
+        );
         assert!(n.contains("Implements trait `FullTextPort`."), "{n}");
         assert!(
             n.contains("3 fields: dimension, embedding_model, index_path."),
             "{n}"
         );
-        assert!(n.contains("Governed by spec: specs/system/search.md."), "{n}");
+        assert!(
+            n.contains("Governed by spec: specs/system/search.md."),
+            "{n}"
+        );
     }
 
     #[test]
@@ -820,12 +840,12 @@ mod tests {
         let d = delta(
             r#"{"nodes_added":[{"name":"Foo","node_type":"type","qualified_name":"crate::Foo"}]}"#,
         );
-        let n = generate_template_narrative(
-            &d,
-            &g,
-            Some("agent worker-12 under persona backend-dev"),
+        let n =
+            generate_template_narrative(&d, &g, Some("agent worker-12 under persona backend-dev"));
+        assert!(
+            n.contains("Produced by agent worker-12 under persona backend-dev."),
+            "{n}"
         );
-        assert!(n.contains("Produced by agent worker-12 under persona backend-dev."), "{n}");
     }
 
     #[test]
@@ -833,13 +853,21 @@ mod tests {
         let g = NarrativeGrounding::default();
         let entries: Vec<String> = (0..5)
             .map(|i| {
-                format!(r#"{{"name":"T{i}","node_type":"type","qualified_name":"crate::search::T{i}"}}"#)
+                format!(
+                    r#"{{"name":"T{i}","node_type":"type","qualified_name":"crate::search::T{i}"}}"#
+                )
             })
             .collect();
         let d = delta(&format!(r#"{{"nodes_added":[{}]}}"#, entries.join(",")));
         let n = generate_template_narrative(&d, &g, None);
-        assert!(n.contains("5 types added to module `crate::search`."), "{n}");
-        assert!(!n.contains("New type"), "grouped output omits per-node detail: {n}");
+        assert!(
+            n.contains("5 types added to module `crate::search`."),
+            "{n}"
+        );
+        assert!(
+            !n.contains("New type"),
+            "grouped output omits per-node detail: {n}"
+        );
     }
 
     #[test]
@@ -849,7 +877,10 @@ mod tests {
             r#"{"nodes_removed":["crate::search::Legacy"],"nodes_modified":[{"qualified_name":"crate::search::VectorIndex","field_changes":[{"field":"complexity","old_value":"3","new_value":"9"}]}]}"#,
         );
         let n = generate_template_narrative(&d, &g, None);
-        assert!(n.contains("`Legacy` removed from module `crate::search`."), "{n}");
+        assert!(
+            n.contains("`Legacy` removed from module `crate::search`."),
+            "{n}"
+        );
         assert!(
             n.contains("`VectorIndex` in `crate::search` modified — complexity: 3 → 9."),
             "{n}"
@@ -874,7 +905,10 @@ mod tests {
     fn empty_or_malformed_delta_renders_empty() {
         let g = NarrativeGrounding::default();
         assert_eq!(generate_template_narrative(&delta("{}"), &g, None), "");
-        assert_eq!(generate_template_narrative(&delta("not json"), &g, None), "");
+        assert_eq!(
+            generate_template_narrative(&delta("not json"), &g, None),
+            ""
+        );
         assert_eq!(generate_template_narrative(&delta(""), &g, None), "");
     }
 
@@ -886,7 +920,10 @@ mod tests {
         );
         d.spec_ref = Some("specs/system/search.md@deadbeef".to_string());
         let n = generate_template_narrative(&d, &g, None);
-        assert!(n.contains("Governed by spec: specs/system/search.md."), "{n}");
+        assert!(
+            n.contains("Governed by spec: specs/system/search.md."),
+            "{n}"
+        );
         assert!(!n.contains('@'), "sha suffix stripped: {n}");
     }
 
@@ -909,7 +946,12 @@ mod tests {
     #[test]
     fn governed_by_edge_adds_spec_fact() {
         let ty = node("n-type", NodeType::Type, "Foo", "crate::Foo");
-        let spec = node("n-spec", NodeType::Spec, "specs/system/foo.md", "specs/system/foo.md");
+        let spec = node(
+            "n-spec",
+            NodeType::Spec,
+            "specs/system/foo.md",
+            "specs/system/foo.md",
+        );
         let g = NarrativeGrounding::from_graph(
             &[ty, spec],
             &[edge("e1", EdgeType::GovernedBy, "n-type", "n-spec")],
@@ -932,8 +974,14 @@ mod tests {
         assert_eq!(facts["edges_added"], 1);
         assert_eq!(facts["nodes_added"][0]["module"], "gyre_domain::search");
         assert_eq!(facts["nodes_added"][0]["implements"][0], "FullTextPort");
-        assert_eq!(facts["nodes_added"][0]["specs"][0], "specs/system/search.md");
-        assert_eq!(facts["nodes_added"][0]["fields"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            facts["nodes_added"][0]["specs"][0],
+            "specs/system/search.md"
+        );
+        assert_eq!(
+            facts["nodes_added"][0]["fields"].as_array().unwrap().len(),
+            3
+        );
     }
 
     #[test]
@@ -962,7 +1010,10 @@ mod tests {
             r#"{"edges_added":[{"edge_type":"contains","source":"a::M","target":"a::M::X"},{"edge_type":"contains","source":"a::M","target":"a::M::Y"},{"edge_type":"implements","source":"a::X","target":"a::T"},{"edge_type":"implements","source":"a::Y","target":"a::T"}]}"#,
         );
         let n = generate_template_narrative(&d, &g, None);
-        assert!(n.contains("4 new relationships established (2 contains, 2 implements)."), "{n}");
+        assert!(
+            n.contains("4 new relationships established (2 contains, 2 implements)."),
+            "{n}"
+        );
         assert!(!n.contains("New contains relationship"), "{n}");
     }
 
@@ -973,7 +1024,10 @@ mod tests {
             r#"{"edges_added":[{"edge_type":"implements","source":"a::X"},{"edge_type":"calls","source":"a::P","target":"a::Q"},{"target":"a::Z"}]}"#,
         );
         let n = generate_template_narrative(&d, &g, None);
-        assert!(n.contains("New calls relationship: `a::P` → `a::Q`."), "{n}");
+        assert!(
+            n.contains("New calls relationship: `a::P` → `a::Q`."),
+            "{n}"
+        );
     }
 
     #[test]
@@ -988,7 +1042,10 @@ mod tests {
             facts["edges_added"][0]["source"],
             "gyre_domain::search::VectorIndex"
         );
-        assert_eq!(facts["edges_added"][0]["target"], "gyre_domain::search::FullTextPort");
+        assert_eq!(
+            facts["edges_added"][0]["target"],
+            "gyre_domain::search::FullTextPort"
+        );
     }
 
     #[test]
