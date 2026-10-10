@@ -1009,44 +1009,77 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_reports_truthful_launch_outcome() {
-        // task-099 F3: the spawn response must report what actually
-        // happened at launch. The test state has no compute target and no
-        // GYRE_ORCHESTRATOR_COMMAND, so the default command
-        // /gyre/entrypoint.sh does not exist on this machine and the launch
-        // must be reported as launch_failed — never as "running" for a row
-        // whose process never started.
+        // task-099 F3: the spawn outcome must report what actually happened
+        // at launch -- never a blanket "running" for a row whose process
+        // never started. Both outcomes are pinned deterministically via a
+        // workspace compute target whose configured command either runs
+        // (/bin/true) or does not exist.
         let state = test_state();
         seed(&state).await;
 
-        let (_agent, _token, launch) =
-            spawn_repo_orchestrator_core(&state, "r-1", req(Some("truthful")), "user-1")
-                .await
-                .unwrap();
-        assert!(
-            launch.launch_status == "running" || launch.launch_status == "launch_failed",
-            "launch_status must be a known value, got: {}",
-            launch.launch_status
-        );
-        if launch.launch_status == "launch_failed" {
-            assert!(
-                launch.launch_detail.is_some(),
-                "launch_failed must carry a reason"
-            );
-        }
+        let ok = launch_with_command(&state, "ct-ok", "/bin/true").await;
+        assert_eq!(ok.launch_status, "running");
+        assert!(ok.launch_detail.is_none());
+
+        // The original F3 defect reported "running" unconditionally; a
+        // nonexistent command must report launch_failed with a reason.
+        let bad = launch_with_command(&state, "ct-bad", "/no/such/entrypoint").await;
+        assert_eq!(bad.launch_status, "launch_failed");
+        let detail = bad
+            .launch_detail
+            .as_deref()
+            .expect("launch_failed must carry a reason");
+        assert!(!detail.is_empty());
 
         // The REST response serializes the same fields (what the CLI parses).
+        let agent = state
+            .agents
+            .find_by_name("launch-probe-ct-bad")
+            .await
+            .unwrap()
+            .expect("launch_with_command persists its probe agent");
         let resp = SpawnOrchestratorResponse {
-            agent: super::super::spawn::orchestrator_response(
-                state.agents.find_by_name("truthful").await.unwrap().unwrap(),
-            ),
+            agent: super::super::spawn::orchestrator_response(agent),
             token: String::new(),
-            launch_status: launch.launch_status.clone(),
-            launch_detail: launch.launch_detail.clone(),
+            launch_status: bad.launch_status.clone(),
+            launch_detail: bad.launch_detail.clone(),
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(json["launch_status"], launch.launch_status);
-        if launch.launch_detail.is_some() {
-            assert!(json["launch_detail"].is_string());
-        }
+        assert_eq!(json["launch_status"], "launch_failed");
+        assert!(json["launch_detail"].is_string());
+    }
+
+    /// Seed the test workspace with a local compute target running `command`,
+    /// then launch a bare agent through `launch_orchestrator_process` (the
+    /// exact function the spawn cores call). The target's `target_type`
+    /// variant is irrelevant to command resolution: `config["command"]`
+    /// takes priority over every env fallback, and the dispatch keys on the
+    /// lowercased string ("kubernetes" -> LocalTarget).
+    async fn launch_with_command(
+        state: &std::sync::Arc<crate::AppState>,
+        ct_id: &str,
+        command: &str,
+    ) -> LaunchOutcome {
+        let mut ct = gyre_domain::ComputeTargetEntity::new(
+            Id::new(ct_id),
+            Id::new("t1"),
+            "test-target",
+            gyre_domain::ComputeTargetType::Kubernetes,
+            0,
+        );
+        ct.config = serde_json::json!({ "command": command });
+        state.compute_targets.create(&ct).await.unwrap();
+        let mut ws = state
+            .workspaces
+            .find_by_id(&Id::new("ws-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        ws.compute_target_id = Some(ct.id.clone());
+        state.workspaces.update(&ws).await.unwrap();
+
+        let agent = gyre_domain::Agent::new(Id::new(ct_id), format!("launch-probe-{ct_id}"), 0);
+        state.agents.create(&agent).await.unwrap();
+        launch_orchestrator_process(state, &agent, &ws, "tok").await
     }
 }
