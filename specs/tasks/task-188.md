@@ -129,9 +129,35 @@ not branch; manual confirmation of their intent for this diff recorded in
 `mechanical-checks.md`. Full workspace suite, all-target clippy, and
 exact-head GitHub CI remain with the verification stage as mandated.
 
+
 Scope note: the spec-approval signing endpoint (`api/specs.rs:610`) still
 creates SignedInputs with `expected_generation: None` — the signer-side pin
 is not exposed in the `ApproveSpecRequest` API. Enforcement (comparison
 against the persisted `Task.generation`) is fully implemented and
 mutation-tested; exposing a signer-side pin would extend the request
 contract and was not part of this task's enumerated scope.
+
+## Re-verification (checkpoint recovery 2eae6545, 2026-10-10)
+
+Recovered interrupted assignment at branch head `1c77bb77` (merge of base
+`f4acb4eb` over implementation commit `9c9bab18`); implementation audit and
+all focused probes re-run fresh, evidence at
+`/tmp/stage/review-evidence/test-results.md`:
+
+- `cargo test -p gyre-server --lib -- constraint_check` → 40 passed / 0
+  failed. Mutation proof re-run: with the binding block disabled at all four
+  call sites, 5 tests fail (repo_id, workspace_id, spec_sha, stale
+  generation, API generation-bump); source restored → 40/40 again.
+- `gyre-domain` (344) / `gyre-adapters` (363) / `gyre-common` (94) all
+  passed / 0 failed. `check-arch.sh`, `check-migration-versions.sh`,
+  `check-migration-sql-portability.sh`, `check-relative-path-defaults.sh`
+  → EXIT 0. Exemption files unchanged in entry count — no verifier
+  weakening.
+- `check-task-commit-attribution.sh` initially failed on a base-inherited
+  gap (task-189's own ship commit `f4acb4eb`, merged in via the base, was
+  absent from task-189's `commits:` list on this branch). Repaired by adding
+  it — same content as the upstream task-208-branch fix `d0d573a8`; check
+  now EXIT 0. This is attribution bookkeeping, not an exemption.
+- Sandbox limits unchanged (TCP `accept()` errno 95; gawk-only scripts) and
+  remain recorded for host verification; full workspace suite, all-target
+  Clippy, and exact-head GitHub CI stay with the verification stage.
