@@ -326,6 +326,16 @@ pub async fn escalate_findings(state: &AppState, findings: &[PatrolFinding]) -> 
                 to,
                 MessageKind::Escalation,
                 Some(serde_json::json!({
+                    // message-bus.md §Payload Schemas: `escalation` requires
+                    // `reason` (string), `context` optional. The identifying
+                    // fields are extension fields, which the schema lets pass
+                    // through.
+                    "reason": finding.detail,
+                    "context": format!(
+                        "spec-lifecycle accountability patrol finding \
+                         (source: {ESCALATION_SOURCE}, severity: {})",
+                        finding.severity
+                    ),
                     "source": ESCALATION_SOURCE,
                     "finding_type": finding.finding_type,
                     "severity": finding.severity,
@@ -809,6 +819,17 @@ mod tests {
                 payloads.iter().any(|p| p.contains(needle)),
                 "escalation payload must identify {needle}: {payloads:?}"
             );
+        }
+
+        // The persisted payload must satisfy the message-bus contract for the
+        // `escalation` kind (message-bus.md §Payload Schemas: `reason`
+        // required) — the same validator the receipt paths run. A patrol that
+        // emits schema-invalid escalations hands consumers a payload their
+        // tooling rejects on send.
+        for msg in &messages {
+            MessageKind::Escalation
+                .validate_payload(msg.payload.as_ref())
+                .expect("escalation payload must satisfy the message-bus escalation schema");
         }
     }
 
