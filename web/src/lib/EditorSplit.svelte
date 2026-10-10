@@ -685,11 +685,14 @@
 
   function handleKeydown(e) {
     if (e.key !== 'Escape') return;
-    if (e._escConsumed) return; // handled by an inner surface (conflict dialog)
-    e._escConsumed = true;      // DetailPanel's panel div must not also react
+    // While the 409 conflict dialog is open it owns Esc (HSI §7): the dialog
+    // closes, the editor stays. The dialog's own window listener handles it.
+    if (specConflict) return;
+    // No dismiss surface (e.g. embedded in the MetaSpecs page rather than a
+    // pop-out) — Esc does nothing.
+    if (!onClose) return;
     e.preventDefault();
-    e.stopPropagation();
-    onClose?.();
+    onClose();
   }
 </script>
 
