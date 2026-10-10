@@ -1226,8 +1226,13 @@ mod tests {
                 a.orchestrator_type == OrchestratorType::WorkspaceOrchestrator && is_live(a)
             })
             .collect();
-        assert_eq!(live.len(), 1, "exactly one live workspace orchestrator, got {} live: {:?}", live.len(),
-            live.iter().map(|a| a.name.clone()).collect::<Vec<_>>());
+        assert_eq!(
+            live.len(),
+            1,
+            "exactly one live workspace orchestrator, got {} live: {:?}",
+            live.len(),
+            live.iter().map(|a| a.name.clone()).collect::<Vec<_>>()
+        );
         assert_eq!(live[0].name, "ws-orch-restart-1");
 
         let original = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
@@ -1267,12 +1272,9 @@ mod tests {
         state.agents.update(&aged).await.unwrap();
         crate::stale_agents::run_once(&state).await.unwrap();
 
-        let code = crate::api::spawn::fail_agent(
-            State(state.clone()),
-            Path(agent.id.to_string()),
-        )
-        .await
-        .unwrap();
+        let code = crate::api::spawn::fail_agent(State(state.clone()), Path(agent.id.to_string()))
+            .await
+            .unwrap();
         assert_eq!(code, StatusCode::OK);
 
         let peers = state

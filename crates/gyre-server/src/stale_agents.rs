@@ -159,7 +159,9 @@ async fn restart_orchestrator(
             let occupied = peers.iter().any(|a| {
                 a.orchestrator_type == dead.orchestrator_type
                     && match dead.orchestrator_type {
-                        gyre_domain::OrchestratorType::RepoOrchestrator => a.repo_id == dead.repo_id,
+                        gyre_domain::OrchestratorType::RepoOrchestrator => {
+                            a.repo_id == dead.repo_id
+                        }
                         _ => true,
                     }
                     && crate::api::orchestrator::is_live(a)
