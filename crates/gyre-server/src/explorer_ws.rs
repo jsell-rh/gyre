@@ -25,6 +25,8 @@
 //! `GYRE_EXPLORER_SDK=0`. Both paths provide the same conversation-with-tools pattern
 //! including self-check loop, refinement budget, and conversation history management.
 
+use crate::gate_executor::truncate_bytes;
+use crate::{auth::AuthenticatedAgent, AppState};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -43,8 +45,6 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
-
-use crate::{auth::AuthenticatedAgent, AppState};
 
 /// Maximum accumulated text buffer from SDK subprocess (1 MB).
 const MAX_SDK_ACCUMULATED_TEXT: usize = 1_024 * 1_024;
@@ -2909,7 +2909,7 @@ async fn run_explorer_agent(
                     let raw_preview = serde_json::to_string_pretty(&query_json)
                         .unwrap_or_else(|_| query_json.to_string());
                     let truncated = if raw_preview.len() > 500 {
-                        format!("{}...", &raw_preview[..500])
+                        format!("{}...", truncate_bytes(&raw_preview, 500))
                     } else {
                         raw_preview
                     };
