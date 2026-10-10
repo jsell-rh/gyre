@@ -114,27 +114,3 @@ stubbing `escalate_findings`) from the interrupted assignment's checkpoint.
   unsupported (`accept` → `Errno 95`, see `/tmp/stage/capabilities.json`), so
   the route was verified through the in-process router tests above; exact-head
   GitHub CI checks remain mandatory for the deployed transport check.
-
-### Repair round 2 (post-merge re-verification at merged HEAD `fb294f6e`)
-
-- Resumed from checkpoint `1dba1c36` with base `a1751da1` merged in (merge
-  touched no files under `crates/` or `scripts/`); working tree was already
-  clean and free of the kill-test mutant — the interrupted assignment's final
-  frontmatter commit had landed. No code changes were needed this round.
-- All evidence re-collected fresh at merged HEAD
-  (`/tmp/stage/review-evidence/task204-clean-run.log`):
-  `spec_lifecycle_patrol` 11 passed, `api::specs::tests` 53 passed,
-  `spec_patrol` 19 passed, all exit 0.
-- Kill-test re-executed at HEAD (mutant re-applied from the retained
-  `/tmp/stage/resume-0.patch`, then reverted; log retained at
-  `/tmp/stage/review-evidence/task204-killtest-mutant.log`, exit 101): the
-  same 3 tests fail — `flags_and_escalates_only_the_accountability_gaps`,
-  `spec_lifecycle_patrol_endpoint_flags_and_escalates`,
-  `workspaceless_finding_broadcasts` — and the working tree is clean after
-  revert.
-- `check-arch.sh`, `check-abac-route-registry.sh`,
-  `check-abac-exempt-handlers.sh` (89 handlers),
-  `check-dead-message-kinds.sh`, `check-mem-port-contracts.sh`,
-  `check-fabricated-scope-defaults.sh`, `check-scope-literal-defaults.sh`,
-  `check-inert-enforcement.sh`, and `check-task-commit-attribution.sh` all
-  pass at HEAD.
