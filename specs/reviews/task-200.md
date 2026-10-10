@@ -96,3 +96,21 @@ Independently re-checked every repair Round 2 claimed, on the committed tree (wo
 Findings: none. The re-land meets the spec contract as amended by the independent spec review (presence **and** wire-type enforcement, no coercion, extension fields pass through).
 
 — Verifier round 3, 2026-10-08
+## Round 4 (independent review of candidate e22bb074, assigned base f4acb4eb)
+
+Independently verified on the exact candidate commit `e22bb074` (clean tree; probe edits restored and md5-verified against the commit afterward):
+
+- **Schema table vs spec**: `payload_schema` re-checked row-by-row against message-bus.md lines 196–229 — all 34 spec kinds match on field names, wire types (`Id`/`String`→Str, `u64`→U64, `u32`→U32, `f64`→F64, `Vec<String>`→StrArray, nested `decisions`), and requiredness, including `PushAccepted.commit_count: u64` optional, `ReconciliationCompleted.specs_evaluated/specs_changed: u32` optional, `BudgetWarning.usage_pct: f64`, `AgentCompleted.decisions` `[{what, why, confidence, alternatives_considered?}]`, `GateFailure` optional `gate_type/status/output/spec_ref/gate_agent_id`. Six non-spec variants in explicit `None` arms; `QueueUpdated`/`DataSeeded` empty schemas; `Custom` object-only with absent allowed.
+- **No dead guard**: `check_field_type` opens directly with the type match; `grep -c "return Ok(())"` over the candidate's `message.rs` = 0 (the F1 defect class from round 2 is absent).
+- **Checkpoint history risk closed**: `8b7e0756` (in `commits:`) had gutted 553 lines (validator + wrong-type assertions + docs) from the verified tree; `17391d79` restored it. Final product surface verified **byte-identical** to reviewed candidate `dc74a2eb` and merge `658cb645` (empty `git diff` on all four product files). All 13 `commits:` SHAs resolve.
+- **Wiring**: REST `api/messages.rs:259` → `ApiError::BadRequest` → 400 (`api/error.rs:56` confirmed); MCP `mcp.rs:1948` → `tool_error`. Both after tier/destination/scoping guards, before Message construction, signing, and store. Exactly two production `payload:` receipt sites exist in `crates/gyre-server/src` (grep); the legacy `agent_messages.rs` endpoint carries no `MessageKind`/`payload` (pre-bus `AgentMessage`), and `ws.rs` only sends outbound — no bypass surface.
+- **Mutation probes (this review, restored after each)**: REST call replaced with constant `Ok` → `send_message_rejects_payload_missing_required_field` **FAILS**; MCP call likewise → `mcp_message_send_rejects_payload_missing_required_field` **FAILS**; type match disabled with presence checks still active → `validate_payload_enforces_field_types` **FAILS**. All three tests are anchored to real enforcement.
+- **Suites on the candidate**: `gyre-common --lib message` 30 passed; `gyre-server --lib api::messages` 14 passed; `gyre-server --lib mcp_message_send` 8 passed; full `gyre-common --lib` 97 passed. Counts match rounds 1–3.
+- **Gates**: attribution, arch, dead-message-kinds, mcp-write-tools OK; `git diff --check f4acb4eb..e22bb074` clean; no diff to `scripts/` or the exemption file (24 pre-existing lines) from base.
+- **`business-continuity.md` SUMMARY row flip in `dc74a2eb`** (assigned 1→0, implemented 4→5): legitimate catch-up, not misrepresentation — task-151 completed Oct 6 in `1e8141f4` (ancestor of base) and its coverage file has shown `implemented` since then; only the SUMMARY rollup row was stale. The per-spec coverage file (source of truth) is unchanged by this task's diff.
+- **Server-internal emitters untouched** per plan item 4 (`emit_event`, `build_agent_completed_payload`, `gyre_record_activity`); `build_agent_completed_payload` emits `confidence` as a string, consistent with the validator's `Decisions` check.
+- Sandbox cannot accept TCP (capabilities.json), so no live-server HTTP probe; the integration tests exercise the full router via tower `oneshot` (real status-code assertions: 400 ×3 + 201), which covers the HTTP mapping in-process. Evidence under `/tmp/stage/review-evidence/` (diffs, suite outputs, mutation-probe outputs, SHA resolution, gate log).
+
+Findings: none. Candidate `e22bb074` approved.
+
+— Reviewer round 4, 2026-10-10
