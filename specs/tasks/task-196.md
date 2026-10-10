@@ -203,3 +203,35 @@ hunk — whitespace/layout only). `commits:` retains the attribution-canonical
 list `["abcfff04...", "88b57180..."]` (re-derived via `dev-attribution.py`);
 the restore, not an exemption, keeps
 `bash scripts/check-task-commit-attribution.sh` at exit 0.
+
+### Checkpoint round (finding e4852943, category=checkpoint)
+
+Recovered-assignment finding resolved at the merged HEAD (base 653a696f
+task-222 merged in at 53606576; product tree byte-identical to the prior
+verified tree e6d79ec8 — `git diff e6d79ec8 HEAD -- crates/ web/src/` is
+empty, and `git diff 3b90956c HEAD -- .../graph.rs` is empty). No product
+code changed this round; fresh verification on the merged tree:
+
+- `cargo test -p gyre-server --lib api::graph::tests::briefing` — 15/15 pass
+  at HEAD (cold build, 8m41s; includes the 400 history-cap boundary, prompt
+  grounding via PromptCaptureFactory, SSE `{answer, sources}` with
+  answer == concatenated partials and non-empty sources for the seeded
+  spec-linked MR, 503, rate limit). Evidence:
+  `/tmp/stage/review-evidence/task-196-checkpoint-round-briefing-tests.txt`.
+- `cd web && npm ci` (locked) then `npx vitest run Briefing.test.js
+  InlineChat.test.js DetailPanelChat.test.js` — 49/49 pass at HEAD.
+  Evidence: `/tmp/stage/review-evidence/task-196-checkpoint-round-frontend-tests.txt`.
+- `bash scripts/check-arch.sh` — passes (exit 0).
+- `python3 scripts/check-rustfmt-diff.py 653a696f` — "changed lines clean",
+  exit 0.
+- `bash scripts/check-task-commit-attribution.sh` — OK exit 0 with the
+  canonical `commits:` list (abcfff04, 88b57180).
+- `git diff --check 653a696f` clean; `web/dist` byte-identical to base
+  restored after build.rs rebuilt it during the test run (task branches
+  don't ship dist rebuilds); no `MUTANT` markers in `crates/` or `web/src/`.
+- Sandbox limitation unchanged: loopback listeners unsupported
+  (`capabilities.json` tcp_listener_probe errno 95), so
+  `tests/graph_integration.rs::test_briefing_ask_sse` and
+  `test_briefing_ask_not_found` still require host verification
+  (`cargo test -p gyre-server --test graph_integration`); both are
+  payload-agnostic and compatible with the new `{answer, sources}` payload.
