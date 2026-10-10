@@ -70,7 +70,7 @@ Persistent storage for breaking changes and per-workspace dependency policies, w
 - **Migration 000056** (`2026-10-08-000056_dep_breaking_policies`): `breaking_changes` (id PK, edge/source-repo indexes, acknowledged fields) and `dependency_policies` (workspace_id PK, all five policy columns). Next unused sequence number; portable SQL (no dialect-only constructs) — check-migration-sql-portability passes.
 - **AppState wiring**: `breaking_changes` and `dependency_policies` now go through the `store!` macro (lib.rs:910-917) — SqliteStorage/PgStorage in DB-backed mode, mem fallback only in pure in-memory mode, identical to every sibling store.
 - **Cascade tests**: `trigger_cascade_tests` (merge_processor.rs:2210) runs after every merge, reads the persistent policy, respects per-workspace opt-out of the dependent's workspace, creates a High-priority `cascade-test` labeled task in each dependent repo, emits `cascade_test_triggered` events, notifies members. Agent completion/failure of `cascade-test` tasks routes through `report_cascade_test_result` (spawn.rs:1363/1464).
-- **Branch hygiene**: reverted the checkpoint's accidental `web/dist` rebuild (fb319050, 7a26107a) — task-163 has no UI changes; the rebuild introduced a trailing-whitespace error in vendored svelte-i18n that fails `git diff --check` (task-210 Round 12 precedent). web/dist now byte-identical to base.
+- **Branch hygiene**: the pipeline checkpoint carried an accidental `web/dist` rebuild (54790eed); reverted at ec2de557 + 38783f63 — task-163 has no UI changes, and the rebuild introduced a trailing-whitespace error in vendored svelte-i18n that fails `git diff --check` (task-210 Round 12 precedent). web/dist now byte-identical to base e96d25ab (all four blobs MD5-matched).
 
 Test evidence (all at HEAD of this branch):
 - `cargo test -p gyre-adapters --lib breaking_change` — 7 passed (roundtrip, missing→None, unacknowledged filter, acknowledge-missing→false, pre-acknowledged persistence, source-repo scoping, **records survive a fresh storage instance** — the hollow-store killer).
@@ -80,5 +80,6 @@ Test evidence (all at HEAD of this branch):
 - `cargo test -p gyre-server --lib merge_processor::tests::trigger_cascade` — 8 passed (task per dependent, policy disabled skip, no-dependents noop, workspace resolution, member notification, default-policy enable, dependent opt-out).
 - `cargo test -p gyre-server --lib api::dependencies::tests` — 64 passed, including Block-policy merge rejection, Warn non-blocking, proceed-after-acknowledgment, breaking-change auto-task creation.
 - `scripts/check-{migration-versions,mem-port-contracts,migration-sql-portability,in-memory-state-stores,task-commit-attribution}.sh` — all OK.
+- `git diff --check e96d25ab..HEAD` — clean (exit 0) after the web revert; `bash scripts/check-task-commit-attribution.sh` — OK.
 
 Sandbox note: TCP listener probe unsupported (errno 95) — no live HTTP verification possible here; exact-head GitHub CI remains the transport check. Recorded in /tmp/stage/review-evidence/sandbox-transport-restriction.json.
