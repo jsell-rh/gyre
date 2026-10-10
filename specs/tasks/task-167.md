@@ -5,7 +5,7 @@ depends_on: []
 progress: not-started
 coverage_sections:
   - "merge-dependencies.md §2. Auto-Detected: Branch Lineage"
-commits: []
+commits: ["15ecde9c5a55dad0fb24aa787ed94712492a9294"]
 ---
 
 ## Spec Excerpt
