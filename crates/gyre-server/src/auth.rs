@@ -185,9 +185,9 @@ impl AgentSigningKey {
 
     /// Mint a signed EdDSA JWT for an agent.
     ///
-    /// `workload` carries optional G10 workload attestation claims embedded
-    /// directly in the JWT so external verifiers can reconstruct workload
-    /// identity from the token alone.
+    /// Scope: fine-grained `repo:{name}:write` (platform-model.md §1 Token
+    /// Scoping — a worker agent's token is scoped to its repo).
+    #[allow(clippy::too_many_arguments)]
     pub fn mint(
         &self,
         agent_id: &str,
@@ -195,14 +195,48 @@ impl AgentSigningKey {
         spawned_by: &str,
         issuer: &str,
         ttl_secs: u64,
+        tenant_id: &str,
+        workspace_id: &str,
+        repo_id: &str,
+        repo_name: &str,
     ) -> Result<String, String> {
         self.mint_with_workload(
-            agent_id, task_id, spawned_by, issuer, ttl_secs, None, None, None, None, None, None,
+            agent_id,
+            task_id,
+            spawned_by,
+            issuer,
+            ttl_secs,
+            tenant_id,
+            workspace_id,
+            repo_id,
+            repo_name,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         )
+    }
+
+    /// Validate a self-issued agent JWT, returning its claims on success.
+    pub fn validate(&self, token: &str, expected_issuer: &str) -> Result<AgentJwtClaims, String> {
+        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::EdDSA);
+        validation.set_issuer(&[expected_issuer]);
+        validation.validate_aud = false;
+        jsonwebtoken::decode::<AgentJwtClaims>(token, &self.decoding_key, &validation)
+            .map(|td| td.claims)
+            .map_err(|e| format!("agent JWT validation: {e}"))
     }
 
     /// Mint a signed EdDSA JWT with embedded G10 workload attestation claims.
     /// Optionally includes M19.4 container identity claims.
+    ///
+    /// §1 Token Scoping: populates the hierarchy claims (tenant_id,
+    /// workspace_id, repo_id) and the fine-grained scope list
+    /// (`repo:{repo_name}:write` for workers) from spawn context.
     #[allow(clippy::too_many_arguments)]
     pub fn mint_with_workload(
         &self,
@@ -211,6 +245,12 @@ impl AgentSigningKey {
         spawned_by: &str,
         issuer: &str,
         ttl_secs: u64,
+        tenant_id: &str,
+        workspace_id: &str,
+        repo_id: &str,
+        repo_name: &str,
+        persona: Option<&str>,
+        attestation_level: Option<u32>,
         wl_pid: Option<u32>,
         wl_hostname: Option<String>,
         wl_compute_target: Option<String>,
@@ -227,12 +267,15 @@ impl AgentSigningKey {
             iss: issuer.to_string(),
             iat: now,
             exp: now + ttl_secs,
-            scope: "agent".to_string(),
+            scope: vec![format!("repo:{repo_name}:write")],
             task_id: task_id.to_string(),
             spawned_by: spawned_by.to_string(),
-            workspace_id: None,
-            repo_id: None,
+            tenant_id: tenant_id.to_string(),
+            workspace_id: Some(workspace_id.to_string()),
+            repo_id: Some(repo_id.to_string()),
             orchestrator_type: None,
+            persona: persona.map(|p| p.to_string()),
+            attestation_level,
             wl_pid,
             wl_hostname,
             wl_compute_target,
@@ -240,20 +283,7 @@ impl AgentSigningKey {
             wl_container_id,
             wl_image_hash,
         };
-        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
-        header.kid = Some(self.kid.clone());
-        jsonwebtoken::encode(&header, &claims, &self.encoding_key)
-            .map_err(|e| format!("JWT mint error: {e}"))
-    }
-
-    /// Validate a self-issued agent JWT, returning its claims on success.
-    pub fn validate(&self, token: &str, expected_issuer: &str) -> Result<AgentJwtClaims, String> {
-        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::EdDSA);
-        validation.set_issuer(&[expected_issuer]);
-        validation.validate_aud = false;
-        jsonwebtoken::decode::<AgentJwtClaims>(token, &self.decoding_key, &validation)
-            .map(|td| td.claims)
-            .map_err(|e| format!("agent JWT validation: {e}"))
+        self.encode(claims)
     }
 
     /// Mint an orchestrator JWT with scope claims (platform-model.md §3).
@@ -263,31 +293,56 @@ impl AgentSigningKey {
     /// `repo_id`. `task_id` carries the orchestrator's own agent id.
     /// Orchestrators are not bound to a task, but the claim is required on
     /// all agent JWTs for `gyre_agent_complete` compatibility.
+    ///
+    /// §1 Token Scoping: workspace orchestrators are scoped to their
+    /// workspace (`workspace:{id}:read` + `workspace:{id}:spawn`); repo
+    /// orchestrators to their repo (`repo:{name}:write` + `repo:{name}:spawn`).
+    #[allow(clippy::too_many_arguments)]
     pub fn mint_orchestrator(
         &self,
         agent_id: &str,
         spawned_by: &str,
         issuer: &str,
         ttl_secs: u64,
+        tenant_id: &str,
         workspace_id: &str,
         repo_id: Option<&str>,
+        repo_name: Option<&str>,
         orchestrator_type: &str,
     ) -> Result<String, String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+        let scope = if orchestrator_type == "workspace_orchestrator" {
+            vec![
+                format!("workspace:{workspace_id}:read"),
+                format!("workspace:{workspace_id}:spawn"),
+            ]
+        } else {
+            // Repo orchestrator — repo_name is required to mint its scope.
+            let name = repo_name.ok_or_else(|| {
+                "repo orchestrator JWT requires repo_name for repo:... scope".to_string()
+            })?;
+            vec![
+                format!("repo:{name}:write"),
+                format!("repo:{name}:spawn"),
+            ]
+        };
         let claims = AgentJwtClaims {
             sub: agent_id.to_string(),
             iss: issuer.to_string(),
             iat: now,
             exp: now + ttl_secs,
-            scope: "agent".to_string(),
+            scope,
             task_id: agent_id.to_string(),
             spawned_by: spawned_by.to_string(),
+            tenant_id: tenant_id.to_string(),
             workspace_id: Some(workspace_id.to_string()),
             repo_id: repo_id.map(|r| r.to_string()),
             orchestrator_type: Some(orchestrator_type.to_string()),
+            persona: Some(orchestrator_type.to_string()),
+            attestation_level: None,
             wl_pid: None,
             wl_hostname: None,
             wl_compute_target: None,
@@ -295,6 +350,11 @@ impl AgentSigningKey {
             wl_container_id: None,
             wl_image_hash: None,
         };
+        self.encode(claims)
+    }
+
+    /// Encode claims into a signed EdDSA JWT.
+    fn encode(&self, claims: AgentJwtClaims) -> Result<String, String> {
         let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
         header.kid = Some(self.kid.clone());
         jsonwebtoken::encode(&header, &claims, &self.encoding_key)
@@ -327,6 +387,19 @@ pub struct AuthenticatedAgent {
     /// - JWT auth: extracted from `tenant_id` claim (defaults to "default").
     /// - All other auth methods: always "default".
     pub tenant_id: String,
+    /// Workspace scope derived from the validated `workspace_id` claim
+    /// (platform-model.md §1 Token Scoping). `None` for callers whose token
+    /// carries no hierarchy claims (global token, API key, legacy UUID agent
+    /// token) — available to all downstream handlers.
+    pub workspace_id: Option<String>,
+    /// Repo scope derived from the validated `repo_id` claim. `None` for
+    /// workspace orchestrators (scoped to the whole workspace) and for
+    /// callers without hierarchy claims.
+    pub repo_id: Option<String>,
+    /// Fine-grained scopes from the validated `scope` claim, e.g.
+    /// `["repo:gyre-server:write"]`. Empty for callers without hierarchy
+    /// claims (they are gated by ABAC/RBAC instead of token scope).
+    pub scope: Vec<String>,
     /// Raw JWT claims for ABAC evaluation (G6).
     /// - JWT auth (Keycloak or agent JWT): populated with the full claims object.
     /// - Global token or API key: `None` — ABAC checks are bypassed for these.
@@ -334,6 +407,34 @@ pub struct AuthenticatedAgent {
     /// True when auth was performed via the deprecated `?token=` query parameter.
     /// Used by WebSocket handlers to send a deprecation warning to the client.
     pub deprecated_token_auth: bool,
+}
+
+impl AuthenticatedAgent {
+    /// Derive the §1 Token Scoping hierarchy fields from validated JWT
+    /// claims. Called on every path that populates `jwt_claims` so
+    /// `workspace_id`/`repo_id`/`scope` always mirror the claims the
+    /// signature actually verified.
+    fn with_hierarchy_from_claims(mut self, claims: &serde_json::Value) -> Self {
+        self.workspace_id = claims
+            .get("workspace_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        self.repo_id = claims
+            .get("repo_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        self.scope = claims
+            .get("scope")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        self
+    }
 }
 
 // -- JWT claim types ----------------------------------------------------------
@@ -528,9 +629,12 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 user_id: None,
                 roles: vec![UserRole::Admin],
                 tenant_id: "default".to_string(),
+                workspace_id: None,
+                repo_id: None,
+                scope: Vec::new(),
                 jwt_claims: None, // Admin bypass — no ABAC evaluation.
-                deprecated_token_auth,
-            });
+            deprecated_token_auth,
+        });
         }
 
         // 2. Per-agent tokens issued at spawn (UUID legacy or JWT).
@@ -561,14 +665,24 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 } else {
                     None // Legacy UUID token — no JWT claims for ABAC.
                 };
-                return Ok(AuthenticatedAgent {
+                let auth = AuthenticatedAgent {
                     agent_id,
                     user_id: None,
                     roles: vec![UserRole::Agent],
                     tenant_id: "default".to_string(),
-                    jwt_claims,
+                    workspace_id: None,
+                    repo_id: None,
+                    scope: Vec::new(),
+                    jwt_claims: jwt_claims.clone(),
                     deprecated_token_auth,
-                });
+                };
+                // §1 Token Scoping: mirror the hierarchy claims the signature
+                // verified onto the resolved principal.
+                let auth = match jwt_claims.as_ref() {
+                    Some(claims) => auth.with_hierarchy_from_claims(claims),
+                    None => auth,
+                };
+                return Ok(auth);
             }
         }
 
@@ -599,6 +713,9 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     user_id: Some(user.id),
                     roles: user.roles,
                     tenant_id: "default".to_string(),
+                    workspace_id: None,
+                    repo_id: None,
+                    scope: Vec::new(),
                     jwt_claims: None, // API key — no ABAC evaluation.
                     deprecated_token_auth,
                 });
@@ -640,6 +757,9 @@ pub async fn authenticate_token(
             user_id: None,
             roles: vec![UserRole::Admin],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: None,
             deprecated_token_auth: false,
         });
@@ -665,14 +785,22 @@ pub async fn authenticate_token(
             } else {
                 None
             };
-            return Ok(AuthenticatedAgent {
+            let auth = AuthenticatedAgent {
                 agent_id,
                 user_id: None,
                 roles: vec![UserRole::Agent],
                 tenant_id: "default".to_string(),
-                jwt_claims,
+                workspace_id: None,
+                repo_id: None,
+                scope: Vec::new(),
+                jwt_claims: jwt_claims.clone(),
                 deprecated_token_auth: false,
-            });
+            };
+            let auth = match jwt_claims.as_ref() {
+                Some(claims) => auth.with_hierarchy_from_claims(claims),
+                None => auth,
+            };
+            return Ok(auth);
         }
     }
 
@@ -694,6 +822,9 @@ pub async fn authenticate_token(
                 user_id: Some(user.id),
                 roles: user.roles,
                 tenant_id: "default".to_string(),
+                workspace_id: None,
+                repo_id: None,
+                scope: Vec::new(),
                 jwt_claims: None,
                 deprecated_token_auth: false,
             });
@@ -802,13 +933,22 @@ async fn validate_jwt(
     .await
     .map_err(|e| format!("user resolution: {e}"))?;
 
-    Ok(AuthenticatedAgent {
+    let auth = AuthenticatedAgent {
         agent_id: user.display_name.clone(),
         user_id: Some(user.id),
         roles: user.roles,
         tenant_id,
-        jwt_claims: raw_claims,
+        workspace_id: None,
+        repo_id: None,
+        scope: Vec::new(),
+        jwt_claims: raw_claims.clone(),
         deprecated_token_auth: false,
+    };
+    // Keycloak tokens carry no §1 hierarchy claims (they are user tokens);
+    // if a deployment ever embeds them, mirror them onto the principal.
+    Ok(match raw_claims.as_ref() {
+        Some(claims) => auth.with_hierarchy_from_claims(claims),
+        None => auth,
     })
 }
 
@@ -1012,13 +1152,22 @@ async fn validate_federated_jwt(token: &str, state: &Arc<AppState>) -> Option<Au
         .trim_start_matches("https://")
         .trim_start_matches("http://");
     let fed_claims_json = serde_json::to_value(&claims).ok();
-    Some(AuthenticatedAgent {
+    let auth = AuthenticatedAgent {
         agent_id: format!("{remote_host}/{}", claims.sub),
         user_id: None,
         roles: vec![UserRole::Agent],
         tenant_id: "default".to_string(),
-        jwt_claims: fed_claims_json,
+        workspace_id: None,
+        repo_id: None,
+        scope: Vec::new(),
+        jwt_claims: fed_claims_json.clone(),
         deprecated_token_auth: false,
+    };
+    // A federated instance's agent JWTs carry §1 hierarchy claims; mirror
+    // them onto the resolved principal like local agent JWTs.
+    Some(match fed_claims_json.as_ref() {
+        Some(c) => auth.with_hierarchy_from_claims(c),
+        None => auth,
     })
 }
 
@@ -1722,7 +1871,10 @@ mod tests {
         ttl_secs: u64,
     ) -> String {
         signing_key
-            .mint(sub, "task-1", "system", issuer, ttl_secs)
+            .mint(
+                sub, "task-1", "system", issuer, ttl_secs, "t1", "ws-remote", "repo-remote",
+                "remote-repo",
+            )
             .expect("mint must succeed")
     }
 
@@ -1834,12 +1986,15 @@ mod tests {
             iss: remote_url.to_string(),
             iat: now - 7200,
             exp: now - 3600,
-            scope: "agent".to_string(),
+            scope: vec!["repo:remote-repo:write".to_string()],
             task_id: "task-1".to_string(),
             spawned_by: "system".to_string(),
+            tenant_id: "t1".to_string(),
             workspace_id: None,
             repo_id: None,
             orchestrator_type: None,
+            persona: None,
+            attestation_level: None,
             wl_pid: None,
             wl_hostname: None,
             wl_compute_target: None,
@@ -2118,6 +2273,9 @@ mod tests {
             user_id: None,
             roles: vec![UserRole::Admin],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: None,
             deprecated_token_auth: false,
         };
@@ -2147,6 +2305,9 @@ mod tests {
             user_id: None,
             roles: vec![UserRole::Admin],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: None,
             deprecated_token_auth: false,
         };

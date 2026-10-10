@@ -111,6 +111,29 @@ async fn spawn_orchestrator(
     // workspace_id + repo_id. task_id carries the orchestrator's own id
     // (orchestrators are not task-bound but the claim is required on all
     // agent JWTs for gyre_agent_complete compatibility).
+    //
+    // §1 Token Scoping: resolve tenant (workspace → tenant) and repo name
+    // so the scope list is minted from real hierarchy context — workspace
+    // tier `workspace:{id}:read|spawn`, repo tier `repo:{name}:write|spawn`.
+    let workspace_entity = state
+        .workspaces
+        .find_by_id(workspace_id)
+        .await
+        .ok()
+        .flatten();
+    let tenant_id = workspace_entity
+        .map(|ws| ws.tenant_id.to_string())
+        .unwrap_or_else(|| "default".to_string());
+    let repo_name = match repo_id {
+        Some(rid) => state
+            .repos
+            .find_by_id(rid)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.name),
+        None => None,
+    };
     let token = state
         .agent_signing_key
         .mint_orchestrator(
@@ -118,8 +141,10 @@ async fn spawn_orchestrator(
             auth_agent_id,
             &state.base_url,
             state.agent_jwt_ttl_secs,
+            &tenant_id,
             &workspace_id.to_string(),
             repo_id.map(|r| r.to_string()).as_deref(),
+            repo_name.as_deref(),
             &orchestrator_type.to_string(),
         )
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("orchestrator token mint: {e}")))?;
@@ -394,7 +419,16 @@ mod tests {
             claims.orchestrator_type.as_deref(),
             Some("workspace_orchestrator")
         );
-        assert_eq!(claims.scope, "agent");
+        // §1 Token Scoping: workspace orchestrator is scoped to its workspace.
+        assert_eq!(
+            claims.scope,
+            vec![
+                "workspace:ws-1:read".to_string(),
+                "workspace:ws-1:spawn".to_string()
+            ]
+        );
+        assert_eq!(claims.tenant_id, "t1");
+        assert_eq!(claims.persona.as_deref(), Some("workspace_orchestrator"));
 
         // Token registered so the auth middleware accepts it.
         let stored = state

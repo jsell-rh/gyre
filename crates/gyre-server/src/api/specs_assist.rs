@@ -1654,6 +1654,9 @@ mod tests {
             user_id: Some(Id::new("user-a")),
             roles: vec![],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: None,
             deprecated_token_auth: false,
         };

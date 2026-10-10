@@ -329,6 +329,9 @@ mod tests {
             user_id: None,
             roles: vec![],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:X" })),
             deprecated_token_auth: false,
         };
@@ -361,6 +364,9 @@ mod tests {
             user_id: None,
             roles: vec![gyre_domain::UserRole::Admin],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: None,
             deprecated_token_auth: false,
         };
@@ -391,6 +397,9 @@ mod tests {
             user_id: None,
             roles: vec![],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:A" })),
             deprecated_token_auth: false,
         };
@@ -422,6 +431,9 @@ mod tests {
             user_id: None,
             roles: vec![],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:A" })),
             deprecated_token_auth: false,
         };
@@ -471,6 +483,9 @@ mod tests {
             user_id: None,
             roles: vec![],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:A" })),
             deprecated_token_auth: false,
         };
@@ -500,6 +515,9 @@ mod tests {
             user_id: None,
             roles: vec![gyre_domain::UserRole::Admin],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: None,
             deprecated_token_auth: false,
         };
@@ -516,6 +534,9 @@ mod tests {
             user_id: None,
             roles: vec![],
             tenant_id: "default".to_string(),
+            workspace_id: None,
+            repo_id: None,
+            scope: Vec::new(),
             jwt_claims: Some(serde_json::json!({ "scope": "repo:corrupt" })),
             deprecated_token_auth: false,
         };

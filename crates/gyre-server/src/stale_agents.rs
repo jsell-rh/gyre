@@ -170,24 +170,38 @@ async fn restart_orchestrator(state: &AppState, dead: &gyre_domain::Agent, now: 
     }
 
     // Scoped JWT for the replacement (same tier and scope as the dead one).
+    // §1 Token Scoping: tenant and repo name resolved from the live stores
+    // so the replacement's scope list is minted from real hierarchy context.
+    let tenant_id = state
+        .workspaces
+        .find_by_id(&dead.workspace_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|ws| ws.tenant_id.to_string())
+        .unwrap_or_else(|| "default".to_string());
+    let repo_name = if let Some(rid) = dead.repo_id.as_ref() {
+        state
+            .repos
+            .find_by_id(rid)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.name)
+    } else {
+        None
+    };
     let token = state.agent_signing_key.mint_orchestrator(
         &replacement.id.to_string(),
         dead.spawned_by.as_deref().unwrap_or("system"),
         &state.base_url,
         state.agent_jwt_ttl_secs,
+        &tenant_id,
         &dead.workspace_id.to_string(),
         dead.repo_id.as_ref().map(|r| r.to_string()).as_deref(),
+        repo_name.as_deref(),
         &dead.orchestrator_type.to_string(),
     );
-    match token {
-        Ok(t) => {
-            let _ = state
-                .kv_store
-                .kv_set("agent_tokens", &replacement.id.to_string(), t)
-                .await;
-        }
-        Err(e) => warn!("restart: failed to mint orchestrator JWT: {e}"),
-    }
 
     // Keypair so the replacement can sign DerivedInputs for children.
     crate::api::spawn::bootstrap_agent_keypair(state, &replacement.id.to_string(), now).await;

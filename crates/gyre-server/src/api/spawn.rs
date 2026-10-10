@@ -430,6 +430,14 @@ pub(crate) async fn spawn_agent_core(
     // container environment at spawn time.  After spawn we create the workload
     // attestation record (stored in state.workload_attestations) which is
     // queryable via GET /api/v1/agents/{id}/workload.
+    //
+    // §1 Token Scoping: the hierarchy claims come from the spawn context —
+    // repo → workspace → tenant. A worker agent's token is scoped to its
+    // repo (`repo:{name}:write`).
+    let tenant_id = workspace
+        .as_ref()
+        .map(|ws| ws.tenant_id.to_string())
+        .unwrap_or_else(|| "default".to_string());
     let token = state
         .agent_signing_key
         .mint(
@@ -438,6 +446,10 @@ pub(crate) async fn spawn_agent_core(
             &auth.agent_id,
             &state.base_url,
             jwt_ttl,
+            &tenant_id,
+            &repo.workspace_id.to_string(),
+            &req.repo_id,
+            &repo.name,
         )
         .unwrap_or_else(|e| {
             tracing::error!("JWT pre-mint failed, falling back to UUID token: {e}");
@@ -640,10 +652,7 @@ pub(crate) async fn spawn_agent_core(
         // process starts — raw values are never in the agent env.
         // Failure is logged and skipped: a missing/undecryptable secret must
         // not block spawning the agent itself.
-        let tenant_id = workspace
-            .as_ref()
-            .map(|ws| ws.tenant_id.to_string())
-            .unwrap_or_else(|| "default".to_string());
+        // tenant_id was resolved above at mint time (§1 Token Scoping).
         match state
             .secrets
             .resolve_for_agent(
