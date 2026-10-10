@@ -1,7 +1,7 @@
 ---
 title: "Repair verified failure on main a11ba8d32859"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
-depends_on: []
+depends_on: [task-228]
 progress: ready-for-review
 commits: []
 ---
@@ -85,5 +85,65 @@ GYRE_BASELINE_FAILURE_JSON {"base": "a11ba8d32859a9018ca74f9745d6b00d4ebe1aa0", 
 - **Attribution for this task**: `python3 /tmp/stage/dev-attribution.py task-225` produced no change — `commits: []` is correct: the repair commit `c7a4b844` is `process(task-068)`-typed (skipped by the attribution check's review/process round-trip skip) and touches `specs/` only, no product surface.
 - **Transport restriction**: this sandbox cannot accept TCP (`accept(): [Errno 95] Operation not supported`, recorded in `/tmp/stage/capabilities.json`). No runtime surface was touched, so no HTTP probe is applicable; exact-head GitHub checks belong to host verification and remain mandatory.
 - **Durable recurrence cause** (already recorded by task-215/222, re-confirmed against current source): `publish()` in `scripts/pipeline/stages.py` (lines ~281–292) learns the squash `mergeCommit.oid` but only stores it in delivery metadata — it never appends the landed SHA to the task's `commits:` frontmatter on main, so every future product-surface ship re-creates this drift and the pipeline will keep minting repair tasks for it. A pipeline-side fix (record the merge SHA in the task file in the merge-confirmation path) is out of scope for this repair round.
+
+
+### Round 2 (finding 374e273d, base `05709c242509b89214876339b3c463ede3a31b60`, prerequisite task-228)
+
+While round 1 awaited publication, main advanced past the assignment base:
+`05709c24` (`feat(task-196)`, +613 lines across `crates/gyre-server/src/api/graph.rs`,
+`web/src/__tests__/Briefing.test.js`, `web/src/components/Briefing.svelte`,
+`web/src/lib/InlineChat.svelte`) landed and re-created the identical drift class;
+the pipeline minted finding `374e273d` and attached it to this task as
+`depends_on: [task-228]`. Task-227 (commit `18c44f1a`) repaired it on main by
+appending `05709c242509b89214876339b3c463ede3a31b60` to `specs/tasks/task-196.md`'s
+`commits:` frontmatter; task-228 (commit `06d70009`) recorded that repair. The
+pipeline merged main into this branch at `7401f8c1` before this round began, so
+the repair is present here; this round reproduced the failure at its base and
+verified the repair holds at merged HEAD, without re-landing an already-landed
+one-line change.
+
+**Reproduction at the finding's base** (detached worktree at
+`05709c242509b89214876339b3c463ede3a31b60`): `bash scripts/check-task-commit-attribution.sh`
+exited 1 with the identical violation — `05709c24 task-196 feat(task-196): Ground
+Briefing Q&A in real briefing data with sources and history validation`. At that
+tree, task-196's frontmatter lists only the three branch SHAs (`3b90956c`,
+`abcfff04`, `88b57180`) — the squashed landing commit cannot contain its own SHA
+(task-095 R3-F4 flaw class). Evidence:
+`/tmp/stage/review-evidence/task-225-r2-attribution-before.txt` (exit 1).
+
+**Mutation check at merged HEAD `7401f8c1` (test-the-repair):** repair present →
+gate exits 0; removing `05709c242509b89214876339b3c463ede3a31b60` from task-196's
+`commits:` frontmatter (sed mutation) → identical FAIL exit 1; repair restored →
+exit 0 again. The current pass is attributable to the recorded SHA, not gate
+drift. Evidence: `task-225-r2-mutation-check.txt` (mutated state, exit 1) and
+`task-225-r2-mutation-restore-check.txt` (restored state, exit 0, frontmatter
+line shown with all 4 SHAs).
+
+**No gate weakened, no product source touched:** `git diff 05709c242509b89214876339b3c463ede3a31b60 HEAD -- scripts/`
+is empty; diff on `crates/`/`web/src`/`web/tests` is empty; the exemption file
+sits at its frozen 3-entry baseline (`01493c88 task-097`, `17c81d5a task-072`,
+`a8d036f4 task-091`) — count re-verified post-round. The branch delta vs the
+failure base is exactly: `specs/tasks/task-196.md` (the landed task-227 repair),
+`specs/tasks/task-227.md`, `specs/tasks/task-228.md`, and this task record.
+Evidence: `task-225-r2-no-gate-weakened.txt`.
+
+**All 21 static gates at merged HEAD `7401f8c1`** exit 0 (architecture, hierarchy,
+ABAC registry + exempt handlers, MCP write tools, migration versions + SQL
+portability, dead message kinds, byte-slice truncation, relative path defaults,
+fail-open ref resolution, mem port contracts, fabricated scope defaults, lossy
+secret conversion, scope literal defaults, inert enforcement, forged scope
+fields, forwarded header trust, in-memory state stores, unbounded external HTTP,
+and the repaired task-commit attribution). Evidence:
+`/tmp/stage/review-evidence/task-225-r2-static-gates.txt` (21 × exit=0).
+
+**Attribution for this task:** `python3 /tmp/stage/dev-attribution.py task-225`
+derives no change — `commits: []` is attribution-canonical: the branch's own
+commits are the round-1 `process(task-068)`/`process(task-225)` specs-only
+commits and the main merge; nothing touches product surface.
+
+**Transport restriction:** this sandbox cannot accept TCP (`accept(): [Errno 95]
+Operation not supported`, recorded in `/tmp/stage/capabilities.json`). No runtime
+surface was touched, so no HTTP probe is applicable; exact-head GitHub checks
+belong to host verification and remain mandatory.
 
 Independent review, full deterministic gates, and GitHub checks on the exact PR head remain required before merge.
