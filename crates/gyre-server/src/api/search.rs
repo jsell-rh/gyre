@@ -5,6 +5,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use gyre_common::Id;
 use gyre_ports::search::SearchQuery;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
@@ -56,16 +57,51 @@ pub async fn search_handler(
         }));
     }
     let limit = params.limit.min(100);
+    let started = std::time::Instant::now();
     let results = state
         .search
         .search(SearchQuery {
             query: q.clone(),
-            entity_type: params.entity_type,
-            workspace_id: params.workspace_id,
+            entity_type: params.entity_type.clone(),
+            workspace_id: params.workspace_id.clone(),
             limit,
         })
         .await
         .map_err(ApiError::Internal)?;
+    let duration_ms = started.elapsed().as_millis() as u64;
+
+    // Auto-track search execution (analytics.md §Auto-Emitted Events).
+    {
+        let entity_types: Vec<String> = {
+            let mut types: Vec<String> =
+                results.iter().map(|r| r.entity_type.clone()).collect();
+            types.sort();
+            types.dedup();
+            types
+        };
+        let ev = gyre_domain::AnalyticsEvent::new(
+            gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+            "search.query",
+            None,
+            serde_json::json!({
+                "query_length": q.chars().count(),
+                "entity_types": entity_types,
+                "result_count": results.len(),
+                "duration_ms": duration_ms,
+            }),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        )
+        .with_scope(
+            None,
+            None,
+            params.workspace_id.as_deref().map(Id::new).as_ref(),
+            None,
+        );
+        let _ = state.analytics.record(&ev).await;
+    }
 
     let total = results.len();
     let items = results
@@ -100,4 +136,105 @@ pub async fn reindex_handler(
         StatusCode::OK,
         Json(serde_json::json!({ "indexed": count })),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::mem::test_state;
+    use axum::body::Body;
+    use http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn search_emits_analytics_event() {
+        // analytics.md §Auto-Emitted Events: search.query carries
+        // query_length, entity_types, result_count, duration_ms.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Index a searchable task through the public API so the search port
+        // has a real document (create_task indexes for search).
+        let task_body = serde_json::json!({
+            "title": "Payment reconciliation engine",
+            "task_type": "implementation"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&task_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/search?q=reconciliation")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["total"], 1, "search must find the indexed task");
+
+        let events = state
+            .analytics
+            .query(Some("search.query"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one search.query event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["query_length"], 14, "\"reconciliation\" has 14 chars");
+        assert_eq!(
+            ev.properties["entity_types"],
+            serde_json::json!(["task"]),
+            "entity_types lists the distinct result types"
+        );
+        assert_eq!(ev.properties["result_count"], 1);
+        assert!(
+            ev.properties["duration_ms"].as_u64().is_some(),
+            "duration_ms must be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_query_emits_no_analytics_event() {
+        // Blank queries short-circuit before search — no event is recorded.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/search?q=")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let events = state
+            .analytics
+            .query(Some("search.query"), None, 10)
+            .await
+            .unwrap();
+        assert!(events.is_empty(), "no event for empty query");
+    }
 }

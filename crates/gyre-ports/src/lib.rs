@@ -64,7 +64,7 @@ pub mod workspace_membership;
 pub use activity::{ActivityQuery, ActivityRepository};
 pub use agent::AgentRepository;
 pub use agent_tracking::{AgentCommitRepository, WorktreeRepository};
-pub use analytics::{AnalyticsRepository, CostRepository};
+pub use analytics::{AnalyticsQueryFilter, AnalyticsRepository, CostRepository};
 pub use attestation_repo::AttestationRepository;
 pub use audit::{AuditQueryFilter, AuditRepository};
 pub use breaking_change::BreakingChangeRepository;

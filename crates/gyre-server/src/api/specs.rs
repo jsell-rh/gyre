@@ -22,6 +22,8 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use gyre_common::Id;
+use gyre_domain::AnalyticsEvent;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -677,6 +679,41 @@ pub async fn approve_spec(
             entry.updated_at = now;
             let _ = state.spec_ledger.save(&entry).await;
 
+            // Auto-track spec approval (analytics.md §Auto-Emitted Events).
+            {
+                let approver_agent_id = if event.approver_type == "agent" {
+                    event.approver_id.strip_prefix("agent:").map(|s| s.to_string())
+                } else {
+                    None
+                };
+                let approver_user_id = if event.approver_type == "human" {
+                    Some(Id::new(
+                        event
+                            .approver_id
+                            .trim_start_matches("user:")
+                            .to_string(),
+                    ))
+                } else {
+                    None
+                };
+                let ws_id = entry.workspace_id.as_deref().map(Id::new);
+                let repo_id = entry.repo_id.as_deref().map(Id::new);
+                let ev = AnalyticsEvent::new(
+                    new_id(),
+                    "spec.approved",
+                    approver_agent_id,
+                    serde_json::json!({
+                        "spec_path": spec_path,
+                        "approver_type": event.approver_type,
+                        "approval_mode": entry.approval_mode,
+                    }),
+                    now,
+                )
+                .with_scope(approver_user_id.as_ref(), None, ws_id.as_ref(), repo_id.as_ref());
+                let _ = state.analytics.record(&ev).await;
+            }
+
+
             // Emit SpecApproved event on the message bus (agent-runtime.md §1).
             // This is the single trigger for all agent work via the signal chain:
             // SpecApproved → workspace orchestrator → delegation task → repo orchestrator → sub-tasks → agents.
@@ -893,6 +930,22 @@ pub async fn reject_spec(
                     e
                 );
             }
+            // mr.closed analytics event (analytics.md §Auto-Emitted Events:
+            // "MR closed without merge") — spec rejection closes its
+            // spec-edit MRs; this is one of the close paths.
+            let ev = AnalyticsEvent::new(
+                new_id(),
+                "mr.closed",
+                mr.author_agent_id.as_ref().map(|id| id.to_string()),
+                serde_json::json!({
+                    "mr_id": mr.id.to_string(),
+                    "repo_id": mr.repository_id.to_string(),
+                    "reason": "spec_rejected",
+                }),
+                now,
+            )
+            .with_scope(None, None, Some(&mr.workspace_id), Some(&mr.repository_id));
+            let _ = state.analytics.record(&ev).await;
         }
     }
 
@@ -2097,6 +2150,40 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn approve_spec_emits_analytics_event() {
+        // analytics.md §Auto-Emitted Events: spec.approved carries spec_path,
+        // approver_type, approval_mode.
+        let (app, state) = app_with_spec();
+        let sha = "a".repeat(40);
+        let body = serde_json::json!({ "sha": sha });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fdesign-principles.md/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let events = state
+            .analytics
+            .query(Some("spec.approved"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one spec.approved event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["spec_path"], "system/design-principles.md");
+        // test-token is the global token → human approver.
+        assert_eq!(ev.properties["approver_type"], "human");
+        assert_eq!(ev.properties["approval_mode"], "human_only");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn approve_then_revoke() {
         let (app, state) = app_with_spec();
         let sha = "a".repeat(40);
@@ -2914,6 +3001,72 @@ specs:
         // Agent should be stopped.
         let updated_agent = state.agents.find_by_id(&agent_id).await.unwrap().unwrap();
         assert_eq!(updated_agent.status, gyre_domain::AgentStatus::Stopped);
+    }
+
+    /// analytics.md §Auto-Emitted Events: rejecting a spec closes its open
+    /// spec-edit MRs, and each close must record an `mr.closed` event with
+    /// the spec-required properties (`mr_id`, `repo_id`, `reason`).
+    /// Regression: the spec-reject close path previously recorded nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reject_spec_records_mr_closed_analytics_events() {
+        let state = test_state();
+        state
+            .spec_ledger
+            .save(&make_ledger_entry(
+                "system/reject-mr.md",
+                ApprovalStatus::Approved,
+            ))
+            .await
+            .unwrap();
+
+        // An open spec-edit MR referencing the spec.
+        let mut mr = gyre_domain::MergeRequest::new(
+            gyre_common::Id::new("mr-spec-edit-1"),
+            gyre_common::Id::new("repo-1"),
+            "Edit spec",
+            "spec-edit/reject-mr",
+            "main",
+            1700000000,
+        );
+        mr.workspace_id = gyre_common::Id::new("ws-1");
+        mr.spec_ref = Some("system/reject-mr.md@0000000000000000000000000000000000000000".to_string());
+        state.merge_requests.create(&mr).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let body = serde_json::json!({ "reason": "spec is invalid" });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Freject-mr.md/reject")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let updated = state
+            .merge_requests
+            .find_by_id(&gyre_common::Id::new("mr-spec-edit-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, gyre_domain::MrStatus::Closed);
+
+        let events = state
+            .analytics
+            .query(Some("mr.closed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one mr.closed event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["mr_id"], "mr-spec-edit-1");
+        assert_eq!(ev.properties["repo_id"], "repo-1");
+        assert_eq!(ev.properties["reason"], "spec_rejected");
+        assert_eq!(ev.workspace_id.as_deref(), Some("ws-1"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

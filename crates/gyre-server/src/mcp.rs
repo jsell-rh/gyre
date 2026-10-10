@@ -1028,8 +1028,10 @@ async fn handle_update_task(state: &AppState, args: &Value) -> Value {
     if let Some(pr) = get_str(args, "pr_link") {
         task.pr_link = Some(pr.to_string());
     }
+    let mut old_status: Option<gyre_domain::TaskStatus> = None;
     if let Some(status_str) = get_str(args, "status") {
         if let Some(new_status) = parse_status(status_str) {
+            old_status = Some(task.status.clone());
             if let Err(e) = task.transition_status(new_status) {
                 return tool_error(format!("Invalid status transition: {e}"));
             }
@@ -1039,7 +1041,28 @@ async fn handle_update_task(state: &AppState, args: &Value) -> Value {
     }
     task.updated_at = now_secs();
     match state.tasks.update(&task).await {
-        Ok(()) => tool_result(format!("Updated task {id_str}")),
+        Ok(()) => {
+            // task.status_changed analytics event (analytics.md §Auto-Emitted).
+            // The MCP tool is the autonomous-agent path for task transitions;
+            // the HTTP endpoint in tasks.rs is the other. Both must record.
+            if let Some(old) = old_status {
+                let ev = gyre_domain::AnalyticsEvent::new(
+                    gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+                    "task.status_changed",
+                    task.assigned_to.as_ref().map(|id| id.to_string()),
+                    serde_json::json!({
+                        "task_id": task.id.to_string(),
+                        "old_status": format!("{:?}", old),
+                        "new_status": format!("{:?}", task.status),
+                        "assigned_to": task.assigned_to.as_ref().map(|id| id.to_string()),
+                    }),
+                    now_secs(),
+                )
+                .with_scope(None, None, Some(&task.workspace_id), None);
+                let _ = state.analytics.record(&ev).await;
+            }
+            tool_result(format!("Updated task {id_str}"))
+        }
         Err(e) => tool_error(format!("Failed to update task: {e}")),
     }
 }
@@ -1408,6 +1431,24 @@ async fn handle_agent_complete(state: &AppState, args: &Value) -> Value {
                     "reason": format!("Agent {} completed task", agent.name),
                 })),
             );
+            // ── agent.completed analytics event (analytics.md §Auto-Emitted) ──────
+            // This MCP tool is the autonomous-agent completion path
+            // (agent-runner.mjs calls gyre_agent_complete); the HTTP endpoint
+            // in spawn.rs is the other. Both must record the event.
+            let duration_secs = now_secs().saturating_sub(agent.spawned_at);
+            let ev = gyre_domain::AnalyticsEvent::new(
+                gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+                "agent.completed",
+                Some(agent.id.to_string()),
+                serde_json::json!({
+                    "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+                    "duration_secs": duration_secs,
+                }),
+                now_secs(),
+            )
+            .with_scope(None, None, Some(&agent.workspace_id), agent.repo_id.as_ref());
+            let _ = state.analytics.record(&ev).await;
+
 
             match state.agents.update(&agent).await {
                 Ok(()) => tool_result(format!("Agent {agent_id} marked complete")),
@@ -3763,6 +3804,178 @@ mod tests {
         assert!(json["result"]["isError"].as_bool().unwrap());
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("not found") || text.contains("Agent not found"));
+    }
+
+    // ── agent_complete records agent.completed analytics event ────────────────
+    // analytics.md §Auto-Emitted Events: the autonomous path (agent-runner.mjs
+    // calls gyre_agent_complete) must emit agent.completed just like the HTTP
+    // endpoint. Fails on the old behavior where the MCP path recorded nothing.
+    #[tokio::test]
+    async fn agent_complete_records_agent_completed_analytics_event() {
+        let state = test_state();
+        let app = crate::build_router(state.clone());
+
+        // Create an agent through the public API so it exists in storage.
+        // The agent registers Idle; complete requires Active→Idle, so
+        // transition it first via the status endpoint.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({"name": "analytics-test-agent"})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let created: Value = serde_json::from_slice(&bytes).unwrap();
+        let agent_id = created["id"].as_str().expect("agent id").to_string();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/agents/{agent_id}/status"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({"status": "active"})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "agent must transition Idle→Active before completion"
+        );
+
+        // Complete the agent through the MCP tool (the autonomous path).
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 52,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_agent_complete",
+                    "arguments": {"agent_id": agent_id}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            json["result"]["isError"].as_bool().unwrap_or(false) == false,
+            "agent completion must succeed: {json}"
+        );
+
+        let events = state
+            .analytics
+            .query(Some("agent.completed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "gyre_agent_complete must record the agent.completed analytics event"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.agent_id.as_deref(), Some(agent_id.as_str()));
+        assert_eq!(ev.event_name, "agent.completed");
+        assert!(
+            ev.properties["duration_secs"].as_u64().is_some(),
+            "duration_secs must be present: {}",
+            ev.properties["duration_secs"]
+        );
+    }
+
+    // ── update_task records task.status_changed analytics event ──────────────
+    // analytics.md §Auto-Emitted Events: the MCP tool is the autonomous-agent
+    // path for task status transitions; it must record task.status_changed
+    // like the HTTP endpoint. Fails on the old behavior (no event recorded).
+    #[tokio::test]
+    async fn update_task_records_status_changed_analytics_event() {
+        let state = test_state();
+        let app = crate::build_router(state.clone());
+
+        // Create a task through the public API.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "title": "mcp-status-task",
+                            "task_type": "implementation"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let created: Value = serde_json::from_slice(&bytes).unwrap();
+        let task_id = created["id"].as_str().expect("task id").to_string();
+
+        // Transition it through the MCP tool (the autonomous path).
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 53,
+                "method": "tools/call",
+                "params": {
+                    "name": "gyre_update_task",
+                    "arguments": {"id": task_id, "status": "in_progress"}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            json["result"]["isError"].as_bool().unwrap_or(false) == false,
+            "task update must succeed: {json}"
+        );
+
+        let events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "gyre_update_task must record the task.status_changed analytics event"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.event_name, "task.status_changed");
+        assert_eq!(ev.properties["task_id"], task_id.as_str());
+        assert_eq!(ev.properties["old_status"], "Backlog");
+        assert_eq!(ev.properties["new_status"], "InProgress");
+        assert!(
+            ev.properties["assigned_to"].is_null(),
+            "unassigned task carries null assigned_to"
+        );
     }
 
     // ── AgentCompleted MessageKind roundtrips ─────────────────────────────────

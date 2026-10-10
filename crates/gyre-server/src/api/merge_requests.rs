@@ -640,14 +640,56 @@ pub async fn transition_mr_status(
             .await;
     }
 
-    // Auto-track mr.merged analytics event
-    if is_merge {
+    // Auto-track mr.merged / mr.closed analytics events (analytics.md §Auto-Emitted Events).
+    if is_merge || is_close {
+        // gate_count: number of gate results recorded for this MR.
+        let gate_count = state
+            .gate_results
+            .list_by_mr_id(mr.id.as_str())
+            .await
+            .map(|rs| rs.len() as u64)
+            .unwrap_or(0);
+        // queue_wait_secs: time from merge-queue enqueue to now, if the MR
+        // passed through the queue.
+        let queue_wait_secs = state
+            .merge_queue
+            .list_queue()
+            .await
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .into_iter()
+                    .find(|e| e.merge_request_id == mr.id)
+                    .map(|e| ts.saturating_sub(e.enqueued_at))
+            });
+
+        let event_name = if is_merge { "mr.merged" } else { "mr.closed" };
+        let properties = if is_merge {
+            serde_json::json!({
+                "mr_id": mr.id.to_string(),
+                "repo_id": mr.repository_id.to_string(),
+                "gate_count": gate_count,
+                "queue_wait_secs": queue_wait_secs,
+            })
+        } else {
+            serde_json::json!({
+                "mr_id": mr.id.to_string(),
+                "repo_id": mr.repository_id.to_string(),
+                "reason": "closed_without_merge",
+            })
+        };
         let ev = AnalyticsEvent::new(
             new_id(),
-            "mr.merged",
+            event_name,
             mr.author_agent_id.as_ref().map(|id| id.to_string()),
-            serde_json::json!({ "mr_id": mr.id.to_string() }),
+            properties,
             ts,
+        )
+        .with_scope(
+            None,
+            None,
+            Some(&mr.workspace_id),
+            Some(&mr.repository_id),
         );
         let _ = state.analytics.record(&ev).await;
     }
@@ -1051,6 +1093,115 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "closed MR's trace must be deleted (close-without-merge)"
+        );
+    }
+
+    #[tokio::test]
+    async fn closing_mr_emits_analytics_event() {
+        // analytics.md §Auto-Emitted Events: mr.closed carries mr_id, repo_id,
+        // reason; scope fields workspace_id/repo_id are attached for filtering.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Analytics close").await;
+
+        let body = serde_json::json!({ "status": "closed" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/status"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let events = state
+            .analytics
+            .query(Some("mr.closed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one mr.closed event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["mr_id"], mr_id);
+        assert_eq!(ev.properties["repo_id"], "repo-1");
+        assert!(
+            ev.properties["reason"].as_str().is_some_and(|r| !r.is_empty()),
+            "reason must be a non-empty string"
+        );
+    }
+
+    #[tokio::test]
+    async fn merging_mr_emits_analytics_event_with_gate_count() {
+        // analytics.md §Auto-Emitted Events: mr.merged carries mr_id, repo_id,
+        // gate_count, queue_wait_secs.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, mr_id) = create_test_mr(app, "Analytics merge").await;
+
+        // Approve first (Open → Merged is invalid; Open → Approved → Merged).
+        let body = serde_json::json!({ "status": "approved" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/status"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Seed two gate results so gate_count is non-zero.
+        for gid in ["gate-1", "gate-2"] {
+            state
+                .gate_results
+                .save(&gyre_domain::GateResult {
+                    id: gyre_common::Id::new(format!("gr-{gid}")),
+                    gate_id: gyre_common::Id::new(gid),
+                    mr_id: gyre_common::Id::new(&mr_id),
+                    status: gyre_domain::GateStatus::Passed,
+                    output: None,
+                    started_at: None,
+                    finished_at: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let body = serde_json::json!({ "status": "merged" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/merge-requests/{mr_id}/status"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let events = state
+            .analytics
+            .query(Some("mr.merged"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one mr.merged event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["mr_id"], mr_id);
+        assert_eq!(ev.properties["repo_id"], "repo-1");
+        assert_eq!(ev.properties["gate_count"], 2, "gate_count counts gate results");
+        // The MR never entered the merge queue — queue_wait_secs is absent/null.
+        assert!(
+            ev.properties.get("queue_wait_secs").map_or(true, |v| v.is_null()),
+            "queue_wait_secs must be null when the MR never queued"
         );
     }
 

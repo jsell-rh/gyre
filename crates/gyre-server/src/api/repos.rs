@@ -312,6 +312,22 @@ pub async fn archive_repo(
             if let Err(e) = state.traces.delete_by_mr(&mr.id).await {
                 tracing::warn!(mr_id = %mr.id, error = %e, "failed to delete gate trace on MR close");
             }
+            // mr.closed analytics event (analytics.md §Auto-Emitted Events:
+            // "MR closed without merge") — repo archival is one of the close
+            // paths; the HTTP transition endpoint and spec-reject are others.
+            let ev = gyre_domain::AnalyticsEvent::new(
+                new_id(),
+                "mr.closed",
+                mr.author_agent_id.as_ref().map(|id| id.to_string()),
+                serde_json::json!({
+                    "mr_id": mr.id.to_string(),
+                    "repo_id": mr.repository_id.to_string(),
+                    "reason": "repo_archived",
+                }),
+                now,
+            )
+            .with_scope(None, None, Some(&mr.workspace_id), Some(&mr.repository_id));
+            let _ = state.analytics.record(&ev).await;
         }
     }
 
@@ -1141,6 +1157,29 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(m3.status, MrStatus::Merged);
+        // analytics.md §Auto-Emitted Events: each MR closed by the archive
+        // must record an `mr.closed` event with the spec-required properties.
+        // Regression: the archive close path previously recorded nothing.
+        let events = state
+            .analytics
+            .query(Some("mr.closed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            2,
+            "one mr.closed event per closed MR (open + approved), none for the merged MR"
+        );
+        let mut closed_ids: Vec<&str> = events
+            .iter()
+            .map(|e| e.properties["mr_id"].as_str().unwrap())
+            .collect();
+        closed_ids.sort();
+        assert_eq!(closed_ids, vec!["mr-approved-2", "mr-open-1"]);
+        for ev in &events {
+            assert_eq!(ev.properties["repo_id"], repo_id);
+            assert_eq!(ev.properties["reason"], "repo_archived");
+        }
     }
 
     #[tokio::test]

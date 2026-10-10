@@ -132,18 +132,30 @@ async fn spawn_orchestrator(
     // children (authorization-provenance.md §4.5).
     bootstrap_agent_keypair(state, &agent.id.to_string(), now).await;
 
-    // Auto-track spawn.
+    // Auto-track spawn (analytics.md §Auto-Emitted Events).
+    let persona_name = match orchestrator_type {
+        OrchestratorType::Worker => "default-worker",
+        OrchestratorType::WorkspaceOrchestrator => "workspace-orchestrator",
+        OrchestratorType::RepoOrchestrator => "repo-orchestrator",
+    };
     let ev = AnalyticsEvent::new(
         new_id(),
         "agent.spawned",
         Some(agent.id.to_string()),
         serde_json::json!({
+            // Orchestrators are not task-bound (the JWT task_id claim is the
+            // orchestrator's own id only for gyre_agent_complete compat) —
+            // the spec's task_id property is null here, not a fabricated id.
+            "task_id": serde_json::Value::Null,
+            "compute_target": "local",
+            "persona": persona_name,
             "orchestrator_type": orchestrator_type.to_string(),
             "workspace_id": workspace_id.to_string(),
             "repo_id": repo_id.map(|r| r.to_string()),
         }),
         now,
-    );
+    )
+    .with_scope(None, None, Some(workspace_id), repo_id);
     let _ = state.analytics.record(&ev).await;
 
     budget::increment_active_agents(state, &workspace_id.to_string()).await;
@@ -574,5 +586,34 @@ mod tests {
                 .any(|m| m.kind == gyre_common::message::MessageKind::Escalation),
             "expected an Escalation message in the workspace orchestrator inbox"
         );
+    }
+
+    #[tokio::test]
+    async fn orchestrator_spawn_emits_agent_spawned_analytics_event() {
+        // analytics.md §Auto-Emitted Events: the orchestrator spawn path
+        // reports its tier via the persona property.
+        let state = test_state();
+        seed(&state).await;
+
+        let (agent, _token) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1")
+                .await
+                .unwrap();
+
+        let events = state
+            .analytics
+            .query(Some("agent.spawned"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one agent.spawned event expected");
+        let ev = &events[0];
+        assert_eq!(ev.agent_id.as_deref(), Some(agent.id.as_str()));
+        assert_eq!(ev.properties["persona"], "workspace-orchestrator");
+        assert_eq!(ev.properties["orchestrator_type"], "workspace_orchestrator");
+        assert_eq!(ev.properties["compute_target"], "local");
+        // Orchestrators are not task-bound: task_id must be null, not the
+        // agent's own id (regression: previously fabricated from agent.id).
+        assert!(ev.properties["task_id"].is_null());
+        assert_eq!(ev.workspace_id.as_deref(), Some("ws-1"));
     }
 }

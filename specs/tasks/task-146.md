@@ -2,14 +2,14 @@
 title: "Complete analytics event schema and auto-emitted events coverage"
 spec_ref: "analytics.md §Event Schema"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "analytics.md §Purpose"
   - "analytics.md §Event Schema"
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: []
+commits: ["7aec532de81863e9de2791434778c292838335a1", "a15de97ae12cd1b914f9e09025f4b3e5db083b35", "5f0602675167018a09ef08ff6adbfcafc7b612cd", "3eebbbb5ac640428868a8f5eb4ae229675c86891", "1f8277301936405de86d3ff5269304a61ab74a44", "dd84d9d00a5b69111ee5a8c131db0c5d1ead08bc", "ee479add261ad42c61d4044eecbbdca8ed6263c9", "a5bc917785f7c2e248e84e4d62117439fc08221e", "fe6a6642c7bbd8331bab9be3ce61164a33058075"]
 ---
 
 ## Spec Excerpt

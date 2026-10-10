@@ -1078,13 +1078,26 @@ pub(crate) async fn spawn_agent_core(
         .await;
     }
 
-    // Auto-track agent spawn
+    // Auto-track agent spawn (analytics.md §Auto-Emitted Events).
+    // Workers run the `default-worker` persona (agent-runtime.md §Bootstrap);
+    // orchestrators report their tier via the orchestrator spawn path.
     let ev = AnalyticsEvent::new(
         new_id(),
         "agent.spawned",
         Some(agent.id.to_string()),
-        serde_json::json!({ "task_id": req.task_id }),
+        serde_json::json!({
+            "task_id": req.task_id,
+            "compute_target": compute_target_label,
+            "persona": "default-worker",
+            "orchestrator_type": "worker",
+        }),
         now,
+    )
+    .with_scope(
+        None,
+        None,
+        Some(&repo.workspace_id),
+        Some(&repo.id),
     );
     let _ = state.analytics.record(&ev).await;
 
@@ -1304,13 +1317,23 @@ pub async fn complete_agent(
         );
     }
 
-    // Auto-track agent completion
+    let duration_secs = now.saturating_sub(agent.spawned_at);
     let ev = AnalyticsEvent::new(
         new_id(),
         "agent.completed",
         Some(agent.id.to_string()),
-        serde_json::json!({ "mr_id": mr.id.to_string() }),
+        serde_json::json!({
+            "mr_id": mr.id.to_string(),
+            "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+            "duration_secs": duration_secs,
+        }),
         now,
+    )
+    .with_scope(
+        None,
+        None,
+        Some(&mr.workspace_id),
+        Some(&mr.repository_id),
     );
     let _ = state.analytics.record(&ev).await;
 
@@ -1323,6 +1346,7 @@ pub async fn complete_agent(
         now,
     );
     let _ = state.analytics.record(&ev).await;
+
 
     // M22.2: Decrement budget active-agent counter when agent completes.
     if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {
@@ -1445,6 +1469,24 @@ pub async fn fail_agent(
     let workspace_id = agent.workspace_id.to_string();
     super::budget::decrement_active_agents(&state, &workspace_id).await;
 
+    // Auto-track agent failure (analytics.md §Auto-Emitted Events).
+    let now = now_secs();
+    let duration_secs = now.saturating_sub(agent.spawned_at);
+    let ev = AnalyticsEvent::new(
+        new_id(),
+        "agent.failed",
+        Some(agent.id.to_string()),
+        serde_json::json!({
+            "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+            "reason": "non-recoverable error",
+            "duration_secs": duration_secs,
+        }),
+        now,
+    )
+    .with_scope(None, None, Some(&agent.workspace_id), agent.repo_id.as_ref());
+    let _ = state.analytics.record(&ev).await;
+
+
     // Notify the spawning user that the agent failed (HSI §2).
     if let Some(ref spawned_by) = agent.spawned_by {
         crate::notifications::notify(
@@ -1512,6 +1554,23 @@ pub async fn stop_agent(
     // M22.2: Decrement budget active-agent counter.
     let workspace_id = agent.workspace_id.to_string();
     super::budget::decrement_active_agents(&state, &workspace_id).await;
+
+    // Auto-track agent kill (analytics.md §Auto-Emitted Events: agent.failed
+    // covers "fails or is killed").
+    let now = now_secs();
+    let ev = AnalyticsEvent::new(
+        new_id(),
+        "agent.failed",
+        Some(agent.id.to_string()),
+        serde_json::json!({
+            "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+            "reason": "killed",
+            "duration_secs": now.saturating_sub(agent.spawned_at),
+        }),
+        now,
+    )
+    .with_scope(None, None, Some(&agent.workspace_id), agent.repo_id.as_ref());
+    let _ = state.analytics.record(&ev).await;
 
     Ok(StatusCode::OK)
 }
@@ -2265,6 +2324,131 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ─── Auto-emitted analytics events (analytics.md §Auto-Emitted Events) ────
+
+    #[tokio::test]
+    async fn spawn_emits_agent_spawned_analytics_event() {
+        // agent.spawned must carry agent_id, task_id, compute_target, persona.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Spawn analytics").await;
+        let (_, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/analytics-spawn").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let events = state
+            .analytics
+            .query(Some("agent.spawned"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one agent.spawned event expected");
+        let ev = &events[0];
+        assert_eq!(ev.agent_id.as_deref(), Some(agent_id.as_str()));
+        assert_eq!(ev.properties["task_id"], task_id);
+        assert!(
+            ev.properties["compute_target"].as_str().is_some_and(|t| !t.is_empty()),
+            "compute_target must be a non-empty string"
+        );
+        assert!(
+            ev.properties["persona"].as_str().is_some_and(|p| !p.is_empty()),
+            "persona must be a non-empty string"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_agent_emits_analytics_event() {
+        // agent.completed must carry agent_id, task_id, duration_secs.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Complete analytics").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/analytics-complete").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let body = serde_json::json!({
+            "branch": "feat/analytics-complete",
+            "title": "Done",
+            "target_branch": "main",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/complete"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let mr_json = body_json(resp).await;
+        let mr_id = mr_json["id"].as_str().unwrap().to_string();
+
+        let events = state
+            .analytics
+            .query(Some("agent.completed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one agent.completed event expected");
+        let ev = &events[0];
+        assert_eq!(ev.agent_id.as_deref(), Some(agent_id.as_str()));
+        assert_eq!(ev.properties["task_id"], task_id);
+        assert!(
+            ev.properties["duration_secs"].as_u64().is_some(),
+            "duration_secs must be present"
+        );
+
+        // The pre-existing mr.created event must survive task-146's additions
+        // (contract repair): completing an agent creates an MR, and that MR
+        // creation is still tracked.
+        let created = state
+            .analytics
+            .query(Some("mr.created"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(created.len(), 1, "one mr.created event expected");
+        assert_eq!(created[0].properties["mr_id"], mr_id);
+        assert_eq!(created[0].properties["source_branch"], "feat/analytics-complete");
+    }
+
+    #[tokio::test]
+    async fn fail_agent_emits_analytics_event() {
+        // agent.failed must carry agent_id, task_id, reason.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Fail analytics").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/analytics-fail").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/fail"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let events = state
+            .analytics
+            .query(Some("agent.failed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one agent.failed event expected");
+        let ev = &events[0];
+        assert_eq!(ev.agent_id.as_deref(), Some(agent_id.as_str()));
+        assert_eq!(ev.properties["task_id"], task_id);
+        assert!(
+            ev.properties["reason"].as_str().is_some_and(|r| !r.is_empty()),
+            "reason must be a non-empty string"
+        );
     }
 
     #[tokio::test]

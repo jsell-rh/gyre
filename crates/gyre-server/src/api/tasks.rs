@@ -326,7 +326,8 @@ pub async fn transition_task_status(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("task {id} not found")))?;
     let new_status = parse_task_status(&req.status)?;
-    task.transition_status(new_status)
+    let old_status = task.status.clone();
+    task.transition_status(new_status.clone())
         .map_err(|e| ApiError::InvalidInput(e.to_string()))?;
     let ts = now_secs();
     task.updated_at = ts;
@@ -347,10 +348,13 @@ pub async fn transition_task_status(
         task.assigned_to.as_ref().map(|id| id.to_string()),
         serde_json::json!({
             "task_id": task.id.to_string(),
-            "new_status": req.status,
+            "old_status": format!("{:?}", old_status),
+            "new_status": format!("{:?}", new_status),
+            "assigned_to": task.assigned_to.as_ref().map(|id| id.to_string()),
         }),
         ts,
-    );
+    )
+    .with_scope(None, None, Some(&task.workspace_id), None);
     let _ = state.analytics.record(&event).await;
 
     Ok(Json(TaskResponse::from(task)))
@@ -525,5 +529,58 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn task_status_transition_emits_analytics_event() {
+        // analytics.md §Auto-Emitted Events: task.status_changed must carry
+        // old_status, new_status, task_id, assigned_to.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, id) = create_test_task(app, "Analytics task").await;
+
+        // Assign the task so assigned_to is populated in the event.
+        let assign_body = serde_json::json!({ "assigned_to": "agent-77" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/tasks/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&assign_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = serde_json::json!({ "status": "in_progress" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/tasks/{id}/status"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one status_changed event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["task_id"], id);
+        assert_eq!(ev.properties["old_status"], "Backlog");
+        assert_eq!(ev.properties["new_status"], "InProgress");
+        assert_eq!(ev.properties["assigned_to"], "agent-77");
+        // agent_id on the event is the assigned agent.
+        assert_eq!(ev.agent_id.as_deref(), Some("agent-77"));
     }
 }
