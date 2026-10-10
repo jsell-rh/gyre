@@ -688,10 +688,7 @@ fn validate_tool_scope(
         }
         // Repo-tier spawning (repo orchestrator persona).
         "gyre_spawn_worker" | "gyre_spawn_repo_orchestrator" => {
-            let repo = args
-                .get("repo_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let repo = args.get("repo_id").and_then(|v| v.as_str()).unwrap_or("");
             check_repo_scope(auth, Some(repo), true, tool_name)
         }
         // Workspace-tier tools (workspace orchestrator persona).
@@ -705,16 +702,13 @@ fn validate_tool_scope(
         // Cross-tier creation tools: accept either a matching repo scope or a
         // matching workspace scope (both orchestrator tiers may create tasks).
         "gyre_create_task" | "gyre_update_task" | "gyre_decompose_spec" => {
-            let repo = args
-                .get("repo_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let repo = args.get("repo_id").and_then(|v| v.as_str()).unwrap_or("");
             let ws = args
                 .get("workspace_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             if !repo.is_empty() {
-                return check_repo_scope(auth, Some(repo), true, tool_name)
+                return check_repo_scope(auth, Some(repo), false, tool_name)
                     .or_else(|_| check_workspace_scope(auth, Some(ws), tool_name));
             }
             if !ws.is_empty() {
@@ -739,7 +733,7 @@ fn check_repo_write_scope(
     repo: Option<&str>,
     action: &str,
 ) -> Result<(), String> {
-    check_repo_scope(auth, repo, true, action)
+    check_repo_scope(auth, repo, false, action)
 }
 
 fn check_repo_read_scope(
@@ -768,23 +762,21 @@ fn check_repo_scope(
         .iter()
         .filter(|s| s.starts_with("repo:"))
         .collect();
+    // No explicit target: a single repo scope in the token identifies the
+    // caller's own repo (workers); multiple or none is ambiguous.
     let target = match repo {
         Some(r) if !r.is_empty() => r.to_string(),
-        // No explicit target: a single repo scope in the token identifies
-        // the caller's own repo (workers); multiple or none is ambiguous.
-        _ => match repo_scopes.len() {
-            1 => repo_scopes[0]
-                .trim_start_matches("repo:")
-                .trim_end_matches(":write")
-                .trim_end_matches(":spawn")
-                .to_string(),
-            _ => {
-                return Err(format!(
-                    "PERMISSION_DENIED: token carries no single repo scope for {action} (scopes: {:?})",
-                    auth.scope
-                ))
-            }
-        },
+        _ if repo_scopes.len() == 1 => repo_scopes[0]
+            .trim_start_matches("repo:")
+            .rsplit_once(':')
+            .map(|(name, _)| name.to_string())
+            .unwrap_or_default(),
+        _ => {
+            return Err(format!(
+                "PERMISSION_DENIED: token carries no single repo scope for {action} (scopes: {:?})",
+                auth.scope
+            ));
+        }
     };
     let allowed = repo_scopes.iter().any(|s| {
         let rest = s.trim_start_matches("repo:");
@@ -792,7 +784,12 @@ fn check_repo_scope(
             Some(parts) => parts,
             None => return false,
         };
-        name == target && (right == "write" || (!require_spawn_right && right == "spawn") || right == "spawn")
+        name == target
+            && if require_spawn_right {
+                right == "spawn"
+            } else {
+                right == "write" || right == "spawn"
+            }
     });
     if allowed {
         Ok(())
@@ -5583,7 +5580,8 @@ mod tests {
                 json!({ "task_id": "t-1", "name": "w", "branch": "b" }),
             ),
             &token,
-        ).await;
+        )
+        .await;
         assert!(json["result"]["isError"].as_bool().unwrap());
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("repo-orchestrator"), "got: {text}");
@@ -5612,6 +5610,18 @@ mod tests {
             .transition_status(gyre_domain::AgentStatus::Active)
             .unwrap();
         state.agents.create(&agent).await.unwrap();
+        // Spawned workers always carry a worktree (spawn_agent_core creates
+        // one); TASK-216's repo-scope check on gyre_create_mr relies on it.
+        let wt = gyre_domain::AgentWorktree::new(
+            gyre_common::Id::new(format!("wt-{agent_id}")),
+            agent.id.clone(),
+            repo.id.clone(),
+            Some(gyre_common::Id::new("task-1")),
+            "feat/w",
+            &format!("/tmp/worktrees/{agent_id}"),
+            0,
+        );
+        state.worktrees.create(&wt).await.unwrap();
 
         let tenant_id = state
             .workspaces
@@ -5656,10 +5666,16 @@ mod tests {
             &token,
         )
         .await;
-        assert!(json["error"].is_object(), "scope denial must be a JSON-RPC error, got: {json}");
+        assert!(
+            json["error"].is_object(),
+            "scope denial must be a JSON-RPC error, got: {json}"
+        );
         let msg = json["error"]["message"].as_str().unwrap();
         assert!(msg.contains("PERMISSION_DENIED"), "got: {msg}");
-        assert!(msg.contains("r-2"), "error must name the target repo: {msg}");
+        assert!(
+            msg.contains("r-2"),
+            "error must name the target repo: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -5739,7 +5755,10 @@ mod tests {
         // Workspace-tier tools within the caller's workspace pass the scope gate.
         let (_status, json) = mcp_post_with_token(
             app,
-            tool_call("gyre_list_repo_orchestrators", json!({ "workspace_id": "ws-1" })),
+            tool_call(
+                "gyre_list_repo_orchestrators",
+                json!({ "workspace_id": "ws-1" }),
+            ),
             &token,
         )
         .await;
@@ -5759,14 +5778,20 @@ mod tests {
 
         let (_status, json) = mcp_post_with_token(
             app,
-            tool_call("gyre_list_repo_orchestrators", json!({ "workspace_id": "ws-2" })),
+            tool_call(
+                "gyre_list_repo_orchestrators",
+                json!({ "workspace_id": "ws-2" }),
+            ),
             &token,
         )
         .await;
         assert!(json["error"].is_object(), "got: {json}");
         let msg = json["error"]["message"].as_str().unwrap();
         assert!(msg.contains("PERMISSION_DENIED"), "got: {msg}");
-        assert!(msg.contains("ws-2"), "error must name the target workspace: {msg}");
+        assert!(
+            msg.contains("ws-2"),
+            "error must name the target workspace: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -5777,7 +5802,10 @@ mod tests {
         let app = crate::build_router(state);
         let (_status, json) = mcp_post(
             app,
-            tool_call("gyre_list_repo_orchestrators", json!({ "workspace_id": "ws-1" })),
+            tool_call(
+                "gyre_list_repo_orchestrators",
+                json!({ "workspace_id": "ws-1" }),
+            ),
         )
         .await;
         assert!(json["error"].is_null(), "got: {json}");
