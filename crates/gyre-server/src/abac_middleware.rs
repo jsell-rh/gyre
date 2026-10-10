@@ -1449,7 +1449,7 @@ pub async fn abac_middleware(
 pub mod tests {
     use super::*;
     use crate::mem::test_state;
-    use axum::{body::Body, routing::get, Router};
+    use axum::{body::Body, routing::get, routing::post, Router};
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
@@ -3218,6 +3218,7 @@ pub mod tests {
             .with_state(state.clone());
 
         let resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/personas/persona-e")
