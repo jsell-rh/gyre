@@ -137,6 +137,40 @@ needed; this round is fresh verification only:
 - `cargo test -p gyre-adapters --test tenant_isolation` at fa6e6952:
   see `tenant-isolation.txt` in the evidence dir for the run record.
 
+**Final verification round (2026-10-10, HEAD aa68bbba → repair commit
+72bd51d1; evidence: `/tmp/stage/review-evidence/task-160-final/`):** this
+assignment resumed after a checkpoint interrupt (prior run died waiting on
+the backgrounded tenant-isolation test). The merged HEAD aa68bbba folded
+base `6bf777a6` (task-200 work) into the candidate; `git diff 2098eddc
+aa68bbba` touches only task-200 files — the task-160 surface is byte-stable
+from the round-4-reviewed candidate, so this round is verification plus one
+bookkeeping repair:
+
+- Clean gates: `check-hierarchy.sh` exit 0; `check-tenant-filter.sh` exit 0
+  (111 read methods on tenant-column tables / 0 violations);
+  `check-api-auth.sh` exit 0 (middleware chain + 4 non-ABAC handlers +
+  delegated frozen-baseline registry); `check-arch.sh` OK;
+  `check-scope-literal-defaults.sh crates` OK.
+- Fresh mutation kills (isolated worktree `/tmp/stage/task160-final`,
+  restored after each; worktree removed after): `Task.workspace_id →
+  Option<Id>` → hierarchy exit 1 naming `task.rs:60`; tenant predicate
+  stripped from `sqlite/secret.rs::resolve_for_agent` → tenant-filter
+  exit 1 naming `secret.rs:293` ("1 violation(s) out of 111");
+  `RouteResourceMapping` for `/api/v1/activity` deleted → api-auth exit 1
+  via the delegated registry check. (Both mutated files use CRLF endings —
+  sed line deletes silently no-op there; mutations applied newline-aware
+  and confirmed by re-read before gating.)
+- `cargo test -p gyre-adapters --test tenant_isolation`: **2 passed /
+  0 failed** (cold build, 7m 11s compile; run record in
+  `tenant-isolation.txt`).
+- Inherited attribution drift repaired in 72bd51d1: the merged base
+  `6bf777a6` (task-200) was absent from `specs/tasks/task-200.md`'s
+  `commits:` frontmatter — same drift class as the task-210 `a781ede2`
+  repair above, fixed the same way (SHA appended to the task's list,
+  mirroring prior repair 5df2f9ab; no exemptions; frozen exemption file
+  untouched). `check-task-commit-attribution.sh` FAIL exit 1 before,
+  OK exit 0 after.
+
 Review history: rounds 1–4 in `specs/reviews/task-160.md` (round-3 findings
 F1 dead exemptions / F2 read-name blind spot fixed in 06df8bfb and verified
 complete in round 4).
