@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "dependency-graph.md §Enforcement Policies"
   - "dependency-graph.md §Cascade Testing"
-commits: ["bb92174675e04d96023125d9f70aab20dd3cc6a5"]
+commits: ["bb92174675e04d96023125d9f70aab20dd3cc6a5", "9f9f4340"]
 ---
 
 ## Spec Excerpt
@@ -83,3 +83,14 @@ Test evidence (all at HEAD of this branch):
 - `git diff --check e96d25ab..HEAD` — clean (exit 0) after the web revert; `bash scripts/check-task-commit-attribution.sh` — OK.
 
 Sandbox note: TCP listener probe unsupported (errno 95) — no live HTTP verification possible here; exact-head GitHub CI remains the transport check. Recorded in /tmp/stage/review-evidence/sandbox-transport-restriction.json.
+
+
+## Verification Repair (round 2, finding 44b85cf5ee5a4d98a5f7473cdc870775)
+
+The verification gate (`tools/checks.sh`, a generated copy of `scripts/dev-check.sh`) exited 1 at candidate `370fbbb4` (base `653a696f`). The log tail only showed the passing web build; `dev-check.sh` collects gate failures via `gate()` and continues, so the real failure printed mid-log.
+
+- **Root cause**: `python3 scripts/check-rustfmt-diff.py 653a696f` failed — changed lines in `crates/gyre-adapters/src/sqlite/breaking_change.rs` (274-279, 299), `sqlite/mod.rs` (17), and `crates/gyre-server/tests/task163_dependency_persistence.rs` (33, 78-84) needed rustfmt-canonical formatting. Reproduced locally: exit 1 with identical line numbers.
+- **Fix**: commit `9f9f4340` applies rustfmt's output verbatim to the three files (`assert!` chains reflowed; `breaking_change` sorted before `budget` in mod.rs; tuple return reflowed). No semantic change — 17 insertions, 16 deletions.
+- **After fix**: rustfmt gate exit 0 ("changed lines clean (9 Rust files checked)") against base `653a696f`; `git diff --check` clean; clippy diff gate exit 0 against base `653a696f` ("9 Rust files, 1145 existing warnings outside changes"); `check-task-commit-attribution.sh` OK after adding `9f9f4340` to this task's `commits:` frontmatter.
+- **All other static gates re-run at the merged head** (`18584395` + `9f9f4340`): arch, hierarchy (GYRE_CHECK_HIERARCHY=1), abac-route-registry, abac-exempt-handlers (89 handlers), mcp-write-tools (8 tools), migration-versions, migration-sql-portability, mem-port-contracts, in-memory-state-stores, fabricated-scope-defaults, lossy-secret-conversion, scope-literal-defaults, inert-enforcement, forged-scope-fields, forwarded-header-trust, unbounded-external-http, dead-message-kinds, byte-slice-truncation, relative-path-defaults, fail-open-ref-resolution — all exit 0.
+- Evidence: `/tmp/stage/review-evidence/verification-repair-44b85cf5.json`, `gate-outputs.txt`.
