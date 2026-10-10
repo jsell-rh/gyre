@@ -1,7 +1,7 @@
 ---
 title: "Repair verified failure on main a11ba8d32859"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
-depends_on: []
+depends_on: [task-229]
 progress: ready-for-review
 commits: []
 ---
@@ -109,3 +109,59 @@ The change is documentation-of-record only; the executor checkpoints and
 publishes the source when this assignment ends, and full workspace suites,
 GitHub checks, and independent review are owned by verification and
 publication as in the task-222 precedent.
+
+### Merge round (assignment base 34248324, prerequisite task-229)
+
+**Context:** while this task's round-1 repair sat at candidate `607b8b2f`
+(repaired `a11ba8d3` task-068 drift on top of `a11ba8d3`), main advanced:
+task-224 had landed the identical task-068 repair as `770785f7`, then
+task-227/228/229 landed the task-196 repair (`05709c24…` recorded in
+`specs/tasks/task-196.md`), task-155's squashed landing `27bd585c` was
+repaired by task-231/232, and the chain culminated in `34248324`
+(task-229). The executor merged base `34248324` into this branch (merge
+`0b312332`, no conflicts — the task-068 repair is byte-identical on both
+sides: `git diff 607b8b2f 34248324 -- specs/tasks/task-068.md` is
+empty). No active merge or rebase remained to resolve.
+
+**This round changed no product source:** the merged tree vs base
+`34248324` is exactly `specs/tasks/task-226.md` (this task file:
+`depends_on: []` → `[task-229]` per this assignment's contract, plus
+this section). `git diff 34248324 HEAD -- scripts/ crates/ web/` is
+empty; `scripts/task-commit-attribution-exemptions.txt` unchanged at its
+frozen 3-entry baseline (`01493c88 task-097`, `17c81d5a task-072`,
+`a8d036f4 task-091`); no gate, skip, or check weakened.
+
+**Fresh verification on the merged tree (HEAD `0b312332`):**
+
+- Reproduction at the exact base commit: detached worktree at
+  `a11ba8d32859a9018ca74f9745d6b00d4ebe1aa0`, `bash
+  scripts/check-task-commit-attribution.sh` → exit 1 with the identical
+  violation `a11ba8d3 task-068` (task-226-round2-reproduce-base-a11ba8d3.txt).
+- `bash scripts/check-task-commit-attribution.sh` at merged HEAD — exit
+  0 (task-226-round2-gate-at-merged-head.txt).
+- Mutation check (this task's own round-1 repair, re-verified after the
+  merge): `a11ba8d3…` removed from `specs/tasks/task-068.md` → gate
+  FAIL exit 1 with exactly `a11ba8d3 task-068 feat(task-068): Graph
+  Summary & Dry-Run MCP Tools`; restored → exit 0
+  (task-226-round2-mutation-check-task068.txt,
+  task-226-round2-mutation-restore-task068.txt).
+- Mutation check (prerequisite drift repaired on main by task-229, the
+  assignment's prerequisite): `05709c24…` removed from
+  `specs/tasks/task-196.md` → gate FAIL exit 1 with exactly `05709c24
+  task-196 feat(task-196): Ground Briefing Q&A in real briefing data
+  with sources and history validation`; restored → exit 0
+  (task-226-round2-mutation-check-task196.txt). The pass on the merged
+  tree is attributable to both recorded SHAs, not gate drift.
+- `python3 /tmp/stage/dev-attribution.py task-226` — no change: the
+  branch delta vs base `34248324` is only `specs/tasks/task-226.md`
+  (specs-only), so `commits: []` remains attribution-canonical for this
+  round.
+
+The TCP `accept()` listener probe remains unsupported in this sandbox
+(errno 95, `/tmp/stage/capabilities.json`); no runtime surface was
+touched, so no HTTP probe applies. Exact-head GitHub checks belong to
+host verification and remain mandatory.
+
+Independent review, full deterministic gates, and GitHub checks on the
+exact PR head remain required before merge. All evidence above is under
+`/tmp/stage/review-evidence/`.
