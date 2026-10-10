@@ -77,11 +77,11 @@ pub struct AnalyticsEvent {
 
 ## Acceptance Criteria
 
-- [ ] AnalyticsEvent struct matches spec schema (all fields present)
-- [ ] All 12 auto-emitted events are recorded at their trigger points
-- [ ] Each event includes all spec-required properties
-- [ ] Query API supports all spec-required filter parameters
-- [ ] Tests pass for each auto-emitted event
+- [x] AnalyticsEvent struct matches spec schema (all fields present)
+- [x] All 12 auto-emitted events are recorded at their trigger points
+- [x] Each event includes all spec-required properties
+- [x] Query API supports all spec-required filter parameters
+- [x] Tests pass for each auto-emitted event
 
 ## Agent Instructions
 
