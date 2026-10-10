@@ -232,6 +232,51 @@ Re-verification at repaired HEAD (`2076ba76`):
   above); the exact commands are recorded in the evidence file for host
   verification and GitHub CI.
 
+## Repair round (checkpoint 0779ae15, exit 130) — new-base merge + dist-churn revert
+
+The prior assignment died mid-verification; its checkpoint `0779ae15` left the
+implementation complete and R1-reviewed. This round absorbed the two new
+merge bases (`db37fd02` task-232, `34248324` task-229 — no task-205 product
+file touched: `git log 0779ae15..6b74e257 -- crates/gyre-common/src/graph.rs
+crates/gyre-server/src/api/graph.rs crates/gyre-server/src/mcp.rs
+crates/gyre-server/src/spec_registry.rs
+crates/gyre-server/tests/graph_integration.rs` is empty) and repaired the
+recurring checkpoint artifacts:
+
+- `web/dist` rebuild churn reverted to merge-base state `34248324` again
+  (restore `8597bbec` + removal of branch-added hashed artifacts `e475fd80`;
+  `git diff 34248324..HEAD -- web/dist` is empty; zero `web/src` delta).
+  Same root cause as rounds 2-4: embedded `npm run build` during checkpoint
+  compiles; bundle string-literals identical, only minifier identifiers
+  renamed. Task branches do not ship dist rebuilds.
+- Product code is bit-identical to the R1-approved checkpoint: `git diff
+  0779ae15..HEAD -- crates/ web/src web/scripts scripts/` is empty. The R1
+  review record (`specs/reviews/task-205.md`, verdict `complete`) applies to
+  this exact tree.
+- Coverage matrix stays at its base state per the round-4 contract repair
+  (`230574eb`): row 7 §4 remains `task-assigned | task-205` for the fresh
+  independent reviewer to re-audit against the shipped code — the
+  implementation does not write its own coverage verdict.
+
+Re-verification at repaired HEAD `e475fd80` (SKIP_WEB_BUILD=1; evidence:
+`/tmp/stage/review-evidence/task205-round5-verification-e475fd80.txt`):
+
+- `cargo build --all` OK.
+- `cargo test -p gyre-common --lib` → 101 passed (4 concept_tests included).
+- `cargo test -p gyre-server --lib -- api::graph::tests mcp::tests
+  spec_registry::tests` → 152 passed (12 concept guards included).
+- `scripts/check-arch.sh`, `check-abac-route-registry.sh`,
+  `check-mcp-write-tools.sh`, `check-mem-port-contracts.sh`,
+  `check-dead-message-kinds.sh`, `check-task-commit-attribution.sh` — all
+  pass at the new merged HEAD (the new merge bases were already recorded by
+  their own tasks).
+- TCP-listener integration tests remain sandbox-blocked: `accept(2)` errno 95
+  re-probed fresh this round; the integration failure signature
+  (reqwest `IncompleteMessage` at `tests/graph_integration.rs:84` — client
+  connects via kernel backlog, server never accepts) confirms a transport
+  restriction, not a code defect. Exact host/CI commands recorded in the
+  evidence file. GitHub CI on the pipeline branch remains mandatory.
+
 ## Review
 
 ### Review changed source code
