@@ -131,3 +131,21 @@ bug-injection probe still fails exactly the Accept test, `vite build`
 reproduces committed dist byte-exactly, attribution gate exit 0, 50/50
 i18n keys. Exact-head GitHub CI (`web-build`) remains mandatory after
 independent review.
+
+Rebase-resolution round (durable finding 48bc0e30, merge head `bcc58d03`,
+base `653a696f` merged into candidate `28fb853d`): the only conflict was the
+generated `specs/coverage/SUMMARY.md` (date + TOTAL row); resolved by
+regenerating with the canonical `scripts/dev-coverage.py`, whose output is
+byte-identical to `scripts/update-coverage-summary.sh` and preserves both
+sides' merged coverage rows (message-bus 85%, business-continuity 100%,
+ui-layout 2%) while correcting one stale hand-edited row
+(human-system-interface 20 n/a / 19 task-assigned / 45%, matching that
+coverage file's own 2026-10-09 header). Product code unchanged by the merge.
+All probes re-run fresh at this head (artifacts under
+/tmp/stage/review-evidence/): `npm ci`; EditorSplit + DetailPanel suites
+66/66; hollow-Accept bug-injection probe still fails exactly the Accept test;
+`vite build` reproduces committed dist byte-exactly; attribution gate exit 0;
+50/50 i18n keys, no dead. TCP listener probes remain unsupported in this
+sandbox (errno 95, /tmp/stage/capabilities.json), so no live server/browser
+run; exact-head GitHub CI (`web-build`) remains mandatory after independent
+review.
