@@ -13,7 +13,7 @@ coverage_sections:
   - "explorer-implementation.md §16 Frontend Components"
   - "explorer-implementation.md §17 ExplorerCanvas (Svelte)"
   - "explorer-implementation.md §25 Phase 1: Canvas + Filters"
-commits: ["d4bbe5769a504cb177aa8bf5f7aae0dd0b4ed22f", "db9f944bd9631a742f93a0512e87f4eb450931dd", "240aab15ab9b5b67a013a204be74b2864dc68000", "3fb05db28561b78c30f12bbc9e8450fe79a9f89d", "6110fe43dbbf19aee4ef9dbf5cab751d89007e90", "58dddc244728efcb163cf07c3f0109a6937d93fc", "d82a5a560e2d6e9b1420da503951b75a97763a16"]
+commits: ["d4bbe5769a504cb177aa8bf5f7aae0dd0b4ed22f", "db9f944bd9631a742f93a0512e87f4eb450931dd", "240aab15ab9b5b67a013a204be74b2864dc68000", "3fb05db28561b78c30f12bbc9e8450fe79a9f89d", "6110fe43dbbf19aee4ef9dbf5cab751d89007e90", "58dddc244728efcb163cf07c3f0109a6937d93fc", "d82a5a560e2d6e9b1420da503951b75a97763a16", "b5fd081f"]
 ---
 
 ## Spec Excerpt
@@ -259,3 +259,66 @@ and fully re-verified at the new head:
   GitHub CI plus manual UI check at localhost:3000).
 
 Progress remains `ready-for-review` on this head.
+
+**Visual-baseline font-truth repair round (2026-10-10).** CI run
+38014132398 (PR 640, head eec5e3c5) failed 10/64 e2e visual tests:
+sandbox-regenerated baselines rasterized through fontconfig fallback
+glyphs while CI loads the Red Hat webfonts from fonts.googleapis.com —
+different text metrics (toolbar +29px taller, canvas areas +4px), so
+every text-bearing screenshot compared outside its 2% budget. A baseline
+generated in one font environment cannot compare equal in another.
+
+Shipped (commit b5fd081f, continuing checkpoint d4bbe576/d7e62a30):
+
+- **Committed font binaries**: `web/tests/e2e/fixtures/fonts/` — 11
+  @fontsource/red-hat-{text,mono,display} latin woff2 files (the same
+  typefaces Google Fonts serves), so sandbox and CI rasterize identical
+  glyph outlines from the same binaries.
+- **Forced font stylesheet**: `fixtures/forced-fonts.css` declares
+  @font-face for those binaries, overrides the --font-{body,mono,
+  display} design tokens, and !important-overrides every literal font
+  stack on the Explorer surface ('system-ui…', "'SF Mono', Menlo…").
+- **Spec wiring** (explorer-visual.spec.js): fonts.googleapis.com is
+  served an empty stylesheet (network never picks faces); /test-assets/
+  fonts/* route serves the woff2 fixtures; forced-fonts.css injects at
+  document_start before app boot; CanvasRenderingContext2D.font setter
+  rewrites ctx.font strings ('system-ui'→'Red Hat Text', SF Mono stack
+  →'Red Hat Mono') so canvas labels also bypass fontconfig; every face
+  is eagerly decoded at document_start.
+- **Baselines regenerated** under this environment: all 15 modified
+  (none added). Toolbar text pixel-decodes to the mock graph's real
+  stats ("47 nodes  23 edges  3 packages … Structural lens"), proving
+  glyphs come from the forced fonts, not tofu/fallback.
+- **gyre-pw-chrome-launch.cjs**: added --no-zygote (zygote fork fails
+  EPERM here; chromium cannot launch without it).
+
+Test evidence (this round, sandbox; static server serves web/dist on
+:2222 with the seeded fixture's native-fetch bootstrap APIs answered,
+tests supply all data via page.route — a real gyre-server cannot run
+here, see transport note):
+
+- explorer-visual.spec.js: **15 passed** (--update-snapshots), **15
+  passed** (clean compare), **30 passed** (--repeat-each=2) — baselines
+  deterministic under the forced-font environment.
+- gyre-dom-probe.spec.js: **7 passed** — structural scenarios (toolbar
+  lens/filter/stats contents, evaluative overlay + playback controls,
+  annotation bar, blast-radius count, filter active state, chat rail)
+  verified against the real SPA.
+- `npm test`: **56 files, 1513 passed | 41 skipped, 0 failed**.
+- Attribution gate at head b5fd081f: check-task-commit-attribution.sh
+  **OK, exit 0** (b5fd081f recorded in commits: frontmatter).
+- Evidence: /tmp/stage/review-evidence/task-065-visual-repair.txt.
+
+Transport notes for host verification: this sandbox's python TCP
+listener probe fails (errno 95) but node http servers bind and serve
+fine on 127.0.0.1 — the restriction is narrower than the capabilities
+file suggests and was not treated as a code defect. Exact-head GitHub
+CI (e2e.yml: npm ci, npm run build, npm test, playwright test against
+the real release gyre-server) remains the authoritative gate: CI loads
+the same committed woff2 binaries through the route interception, so
+the regenerated baselines should compare equal there. If CI still
+differs, inspect its failure artifacts for a font-truth divergence
+before touching these baselines again — do not regenerate from a
+different font environment.
+
+Progress remains `ready-for-review` on this head (b5fd081f lineage).
