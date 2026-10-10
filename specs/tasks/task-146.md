@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["38c2c5e777fb71633ba6106f6cb8ff037c58e4ff"]
+commits: ["7aec532de81863e9de2791434778c292838335a1", "a15de97ae12cd1b914f9e09025f4b3e5db083b35", "5f0602675167018a09ef08ff6adbfcafc7b612cd", "3eebbbb5ac640428868a8f5eb4ae229675c86891", "1f8277301936405de86d3ff5269304a61ab74a44", "dd84d9d00a5b69111ee5a8c131db0c5d1ead08bc", "ee479add261ad42c61d4044eecbbdca8ed6263c9", "a5bc917785f7c2e248e84e4d62117439fc08221e", "fe6a6642c7bbd8331bab9be3ce61164a33058075"]
 ---
 
 ## Spec Excerpt
@@ -96,45 +96,63 @@ pub struct AnalyticsEvent {
 
 ## Implementation Notes
 
-- Recovery repair (attempt 9873223d, prior attempt ace343d1 crashed mid-bookkeeping): the
-  interrupted attempt's edits to this file had partially reverted the frontmatter to the
-  base's `not-started` state and left its commit list mid-rewrite. The product code was
-  already complete and identical to the reviewed candidate (diff vs `38932583` on
-  `crates/` is empty at merge head `c0f7df27`). This round restores the contract file and
-  re-verifies; no code changed.
-- The nine `commits:` SHAs above are the assignment's list, exactly as issued. All nine
-  resolve in remote refs (`origin/devloop/task-146/attempt-12`,
-  `origin/pipeline/task-146/*`); the implementation also landed as squashed checkpoint
-  `38c2c5e7` (via merge `1678b05b`) on this branch.
+- Recovery repair (attempt 9873223d, then re-merged onto newer main as
+  3802b8d9): an earlier interrupted attempt had rewritten this file's
+  `commits:` list away from the assignment's nine SHAs. The nine-SHA list
+  above is the assignment's, exactly as issued; all nine resolve in local
+  and remote refs. The implementation also landed on this branch as
+  checkpoint `38c2c5e7` (via merge `1678b05b`), whose only product-surface
+  file is this task file itself.
+- Contract repair round 3802b8d9: no product code changed
+  (`git diff 73a31e0b HEAD -- crates/gyre-server/src/api/mod.rs` is empty —
+  analytics routes byte-identical to base, no new endpoints, per the task's
+  own instruction); this round re-verified the merged tree (base
+  `73a31e0b` absorbed task-200/213/219 merges) and recorded fresh evidence.
 
 ## Shipped
 
-- Event schema: `AnalyticsEvent` (`gyre-domain/src/analytics.rs`) has all 9 spec fields;
-  `with_scope` populates user/session/workspace/repo; unit test
-  `analytics_event_matches_spec_schema` pins the shape via serde round-trip.
-- All 12 auto-emitted events record at real trigger points with the spec-required
-  properties (emit sites: tasks.rs:345, mcp.rs:1049, merge_requests.rs:681,
-  merge_processor.rs:757/1533/1823, repos.rs:318, specs.rs:701/936, spawn.rs:1084/1321/
-  1475/1561, orchestrator.rs:141, admin.rs:337, stale_agents.rs:41, gate_executor.rs:114,
-  budget.rs:270, search.rs:84). Multi-path triggers per event where the spec names
-  several paths: agent.failed (fail/admin-kill/stale-abort), mr.closed (HTTP
-  transition/repo-archive/spec-reject), mr.merged (HTTP transition + queue merge),
-  agent.spawned (direct + orchestrator), task.status_changed (REST + MCP).
-- Query API: no new endpoints (routes byte-identical to base `e96d25ab` in
-  `api/mod.rs`); `event_name` (incl. trailing-`*` prefix on both SQLite and Postgres),
-  `agent_id`, `user_id`, `workspace_id`, `repo_id`, `since`, `until` (ISO8601 or unix
-  secs), `limit` (default 100, max 10_000), `group_by` (event_name/agent_id/
-  workspace_id/day, others rejected) all work.
-- Test evidence at head `c0f7df27` (this recovery attempt, focused probes, SKIP_WEB_BUILD
-  test profile; artifacts under `/tmp/stage/review-evidence/`): gyre-domain analytics
-  3/3; gyre-adapters sqlite::analytics 13/13 (incl. `analytics_query_filtered_all_params`
-  covering wildcard prefix, conjunctive scope filters, inclusive since/until bounds,
-  limit); gyre-server `api::analytics` 20/20; per-event suites 18/18 across
-  tasks/spawn/merge_requests/specs/budget/search/admin/repos/mcp/orchestrator/stale_agents
-  /gate_executor plus merge_processor 2/2 (`queue_merge_records_mr_merged_analytics_event`,
-  `atomic_group_all_members_merge_in_one_cycle`) — all 12 events' properties asserted.
-- No verifier weakened: all 34 exemption files have entry counts identical to base
-  `e96d25ab`; `scripts/check-task-commit-attribution.sh` exits 0 on this tree.
-- Sandbox cannot bind a TCP listener (errno 95, `/tmp/stage/capabilities.json`), so no
-  live HTTP probe was run here; exact-head GitHub checks remain the transport
-  verification.
+- Event schema: `AnalyticsEvent` (`gyre-domain/src/analytics.rs`) carries
+  all 9 spec fields (id, event_name, agent_id, user_id, session_id,
+  workspace_id, repo_id, properties, timestamp); `with_scope` populates the
+  four scope fields. `analytics_event_matches_spec_schema` pins the shape
+  via serde round-trip.
+- All 12 auto-emitted events record at real trigger points with the
+  spec-required properties. Emit sites at HEAD `3c14d294`:
+  task.status_changed (tasks.rs:346 REST, mcp.rs:1049), mr.merged
+  (merge_requests.rs:658 HTTP transition, merge_processor.rs:1849
+  `emit_mr_merged` for both queue paths incl. atomic groups), mr.closed
+  (merge_requests.rs:668 HTTP transition, repos.rs:310 repo-archive,
+  specs.rs:933 spec-reject), agent.spawned (spawn.rs:1082 direct,
+  orchestrator.rs:141 orchestrator tiers), agent.completed (spawn.rs:1318
+  HTTP, mcp.rs:1439), agent.failed (spawn.rs:1482 fail, spawn.rs:1570 stop,
+  admin.rs:334 admin-kill, stale_agents.rs:42 heartbeat-abort),
+  merge_queue.processed (merge_processor.rs:747 group, :1531 single,
+  :1826 `emit_queue_processed_failed`), gate.failed/gate.passed
+  (gate_executor.rs:111), spec.approved (specs.rs:691), budget.warning
+  (budget.rs:252 `emit_budget_warning`, called from the spawn-path budget
+  check and usage recording), search.query (search.rs:83).
+- Query API: routes byte-identical to base in `api/mod.rs` (verified —
+  no diff). `POST/GET /api/v1/analytics/events` supports `event_name`
+  (incl. trailing-`*` prefix wildcard on SQLite and Postgres), `agent_id`,
+  `user_id`, `workspace_id`, `repo_id`, `since`/`until` (ISO8601 or unix
+  secs), `limit` (default 100, max 10_000), `group_by` (event_name/
+  agent_id/workspace_id/day; unsupported fields rejected with 400).
+  `GET /api/v1/analytics/count` and `/daily` cover count and daily
+  aggregation.
+- Test evidence at HEAD `3c14d294` (this round, focused probes,
+  SKIP_WEB_BUILD=1; artifacts under /tmp/stage/review-evidence/):
+  gyre-domain `--lib analytics` 3/3; gyre-adapters `--lib sqlite::analytics`
+  13/13 (incl. `analytics_query_filtered_all_params`: prefix wildcard,
+  conjunctive scope filters, inclusive since/until bounds, limit);
+  gyre-server `--lib api::analytics` 20/20; per-event suites 22/22
+  (task.status_changed ×2 REST+MCP, agent.spawned ×2, agent.completed ×2,
+  agent.failed ×3 fail/kill/stale-abort, mr.closed ×3, mr.merged ×2,
+  merge_queue.processed via queue-merge + atomic-group tests, gate ×2,
+  spec.approved, budget.warning positive+negative, search.query
+  positive+negative) — every spec-required property asserted.
+- No verifier weakened: exemption-file diffs vs base `73a31e0b` are pure
+  line-number re-anchoring of the same frozen entries (no entry added or
+  removed); `scripts/check-task-commit-attribution.sh` exits 0 on this tree.
+- Sandbox cannot bind a TCP listener (errno 95, /tmp/stage/capabilities.json),
+  so no live HTTP probe was run here; exact-head GitHub checks remain the
+  transport verification.
