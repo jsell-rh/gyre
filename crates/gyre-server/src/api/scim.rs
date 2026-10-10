@@ -282,19 +282,22 @@ pub async fn scim_create_user(
         }
     }
 
-    // URL-safe handle derivation, mirroring the SSO path: sanitize the
-    // IdP-provided name, fall back to the external id (unique per caller),
-    // and reject when neither yields a usable handle — never persist a
-    // non-URL-safe or empty username through the provisioning path.
+    // URL-safe handle derivation, mirroring the SSO path's fallback chain
+    // (auth.rs find_or_create_user): sanitize the IdP-provided name, then
+    // sanitize the external id, and reject when neither yields a usable
+    // handle — never persist a non-URL-safe or empty username through the
+    // provisioning path. The external id is an opaque IdP identifier (RFC
+    // 7644 SCIM externalId / RFC 7519 StringOrURI; Auth0 externalIds
+    // contain '|'), not a URL-safe string, so the raw value must not be
+    // persisted as the handle even when it is unique per caller.
     let username = match User::sanitize_username(&req.user_name) {
         Some(handle) => handle,
-        None if !ext_id.is_empty() => ext_id.clone(),
-        None => {
-            return Err(ApiError::InvalidInput(format!(
-                "userName {:?} has no URL-safe characters and no externalId to fall back to",
+        None => User::sanitize_username(&ext_id).ok_or_else(|| {
+            ApiError::InvalidInput(format!(
+                "userName {:?} has no URL-safe characters and no URL-safe externalId to fall back to",
                 req.user_name
-            )))
-        }
+            ))
+        })?,
     };
     // Username is unique (spec §Username vs Display Name). The adapter
     // also enforces this, but checking here yields a precise 409 instead
@@ -600,6 +603,37 @@ mod tests {
         assert_eq!(create_resp.status(), StatusCode::CREATED);
         let created = body_json(create_resp).await;
         assert_eq!(created["userName"], "ext-fall-back");
+
+        // The externalId fallback is itself sanitized: externalIds are
+        // opaque IdP identifiers (Auth0 externalIds contain '|'), so the
+        // raw value must not be persisted as the handle even though it is
+        // unique per caller — mirrors find_or_create_user's subject-
+        // fallback chain (auth.rs).
+        let opaque = serde_json::json!({
+            "userName": "!!!",
+            "externalId": "auth0|67890"
+        });
+        let resp = app
+            .clone()
+            .oneshot(scim_request("POST", "/scim/v2/Users", Some(opaque)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let created = body_json(resp).await;
+        assert_eq!(created["userName"], "auth067890");
+        assert!(
+            gyre_domain::User::validate_username(created["userName"].as_str().unwrap()).is_ok(),
+            "fallback username must satisfy the URL-safe handle contract"
+        );
+
+        // Neither userName nor externalId yields anything URL-safe: reject.
+        let neither = serde_json::json!({ "userName": "!!!", "externalId": "!?!" });
+        let resp = app
+            .clone()
+            .oneshot(scim_request("POST", "/scim/v2/Users", Some(neither)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
         let no_fallback = serde_json::json!({ "userName": "!!!" });
         let resp = app
