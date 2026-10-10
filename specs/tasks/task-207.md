@@ -6,7 +6,7 @@ review: specs/reviews/task-207.md
 progress: ready-for-review
 coverage_sections:
   - "business-continuity.md §5. Data Retention Policies"
-commits: ["d365e47f45f04b633516eef3a058d26a528662a0", "e57cbd2c13b1f4470940769ffdbf6d693d9066f1", "16e7c07affb1d27f3732c6208501607fb446957b", "5f58013e398a726ecb2d583e1e3294f042c353bf", "2b1fa2ae823dfc912d85cbd41d4e9069a9cc02b4", "3a3c727b1df1480c95b3c0929cc3297d2e5ae161", "d69ef5baf6ccae0700b4aaf74499189080333f17", "dbc06219e0500d33c08b0c578f6c9e3679f7bc88", "6a908460b4d37971938a6f9cc4bfca182fefd592"]
+commits: ["d365e47f45f04b633516eef3a058d26a528662a0", "e57cbd2c13b1f4470940769ffdbf6d693d9066f1", "16e7c07affb1d27f3732c6208501607fb446957b", "5f58013e398a726ecb2d583e1e3294f042c353bf", "2b1fa2ae823dfc912d85cbd41d4e9069a9cc02b4", "3a3c727b1df1480c95b3c0929cc3297d2e5ae161", "d69ef5baf6ccae0700b4aaf74499189080333f17", "dbc06219e0500d33c08b0c578f6c9e3679f7bc88", "6a908460b4d37971938a6f9cc4bfca182fefd592", "a4d49ca1afa39ad103daceb2843fe99f2cd276ac"]
 ---
 
 ## Spec Excerpt
@@ -192,3 +192,39 @@ the single truthful `ready-for-review`; attribution extended with
 `1c366396` and `0e5d012a`. No production code changed — none was needed.
 Root-cause reproduction and evidence:
 /tmp/stage/review-evidence/task-207-contract-repair-r2-root-cause.md
+
+### Verification-repair round (2026-10-10, assignment 623e29dc7d0248cbb3f710258201263b)
+
+Repair category `verification`: durable finding
+`9f41b337b9304567889b94f034425593` — `bash checks.sh` exit 1 on the merge
+of candidate `6d0c53ff` into base `7c6ac232`. The controller-host artifact
+is unreachable from this sandbox, but the log tail plus local reproduction
+pin the failure exactly:
+
+- The tail is noise: the vite build **succeeded** (`✓ built in 14.30s`)
+  and the `Removing web/dist/...` lines are `dev-check.sh:85-86`'s own
+  dist cleanup after that successful build. Exit 1 means an earlier gate
+  had set `FAILED=1` (the script collects regressions).
+- Reproduced: `dev-check.sh:8` runs `git diff --check HEAD^1 HEAD`. In the
+  verify checkout HEAD^1 is the base and HEAD is the merge (identical tree
+  to this branch's `767794c7`); the diff **adds**
+  `web/dist/assets/index-D4CX8rVo.js` (regenerated bundle from checkpoint
+  `e57cbd2c`) whose line 5 ends with trailing whitespace (backtick, space,
+  TAB — rollup minified output). Git exits 2 → `|| FAILED=1` → checks.sh
+  exits 1. Exit codes reconcile with the durable finding; full root cause:
+  /tmp/stage/review-evidence/task-207-verification-failure-root-cause.md.
+
+Repair commit `a4d49ca1`: restores `web/dist` to the exact base `7c6ac232`
+blobs (deleting the candidate-only regenerated bundles). Committed bundle
+churn is needed by no gate — dev-check.sh rebuilds web/dist itself and
+restores it afterward, and `SKIP_WEB_BUILD=1` cargo builds serve the same
+UI either way. No verifier was weakened, no exemption added. After the
+repair, `git diff --check 7c6ac232 HEAD` exits 0.
+
+Implementation re-verified intact on this branch (unchanged by the repair):
+all 29 `cargo test -p gyre-server --lib retention` tests pass (both-
+direction purges, idempotency, notification read/unread split, snapshot
+tiering on disk, policy persistence across re-init, PUT validation, 02:00
+UTC next-run computation); `scripts/check-arch.sh` and
+`scripts/check-task-commit-attribution.sh` pass. Frontmatter attribution
+extended with `a4d49ca1`; progress remains `ready-for-review`.
