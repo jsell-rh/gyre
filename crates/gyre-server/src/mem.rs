@@ -4119,6 +4119,80 @@ impl gyre_ports::MetaSpecBindingRepository for MemMetaSpecBindingRepository {
     }
 }
 
+/// Port-contract test for the mem meta-spec delete guard: `delete` must
+/// fail when bindings reference the meta-spec (mirrors the SQLite adapter's
+/// `delete_with_binding_fails`), and the guard must see bindings written
+/// through the shared binding store — the wiring `lib.rs` production state
+/// and `test_state` both use.
+#[cfg(test)]
+mod meta_spec_binding_contract_tests {
+    use super::*;
+    use gyre_ports::{MetaSpecBindingRepository, MetaSpecRepository};
+
+    fn sample_meta_spec(id: &str) -> gyre_domain::MetaSpec {
+        gyre_domain::MetaSpec {
+            id: Id::new(id),
+            kind: gyre_domain::meta_spec::MetaSpecKind::Standard,
+            name: "mem-guard-std".to_string(),
+            scope: gyre_domain::meta_spec::MetaSpecScope::Global,
+            scope_id: None,
+            prompt: "You are a diligent worker.".to_string(),
+            version: 1,
+            content_hash: "hash-v1".to_string(),
+            required: false,
+            approval_status: gyre_domain::meta_spec::MetaSpecApprovalStatus::Approved,
+            approved_by: None,
+            approved_at: None,
+            created_by: "system".to_string(),
+            created_at: 1000,
+            updated_at: 1000,
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_fails_when_binding_references_meta_spec() {
+        let binding_store = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+        let ms_repo = MemMetaSpecRepository::with_binding_store(Arc::clone(&binding_store));
+        let binding_repo = MemMetaSpecBindingRepository::with_store(binding_store);
+
+        let ms = sample_meta_spec("ms-guarded");
+        ms_repo.create(&ms).await.unwrap();
+
+        // No bindings yet → delete succeeds.
+        ms_repo.delete(&ms.id).await.unwrap();
+        assert!(
+            ms_repo.get_by_id(&ms.id).await.unwrap().is_none(),
+            "delete must remove the meta-spec when no bindings reference it"
+        );
+
+        // Re-create, bind, then delete → error, row retained.
+        ms_repo.create(&ms).await.unwrap();
+        binding_repo
+            .create(&gyre_domain::MetaSpecBinding {
+                id: Id::new("bind-1"),
+                spec_id: "system/guard.md".to_string(),
+                meta_spec_id: ms.id.clone(),
+                pinned_version: 1,
+                created_at: 1000,
+            })
+            .await
+            .unwrap();
+        let err = ms_repo.delete(&ms.id).await;
+        assert!(
+            err.is_err(),
+            "delete must fail while a binding references the meta-spec (port contract)"
+        );
+        assert!(
+            err.unwrap_err().to_string().contains("binding"),
+            "error must name the binding constraint"
+        );
+        assert!(
+            ms_repo.get_by_id(&ms.id).await.unwrap().is_some(),
+            "failed delete must retain the meta-spec row"
+        );
+    }
+}
+
 // ── In-memory ChainAttestationRepository ────────────────────────────────────
 
 #[derive(Default)]

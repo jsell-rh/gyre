@@ -14,7 +14,7 @@ coverage_sections:
   - "agent-runtime.md §Stale Pin Detection"
   - "agent-runtime.md §Bootstrap"
   - "agent-runtime.md §API"
-commits: ["7c79870cca8f13e2c249d6766d6aeb135ba51964", "bf462e6c1f187f2bd3ca880942e6ee18f2ffb607", "5d428e7c4b856d48e1796e2fbbf01b3ce7e52b1a"]
+commits: ["b453e571043f857c7b86091ba3be12a3ff90e2a3", "7c79870cca8f13e2c249d6766d6aeb135ba51964", "bf462e6c1f187f2bd3ca880942e6ee18f2ffb607", "5d428e7c4b856d48e1796e2fbbf01b3ce7e52b1a"]
 ---
 
 ## Spec Excerpt
@@ -97,56 +97,78 @@ From `agent-runtime.md` §2:
 
 ## Shipped
 
-All §2 acceptance criteria are met by the implementation at commit
-`5d428e7c` (task `commits:` frontmatter), verified again at this branch HEAD
-after two interrupted pipeline attempts that changed no product code:
+All §2 acceptance criteria are met at this branch HEAD. Review round 6
+raised three code findings; all three are closed — the fixes themselves
+landed in the recovered checkpoint commit `bf462e6c`, and this session
+added the two missing durable regression tests that had existed only as
+the reviewer's (removed) probes.
 
 - **Kinds & storage:** `MetaSpec` domain entity (domain/meta_spec.rs) with
   Persona/Principle/Standard/Process kinds and Global/Workspace scopes;
   SQLite + Postgres + mem adapters implementing `MetaSpecRepository`
   (migration 000032: meta_specs, meta_spec_versions, meta_spec_bindings).
 - **Versioning:** every update bumps `version`, recomputes the SHA-256
-  `content_hash`, and archives the prior row into immutable
-  `meta_spec_versions` (adapter test `update_archives_version`); pinned
-  versions resolve from history via `prompt_at_version`.
+  `content_hash`, archives the prior row into immutable
+  `meta_spec_versions`, and resets `approval_status` to Pending (adapter
+  test `update_archives_version`); pinned versions resolve from history
+  via `prompt_at_version`.
 - **Prompt assembly** (`crates/gyre-server/src/prompt_assembly.rs`):
   required tenant → required workspace → spec-level bindings at pinned
   versions, kind-ranked (persona→principle→standard→process) with stable
-  tiebreak; same-`meta_spec_id` dedup keeps the required section; unresolvable
-  pins are skipped with a warn rather than injecting the wrong version;
-  `set_sha` hashes the canonical serialization. 8 focused tests pass.
-- **Agent delivery:** `spawn.rs:659` injects `GYRE_META_SPEC_PROMPT` into the
+  tiebreak; same-`meta_spec_id` dedup keeps the required section;
+  unresolvable pins are skipped with a warn. **Round-6 fix 1:** only
+  `approval_status == Approved` meta-specs inject in any band — required
+  bands pass through `filter_approved`, and band 3 fail-closes on the
+  entity's CURRENT approval status (an edited-to-Pending meta-spec's
+  pinned versions do not inject until re-approved). Tests:
+  `pending_required_meta_spec_excluded`,
+  `pending_bound_meta_spec_skipped`.
+- **Agent delivery:** `spawn.rs` injects `GYRE_META_SPEC_PROMPT` into the
   container env on all three compute backends;
-  `docker/gyre-agent/agent-runner.mjs:295` prepends it to the LLM prompt —
-  guarded by `agent-runner.test.mjs` (real runner as child process against a
-  stubbed SDK; 3/3 pass), wired into CI job `gyre-agent-tests`.
-- **Attestation:** `merge_processor.rs:1590-1617` populates
-  `meta_specs_used` in the `MergeAttestation` bundle from the spawn-time
-  prompt-set record (by `author_agent_id`); spawn responses expose
-  `meta_spec_set_sha` from the real assembled set.
+  `docker/gyre-agent/agent-runner.mjs` prepends it to the LLM prompt —
+  guarded by `agent-runner.test.mjs` (real runner as child process against
+  a stubbed SDK), wired into CI job `gyre-agent-tests`.
+- **Attestation:** `merge_processor.rs` populates `meta_specs_used` in the
+  `MergeAttestation` bundle from the spawn-time prompt-set record (by
+  `author_agent_id`); spawn responses expose `meta_spec_set_sha` from the
+  real assembled set.
 - **Stale pin detection:** hourly `meta_spec_stale_pin_check` job
-  (jobs.rs:508-522) calls `detect_stale_pins`, creating priority-6
+  (jobs.rs) calls `detect_stale_pins`, creating priority-6
   `MetaSpecDrift` notifications for workspace Admin/Owner members, deduped
   per (spec, meta-spec) via kv; binding replacement clears dedup keys.
   Test `stale_pin_detection_creates_notification` passes.
-- **Bootstrap:** `seed_builtin_meta_specs` (lib.rs:1370, invoked at
-  main.rs:50) seeds the 9 spec'd defaults idempotently when the table is
-  empty, with real SHA-256 content hashes.
+- **Bootstrap:** `seed_builtin_meta_specs` (lib.rs, invoked at main.rs)
+  seeds the 9 spec'd defaults idempotently when the table is empty, with
+  real SHA-256 content hashes.
 - **API:** flat `/api/v1/meta-specs` CRUD + `?scope/?scope_id/?kind/?required`
   filters, `:id/versions` + `:id/versions/:version` history, and
   `/api/v1/specs/:path/meta-spec-bindings` (PUT/GET), with
   `RouteResourceMapping` ABAC entries; all registry writes (POST/PUT/DELETE)
   are scope-admin gated (tenant Admin for Global, workspace Owner/Admin for
   Workspace; agent tokens 403); DELETE returns 409 while bindings reference
-  the meta-spec. 18 API tests + 14 adapter tests pass.
+  the meta-spec. **Round-6 fix 2:** `put_spec_meta_spec_bindings` requires
+  membership in the workspace owning the spec (global Admin OR user
+  identity with Owner/Admin/Developer membership; unscoped specs
+  admin-only; agent tokens 403) and validates that each bound meta-spec is
+  visible from that workspace (Global anywhere, Workspace only in its
+  own) — closing the cross-workspace prompt-injection hole. Test:
+  `spec_bindings_require_membership_in_owning_workspace` (non-member
+  Developer 403, agent token 403, owning-workspace Developer 200).
+- **Mem adapter port contract** (round-6 fix 3):
+  `MemMetaSpecRepository::delete` enforces the port-documented binding
+  guard against the shared binding store (same store the binding repo
+  writes through, mirroring the DB adapters' single-storage wiring in
+  `lib.rs`). Test:
+  `mem::meta_spec_binding_contract_tests::delete_fails_when_binding_references_meta_spec`.
 
-**Test evidence this cycle** (at HEAD, `SKIP_WEB_BUILD=1` after one web-asset
-build; full log retained at
-`/tmp/stage/review-evidence/task116-recovered-head-verification.md`):
-prompt_assembly 8/8, api::meta_specs 18/18, stale_pin 1/1, spawn 36/36,
-adapters meta_spec 14/14, agent-runner 3/3 (node --test); check-arch,
-check-abac-route-registry, check-mem-port-contracts, check-mcp-write-tools
-all OK. `cargo test --all` is owned by the verification stage per assignment
+**Test evidence this session** (at HEAD after the two test additions,
+`SKIP_WEB_BUILD=1`; full log:
+`/tmp/stage/review-evidence/task116-round6-repairs.md`): meta_spec suites
+26/26 (api 18 + mem contract 2 + assembly/stale/related 6), prompt_assembly
+10/10, mem:: 2/2, spawn 36/36; check-arch, check-abac-route-registry,
+check-mem-port-contracts all OK. Cold test build took ~21 min (empty target
+cache explains the prior session's build timeouts — not a code defect).
+`cargo test --all` is owned by the verification stage per assignment
 constraints; focused suites above are the smallest relevant probes.
 Infrastructure restrictions (npm registry unreachable, TCP listener probe
 errno 95) recorded in the evidence file — exact-head GitHub CI remains the

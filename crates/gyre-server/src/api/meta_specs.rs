@@ -2156,4 +2156,186 @@ mod registry_tests {
             .collect();
         assert_eq!(drift2.len(), 1, "dedup key must prevent duplicate notifications");
     }
+
+    /// Review round 6 finding: `put_spec_meta_spec_bindings` previously
+    /// authorized only on the JWT role, with no check that the caller has
+    /// membership in the workspace owning the target spec. A Developer-role
+    /// JWT with no membership anywhere could bind a Global meta-spec to a
+    /// spec owned by another workspace — and assembly band 3 injects bound
+    /// prompts into every agent spawned for tasks under that spec. This test
+    /// pins the membership gate: non-member Developer → 403, member
+    /// Developer (of the owning workspace) → 200, agent token → 403.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_bindings_require_membership_in_owning_workspace() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use gyre_domain::meta_spec::{MetaSpec, MetaSpecApprovalStatus, MetaSpecKind, MetaSpecScope};
+
+        let state = make_test_state_with_jwt();
+
+        // Workspace owning the victim spec.
+        let victim_ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("ws-bind-victim"),
+            gyre_common::Id::new("tenant-bind"),
+            "Victim WS".to_string(),
+            "bind-victim-slug".to_string(),
+            1000,
+        );
+        state.workspaces.create(&victim_ws).await.unwrap();
+
+        // Spec ledger entry scoped to the victim workspace.
+        let entry = gyre_domain::SpecLedgerEntry {
+            path: "system/victim-bind.md".to_string(),
+            title: "Victim".to_string(),
+            owner: "system".to_string(),
+            kind: None,
+            current_sha: "abc".to_string(),
+            approval_mode: "standard".to_string(),
+            approval_status: gyre_domain::ApprovalStatus::Approved,
+            linked_tasks: vec![],
+            linked_mrs: vec![],
+            drift_status: "clean".to_string(),
+            created_at: 1000,
+            updated_at: 1000,
+            repo_id: None,
+            workspace_id: Some("ws-bind-victim".to_string()),
+        };
+        state.spec_ledger.save(&entry).await.unwrap();
+
+        // Global meta-spec (bindable from any workspace per visibility rule).
+        let ms = MetaSpec {
+            id: gyre_common::Id::new("ms-bind-target"),
+            kind: MetaSpecKind::Standard,
+            name: "bindable-std".to_string(),
+            scope: MetaSpecScope::Global,
+            scope_id: None,
+            prompt: "bindable content".to_string(),
+            version: 1,
+            content_hash: "h1".to_string(),
+            required: false,
+            approval_status: MetaSpecApprovalStatus::Approved,
+            approved_by: None,
+            approved_at: None,
+            created_by: "system".to_string(),
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        state.meta_specs.create(&ms).await.unwrap();
+
+        // Attacker: Developer role, member of NO workspace.
+        let mut attacker = gyre_domain::User::new(
+            gyre_common::Id::new("user-bind-attacker"),
+            "bind-attacker-sub",
+            "bind-attacker".to_string(),
+            1000,
+        );
+        attacker.roles = vec![gyre_domain::UserRole::Developer];
+        state.users.create(&attacker).await.unwrap();
+
+        let claims = serde_json::json!({
+            "sub": "bind-attacker-sub",
+            "preferred_username": "bind-attacker",
+            "email": "bind-attacker@example.com",
+            "realm_access": { "roles": ["developer"] }
+        });
+        let attacker_token = sign_test_jwt(&claims, 3600);
+
+        let body = format!(
+            r#"{{"bindings":[{{"meta_spec_id":"{}","pinned_version":1}}]}}"#,
+            ms.id
+        );
+        let uri = "/api/v1/specs/system%2Fvictim-bind.md/meta-spec-bindings";
+
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Non-member Developer (role alone) → 403.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {attacker_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "Developer role alone must not bind meta-specs to another workspace's spec"
+        );
+
+        // Agent token (no user identity) → 403.
+        state
+            .kv_store
+            .kv_set("agent_tokens", "agt-bind", "agt-bind-secret".to_string())
+            .await
+            .unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(uri)
+                    .header("authorization", "Bearer agt-bind-secret")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "agent tokens cannot change spec meta-spec bindings"
+        );
+
+        // Member Developer of the owning workspace → 200.
+        state
+            .workspace_memberships
+            .create(&gyre_domain::WorkspaceMembership::new(
+                gyre_common::Id::new("mem-bind-member"),
+                gyre_common::Id::new("user-bind-member"),
+                gyre_common::Id::new("ws-bind-victim"),
+                gyre_domain::WorkspaceRole::Developer,
+                gyre_common::Id::new("user-bind-member"),
+                1000,
+            ))
+            .await
+            .unwrap();
+        let mut member = gyre_domain::User::new(
+            gyre_common::Id::new("user-bind-member"),
+            "bind-member-sub",
+            "bind-member".to_string(),
+            1000,
+        );
+        member.roles = vec![gyre_domain::UserRole::Developer];
+        state.users.create(&member).await.unwrap();
+        let claims = serde_json::json!({
+            "sub": "bind-member-sub",
+            "preferred_username": "bind-member",
+            "email": "bind-member@example.com",
+            "realm_access": { "roles": ["developer"] }
+        });
+        let member_token = sign_test_jwt(&claims, 3600);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {member_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Developer member of the owning workspace must be able to set bindings"
+        );
+    }
 }
