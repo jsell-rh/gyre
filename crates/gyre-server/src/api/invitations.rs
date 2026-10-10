@@ -114,6 +114,37 @@ fn caller_user_id(auth: &AuthenticatedAgent) -> Id {
         .unwrap_or_else(|| Id::new(auth.agent_id.clone()))
 }
 
+/// Tenant magic-link guard (task-110): when a Bearer identity IS presented
+/// on a token-authenticated invitation route, the caller must be the
+/// invitee — an authenticated user must not accept, decline, or burn an
+/// invitation issued to someone else's email.
+///
+/// A caller linked to a stored user matches by that user's email
+/// (case-insensitive; invitations normalize to lowercase). Callers with no
+/// user link (agent tokens, the global dev token) carry no email identity
+/// and are rejected — the token alone is the auth factor for those, and an
+/// identity-less accept goes through the unauthenticated path where the
+/// guard is simply not applicable.
+async fn require_matching_invitee(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    invited_email: &str,
+) -> Result<(), ApiError> {
+    let caller_id = caller_user_id(auth);
+    let caller_email = state
+        .users
+        .find_by_id(&caller_id)
+        .await?
+        .and_then(|u| u.email)
+        .map(|e| e.to_lowercase());
+    match caller_email {
+        Some(email) if email == invited_email.to_lowercase() => Ok(()),
+        _ => Err(ApiError::Forbidden(
+            "this invitation was issued to a different email address".to_string(),
+        )),
+    }
+}
+
 // ─── Request/response types ──────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -533,9 +564,14 @@ pub struct AcceptInviteResponse {
 
 /// POST /api/v1/invite/:token/accept
 ///
-/// Accepts a tenant invitation via magic-link token. No Bearer auth: the
-/// 256-bit CSPRNG token in the URL is the auth factor (same trust model as
-/// the magic link the invitee received by email).
+/// Accepts a tenant invitation via magic-link token. Bearer auth is
+/// optional: the 256-bit CSPRNG token in the URL is the auth factor (same
+/// trust model as the magic link the invitee received by email), since the
+/// invitee may have no credentials yet.
+///
+/// When a Bearer identity IS presented, it must match the invitation's
+/// email — an authenticated caller must not accept (or burn) an
+/// invitation issued to someone else's address.
 ///
 /// Flow (spec §Tenant invitation flow):
 /// - token → invitation (hash lookup), must be Pending and unexpired
@@ -549,6 +585,7 @@ pub struct AcceptInviteResponse {
 ///   match within the same tenant.
 /// - Activate pre-assigned workspace memberships.
 pub async fn accept_tenant_invitation(
+    auth: Option<AuthenticatedAgent>,
     Path(token): Path<String>,
     State(state): State<Arc<AppState>>,
     body: Option<Json<AcceptInviteRequest>>,
@@ -567,6 +604,9 @@ pub async fn accept_tenant_invitation(
             "invitation is {}",
             invitation.status.as_str()
         )));
+    }
+    if let Some(auth) = &auth {
+        require_matching_invitee(&state, auth, &invitation.email).await?;
     }
     let now = now_secs();
     if invitation.is_expired(now) {
@@ -669,7 +709,11 @@ pub async fn accept_tenant_invitation(
 }
 
 /// POST /api/v1/invite/:token/decline
+///
+/// Bearer auth optional (token is the auth factor); when presented, the
+/// identity must match the invitation's email — same guard as accept.
 pub async fn decline_tenant_invitation(
+    auth: Option<AuthenticatedAgent>,
     Path(token): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<StatusCode, ApiError> {
@@ -684,6 +728,9 @@ pub async fn decline_tenant_invitation(
             "invitation is {}",
             invitation.status.as_str()
         )));
+    }
+    if let Some(auth) = &auth {
+        require_matching_invitee(&state, auth, &invitation.email).await?;
     }
     if invitation.is_expired(now_secs()) {
         state
@@ -1586,6 +1633,188 @@ mod tests {
         assert!(require_tenant_admin(&auth).is_err());
     }
 
+    /// Task-110 identity guard: a Bearer-authenticated caller whose email
+    /// does NOT match the invitation cannot accept or decline the tenant
+    /// magic link — 403, the invitation stays Pending (not burned), and a
+    /// later correct (token-only) acceptance still succeeds.
+    #[tokio::test]
+    async fn tenant_accept_rejects_mismatched_bearer_identity() {
+        let state = test_state();
+        // A stored user with a DIFFERENT email than the invitation.
+        let mut mallory = User::new(
+            Id::new("mallory-1"),
+            "tenant:default:email:mallory@evil.example.com",
+            "mallory",
+            now_secs(),
+        );
+        mallory.email = Some("mallory@evil.example.com".to_string());
+        mallory.tenant_id = Some(Id::new("default"));
+        state.users.create(&mallory).await.unwrap();
+        let raw_key = format!("gyre_{}", uuid::Uuid::new_v4().simple());
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(&raw_key), &mallory.id, "test")
+            .await
+            .unwrap();
+
+        let app = Router::new()
+            .route("/api/v1/tenant/invite", post(invite_to_tenant))
+            .route("/api/v1/invite/:token/accept", post(accept_tenant_invitation))
+            .route("/api/v1/invite/:token/decline", post(decline_tenant_invitation))
+            .with_state(state.clone());
+
+        // Admin invites alice@example.com.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tenant/invite")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"email": "alice@example.com"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let token = json["invite_url"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_string();
+
+        // Mallory (authenticated, different email) tries to accept → 403 …
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/invite/{token}/accept"))
+                    .header("authorization", format!("Bearer {raw_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // … and to decline → 403 too.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/invite/{token}/decline"))
+                    .header("authorization", format!("Bearer {raw_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // The invitation was not burned: the invitee can still accept
+        // token-only (no Bearer) and gets 200.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/invite/{token}/accept"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// Task-110 identity guard (positive): the invitee's own authenticated
+    /// identity CAN accept — matching email passes the guard and links the
+    /// existing account.
+    #[tokio::test]
+    async fn tenant_accept_allows_matching_bearer_identity() {
+        let state = test_state();
+        let mut alice = User::new(
+            Id::new("alice-1"),
+            "tenant:default:email:alice@example.com",
+            "alice",
+            now_secs(),
+        );
+        alice.email = Some("alice@example.com".to_string());
+        alice.tenant_id = Some(Id::new("default"));
+        state.users.create(&alice).await.unwrap();
+        let raw_key = format!("gyre_{}", uuid::Uuid::new_v4().simple());
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(&raw_key), &alice.id, "test")
+            .await
+            .unwrap();
+
+        let app = Router::new()
+            .route("/api/v1/tenant/invite", post(invite_to_tenant))
+            .route("/api/v1/invite/:token/accept", post(accept_tenant_invitation))
+            .with_state(state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tenant/invite")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"email": "alice@example.com"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let token = json["invite_url"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_string();
+
+        // Alice accepts with her own API key: same email → allowed, and
+        // the mode is "linked" because her account already exists.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/invite/{token}/accept"))
+                    .header("authorization", format!("Bearer {raw_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["mode"], "linked");
+    }
+
     #[tokio::test]
     async fn workspace_invitation_full_lifecycle() {
         let state = test_state();
@@ -1735,6 +1964,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
     }
+
 
     #[tokio::test]
     async fn workspace_invitation_decline_leaves_no_membership() {
