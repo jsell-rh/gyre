@@ -6,8 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "user-management.md §User Entity"
   - "user-management.md §Username vs Display Name"
-  - "user-management.md §User Preferences"
-commits: ["3ba2ed859cc8139968ce6ee9978fe19dd94f29e5", "9391340519d34cfd5c45a711fc4c1fd98cea99b8", "c76b224d984ddcfe253dcc0b58f0de21093e5238", "7f00472ce2ac51518fae404a0783cd511b679b7e"]
+commits: ["3ba2ed859cc8139968ce6ee9978fe19dd94f29e5", "9391340519d34cfd5c45a711fc4c1fd98cea99b8", "c76b224d984ddcfe253dcc0b58f0de21093e5238", "7f00472ce2ac51518fae404a0783cd511b679b7e", "cf32398a97a3f8866b4838728f34be8665c476"]
 review: specs/reviews/task-120.md
 ---
 
@@ -101,6 +100,31 @@ Preferences stored server-side (not localStorage). Persist across devices and se
 Read `specs/system/user-management.md` §User Entity through §User Preferences for full requirements. Existing User model: `gyre-domain/src/user.rs`. User port: `gyre-ports/src/user.rs` (or grep for `UserRepository`). SQLite adapter: grep for `impl UserRepository` in `gyre-adapters/`. Auth flow: `gyre-server/src/auth.rs`. User API: `gyre-server/src/api/users.rs`. Profile adapter: `gyre-adapters/src/sqlite/user_profile.rs`. Check migration numbering: `ls crates/gyre-adapters/migrations/ | tail -5` — currently at 000049.
 
 ## Shipped
+
+**Checkpoint-recovery round (2026-10-10, evidence under
+/tmp/stage/review-evidence/task-120-checkpoint-recovery/):** completed the
+collision-lockout repair of durable finding `f6b29ff8c0e34f9d9c6db30982f89ff1`
+from the interrupted `f91c4d5a` assignment. The interrupted checkpoint
+(`3ba2ed85`) carried the full suffix-walk design (resolve_unique_username,
+suffixed_username, `u-<id>` escape hatch) and its three tests, but a mangled
+edit had dropped the `let base_username` binding in `find_or_create_user`,
+leaving the tree uncompilable (E0425). Commit `cf32398a` restores the single
+binding: base = `User::sanitize_username(preferred_username)` falling back to
+the raw SSO subject when sanitization yields nothing. A second SSO user whose
+derived handle collides with an existing user's ("Jordan Sell" vs
+"Jordan_Sell" → both "jordan-sell") now logs in with migration 000056's
+deterministic suffix scheme (base, base-2, base-3, ...) instead of a permanent
+401 lockout (username immutable, find_by_external_id keeps missing, no
+pre-auth recovery path). Also this round: `web/dist` churn from the
+unpinned local build carried by the checkpoint was restored to the
+upstream-committed hashes (commits `b10b4a36`, `89febe77`) — minifier
+variable-rename churn only, no task-120 content (task-120 is backend-only).
+Verified: focused collision tests 7/7, full auth suite **42 passed, 0
+failed** (39 reviewed baseline + 3 collision tests), domain user 11/11,
+users API 14/14, SCIM 9/9, adapters 349/349 (12 ignored, baseline), task-120
+surface otherwise byte-identical to the reviewed Round-2 tree since
+`93913405` except the one binding. Host-side: `cargo test --all` + GitHub CI
+on this exact head.
 
 **Review-repair round (2026-10-10, evidence under
 /tmp/stage/review-evidence/task-120-pg-bigint-repair/):** repaired durable
