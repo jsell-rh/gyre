@@ -86,4 +86,81 @@ The rejected integration's only preserved item was `specs/coverage/SUMMARY.md`. 
 
 All three findings repaired with real implementations and regression tests that fail on the original failure classes. No new exemptions, no gate weakening, no deleted tests, no unrelated changes — the round-2 diff beyond the F1/F2/F3 product repairs is spec/coverage bookkeeping and this task file. **progress: complete.**
 
-— Reviewer, 2026-10-09
+
+## Round 3 (2026-10-10) — merge-round re-review, verdict NEEDS-REVISION
+
+Assignment base `6bf777a6` merged as `c817a5f6`; candidate `465615b7`.
+Product-surface identity re-confirmed independently: `git diff 0ceae938..465615b7
+-- crates/` touches only the three merged task-200 files; all task-120 crate
+paths byte-identical to the Round-2 PASS tree. Both frontmatter commits
+(`c76b224d`, `7f00472c`) are ancestors of the candidate; migration 000056 is
+byte-identical between `c76b224d` and `465615b7`. Stray `.rlib`/`.rmeta`
+artifacts removed by `bad88ded` stay removed (`git ls-files | grep -E '\.rlib$|\.rmeta$|^libp'`
+→ empty). Coverage bookkeeping checks out: `grep -c -F '| not-started |'
+specs/coverage/system/user-management.md` → 0; `update-coverage-summary.sh`
+reproduces SUMMARY.md byte-identically.
+
+Fresh test runs on the candidate tree (evidence under
+`/tmp/stage/review-evidence/task-120-final/`):
+
+- `cargo test -p gyre-domain --lib user` → **11 passed** (`domain-user-tests.txt`).
+- `cargo test -p gyre-server --lib auth::` → **39 passed** (`server-auth-tests.txt`).
+- `cargo test -p gyre-server --lib api::users` → **14 passed** (`server-users-tests.txt`).
+- `cargo test -p gyre-server --lib api::scim` → **9 passed** (`scim-tests.txt`).
+- `cargo test -p gyre-adapters --lib` → **349 passed, 12 ignored** (`adapters-tests.txt`).
+- Gates on this tree: migration versions, SQL portability, mem-port contracts,
+  arch, commit attribution — all OK.
+
+Mutation probes (each reverted; tree verified clean afterward — the tests
+bite, they are not self-confirming):
+
+- **Probe A** — removed the sqlite `update()` username-immutability guard →
+  `sqlite::user::tests::username_immutable_on_update` FAILED (exit 1).
+- **Probe B** — replaced auth's `sanitize_username` derivation with the raw
+  `preferred_username` → `first_login_derives_url_safe_username_from_preferred`
+  and `preferred_username_unsanitizable_falls_back_to_subject` both FAILED.
+- **Probe C** — reverted `PUT /users/me` preferences to the pre-task-120
+  silent replace → both `put_me_*` tests FAILED.
+- Post-restore re-runs of all four surfaces → green.
+
+### New finding
+
+- [open] **F4 (major): `last_login_at` declared `INTEGER` in migration 000056
+  but mapped `Nullable<BigInt>` in schema.rs / `UserRow` — breaks user reads
+  on PostgreSQL deployments.** `up.sql:23`:
+  `ALTER TABLE users ADD COLUMN last_login_at INTEGER`; `schema.rs:190`:
+  `last_login_at -> Nullable<BigInt>`; `postgres/user.rs:39` and
+  `sqlite/user.rs:39`: `last_login_at: Option<i64>` (Queryable/Selectable).
+  PG is a live deployment path (`GYRE_DATABASE_URL=postgres://…`;
+  `server/src/lib.rs:813-824` builds `PgStorage`; `UserRepository` implemented
+  for it). On PG, `INTEGER` is int4 (4 bytes); diesel 2.3.7's
+  `FromSql<BigInt, Pg> for i64` (vendored source `pg/types/integers.rs:79-99`)
+  hard-fails any value whose byte length ≠ 8: *"Received less than 8 bytes
+  while decoding an i64. Was an Integer expression accidentally marked as
+  BigInt?"*. Writes of epoch-seconds values fit int4 so inserts succeed —
+  the failure surfaces at read time, after `record_login` has stamped every
+  authenticated user: `find_by_external_id` runs in `validate_jwt` on every
+  authenticated request, so on PG every login-stamped user row fails
+  deserialization. SQLite is unaffected (int8==int4 under INTEGER affinity),
+  which is why all 349 adapter tests stay green. No PG server exists in this
+  sandbox (psql/postgres absent; `PgValue::new` is feature-gated), so the
+  probe is source-level plus host-side commands recorded in
+  `probe-D-source-evidence.txt`. **Fix: `up.sql:23` `INTEGER` → `BIGINT`**
+  (matches the users table's own `created_at/updated_at BIGINT` from
+  migration 000001). Severity context: the same mismatch class pre-exists at
+  the base for other tables (personas.updated_at from 000012, meta_specs.*
+  from 000032, spec_approval_events from 000010, messages/hsi from
+  000017/000020) — not introduced by this task, but `last_login_at` is a new
+  column on the table read by every authenticated request, and the repo's own
+  migration-portability rule exists precisely to keep both backends working.
+  A process item for the pre-existing columns is warranted separately.
+
+### Verdict
+
+The task-120 product surface itself remains as verified in Round 2 (PASS on
+substance), and the merge/bookkeeping work this round is clean. F4 is a new
+column added by this task's migration violating the shared-migrations
+run-on-both-backends contract — one-word fix in `up.sql`, but it must land
+before approval. **needs-revision.**
+
+— Reviewer, 2026-10-10
