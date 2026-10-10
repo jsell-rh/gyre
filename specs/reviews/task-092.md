@@ -119,3 +119,112 @@ view, conflict dialog) and the §1/§7 presence liveness contracts (heartbeat
 legs, departure rebroadcast on all removal paths, session-scoped eviction
 stop, reconnect re-seed). Socket-level end-to-end tests remain for the
 controller's host run — they are environmental here.
+## Round 6 — independent review of candidate 7f0f9290 (base 8c2d1775)
+
+Fresh model, fresh evidence. Assignment: candidate `7f0f9290`, base
+`8c2d1775`. All evidence under `/tmp/stage/review-evidence/`.
+
+### Diff scope
+
+Range contains 38 commits, but product surface is narrow: `ws.rs` (+550),
+`lib.rs` (sweeper extraction + departure broadcast), `App.svelte` (heartbeat
+wiring), `DetailPanel.svelte` (editing-entity reporting), `presence.js`
+(`createPresenceHeartbeat`), `ConcurrentEditBanner.svelte` (reconnect re-seed),
+banner/presence tests, the rebuilt `web/dist` bundle, and the sweep-artifact
+lint (`.gitignore` anchor, pre-commit + CI wiring). The 409 conflict engine
+(`specs_assist.rs`), `protocol.rs` `editing_entity`, ABAC registrations, and
+`Inbox.svelte` diff rendering all pre-exist the assigned base (verified: zero
+diff on those files in this range) — they implement task-092 and were
+reviewed in R1-R5; re-verified here by source reading and focused tests.
+
+### What I verified independently
+
+Backend (all commands + exit codes in `focused-test-results.md`):
+
+- `cargo test -p gyre-server --lib specs_assist` — 21/21 ok, including all
+  three conflict tests (`save_spec_stale_base_sha_returns_409_with_diff`,
+  `save_spec_conflict_notifies_caller_and_concurrent_editor`,
+  `save_spec_overwrite_bypasses_stale_base_sha`).
+- Socket-free F4 tests — 2/2 ok
+  (`broadcast_presence_departure_reaches_only_workspace_subscribers`,
+  `evict_stale_presence_removes_stale_and_notifies_evictee_and_subscribers`).
+- `cargo test -p gyre-server --lib ws::` — 57 passed / 8 failed; every failure
+  is `ConnectionReset` (Os 104) at the *first* `connect_async`. Control
+  experiment at the assigned base `8c2d1775` (isolated worktree, private
+  target dir): the 4 pre-existing socket tests fail identically (0/4, same
+  signature) — the class is the sandbox's `accept()` errno 95 (independently
+  re-probed with a raw python socket: bind+listen OK, accept → errno 95,
+  client recv 0 bytes). Not a regression; host CI must run the 4 new
+  socket-level departure tests (`ws_graceful_disconnect_rebroadcasts_departure`,
+  `ws_socket_close_rebroadcasts_departure`,
+  `ws_session_cap_eviction_rebroadcasts_departure`,
+  `ws_idle_sweeper_rebroadcasts_departure`).
+
+Mutation probes (each reverted immediately; worktree clean after each —
+`mutation-probes.md`):
+
+- M1 disable the 409 stale check → both conflict tests FAIL (201 vs 409).
+- M3 sweeper drops the departure broadcast → sweeper test FAIL.
+- M4 notification body drops the persisted diff → both-editors test FAIL.
+- M5 30s heartbeat timer emptied → 4 presence tests FAIL.
+- M2 (socket-close path, no broadcast) survived the *socket-free* tests —
+  expected: that path is covered only by the socket-restricted test. Recorded
+  as a CI verification item, not a source defect.
+- M6 (banner ignores `view:"disconnected"`) survived — behavior-preserving
+  mutant: the server's synthesized departure always carries
+  `editing_entity: None`, so the else-branch entry update also hides the
+  banner. Outcome redundantly covered; not a defect.
+
+Frontend (`npm ci` from lockfile — 169 packages, completed cleanly this run):
+
+- Task suites (presence, ConcurrentEditBanner, SpecConflictDialog, Inbox) —
+  58/58 ok.
+- Full `web/` suite — 58 files, 1548 passed / 0 failed / 41 config-level skips.
+  The implementer's claimed pre-existing canvas/WebGL failures did not recur
+  in this run; regardless, this run is green.
+
+Source verification of the spec contract (HSI §7 items):
+
+1. *Second editor sees a warning* — `ConcurrentEditBanner` fetches
+   `GET /workspaces/:id/presence` on open, filters `editing_entity ===
+   spec:<path>`, excludes self by session_id and user_id (selfUserId wired
+   from `api.me()` to both DetailPanel instances), stays live on
+   `UserPresence`/`PresenceEvicted`, re-seeds on reconnect with a
+   stale-response sequence guard. i18n strings match the spec wording
+   ("{user} is also editing this spec").
+2. *Edits not merged; second save gets a conflict* — `save_spec` compares
+   `base_sha` against the spec ledger `current_sha` (both `specs/x` and
+   stripped `x` candidates); mismatch → 409 with `{current_sha, base_sha,
+   current_content, submitted_content, diff}`. `line_diff` is a real LCS
+   line diff, not a stub. `overwrite` bypasses only the stale check.
+3. *Conflict in both Inboxes with a diff view* — `spec_conflict_response`
+   creates `SpecConflict` notifications (priority 2) for the caller plus
+   every presence-map user editing `spec:<path>`; body persists the full
+   line diff; `Inbox.svelte` renders `SpecDiffView` from `body.diff`.
+4. *Warning disappears on leave* — all four removal paths (graceful
+   disconnect, socket-close cleanup, 5-session cap, idle sweeper spawned from
+   `main.rs:73`) call `broadcast_presence_departure`, which synthesizes a
+   `UserPresence { view: "disconnected" }` scoped to the removed entry's
+   workspace with server-verified `user_id`.
+
+Supporting invariants: the presence route is ABAC-registered
+(`workspace` resource), `specs/save` is ABAC-registered (`spec`/`write`);
+`UserPresence` derives `user_id` from the authenticated connection and
+validates session_id against Subscribe; the rebuilt `web/dist` bundle
+contains the new conflict/presence code (grep: `concurrent_edit`,
+`PresenceEvicted`); all 19 mechanical repo checks pass, including the new
+`check-sandbox-sweep-artifacts.sh`. The attribution gate fails on a
+pre-existing task-210 commit (`a781ede2`) that is present in the assigned
+base itself (re-verified in an isolated base worktree) — pre-existing, not
+introduced by this range, and outside task-092's scope.
+
+### Findings
+
+None. No fake implementations, no missing enforcement, no unsafe scope
+handling, no self-confirming tests found. The M2 gap is environmental
+coverage allocation (delegated to CI), and the attribution failure
+pre-exists the base.
+
+**Verdict: approve.** Candidate `7f0f9290` satisfies the task-092 contract;
+socket-level end-to-end tests are the host-CI gate (4 new tests + the
+pre-existing socket suite).
