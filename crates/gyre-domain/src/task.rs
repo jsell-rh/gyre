@@ -72,6 +72,11 @@ pub struct Task {
     pub order: Option<u32>,
     /// Task IDs that must complete before this task starts.
     pub depends_on: Vec<Id>,
+    /// Monotonic deployment (assignment) generation — incremented each time the
+    /// task is reassigned to a different agent (authorization-provenance.md §2.4).
+    /// `SignedInput.expected_generation` binds an authorization root to a specific
+    /// generation so stale authorizations cannot be replayed after reassignment.
+    pub generation: u32,
 }
 
 impl Task {
@@ -97,6 +102,7 @@ impl Task {
             task_type: None,
             order: None,
             depends_on: Vec::new(),
+            generation: 1,
         }
     }
 

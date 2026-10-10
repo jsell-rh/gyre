@@ -1020,7 +1020,13 @@ async fn handle_update_task(state: &AppState, args: &Value) -> Value {
         task.priority = parse_priority(p);
     }
     if let Some(agent_id) = get_str(args, "assigned_to") {
-        task.assigned_to = Some(Id::new(agent_id));
+        let new_assignee = Id::new(agent_id);
+        // §2.4 replay prevention: reassignment bumps the deployment generation,
+        // invalidating SignedInputs pinned to the previous generation.
+        if task.assigned_to.as_ref() != Some(&new_assignee) {
+            task.generation = task.generation.saturating_add(1);
+        }
+        task.assigned_to = Some(new_assignee);
     }
     if let Some(branch) = get_str(args, "branch") {
         task.branch = Some(branch.to_string());

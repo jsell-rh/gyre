@@ -3344,6 +3344,145 @@ pub(crate) fn verify_chain(
     }
 }
 
+/// Context binding verification for the root `SignedInput` (§2.4 Replay Prevention).
+///
+/// Compares the signed `InputContent` against the actual target of the current
+/// push/merge. A `SignedInput` that authorizes work on repo-A must not be
+/// replayable to authorize work on repo-B; a modified spec (different SHA)
+/// must require a new approval; an `expected_generation` pin is only valid for
+/// that specific deployment generation of the task.
+///
+/// `task_spec_sha` — the task's currently approved spec SHA (`None` when it
+/// cannot be resolved; the spec_sha binding is then skipped rather than
+/// failing on absent data). `task_generation` — the task's CURRENT persisted
+/// deployment generation. Both are looked up from real state by the caller;
+/// this function performs no lookups itself.
+///
+/// `valid_until` is NOT re-checked here — it is enforced by
+/// `verify_attestation_audit_only` (signed_input.valid_until node) and must
+/// not be duplicated.
+///
+/// Fail closed: every present binding must match exactly; a mismatch yields
+/// `valid: false` with a `context_binding.*` child naming the failing binding.
+pub(crate) fn verify_context_binding(
+    root: &gyre_common::SignedInput,
+    target_repo_id: &str,
+    target_workspace_id: &str,
+    task_spec_sha: Option<&str>,
+    task_generation: Option<u32>,
+) -> gyre_common::VerificationResult {
+    let mut children = Vec::new();
+    let mut all_valid = true;
+
+    // Binding 1: repo_id — the input cannot be replayed to a different repo.
+    let repo_ok = root.content.repo_id == target_repo_id;
+    children.push(gyre_common::VerificationResult {
+        label: "context_binding.repo_id".to_string(),
+        valid: repo_ok,
+        message: if repo_ok {
+            format!("signed repo_id {} matches target", root.content.repo_id)
+        } else {
+            format!(
+                "signed repo_id {} does not match target repo {} — authorization is \
+                 bound to a different repository",
+                root.content.repo_id, target_repo_id
+            )
+        },
+        children: vec![],
+    });
+    if !repo_ok {
+        all_valid = false;
+    }
+
+    // Binding 2: workspace_id — the input cannot be replayed across workspaces.
+    let ws_ok = root.content.workspace_id == target_workspace_id;
+    children.push(gyre_common::VerificationResult {
+        label: "context_binding.workspace_id".to_string(),
+        valid: ws_ok,
+        message: if ws_ok {
+            format!(
+                "signed workspace_id {} matches target",
+                root.content.workspace_id
+            )
+        } else {
+            format!(
+                "signed workspace_id {} does not match target workspace {} — \
+                 authorization is bound to a different workspace",
+                root.content.workspace_id, target_workspace_id
+            )
+        },
+        children: vec![],
+    });
+    if !ws_ok {
+        all_valid = false;
+    }
+
+    // Binding 3: spec_sha — a modified spec requires a new approval and new
+    // SignedInput. Only compared when the task's current approved SHA is
+    // resolvable; an empty signed SHA cannot match any real spec and fails.
+    if let Some(current_sha) = task_spec_sha {
+        let spec_ok = !root.content.spec_sha.is_empty() && root.content.spec_sha == current_sha;
+        children.push(gyre_common::VerificationResult {
+            label: "context_binding.spec_sha".to_string(),
+            valid: spec_ok,
+            message: if spec_ok {
+                format!(
+                    "signed spec_sha {} matches current approved spec",
+                    root.content.spec_sha.chars().take(8).collect::<String>()
+                )
+            } else {
+                format!(
+                    "signed spec_sha {} does not match current approved spec {} — \
+                     the spec changed after this authorization was signed",
+                    root.content.spec_sha, current_sha
+                )
+            },
+            children: vec![],
+        });
+        if !spec_ok {
+            all_valid = false;
+        }
+    }
+
+    // Binding 4: expected_generation — when present, the input is only valid
+    // for that specific deployment generation of the task (prevents replay of
+    // an old authorization after reassignment). Absent → no pin, no check.
+    if let Some(expected) = root.expected_generation {
+        let gen_ok = task_generation == Some(expected);
+        children.push(gyre_common::VerificationResult {
+            label: "context_binding.expected_generation".to_string(),
+            valid: gen_ok,
+            message: if gen_ok {
+                format!("signed expected_generation {expected} matches task generation")
+            } else {
+                format!(
+                    "signed expected_generation {expected} does not match current task \
+                     generation {} — the task was reassigned after this authorization \
+                     was signed",
+                    task_generation
+                        .map(|g| g.to_string())
+                        .unwrap_or_else(|| "unavailable".to_string())
+                )
+            },
+            children: vec![],
+        });
+        if !gen_ok {
+            all_valid = false;
+        }
+    }
+
+    gyre_common::VerificationResult {
+        label: "context_binding".to_string(),
+        valid: all_valid,
+        message: if all_valid {
+            "signed input context matches the verification target".to_string()
+        } else {
+            "context binding failed — signed input targets a different context".to_string()
+        },
+        children,
+    }
+}
+
 /// Accumulate all constraints from a verified chain (§4.3, §6.2 Phase 2).
 ///
 /// Walks the chain root→leaf, collecting:
