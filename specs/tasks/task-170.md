@@ -12,7 +12,7 @@ coverage_sections:
   - "ui-layout.md §Encoding Layer"
   - "ui-layout.md §Extensibility"
   - "ui-layout.md §LLM Constraints"
-commits: ["9447554ca17555cc49bf1ffa92000fc933230588", "5cf54bce14c1b459045b4477d98a893bdbda5212", "c76fa1fd697ad44ae0fc08e22b70e5768e5b5026", "b69e01002b21ef5d2b7fa446067aca61e3890d0b", "088316309803e92cd7cf96cac53239431c059185", "95801f2b4ebbe93543bfe7d31fce386ce665be42", "49614e41c1b313f0c981d93013dcf6ddbc26c636", "9aa19ef9c94c075ed9d6fd154b037855542ca27b", "3c41b41997c20414f1167d4e8da6746b6e55a875"]
+commits: ["9447554ca17555cc49bf1ffa92000fc933230588", "5cf54bce14c1b459045b4477d98a893bdbda5212", "c76fa1fd697ad44ae0fc08e22b70e5768e5b5026", "b69e01002b21ef5d2b7fa446067aca61e3890d0b", "088316309803e92cd7cf96cac53239431c059185", "95801f2b4ebbe93543bfe7d31fce386ce665be42", "49614e41c1b313f0c981d93013dcf6ddbc26c636", "9aa19ef9c94c075ed9d6fd154b037855542ca27b", "3c41b41997c20414f1167d4e8da6746b6e55a875", "6ab72e5520689bf1a11ae1901002d3b4d560516a"]
 ---
 
 ## Spec Excerpt
@@ -139,3 +139,28 @@ base `19d65446` is this file's own lifecycle fields.
 HTTP smoke possible here; enforcement is covered by the oneshot tests
 above. Full suites, all-target Clippy, arch check, and GitHub CI are
 owned by verification/publication per assignment scope.
+
+**Round 05a437fd (repair of verification finding 70509006):** the
+host gate run at merge head `ae9d4446` exited 1. The 16k log tail
+showed only successful vite output, pushing the real failure out of
+the tail: `check-rustfmt-diff.py` flagged four task-170 lines needing
+formatting (`view_spec.rs:140,148`, `explorer_views.rs:186-188,1176`
+— trailing-comma and argument-position reflows only). Repair commit
+`6ab72e55` runs `cargo fmt` on exactly those two files and reverts
+the formatting-only churn `cargo fmt -p gyre-server` produced in nine
+unrelated files (verified: `git diff a83aef11 HEAD -- web/` empty;
+the Rust delta vs published candidate `a83aef11` is exactly the four
+reformatted lines, no semantic change; `web/dist` untouched). All
+other gate components were re-verified at the repaired head and pass:
+`git diff --check`, rustfmt-diff (exit 0), clippy-diff
+all-targets/all-features (exit 0, 1145 pre-existing warnings outside
+changed lines), arch, hierarchy, and all 19 mechanical static checks
+including check-task-commit-attribution (exit 0).
+
+**Focused tests re-verified at repaired HEAD `6ab72e55` (evidence:
+`/tmp/stage/review-evidence/task-170-*-6ab72e55.txt`):** gyre-common
+`view_spec` 13/13; gyre-server `api::explorer_views` 16/16; vitest
+`--pool=threads` task-scoped 32/32 across 4 files (view-spec 17,
+viewEvents 9, MoldableViewListView, MoldableViewNodeTypeFilter;
+locked deps via `npm ci`). The repair commit `6ab72e55` is recorded
+in `commits:` above.
