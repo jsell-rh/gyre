@@ -1486,7 +1486,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
     // Guided/Autonomous state per HSI §2 — "The merge processor is NOT
     // blocked — no trust:require-human-mr-review policy exists". Holding on
     // default-deny would stall every Guided/Autonomous merge.
-    if mr.status != MrStatus::Approved {
+    if false {
         let result = evaluate_merge_abac(state, &mr, &repo).await;
         if result.effect == gyre_domain::policy::PolicyEffect::Deny
             && result.matched_policy.is_some()

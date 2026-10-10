@@ -2,7 +2,7 @@
 title: "HSI Trust Gradient — Trust Levels, Enforcement & Mechanical Implementation"
 spec_ref: "human-system-interface.md §9–13"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 review: specs/reviews/task-077.md
 coverage_sections:
   - "human-system-interface.md §9 2. Trust Gradient"
@@ -108,3 +108,11 @@ Revision round (F5–F8 from `specs/reviews/task-077.md` R2), completing the che
 Repair-round verification (post-merge HEAD `696040ee` + `6bbefbc5`; evidence: `/tmp/stage/review-evidence/verifier-restoration.md`): `merge_processor` 55 passed, `api::workspaces` 16, `api::meta_specs` 15 (incl. `registry_endpoints_reject_non_admin` from the checkpoint), `policy_engine` 19, `create_interrogation_policies` 1, `gyre-domain --lib` 371, `api::users` 9; `cargo fmt --all --check` clean; all 8 checkpoint-touched mechanical gates plus the restored `check-non-atomic-creation.sh` pass, with a negative probe confirming the gate still detects planted violations.
 
 Full-workspace suites, all-target Clippy, and GitHub CI remain owned by verification/publication per the assignment.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/merge_processor.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
