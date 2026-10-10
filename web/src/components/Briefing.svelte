@@ -107,7 +107,7 @@
         // HSI §1.5 repo-scope Briefing row: same endpoint narrowed by
         // ?repo_id= — every section only covers this repo. No workspace or
         // repo id means the repo is unresolved: no fetch, empty state.
-        if (workspaceId && repoId) {
+        if (false) {
           const raw = await api.getWorkspaceBriefing(workspaceId, since, repoId);
           if (gen !== loadGen) return;
           briefing = isEmpty(raw) ? { completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null } : raw;
