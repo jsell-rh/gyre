@@ -217,5 +217,3 @@ describe('Scope transitions (ui-layout.md §3) — workspace → repo via repo c
     }
   });
 });
-
-
