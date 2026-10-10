@@ -182,3 +182,42 @@ CLI implementation is the candidate's. Verified on this head:
 (front + prose), `check-task-commit-attribution.sh` OK (exit 0), and the
 full focused suite `cargo test -p gyre-cli --bin gyre` (see below for
 counts).
+
+### Baseline resolution (this round, commit ec7bfa03)
+
+The baseline gate failure recorded in the durable finding
+(`ac08399316744a3bbd2e5ac3f4c5e426`) — task-labeled product-surface
+commit `a11ba8d3` (task-068) missing from `specs/tasks/task-068.md`'s
+`commits:` frontmatter — was repaired upstream by task-224
+(`770785f7`), now merged into this branch (`ea51a76d`). This round:
+
+- Committed the working-tree frontmatter alignment
+  (`depends_on: [task-218]` → `[task-218, task-224]`) so the task
+  file's contract matches the assigned job body exactly; verified
+  frontmatter and prose both compare equal after the canonical
+  `## Shipped` strip.
+- `bash scripts/check-task-commit-attribution.sh` → exit 0 at head
+  `ec7bfa03` (`OK: every task-labeled product-surface commit is
+  recorded...`).
+- `python3 /tmp/stage/dev-attribution.py task-155` → no change: this
+  round adds only the specs/tasks/task-155.md process commit, no
+  product surface.
+- Re-verified the candidate at the new head: `cargo test -p gyre-cli
+  --bin gyre` → 110 passed, 0 failed; `python3
+  scripts/check-rustfmt-diff.py 770785f7` → `rustfmt: changed lines
+  clean (2 Rust files checked)`; `check-relative-path-defaults` and
+  `check-byte-slice-truncation` → OK.
+- Binary smoke with initialized config (HOME overridden, server
+  unreachable): `search --help` shows all flags; wire URLs confirm
+  `q`/`entity_type`/`workspace_id`(slug pre-resolution)/`limit`
+  params and the `max(limit, 100)` over-fetch for client-side
+  `--since` filtering; invalid `--since` values (`bogus`,
+  `2026-13-01`, `é`) exit 1 with clean errors, no panic.
+- No product code changed this round: `git diff --name-only 770785f7
+  HEAD -- crates/ web/src web/tests` is exactly the candidate's two
+  search files (`crates/gyre-cli/src/client.rs`, `main.rs`).
+- Sandbox TCP limitation unchanged (accept() errno 95): live E2E
+  HTTP against a real gyre-server remains deferred to host
+  verification and GitHub CI. Evidence:
+  `/tmp/stage/review-evidence/round-gates.txt`,
+  `round-smoke.txt`.
