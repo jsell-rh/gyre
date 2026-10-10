@@ -60,7 +60,11 @@ fn build_match_expr(raw: &str) -> String {
         .join(" ")
 }
 
+// `QueryableByName`'s derive expands to `Self { field: field, … }` with spans
+// mapped onto these declarations, so clippy::redundant_field_names fires on
+// generated code, not on anything written here.
 #[derive(QueryableByName)]
+#[allow(clippy::redundant_field_names)]
 struct FtsRow {
     #[diesel(sql_type = Text)]
     entity_type: String,
@@ -78,12 +82,14 @@ struct FtsRow {
 }
 
 #[derive(QueryableByName)]
+#[allow(clippy::redundant_field_names)]
 struct CountRow {
     #[diesel(sql_type = BigInt)]
     cnt: i64,
 }
 
 #[derive(QueryableByName)]
+#[allow(clippy::redundant_field_names)]
 struct TenantRow {
     #[diesel(sql_type = Text)]
     tenant_id: String,
@@ -266,6 +272,7 @@ mod tests {
     }
 
     #[derive(diesel::QueryableByName)]
+    #[allow(clippy::redundant_field_names)]
     struct MasterRow {
         #[diesel(sql_type = diesel::sql_types::Text)]
         obj_type: String,

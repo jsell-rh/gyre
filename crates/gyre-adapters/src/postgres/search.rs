@@ -44,7 +44,11 @@ pub(crate) fn ensure_search_table(conn: &mut PgConnection) -> Result<()> {
     Ok(())
 }
 
+// `QueryableByName`'s derive expands to `Self { field: field, … }` with spans
+// mapped onto these declarations, so clippy::redundant_field_names fires on
+// generated code, not on anything written here.
 #[derive(QueryableByName)]
+#[allow(clippy::redundant_field_names)]
 struct TsRow {
     #[diesel(sql_type = Text)]
     entity_type: String,
@@ -62,12 +66,14 @@ struct TsRow {
 }
 
 #[derive(QueryableByName)]
+#[allow(clippy::redundant_field_names)]
 struct CountRow {
     #[diesel(sql_type = BigInt)]
     cnt: i64,
 }
 
 #[derive(QueryableByName)]
+#[allow(clippy::redundant_field_names)]
 struct TenantRow {
     #[diesel(sql_type = Text)]
     tenant_id: String,
