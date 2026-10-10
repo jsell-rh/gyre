@@ -20,6 +20,8 @@ vi.mock('../lib/api.js', () => ({
   api: {
     repoGates: vi.fn().mockResolvedValue([]),
     repoSpecPolicy: vi.fn().mockResolvedValue(null),
+    repoSpecLifecycle: vi.fn().mockResolvedValue(null),
+    setRepoSpecLifecycle: vi.fn().mockResolvedValue({}),
     repoBudget: vi.fn().mockResolvedValue(null),
     workspaceBudget: vi.fn().mockResolvedValue(null),
     auditEvents: vi.fn().mockResolvedValue([]),
@@ -67,14 +69,15 @@ describe('RepoSettings', () => {
     expect(tablist.getAttribute('aria-label')).toBe('Repo settings sections');
   });
 
-  it('renders all 8 inner tabs', () => {
+  it('renders all 9 inner tabs', () => {
     const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
     const tabs = container.querySelectorAll('[role="tab"]');
-    expect(tabs.length).toBe(8);
+    expect(tabs.length).toBe(9);
     const labels = Array.from(tabs).map(t => t.textContent.trim());
     expect(labels).toContain('General');
     expect(labels).toContain('Gates');
     expect(labels).toContain('Policies');
+    expect(labels).toContain('Spec Lifecycle');
     expect(labels).toContain('Budget');
     expect(labels).toContain('Dependencies');
     expect(labels).toContain('Release');
@@ -232,6 +235,75 @@ describe('RepoSettings', () => {
         expect(container.querySelector('[data-testid="toggle-require-approval"]')).toBeTruthy();
         expect(container.querySelector('[data-testid="toggle-stale-warning"]')).toBeTruthy();
       }
+    });
+  });
+
+  describe('Spec Lifecycle tab', () => {
+    async function openSpecLifecycleTab(container) {
+      await fireEvent.click(container.querySelector('#repo-stab-spec-lifecycle'));
+    }
+
+    const defaultConfig = {
+      enabled: true,
+      watched_paths: ['specs/system/', 'specs/development/'],
+      ignored_paths: ['specs/milestones/', 'specs/prior-art/', 'specs/personas/', 'specs/prompts/'],
+      auto_invalidate_approvals: true,
+      dedup_open_tasks: true,
+      default_priority_new: 'Medium',
+      default_priority_modified: 'High',
+      default_priority_deleted: 'High',
+    };
+
+    it('shows spec lifecycle panel', async () => {
+      const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
+      await openSpecLifecycleTab(container);
+      expect(container.querySelector('[data-testid="repo-spec-lifecycle-tab"]')).toBeTruthy();
+    });
+
+    it('calls api.repoSpecLifecycle when tab opens', async () => {
+      const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
+      await openSpecLifecycleTab(container);
+      expect(api.repoSpecLifecycle).toHaveBeenCalledWith('repo-1');
+    });
+
+    it('renders config fields when data exists', async () => {
+      api.repoSpecLifecycle.mockResolvedValue({ ...defaultConfig });
+      const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
+      await openSpecLifecycleTab(container);
+      await new Promise(r => setTimeout(r, 0));
+      const form = container.querySelector('[data-testid="spec-lifecycle-form"]');
+      expect(form).toBeTruthy();
+      expect(container.querySelector('[data-testid="toggle-spec-lifecycle-enabled"]').checked).toBe(true);
+      expect(container.querySelector('[data-testid="toggle-auto-invalidate"]').checked).toBe(true);
+      expect(container.querySelector('[data-testid="toggle-dedup-tasks"]').checked).toBe(true);
+      const watched = container.querySelectorAll('[data-testid="watched-paths-list"] .path-tag');
+      expect(watched.length).toBe(2);
+      expect(watched[0].textContent).toContain('specs/system/');
+      expect(container.querySelector('[data-testid="select-priority-new"]').value).toBe('Medium');
+      expect(container.querySelector('[data-testid="select-priority-modified"]').value).toBe('High');
+      expect(container.querySelector('[data-testid="select-priority-deleted"]').value).toBe('High');
+    });
+
+    it('saves edited config via api.setRepoSpecLifecycle', async () => {
+      api.repoSpecLifecycle.mockResolvedValue({ ...defaultConfig });
+      const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
+      await openSpecLifecycleTab(container);
+      await new Promise(r => setTimeout(r, 0));
+
+      // Add a watched path
+      const input = container.querySelector('[data-testid="new-watched-path-input"]');
+      await fireEvent.input(input, { target: { value: 'docs/specs/' } });
+      await fireEvent.click(container.querySelector('[data-testid="add-watched-path-btn"]'));
+
+      // Remove an ignored path
+      const removeBtn = container.querySelector('[data-testid="remove-ignored-path-btn"]');
+      await fireEvent.click(removeBtn);
+
+      await fireEvent.click(container.querySelector('[data-testid="save-spec-lifecycle-btn"]'));
+      expect(api.setRepoSpecLifecycle).toHaveBeenCalledWith('repo-1', expect.objectContaining({
+        watched_paths: expect.arrayContaining(['docs/specs/']),
+        ignored_paths: expect.not.arrayContaining(['specs/milestones/']),
+      }));
     });
   });
 

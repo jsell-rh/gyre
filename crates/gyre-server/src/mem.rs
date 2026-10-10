@@ -2477,6 +2477,35 @@ impl gyre_ports::PushGateRepository for MemPushGateRepository {
 }
 
 #[derive(Default)]
+pub struct MemSpecLifecycleRepository {
+    store: Arc<Mutex<HashMap<String, gyre_domain::SpecLifecycleConfig>>>,
+}
+
+#[async_trait]
+impl gyre_ports::SpecLifecycleRepository for MemSpecLifecycleRepository {
+    async fn get_for_repo(&self, repo_id: &str) -> Result<gyre_domain::SpecLifecycleConfig> {
+        Ok(self
+            .store
+            .lock()
+            .await
+            .get(repo_id)
+            .cloned()
+            .unwrap_or_default())
+    }
+    async fn set_for_repo(
+        &self,
+        repo_id: &str,
+        config: gyre_domain::SpecLifecycleConfig,
+    ) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(repo_id.to_string(), config);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
 pub struct MemSpecApprovalRepository {
     store: Arc<Mutex<HashMap<String, gyre_domain::SpecApproval>>>,
 }
@@ -3295,6 +3324,7 @@ fn test_state_inner(
         agent_log_tx: Arc::new(Mutex::new(HashMap::new())),
         quality_gates: Arc::new(MemQualityGateRepository::default()),
         gate_results: Arc::new(MemGateResultRepository::default()),
+        spec_lifecycle_configs: Arc::new(MemSpecLifecycleRepository::default()),
         push_gate_registry: Arc::new(crate::pre_accept::builtin_gates()),
         repo_push_gates: Arc::new(MemPushGateRepository::default()),
         speculative_results: Arc::new(Mutex::new(HashMap::new())),
