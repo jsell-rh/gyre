@@ -9,7 +9,7 @@ coverage_sections:
   - "ui-layout.md §Drill-Down (Entity Detail)"
   - "ui-layout.md §Inline Expansion (Inbox/Briefing)"
   - "ui-layout.md §Contextual Chat"
-commits: ["1a036edc18062df4ad0fd6d9ae1ef261cd4cacfb", "43f67b86d9912e4f4b945cf15dd42700a23ffe52", "94de2edcff81d1fc9c048f000c5d9f31c78acd29", "2c5641aeb1f5a725d14cf0741aa4066703bcb40e", "add218c8c0e9af1a21c20e2587f02d7f734e10ff", "3b28d8480fe841c3b602ad4d4eb38dc3bb215100", "99e99039f01c69ef3b7c19f712aeb8de3f83c864", "e25dd52404f06f48b170c4b9cabd9817b036e7f2", "6bdd55fdb3975a755e9015fa7a33607a2549dcf9"]
+commits: ["6bdd55fdb3975a755e9015fa7a33607a2549dcf9", "1a036edc18062df4ad0fd6d9ae1ef261cd4cacfb", "43f67b86d9912e4f4b945cf15dd42700a23ffe52", "94de2edcff81d1fc9c048f000c5d9f31c78acd29", "2c5641aeb1f5a725d14cf0741aa4066703bcb40e", "add218c8c0e9af1a21c20e2587f02d7f734e10ff", "3b28d8480fe841c3b602ad4d4eb38dc3bb215100", "99e99039f01c69ef3b7c19f712aeb8de3f83c864", "e25dd52404f06f48b170c4b9cabd9817b036e7f2"]
 ---
 
 ## Spec Excerpt
