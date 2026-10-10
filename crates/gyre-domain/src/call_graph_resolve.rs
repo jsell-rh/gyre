@@ -305,7 +305,7 @@ pub fn resolve_go_node<'a>(
 fn node_in_pkg(node: &GraphNode, pkg: &str) -> bool {
     node.qualified_name
         .strip_prefix(pkg)
-        .map_or(false, |rest| rest.starts_with('.'))
+        .is_some_and(|rest| rest.starts_with('.'))
         || path_contains_segment(&node.file_path, pkg)
 }
 

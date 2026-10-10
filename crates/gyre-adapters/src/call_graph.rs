@@ -221,7 +221,8 @@ mod tests {
     /// Serializes tests that read or write `GO_CALLGRAPH_BIN`: `set_var`
     /// mutates process-global state, so binary discovery must not race
     /// across tests that exercise the Go path.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
     #[cfg(unix)]
     #[tokio::test]
@@ -230,7 +231,7 @@ mod tests {
         // shape must surface as parsed CallEdges. Exercises discovery step 1
         // plus the stdout -> Vec<CallEdge> path, which the degradation
         // tests never reach.
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         let dir = tempfile::TempDir::new().unwrap();
         let stub = dir.path().join("go-callgraph-stub");
         std::fs::write(
@@ -266,7 +267,7 @@ mod tests {
         // No go.mod, and (in CI) no binary -- must degrade to empty, never
         // error. Also proves GO_CALLGRAPH_BIN removal restored the default
         // discovery path (temp dirs hold no binary).
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         let dir = tempfile::TempDir::new().unwrap();
         let extractor = SubprocessCallGraphExtractor::new();
         let edges = extractor
