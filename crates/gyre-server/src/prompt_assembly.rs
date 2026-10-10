@@ -22,6 +22,9 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use gyre_common::Id;
+use gyre_domain::agent::MetaSpecUsed;
+use gyre_domain::task::Task;
 use gyre_domain::meta_spec::{
     MetaSpec, MetaSpecApprovalStatus, MetaSpecKind, MetaSpecScope, MetaSpecVersion,
 };
@@ -70,6 +73,18 @@ fn scope_str(scope: &MetaSpecScope) -> &'static str {
         MetaSpecScope::Global => "global",
         MetaSpecScope::Workspace => "workspace",
     }
+}
+
+/// Sort meta-specs by injection-order rank for their kind
+/// (persona → principle → standard → process), with a stable name tiebreak
+/// so the assembled set (and its SHA) is deterministic.
+fn sort_by_kind(specs: &mut Vec<MetaSpec>) {
+    specs.sort_by(|a, b| {
+        kind_rank(&a.kind)
+            .cmp(&kind_rank(&b.kind))
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+    });
 }
 
 /// Resolve the prompt text for a meta-spec at a specific version.

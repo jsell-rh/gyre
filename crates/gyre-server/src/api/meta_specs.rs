@@ -1379,7 +1379,8 @@ pub async fn put_spec_meta_spec_bindings(
                     None => "no workspace".to_string(),
                 };
                 return Err(ApiError::BadRequest(format!(
-                    "meta-spec '{}' is scoped to workspace '{ms_ws}' and cannot bind to spec '{spec_path}' ({spec_ws_desc})"
+                    "meta-spec '{}' is scoped to workspace '{}' and cannot bind to spec '{}' ({})",
+                    entry.meta_spec_id, ms_ws, spec_path, spec_ws_desc
                 )));
             }
         if entry.pinned_version > ms.version {

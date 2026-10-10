@@ -3332,9 +3332,8 @@ fn test_state_inner(
         graph_store: Arc::new(gyre_adapters::MemGraphStore::new()),
         saved_views: Arc::new(gyre_adapters::MemSavedViewRepository::default()),
         wg_config: crate::WireGuardConfig::from_env(),
-        meta_specs: Arc::new(MemMetaSpecRepository::default()),
-        meta_spec_bindings: Arc::new(MemMetaSpecBindingRepository::default()),
-        meta_spec_sets: Arc::new(MemMetaSpecSetRepository::default()),
+        agent_inbox_max: 1000,
+        user_workspace_state: Arc::new(MemUserWorkspaceStateRepository::default()),
         messages: Arc::new(MemMessageRepository::default()),
         message_dispatch_tx: {
             let (tx, rx) = tokio::sync::mpsc::channel(256);
@@ -4054,7 +4053,7 @@ pub struct MemJudgmentLedgerRepository;
 impl gyre_ports::JudgmentLedgerRepository for MemJudgmentLedgerRepository {
     async fn list_for_user(
         &self,
-        _user_id: &Id,
+        _user_id: &str,
         _workspace_id: Option<&Id>,
         _judgment_type: Option<gyre_domain::JudgmentType>,
         _since: Option<u64>,
