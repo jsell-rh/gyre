@@ -1492,6 +1492,60 @@ mod tests {
         build_router(mem::test_state())
     }
 
+    /// `build_state` must give each server instance its own explorer session
+    /// registry: two servers built in the same process must never evict each
+    /// other's sessions. With the previous process-global registry, the
+    /// explorer WS integration suite (7 test servers in one process, all
+    /// authenticating as the same dev-token identity) evicted the slowest
+    /// session mid-test, killing `explorer_ws_rate_limiting` with
+    /// "Session replaced by a newer connection." (verification finding
+    /// 11bdc76d: `cargo test --all` exit 101). Exercises the production
+    /// wiring path, not a hand-built registry.
+    #[tokio::test]
+    async fn build_state_isolates_explorer_sessions_per_server() {
+        let state_a = build_state("token-a", "http://127.0.0.1:1", None);
+        let state_b = build_state("token-b", "http://127.0.0.1:2", None);
+        assert!(
+            !Arc::ptr_eq(&state_a.explorer_sessions, &state_b.explorer_sessions),
+            "each build_state call must own a fresh explorer session registry"
+        );
+        // Same user on both servers: B filling its own limit must never
+        // evict A's session (the cross-server eviction that failed the
+        // integration suite under the process-global registry).
+        let (_a1, shutdown_a1) = state_a.explorer_sessions.register("default:system", 2);
+        let (_a2, shutdown_a2) = state_a.explorer_sessions.register("default:system", 2);
+        let _b1 = state_b.explorer_sessions.register("default:system", 2);
+        let _b2 = state_b.explorer_sessions.register("default:system", 2);
+        let (_b3, shutdown_b3) = state_b.explorer_sessions.register("default:system", 2);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), shutdown_a1.notified())
+                .await
+                .is_err()
+                && tokio::time::timeout(
+                    std::time::Duration::from_millis(50),
+                    shutdown_a2.notified()
+                )
+                .await
+                .is_err(),
+            "server B registrations must not evict server A's sessions"
+        );
+        // B at its own limit evicts only B's oldest.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), shutdown_b3.notified())
+                .await
+                .is_err(),
+            "the session that made room must survive"
+        );
+        // And A's own limit still evicts within A.
+        let (_a3, _sa3) = state_a.explorer_sessions.register("default:system", 2);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), shutdown_a1.notified())
+                .await
+                .is_ok(),
+            "A's own limit must still evict A's oldest session"
+        );
+    }
+
     #[tokio::test]
     async fn integration_health_endpoint() {
         let app = test_app();

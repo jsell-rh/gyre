@@ -122,7 +122,7 @@ impl ExplorerSessionRegistry {
     /// shutdown signal. If the user is at the per-user session limit, the
     /// oldest sessions are evicted (signalled to close) to make room, matching
     /// the zombie-session handling intent: the new connection always wins.
-    fn register(&self, user_key: &str, limit: usize) -> (u64, Arc<tokio::sync::Notify>) {
+    pub(crate) fn register(&self, user_key: &str, limit: usize) -> (u64, Arc<tokio::sync::Notify>) {
         // A limit of 0 is meaningless for an eviction-based design (the new
         // connection always wins, so we cannot reject it) and would panic in
         // the eviction loop below; clamp to 1.
@@ -3657,7 +3657,6 @@ fn extract_computed_node_refs(expr: &str, out: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     /// Deterministic eviction oracle: `Notify::notify_one()` stores a permit
     /// when no waiter is registered, so polling `notified()` with a short
