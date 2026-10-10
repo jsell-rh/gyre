@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["38c2c5e777fb71633ba6106f6cb8ff037c58e4ff"]
+commits: ["7aec532de81863e9de2791434778c292838335a1", "a15de97ae12cd1b914f9e09025f4b3e5db083b35", "5f0602675167018a09ef08ff6adbfcafc7b612cd", "3eebbbb5ac640428868a8f5eb4ae229675c86891", "1f8277301936405de86d3ff5269304a61ab74a44", "dd84d9d00a5b69111ee5a8c131db0c5d1ead08bc", "ee479add261ad42c61d4044eecbbdca8ed6263c9", "a5bc917785f7c2e248e84e4d62117439fc08221e", "fe6a6642c7bbd8331bab9be3ce61164a33058075"]
 ---
 
 ## Spec Excerpt
@@ -102,20 +102,33 @@ pub struct AnalyticsEvent {
   above is the assignment's, exactly as issued; all nine resolve in local
   and remote refs. The implementation also landed on this branch as
   checkpoint `38c2c5e7` (via merge `1678b05b`), whose only product-surface
-  file is this task file itself.
-- Contract repair round 3802b8d9: no product code changed
+  files are the analytics schema/migration/adapter changes listed there.
+- Contract repair round 3802b8d9: no analytics product code changed
   (`git diff 73a31e0b HEAD -- crates/gyre-server/src/api/mod.rs` is empty —
   analytics routes byte-identical to base, no new endpoints, per the task's
   own instruction); re-verified the merged tree (base `73a31e0b` absorbed
   task-200/213/219) and recorded fresh evidence.
-- Contract repair round e08e8997 (this round): the post-repair bookkeeping
-  commit `560e7d91` had again overwritten the nine-SHA `commits:` list with
-  the checkpoint SHA, unchecked the acceptance boxes, and dropped the
-  Shipped section. Restored the contract file again. No product code
-  changed this round either: merge `c49926a1` (base `653a696f`, absorbing
-  main's task-222) touched only spec/task files — `git diff 3c14d294 HEAD
-  -- crates/ scripts/` is empty, so the analytics code at HEAD is
-  byte-identical to the `3c14d294` tree that passed every focused suite.
+- Contract repair round e08e8997: the post-repair bookkeeping commit
+  `560e7d91` had again overwritten the nine-SHA `commits:` list with the
+  checkpoint SHA, unchecked the acceptance boxes, and dropped the Shipped
+  section. Restored the contract file. No product code changed that round
+  either: merge `c49926a1` (base `653a696f`, absorbing main's task-222)
+  touched only spec/task files.
+- Contract repair round 157407eb (this round): HEAD's committed task file
+  had again been reduced to the single checkpoint SHA by pipeline
+  bookkeeping (`6ae9eefb`), and the merge `86a66cf0` (base `a11ba8d3`,
+  absorbing main's task-068) changed `crates/` — so last round's
+  "analytics code byte-identical" claim no longer held globally. This
+  round re-verified analytics behavior directly at HEAD: the task-068
+  delta (`mcp.rs` +499, `view_query_resolver.rs` +338, `explorer_ws.rs`,
+  `graph_integration.rs`) contains zero analytics emit-site changes
+  (0 hits for `record_event`/`"task.status_changed"`/`"agent.completed"`
+  in `git diff 3c14d294 HEAD -- crates/`), and every focused suite was
+  re-run at HEAD (see Shipped). Also repaired main-side attribution
+  drift absorbed by the merge: `a11ba8d3` (task-068's product commit)
+  added to task-068's `commits:` frontmatter per the gate script's
+  prescribed fix — `origin/main` fails `check-task-commit-attribution.sh`
+  identically without it; no exemption file touched.
 
 ## Shipped
 
@@ -126,16 +139,17 @@ pub struct AnalyticsEvent {
   via serde round-trip. Id-typed fields are stored as text (`Option<String>`)
   matching the storage layer's TEXT columns.
 - All 12 auto-emitted events record at real trigger points with the
-  spec-required properties. Emit sites at HEAD `c49926a1` (line numbers
-  re-verified this round):
-  task.status_changed (api/tasks.rs:347 REST, mcp.rs:1051 MCP),
+  spec-required properties. Emit sites re-verified at HEAD `86a66cf0`
+  (line numbers drifted +13 in mcp.rs and +17 in merge_processor.rs since
+  the task-068 merge; all other sites unchanged):
+  task.status_changed (api/tasks.rs:347 REST, mcp.rs:1064 MCP),
   mr.merged (api/merge_requests.rs:666 HTTP transition,
-  merge_processor.rs:1847 `emit_mr_merged` for both queue paths incl.
+  merge_processor.rs:1864 `emit_mr_merged` for both queue paths incl.
   atomic groups), mr.closed (api/merge_requests.rs:666 HTTP transition,
   api/repos.rs:320 repo-archive, api/specs.rs:938 spec-reject),
   agent.spawned (api/spawn.rs:1086 direct, api/orchestrator.rs:143
   orchestrator tiers), agent.completed (api/spawn.rs:1323 HTTP,
-  mcp.rs:1441 MCP), agent.failed (api/spawn.rs:1477 fail,
+  mcp.rs:1454 MCP), agent.failed (api/spawn.rs:1477 fail,
   api/spawn.rs:1563 stop, api/admin.rs:339 admin-kill, stale_agents.rs:43
   heartbeat-abort), merge_queue.processed (merge_processor.rs:759 group,
   :1536 single, :1823 `emit_queue_processed_failed`), gate.failed /
@@ -144,28 +158,30 @@ pub struct AnalyticsEvent {
   `emit_budget_warning`, called from the spawn-path budget check and usage
   recording), search.query (api/search.rs:84).
 - Query API: routes byte-identical to base in `api/mod.rs` (verified —
-  no diff). `POST/GET /api/v1/analytics/events` supports `event_name`
-  (incl. trailing-`*` prefix wildcard on SQLite and Postgres), `agent_id`,
-  `user_id`, `workspace_id`, `repo_id`, `since`/`until` (ISO8601 or unix
-  secs), `limit` (default 100, max 10_000), `group_by` (event_name/
-  agent_id/workspace_id/day; unsupported fields rejected with 400).
-  `GET /api/v1/analytics/count` and `/daily` cover count and daily
-  aggregation.
-- Test evidence: focused probes all exit 0 on the code at HEAD (crates/
-  byte-identical to `3c14d294`, which passed the full set): gyre-domain
-  `--lib analytics` 3/3 (re-run this round at HEAD, 2m11s cold build,
-  `analytics_event_matches_spec_schema` passes); gyre-adapters `--lib
+  no diff vs `a11ba8d3`). `POST/GET /api/v1/analytics/events` supports
+  `event_name` (incl. trailing-`*` prefix wildcard on SQLite and
+  Postgres), `agent_id`, `user_id`, `workspace_id`, `repo_id`,
+  `since`/`until` (ISO8601 or unix secs), `limit` (default 100, max
+  10_000), `group_by` (event_name/agent_id/workspace_id/day; unsupported
+  fields rejected with 400). `GET /api/v1/analytics/count` and `/daily`
+  cover count and daily aggregation.
+- Test evidence (all re-run this round at HEAD `86a66cf0`, all exit 0):
+  gyre-domain `--lib analytics` 3/3 (incl.
+  `analytics_event_matches_spec_schema`); gyre-adapters `--lib
   sqlite::analytics` 13/13 (incl. `analytics_query_filtered_all_params`:
   prefix wildcard, conjunctive scope filters, inclusive since/until
   bounds, limit); gyre-server `--lib api::analytics` 20/20; per-event
-  suites 22/22 (task.status_changed ×2 REST+MCP, agent.spawned ×2,
-  agent.completed ×2, agent.failed ×3 fail/kill/stale-abort, mr.closed ×3,
-  mr.merged ×2, merge_queue.processed via queue-merge + atomic-group
-  tests, gate ×2, spec.approved, budget.warning positive+negative,
-  search.query positive+negative) — every spec-required property asserted.
+  batch 20/20 (task.status_changed ×2 REST+MCP, agent.spawned ×2,
+  agent.completed ×2, agent.failed ×3 fail/admin-kill/stale-abort,
+  mr.closed ×3 transition/repo-archive/spec-reject, mr.merged ×2,
+  merge_queue.processed via queue-merge + atomic-group tests, gate ×2,
+  spec.approved, budget.warning positive, search.query positive);
+  negative paths: `budget_warning_not_emitted_below_threshold` and
+  `empty_query_emits_no_analytics_event` both pass — every spec-required
+  property asserted.
 - No verifier weakened: `scripts/check-task-commit-attribution.sh` exits
-  0 on the current tree (re-run this round); exemption files unchanged
-  this round.
+  0 on the final tree (re-run after the task-068 frontmatter repair);
+  exemption files unchanged (frozen count 3).
 - Sandbox cannot bind a TCP listener (errno 95, /tmp/stage/capabilities.json),
   so no live HTTP probe was run here; exact-head GitHub checks remain the
   transport verification for `POST/GET /api/v1/analytics/events` (all
