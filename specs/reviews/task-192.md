@@ -40,3 +40,21 @@ Minor (not blocking, recorded for completeness):
 - `--workspace` on `show`/`set` is a no-op boolean (scope is identical with or without it). The spec's example forms still work verbatim, and the flag documents intent; a stricter mutually-exclusive scope enum would be a stylistic change with no behavioral contract behind it.
 - `resolve_workspace_slug` takes the first slug match and is tenant-unscoped — pre-existing helper behavior shared with `deps`/`explore`/`Divergence`, out of this task's scope.
 - End-to-end verification against a live server (real 403/400 round-trips, updated budget persisted) is not possible in this sandbox (loopback listeners forbidden, os error 95); the strongest available substitutes were run: exact request-shape assertions through `RequestBuilder::build()` + `reqwest::Response::from` error-path tests + live binary probes reaching the real routes (connection refused at the exact spec URLs). The host/GitHub gates run the live-server suite.
+
+## Round 3 (independent review of candidate b8881c3e, base 06d70009)
+
+Full-diff inspection of `06d70009..b8881c3e` (7 files: gyre-cli client.rs/main.rs/Cargo.toml, docs/cli.md, exemption file, task file, this review file) plus fresh probes at the exact candidate:
+
+- `cargo test -p gyre-cli --bin gyre` → 107 passed, 0 failed; budget filter → 13 passed, 0 failed.
+- `bash scripts/check-arch.sh` → passed. `bash scripts/check-relative-path-defaults.sh` → OK at the candidate.
+- Exemption-forbidden gate replayed with dev-check.sh's exact set-difference semantics across all 34 `-exemptions.txt` files: zero added entries; the task-099 `main.rs:1737` file entry was deleted (deletions allowed) and replaced by the documented inline `// path:ok` marker at main.rs:1862 — hazard count unchanged (exactly one DYN_REL_PATH site, unexempted count zero), so the durable verification failure 53faa387 is genuinely repaired, not grandfathered.
+- Live binary probes (evidence: review-evidence/task192-live-binary-probes.txt): with a gyre-form remote `…/git/platform-team/widgets.git`, bare `show` reaches `GET /api/v1/workspaces?slug=platform-team`; `--tenant` reaches `GET /api/v1/budget/summary`; `--workspace-name nope` reaches `GET /api/v1/workspaces?slug=nope`; both spec set forms reach the resolver; `set --tenant`, empty `set`, and `--tenant --workspace` exit 1 with honest errors; a non-gyre remote (no `/git/` segment) fails inference honestly rather than fabricating a scope. Help text on all three surfaces documents repo scope → owning workspace.
+
+**One finding (test gap, round 3): the fetch-merge-PUT composition inside `set_workspace_budget` is not executed by any test.** `set_workspace_budget_put_body_is_merged_config` (client.rs:1603) derives the merged body itself and asserts `build_set_workspace_budget`'s serialization — it never calls `set_workspace_budget` (client.rs:1373). Mutation-verified in an isolated worktree at the candidate (evidence: review-evidence/task192-mutation-checks.txt):
+
+- Replacing the merged config with the bare overrides at the composition site → 13/13 budget tests pass.
+- PUTting `current.config` instead of the merged config — the user-facing direction where every `set` flag is silently ignored — → 13/13 pass.
+
+Round 2's "dropped merge → PUT-body test fails" claim does not hold at the composition site: that mutation was made in `merge_budget_config` (the helper), not in `set_workspace_budget` (the method). Production code is correct as shipped; the acceptance criterion "the test must fail if the URL or body is wrong" is satisfied for URL and builder-level body but not for the set path's body. Killing mutations 2 and 5 requires one test that drives the method end-to-end against a mock HTTP layer answering the first GET with a known config and asserting the captured PUT body — not runnable in this sandbox (loopback listeners forbidden), so the host/GitHub verifier must run it.
+
+All other mutation checks killed their targets: wrong routes (2 tests fail), swallowed error body (1 fails), emptied PUT body (1 fails), reintroduced zero-limit display bug (1 fails).
