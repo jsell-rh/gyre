@@ -5,7 +5,7 @@ depends_on: [task-211]
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §CLI"
-commits: ["ed0669fb96d593756a62146bee3601686229a3c2", "2fe8149b019df51989c3f666c99b993c3870af0d", "97ee3df5cddf77c8e6a296925175801347240dbc", "87fae32e02d6d4bdeca2070de71e5bec2eb7d458", "6abdfdec95bf12b68c2bdf9ba3e759944524af3f", "4d16c6c5b2ded0f53c67e528f4ecf5299fd714ca", "6f4d1366b84193c972c2e7c13a1a42059da2806a", "a5a82183d3e67df0aac25f30e2ba16c5709081f2"]
+commits: ["ed0669fb96d593756a62146bee3601686229a3c2", "2fe8149b019df51989c3f666c99b993c3870af0d", "97ee3df5cddf77c8e6a296925175801347240dbc", "87fae32e02d6d4bdeca2070de71e5bec2eb7d458", "6abdfdec95bf12b68c2bdf9ba3e759944524af3f", "4d16c6c5b2ded0f53c67e528f4ecf5299fd714ca", "6f4d1366b84193c972c2e7c13a1a42059da2806a", "a5a82183d3e67df0aac25f30e2ba16c5709081f2", "f4bdb092211438e96dd40533f72a69fe3bc075b8"]
 ---
 
 ## Spec Excerpt
@@ -143,3 +143,53 @@ evidence under `/tmp/stage/review-evidence/` (suffix `-merged-head`):
 - Help surfaces re-verified via the built binary at this HEAD
   (`task192-budget-help-merged-head.txt`): all three document repo scope maps
   to the owning workspace budget.
+
+**Checkpoint recovery round (merged head `22e77241`, base `770785f7`):** the
+branch was recovered from interrupted-attempt source `f4bdb092` (the same
+content as the previously reviewed candidate — it is a squashed preservation
+of the branch at the interruption point) and merged with the new assignment
+base. Product surface is byte-identical to the recovered candidate —
+`git diff f4bdb092 HEAD -- crates/gyre-cli/ docs/cli.md` is empty (the merge
+brought only task-068/task-224 work: domain view-query resolver, mcp graph
+tools, explorer ws — zero budget/CLI interaction, confirmed by
+`git diff 653a696f 770785f7 --stat -- crates/gyre-cli/
+crates/gyre-server/src/api/budget.rs crates/gyre-server/src/api/mod.rs`
+being empty). `f4bdb092` added to `commits:` for review scoping (recovery
+checkpoint carrying the product surface, same precedent as `ed0669fb`/
+`6abdfdec`). Fresh probes, evidence under `/tmp/stage/review-evidence/`
+(suffix `-recovered`):
+- `cargo test -p gyre-cli --bin gyre` → 107 passed, 0 failed; budget filter →
+  13 passed, 0 failed.
+- Mutation check re-run at this HEAD: renaming the client URL
+  `budget`→`budgets` fails the same 2 wiring tests
+  (`get_workspace_budget_builds_real_route`,
+  `set_workspace_budget_put_body_is_merged_config`); source restored
+  (md5-verified) and the full 107-test suite re-run green —
+  `task192-mutation-url-check-recovered.txt`.
+- Live binary probes from a repo whose origin remote is
+  `…/git/platform-team/widgets.git` (refused connect = the assertion; this
+  sandbox forbids listeners, errno 95): bare `budget show` reaches
+  `GET /api/v1/workspaces?slug=platform-team`; `--tenant` reaches
+  `GET /api/v1/budget/summary`; `set --llm-tokens 500000` resolves the
+  workspace first; `set --tenant`, empty `set`, and `--tenant --workspace`
+  all exit 1 with honest errors — `task192-live-url-probes-recovered.txt`,
+  `task192-live-probe-show-bare.txt`, `task192-live-probe-remaining.txt`.
+- `bash scripts/check-arch.sh`,
+  `bash scripts/check-relative-path-defaults.sh` (exemption pointer
+  `main.rs:1862` matches the actual code line at this HEAD),
+  `bash scripts/check-task-commit-attribution.sh`,
+  `python3 scripts/check-rustfmt-diff.py 770785f7` (changed lines clean) →
+  all pass — `task192-check-arch-recovered.txt`,
+  `task192-relative-path-check-recovered.txt`,
+  `task192-commit-attribution-recovered.txt`.
+- Help surfaces verified via the built binary at this HEAD
+  (`task192-budget-cmd-help-recovered.txt`,
+  `task192-budget-show-help-recovered.txt`,
+  `task192-budget-set-help-recovered.txt`): all three document that repo
+  scope maps to the owning workspace budget.
+- Live end-to-end HTTP against a running server could not be exercised here
+  (sandbox cannot bind listeners); the client-level tests assert the exact
+  request wire format (method, URL, auth header, JSON body) which the routes
+  in `api/mod.rs:609-613` accept, and error paths are exercised with real
+  `reqwest::Response` objects carrying the server's exact wire shape. Host
+  verification / GitHub CI must run the live-server round-trip.
