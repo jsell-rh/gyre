@@ -75,15 +75,20 @@
 
   // ── Preview state machine (ui-layout.md §2/§9) ─────────────────────────────
   // editing → preview_running → preview_complete (Iterate returns to editing
-  // with results still visible, §9 State 3).
+  // with results still visible, §9 State 3). A preview that fails, times out,
+  // or is unavailable never presents State 3 — it returns to editing (the
+  // Architecture tab keeps the fast graphPredict overlays) with an error banner.
   let previewState = $state('editing');
+  let previewError = $state(null);
   let selectedSpecPaths = $state([]);
   let previewPollTimer = null;
   let previewProgress = $state([]);
   let codeDiffFiles = $state([]); // [{ path, diff: [{op,text}] }]
   let previewRunning = $state(false);
-  // Right-panel tab: Architecture (default) or Code Diff (§2 Editor Split).
   let activeImpactTab = $state('architecture');
+  // Last meta-spec preview result (real PreviewResponse shape: preview_id,
+  // state, specs, blast_radius, structural_impact) rendered in the right pane.
+  let metaPreviewResult = $state(null);
 
   const selectableSpecs = $derived(
     Array.isArray(targetSpecs) ? targetSpecs.filter((s) => s?.path) : [],
@@ -211,27 +216,33 @@
   async function runPreview() {
     if (!canRunPreview) return;
     previewRunning = true;
+    previewError = null;
     stopPreviewPoll();
     try {
       if (context === 'meta-spec' && workspaceId) {
         // Meta-spec preview loop (§9): preview the persona change against the
-        // selected target specs.
-        let usedPreviewId = null;
+        // selected target specs. Real PreviewResponse shape: { preview_id,
+        // state, specs, blast_radius, structural_impact }.
+        let res;
         try {
-          const res = await api.previewPersona(workspaceId, {
+          res = await api.previewPersona(workspaceId, {
             persona_id: specPath ?? undefined,
             content,
             spec_paths: selectedSpecPaths,
           });
-          usedPreviewId = res?.preview_id ?? null;
-          if (res && !usedPreviewId) applyPreviewResult(res);
-        } catch {
-          toastInfo($t('editor_split.preview_unavailable'));
+        } catch (e) {
+          // Preview service unavailable — return to editing; never present
+          // §9 State 3 without a real result.
+          failPreview($t('editor_split.preview_unavailable'), e);
+          return;
         }
-        if (usedPreviewId) {
-          pollPreviewPersona(usedPreviewId);
-        } else {
+        if (res?.preview_id) {
+          pollPreviewPersona(res.preview_id, res);
+        } else if (res) {
+          applyPreviewResult(res);
           finishPreview();
+        } else {
+          failPreview($t('editor_split.preview_unavailable'));
         }
       } else if (repoId && specPath) {
         // Spec preview: thorough preview on a throwaway branch.
@@ -241,16 +252,17 @@
         });
         if (result?.task_id) {
           pollPreviewTask(result.task_id);
-        } else {
+        } else if (result) {
           applyPreviewResult(result);
           finishPreview();
+        } else {
+          failPreview($t('editor_split.preview_fallback'));
         }
       }
     } catch (e) {
-      // Thorough preview unavailable — fall back to the fast graph prediction
-      // already rendered in the Architecture tab.
-      toastInfo($t('editor_split.preview_fallback'));
-      finishPreview();
+      // Thorough preview unavailable — back to editing; the Architecture tab
+      // keeps the fast graphPredict overlays (Phase 1, ui-layout.md §2).
+      failPreview($t('editor_split.preview_fallback'), e);
     } finally {
       previewRunning = false;
     }
@@ -272,23 +284,29 @@
           return;
         }
         if (status?.status === 'failed') {
-          toastError($t('editor_split.preview_failed', { values: { error: status?.error ?? 'agent execution failed' } }));
-          cancelPreview();
+          failPreview(
+            $t('editor_split.preview_failed', { values: { error: status?.error ?? 'agent execution failed' } }),
+          );
           return;
         }
       } catch {
-        // keep polling
+        // transient poll error — keep polling
       }
       if (elapsed >= 300000) {
-        toastInfo($t('editor_split.preview_timeout'));
-        cancelPreview();
+        failPreview($t('editor_split.preview_timeout'));
       }
     }, 10000);
   }
 
-  function pollPreviewPersona(previewId) {
+  function pollPreviewPersona(previewId, initial) {
     previewState = 'preview_running';
-    previewProgress = selectedSpecPaths.map((path) => ({ path, status: 'running' }));
+    previewProgress = (initial?.specs?.length ? initial.specs : selectedSpecPaths).map?.((pathOrSpec) =>
+      typeof pathOrSpec === 'string' ? { path: pathOrSpec, status: 'running' } : pathOrSpec,
+    ) ?? [];
+    if (!previewProgress.length) {
+      previewProgress = selectedSpecPaths.map((path) => ({ path, status: 'running' }));
+    }
+    if (initial) applyPreviewResult(initial);
     let elapsed = 0;
     previewPollTimer = setInterval(async () => {
       elapsed += 1500;
@@ -300,14 +318,18 @@
           finishPreview();
           return;
         }
-      } catch {
-        stopPreviewPoll();
-        finishPreview();
+        if (status.state === 'failed' || status.state === 'error') {
+          failPreview($t('editor_split.preview_failed', { values: { error: status.state } }));
+          return;
+        }
+      } catch (e) {
+        // Status endpoint failing mid-poll is a failed preview, not a
+        // completed one — back to editing.
+        failPreview($t('editor_split.preview_unavailable'), e);
         return;
       }
       if (elapsed >= 30000) {
-        stopPreviewPoll();
-        finishPreview();
+        failPreview($t('editor_split.preview_timeout'));
       }
     }, 1500);
   }
@@ -315,31 +337,27 @@
   /**
    * Map a completed preview result onto the Architecture (ghost overlays /
    * node delta) and Code Diff tabs. Accepts the shapes returned by
-   * thoroughPreview/taskStatus ({predictions, code_diff|specs_diff}) and
-   * previewPersona status ({architecture_diff, specs_diff}).
+   * thoroughPreview/taskStatus ({predictions, code_diff}) and the real
+   * previewPersona PreviewResponse ({preview_id, state, specs,
+   * blast_radius, structural_impact}) — the meta-spec result is kept whole
+   * for the right-pane summary (§9 State 3).
    */
   function applyPreviewResult(result) {
     if (!result) return;
+    // Meta-spec preview results (real server shape) are stored for the
+    // Architecture pane summary and per-spec Code Diff listing.
+    if (result.preview_id) {
+      metaPreviewResult = result;
+    }
     // Structural delta → ghost overlays on the Architecture tab.
-    const preds = result.predictions ?? result.architecture_diff ?? [];
+    const preds = result.predictions ?? [];
     if (Array.isArray(preds) && preds.length) {
-      if (typeof preds[0] === 'string') {
-        // architecture_diff lines ("+ node", "~ node", "= n unchanged")
-        derivedOverlays = preds
-          .filter((l) => l.startsWith('+') || l.startsWith('~'))
-          .map((l) => ({
-            nodeId: l.slice(1).trim().split(' ')[0],
-            type: l.startsWith('+') ? 'new' : 'modified',
-          }))
-          .filter((p) => p.nodeId);
-      } else {
-        derivedOverlays = preds
-          .map((p) => ({
-            nodeId: p.node_id ?? p.nodeId ?? p.name ?? p.qualified_name,
-            type: p.change_type ?? p.type ?? p.action ?? 'modified',
-          }))
-          .filter((p) => p.nodeId);
-      }
+      derivedOverlays = preds
+        .map((p) => ({
+          nodeId: p.node_id ?? p.nodeId ?? p.name ?? p.qualified_name,
+          type: p.change_type ?? p.type ?? p.action ?? 'modified',
+        }))
+        .filter((p) => p.nodeId);
       // Unmatched prediction-only nodes get appended in loadGraph; for the
       // thorough result, append synthetic nodes so the delta is visible even
       // without a graph linkage.
@@ -371,6 +389,22 @@
   function finishPreview() {
     stopPreviewPoll();
     previewState = 'preview_complete';
+  }
+
+  /**
+   * A failed/unavailable/timed-out preview: back to the editing state with an
+   * error banner in the right pane. The Architecture tab keeps whatever the
+   * fast graphPredict pass loaded — §9 State 3 is never presented without a
+   * real completed result.
+   */
+  function failPreview(message, err) {
+    stopPreviewPoll();
+    previewState = 'editing';
+    previewProgress = [];
+    previewError = err
+      ? `${message} (${err?.message ?? err})`
+      : message;
+    if (err) console.warn('[EditorSplit] preview failed:', err);
   }
 
   function cancelPreview() {
@@ -572,16 +606,90 @@
     specConflict = null;
   }
 
+  let textareaEl = $state(null);
+
+  // Markdown toolbar (ui-layout.md §2 "standard markdown editor with
+  // toolbar"): each action wraps or prefixes the textarea selection.
+  const TOOLBAR_BUTTONS = [
+    { id: 'bold', label: 'B', wrap: '**' },
+    { id: 'italic', label: 'I', wrap: '_' },
+    { id: 'heading', label: 'H', wrap: '## ', prefix: true },
+    { id: 'list', label: '•', wrap: '- ', prefix: true },
+    { id: 'code', label: '</>', wrap: '`' },
+    { id: 'link', label: '🔗', wrap: null, template: '[title](url)' },
+    { id: 'quote', label: '"', wrap: null, template: '> ' },
+    { id: 'undo', label: '⤺', action: 'undo' },
+    { id: 'redo', label: '⤻', action: 'redo' },
+  ];
+
+  /**
+   * Apply a toolbar action to the textarea selection and update content.
+   * Boring by design: wrap/prefix/template only, no parsing.
+   */
+  function applyToolbarAction(btn) {
+    if (!textareaEl) return;
+    const { selectionStart: start, selectionEnd: end } = textareaEl;
+    if (btn.action === 'undo') {
+      textareaEl.focus();
+      document.execCommand('undo');
+      return;
+    }
+    if (btn.action === 'redo') {
+      textareaEl.focus();
+      document.execCommand('redo');
+      return;
+    }
+    if (btn.template) {
+      const insert = btn.template;
+      const next = content.slice(0, start) + insert + content.slice(end);
+      content = next;
+      onChange?.(next);
+      queueMicrotask(() => {
+        textareaEl.focus();
+        textareaEl.setSelectionRange(start + insert.length, start + insert.length);
+      });
+      return;
+    }
+    const wrap = btn.wrap ?? '';
+    const prefixMode = Boolean(btn.prefix);
+    let next;
+    let selStart;
+    let selEnd;
+    if (prefixMode) {
+      // Insert at line start(s): walk back to the line start (or each
+      // selected line's start) and prepend.
+      const lineStart = content.lastIndexOf('\n', start - 1) + 1;
+      const selected = content.slice(lineStart, end);
+      const prefixed = selected.replace(/^/gm, wrap);
+      next = content.slice(0, lineStart) + prefixed + content.slice(end);
+      selStart = start + wrap.length;
+      selEnd = end + wrap.length * (selected.split('\n').length);
+    } else {
+      const selected = content.slice(start, end);
+      next = content.slice(0, start) + wrap + selected + wrap + content.slice(end);
+      selStart = start + wrap.length;
+      selEnd = selStart + selected.length;
+    }
+    content = next;
+    onChange?.(next);
+    queueMicrotask(() => {
+      textareaEl.focus();
+      textareaEl.setSelectionRange(selStart, selEnd);
+    });
+  }
+
   function handleContentInput(e) {
     content = e.target.value;
     onChange?.(content);
   }
 
   function handleKeydown(e) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      onClose?.();
-    }
+    if (e.key !== 'Escape') return;
+    if (e._escConsumed) return; // handled by an inner surface (conflict dialog)
+    e._escConsumed = true;      // DetailPanel's panel div must not also react
+    e.preventDefault();
+    e.stopPropagation();
+    onClose?.();
   }
 </script>
 
@@ -641,14 +749,27 @@
         <ConcurrentEditBanner {specPath} {workspaceId} {wsStore} {selfUserId} />
       {/if}
       {#if previewState === 'preview_running'}
-        <!-- Editor locked during preview (§9 State 2): show the content
-             read-only with the pending draft additions highlighted. -->
+        <!-- Editor locked during preview (§9 State 2): the draft is shown
+             read-only — verbatim, no diff styling (the draft is markdown,
+             not a diff). -->
         <div class="locked-editor" role="region" aria-label={$t('editor_split.editor_locked_aria')} data-testid="editor-locked">
           {#each content.split('\n') as line}
-            <div class="locked-line {line.startsWith('+') ? 'add' : line.startsWith('-') ? 'remove' : 'ctx'}">{line}</div>
+            <div class="locked-line">{line}</div>
           {/each}
         </div>
       {:else}
+        <div class="md-toolbar" role="toolbar" aria-label={$t('editor_split.md_toolbar_aria')} data-testid="md-toolbar">
+          {#each TOOLBAR_BUTTONS as btn (btn.id)}
+            <button
+              class="md-btn"
+              type="button"
+              onclick={() => applyToolbarAction(btn)}
+              aria-label={btn.aria ?? btn.label}
+              title={btn.aria ?? btn.label}
+              data-testid={`md-${btn.id}`}
+            >{btn.label}</button>
+          {/each}
+        </div>
         <textarea
           class="split-textarea"
           value={content}
@@ -656,6 +777,7 @@
           placeholder={$t('editor_split.spec_placeholder')}
           aria-label={$t('editor_split.spec_editor')}
           spellcheck="false"
+          bind:this={textareaEl}
           data-testid="editor-split-textarea"
         ></textarea>
       {/if}
@@ -788,6 +910,11 @@
         </div>
       {:else}
         <!-- Preview Complete / spec context: Architecture (default) + Code Diff tabs -->
+        {#if previewError}
+          <div class="preview-error" role="alert" data-testid="preview-error">
+            <strong>{$t('editor_split.preview_error_label')}:</strong> {previewError}
+          </div>
+        {/if}
         <div class="pane-header">
           <div class="impact-tabs" role="tablist" aria-label={$t('editor_split.impact_view_aria')}>
             <button
@@ -826,12 +953,43 @@
             id="editor-split-panel-arch"
             aria-labelledby="editor-split-tab-arch"
           >
-            <ArchPreviewCanvas
-              nodes={graphNodes}
-              edges={graphEdges}
-              ghostOverlays={overlays}
-              size="full"
-            />
+            {#if context === 'meta-spec' && metaPreviewResult}
+              <!-- Meta-spec preview (§9 State 3): the real PreviewResponse —
+                   structural impact + blast radius the server computed. -->
+              <div class="meta-impact" data-testid="meta-impact">
+                <div class="meta-impact-section">
+                  <h4 class="meta-impact-title">{$t('editor_split.architecture')}</h4>
+                  <dl class="meta-impact-list">
+                    <div class="meta-impact-row"><dt>{$t('editor_split.impact_scope')}</dt><dd>{metaPreviewResult.structural_impact?.scope ?? '—'}</dd></div>
+                    <div class="meta-impact-row"><dt>{$t('editor_split.impact_affected_spec_count')}</dt><dd>{metaPreviewResult.structural_impact?.affected_spec_count ?? '—'}</dd></div>
+                    <div class="meta-impact-row"><dt>{$t('editor_split.impact_affected_workspaces')}</dt><dd>{metaPreviewResult.blast_radius?.affected_workspace_count ?? metaPreviewResult.blast_radius?.affected_workspaces?.length ?? 0}</dd></div>
+                    <div class="meta-impact-row"><dt>{$t('editor_split.impact_affected_repos')}</dt><dd>{metaPreviewResult.blast_radius?.affected_repos?.length ?? 0}</dd></div>
+                  </dl>
+                </div>
+                {#if metaPreviewResult.blast_radius?.affected_repos?.length}
+                  <div class="meta-impact-section">
+                    <h4 class="meta-impact-title">{$t('editor_split.impact_affected_repos')}</h4>
+                    <ul class="meta-repo-list">
+                      {#each metaPreviewResult.blast_radius.affected_repos as repo (repo.id)}
+                        <li class="meta-repo-item">
+                          <span class="meta-repo-id">{repo.id}</span>
+                          {#if repo.reason}
+                            <span class="meta-repo-reason">{$t('editor_split.impact_reason')}: {repo.reason}</span>
+                          {/if}
+                        </li>
+                      {/each}
+                    </ul>
+                  </div>
+                {/if}
+              </div>
+            {:else}
+              <ArchPreviewCanvas
+                nodes={graphNodes}
+                edges={graphEdges}
+                ghostOverlays={overlays}
+                size="full"
+              />
+            {/if}
           </div>
         {:else}
           <div
@@ -848,6 +1006,22 @@
                   <SpecDiffView diff={file.diff} />
                 </div>
               {/each}
+            {:else if context === 'meta-spec' && previewState === 'preview_complete'}
+              <!-- Meta-spec previews report per-spec completion; the endpoint
+                   produces no line-level diff, so list the spec statuses. -->
+              {#if metaPreviewResult?.specs?.length}
+                <div class="meta-spec-statuses" data-testid="meta-spec-statuses">
+                  {#each metaPreviewResult.specs as s (s.path)}
+                    <div class="meta-spec-status">
+                      <span class="meta-spec-path">{s.path}</span>
+                      <span class="meta-spec-state">{s.status}</span>
+                    </div>
+                  {/each}
+                </div>
+                <p class="code-diff-empty">{$t('editor_split.no_line_diff_available')}</p>
+              {:else}
+                <p class="code-diff-empty">{$t('editor_split.no_code_diff')}</p>
+              {/if}
             {:else if previewState === 'preview_complete'}
               <p class="code-diff-empty">{$t('editor_split.no_code_diff')}</p>
             {:else}
@@ -1034,8 +1208,66 @@
   }
 
   .locked-line { white-space: pre-wrap; color: var(--color-text-secondary); }
-  .locked-line.add { color: var(--color-success, #2e9e5b); }
-  .locked-line.remove { color: var(--color-danger, #cc3340); text-decoration: line-through; }
+
+  /* Markdown toolbar (ui-layout.md §2) */
+  .md-toolbar {
+    display: flex;
+    gap: 2px;
+    align-items: center;
+    padding: 4px var(--space-3);
+    border-bottom: 1px solid var(--color-border);
+    background: var(--color-surface-1, transparent);
+  }
+  .md-btn {
+    min-width: 26px;
+    height: 24px;
+    padding: 0 6px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--color-text-secondary);
+    font-size: 12px;
+    font-family: var(--font-mono, monospace);
+    cursor: pointer;
+  }
+  .md-btn:hover { background: var(--color-surface-3, rgba(127,127,127,.15)); color: var(--color-text); }
+  .md-btn:active { transform: translateY(1px); }
+
+  /* Preview error banner (right pane) */
+  .preview-error {
+    margin: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--color-danger, #cc3340);
+    border-radius: 6px;
+    background: rgba(204, 51, 64, 0.08);
+    color: var(--color-text);
+    font-size: 12px;
+  }
+
+  /* Meta-spec preview impact summary (real PreviewResponse fields) */
+  .meta-impact {
+    overflow: auto;
+    padding: var(--space-4);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+  .meta-impact-title { margin: 0 0 var(--space-2); font-size: 12px; font-weight: 600; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: 0.04em; }
+  .meta-impact-list { margin: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+  .meta-impact-row { display: flex; justify-content: space-between; gap: var(--space-3); font-size: 13px; }
+  .meta-impact-row dt { color: var(--color-text-secondary); }
+  .meta-impact-row dd { margin: 0; font-family: var(--font-mono, monospace); }
+  .meta-repo-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--space-2); }
+  .meta-repo-item { display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+  .meta-repo-id { font-family: var(--font-mono, monospace); }
+  .meta-repo-reason { color: var(--color-text-secondary); font-size: 12px; }
+  .meta-spec-statuses { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3); }
+  .meta-spec-status { display: flex; justify-content: space-between; gap: var(--space-3); font-size: 13px; }
+  .meta-spec-path { font-family: var(--font-mono, monospace); }
+  .meta-spec-state { color: var(--color-text-secondary); }
 
   /* LLM suggestion block */
   .suggestion-block {

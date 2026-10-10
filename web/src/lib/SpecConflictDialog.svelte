@@ -35,10 +35,14 @@
   }
 
   function handleKeydown(e) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      onClose?.();
-    }
+    if (e.key !== 'Escape') return;
+    // Consume Esc here: only the dialog closes. Without the guard the same
+    // keypress also reaches EditorSplit's window handler, collapsing the
+    // editor while the user only meant to dismiss the dialog.
+    e._escConsumed = true;
+    e.preventDefault();
+    e.stopPropagation();
+    onClose?.();
   }
 </script>
 
