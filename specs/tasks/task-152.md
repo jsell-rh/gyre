@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "realized-model.md §6 Narrative Generation"
-commits: ["2d28430978cb40280236fe0199c43cd74ff07106", "0c2fe361cce879052a33f7d8be0d54fe9d625710", "e5d4452e90ee8d08ef1be8bae45eb13254d934ec", "c14e57697180cfb323310f81a7ab12f748df3312", "f4e08ad08f2a81e1e96cda6b1382672c80afb16b"]
+commits: ["3bea61432cae19f142fca09849311f020c0ab95d", "2d28430978cb40280236fe0199c43cd74ff07106", "0c2fe361cce879052a33f7d8be0d54fe9d625710", "e5d4452e90ee8d08ef1be8bae45eb13254d934ec", "c14e57697180cfb323310f81a7ab12f748df3312", "f4e08ad08f2a81e1e96cda6b1382672c80afb16b"]
 ---
 
 ## Spec Excerpt
@@ -203,7 +203,7 @@ Out of scope, noted for main: `web/dist` committed on main is stale relative to 
 `briefing-since` markup, still shipping `sidebar-badge` markup deleted 2026-03-28) — a main-side
 regeneration is a separate task.
 
-- **Round 5 (this round) — verification-repair for the `bbe4d456` finding**: the verification
+- **Round 5 — verification-repair for the `bbe4d456` finding**: the verification
   merge (base `918f16bf` + candidate `494128e0`) failed `tools/checks.sh` with exit 1. Root cause
   reproduced locally against the identical merge tree (`git merge-tree` output `cd75303f`,
   byte-equal to the sandbox HEAD): two diff-gates failed on candidate changed lines while passing
@@ -248,3 +248,55 @@ regeneration is a separate task.
 
   Attribution: `dev-attribution.py task-152` recorded repair commit `0c2fe361` (full SHA
   `0c2fe361cce879052a33f7d8be0d54fe9d625710`) in `commits:` (commit `a0331bb6`).
+
+- **Round 6 (this round) — verification-repair for the `8fb5b2fb` finding** (`cargo test --all`
+  exit 101: `explorer_ws_connect_and_list_views` panicked, first WS response `type:"error"` instead
+  of `views`). Root cause, reproduced from the exact failing tree `9ba3589f` (base `73a31e0b`):
+  that tree still had the process-global `ACTIVE_SESSIONS` map. The integration binary runs 7
+  `#[tokio::test]`s concurrently, each `WsCtx::new()` building its own server on its own port but
+  all authenticating as the same dev user (`default:system`), and `max_sessions_per_user()=3` —
+  the 4th concurrent registration evicted a LIVE session on a different server, which then
+  received the eviction error ("Session replaced by a newer connection.") from the
+  `shutdown_notify` branch of the select! loop instead of its `views` response. The fix is the
+  checkpoint `2d284309` `ExplorerSessionRegistry` scoped to `AppState` (each server owns its
+  registry; each test holds ≤1 session; no cross-server eviction possible), with four regression
+  tests including `session_registry_is_per_instance_not_process_global` — the exact recorded
+  scenario. The previous assignment was killed (exit 130) before it could run either this test
+  binary or the registry tests; its last act pushed branch
+  `pipeline/task-152/1c784e435d1848baba3a698c5ce2122f-1` at `b8c5a8d9`.
+
+  This round merged the current assignment base `06d70009` (HEAD `180db347`; `crates/`+`web/`
+  byte-identical to the tested candidate `b8c5a8d9`), then verified on the merged tree with a
+  cold build (`CARGO_HOME=/tmp/cargo`, `CARGO_TARGET_DIR=/tmp/gyre-target`, real cargo — the
+  stage wrapper flock deadlock from the killed run no longer applies; no lock held):
+  `cargo test -p gyre-server --lib session_registry` → **4 passed, 0 failed**;
+  `-p gyre-domain --lib narrative` → **15 passed**; `-p gyre-server --lib -- narrative briefing`
+  → **22 passed**; `--lib graph_extraction` → **20 passed**; all logs under
+  `/tmp/stage/review-evidence/` (`r6-round-summary.md` consolidates).
+
+  Two gate repairs surfaced by the merged tree (evidence: `gate-check-byte-slice-truncation.sh.log`,
+  `r6-clippy-final.log`):
+  1. `check-byte-slice-truncation.sh` FAILED on the merged tree: the registry change added ~55
+     lines above the pre-existing `&raw_preview[..500]` slice, moving it from line 2882 (where the
+     exemption entry pinned it) to 2937 — the line-pinned exemption stopped matching and the gate
+     correctly flagged the main-owned F4 hazard. Re-pinning the line would have been a new
+     exemption entry (forbidden); per the gate's own policy ("fix opportunistically when touching
+     these files — when you fix one, DELETE its exemption line") the slice is now
+     `chars().take(500)` char-boundary truncation (multibyte JSON near the limit previously
+     PANICKED; strictly a fix), and the exemption line is deleted (list 3→2).
+  2. `check-clippy-diff.py 06d70009` flagged `clippy::assertions_on_constants` ×2 on
+     candidate-changed lines in `test_agent_turn_budgets_are_independent`; the consts are now read
+     through local bindings — same invariants, same assertions.
+
+  Post-repair on the final tree: rustfmt-diff → exit 0; clippy-diff → exit 0 ("changed lines
+  clean, 1139 existing warnings outside changes"); byte-slice gate → exit 0; the other 20 static
+  gates → PASS (21/21 total, `gate-check-*.log`); affected tests re-run green
+  (`r6-clippy-final.log`: 5 passed including all session_registry tests).
+
+  Transport restriction (unchanged): this sandbox cannot `accept()` TCP listeners (errno 95,
+  `/tmp/stage/capabilities.json`, re-probed live), so `cargo test -p gyre-server --test
+  explorer_ws_integration` (all 7 tests, including the failing `explorer_ws_connect_and_list_views`)
+  must run on the exact head on the host / GitHub CI — that is the remaining required check for
+  this finding. The `session_registry_*` unit tests are the executable local proof of the fix
+  mechanism, and the WS integration failure mechanism (same dev user across 7 concurrent tests,
+  per-user cap 3, process-global map) is structurally impossible with a per-`AppState` registry.
