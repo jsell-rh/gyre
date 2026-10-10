@@ -2258,19 +2258,19 @@ specs:
         // Manifest with two specs and a cross-spec depends_on link pinned to a
         // SHA that does not match the target's ledger SHA — the staleness
         // checker must see it after a restart too.
-        let manifest = "version: 1\n\
-specs:\n\
-  - path: system/parent.md\n\
-    title: Parent\n\
-    owner: user:test\n\
-  - path: system/child.md\n\
-    title: Child\n\
-    owner: user:test\n\
-    links:\n\
-      - type: depends_on\n\
-        target: system/parent.md\n\
-        target_sha: old_pinned_sha\n\
-        reason: needs parent guarantees\n";
+        let manifest = r#"version: 1
+specs:
+  - path: system/parent.md
+    title: Parent
+    owner: user:test
+  - path: system/child.md
+    title: Child
+    owner: user:test
+    links:
+      - type: depends_on
+        target: system/parent.md
+        target_sha: old_pinned_sha
+        reason: needs parent guarantees"#;
         let (dir, sha) =
             make_test_repo(&[("specs/manifest.yaml", manifest), ("specs/system/parent.md", "# P"), ("specs/system/child.md", "# C")])
                 .await;
@@ -2367,18 +2367,18 @@ specs:\n\
     async fn staleness_query_parity_after_restart() {
         use crate::mem::{MemRepoRepository, MemSpecLedgerRepository, MemWorkspaceRepository};
 
-        let manifest = "version: 1\n\
-specs:\n\
-  - path: system/parent.md\n\
-    title: Parent\n\
-    owner: user:test\n\
-  - path: system/child.md\n\
-    title: Child\n\
-    owner: user:test\n\
-    links:\n\
-      - type: depends_on\n\
-        target: system/parent.md\n\
-        target_sha: old_pinned_sha\n";
+        let manifest = r#"version: 1
+specs:
+  - path: system/parent.md
+    title: Parent
+    owner: user:test
+  - path: system/child.md
+    title: Child
+    owner: user:test
+    links:
+      - type: depends_on
+        target: system/parent.md
+        target_sha: old_pinned_sha"#;
         let (dir, sha) =
             make_test_repo(&[("specs/manifest.yaml", manifest), ("specs/system/parent.md", "# P"), ("specs/system/child.md", "# C")])
                 .await;
