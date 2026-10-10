@@ -146,9 +146,35 @@ Focused probes (all this branch, `npm ci` locked versions; logs in
   fails with errno 95 (see `/tmp/stage/capabilities.json`). Static review
   shows this branch changes none of the e2e specs' selectors; exact-head
   GitHub CI remains mandatory. `check-task-commit-attribution.sh` fails on
-  `a781ede2`/task-210 identically at base 8c2d1775 — that commit sits on
-  origin/main and its absence from main's task-210.md is a pre-existing
-  baseline issue outside this task's review scope.
+  `a781ede2`/task-210 at the old base 8c2d1775; main has since recorded that
+  SHA in task-210.md (f38abb7e), so the check passes there today. The
+  equivalent drift on the new base — `6bf777a6`/task-200, never recorded by
+  main's task-200 process — was repaired on this branch in c2a01d35 by the
+  check's prescribed remedy (SHA appended to task-200.md's `commits:`
+  frontmatter, no exemption); the check passes at this branch head.
+
+Checkpoint continuation round (merge head `eb0d7fac` = candidate `9552a1a6`
++ new base `6bf777a6`, then repair commit `c2a01d35`): the prior attempt
+crashed (exit 130) mid-verification under CPU starvation (load ~45 on 8
+cores); this round re-ran the focused probes at the merged head with a
+clean box (load ~3, `npm ci` locked versions). No code changed in this
+round — product surface is byte-identical to the reviewed candidate
+`9552a1a6`; only specs bookkeeping (task-200 frontmatter repair, this
+section) differs. All probes green at `eb0d7fac`:
+
+- Frontend suite: 58 files, **1546 passed / 0 failed** (41 pre-existing
+  skips), EXIT=0.
+- `cargo test -p gyre-server --lib api::graph::tests` → **26 passed / 0
+  failed** (incl. both `briefing_repo_filter_*` regressions);
+  `... --lib briefing` → **22 passed / 0 failed**.
+- `check-forged-scope-fields.sh` → OK after the mcp.rs merge; attribution
+  check → OK after the task-200 frontmatter repair. Logs in
+  `/tmp/stage/review-evidence/*-eb0d7fac.txt`.
+
+  The graph/briefing test counts rose from 23→26 and 19→22 vs the prior
+  round: the new base added message-bus tests to those same modules
+  (`api::graph::tests` gained 3, `--lib briefing` filter gained 3), all
+  passing alongside the task-083 regressions.
 
 Contract note for the reviewer: an earlier attempt ticked the acceptance
 checkboxes in this file, which the pipeline's `requirement_parts` treats as
