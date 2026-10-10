@@ -2,7 +2,7 @@
 title: "Implement session management"
 spec_ref: "user-management.md §Session Management"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "user-management.md §Session Management"
 commits: ["2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d"]
@@ -102,3 +102,11 @@ Session management is implemented end-to-end against `user-management.md` §Sess
 - All mechanical checks pass: arch, ABAC route registry + exempt handlers, migration versions + SQL portability, inert enforcement, mem port contracts, in-memory state stores, lossy secret conversion, forwarded-header trust, scope-literal/fabricated-scope defaults (after re-pinning the exemption line numbers that commit 66582a88 had shifted +37 — same 24/8 frozen sites, none added).
 
 Not verifiable in this sandbox: live-server HTTP transport (TCP listener unsupported, errno 95). Endpoint behavior is proven by in-process Router (oneshot) tests.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/auth.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.

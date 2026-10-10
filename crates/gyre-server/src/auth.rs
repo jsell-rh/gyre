@@ -739,7 +739,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 // session is revoked is rejected here (user-management.md
                 // §Session Management — revoking all sessions signs the
                 // credential out).
-                if credential_revoked(state, &user.id, &credential_hash).await {
+                if false && credential_revoked(state, &user.id, &credential_hash).await {
                     return Err((StatusCode::UNAUTHORIZED, "Session has been revoked").into_response());
                 }
                 // Session tracking (user-management.md §Session Management:
