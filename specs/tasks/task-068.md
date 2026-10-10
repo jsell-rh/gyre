@@ -127,21 +127,35 @@ and Bearer-token `mcpServers.gyre` config.
 - Read-only tools are outside the `needs_write` RBAC gate (Agent role not
   required), matching their handler effects.
 
-Test evidence (2026-10-09, HEAD `39852a29`):
+Test evidence (2026-10-10, HEAD `4b0baced` on base `c9b0a6f9`; includes the
+`8cdde883` clippy/rustfmt repair that closed the failing check-clippy-diff gate
+— source is otherwise byte-identical to the reviewed round-2 tree, which
+carries the complete verdict in specs/reviews/task-068.md):
 
+- `python3 scripts/check-clippy-diff.py c9b0a6f9` → exit 0 ("changed lines
+  clean, 4 Rust files, 1141 existing warnings outside changes"); merge-state
+  rerun at HEAD (base HEAD^1) also exit 0.
+- `python3 scripts/check-rustfmt-diff.py c9b0a6f9` → exit 0.
+- `cargo test -p gyre-domain view_query_resolver` → 124 passed, 0 failed.
 - `cargo test -p gyre-server --lib mcp_graph` → 10 passed, 0 failed
   (in-process JSON-RPC through the router, including tools/list registration
   assertions for all five tools via `mcp_tools_list`).
-- `cargo test -p gyre-domain view_query_resolver` → 124 passed, 0 failed
-  (graph summary counts, all dry-run warning classes and boundaries).
-- `cargo test -p gyre-server --lib mcp` → 78 passed, 0 failed.
+- `cargo test -p gyre-server --lib mcp::` → 77 passed, 0 failed.
+- Static gates at HEAD: arch, hierarchy, mcp-write-tools, commit-attribution,
+  byte-slice-truncation, abac-route-registry, migration-versions,
+  dead-message-kinds, relative-path-defaults, fail-open-ref-resolution,
+  mem-port-contracts, fabricated-scope-defaults, lossy-secret-conversion,
+  scope-literal-defaults, inert-enforcement, forged-scope-fields,
+  forwarded-header-trust, in-memory-state-stores, unbounded-external-http,
+  migration-sql-portability, abac-exempt-handlers — all pass; no new
+  exemption entries.
 - TCP twins (`tests/graph_integration.rs`: `test_mcp_graph_summary`,
   `test_mcp_graph_query_dryrun`, `test_mcp_graph_nodes`,
   `test_mcp_graph_edges`, `test_mcp_graph_search`) cannot run in this
   sandbox: loopback `accept()` is seccomp-blocked (errno 95, recorded in
-  `/tmp/stage/review-evidence/task-068-tcp-twin-probe.txt`; the twin panics
-  with `hyper IncompleteMessage` because `axum::serve` never accepts). Host
-  verification / exact-head GitHub CI must run these five twins.
+  `/tmp/stage/review-evidence/task-068-attempt523ba30e-sandbox.txt`; the twin
+  panics with `hyper IncompleteMessage` because `axum::serve` never accepts).
+  Host verification / exact-head GitHub CI must run these five twins.
 
 ## Agent Instructions
 
