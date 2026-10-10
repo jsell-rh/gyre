@@ -876,6 +876,8 @@ async fn find_or_create_user_tenant(
     Ok(user)
 }
 
+// -- Federation JWT validation (G11) ------------------------------------------
+
 /// Extract the `iss` claim from a JWT payload without verifying the signature.
 /// Used to route federation tokens to the correct remote JWKS endpoint.
 fn extract_iss_from_jwt_payload(token: &str) -> Option<String> {
