@@ -1,6 +1,6 @@
 # Spec Coverage Summary
 
-**Last updated:** 2026-10-08
+**Last updated:** 2026-10-10
 
 | Spec | Total | n/a | Not Started | Assigned | Implemented | Verified | Coverage |
 |------|-------|-----|-------------|----------|-------------|----------|----------|
@@ -35,7 +35,7 @@
 | spec-lifecycle.md | 13 | 3 | 0 | 2 | 3 | 5 | 80% |
 | spec-links.md | 17 | 3 | 0 | 1 | 3 | 10 | 92% |
 | spec-registry.md | 19 | 1 | 0 | 4 | 5 | 9 | 77% |
-| supply-chain.md | 18 | 4 | 0 | 7 | 6 | 1 | 50% |
+| supply-chain.md | 18 | 4 | 0 | 3 | 10 | 1 | 78% |
 | system-explorer.md | 19 | 10 | 0 | 9 | 0 | 0 | 0% |
 | trusted-foundry-integration.md | 26 | 26 | 0 | 0 | 0 | 0 | 0% |
 | ui-journeys.md | 13 | 13 | 0 | 0 | 0 | 0 | 0% |
@@ -44,4 +44,4 @@
 | user-management.md | 36 | 10 | 0 | 26 | 0 | 0 | 0% |
 | view-query-grammar.md | 16 | 0 | 0 | 16 | 0 | 0 | 0% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **218** | **0** | **312** | **109** | **163** | **46%** |
+| **TOTAL** | **802** | **218** | **0** | **308** | **113** | **163** | **47%** |

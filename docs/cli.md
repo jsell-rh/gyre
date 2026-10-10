@@ -171,6 +171,30 @@ Notes:
   results until the dedicated `/api/v1/search/suggest` endpoint lands
   (task-153).
 
+
+## Supply Chain (task-165)
+
+```bash
+# Generate gyre-stack.lock from the agent's registered stack and write it
+# to the repo (run from the repo root; commit the file to pin the stack)
+gyre stack lock
+
+# Write to a custom path
+gyre stack lock --output lockfiles/gyre-stack.lock
+```
+
+Notes:
+
+- `gyre stack lock` fetches the agent's registered stack
+  (`GET /api/v1/agents/{id}/stack`) and serializes it as TOML: every stack
+  component (agents_md_hash, hooks, mcp_servers, model, cli_version,
+  settings_hash, persona_hash) plus the composite fingerprint and
+  `lock_timestamp` (supply-chain.md §gyre-stack.lock).
+- The committed lockfile is enforced at push time: the server parses it
+  from the pushed tree, verifies its internal integrity (recomputes the
+  fingerprint), and flags drift against the pushing agent's attested
+  stack — rejecting or warning per the repo stack policy's enforcement
+
 ---
 
 ## Connection / Diagnostics

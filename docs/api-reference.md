@@ -88,8 +88,8 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/repos/{id}/review-routing?path={file}` | Ordered list of agents to request review from, ranked by recency and commit count (M13.4) |
 | `GET` | `/api/v1/repos/{id}/speculative` | List all speculative merge results for active branches (M13.5) |
 | `GET` | `/api/v1/repos/{id}/speculative/{branch}` | Speculative merge result for a specific branch against main (M13.5) |
-| `GET` | `/api/v1/repos/{id}/stack-policy` | Get repo's required stack fingerprint for push attestation (M14.2) |
-| `PUT` | `/api/v1/repos/{id}/stack-policy` | Set / clear required stack fingerprint (**Admin only**, M14.2) |
+| `GET` | `/api/v1/repos/{id}/stack-policy` | Get repo's stack policy — `required_fingerprint`, `required_level`, `min_attestation_level` (1..=3), `enforcement` (`block`/`warn`); `null` fields when no policy is set (M14.2, task-165) |
+| `PUT` | `/api/v1/repos/{id}/stack-policy` | Set / clear repo stack policy — body `{required_fingerprint, required_level?, min_attestation_level?, enforcement?}`. Pushes from agents below `min_attestation_level` are rejected (`block`, default) or flagged with a `constraint_violation` event (`warn`) per supply-chain.md §Policy per Level. **Admin only** (M14.2, task-165) |
 | `GET` | `/api/v1/repos/{id}/abac-policy` | Get the ABAC policy list for a repo — array of `AbacPolicy` objects; each policy has `id`, `name`, `rules` (AND within), evaluated as OR across policies (G6) |
 | `PUT` | `/api/v1/repos/{id}/abac-policy` | Replace the ABAC policy list (**Admin only**); policies are matched against JWT claims on push and spawn; `rules` is a list of `{claim, operator, value}` match conditions combined with AND; multiple policies in the array are OR'd together (G6) |
 | `GET` | `/api/v1/repos/{id}/attestations/{commit_sha}/verification` | Full `VerificationResult` tree for the attestation chain associated with a commit; includes chain structure validation, signature verification, constraint evaluation status (TASK-008, §6.4) |
@@ -120,7 +120,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST` | `/api/v1/repos/{id}/graph/link` | Manually link a node to a spec path: `{node_id, spec_path, confidence?}` (`confidence`: `high`/`medium`/`low`/`none`; default `high`); **Developer+ required** (M30) |
 | `GET` | `/api/v1/repos/{id}/graph/predict` | Structural prediction stub — `{repo_id, predictions: []}` (M30) |
 | `POST/GET` | `/api/v1/agents` | Register (returns auth_token) / list (`?status=&workspace_id=`) |
-| `GET` | `/api/v1/agents/{id}` | Get agent |
+| `GET` | `/api/v1/agents/{id}` | Get agent — includes `attestation_level` (1..=3) resolved at the agent's last push: 3 = Gyre-managed container (server-verified), 2 = registered stack (self-reported), 1 = raw push, no attestation; `null` before the first push (task-165, supply-chain.md §Attestation Levels) |
 | `PUT` | `/api/v1/agents/{id}/status` | Update agent status — `AgentStatus` variants: `Spawning`, `Running`, `Paused`, `Completed`, `Failed`, `Dead`, `Cancelled`; `Paused` used during BCP disconnected mode (M23.3, agent-runtime spec) |
 | `POST` | `/api/v1/agents/{id}/usage` | Record LLM usage for an agent — `{model, input_tokens, output_tokens, cost_usd?}`; accumulated in budget tracking; `attestation.meta_specs_used` updated with active workspace meta-spec SHA (agent-runtime spec) |
 | `PUT` | `/api/v1/agents/{id}/heartbeat` | Agent heartbeat; on Linux, verifies PID liveness via `/proc/{pid}` and logs a warning if the process is no longer running (G10) |
