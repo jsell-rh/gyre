@@ -547,9 +547,9 @@ fn path_params(pattern: &str, path: &str) -> HashMap<String, String> {
 ///   addressed entity, so no `resource.id` is set.
 ///
 /// Attributes requiring entity lookup (`resource.tenant_id`, `owner`, `team`,
-/// `approval_status`, `visibility`, and nested child ids like `:node_id`)
-/// are populated by the evaluation-flow entity lookup (§Evaluation Flow
-/// step 2).
+/// `approval_status`, `visibility`) are populated by
+/// [`extract_entity_attributes`] below. Nested child ids like `:node_id` are
+/// not resource identity attributes and stay unpopulated.
 fn extract_path_attributes(
     ctx: &mut AttributeContext,
     pattern: &str,
@@ -586,6 +586,322 @@ fn extract_path_attributes(
     };
     if let Some(id) = resource_id {
         ctx.set("resource.id", id);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entity-lookup resource attributes
+// ---------------------------------------------------------------------------
+
+/// Percent-decode a path parameter (spec routes carry `system%2Ffoo.md`).
+/// Returns `None` when the value contains invalid escapes — a malformed
+/// identity cannot be looked up, and conditions on the looked-up attributes
+/// fail closed.
+fn percent_decode(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return None;
+            }
+            let hi = (bytes[i + 1] as char).to_digit(16)?;
+            let lo = (bytes[i + 2] as char).to_digit(16)?;
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Read a `Single` string attribute from the context.
+fn attr_str<'a>(ctx: &'a AttributeContext, key: &str) -> Option<&'a str> {
+    match ctx.get(key) {
+        Some(AttrValue::Single(s)) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
+/// Set `resource.tenant_id` from the addressed workspace's tenant. Absent
+/// when the workspace does not exist — no tenant is fabricated.
+async fn set_tenant_from_workspace(
+    state: &AppState,
+    ctx: &mut AttributeContext,
+    workspace_id: &str,
+) {
+    if ctx.has("resource.tenant_id") {
+        return;
+    }
+    match state
+        .workspaces
+        .find_by_id(&gyre_common::Id::new(workspace_id))
+        .await
+    {
+        Ok(Some(ws)) => ctx.set("resource.tenant_id", ws.tenant_id.to_string()),
+        Ok(None) => {}
+        Err(e) => tracing::warn!(
+            workspace_id = %workspace_id,
+            err = %e,
+            "workspace lookup for resource.tenant_id failed; attribute unset"
+        ),
+    }
+}
+
+/// Set `resource.tenant_id` from the addressed repo's workspace tenant.
+async fn set_tenant_from_repo(state: &AppState, ctx: &mut AttributeContext, repo_id: &str) {
+    if ctx.has("resource.tenant_id") {
+        return;
+    }
+    match state
+        .repos
+        .find_by_id(&gyre_common::Id::new(repo_id))
+        .await
+    {
+        Ok(Some(repo)) => set_tenant_from_workspace(state, ctx, &repo.workspace_id.to_string()).await,
+        Ok(None) => {}
+        Err(e) => tracing::warn!(
+            repo_id = %repo_id,
+            err = %e,
+            "repo lookup for resource.tenant_id failed; attribute unset"
+        ),
+    }
+}
+
+/// Extract resource attributes sourced from entity lookup / entity fields
+/// (§Attributes: `resource.tenant_id`, `resource.owner`, `resource.team`,
+/// `resource.approval_status`, `resource.visibility`).
+///
+/// Looks up the addressed entity in the real stores and copies its scope and
+/// ownership fields into the context. Lookup failures and missing entities
+/// leave the attributes unset — conditions on them then fail closed (a
+/// missing attribute never matches), the same discipline as the
+/// membership-sourced subject attributes.
+///
+/// `resource.visibility` and `resource.team` apply only to entities that
+/// carry those fields (none today: specs and personas carry `owner` +
+/// `approval_status`; scope-scoped entities carry their workspace/repo/tenant
+/// identity). When an entity type gains those fields, its arm here must set
+/// them.
+async fn extract_entity_attributes(
+    state: &AppState,
+    ctx: &mut AttributeContext,
+    pattern: &str,
+    path: &str,
+    resource_type: &str,
+) {
+    let params = path_params(pattern, path);
+    let resource_id = attr_str(ctx, "resource.id").map(|s| s.to_string());
+
+    // Resolve the tenant of the addressed scope chain: repo → workspace →
+    // tenant. Runs for every resource type: repo/workspace-parented routes
+    // name their parent directly; entity lookups below backfill via the
+    // entity's own workspace.
+    let path_repo_id = attr_str(ctx, "resource.repo_id").map(|s| s.to_string());
+    let path_workspace_id = attr_str(ctx, "resource.workspace_id").map(|s| s.to_string());
+    if let Some(repo_id) = path_repo_id {
+        set_tenant_from_repo(state, ctx, &repo_id).await;
+    } else if let Some(ws_id) = path_workspace_id {
+        set_tenant_from_workspace(state, ctx, &ws_id).await;
+    }
+
+    match resource_type {
+        // Spec routes address the spec by its registry path (`:path`,
+        // URL-encoded). The ledger entry carries owner, approval status,
+        // and the repo/workspace scope (§Attributes: "Entity lookup",
+        // "Entity field").
+        "spec" => {
+            let Some(raw) = params.get("path") else { return };
+            let Some(spec_path) = percent_decode(raw) else {
+                tracing::warn!(%raw, "spec path is not valid percent-encoding; entity attributes unset");
+                return;
+            };
+            match state.spec_ledger.find_by_path(&spec_path).await {
+                Ok(Some(entry)) => {
+                    ctx.set("resource.owner", entry.owner.clone());
+                    ctx.set(
+                        "resource.approval_status",
+                        entry.approval_status.to_string(),
+                    );
+                    if let Some(repo) = &entry.repo_id {
+                        if !ctx.has("resource.repo_id") {
+                            ctx.set("resource.repo_id", repo.clone());
+                        }
+                        set_tenant_from_repo(state, ctx, repo).await;
+                    }
+                    if let Some(ws) = &entry.workspace_id {
+                        if !ctx.has("resource.workspace_id") {
+                            ctx.set("resource.workspace_id", ws.clone());
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    spec_path = %spec_path,
+                    err = %e,
+                    "spec ledger lookup failed; entity attributes unset"
+                ),
+            }
+        }
+        // Persona: owner and approval lifecycle (§Attributes "Entity field").
+        "persona" => {
+            let Some(id) = resource_id else { return };
+            match state
+                .personas
+                .find_by_id(&gyre_common::Id::new(id.clone()))
+                .await
+            {
+                Ok(Some(p)) => {
+                    if let Some(owner) = &p.owner {
+                        ctx.set("resource.owner", owner.clone());
+                    }
+                    ctx.set(
+                        "resource.approval_status",
+                        match p.approval_status {
+                            gyre_domain::PersonaApprovalStatus::Pending => "pending",
+                            gyre_domain::PersonaApprovalStatus::Approved => "approved",
+                            gyre_domain::PersonaApprovalStatus::Deprecated => "deprecated",
+                        },
+                    );
+                    match &p.scope {
+                        gyre_domain::PersonaScope::Workspace(ws) => {
+                            if !ctx.has("resource.workspace_id") {
+                                ctx.set("resource.workspace_id", ws.to_string());
+                            }
+                            set_tenant_from_workspace(state, ctx, &ws.to_string()).await;
+                        }
+                        gyre_domain::PersonaScope::Tenant(t) => {
+                            if !ctx.has("resource.tenant_id") {
+                                ctx.set("resource.tenant_id", t.to_string());
+                            }
+                        }
+                        gyre_domain::PersonaScope::Repo(r) => {
+                            if !ctx.has("resource.repo_id") {
+                                ctx.set("resource.repo_id", r.to_string());
+                            }
+                            set_tenant_from_repo(state, ctx, &r.to_string()).await;
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    persona_id = %id,
+                    err = %e,
+                    "persona lookup failed; entity attributes unset"
+                ),
+            }
+        }
+        // Task: workspace/repo scope from the entity itself.
+        "task" => {
+            let Some(id) = resource_id else { return };
+            match state
+                .tasks
+                .find_by_id(&gyre_common::Id::new(id.clone()))
+                .await
+            {
+                Ok(Some(t)) => {
+                    if !ctx.has("resource.workspace_id") {
+                        ctx.set("resource.workspace_id", t.workspace_id.to_string());
+                    }
+                    if !ctx.has("resource.repo_id") {
+                        ctx.set("resource.repo_id", t.repo_id.to_string());
+                    }
+                    set_tenant_from_workspace(state, ctx, &t.workspace_id.to_string()).await;
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    task_id = %id,
+                    err = %e,
+                    "task lookup failed; entity attributes unset"
+                ),
+            }
+        }
+        // Agent: workspace/repo scope from the entity itself.
+        "agent" => {
+            let Some(id) = resource_id else { return };
+            match state
+                .agents
+                .find_by_id(&gyre_common::Id::new(id.clone()))
+                .await
+            {
+                Ok(Some(a)) => {
+                    if !ctx.has("resource.workspace_id") {
+                        ctx.set("resource.workspace_id", a.workspace_id.to_string());
+                    }
+                    if !ctx.has("resource.repo_id") {
+                        if let Some(r) = &a.repo_id {
+                            ctx.set("resource.repo_id", r.to_string());
+                        }
+                    }
+                    set_tenant_from_workspace(state, ctx, &a.workspace_id.to_string()).await;
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    agent_id = %id,
+                    err = %e,
+                    "agent lookup failed; entity attributes unset"
+                ),
+            }
+        }
+        // Merge request: repo via repository_id, workspace from the entity.
+        "merge_request" => {
+            let Some(id) = resource_id else { return };
+            match state
+                .merge_requests
+                .find_by_id(&gyre_common::Id::new(id.clone()))
+                .await
+            {
+                Ok(Some(mr)) => {
+                    if !ctx.has("resource.workspace_id") {
+                        ctx.set("resource.workspace_id", mr.workspace_id.to_string());
+                    }
+                    if !ctx.has("resource.repo_id") {
+                        ctx.set("resource.repo_id", mr.repository_id.to_string());
+                    }
+                    set_tenant_from_repo(state, ctx, &mr.repository_id.to_string()).await;
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    mr_id = %id,
+                    err = %e,
+                    "merge request lookup failed; entity attributes unset"
+                ),
+            }
+        }
+        // Team routes name the team directly (`:team_id`) or via `:id`
+        // under a workspace parent; both carry the owning workspace.
+        "team" => {
+            let team_param = params
+                .get("team_id")
+                .cloned()
+                .or_else(|| resource_id.clone());
+            let Some(team_id) = team_param else { return };
+            match state
+                .teams
+                .find_by_id(&gyre_common::Id::new(team_id.clone()))
+                .await
+            {
+                Ok(Some(team)) => {
+                    if !ctx.has("resource.workspace_id") {
+                        ctx.set("resource.workspace_id", team.workspace_id.to_string());
+                    }
+                    set_tenant_from_workspace(state, ctx, &team.workspace_id.to_string()).await;
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    team_id = %team_id,
+                    err = %e,
+                    "team lookup failed; entity attributes unset"
+                ),
+            }
+        }
+        // Tenant-scoped entities need no further lookup: the path names the
+        // tenant (registry: `/api/v1/tenants/:id`), and the tenant of a
+        // tenant is itself.
+        _ => {}
     }
 }
 
@@ -972,6 +1288,14 @@ pub async fn abac_middleware(
     // addressed workspace. `resource.type`, `action`, and `env.time` are
     // injected by the evaluation engine itself.
     extract_path_attributes(&mut ctx, &pattern, req.uri().path(), resource_type);
+
+    // Resource attributes from entity lookup / entity fields (§Attributes:
+    // resource.tenant_id, owner, team, approval_status, visibility — source
+    // "Entity lookup" / "Entity field"). Runs after path extraction so the
+    // lookups can reuse the path-derived scope ids, and BEFORE membership
+    // extraction: `subject.workspace_role` must reflect the entity's own
+    // workspace (backfilled here), not just the path-named one.
+    extract_entity_attributes(&state, &mut ctx, &pattern, req.uri().path(), resource_type).await;
 
     // Membership-sourced subject attributes (§Attributes: source "Membership",
     // "Memberships", "Team memberships"). JWT claims above may carry richer
@@ -2431,6 +2755,504 @@ pub mod tests {
             resp.status(),
             StatusCode::FORBIDDEN,
             "env.main_health must read 'red' for a paused merge queue and deny"
+        );
+    }
+
+    // --- §Attributes: entity-lookup / entity-field resource attributes ---
+
+    /// Seed the scope chain tenant `t-1` → workspace `ws-e` → repo `repo-e`,
+    /// plus a pending-approval spec `system/design.md` owned by `user:alice`
+    /// scoped to the repo. Returns the seeded state.
+    async fn setup_entity_state() -> Arc<AppState> {
+        use crate::auth::test_helpers::make_test_state_with_jwt;
+        use gyre_domain::{
+            Repository as DomainRepo, SpecLedgerEntry, Tenant, Workspace, ApprovalStatus,
+        };
+
+        let state = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            let h = tokio::runtime::Handle::current();
+            h.block_on(seed_builtin_policies(&state));
+        });
+
+        state
+            .tenants
+            .create(&Tenant::new(Id::new("t-1"), "Acme", "acme", 0))
+            .await
+            .unwrap();
+        state
+            .workspaces
+            .create(&Workspace::new(
+                Id::new("ws-e"),
+                Id::new("t-1"),
+                "Eng",
+                "eng",
+                0,
+            ))
+            .await
+            .unwrap();
+        state
+            .repos
+            .create(&DomainRepo::new(
+                Id::new("repo-e"),
+                Id::new("ws-e"),
+                "app",
+                "/tmp/repo-e",
+                0,
+            ))
+            .await
+            .unwrap();
+
+        state
+            .spec_ledger
+            .save(&SpecLedgerEntry {
+                path: "system/design.md".to_string(),
+                title: "Design".to_string(),
+                owner: "user:alice".to_string(),
+                kind: None,
+                current_sha: "a".repeat(40),
+                approval_mode: "human_only".to_string(),
+                approval_status: ApprovalStatus::Pending,
+                linked_tasks: vec![],
+                linked_mrs: vec![],
+                drift_status: "unknown".to_string(),
+                created_at: 0,
+                updated_at: 0,
+                repo_id: Some("repo-e".to_string()),
+                workspace_id: Some("ws-e".to_string()),
+            })
+            .await
+            .unwrap();
+
+        state
+    }
+
+    /// `resource.owner` and `resource.approval_status` must come from the
+    /// spec ledger entry (§Attributes, source "Entity field"), and
+    /// `resource.tenant_id` from the entity's scope chain. A policy keyed on
+    /// the owner must match; a policy keyed on a different owner must not.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_entity_attributes_reach_live_evaluation() {
+        let state = setup_entity_state().await;
+
+        // Deny spec reads unless the resource owner is user:alice (810
+        // outranks the Developer read allow at 800).
+        state
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-owner-deny"),
+                name: "owner-not-alice-deny".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 810,
+                effect: PolicyEffect::Deny,
+                conditions: vec![Condition {
+                    attribute: "resource.owner".to_string(),
+                    operator: ConditionOp::NotEquals,
+                    value: ConditionValue::String("user:alice".to_string()),
+                }],
+                actions: vec!["read".to_string()],
+                resource_types: vec!["spec".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("system"),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/specs/:path", get(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state.clone());
+
+        // The seeded spec's owner IS user:alice → the NotEquals deny does not
+        // match → the Developer read allow (800) grants.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/system%2Fdesign.md")
+                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "resource.owner == user:alice must reach live evaluation (NotEquals deny not tripped)"
+        );
+
+        // Flip the ledger entry's owner to user:bob → NotEquals now matches
+        // → deny.
+        let mut entry = state
+            .spec_ledger
+            .find_by_path("system/design.md")
+            .await
+            .unwrap()
+            .expect("seeded entry");
+        entry.owner = "user:bob".to_string();
+        state.spec_ledger.save(&entry).await.unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/system%2Fdesign.md")
+                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "resource.owner == user:bob must trip the NotEquals deny"
+        );
+    }
+
+    /// `resource.approval_status` must flow from the ledger entry into
+    /// evaluation: a deny keyed on `pending` must fire only while the spec
+    /// is pending.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_approval_status_reaches_live_evaluation() {
+        let state = setup_entity_state().await;
+
+        state
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-pending-deny"),
+                name: "pending-spec-no-write".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 810,
+                effect: PolicyEffect::Deny,
+                conditions: vec![Condition {
+                    attribute: "resource.approval_status".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("pending".to_string()),
+                }],
+                actions: vec!["write".to_string()],
+                resource_types: vec!["spec".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("system"),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/specs/:path", post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state.clone());
+
+        let token = member_jwt();
+        let req = || {
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/specs/system%2Fdesign.md")
+                .header("Authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        // Pending spec → deny.
+        let resp = app.clone().oneshot(req()).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "resource.approval_status == pending must reach live evaluation"
+        );
+
+        // Approve the spec → deny no longer matches → Developer allow grants.
+        let mut entry = state
+            .spec_ledger
+            .find_by_path("system/design.md")
+            .await
+            .unwrap()
+            .expect("seeded entry");
+        entry.approval_status = gyre_domain::ApprovalStatus::Approved;
+        state.spec_ledger.save(&entry).await.unwrap();
+
+        let resp = app.oneshot(req()).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "approved spec must not trip the pending-only deny"
+        );
+    }
+
+    /// `resource.tenant_id` must resolve through the entity's scope chain
+    /// (spec → repo → workspace → tenant) for a resource whose route does
+    /// not name any scope ids. The dynamic-reference form
+    /// (`$subject.tenant_id`) must compare against it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spec_resource_tenant_resolves_via_scope_chain() {
+        let state = setup_entity_state().await;
+
+        // Allow spec reads only when the resource's tenant equals the
+        // subject's tenant (cross-tenant read → no allow → default deny).
+        state
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-tenant-match-allow"),
+                name: "same-tenant-read".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 810,
+                effect: PolicyEffect::Allow,
+                conditions: vec![Condition {
+                    attribute: "resource.tenant_id".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("$subject.tenant_id".to_string()),
+                }],
+                actions: vec!["read".to_string()],
+                resource_types: vec!["spec".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("system"),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/specs/:path", get(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state.clone());
+
+        // member_jwt's tenant: the test state's auth config. The seeded chain
+        // uses tenant t-1, so the same-tenant allow must NOT match → deny.
+        // (This also proves the tenant is really looked up, not fabricated
+        // from the path or a default.)
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/specs/system%2Fdesign.md")
+                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "resource.tenant_id must resolve to t-1 (≠ subject tenant), not a fabricated default"
+        );
+    }
+
+    /// Task/agent/mr/team resource attributes must come from the entity's
+    /// own workspace (§Attributes, source "Entity lookup"): the route names
+    /// only the entity, and the workspace/tenant are looked up.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn task_entity_scope_backfills_workspace_and_tenant() {
+        use gyre_domain::Task;
+
+        let state = setup_entity_state().await;
+
+        // A task in ws-e (created via Task::new then re-scoped), proving the
+        // workspace is read from the entity, not from the path.
+        let mut task = Task::new(Id::new("task-e"), "Entity lookup task", 0);
+        task.workspace_id = Id::new("ws-e");
+        task.repo_id = Id::new("repo-e");
+        state.tasks.create(&task).await.unwrap();
+
+        // Deny task reads when the resource tenant is t-1.
+        state
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-task-tenant-deny"),
+                name: "task-t1-no-read".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 810,
+                effect: PolicyEffect::Deny,
+                conditions: vec![Condition {
+                    attribute: "resource.tenant_id".to_string(),
+                    operator: ConditionOp::Equals,
+                    value: ConditionValue::String("t-1".to_string()),
+                }],
+                actions: vec!["read".to_string()],
+                resource_types: vec!["task".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("system"),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/tasks/:id", get(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state.clone());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/tasks/task-e")
+                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "task → workspace → tenant lookup must surface resource.tenant_id == t-1"
+        );
+    }
+
+    /// Persona entity attributes: owner + approval status from the persona
+    /// record, workspace/tenant from its scope.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn persona_entity_attributes_reach_live_evaluation() {
+        use gyre_domain::{Persona, PersonaApprovalStatus, PersonaScope};
+
+        let state = setup_entity_state().await;
+
+        let mut persona = Persona::new(
+            Id::new("persona-e"),
+            "security",
+            "security",
+            PersonaScope::Workspace(Id::new("ws-e")),
+            "prompt",
+            0,
+        );
+        persona.owner = Some("user:alice".to_string());
+        persona.approval_status = PersonaApprovalStatus::Pending;
+        state.personas.create(&persona).await.unwrap();
+
+        // Deny persona reads while approval is pending and the caller is not
+        // the owner. member_jwt's subject is member-user; the owner is
+        // user:alice → deny must fire.
+        state
+            .policies
+            .create(&Policy {
+                id: gyre_common::Id::new("test-persona-deny"),
+                name: "pending-persona-owner-only".to_string(),
+                description: String::new(),
+                scope: PolicyScope::Tenant,
+                scope_id: None,
+                priority: 810,
+                effect: PolicyEffect::Deny,
+                conditions: vec![
+                    Condition {
+                        attribute: "resource.approval_status".to_string(),
+                        operator: ConditionOp::Equals,
+                        value: ConditionValue::String("pending".to_string()),
+                    },
+                    Condition {
+                        attribute: "resource.owner".to_string(),
+                        operator: ConditionOp::NotEquals,
+                        value: ConditionValue::String("member-user".to_string()),
+                    },
+                ],
+                actions: vec!["read".to_string()],
+                resource_types: vec!["persona".to_string()],
+                enabled: true,
+                built_in: false,
+                immutable: false,
+                created_by: Id::new("system"),
+                created_at: 0,
+                updated_at: 0,
+            })
+            .await
+            .unwrap();
+
+        init_resolver();
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/personas/:id", get(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state.clone());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/personas/persona-e")
+                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "persona owner (user:alice) + pending approval must reach live evaluation"
+        );
+
+        // Approve the persona → the pending-only deny arm no longer matches
+        // → Developer read allow (800) grants.
+        let mut updated = persona;
+        updated.approval_status = PersonaApprovalStatus::Approved;
+        state.personas.update(&updated).await.unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/personas/persona-e")
+                    .header("Authorization", format!("Bearer {}", member_jwt()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "approved persona must not trip the pending-only deny"
         );
     }
 }
