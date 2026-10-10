@@ -21,4 +21,3 @@ crates/gyre-server/src/snapshot.rs:9                  # DEFAULT_SNAPSHOT_PATH ".
 # (// path:ok) since task-192: file entries are line-number pointers that
 # break whenever code above the site moves, tripping the frozen-baseline
 # new-exemption gate. The hazard remains owned by task-099. ---
-
