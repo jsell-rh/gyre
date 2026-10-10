@@ -128,3 +128,35 @@ changes the requirement generation hash — completion markers are reviewer/veri
 record, not implementer mutations (task-201 precedent: `ready-for-review` with all boxes
 unchecked). This attempt applies only hash-excluded mutations: `progress`, `commits`, and
 this `## Shipped` section. Acceptance Criteria text is byte-identical to base.
+
+## Repair attempt 0d9343d0 (evidence regeneration)
+
+The prior attempt (checkpoint `c416f16d`, agent exit 130) completed the wiring and
+reviews but died waiting on its mutation probe, and its evidence directory did not
+survive into this sandbox. No source change was needed — the checkpoint is correct.
+This attempt re-verified everything fresh at HEAD `abdfc3ab` in an isolated worktree
+(`/tmp/task199-ev-wt`, private `CARGO_TARGET_DIR`), evidence under
+`/tmp/stage/review-evidence/task-199/`:
+
+- **Good run**: `SKIP_WEB_BUILD=1 cargo test -p gyre-server --test dependency_persistence`
+  → 1 passed; 0 failed; EXIT=0 (cold build 16m11s; test binary hash
+  `dependency_persistence-dffbac4508bfe1c8` matches the prior attempt's, confirming
+  source identity).
+- **Mutation probe**: reverted lib.rs:909-912 to the old
+  `Arc::new(mem::MemDependencyRepository::default())` literal in the worktree only →
+  FAILED at tests/dependency_persistence.rs:70 "edge must survive restart on
+  SQLite-backed state", 0 passed; 1 failed; EXIT=101. The test kills the exact
+  regression this task fixes. Source restored and verified byte-identical to HEAD.
+- **Post-restore re-run**: 1 passed; 0 failed; EXIT=0.
+- **Mem-mode regression**: `env -u GYRE_DATABASE_URL cargo test -p gyre-server --lib --
+  api::dependencies dep_staleness` → 72 passed; 0 failed; EXIT=0.
+- **Architecture lint**: `bash scripts/check-arch.sh` → "Architecture lint passed",
+  EXIT=0.
+- **Attribution gate**: `bash scripts/check-task-commit-attribution.sh` → OK, EXIT=0.
+
+Sandbox note: the first cargo invocation hit transient crates.io proxy warm-up
+failures (connection refused); retry succeeded and the full download+build completed —
+an infrastructure hiccup, not a code defect. Listener-based verification is not
+possible here (tcp_listener_probe: Errno 95 Operation not supported); the focused
+test suites above cover the changed path, and full workspace gates remain owned by
+verification/publication.
