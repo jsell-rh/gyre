@@ -2,8 +2,10 @@
 --
 -- One row per authenticated session. Created on successful API-key auth;
 -- `token_hash` is the SHA-256 hex of the session token (plaintext never
--- stored). `revoked` sessions are kept for audit until the retention cleanup
--- job deletes rows whose `expires_at` is older than the cutoff.
+-- stored). `revoked` sessions are never deleted by retention cleanup: a revoked row
+-- is the durable record that keeps a signed-out credential rejected
+-- ("sign out everywhere"); deleting one would silently re-authorize the
+-- API key it belonged to. Cleanup removes only unrevoked expired rows.
 
 CREATE TABLE IF NOT EXISTS user_sessions (
     id TEXT PRIMARY KEY NOT NULL,

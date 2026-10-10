@@ -673,14 +673,20 @@ mod tests {
 
     // ── SessionRepository (user-management.md §Session Management) ─────────
 
-    fn make_session(id: &str, user_id: &Id, token_hash: &str, expires_at: u64) -> UserSession {
+    fn make_session(
+        id: &str,
+        user_id: &Id,
+        token_hash: &str,
+        created_at: u64,
+        expires_at: u64,
+    ) -> UserSession {
         UserSession::new(
             Id::new(id),
             user_id.clone(),
             token_hash,
             "127.0.0.1",
             "gyre-test/1.0",
-            1_000,
+            created_at,
             expires_at,
         )
     }
@@ -691,7 +697,7 @@ mod tests {
         let u = make_user("s-u1");
         UserRepository::create(&s, &u).await.unwrap();
 
-        let sess = make_session("sess-1", &u.id, "hash-1", 2_000);
+        let sess = make_session("sess-1", &u.id, "hash-1", 1_000, 2_000);
         SessionRepository::create(&s, &sess).await.unwrap();
 
         let found = SessionRepository::find_by_id(&s, &Id::new("sess-1"))
@@ -716,7 +722,7 @@ mod tests {
         let u = make_user("s-u2");
         UserRepository::create(&s, &u).await.unwrap();
 
-        let sess = make_session("sess-dup", &u.id, "hash-dup", 2_000);
+        let sess = make_session("sess-dup", &u.id, "hash-dup", 1_000, 2_000);
         SessionRepository::create(&s, &sess).await.unwrap();
         // Port contract: create fails if a session with the same id exists.
         assert!(
@@ -731,7 +737,7 @@ mod tests {
         let u = make_user("s-u3");
         UserRepository::create(&s, &u).await.unwrap();
 
-        let sess = make_session("sess-dev", &u.id, "cred-hash", 2_000);
+        let sess = make_session("sess-dev", &u.id, "cred-hash", 1_000, 2_000);
         SessionRepository::create(&s, &sess).await.unwrap();
 
         // Exact (user, credential, ip, user-agent) → found.
@@ -771,7 +777,7 @@ mod tests {
         let u = make_user("s-u4b");
         UserRepository::create(&s, &u).await.unwrap();
 
-        let sess = make_session("sess-slide", &u.id, "hash-slide", 2_000);
+        let sess = make_session("sess-slide", &u.id, "hash-slide", 1_000, 2_000);
         SessionRepository::create(&s, &sess).await.unwrap();
 
         // Throttled activity write slides the TTL: a daily-active device
@@ -800,8 +806,8 @@ mod tests {
         let u = make_user("s-u9");
         UserRepository::create(&s, &u).await.unwrap();
 
-        let old_expired_revoked = make_session("sess-rr", &u.id, "h-rr", 1_000);
-        let old_expired_live = make_session("sess-rl", &u.id, "h-rl", 2_000);
+        let old_expired_revoked = make_session("sess-rr", &u.id, "h-rr", 1_000, 1_000);
+        let old_expired_live = make_session("sess-rl", &u.id, "h-rl", 1_000, 2_000);
         SessionRepository::create(&s, &old_expired_revoked).await.unwrap();
         SessionRepository::create(&s, &old_expired_live).await.unwrap();
         SessionRepository::revoke(&s, &Id::new("sess-rr"), &u.id)
@@ -837,8 +843,8 @@ mod tests {
         let u = make_user("s-u10");
         UserRepository::create(&s, &u).await.unwrap();
 
-        let stale = make_session("sess-old-dev", &u.id, "cred-x", 1_000);
-        let fresh = make_session("sess-new-dev", &u.id, "cred-x", 9_000);
+        let stale = make_session("sess-old-dev", &u.id, "cred-x", 1_000, 2_000);
+        let fresh = make_session("sess-new-dev", &u.id, "cred-x", 8_000, 9_000);
         SessionRepository::create(&s, &stale).await.unwrap();
         SessionRepository::create(&s, &fresh).await.unwrap();
 
@@ -863,7 +869,7 @@ mod tests {
         UserRepository::create(&s, &u1).await.unwrap();
         UserRepository::create(&s, &u2).await.unwrap();
 
-        let sess = make_session("sess-rev", &u1.id, "hash-rev", 2_000);
+        let sess = make_session("sess-rev", &u1.id, "hash-rev", 1_000, 2_000);
         SessionRepository::create(&s, &sess).await.unwrap();
 
         // Wrong owner: revoke is a no-op (scoped), not an error.
@@ -900,9 +906,9 @@ mod tests {
         let other = make_user("s-u8");
         UserRepository::create(&s, &other).await.unwrap();
 
-        let s1 = make_session("sess-a1", &u.id, "h-a1", 2_000);
-        let s2 = make_session("sess-a2", &u.id, "h-a2", 9_000);
-        let keep = make_session("sess-b1", &other.id, "h-b1", 2_000);
+        let s1 = make_session("sess-a1", &u.id, "h-a1", 1_000, 2_000);
+        let s2 = make_session("sess-a2", &u.id, "h-a2", 1_000, 9_000);
+        let keep = make_session("sess-b1", &other.id, "h-b1", 1_000, 2_000);
         SessionRepository::create(&s, &s1).await.unwrap();
         SessionRepository::create(&s, &s2).await.unwrap();
         SessionRepository::create(&s, &keep).await.unwrap();
@@ -927,7 +933,8 @@ mod tests {
         // Retention cleanup deletes only UNREVOKED rows expired before the
         // cutoff: sess-a1 (revoked, expired) survives as the durable
         // sign-out record; sess-b1 (unrevoked, expired) is deleted;
-        // sess-a2 (unrevoked, unexpired) survives.
+        // sess-a2 (revoked but unexpired) survives — expiry is what gates
+        // retention, and revocation only makes a row undeletable.
         let deleted = SessionRepository::delete_expired_before(&s, 5_000)
             .await
             .unwrap();
@@ -954,8 +961,10 @@ mod tests {
             "the revoked row must survive retention cleanup"
         );
         assert!(
-            remaining.iter().any(|x| x.id == Id::new("sess-a2") && !x.revoked),
-            "the unexpired row must survive"
+            remaining.iter().any(|x| x.id == Id::new("sess-a2")),
+            "the unexpired row must survive (revoked by the test's own \
+             revoke-all, but not yet expired — expiry, not revocation, \
+             gates retention)"
         );
     }
 }

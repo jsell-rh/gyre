@@ -1402,7 +1402,7 @@ mod tests {
 
     use super::{
         test_helpers::*, AuthenticatedAgent, WsTicketStore, SESSION_TTL_SECS,
-        SESSION_TOUCH_THROTTLE_SECS, track_session,
+        SESSION_TOUCH_THROTTLE_SECS, credential_revoked, track_session,
     };
     use crate::mem::test_state;
     use gyre_domain::UserRole;

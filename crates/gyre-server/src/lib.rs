@@ -1372,10 +1372,12 @@ pub fn spawn_budget_daily_reset(state: Arc<AppState>) {
 /// Spawn a background task that deletes long-expired user sessions
 /// (user-management.md §Session Management — task-111 plan §6).
 ///
-/// Sessions whose `expires_at` is more than 30 days in the past are deleted;
-/// revocation state only needs to live as long as the session could have
-/// been presented. Revoked-but-unexpired rows are kept for audit until the
-/// retention cutoff passes them too.
+/// Sessions whose `expires_at` is more than 30 days in the past are
+/// deleted. Revoked rows are NEVER deleted, whatever their age (the
+/// `SessionRepository::delete_expired_before` port contract): a revoked row
+/// is the durable record that keeps a signed-out credential rejected
+/// ("sign out everywhere") — deleting one would silently re-authorize the
+/// API key it belonged to.
 pub fn spawn_session_cleanup(state: Arc<AppState>) {
     const INTERVAL_SECS: u64 = 24 * 3600; // daily
     const RETENTION_PAST_EXPIRY_SECS: u64 = 30 * 24 * 3600; // 30 days
