@@ -454,7 +454,7 @@ mod tests {
     const BACKLOG_MAX: u64 = 604_800; // 7d
 
     fn make_task(id: &str, labels: &[&str], status: TaskStatus, created_at: u64) -> Task {
-        let mut task = Task::new(Id::new(id), &format!("Task {id}"), created_at);
+        let mut task = Task::new(Id::new(id), format!("Task {id}"), created_at);
         task.labels = labels.iter().map(|l| l.to_string()).collect();
         task.status = status;
         task.priority = TaskPriority::High;
