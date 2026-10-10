@@ -110,3 +110,83 @@ The task meets the spec section as scoped (Principle, Architecture, Secret Scopi
 **progress: complete**
 
 — Reviewer, 2026-10-09
+
+## Round 4 (independent review, candidate `a8f242fa` vs base `653a696f`)
+
+Retry of the incomplete review-model round on the same candidate. All probes
+run fresh on the exact candidate tree (worktree clean at `a8f242fa`,
+`CARGO_TARGET_DIR=/tmp/gyre-target`, `SKIP_WEB_BUILD=1`; logs under
+`/tmp/stage/review-evidence`).
+
+Verdict: **complete (approved)**.
+
+### Independent evidence (first run of the server suites on this exact tree)
+
+Unlike prior rounds, which ran the gyre-server suites on separate trees whose
+crates/ bytes were asserted identical, this round built and ran them on
+`a8f242fa` itself:
+
+- `cargo test -p gyre-server --lib -- api::spawn::tests mem::secret_contract_tests mem::trace_payload_tests`
+  → **44 passed, 0 failed**, all five F2 secret-delivery tests passing by
+  name, plus the 4 mem contract tests and 6 trace payload tests.
+- `cargo test -p gyre-server --lib constraint_check` → **31 passed** —
+  regression cover for the sibling F3 fix in `create_violation_notifications`.
+- `cargo test -p gyre-common --lib secret` → **5 passed**.
+- `cargo test -p gyre-adapters --lib sqlite::secret` → **17 passed**.
+- **Mutation probe (fresh, this round):** reintroducing the F3 `"default"`
+  tenant fabrication together with F4's `from_utf8_lossy` makes
+  `spawn_unresolvable_workspace_skips_secret_resolution` fail with
+  `GYRE_CRED_LEAK=leaked` actually delivered to the child env (the exact
+  leak scenario), and `spawn_non_utf8_secret_skipped_others_delivered` fail.
+  Source restored byte-identical; both tests pass again on the restored tree.
+
+### Diff review (base → candidate, 13 files)
+
+The four crates files carry the revision-round product deltas only:
+`spawn.rs` (F3/F4 skip-and-warn semantics + the five delivery tests),
+`mem.rs` (F1 duplicate guard + contract tests; task-087 F2 trace-payload
+parity in `store()`/`delete_by_mr`, matching `build_payload_blob`/
+`decode_payload_blob` empty-sections-are-None semantics in
+`sqlite/trace.rs`), `constraint_check.rs` (sibling F3 fix), and
+`sqlite/secret.rs` (F5 operator-visible downgrade warnings only — the diff
+against base is exactly two `tracing::warn!` blocks). Exemption files only
+drained (fabricated-scope-defaults 7→6, lossy-secret-conversion 1→0,
+mem-port-contracts 1→0, unwritten-store-fields 1→0); no frozen count raised.
+web/ is untouched vs base — the accidental SPA rebuild from checkpoint
+`9997b253` is fully reverted by `f5167f47` (`git diff 653a696f a8f242fa --
+web/` is empty), and `git diff --check 653a696f a8f242fa` exits clean, so
+the verification stage's whitespace failure (attempt fd65ff50) does not
+reproduce on this candidate.
+
+### Contract and attribution
+
+`dev-contract.requirement_parts` strips `## Shipped` (including its nested
+repair subsections) from the contract prose; remaining top-level sections
+are exactly Spec Excerpt / Implementation Plan / Acceptance Criteria /
+Agent Instructions. All 14 frontmatter SHAs resolve as ancestors of
+`a8f242fa`; every task-097-labeled product-surface commit in the base..
+candidate range (10 of them) is in the frontmatter;
+`check-task-commit-attribution.sh` exits 0 on this tree.
+
+### Gates (all on this tree, all exit 0)
+
+rustfmt-diff and clippy-diff vs base (4 Rust files, clean), arch,
+migration-versions, mem-port-contracts, fabricated-scope-defaults,
+lossy-secret-conversion, unwritten-store-fields, scope-literal-defaults,
+inert-enforcement, forged-scope-fields, in-memory-state-stores,
+migration-sql-portability, forwarded-header-trust, unbounded-external-http,
+relative-path-defaults, byte-slice-truncation, abac-exempt-handlers,
+abac-route-registry, mcp-write-tools, dead-message-kinds.
+
+### Non-blocking observations (recorded, no action required of task-097)
+
+- Postgres `SecretRepository` remains a `bail!` stub — pre-existing crate
+  convention (matches `user_profile.rs` etc.), unchanged by this diff.
+- `BLOB` columns in the shared `000053` migration follow the established
+  `000047` precedent and are accepted by the portability gate; PG parity is
+  a repo-wide posture, not a task-097 regression.
+- Residual §7 items (Admin API, MCP resources, rotation job, teardown
+  revocation) are explicitly task-098/100 scope per the task's coverage
+  sections and the round-1 scope note.
+
+— Reviewer, 2026-10-10
