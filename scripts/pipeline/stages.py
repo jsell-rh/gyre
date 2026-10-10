@@ -389,7 +389,12 @@ def baseline_repair(execution, observation):
     from .catalog import generation_for
     store = execution.store
     key = observation['base'] + ':' + observation['environment']
-    excerpt = Path(observation['baseline_log']).read_text()[-24000:]
+    # Task bodies are materialized into the repository (pipeline-remote writes
+    # specs/tasks/task-NNN.md) and must pass dev-check.sh's
+    # `git diff --check HEAD^1 HEAD`; log-internal trailing whitespace would
+    # fail that gate, so strip it from generated baseline excerpts.
+    excerpt = '\n'.join(line.rstrip() for line in
+                        Path(observation['baseline_log']).read_text()[-24000:].splitlines())
     body = ('---\ntitle: "Repair verified failure on main ' + observation['base'][:12] + '"\n'
             'spec_ref: "GOAL.md — real implementations and meaningful verification"\n'
             'depends_on: []\nprogress: not-started\ncommits: []\n---\n\n'

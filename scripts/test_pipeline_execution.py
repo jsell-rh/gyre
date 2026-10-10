@@ -274,5 +274,39 @@ class CrashTest(unittest.TestCase):
         self.assertEqual(self.store.task('task-001')['data']['candidate'], base)
 
 
+class BaselineExcerptTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = Store(self.temp.name)
+        self.addCleanup(self.store.close)
+        source = self.store.directory / 'source'
+        (source / 'specs/system').mkdir(parents=True)
+        (source / 'specs/development').mkdir()
+        (source / 'specs/tasks').mkdir()
+        (source / 'specs/GOAL.md').write_text('real code')
+        self.log = self.store.directory / 'baseline.log'
+        self.log.write_text('head of log\nFAIL: trailing space and tab \t\nmiddle\t \nCR at eol\r\n')
+
+    def repair(self):
+        from pipeline.stages import baseline_repair
+        execution = Execution(self.store, {'id': 'attempt', 'token': 1})
+        return baseline_repair(execution, {'base': 'a' * 40, 'environment': 'env',
+                                           'baseline_log': str(self.log)})
+
+    def test_generated_task_body_carries_no_trailing_whitespace(self):
+        body = self.store.task(self.repair())['body']
+        offenders = [index for index, line in enumerate(body.splitlines(), 1)
+                     if line != line.rstrip()]
+        self.assertEqual(offenders, [], f'trailing whitespace on lines {offenders}')
+
+    def test_deduplication_returns_the_same_task(self):
+        first = self.repair()
+        second = self.repair()
+        self.assertEqual(first, second)
+        rows = self.store.db.execute("SELECT count(*) FROM tasks WHERE name LIKE 'task-%'").fetchone()[0]
+        self.assertEqual(rows, 1)
+
+
 if __name__ == '__main__':
     unittest.main()
