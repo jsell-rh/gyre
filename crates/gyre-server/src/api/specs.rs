@@ -687,6 +687,17 @@ pub async fn approve_spec(
                 }
                 None => gyre_common::message::Destination::Broadcast,
             };
+            let payload = serde_json::json!({
+                "repo_id": entry.repo_id,
+                "spec_path": spec_path,
+                "spec_sha": req.sha,
+                "approved_by": event.approver_id,
+                "approval_id": event.id,
+                // workspace_id is consumed by the server-side signal chain
+                // (not part of the spec'd bus payload — the bus destination
+                // already carries it) to scope the orchestrator registry.
+                "workspace_id": entry.workspace_id,
+            });
             state
                 .emit_event(
                     entry
@@ -695,15 +706,18 @@ pub async fn approve_spec(
                         .map(|ws| gyre_common::Id::new(ws.as_str())),
                     dest,
                     gyre_common::message::MessageKind::SpecApproved,
-                    Some(serde_json::json!({
-                        "repo_id": entry.repo_id,
-                        "spec_path": spec_path,
-                        "spec_sha": req.sha,
-                        "approved_by": event.approver_id,
-                        "approval_id": event.id,
-                    })),
+                    Some(payload.clone()),
                 )
                 .await;
+
+            // Task-115 (agent-runtime.md §1 Phases 1–3): intercept the
+            // workspace-destined SpecApproved signal server-side and route
+            // it through the orchestrator registry — ensure exactly one
+            // active workspace orchestrator, deliver the message to its
+            // inbox, and run its cross-repo delegation processing. Internal
+            // server mechanism, not a message bus feature (the bus message
+            // above is unaffected).
+            crate::signal_chain::on_spec_approved(&state, &payload).await;
         }
     }
 
@@ -945,27 +959,50 @@ pub async fn reject_spec(
     }
 
     // Agent-runtime §1: Create priority-2 "Spec rejected" notification for
-    // workspace Admin/Developer members.
-    if let Some(ref ws_id) = entry.workspace_id {
+    // workspace Admin/Developer members. Tenant scope is resolved from the
+    // workspace record — never fabricated via a "default" fallback (a
+    // lookup failure means the scope cannot be determined; skip and log).
+    if let Some(ws_id) = &entry.workspace_id {
         let ws_id = gyre_common::Id::new(ws_id.as_str());
-        if let Ok(members) = state.workspace_memberships.list_by_workspace(&ws_id).await {
-            for member in &members {
-                if matches!(
-                    member.role,
-                    gyre_domain::WorkspaceRole::Admin
-                        | gyre_domain::WorkspaceRole::Developer
-                        | gyre_domain::WorkspaceRole::Owner
-                ) {
-                    let tenant_id = entry.repo_id.as_deref().unwrap_or("default");
-                    crate::notifications::notify(
-                        state.as_ref(),
-                        ws_id.clone(),
-                        member.user_id.clone(),
-                        gyre_common::NotificationType::SpecRejected,
-                        format!("Spec '{}' rejected: {}", spec_path, req.reason),
-                        tenant_id,
-                    )
-                    .await;
+        // Resolve the tenant once outside the member fanout.
+        let tenant_id: Option<String> = match state.workspaces.find_by_id(&ws_id).await {
+            Ok(Some(ws)) => Some(ws.tenant_id.to_string()),
+            Ok(None) => {
+                tracing::warn!(
+                    workspace_id = %ws_id,
+                    spec_path = %spec_path,
+                    "spec rejection: workspace not found; skipping member notifications"
+                );
+                None
+            }
+            Err(e) => {
+                tracing::warn!(
+                    workspace_id = %ws_id,
+                    spec_path = %spec_path,
+                    "spec rejection: workspace lookup failed ({e}); skipping member notifications"
+                );
+                None
+            }
+        };
+        if let Some(tenant_id) = tenant_id {
+            if let Ok(members) = state.workspace_memberships.list_by_workspace(&ws_id).await {
+                for member in &members {
+                    if matches!(
+                        member.role,
+                        gyre_domain::WorkspaceRole::Admin
+                            | gyre_domain::WorkspaceRole::Developer
+                            | gyre_domain::WorkspaceRole::Owner
+                    ) {
+                        crate::notifications::notify(
+                            state.as_ref(),
+                            ws_id.clone(),
+                            member.user_id.clone(),
+                            gyre_common::NotificationType::SpecRejected,
+                            format!("Spec '{}' rejected: {}", spec_path, req.reason),
+                            tenant_id.clone(),
+                        )
+                        .await;
+                    }
                 }
             }
         }
@@ -2094,6 +2131,145 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(entry.approval_status, ApprovalStatus::Approved);
+    }
+
+    // Task-115 / agent-runtime.md §1 Phase 1→2: approving a workspace-scoped
+    // spec must (a) emit the SpecApproved message on the bus with the
+    // spec'd payload shape, and (b) trigger the server-side signal chain —
+    // a workspace orchestrator is spawned and creates a Delegation task
+    // referencing the approved spec_ref path@sha.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn approve_spec_emits_spec_approved_and_triggers_chain() {
+        let state = test_state();
+
+        // Seed a workspace + repo so the spec is workspace-scoped and the
+        // chain has a repo to delegate to.
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let ws = gyre_domain::Workspace::new(
+                    gyre_common::Id::new("ws-9"),
+                    gyre_common::Id::new("t1"),
+                    "Ws",
+                    "ws",
+                    0,
+                );
+                state.workspaces.create(&ws).await.unwrap();
+                let repo = gyre_domain::Repository::new(
+                    gyre_common::Id::new("r-9"),
+                    gyre_common::Id::new("ws-9"),
+                    "r-9",
+                    "/tmp/gyre-r-9",
+                    0,
+                );
+                state.repos.create(&repo).await.unwrap();
+                state
+                    .spec_ledger
+                    .save(&SpecLedgerEntry {
+                        path: "system/auth.md".to_string(),
+                        title: "Auth".to_string(),
+                        owner: "user:jsell".to_string(),
+                        kind: None,
+                        current_sha: "b".repeat(40),
+                        approval_mode: "human_only".to_string(),
+                        approval_status: ApprovalStatus::Pending,
+                        linked_tasks: vec![],
+                        linked_mrs: vec![],
+                        drift_status: "unknown".to_string(),
+                        created_at: 1700000000,
+                        updated_at: 1700000000,
+                        repo_id: Some("r-9".to_string()),
+                        workspace_id: Some("ws-9".to_string()),
+                    })
+                    .await
+                    .unwrap();
+            })
+        });
+        let app = crate::api::api_router().with_state(state.clone());
+
+        let sha = "b".repeat(40);
+        let body = serde_json::json!({ "sha": sha });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/specs/system%2Fauth.md/approve")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // (a) The SpecApproved bus message exists, workspace-destined, with
+        // the spec'd payload fields (repo_id, spec_path, spec_sha,
+        // approved_by, approval_id).
+        let msgs = state
+            .messages
+            .list_by_workspace(
+                &gyre_common::Id::new("ws-9"),
+                None,
+                None,
+                None,
+                None,
+                Some(100),
+            )
+            .await
+            .unwrap();
+        let bus_msg = msgs
+            .iter()
+            .find(|m| m.kind == gyre_common::message::MessageKind::SpecApproved)
+            .expect("SpecApproved emitted on the bus");
+        let payload = bus_msg.payload.as_ref().expect("payload present");
+        for field in [
+            "repo_id",
+            "spec_path",
+            "spec_sha",
+            "approved_by",
+            "approval_id",
+        ] {
+            assert!(
+                payload.get(field).is_some_and(|v| !v.is_null()),
+                "payload field {field} missing: {payload}"
+            );
+        }
+        assert_eq!(payload["spec_sha"], serde_json::json!(sha));
+        assert_eq!(
+            payload["repo_id"],
+            serde_json::json!("r-9"),
+            "payload carries the ledger entry's repo"
+        );
+        assert!(
+            matches!(
+                &bus_msg.to,
+                gyre_common::message::Destination::Workspace(ws) if *ws == gyre_common::Id::new("ws-9")
+            ),
+            "SpecApproved routed to Destination::Workspace(ws-9), got {:?}",
+            bus_msg.to
+        );
+        let agents = state
+            .agents
+            .list_by_workspace(&gyre_common::Id::new("ws-9"))
+            .await
+            .unwrap();
+        assert!(
+            agents.iter().any(
+                |a| a.orchestrator_type == gyre_domain::OrchestratorType::WorkspaceOrchestrator
+            ),
+            "workspace orchestrator spawned by the approve handler"
+        );
+        let tasks = state.tasks.list().await.unwrap();
+        let delegation = tasks
+            .iter()
+            .find(|t| t.task_type == Some(gyre_domain::TaskType::Delegation))
+            .expect("delegation task created by the signal chain");
+        assert_eq!(delegation.repo_id, gyre_common::Id::new("r-9"));
+        assert_eq!(
+            delegation.spec_path.as_deref(),
+            Some(format!("system/auth.md@{sha}")).as_deref(),
+            "delegation task pins spec_ref path@sha"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

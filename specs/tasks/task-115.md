@@ -2,7 +2,7 @@
 title: "Implement spec approval signal chain & orchestrators"
 spec_ref: "agent-runtime.md §1 Agent Lifecycle"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "agent-runtime.md §The Model"
   - "agent-runtime.md §1. Agent Lifecycle"
@@ -10,7 +10,7 @@ coverage_sections:
   - "agent-runtime.md §Phase 1: Spec Approval Triggers Orchestration"
   - "agent-runtime.md §Phase 2: Workspace Orchestrator — Cross-Repo Coordination"
   - "agent-runtime.md §Phase 3: Repo Orchestrator — Task Decomposition"
-commits: []
+commits: ["7f9f113cf2c00c7ce2366d1204a1ed75893fe97d", "e62a9d7e8943ad0ece7495c2ae9b8f3e5ad57d78", "0a13a2ee8fd20987829dab377cebbe75e2edc768", "e2153b406a60c0565053e1792731eef3d1d1557c"]
 ---
 
 ## Spec Excerpt
@@ -89,3 +89,71 @@ When a delegation task is created, the task scheduler spawns the repo orchestrat
 ## Agent Instructions
 
 Read `specs/system/agent-runtime.md` §1 (all of it, Phases 1-8) for full context. The spec approval handler is in `gyre-server/src/api/specs.rs` — grep for `approve`. Message bus types are in `gyre-common/src/message.rs` (MessageKind::SpecApproved already exists). Agent spawning is in `gyre-server/src/api/spawn.rs`. Task types (Delegation, Coordination, Implementation) are defined in `gyre-domain/src/task.rs`. MCP tools are in `gyre-server/src/mcp.rs`. The existing `domain_events.rs` handles event emission patterns.
+
+## Shipped
+
+Implementation: `7f9f113c` (retained from the checkpointed round; product
+surface unchanged this round — this repair restores the task file's recording
+state only).
+
+- **Phase 1** (`api/specs.rs`): `approve_spec` records the ledger approval,
+  emits the bus `SpecApproved` message (`Destination::Workspace(ws)`,
+  payload `{repo_id, spec_path, spec_sha, approved_by, approval_id}` —
+  `workspace_id` added server-side to scope the registry, distinct from the
+  bus destination), then invokes `signal_chain::on_spec_approved` to route
+  the workspace-destined signal server-side.
+- **Phase 2** (`signal_chain.rs`): `OrchestratorRegistry` — per-workspace and
+  per-repo `Arc<Mutex<()>>` maps behind one `Arc` (stable lock identity across
+  `AppState` clones). `on_spec_approved` acquires the workspace lock, ensures a
+  live workspace-orchestrator agent via the task-093 spawn core
+  (workspace-scoped JWT, keypair, budget), delivers the message to its inbox
+  (`Destination::Agent`, acked), and runs cross-repo coordination: delegation
+  task (`task_type: Delegation`, `spec_path: path@sha`) for the spec's repo,
+  coordination tasks (`task_type: Coordination`) for `spec_links` dependents,
+  priority-4 `CrossWorkspaceSpecChange` notifications for cross-workspace
+  dependents' Admins/Owners. Orchestrator transitions to Idle after processing
+  (spawned on demand, not long-lived).
+- **Phase 3**: `spawn_task_scheduler` (30 s loop, started in `main.rs`, job
+  registry tracked for `/healthz` and `POST /admin/jobs/task_scheduler/run`).
+  `scheduler_run_once` claims Backlog Delegation/Coordination tasks
+  (Backlog→InProgress claim makes re-entry idempotent), acquires the per-repo
+  registry lock, spawns the repo orchestrator via the task-093 core when none
+  is live, and processes: Delegation → reads the approved spec at the pinned
+  SHA (real `git cat-file` via `read_git_file`), decomposes (LLM judgment via
+  `state.llm` when configured; deterministic one-per-`##`-section fallback
+  without) into ordered Implementation sub-tasks carrying `spec_ref path@sha`,
+  `parent_task_id`, `order`, `depends_on` chaining, then marks the delegation
+  task Done. Coordination → impact assessment (LLM or conservative
+  deterministic), then Done. `Implementation` and untyped tasks stay Backlog —
+  Phase 4's worker-spawn path (task-118); `spawn_agent_core` independently
+  rejects Delegation/Coordination task types.
+- **Incidental fix** (this branch's diff shifted the frozen exemption line):
+  `reject_spec`'s notification fanout fabricated a tenant scope via
+  `entry.repo_id.unwrap_or("default")` — also a repo/tenant type confusion.
+  Now resolves the tenant from the workspace record, skips+logs when
+  unresolvable; exemption entry deleted, `FROZEN_EXEMPTION_COUNT` 7→6.
+
+Test evidence (all run this round at HEAD `f9531138` + this repair):
+`cargo test -p gyre-server --lib signal_chain` → 10 passed, 0 failed;
+`--lib api::specs` → 73 passed, 0 failed (incl.
+`approve_spec_emits_spec_approved_and_triggers_chain`); `--lib mcp` → 71
+passed, 0 failed; `--lib api::orchestrator` → 6 passed, 0 failed;
+`cargo build -p gyre-server` → exit 0. Attribution gate
+(`check-task-commit-attribution.sh`) and
+`check-fabricated-scope-defaults.sh` → OK. Sandbox transport restriction
+recorded (`tcp_listener_probe: unsupported, errno 95`,
+`/tmp/stage/capabilities.json`): listener-bound tests (`tty::`, `ws::`,
+`otlp_receiver::`, `git_http::`, gyre-cli `ws_integration`) cannot run here —
+unchanged from base, must run on host/CI; `cargo test --all` remains for the
+verification gate. Evidence: `/tmp/stage/review-evidence/task-115-evidence.txt`.
+
+Contract repair (finding `4ba66d19`, 2026-10-10): the prior round recorded
+completion by editing the contract itself — ticking the Acceptance Criteria
+checklist, rewriting the last criterion's text, and inserting `## Shipped`
+between the criteria and Agent Instructions. This round restores all four
+contract sections byte-identical to the assignment template (verified:
+`awk` section diff vs `f4acb4eb` → identical for Spec Excerpt, Implementation
+Plan, Acceptance Criteria, Agent Instructions) and records completion only in
+the sanctioned places — frontmatter (`progress:`, `commits:` including
+`7f9f113c`, which the attribution gate required) and this end-of-file
+`## Shipped` section. No product files touched this round.
