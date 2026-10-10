@@ -87,9 +87,8 @@ Read `specs/system/agent-gates.md` Part 1 §Gate Types through §AgentReview Gat
 ## Shipped
 
 Both `agent-gates.md` coverage sections are implemented with real, production
-behavior (checkpoint commits `42d79754`…`1b40aacb`, recovered and verified in
-this assignment; the attribution repair from the interrupted run is included
-at `9bda8c17`).
+behavior (product commits `42d79754`…`1b40aacb`, recovered across interrupted
+runs and completed in this assignment, including the review-F1/F2/F3 repairs).
 
 - **Gate types**: `AgentReview` and `AgentValidation` variants in
   `gyre-common`'s `GateType`; `QualityGate` carries `persona` (existing) and
@@ -105,31 +104,45 @@ at `9bda8c17`).
   error, not a silent None), MR title, and task description (acceptance
   criteria carrier) via MR → author agent → task.
 - **Scoped token**: `AgentSigningKey::mint_scoped` mints a JWT with
-  `scope: review:submit` only. Enforcement is real and triple-layered:
-  `git_http` denies push (403 read-only), the ABAC middleware allow-lists
-  review routes only (403 outside), and `submit_review` binds the reviewer
-  identity to the token subject (forged `reviewer_agent_id` in the body is
-  ignored). All four behaviors covered by `tests/task134_review_probe.rs`
-  (4 passed) — oneshot router calls, no listener required.
+  `scope: review:submit` only (review agents) or `validation:report`
+  (validation agents, review F2 — validators have no review-submission
+  capability). Enforcement is real and layered, all exact-match capability
+  comparison (review F3): `git_http` denies push (403 read-only), the ABAC
+  middleware allow-lists each capability's routes only (403 outside;
+  validators are read-only MR context), and `submit_review` binds the
+  reviewer identity to the token subject (forged `reviewer_agent_id` in the
+  body is ignored). Covered by `tests/task134_review_probe.rs` (7 passed) —
+  oneshot router calls, no listener required.
 - **Verdict mapping**: Approved → Passed, ChangesRequested → Failed with the
   agent's feedback surfaced in gate output; only the gate's own agent's
   verdict counts; exit-0-without-review fails ("cannot determine state" is
   not "state is fine"). Unit tests plus two end-to-end tests that bind a real
   axum server, a real bare git repo with a spec pinned at a pre-tip SHA, and
   drive the fixture `review_agent_driver.sh` through the live Review API.
+  Both e2e tests seed builtin ABAC policies (review F1: `build_state` wires
+  an empty policy store; unseeded default-deny made the driver's review POST
+  403 on loopback-capable hosts); `e2e_review_submission_is_abac_allowed_`
+  `with_seeded_policies` guards that regression without needing loopback.
 - **Teardown**: token revoked (`kv_remove`) on every exit path (verdict,
   timeout, spawn failure) — asserted by tests; temp spec/diff files removed.
 - **AgentValidation**: spawns the configured validation agent with
   `GYRE_VALIDATION_TYPE` delivered and attributed in output; pass/fail from
   the exit code; no-command fails closed.
 
-Test evidence (this sandbox, branch `pipeline/task-134/24f2f8fe…-1`, in
-`/tmp/stage/review-evidence/task-134-verification.md`): gate_executor 33/33,
-task134_review_probe 4/4, api::gates 6/6, api::merge_requests 21/21, adapters
-quality_gate 1/1, git2 read_file_at_commit 3/3. All 15 frozen-baseline
-mechanical checks pass, plus migration versions/portability and commit
-attribution. The two `agent_review_end_to_end` tests SKIP here — this sandbox
-denies loopback `accept()` (errno 95, infrastructure restriction, recorded in
-capabilities); they must run on host/GitHub CI, which is mandatory for
-exact-head verification anyway. `cargo test --all` is owned by verification
-and publication; focused suites above cover every touched module.
+Test evidence (this sandbox, branch `pipeline/task-134/8f3dfc3c…-1`, in
+`/tmp/stage/review-evidence/task-134-verification.md`): gate_executor 35/35,
+task134_review_probe 7/7, abac_middleware 9/9, git_http 36/37 — the single
+failure is `git_clone_empty_repo_via_smart_http`, pre-existing on base and
+unmodified by this branch, whose clone client fails with `getpeername()
+errno 95` — the documented sandbox transport restriction (capabilities.json
+records loopback `accept()` errno 95), not a code defect; it must pass on
+host/GitHub CI. All 18 frozen-baseline mechanical checks pass, plus migration
+versions/portability and commit attribution. The two
+`agent_review_end_to_end` tests SKIP here for the same errno-95 reason; they
+must run on host/GitHub CI, which is mandatory for exact-head verification
+anyway. `cargo test --all` is owned by verification and publication; focused
+suites above cover every touched module. This round also repaired a
+verification finding outside task-134's surface: base commit `27bd585c`
+(task-155) was missing from `specs/tasks/task-155.md`'s `commits:` list,
+failing `check-task-commit-attribution.sh` at this head — appended, gate
+green.
