@@ -1,7 +1,7 @@
 ---
 title: "Hierarchy enforcement scripts — check-hierarchy, check-tenant-filter, check-api-auth"
 spec_ref: "hierarchy-enforcement.md §7"
-depends_on: []
+depends_on: [task-236]
 progress: ready-for-review
 coverage_sections:
   - "hierarchy-enforcement.md §Invariant Enforcement"
@@ -191,6 +191,43 @@ bookkeeping repair:
   delegated registry check. `cargo test -p gyre-adapters --test
   tenant_isolation`: **2 passed / 0 failed** (7m 21s compile; run record
   `tenant-isolation.txt` in the evidence dir).
+
+- **Baseline-repair verification round (2026-10-10, merged HEAD afd7379d;
+  evidence: `/tmp/stage/review-evidence/task-160-baseline-repair/`):** this
+  assignment was re-issued with `status: baseline_failed` — the baseline run
+  at base `27bd585c` failed `check-task-commit-attribution.sh` (task-155
+  commit missing from `specs/tasks/task-155.md`). The merge afd7379d folded
+  verified base `e77537fa` (task-236) into candidate `8b1807de`; the
+  task-155 attribution drift was repaired base-side by `7c6ac232` (task-231)
+  before this merge, so the inherited baseline failure is resolved at HEAD
+  with no new drift: `check-task-commit-attribution.sh` exit 0. The task-160
+  surface is byte-stable from the candidate (empty `git diff 8b1807de
+  afd7379d -- scripts/ crates/gyre-adapters/
+  crates/gyre-server/src/abac_middleware.rs`; the only task-surface-path
+  delta is a base-side *removal* of one byte-slice exemption entry —
+  strengthening, and the dev-check exemption-growth guard compares additions
+  only). The pipeline's frontmatter sync (`depends_on: [task-236]`, matching
+  the assigned contract) is committed with this record. No source change was
+  needed; this round is fresh verification only:
+
+  - Clean gates at afd7379d: `check-hierarchy.sh` exit 0;
+    `check-tenant-filter.sh` exit 0 (111 read methods on tenant-column
+    tables / 0 violations); `check-api-auth.sh` exit 0 (middleware chain +
+    4 non-ABAC handlers + delegated frozen-baseline registry);
+    `check-arch.sh` OK; `check-scope-literal-defaults.sh crates` OK;
+    `check-task-commit-attribution.sh` OK. Pre-commit/CI wiring confirmed
+    intact (`.github/workflows/ci.yml` runs all three gates;
+    `scripts/dev-check.sh` static_gates includes them).
+  - Fresh mutation kills in isolated worktree `/tmp/stage/task160-basemut`
+    (restored after each; worktree removed after):
+    `Task.workspace_id → Option<Id>` → hierarchy exit 1 naming `task.rs:60`;
+    tenant predicate stripped from `sqlite/secret.rs::resolve_for_agent` →
+    tenant-filter exit 1 ("1 violation(s) out of 111", naming
+    `secret.rs:293`); deleted `RouteResourceMapping` for `/api/v1/activity`
+    → api-auth exit 1 via the delegated registry check.
+  - `cargo test -p gyre-adapters --test tenant_isolation`: **2 passed /
+    0 failed** (cold build 7m13s compile; run record in
+    `tenant-isolation.txt` in the evidence dir).
 
 Review history: rounds 1–4 in `specs/reviews/task-160.md` (round-3 findings
 F1 dead exemptions / F2 read-name blind spot fixed in 06df8bfb and verified
