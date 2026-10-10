@@ -1,11 +1,11 @@
 ---
 title: "Ground Briefing Q&A in real briefing data with sources and history validation"
 spec_ref: "human-system-interface.md §9 Briefing Q&A (§1295-1332)"
-depends_on: []
-progress: not-started
+depends_on: [task-213]
+progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §47"
-commits: []
+commits: ["abcfff040406d5e320dfa970b725f0748178e333", "88b57180cf1397df7966381d3289b8d497c79c20"]
 ---
 
 ## Spec Excerpt
@@ -115,3 +115,91 @@ All work in `crates/gyre-server/src/api/graph.rs` unless noted.
   leaving mirrored/self-confirming assertions.
 - Skip formatters/linters/full-suite runs beyond the two test commands above; the loop
   handles global validation.
+
+## Shipped
+
+Implementation recovered from interrupted assignment (checkpoint 88b57180),
+rustfmt-repaired in abcfff04 (formatting-only, five hunks inside task-196's
+own changed lines; `rustfmt --edition 2021`, gate re-run clean), re-verified
+fresh in each round:
+
+- **History cap (§1325):** `briefing_ask` rejects `history.len() > 20` with
+  `ApiError::InvalidInput` → HTTP 400 after `require_workspace`, before the rate
+  limiter; exactly 20 accepted. No truncation path remains (the `drain` block is
+  gone).
+- **Grounding (§1327 bullets 1+3):** `resolve_since` (new shared helper:
+  last_seen_at → 24h fallback) is used by both `get_workspace_briefing` and
+  `briefing_ask`; the real `assemble_briefing` output is JSON-serialized into
+  `{{context}}` of the system prompt, with `req.history` replayed as
+  `"{role}: {content}"` lines so follow-ups work. Server stays stateless.
+- **Response contract (§1325):** the terminal SSE `complete` event carries
+  `{answer, sources}` — `answer` is the full concatenated stream text, `sources`
+  is a de-duplicated array derived from briefing items' `spec_path` and
+  completed agents' `{spec_ref, agent_id}` (`briefing_sources()`). `partial`
+  events still stream incremental `{type, text}` chunks.
+- **Frontend:** `InlineChat.svelte` reads `parsed.answer ?? parsed.text ??
+  streamBuffer` on `complete` and notifies the caller via new `onassistant`;
+  `Briefing.svelte` tracks both user and assistant turns (client owns
+  conversation state) and sends full history (capped client-side at 20) on
+  follow-ups.
+- Untouched as instructed: route registration (`api/mod.rs`), ABAC `generate`
+  mapping (`abac_middleware.rs`), 10 req/60s rate limiter, `LlmUnavailable` →
+  503.
+- Dropped the accidental `web/dist` rebuild the interrupted checkpoint had
+  captured (build.rs rebuild during cargo test) — task branches don't ship dist
+  rebuilds (task-210 round 12 precedent) and the regenerated bundle carried a
+  `git diff --check` trailing-whitespace failure. `web/dist` is byte-identical
+  to main again.
+
+### Verification (product source at 88b57180, formatting-only delta in
+abcfff04; re-run fresh this contract-repair round on the restored tree)
+
+- `cargo test -p gyre-server --lib api::graph::tests::briefing` — 15/15 pass
+  (400 cap incl. 20-accepted boundary, prompt grounding via PromptCaptureFactory
+  asserting the seeded MR title + spec path + history replay in the captured
+  system prompt, SSE `{answer, sources}` shape with answer == concatenated
+  partials, non-empty sources for the seeded spec-linked MR, 503, rate limit).
+  Evidence: `/tmp/stage/review-evidence/task-196-contract-repair-briefing-tests.txt`
+  (fresh run this round; earlier rounds' logs:
+  `task-196-server-briefing-tests.txt`, `task-196-tests-repair-round.txt`).
+- `cd web && npx vitest run Briefing.test.js InlineChat.test.js
+  DetailPanelChat.test.js` — 49/49 pass (complete-event `{answer, sources}`
+  consumption, follow-up history accumulation, no regressions in shared
+  InlineChat consumers). Evidence:
+  `/tmp/stage/review-evidence/task-196-contract-repair-frontend-tests.txt`.
+- `bash scripts/check-arch.sh` — passes.
+- `python3 scripts/check-rustfmt-diff.py 73a31e0b` — "changed lines clean",
+  exit 0.
+- `bash scripts/check-task-commit-attribution.sh` — OK exit 0 with the
+  canonical `commits:` list (abcfff04, 88b57180; re-derived by
+  `dev-attribution.py`, matching HEAD e6d79ec8).
+- `git diff --check 73a31e0b` (working tree) — clean; `git diff 73a31e0b HEAD
+  -- web/dist` empty.
+- No `MUTANT` markers in `crates/` or `web/src/`.
+- Sandbox limitation: loopback listeners are unsupported here
+  (`capabilities.json`: tcp_listener_probe errno 95), so
+  `tests/graph_integration.rs::test_briefing_ask_sse` and
+  `test_briefing_ask_not_found` cannot run in this sandbox. Both are
+  payload-agnostic (assert 200/SSE content-type/`partial`+`complete` presence
+  and 404) and compatible with the new payload; host verification must run
+  `cargo test -p gyre-server --test graph_integration`.
+
+### Contract-repair round (finding 27dbc148, category=contract)
+
+Audit: the assigned contract (Spec Excerpt, Why-open finding, Implementation
+Plan, Acceptance Criteria, Agent Instructions) is byte-identical to the
+decomposition commit — verified by hashing `scripts/dev-contract.py`
+`requirement_parts` prose (identical) and frontmatter (differs only in the
+lifecycle-managed `progress`/`commits` fields plus the assignment-issued
+`depends_on: [task-213]`). The finding's cause: the prior round recorded its
+repair narrative under `## Repair round (baseline finding d9546b22)` — an
+unknown heading, which the contract hash treats as normative prose, changing
+the requirement generation. Repaired by removing that section and recording
+this round under the canonical `## Shipped` operational heading only (this
+subsection is nested under it). Product files untouched this round:
+`git diff e6d79ec8 -- crates/ web/src/` empty; the only source-side delta on
+the branch remains 88b57180 + the formatting-only abcfff04 (verified hunk by
+hunk — whitespace/layout only). `commits:` retains the attribution-canonical
+list `["abcfff04...", "88b57180..."]` (re-derived via `dev-attribution.py`);
+the restore, not an exemption, keeps
+`bash scripts/check-task-commit-attribution.sh` at exit 0.

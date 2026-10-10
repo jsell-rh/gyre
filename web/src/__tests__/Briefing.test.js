@@ -260,9 +260,12 @@ describe('Briefing S4.3', () => {
 
     it('calls briefingAsk when user submits question', async () => {
       const { api } = await import('../lib/api.js');
-      const mockResponse = new Response('data: {"type":"complete","text":"42"}\n\n', {
-        headers: { 'Content-Type': 'text/event-stream' },
-      });
+      const mockResponse = new Response(
+        'data: {"type":"partial","text":"partial stream "}\n\n' +
+        'data: {"type":"partial","text":"buffer"}\n\n' +
+        'data: {"type":"complete","answer":"final answer text","sources":[{"spec_path":"payment-retry.md"}]}\n\n',
+        { headers: { 'Content-Type': 'text/event-stream' } }
+      );
       api.briefingAsk.mockResolvedValue(mockResponse);
 
       render(Briefing, { props: { workspaceId: 'ws-1', scope: 'workspace' } });
@@ -276,6 +279,32 @@ describe('Briefing S4.3', () => {
         expect(api.briefingAsk).toHaveBeenCalledWith(
           'ws-1',
           expect.objectContaining({ question: 'What happened today?' })
+        );
+      });
+      // HSI §1325: the complete event carries {answer, sources} — the
+      // assistant message must come from `answer`, not the partial buffer.
+      await waitFor(() => {
+        expect(screen.getByText('final answer text')).toBeTruthy();
+      });
+      expect(screen.queryByText('partial stream buffer')).toBeNull();
+
+      // Follow-up: the client owns the conversation state, so the second
+      // request's history must include BOTH the first user turn and the
+      // committed assistant answer.
+      await fireEvent.input(screen.getByRole('textbox'), {
+        target: { value: 'And what about the MRs?' },
+      });
+      await fireEvent.click(screen.getByRole('button', { name: /send/i }));
+      await waitFor(() => {
+        expect(api.briefingAsk).toHaveBeenCalledWith(
+          'ws-1',
+          expect.objectContaining({
+            question: 'And what about the MRs?',
+            history: [
+              { role: 'user', content: 'What happened today?' },
+              { role: 'assistant', content: 'final answer text' },
+            ],
+          })
         );
       });
     });
