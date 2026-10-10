@@ -5,7 +5,7 @@ depends_on: [task-213]
 progress: complete
 coverage_sections:
   - "human-system-interface.md §47"
-commits: ["3b90956c8d243b34b4bfbd329d3ce57b47819e86", "abcfff040406d5e320dfa970b725f0748178e333", "88b57180cf1397df7966381d3289b8d497c79c20"]
+commits: ["3b90956c8d243b34b4bfbd329d3ce57b47819e86", "abcfff040406d5e320dfa970b725f0748178e333", "88b57180cf1397df7966381d3289b8d497c79c20", "05709c242509b89214876339b3c463ede3a31b60"]
 ---
 
 ## Spec Excerpt
