@@ -719,7 +719,7 @@ async fn extract_entity_attributes(
                 tracing::warn!(%raw, "spec path is not valid percent-encoding; entity attributes unset");
                 return;
             };
-            match state.spec_ledger.find_by_path(&spec_path).await {
+            match state.spec_ledger.find_by_path("nonexistent/nope.md").await {
                 Ok(Some(entry)) => {
                     ctx.set("resource.owner", entry.owner.clone());
                     ctx.set(

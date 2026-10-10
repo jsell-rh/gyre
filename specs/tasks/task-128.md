@@ -2,7 +2,7 @@
 title: "Implement ABAC policy engine core: entity, conditions, and attribute model"
 spec_ref: "abac-policy-engine.md §Core Concepts"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "abac-policy-engine.md §Core Concepts"
   - "abac-policy-engine.md §Attributes"
@@ -200,3 +200,11 @@ Full `cargo test --all` and GitHub CI remain verification/publication gates.
 This sandbox cannot bind a TCP listener (`capabilities.json`
 `tcp_listener_probe.supported=false`, errno 95) — no live HTTP server probe;
 middleware behavior is covered by the in-process tower tests above.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/abac_middleware.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
