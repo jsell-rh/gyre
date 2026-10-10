@@ -1,7 +1,7 @@
 ---
 title: "Repair verified failure on main 05709c242509"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
-depends_on: []
+depends_on: [task-232]
 progress: ready-for-review
 commits: []
 ---
@@ -69,5 +69,50 @@ GYRE_BASELINE_FAILURE_JSON {"base": "05709c242509b89214876339b3c463ede3a31b60", 
 - **Mutation check (test-the-repair)**: with the repair reverted via `git stash`, the gate re-fails with the identical violation (exit 1, `task-229-reproduction-before-repair.txt`); restoring it re-passes (exit 0) — the pass is attributable to the recorded SHA, not gate drift.
 - **Attribution for this task**: `python3 /tmp/stage/dev-attribution.py task-229` produces no change, so `commits: []` is correct: this repair round adds only task records (`specs/tasks/task-196.md`, `specs/tasks/task-229.md`), no product surface.
 - **Transport restriction**: this sandbox cannot accept TCP (`accept(): [Errno 95] Operation not supported`, recorded in `/tmp/stage/capabilities.json`). No runtime surface was touched, so no HTTP probe is applicable; exact-head GitHub checks belong to host verification and remain mandatory.
+
+### Merge round (assignment base db37fd02, prerequisite task-232)
+
+**Context:** while this task's round-1 repair sat at candidate `d4384cde`
+(repaired `05709c24` task-196 drift on top of `05709c24`), main advanced:
+task-227/228 landed the same task-196 repair, task-155's squashed landing
+`27bd585c` re-introduced the drift class on task-155, and task-231/232
+repaired it (recording `27bd585c…` in `specs/tasks/task-155.md`). The
+executor merged base `db37fd02fcaf0b4ad1b00ca4abde6bf12e7dbae8` into this
+branch (merge `ec20df43`, no conflicts — the task-196 repair is byte-identical
+on both sides: `git diff d4384cde db37fd02 -- specs/tasks/task-196.md` is
+empty). No active merge or rebase remained to resolve.
+
+**This round changed no product source:** the merged tree vs base `db37fd02`
+is exactly `specs/tasks/task-229.md` (this task file: `depends_on: []` →
+`[task-232]` per this assignment's contract, plus this section).
+`git diff db37fd02 HEAD -- scripts/ crates/ web/` is empty;
+`scripts/task-commit-attribution-exemptions.txt` unchanged at its frozen
+3-entry baseline; no gate, skip, or check weakened.
+
+**Fresh verification on the merged tree (HEAD `ec20df43`):**
+
+- `bash scripts/check-task-commit-attribution.sh` — exit 0.
+  Evidence: `/tmp/stage/review-evidence/task-229-round2-gate-at-merged-head.txt`.
+- Mutation check (task-155 SHA, the prerequisite drift repaired on main by
+  task-231): `27bd585c…` removed from `specs/tasks/task-155.md` via sed →
+  gate FAIL exit 1 with exactly `27bd585c task-155 feat(task-155): Implement
+  gyre search CLI command`; restored → exit 0. Evidence:
+  `/tmp/stage/review-evidence/task-229-round2-mutation-check.txt`.
+- Mutation check (task-196 SHA, this task's own round-1 repair, re-verified
+  after the merge): `05709c24…` removed from `specs/tasks/task-196.md` via
+  sed → gate FAIL exit 1 with exactly `05709c24 task-196 feat(task-196):
+  Ground Briefing Q&A in real briefing data with sources and history
+  validation`; restored → exit 0. Evidence:
+  `/tmp/stage/review-evidence/task-229-round2-mutation-check-task196.txt`.
+  The pass on the merged tree is attributable to both recorded SHAs, not
+  gate drift.
+- `python3 /tmp/stage/dev-attribution.py task-229` — no change: the branch
+  delta vs `origin/main` is only `d4384cde` (pipeline checkpoint, specs-only),
+  so `commits: []` remains attribution-canonical for this specs-only round.
+
+The TCP `accept()` listener probe remains unsupported in this sandbox
+(errno 95, `/tmp/stage/capabilities.json`); no runtime surface was touched,
+so no HTTP probe applies. Exact-head GitHub checks belong to host
+verification and remain mandatory.
 
 Independent review, full deterministic gates, and GitHub checks on the exact PR head remain required before merge. All evidence above is under `/tmp/stage/review-evidence/`.
