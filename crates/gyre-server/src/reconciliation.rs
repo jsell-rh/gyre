@@ -1787,3 +1787,128 @@ mod tests {
         assert_eq!(msgs.len(), 1, "identical re-PUT must not emit another event");
     }
 }
+
+#[cfg(test)]
+mod review_probe {
+    use super::*;
+    use crate::mem::test_state;
+    use gyre_domain::meta_spec::{MetaSpec, MetaSpecApprovalStatus, MetaSpecKind, MetaSpecScope};
+    use gyre_domain::{Repository, Workspace};
+
+    fn now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    fn sha256_hex(s: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(s.as_bytes());
+        hex::encode(h.finalize())
+    }
+
+    async fn make_workspace(state: &Arc<AppState>, id: &str) -> gyre_domain::Workspace {
+        let ws = Workspace {
+            id: Id::new(id),
+            tenant_id: Id::new("default"),
+            name: format!("ws-{id}"),
+            slug: id.to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Autonomous,
+            llm_model: None,
+            created_at: 1_000_000,
+            compute_target_id: None,
+        };
+        state.workspaces.create(&ws).await.unwrap();
+        ws
+    }
+
+    async fn make_repo(state: &Arc<AppState>, id: &str, ws_id: &str) -> Repository {
+        let repo = Repository::new(Id::new(id), Id::new(ws_id), format!("repo-{id}"), format!("/tmp/x/{id}"), now());
+        state.repos.create(&repo).await.unwrap();
+        repo
+    }
+
+    async fn make_meta_spec(state: &Arc<AppState>, name: &str, version: u32) -> MetaSpec {
+        let prompt = format!("prompt for {name} v{version}");
+        let ms = MetaSpec {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            kind: MetaSpecKind::Persona,
+            name: name.to_string(),
+            scope: MetaSpecScope::Global,
+            scope_id: None,
+            prompt,
+            version,
+            content_hash: sha256_hex(&format!("prompt for {name} v{version}")),
+            required: false,
+            approval_status: MetaSpecApprovalStatus::Approved,
+            approved_by: Some("admin".to_string()),
+            approved_at: Some(now()),
+            created_by: "admin".to_string(),
+            created_at: now(),
+            updated_at: now(),
+        };
+        state.meta_specs.create(&ms).await.unwrap();
+        ms
+    }
+
+    /// Probe: does a SECOND reconciliation wave emit its own
+    /// ReconciliationCompleted after the first wave completed?
+    #[tokio::test(flavor = "multi_thread")]
+    async fn second_wave_emits_own_completion() {
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-probe-2wave").await;
+        make_repo(&state, "repo-pw", "ws-probe-2wave").await;
+        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+
+        let count = |ws_id: Id| {
+            let state = state.clone();
+            async move {
+                state
+                    .messages
+                    .list_by_workspace(&ws_id, Some("reconciliation_completed"), None, None, None, Some(50))
+                    .await
+                    .unwrap()
+                    .len()
+            }
+        };
+
+        // Wave 1
+        run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
+        let tasks = state.tasks.list_by_workspace(&ws.id).await.unwrap();
+        for mut t in tasks {
+            if t.labels.iter().any(|l| l == RECONCILIATION_LABEL) {
+                t.transition_status(TaskStatus::InProgress).unwrap();
+                t.transition_status(TaskStatus::Review).unwrap();
+                t.transition_status(TaskStatus::Done).unwrap();
+                state.tasks.update(&t).await.unwrap();
+            }
+        }
+        maybe_emit_reconciliation_completed(&state, &ws.id).await;
+        assert_eq!(count(ws.id.clone()).await, 1, "wave 1 completes");
+
+        // Registry version bumps -> wave 2 gets a new title (dedup passes
+        // because wave-1 tasks are terminal).
+        state.meta_specs.update(&MetaSpec { version: 5, ..ms.clone() }).await.unwrap();
+        let s2 = run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
+        assert_eq!(s2.tasks_created, 1, "wave 2 task created");
+
+        let tasks = state.tasks.list_by_workspace(&ws.id).await.unwrap();
+        for mut t in tasks {
+            if t.labels.iter().any(|l| l == RECONCILIATION_LABEL) && t.status != TaskStatus::Done {
+                t.transition_status(TaskStatus::InProgress).unwrap();
+                t.transition_status(TaskStatus::Review).unwrap();
+                t.transition_status(TaskStatus::Done).unwrap();
+                state.tasks.update(&t).await.unwrap();
+            }
+        }
+        maybe_emit_reconciliation_completed(&state, &ws.id).await;
+        let n = count(ws.id.clone()).await;
+        assert_eq!(n, 2, "wave 2 completion must emit its own ReconciliationCompleted (doc comment: 'A later wave ... emits its own completion'); got {n}");
+    }
+}
