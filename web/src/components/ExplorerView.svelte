@@ -739,6 +739,20 @@
     }
   }
 
+  /** Read the drilled repo name from the current URL (?repo=name), or null.
+   *  Scope drill per ui-layout.md §3: selectRepo pushes this param; reading
+   *  it back makes the drilled state deep-linkable on reload/refresh and
+   *  lets popstate (browser Back/Forward) keep the view in sync with the
+   *  URL instead of drifting. */
+  function drilledRepoFromUrl() {
+    try {
+      const param = new URL(window.location.href).searchParams.get('repo');
+      return param || null;
+    } catch {
+      return null;
+    }
+  }
+
   function selectRepo(repo) {
     // In workspace-scope mode, selecting a repo loads its graph in this view.
     // Scope drill per ui-layout.md §3: URL updates via pushState (no reload),
@@ -764,6 +778,54 @@
       window.history.pushState(window.history.state, '', url.toString());
     }
   }
+
+  // Restore the drilled repo from ?repo= once the workspace repo list is
+  // available (repo name -> id resolution needs the loaded list). Runs only
+  // at workspace scope with a drill param present; the mount-time restore
+  // deliberately does NOT push another history entry - the URL is already
+  // the drilled one.
+  let drillRestored = false;
+  $effect(() => {
+    if (drillRestored || scopeType !== 'workspace' || wsReposLoading || !wsRepos.length) return;
+    const name = drilledRepoFromUrl();
+    if (!name) return;
+    const repo = wsRepos.find(r => (r.name ?? r.id) === name);
+    if (!repo) return;
+    drillRestored = true;
+    selectedRepoId = repo.id;
+    showingRepoGraph = true;
+    clearConceptSearch();
+    loadGraph(repo.id);
+  });
+
+  // Browser Back/Forward (popstate): keep the view in sync with the URL.
+  // App-level popstate handles mode changes; this handles the drill param
+  // within the explorer view. Back from a drilled state (param gone) returns
+  // to the repo list; Forward re-enters the drilled graph.
+  $effect(() => {
+    const onPopstate = () => {
+      if (scopeType !== 'workspace') return;
+      const name = drilledRepoFromUrl();
+      if (!name) {
+        if (showingRepoGraph) {
+          showingRepoGraph = false;
+          selectedRepoId = '';
+          graph = null;
+          graphError = null;
+        }
+        return;
+      }
+      const repo = wsRepos.find(r => (r.name ?? r.id) === name);
+      if (repo && (!showingRepoGraph || selectedRepoId !== repo.id)) {
+        selectedRepoId = repo.id;
+        showingRepoGraph = true;
+        clearConceptSearch();
+        loadGraph(repo.id);
+      }
+    };
+    window.addEventListener('popstate', onPopstate);
+    return () => window.removeEventListener('popstate', onPopstate);
+  });
 
   async function loadRepos() {
     reposLoading = true;

@@ -163,16 +163,13 @@ describe('Scope transitions (ui-layout.md §3) — workspace → repo via repo c
     });
 
     // 2. Content cross-fades: fadeContent() toggles the `faded` class for
-    //    150ms then restores visibility. Depending on real-timer progress
-    //    when we read it, either state is valid — what is NOT valid is the
-    //    content root being replaced or staying faded forever (asserted
-    //    precisely in the fake-timer test below).
+    //    150ms then restores visibility. Under real timers the mid-fade
+    //    class state is racy to observe here (the window is 150ms), so the
+    //    fade window itself is asserted deterministically in the fake-timer
+    //    test below; here the content root surviving the transition and
+    //    settling back to visible is the observable.
     const contentAfter = container.querySelector('.content-inner');
     expect(contentAfter).toBeTruthy();
-    // classList (not className) — Svelte appends scoped style classes.
-    expect(
-      contentAfter.classList.contains('faded') || !contentAfter.classList.contains('faded')
-    ).toBe(true);
     // 3. Workspace scope context unchanged: the repo-mode breadcrumb keeps
     //    the workspace segment clickable (scope container persists).
     const bcAfter = container.querySelector('[data-testid="repo-breadcrumb"]');

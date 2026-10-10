@@ -45,19 +45,20 @@ describe('AccordionItem (ui-layout.md §3 Inline Expansion)', () => {
     expect(header.getAttribute('aria-controls')).toBe(bodyEl.id);
   });
 
-  it('keyboard activation toggles via the button (Enter/Space are native)', async () => {
-    const ontoggle = vi.fn();
+  it('header is a type=button button (native keyboard activation, no form submission)', () => {
     const { container } = render(AccordionItem, {
-      props: { id: 'kb', open: false, ontoggle },
+      props: { id: 'kb', open: false, ontoggle: () => {} },
     });
     const header = container.querySelector('.accordion-header');
-    await fireEvent.keyDown(header, { key: 'Enter' });
-    // Native button semantics: Enter/Space trigger click; jsdom fires click
-    // for Enter on buttons. If jsdom does not synthesize it, the contract is
-    // still "it is a real <button>" (asserted above) — activation is native.
-    if (ontoggle.mock.calls.length > 0) {
-      expect(ontoggle).toHaveBeenCalledWith('kb');
-    }
+    // Keyboard accessibility comes from the element itself: browsers
+    // natively activate <button> from Enter/Space. jsdom does not synthesize
+    // the keydown->click step (that is browser behavior, not DOM), so the
+    // honest assertions are the element tag and type: a real BUTTON with
+    // type=button is keyboard-activatable by construction and never
+    // triggers implicit form submission inside a <form>. The activation
+    // path itself is covered by the click test above.
+    expect(header.tagName).toBe('BUTTON');
+    expect(header.getAttribute('type')).toBe('button');
   });
 });
 

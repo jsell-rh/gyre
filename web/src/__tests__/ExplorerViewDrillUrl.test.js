@@ -135,4 +135,68 @@ describe('ExplorerView — workspace-scope repo drill URL (ui-layout.md §3)', (
       expect(container.querySelector('.ws-repo-card')).toBeTruthy();
     });
   });
+
+  it('restores the drilled repo from ?repo= on mount (deep-link)', async () => {
+    const { api } = await import('../lib/api.js');
+    api.repos.mockResolvedValue([REPO]);
+    api.workspaceRepos.mockResolvedValue([REPO]);
+    api.allRepos.mockResolvedValue([REPO]);
+
+    // Deep-link: the URL already carries the drill param (as left by
+    // selectRepo on a previous page lifetime, or shared by a user).
+    window.history.pushState({}, '', '/workspaces/payments/explorer?repo=payment-api');
+
+    const { container } = render(ExplorerView, {
+      props: { scope: { type: 'workspace', workspaceId: 'ws-1' } },
+    });
+
+    // The drilled graph loads (canvas re-renders for the drilled scope)
+    // without another pushState - the URL is already the drilled one.
+    await waitFor(() => {
+      expect(api.repoGraph).toHaveBeenCalledWith('repo-1');
+    });
+    // The repo-list cards are replaced by the drilled graph view
+    await waitFor(() => {
+      expect(container.querySelector('.ws-repo-card')).toBeFalsy();
+    });
+    // The back-to-repos button appears (drilled state is active)
+    expect(container.querySelector('.back-to-repos-btn')).toBeTruthy();
+  });
+
+  it('browser Back from the drilled URL returns to the repo list (popstate sync)', async () => {
+    const { api } = await import('../lib/api.js');
+    api.repos.mockResolvedValue([REPO]);
+    api.workspaceRepos.mockResolvedValue([REPO]);
+    api.allRepos.mockResolvedValue([REPO]);
+
+    window.history.pushState({}, '', '/workspaces/payments/explorer');
+    const { container } = render(ExplorerView, {
+      props: { scope: { type: 'workspace', workspaceId: 'ws-1' } },
+    });
+    const repoCard = await waitFor(() => {
+      const btn = container.querySelector('.ws-repo-card');
+      expect(btn).toBeTruthy();
+      return btn;
+    }, { timeout: 5000 });
+
+    // Drill in (pushes ?repo=payment-api)
+    await fireEvent.click(repoCard);
+    await waitFor(() => {
+      expect(new URL(window.location.href).searchParams.get('repo')).toBe('payment-api');
+    });
+    await waitFor(() => {
+      expect(container.querySelector('.back-to-repos-btn')).toBeTruthy();
+    });
+
+    // Browser Back: popstate fires with the URL param gone - the view must
+    // return to the repo list (no drift between URL and view state).
+    window.history.back();
+    await waitFor(() => {
+      expect(container.querySelector('.ws-repo-card')).toBeTruthy();
+    });
+    await waitFor(() => {
+      expect(new URL(window.location.href).searchParams.has('repo')).toBe(false);
+    });
+    expect(container.querySelector('.back-to-repos-btn')).toBeFalsy();
+  });
 });
