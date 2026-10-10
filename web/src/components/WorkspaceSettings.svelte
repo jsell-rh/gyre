@@ -377,7 +377,11 @@
     if (!workspace?.id) return;
     generalSaving = true;
     try {
-      await api.updateWorkspace(workspace.id, { compute_target_id: defaultComputeTarget });
+      // Empty selection means "no workspace target — fall back to tenant
+      // default" (agent-runtime.md §3); the API clears via JSON null.
+      await api.updateWorkspace(workspace.id, {
+        compute_target_id: defaultComputeTarget || null,
+      });
       generalSaved = true;
       setTimeout(() => { generalSaved = false; }, 2000);
     } catch (e) { toastError(e?.message ?? $t('workspace_settings.save_failed_settings')); }

@@ -234,8 +234,37 @@ pub async fn update_workspace(
     if let Some(ct_id_value) = req.compute_target_id {
         ws.compute_target_id = match ct_id_value {
             serde_json::Value::Null => None,
-            serde_json::Value::String(s) => Some(Id::new(s)),
-            _ => ws.compute_target_id,
+            serde_json::Value::String(s) => {
+                // agent-runtime.md §3: "Workspace selects ONE compute target
+                // from the tenant's list" — the ID must resolve to an
+                // existing target in THIS workspace's tenant. Rejecting
+                // here prevents binding a workspace to another tenant's
+                // target (cross-tenant leak) or to a stale ID that would
+                // silently fall through the spawn-time fallback chain.
+                let target = state
+                    .compute_targets
+                    .get_by_id(&Id::new(&s))
+                    .await?
+                    .ok_or_else(|| {
+                        ApiError::InvalidInput(format!(
+                            "compute target {s} not found"
+                        ))
+                    })?;
+                if target.tenant_id != ws.tenant_id {
+                    // Same shape as the compute-targets handlers: a
+                    // cross-tenant ID is indistinguishable from a missing
+                    // one — do not confirm its existence.
+                    return Err(ApiError::InvalidInput(format!(
+                        "compute target {s} not found"
+                    )));
+                }
+                Some(target.id)
+            }
+            _ => {
+                return Err(ApiError::InvalidInput(
+                    "compute_target_id must be a string or null".to_string(),
+                ))
+            }
         };
     }
     // When the trust level changes, write the workspace row AND its `trust:`
@@ -933,6 +962,195 @@ mod tests {
         assert!(
             !policies.iter().any(|p| p.name.starts_with("trust:")),
             "Guided preset must not seed trust: policies"
+        );
+    }
+
+    // -- Compute target binding (agent-runtime.md §3) --------------------------
+
+    /// Binding a workspace to a compute target in the same tenant succeeds
+    /// and round-trips through the workspace response (spec §3: "Workspace
+    /// selects ONE compute target from the tenant's list").
+    #[tokio::test]
+    async fn update_workspace_binds_compute_target_in_tenant() {
+        let state = crate::mem::test_state();
+        // Seed a compute target in tenant t1 directly via the repository.
+        let ct = gyre_domain::ComputeTargetEntity::new(
+            gyre_common::Id::new("ct-t1-1"),
+            gyre_common::Id::new("t1"),
+            "local-docker".to_string(),
+            gyre_domain::ComputeTargetType::Container,
+            100,
+        );
+        state.compute_targets.create(&ct).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let body = serde_json::json!({ "tenant_id": "t1", "name": "CtWs", "slug": "ct-ws" });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let created = body_json(create_resp).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let update = serde_json::json!({ "compute_target_id": "ct-t1-1" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let updated = body_json(resp).await;
+        assert_eq!(updated["compute_target_id"], "ct-t1-1");
+
+        // Clearing with null also round-trips.
+        let clear = serde_json::json!({ "compute_target_id": null });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&clear).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let updated = body_json(resp).await;
+        eprintln!("CLEAR_RESPONSE: {updated}");
+        assert!(updated["compute_target_id"].is_null(), "clear response was: {updated}");
+    }
+
+    /// A compute target from ANOTHER tenant must be rejected: the spawn-time
+    /// fallback chain would otherwise never resolve it (workspace tenant ≠
+    /// target tenant), and binding it would leak the other tenant's
+    /// infrastructure config into this workspace's spawn decisions.
+    #[tokio::test]
+    async fn update_workspace_rejects_cross_tenant_compute_target() {
+        let state = crate::mem::test_state();
+        // Seed a compute target in a DIFFERENT tenant.
+        let ct = gyre_domain::ComputeTargetEntity::new(
+            gyre_common::Id::new("ct-other-1"),
+            gyre_common::Id::new("other-tenant"),
+            "evil-docker".to_string(),
+            gyre_domain::ComputeTargetType::Container,
+            100,
+        );
+        state.compute_targets.create(&ct).await.unwrap();
+
+        let app = crate::api::api_router().with_state(state.clone());
+        let body = serde_json::json!({ "tenant_id": "t1", "name": "CtWs2", "slug": "ct-ws-2" });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let created = body_json(create_resp).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let update = serde_json::json!({ "compute_target_id": "ct-other-1" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "cross-tenant compute target binding must be rejected"
+        );
+
+        // The workspace must be unchanged — no partial application.
+        let ws_after = state
+            .workspaces
+            .find_by_id(&gyre_common::Id::new(&id))
+            .await
+            .unwrap()
+            .expect("workspace still exists");
+        assert!(
+            ws_after.compute_target_id.is_none(),
+            "rejected binding must not persist"
+        );
+    }
+
+    /// A nonexistent compute target ID must be rejected with 400, not
+    /// silently stored: a stale ID would fall through the spawn-time
+    // fallback chain, hiding the misconfiguration.
+    #[tokio::test]
+    async fn update_workspace_rejects_unknown_compute_target() {
+        let state = crate::mem::test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let body = serde_json::json!({ "tenant_id": "t1", "name": "CtWs3", "slug": "ct-ws-3" });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let created = body_json(create_resp).await;
+        let id = created["id"].as_str().unwrap().to_string();
+
+        let update = serde_json::json!({ "compute_target_id": "no-such-target" });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "unknown compute target must be rejected, not silently stored"
         );
     }
 }
