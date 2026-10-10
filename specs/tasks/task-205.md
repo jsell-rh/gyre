@@ -2,10 +2,11 @@
 title: "Manifest-driven Concept Views for the knowledge graph"
 spec_ref: "realized-model.md §4 Concept Views"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "realized-model.md §4. Concept Views"
-commits: []
+commits: ["d75afe7c1e3d163f64d5ad42a1edf8588cbb7a07", "4052081908cf27a9d7abec9923fe24ee850f1a88", "fcd83271fbb7b8dacaadf7709e4e67a892c26a1d"]
+review: specs/reviews/task-205.md
 ---
 
 ## Spec Excerpt
@@ -169,3 +170,72 @@ Real work only — no substring stand-in for the manifest projection.
   and the tests you add/touch. Conventional commits; author unchanged.
 - When done, set this task's `progress: complete`, record commit SHAs, and the
   reviewer will re-audit the coverage row.
+
+## Shipped
+
+- `specs/manifest.yaml` `concepts:` blocks parse into domain `ConceptView`s
+  (five include-rule vectors, repeated-key aggregation) via
+  `SpecManifest.concepts` + `From<&ConceptDef>`; repos without a concepts
+  block parse cleanly.
+- `GET /api/v1/repos/:id/graph/concept/:name` and
+  `GET /api/v1/workspaces/:id/graph/concept/:name` return the
+  manifest-driven union projection (types/traits/modules/endpoints/specs,
+  anchored case-sensitive `*`-globs, edge-metadata route paths, GovernedBy
+  spec linkage) with 404/no-contribution for undefined concept names —
+  substring fallback removed; the `?concept=` substring query param on
+  `/graph` is preserved as a distinct surface per spec §7.
+- MCP `graph_concept` tool shares the same projection assembly (HSI §11
+  parity) for repo and workspace scopes, with explicit errors for undefined
+  concepts and unknown repos.
+- Glob matcher + projection live in `gyre-common` (`glob_match`,
+  `ConceptView::project`); no new crate dependencies; 16 new tests including
+  integration tests a mutation probe confirms fail under substring revert.
+
+## Repair round (checkpoint d415416e, exit 130)
+
+The interrupted assignment left the implementation complete and an R1 review
+on record (`specs/reviews/task-205.md`, verdict `complete`); what died mid-run
+was investigation of a 35/35 `graph_integration` failure. Root-caused this
+round as sandbox infrastructure, not code: `accept(2)` returns `EOPNOTSUPP`
+(errno 95) in this runtime for every stack (Python `socket.accept` and a
+minimal Rust/tokio `TcpListener::accept` probe both fail identically; `bind`
+and `connect` succeed). Every test in that binary serves HTTP over a real
+listener, so all 35 fail uniformly — including pre-existing tests untouched
+by this task. Evidence: `/tmp/stage/review-evidence/task205-sandbox-tcp-accept-restriction.txt`
+(probe source, outputs, and the exact host/CI commands required).
+
+Repairs shipped in `2076ba76`:
+
+- `scripts/check-task-commit-attribution.sh` failed at the merged HEAD
+  because the merge base itself (`f4acb4eb`, landed task-189) is a
+  task-labeled product-surface commit absent from task-189's frontmatter
+  (which listed only the pre-squash pipeline SHAs). Recorded `f4acb4eb` in
+  `specs/tasks/task-189.md` `commits:` — the check's documented remedy; no
+  exemptions added, exemption file untouched. Gate now passes.
+- `web/dist` churn reverted to the merge-base state: the hashed-file swap
+  came from the embedded `npm run build` during checkpoint compiles, not
+  from any web change (branch has zero `web/src`/`web/tests`/`package.json`
+  delta; bundle string-literals are identical — only minifier-renamed
+  identifiers differ). Task branches do not ship dist rebuilds.
+
+Re-verification at repaired HEAD (`2076ba76`):
+
+- `cargo build --all` OK.
+- `cargo test -p gyre-server --lib -- api::graph::tests mcp::tests
+  spec_registry::tests` → 142 passed (all 12 concept tests included).
+- `cargo test -p gyre-common --lib` → 98 passed (4 concept_tests included).
+- `scripts/check-arch.sh`, `check-abac-route-registry.sh`,
+  `check-mcp-write-tools.sh`, `check-mem-port-contracts.sh`,
+  `check-dead-message-kinds.sh`, `check-task-commit-attribution.sh` — all pass.
+- TCP-listener integration tests (`cargo test -p gyre-server --test
+  graph_integration`) cannot run in this sandbox (accept(2) restriction
+  above); the exact commands are recorded in the evidence file for host
+  verification and GitHub CI.
+
+## Review
+
+### Review changed source code
+
+- specs/coverage/system/realized-model.md
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.

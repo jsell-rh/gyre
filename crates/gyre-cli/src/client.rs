@@ -441,8 +441,11 @@ impl GyreClient {
     /// GET /api/v1/repos/:id/graph/concept/:name or
     /// GET /api/v1/workspaces/:id/graph/concept/:name
     ///
-    /// Uses the dedicated concept search endpoints which filter by name pattern
-    /// server-side (the generic /graph endpoints ignore the concept query param).
+    /// Concept view projection (realized-model.md §4): the concept is resolved
+    /// from the repo's specs/manifest.yaml and the knowledge graph is projected
+    /// through its include patterns. A concept not defined in the manifest
+    /// 404s. (The `?concept=` substring filter on GET /graph is a distinct
+    /// surface.)
     pub async fn get_graph_concept(
         &self,
         concept: &str,
