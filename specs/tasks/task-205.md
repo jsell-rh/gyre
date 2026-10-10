@@ -232,6 +232,53 @@ Re-verification at repaired HEAD (`2076ba76`):
   above); the exact commands are recorded in the evidence file for host
   verification and GitHub CI.
 
+## Repair round (checkpoint f4c94baf, exit 130) — re-verification at merged HEAD
+
+The second interrupted assignment left the implementation, R1 review
+(verdict `complete`), and the coverage-row ownership (`8fcbf518`) all in
+place; what died mid-run was collection of post-merge verification at the
+new base. This round merged base `73a31e0b` (HEAD `a27db41d`) and completed
+that verification. The base merge is markdown-only (task-200/213/219 task
+records; `git diff --stat f4c94baf..a27db41d -- web/ crates/` is empty) —
+zero concept-surface delta, no re-implementation required.
+
+Re-verification at merged HEAD `a27db41d` (fresh sandbox; evidence
+regenerated under /tmp/stage/review-evidence/):
+
+- `cargo build --all` OK (7m 55s, cold target dir; no web/dist churn from
+  the embedded npm build — working tree clean after build).
+- `cargo test -p gyre-server --lib -- api::graph::tests mcp::tests
+  spec_registry::tests` → 143 passed, 0 failed (all 12 concept tests
+  included; +1 vs prior round is upstream task-200 schema-validation work
+  in a neighboring suite, not a concept-surface change).
+- `cargo test -p gyre-common --lib` → 101 passed, 0 failed (4
+  concept_tests included).
+- Substring-revert mutation probe re-run at this HEAD: replacing
+  `ConceptView::matches_node` with the old hollow case-insensitive
+  substring-on-concept-name behavior fails all four projection guards
+  (`concept_projection_unions_all_include_rules`,
+  `graph_concept_returns_manifest_projection_not_substring`,
+  `workspace_graph_concept_unions_manifest_projections`,
+  `mcp_graph_concept_manifest_projection_not_substring`; cargo exit 101 on
+  both crates). Baseline green before and after the probe (tree verified
+  clean after restore). Evidence:
+  `/tmp/stage/review-evidence/task205-head-reverification-a27db41d.md`
+  (plus raw logs mutant-common.log / mutant-server.log /
+  baseline-server.log, and the regenerated sandbox accept(2)-restriction
+  file with exact host/CI commands).
+- `scripts/check-arch.sh`, `check-abac-route-registry.sh`,
+  `check-mcp-write-tools.sh`, `check-mem-port-contracts.sh`,
+  `check-dead-message-kinds.sh`, `check-task-commit-attribution.sh` — all
+  pass at `a27db41d`.
+- All coverage-row line anchors re-verified at `a27db41d` (row text
+  unchanged since `8fcbf518`).
+- TCP-listener integration tests (`cargo test -p gyre-server --test
+  graph_integration`, 32 tokio tests) remain sandbox-blocked (accept(2)
+  errno 95, re-verified fresh this round); exact commands recorded in the
+  evidence file for host verification and GitHub CI. The three
+  projection regression guards themselves run in-sandbox via `--lib` and
+  are green.
+
 ## Review
 
 ### Review changed source code
