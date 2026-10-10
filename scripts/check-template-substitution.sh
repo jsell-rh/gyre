@@ -44,12 +44,15 @@ for const_name in $PROMPT_CONSTS; do
     # Extract all {{variable}} placeholders from this constant's definition.
     # The constant may span multiple lines; collect from the definition line
     # until the next `pub const` or end of file.
-    CONST_LINE=$(grep -n "pub const $const_name" "$DEFAULTS_FILE" | head -1 | cut -d: -f1)
+    CONST_LINE=$(grep -n -m1 "pub const $const_name" "$DEFAULTS_FILE" | cut -d: -f1)
     [ -z "$CONST_LINE" ] && continue
 
+    # grep -m1 instead of `| head -1`: under load, head can exit before grep
+    # finishes writing, SIGPIPE-ing grep; with `set -o pipefail` that aborts
+    # the whole script (exit 141) mid-run — a flaky gate. grep -m1 stops on
+    # the first match itself, so no downstream consumer can race it.
     NEXT_CONST_LINE=$(tail -n +"$((CONST_LINE + 1))" "$DEFAULTS_FILE" \
-        | grep -n 'pub const PROMPT_' \
-        | head -1 \
+        | grep -n -m1 'pub const PROMPT_' \
         | cut -d: -f1 || echo "")
 
     if [ -n "$NEXT_CONST_LINE" ]; then
@@ -97,8 +100,7 @@ for const_name in $PROMPT_CONSTS; do
 
             # Find function end (next fn definition or +200 lines, whichever is first)
             FN_END_SEARCH=$(tail -n +"$((ref_lineno + 1))" "$consumer_file" \
-                | grep -n 'async fn \|pub fn ' \
-                | head -1 \
+                | grep -n -m1 'async fn \|pub fn ' \
                 | cut -d: -f1 || echo "200")
             FN_END=$((ref_lineno + FN_END_SEARCH))
 
@@ -111,8 +113,15 @@ for const_name in $PROMPT_CONSTS; do
             # Check each template variable
             for var in $TEMPLATE_VARS; do
                 # Check if the function body contains .replace("{{var}}", ...)
-                # The var includes {{ and }}, e.g., {{spec_content}}
-                if ! echo "$FN_BODY" | grep -q "replace(\"$var\""; then
+                # The var includes {{ and }}, e.g., {{spec_content}}.
+                # Here-string, not `echo | grep -q`: under CPU load, grep -q
+                # can match and exit before echo finishes writing, SIGPIPE-ing
+                # echo; with `set -o pipefail` the pipeline then reports 141,
+                # which `if !` misreads as "variable not substituted" — a
+                # false violation on correct code (observed on graph.rs
+                # briefing_ask/predict_graph under load). A here-string has no
+                # upstream writer to signal.
+                if ! grep -qF "replace(\"$var\"" <<< "$FN_BODY"; then
                     echo ""
                     echo "MISSING TEMPLATE SUBSTITUTION: $consumer_file:$ref_lineno (fn $fn_name)"
                     echo "  Template $const_name declares variable $var"
