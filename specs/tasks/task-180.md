@@ -155,15 +155,14 @@ Defects found and fixed across the repair rounds since that review:
    task-200.md; `git diff 6bf777a6 HEAD -- specs/tasks/task-200.md` matches
    `git diff 6bf777a6 origin/main` exactly).
 
-Test evidence (this round, final HEAD `738f8c3f`, CARGO_TARGET_DIR=/tmp/gyre-target,
-exact commands/counts in `/tmp/stage/review-evidence/task180-verify-repair-round.md`):
+Test evidence (this round; code-state head `0c4a767e` — the branch tip
+differs from it only by this task-file record; CARGO_TARGET_DIR=/tmp/gyre-target,
+exact commands/counts and probe-head SHAs in
+`/tmp/stage/review-evidence/task180-verify-repair-round.md`):
 
-- `git diff --check 6bf777a6..738f8c3f` — **exit 0** (the failing gate's
-  condition on this assignment's base).
-- Verification-merge shape reproduced locally: checkout base `6bf777a6`,
-  `merge --no-ff` the candidate → `git diff --check HEAD^1 HEAD` —
-  **exit 0** (the exact probe that failed as finding `fc532b04`; earlier
-  probe merge `9251ddff`, re-verified at the final head).
+- `git diff --check 6bf777a6..<branch tip>` — **exit 0** (the failing
+  gate's condition on this assignment's base; re-run at the branch tip
+  after each record-only amend).
 - `bash scripts/check-task-commit-attribution.sh` — **exit 0** (OK).
 - `cargo test -p gyre-domain --lib spec_assertions` — **51 passed, 0 failed**.
 - `cargo test -p gyre-server --lib push_check` — **3 passed, 0 failed**.
