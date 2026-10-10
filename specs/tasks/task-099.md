@@ -9,7 +9,8 @@ coverage_sections:
   - "platform-model.md §8 gyre bootstrap CLI Command"
   - "platform-model.md §8 What It Does"
   - "platform-model.md §8 Starter Kit"
-commits: ["4566fc4843802c3a1f9057809078ca2bba615721", "aede618804407b47b16f9e76dd434cac4f8e1646", "e54363c8dd92fa53e3fd2a8727fad0bd7a05f20e", "2061f8c4f7cd289e6328897d2c4ddf48be69970c", "c903a80b64fc25fa2fed19822990c95c53452e37"]
+  - "platform-model.md §8 Protocol Injection"
+commits: ["aede618804407b47b16f9e76dd434cac4f8e1646", "e54363c8dd92fa53e3fd2a8727fad0bd7a05f20e", "2061f8c4f7cd289e6328897d2c4ddf48be69970c", "c903a80b64fc25fa2fed19822990c95c53452e37"]
 ---
 
 ## Spec Excerpt
@@ -108,50 +109,28 @@ When any agent is spawned, the MCP server injects:
 
 ## Implementation Notes
 
-**Original round (`c903a80b`):** `gyre bootstrap` CLI subcommand + server
-`POST /api/v1/users` (Admin-gated, CSPRNG key, only the SHA-256 hash
-persisted, `external_id = "local:{username}"`), pure logic in
-`gyre-cli/src/bootstrap.rs`, orchestration in `main.rs::run_bootstrap` with
-`StepTracker`. Resumability added in `c2755e1b` (find-by-slug reuse, saved
-credential reuse, 409 on orchestrator spawn kept as AlreadyLive).
-
-**Revision round (this round, F1-F7):**
-
-- **F1 (admin tenant binding):** `CreateUserRequest` gained a required
-  `tenant_id`, the handler loads the tenant and rejects an unknown one, and
-  the user row carries the binding (migrations `2026-10-09-000056_user_tenant_id`
-  + adapters/schema). The auth extractor's API-key path now resolves the
-  tenant from `user.tenant_id` and fail-closes (403) on an unbound user;
-  OIDC `find_or_create_user` binds the validated tenant claim at creation.
-  Server-originated messages (`emit_event`/`emit_telemetry`) resolve the
-  tenant from the workspace record instead of fabricating `"default"`.
-- **F2 (persona attachment):** `Agent.persona_id` (migration
-  `2026-10-09-000057_agent_persona_id`) is set at orchestrator spawn.
-  `resolve_orchestrator_persona` consults `state.personas` (the store
-  bootstrap step 5 populates) with nearest-scope-wins Repo > Workspace >
-  Tenant, and a missing or unapproved persona REJECTS the spawn (Result,
-  consumed — not a warn-logged discard).
-- **F3 (truthful launch):** `spawn_orchestrator` launches a real process via
-  `launch_orchestrator_process` (compute-target priority workspace → tenant
-  default → local; server-controlled command only) and returns a
-  `LaunchOutcome` surfaced in the REST/MCP response (`launch_status`
-  `running`/`launch_failed` + detail). The CLI summary reports exactly what
-  happened; `launch_failed` never prints "running". Auto-restart + the stale
-  detector remain the recovery path.
-- **F4/F5 (spec registry):** step 6 now pushes the local tree to the server
-  repo (committing uncommitted starter-kit files first, starter-kit paths
-  only) and calls the new `POST /api/v1/repos/:id/sync-specs`, which re-runs
-  `sync_spec_ledger` against the default-branch HEAD at first-run time.
-  `STARTER_MANIFEST` now emits `approval: {mode: human_only}` — parseable by
-  the server's `SpecEntry` schema (tested).
-- **F6 (starter-kit path):** `--starter-kit` without `--repo-path` is
-  rejected with an explanation instead of writing to a relative
-  `./<repo-name>/` path.
-- **F7 (auth-boundary test):** `api_key_authenticates_through_full_router_with_tenant_binding`
-  exercises the minted key through the full router (`GET /api/v1/users/me`,
-  `Authorization: Bearer <raw key>`) and asserts identity + tenant binding.
-  These notes describe the shipping design (previous notes described the
-  superseded `c903a80b` task+spawn flow).
+- **Server**: `POST /api/v1/users` added in `crates/gyre-server/src/api/users.rs::create_user`
+  — Admin-only (per-handler role check), mints an authenticating API key in the
+  same call (stored via `state.api_keys`, the store the auth extractor consults;
+  only the SHA-256 hash is persisted). `external_id = "local:{username}"` gives
+  stable duplicate detection. Route registered in `api/mod.rs`.
+- **CLI**: `crates/gyre-cli/src/bootstrap.rs` holds pure logic (persona prompt
+  registry via `include_str!`, slug derivation, gate detection, starter-kit
+  writer, summary renderer); orchestration lives in `main.rs::run_bootstrap`
+  with a `StepTracker` reporting completed steps + resume hint on failure.
+- **Client**: 10 new `GyreClient` methods (`health`, `create_tenant`,
+  `create_user`, `create_workspace`, `create_repo`, `create_persona`,
+  `approve_persona`, `create_gate`, `create_task`, `spawn_agent`).
+- **Personas**: `specs/personas/repo-orchestrator.md` authored (referenced by
+  platform-model.md §3 but previously missing); all four prompts embedded in
+  the CLI at `crates/gyre-cli/src/bootstrap/personas/`.
+- **Spec registry step**: report-only — no REST registration endpoint exists;
+  the spec ledger syncs on push to the default branch (stated in output).
+- **Orchestrator spawn**: creates task first with `task_type: "implementation"`
+  (spawn rejects tasks without it), then `POST /api/v1/agents/spawn`.
+- Tests: 3 server handler tests (key authenticates as new user, duplicate
+  rejected, unknown role rejected) + 11 CLI tests (parse/flags, slug, gates,
+  starter kit, manifest shape, summary rendering, persona coverage).
 
 ## Verification
 

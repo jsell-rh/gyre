@@ -611,7 +611,10 @@ pub async fn sync_specs(
         .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
 
     // Per-handler authorization: the repo must belong to a workspace in the
-    // caller's tenant (system token bypasses -- tenant "system").
+    // caller's tenant. The global system token (agent_id "system") bypasses —
+    // its tenant_id resolves to the system principal's tenant ("default"),
+    // which is a principal identity, not a real tenant scope (see
+    // hierarchy-enforcement.md §Bootstrap Behavior).
     let workspace = state
         .workspaces
         .find_by_id(&repo.workspace_id)
@@ -622,7 +625,7 @@ pub async fn sync_specs(
                 repo.workspace_id
             ))
         })?;
-    if auth.tenant_id != "system" && auth.tenant_id != workspace.tenant_id.to_string() {
+    if auth.agent_id != "system" && auth.tenant_id != workspace.tenant_id.to_string() {
         return Err(ApiError::Forbidden(
             "repo does not belong to the caller's tenant".to_string(),
         ));

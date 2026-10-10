@@ -221,9 +221,21 @@ pub(crate) async fn launch_orchestrator_process(
         work_dir: "/tmp".to_string(),
     };
 
+    // Probe info for the exit monitor: it must probe liveness with the same
+    // target type the process launched on (a container handle has no pid, so
+    // a LocalTarget probe would report dead instantly). SSH liveness probes
+    // re-open a connection, so the monitor keeps the connection parameters.
+    let mut launch_image: Option<String> = None;
+    let mut launch_ssh: Option<(String, String, Option<String>, Option<u16>)> = None;
+
+    // Launch on the resolved target. Mirrors api/spawn.rs: container via
+    // ContainerTarget (G8 security defaults), ssh via SshTarget (with
+    // optional remote container_mode), everything else (local, kubernetes
+    // until a k8s adapter exists) via LocalTarget.
     let launch_result = match &target_config {
         Some(cfg) if cfg.target_type == "container" => {
             let image = cfg.config["image"].as_str().unwrap_or("gyre-agent:latest").to_string();
+            launch_image = Some(image.clone());
             let mut ct = gyre_adapters::compute::ContainerTarget::new(image.clone());
             ct = ct.with_network(cfg.config["network"].as_str().unwrap_or("none"));
             if let Some(mem) = cfg.config["memory_limit"].as_str() {
@@ -233,6 +245,68 @@ pub(crate) async fn launch_orchestrator_process(
                 ct = ct.with_pids_limit(pids as u32);
             }
             gyre_ports::ComputeTarget::spawn_process(&ct, &spawn_config).await
+        }
+        Some(cfg) if cfg.target_type == "ssh" => {
+            // M19.5 SSH remote spawn (same shape as api/spawn.rs).
+            let user = cfg.config["user"].as_str().unwrap_or("root").to_string();
+            let host = cfg.config["host"].as_str().unwrap_or("localhost").to_string();
+            launch_ssh = Some((
+                user.clone(),
+                host.clone(),
+                cfg.config["identity_file"].as_str().map(str::to_string),
+                cfg.config["port"].as_u64().map(|p| p as u16),
+            ));
+            let mut ssh_target = gyre_adapters::compute::SshTarget::new(user, host);
+            if let Some(id_file) = cfg.config["identity_file"].as_str() {
+                ssh_target = ssh_target.with_identity(id_file);
+            }
+            if let Some(port) = cfg.config["port"].as_u64() {
+                ssh_target = ssh_target.with_port(port as u16);
+            }
+            let container_mode = cfg.config["container_mode"].as_bool().unwrap_or(false);
+            let ssh_spawn_config = if container_mode {
+                // Wrap the command in a docker run on the remote host.
+                // Validate the agent name to prevent injection (M19.5-A) —
+                // direct args, no shell.
+                let safe_name = agent
+                    .name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+                if !safe_name || agent.name.is_empty() || agent.name.len() > 63 {
+                    return LaunchOutcome {
+                        launch_status: "launch_failed".to_string(),
+                        launch_detail: Some(
+                            "agent name must be 1-63 chars of [a-zA-Z0-9._-] \
+                             for remote container use"
+                                .to_string(),
+                        ),
+                    };
+                }
+                let image = cfg.config["image"].as_str().unwrap_or("gyre-agent:latest");
+                let mut docker_args = vec![
+                    "run".to_string(),
+                    "--detach".to_string(),
+                    "--rm".to_string(),
+                    "--network=none".to_string(),
+                    "--memory=2g".to_string(),
+                    "--pids-limit=512".to_string(),
+                    "--user=65534:65534".to_string(),
+                    format!("--name={}", agent.name),
+                    image.to_string(),
+                    command.clone(),
+                ];
+                docker_args.extend(args.iter().cloned());
+                gyre_ports::SpawnConfig {
+                    name: agent.name.clone(),
+                    command: "docker".to_string(),
+                    args: docker_args,
+                    env: std::collections::HashMap::new(),
+                    work_dir: spawn_config.work_dir.clone(),
+                }
+            } else {
+                spawn_config
+            };
+            gyre_ports::ComputeTarget::spawn_process(&ssh_target, &ssh_spawn_config).await
         }
         _ => {
             // Default: local process spawn.
@@ -249,17 +323,55 @@ pub(crate) async fn launch_orchestrator_process(
                 .lock()
                 .await
                 .insert(agent_id_str.clone(), handle.clone());
-            // Monitor: on exit, free the registry slot and drop the agent to
-            // Idle so the stale detector / restart loop takes over.
+            // Monitor: on exit, free the registry slot and mark the agent
+            // Dead so the stale detector / restart loop takes over. The
+            // is_alive probe MUST use the same target type the process was
+            // launched with — a container handle carries no pid, so probing
+            // it with LocalTarget::is_alive reports dead instantly and would
+            // kill a healthy orchestrator 5s after launch.
             let state_mon = std::sync::Arc::clone(state);
             let orch_type = agent.orchestrator_type.clone();
             tokio::spawn(async move {
-                let local = gyre_adapters::compute::LocalTarget;
-                let _ = &local;
                 loop {
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                    let alive =
-                        gyre_ports::ComputeTarget::is_alive(&local, &handle).await.unwrap_or(false);
+                    let alive = match handle.target_type.as_str() {
+                        "container" => {
+                            // Rebuild the probe target from the launch
+                            // config stored on the registry handle.
+                            let image = launch_image
+                                .as_deref()
+                                .unwrap_or("gyre-agent:latest")
+                                .to_string();
+                            let ct = gyre_adapters::compute::ContainerTarget::new(image);
+                            gyre_ports::ComputeTarget::is_alive(&ct, &handle).await
+                        }
+                        "ssh" => {
+                            // SSH liveness is probed by remote pid. When the
+                            // probe itself cannot run (connection refused,
+                            // ssh missing), do NOT declare the orchestrator
+                            // dead — the stale detector still owns
+                            // heartbeat-based recovery.
+                            match &launch_ssh {
+                                Some((user, host, id_file, port)) => {
+                                    let mut probe =
+                                        gyre_adapters::compute::SshTarget::new(user.clone(), host.clone());
+                                    if let Some(f) = id_file {
+                                        probe = probe.with_identity(f.clone());
+                                    }
+                                    if let Some(p) = port {
+                                        probe = probe.with_port(*p);
+                                    }
+                                    gyre_ports::ComputeTarget::is_alive(&probe, &handle).await
+                                }
+                                None => Ok(true),
+                            }
+                        }
+                        _ => {
+                            let local = gyre_adapters::compute::LocalTarget;
+                            gyre_ports::ComputeTarget::is_alive(&local, &handle).await
+                        }
+                    }
+                    .unwrap_or(true);
                     if !alive {
                         state_mon
                             .process_registry
