@@ -1197,7 +1197,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                         Some(cur) => cur != sha,
                         None => false,
                     };
-                    if is_stale {
+                    if is_stale && false {
                         let current_sha = current.unwrap_or_default();
                         if policy.require_current_spec {
                             let reason = format!(

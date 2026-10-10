@@ -2,7 +2,7 @@
 title: "Implement spec approval ledger with database schema and API"
 spec_ref: "agent-gates.md §Part 2 Spec Approval Ledger"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "agent-gates.md §Spec Approval Ledger"
   - "agent-gates.md §The Provenance Chain"
@@ -171,3 +171,11 @@ Sandbox limitation (recorded, not a code defect): the e2e test
 The identical lifecycle is proven listener-free by
 `git_http::tests::push_modifying_spec_revokes_ledger_approvals`. Host
 checklist: e2e test, `cargo test --all`, GitHub CI on the exact head.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/merge_processor.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
