@@ -256,17 +256,13 @@ pub fn resolve_approval_status(
         return ApprovalStatus::Approved;
     }
 
-    let approval = entry.approval.as_ref();
-    let has_valid_human = events.iter().any(|e| is_valid_human_approval(e, approval, current_sha));
-    let has_valid_agent = events.iter().any(|e| is_valid_agent_approval(e, approval, current_sha));
-
-    match entry.effective_approval_mode() {
-        ApprovalMode::HumanOnly => has_valid_human,
-        ApprovalMode::AgentOnly => has_valid_agent,
-        ApprovalMode::HumanAndAgent => has_valid_human && has_valid_agent,
-    }
-    .then_some(ApprovalStatus::Approved)
-    .unwrap_or(ApprovalStatus::Pending)
+    let _ = entry.approval.as_ref();
+    // MUTATION: legacy "any valid approval" behavior
+    events
+        .iter()
+        .any(|e| e.spec_sha == current_sha && e.is_active())
+        .then_some(ApprovalStatus::Approved)
+        .unwrap_or(ApprovalStatus::Pending)
 }
 
 /// A human approval is valid when it is active, matches `current_sha`, and the

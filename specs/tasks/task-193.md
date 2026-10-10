@@ -2,7 +2,7 @@
 title: "Mode-based spec approval status resolution with attestation/stack_hash validity"
 spec_ref: "spec-registry.md §9 Approval Status Resolution"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "spec-registry.md §9"
 commits: ["1e55eef5973023193199d136a844f072d25f1b36", "b1ead356c8c96561b8b88374922312ca82831824", "5d4ebb171e2f01c7d5fdd6898c5c008f854ac74a", "e42c374d89663ff8bac7990edb2853942534fdf2", "0e6c1b88e05e10e2ab8c40eb958d28e27579a6d6", "56b51b3fa52d5d978ec8ca9519884ddc31bf58a9"]
@@ -96,3 +96,11 @@ Additionally, `SpecApprovalEvent` (`crates/gyre-domain/src/spec_ledger.rs:60-75`
 Sandbox note: no TCP listener support (capabilities.json), so no live-server HTTP check was performed here; the E2E tests exercise the full axum router (auth middleware → handler → SQLite-backed stores) in-process, which is the strongest available transport-level verification. Exact-head GitHub CI remains mandatory.
 
 **Repair round (head `eb4477d0`):** reverted the accidental `web/dist` bundle rebuild shipped in task-labeled commit `b65efd44` (zero `web/src` changes; trailing whitespace in the vendored svelte-i18n bundle made `git diff --check 8c2d1775 c7e47667` exit 2). `web/dist` restored to base `8c2d1775` (bit-identical to current base `73a31e0b`'s dist) via process commit `eb4477d0`; crates untouched — task files remain 0 diff lines vs candidate `c7e47667`. Post-repair: `git diff --check` vs both base SHAs exits 0, `check-arch.sh`, `check-task-commit-attribution.sh`, `check-migration-versions.sh`, `check-migration-sql-portability.sh` all pass (logs in /tmp/stage/review-evidence/).
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/spec_registry.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
