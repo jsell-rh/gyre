@@ -160,6 +160,32 @@ enum Commands {
         #[arg(long)]
         workspace: Option<String>,
     },
+
+    /// Full-text search across all entities (specs, tasks, MRs, commits, agents)
+    Search {
+        /// Search query — supports quoted phrases and facet:value syntax
+        /// (e.g. "merge queue" type:spec status:approved)
+        query: Option<String>,
+        /// Filter by entity type (spec, task, mr, commit, agent)
+        #[arg(long, short = 't')]
+        r#type: Option<String>,
+        /// Filter by status
+        #[arg(long)]
+        status: Option<String>,
+        /// Filter by workspace slug
+        #[arg(long, short = 'w')]
+        workspace: Option<String>,
+        /// Only results since this time (e.g., 7d, 2026-03-01)
+        #[arg(long)]
+        since: Option<String>,
+        /// Autocomplete mode — return suggestions for the given prefix
+        #[arg(long)]
+        suggest: Option<String>,
+        /// Maximum results to return
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
+
     /// Show system trace for a merge request
     Trace {
         /// Merge request ID
@@ -937,6 +963,93 @@ async fn main() -> Result<()> {
                     let confidence = n["spec_confidence"].as_str().unwrap_or("None");
                     let spec = n["spec_path"].as_str().unwrap_or("-");
                     println!("{ntype:<12} {name:<30} {qname:<50} {confidence:<10} {spec}");
+                }
+            }
+        }
+
+        Commands::Search {
+            query,
+            r#type,
+            status,
+            workspace,
+            since,
+            suggest,
+            limit,
+        } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+
+            let status_filter = status.as_deref().map(str::trim).filter(|s| !s.is_empty());
+            let since_cutoff = match since.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                Some(s) => Some(parse_since(s).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "invalid --since value '{s}' (expected <N><s|m|h|d|w> such as 7d, or a date like 2026-03-01)"
+                    )
+                })?),
+                None => None,
+            };
+
+            // Autocomplete: the dedicated /search/suggest endpoint
+            // (search.md §API, task-153) is not implemented yet; fall back
+            // to a regular search over the prefix and keep title-prefix
+            // matches (see `collect_suggestions`).
+            let q = match suggest.as_deref() {
+                Some(p) if !p.trim().is_empty() => p.trim().to_string(),
+                _ => query.as_deref().unwrap_or_default().trim().to_string(),
+            };
+
+            if q.is_empty() {
+                println!("No search query given. Usage: gyre search <query> [--type spec] [--status approved] [--workspace slug] [--since 7d] [--suggest prefix] [--limit N]");
+            } else {
+                let workspace_id = match &workspace {
+                    Some(slug) => Some(api.resolve_workspace_slug(slug).await?),
+                    None => None,
+                };
+                // `--type`/`--workspace` are enforced server-side
+                // (entity_type / workspace_id params on GET /api/v1/search).
+                // `--status`/`--since` filter client-side against live
+                // entity state, so over-fetch candidates before filtering;
+                // the server caps any limit at 100, which bounds how many
+                // candidates a filtered search can scan.
+                let filtering = status_filter.is_some() || since_cutoff.is_some();
+                let fetch_limit = if filtering { limit.max(100) } else { limit };
+                let entity_type = r#type.as_deref().map(str::trim).filter(|t| !t.is_empty());
+                let mut response = api
+                    .search(&q, entity_type, workspace_id.as_deref(), fetch_limit)
+                    .await?;
+
+                if filtering {
+                    // Search index facets freeze at create time (the index
+                    // write sites run only on entity creation), so resolve
+                    // live status/recency per result before filtering.
+                    let mut kept: Vec<client::SearchResult> = Vec::new();
+                    let mut unresolvable = 0usize;
+                    for r in &response.results {
+                        let live = live_entity_state(&api, r).await;
+                        if live.unavailable {
+                            unresolvable += 1;
+                        }
+                        if result_matches_filters(status_filter, since_cutoff, &live) {
+                            kept.push(r.clone());
+                        }
+                    }
+                    if unresolvable > 0 {
+                        eprintln!(
+                            "note: {unresolvable} result(s) excluded — live status/recency \
+                             could not be resolved for their entity type (spec/commit have \
+                             no detail endpoint yet, or the record was deleted)"
+                        );
+                    }
+                    response.total = kept.len();
+                    kept.truncate(limit);
+                    response.results = kept;
+                }
+
+                if let Some(prefix) = suggest.as_deref() {
+                    print_search_suggestions(prefix, &response);
+                } else {
+                    print_search_results(&response);
                 }
             }
         }
@@ -1732,9 +1845,14 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
         _ => println!("  No spec manifest found - spec registry stays empty until specs are pushed"),
     }
     if args.starter_kit {
-        let target = repo_path
-            .clone()
-            .unwrap_or_else(|| std::path::PathBuf::from(&repo_name));
+        // A bare `repo_name` here would default to a RELATIVE path resolved
+        // against the process cwd (task-099 F6) — the starter kit must land
+        // at an explicit, operator-visible location instead.
+        let target = repo_path.clone().ok_or_else(|| {
+            step.fail(anyhow::anyhow!(
+                "--starter-kit needs --repo-path: pass the directory to write the kit into"
+            ))
+        })?;
         bootstrap::write_starter_kit(&target)?;
         println!("  Starter kit written to {}", target.display());
     }
@@ -2181,6 +2299,277 @@ fn print_spec_links_table(links: &[serde_json::Value]) {
                 println!("             reason: {reason}");
             }
         }
+    }
+}
+
+/// Render search results as a readable table (search.md §CLI):
+/// one line per result with entity type, title, id, and snippet.
+fn print_search_results(results: &client::SearchResponse) {
+    if results.results.is_empty() {
+        println!("No results for '{}'.", results.query);
+        return;
+    }
+    println!(
+        "Search results for '{}' ({} shown of {} total):",
+        results.query,
+        results.results.len(),
+        results.total
+    );
+    println!("{}", "-".repeat(80));
+    for r in &results.results {
+        let snippet = r.snippet.replace(['\n', '\r'], " ");
+        println!("[{}] {} ({})", r.entity_type, r.title, r.entity_id);
+        if !snippet.is_empty() {
+            println!("      {snippet}");
+        }
+    }
+}
+
+/// Current UNIX time in seconds.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Days from civil date to days since the UNIX epoch (Howard Hinnant's
+/// algorithm — no chrono dependency needed for one date parse).
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64; // [0, 399]
+    let mp = (m + 9) % 12; // [0, 11]
+    let doy = (153 * mp as u64 + 2) / 5 + d as u64 - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146097 + doe as i64 - 719468
+}
+
+/// Parse a relative `--since` duration (`7d`, `12h`, `30m`, `2w`, `45s`)
+/// against `now` (UNIX seconds), returning the cutoff. `now` is a
+/// parameter so tests are deterministic.
+fn parse_since_relative(s: &str, now: u64) -> Option<u64> {
+    let s = s.trim();
+    let mut chars = s.chars();
+    // Relative: <count><unit> where unit ∈ {s, m, h, d, w}. Split on the
+    // last char, not a byte index — a multibyte unit must not panic.
+    let unit = chars.next_back()?;
+    let digits = chars.as_str();
+    let count: u64 = digits.parse().ok()?;
+    let secs = match unit {
+        's' => count,
+        'm' => count.checked_mul(60)?,
+        'h' => count.checked_mul(3600)?,
+        'd' => count.checked_mul(86_400)?,
+        'w' => count.checked_mul(604_800)?,
+        _ => return None,
+    };
+    now.checked_sub(secs)
+}
+
+/// Parse a `--since` argument (search.md §Query Language `since:` facet):
+/// either a relative duration or an ISO date, against `now`.
+fn parse_since_at(s: &str, now: u64) -> Option<u64> {
+    parse_since_relative(s, now).or_else(|| parse_since_date(s))
+}
+
+/// ISO date branch of `--since` (e.g. `2026-03-01` → UTC midnight).
+/// Kept separate from the relative parser so each stays testable in
+/// isolation; `parse_since_at` dispatches on shape.
+fn parse_since_date(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let mut parts = s.splitn(3, '-');
+    let (y, m, d) = (parts.next()?, parts.next()?, parts.next()?);
+    // Strictly zero-padded ISO 8601 calendar date: YYYY-MM-DD. Variable
+    // widths (2026-3-1) are rejected rather than guessed at.
+    if y.len() != 4 || m.len() != 2 || d.len() != 2 {
+        return None;
+    }
+    if !y.bytes().all(|b| b.is_ascii_digit())
+        || !m.bytes().all(|b| b.is_ascii_digit())
+        || !d.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let y: i64 = y.parse().ok()?;
+    let m: u32 = m.parse().ok()?;
+    let d: u32 = d.parse().ok()?;
+    if !is_valid_civil_date(y, m, d) {
+        return None;
+    }
+    let days = days_from_civil(y, m, d);
+    if days < 0 {
+        return None;
+    }
+    Some(days as u64 * 86_400)
+}
+
+/// True when (y, m, d) is a real calendar date (rejects Feb 30, Apr 31,
+/// month 13, ...). Years before 1970 are out of domain for `--since`.
+fn is_valid_civil_date(y: i64, m: u32, d: u32) -> bool {
+    if y < 1970 || !(1..=12).contains(&m) {
+        return false;
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let max_d = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ => {
+            // February.
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+    };
+    (1..=max_d).contains(&d)
+}
+
+/// Parse a `--since` value against the current clock: relative (`7d`)
+/// or ISO date (`2026-03-01`).
+fn parse_since(s: &str) -> Option<u64> {
+    parse_since_at(s, now_secs())
+}
+
+/// Live status/recency of a search result, resolved from the entity's
+/// detail endpoint. The search index is written only at entity creation,
+/// so its `status` facet freezes at the create-time value; `--status` and
+/// `--since` must consult the live record.
+#[derive(Debug, Clone, PartialEq)]
+struct LiveEntityState {
+    /// Current status string (task/mr/agent states; empty when unknown).
+    status: String,
+    /// Most recent activity timestamp (UNIX secs; 0 when unknown).
+    updated_at: u64,
+    /// True when neither field could be resolved for this entity type.
+    unavailable: bool,
+}
+
+/// Fetch the live state behind one search result. Entity types the CLI
+/// cannot query (spec/commit — no detail endpoint on the current API)
+/// return `unavailable`, and the filter treats them conservatively
+/// (see `result_matches_filters`).
+async fn live_entity_state(api: &client::GyreClient, r: &client::SearchResult) -> LiveEntityState {
+    match r.entity_type.as_str() {
+        "task" => match api.get_task(&r.entity_id).await {
+            Ok(t) => LiveEntityState {
+                status: t.status,
+                updated_at: t.updated_at,
+                unavailable: false,
+            },
+            // The entity may have been deleted after indexing; a missing
+            // record can no longer match a status/recency filter.
+            Err(_) => LiveEntityState {
+                status: String::new(),
+                updated_at: 0,
+                unavailable: true,
+            },
+        },
+        "mr" => match api.get_mr(&r.entity_id).await {
+            Ok(mr) => LiveEntityState {
+                status: mr.status,
+                updated_at: mr.updated_at,
+                unavailable: false,
+            },
+            Err(_) => LiveEntityState {
+                status: String::new(),
+                updated_at: 0,
+                unavailable: true,
+            },
+        },
+        "agent" => match api.get_agent(&r.entity_id).await {
+            Ok(a) => {
+                // Agents carry no updated_at; recency is the later of
+                // spawn time and last heartbeat.
+                let updated_at = a.spawned_at.max(a.last_heartbeat.unwrap_or(0));
+                LiveEntityState {
+                    status: a.status,
+                    updated_at,
+                    unavailable: false,
+                }
+            }
+            Err(_) => LiveEntityState {
+                status: String::new(),
+                updated_at: 0,
+                unavailable: true,
+            },
+        },
+        // spec/commit: no detail endpoint to resolve live state from.
+        _ => LiveEntityState {
+            status: String::new(),
+            updated_at: 0,
+            unavailable: true,
+        },
+    }
+}
+
+/// Decide whether one search result passes the `--status`/`--since`
+/// filters, given its live state.
+///
+/// Semantics:
+/// - `--status S`: keep results whose live status equals `S`
+///   (case-insensitive). Results whose live status cannot be resolved
+///   (entity type has no detail endpoint, or the record is gone) are
+///   dropped — an unknown status is not a match.
+/// - `--since T`: keep results with a known last-activity timestamp
+///   at or after `T`. Unknown timestamps drop only when a timestamp
+///   filter is active.
+fn result_matches_filters(
+    status_filter: Option<&str>,
+    since_cutoff: Option<u64>,
+    live: &LiveEntityState,
+) -> bool {
+    // Unresolvable live state (no detail endpoint for the entity type, or
+    // the record is gone) can never satisfy a status or recency claim.
+    if (status_filter.is_some() || since_cutoff.is_some()) && live.unavailable {
+        return false;
+    }
+    if let Some(want) = status_filter {
+        if live.status.to_lowercase() != want.to_lowercase() {
+            return false;
+        }
+    }
+    if let Some(cutoff) = since_cutoff {
+        if live.updated_at < cutoff {
+            return false;
+        }
+    }
+    true
+}
+
+/// Collect autocomplete suggestions for `prefix`: results whose title starts
+/// with the prefix (case-insensitive). The server's search endpoint matches
+/// by substring anywhere in the title or body, so the prefix filter for
+/// autocomplete is applied client-side.
+fn collect_suggestions<'a>(
+    prefix: &str,
+    results: &'a client::SearchResponse,
+) -> Vec<(&'a str, &'a str, &'a str)> {
+    let p = prefix.to_lowercase();
+    results
+        .results
+        .iter()
+        .filter(|r| r.title.to_lowercase().starts_with(&p))
+        .map(|r| {
+            (
+                r.entity_type.as_str(),
+                r.title.as_str(),
+                r.entity_id.as_str(),
+            )
+        })
+        .collect()
+}
+
+/// Render autocomplete suggestions for `prefix` in `type  title  (id)` form.
+fn print_search_suggestions(prefix: &str, results: &client::SearchResponse) {
+    let matches = collect_suggestions(prefix, results);
+    if matches.is_empty() {
+        println!("No suggestions for '{}'.", prefix);
+        return;
+    }
+    for (entity_type, title, entity_id) in &matches {
+        println!("{entity_type}    {title}    ({entity_id})");
     }
 }
 
@@ -2958,6 +3347,281 @@ mod tests {
         } else {
             panic!("Expected Explore");
         }
+    }
+
+    // ── Search command tests ────────────────────────────────────────────────
+
+    #[test]
+    fn cli_search_parses() {
+        let args = Cli::try_parse_from(["gyre", "search", "identity security"]);
+        assert!(args.is_ok());
+        if let Commands::Search {
+            query,
+            r#type,
+            status,
+            workspace,
+            since,
+            suggest,
+            limit,
+        } = args.unwrap().command
+        {
+            assert_eq!(query.as_deref(), Some("identity security"));
+            assert!(r#type.is_none());
+            assert!(status.is_none());
+            assert!(workspace.is_none());
+            assert!(since.is_none());
+            assert!(suggest.is_none());
+            assert_eq!(limit, 20);
+        } else {
+            panic!("Expected Search");
+        }
+    }
+
+    #[test]
+    fn cli_search_faceted_parses() {
+        let args = Cli::try_parse_from([
+            "gyre",
+            "search",
+            "--type",
+            "spec",
+            "--status",
+            "approved",
+            "--workspace",
+            "platform-team",
+            "--since",
+            "7d",
+            "--limit",
+            "5",
+            "ABAC",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Search {
+            query,
+            r#type,
+            status,
+            workspace,
+            since,
+            suggest,
+            limit,
+        } = args.unwrap().command
+        {
+            assert_eq!(query.as_deref(), Some("ABAC"));
+            assert_eq!(r#type.as_deref(), Some("spec"));
+            assert_eq!(status.as_deref(), Some("approved"));
+            assert_eq!(workspace.as_deref(), Some("platform-team"));
+            assert_eq!(since.as_deref(), Some("7d"));
+            assert!(suggest.is_none());
+            assert_eq!(limit, 5);
+        } else {
+            panic!("Expected Search");
+        }
+    }
+
+    #[test]
+    fn cli_search_suggest_parses() {
+        let args = Cli::try_parse_from(["gyre", "search", "--suggest", "iden"]);
+        if let Commands::Search { query, suggest, .. } = args.unwrap().command {
+            assert!(query.is_none());
+            assert_eq!(suggest.as_deref(), Some("iden"));
+        } else {
+            panic!("Expected Search");
+        }
+    }
+
+    #[test]
+    fn parse_since_relative_units() {
+        // Fixed `now` keeps the arithmetic observable.
+        let now = 1_000_000_000u64;
+        assert_eq!(parse_since_at("45s", now), Some(now - 45));
+        assert_eq!(parse_since_at("30m", now), Some(now - 1_800));
+        assert_eq!(parse_since_at("12h", now), Some(now - 43_200));
+        assert_eq!(parse_since_at("7d", now), Some(now - 604_800));
+        assert_eq!(parse_since_at("2w", now), Some(now - 1_209_600));
+    }
+
+    #[test]
+    fn parse_since_relative_rejects_junk() {
+        let now = 1_000_000_000u64;
+        // Unknown unit, empty, bare unit, negative, float, and overflow
+        // (a count whose seconds exceed `now` itself) all fail.
+        assert_eq!(parse_since_at("7x", now), None);
+        assert_eq!(parse_since_at("", now), None);
+        assert_eq!(parse_since_at("d", now), None);
+        assert_eq!(parse_since_at("-3d", now), None);
+        assert_eq!(parse_since_at("1.5d", now), None);
+        assert_eq!(parse_since_at("999999999999999999999d", now), None);
+    }
+
+    #[test]
+    fn parse_since_multibyte_unit_does_not_panic() {
+        // Regression: a byte-index split panicked on multibyte input
+        // (`--since é`). It must be a clean parse error, not a crash.
+        let now = 1_000_000_000u64;
+        assert_eq!(parse_since_at("é", now), None);
+        assert_eq!(parse_since_at("7é", now), None);
+        assert_eq!(parse_since_at("café", now), None);
+    }
+
+    #[test]
+    fn parse_since_relative_before_epoch_fails() {
+        // A duration longer than elapsed time since the epoch cannot be
+        // represented as a cutoff; it must be an error, not a wraparound.
+        assert_eq!(parse_since_at("999999w", 1_000_000_000), None);
+    }
+
+    #[test]
+    fn parse_since_iso_date() {
+        // 2026-03-01T00:00:00Z == 1772323200 (verified independently).
+        assert_eq!(parse_since_at("2026-03-01", 0), Some(1_772_323_200));
+        // Leap-year day is a valid date.
+        assert_eq!(parse_since_at("2024-02-29", 0), Some(1_709_164_800));
+    }
+
+    #[test]
+    fn parse_since_iso_date_rejects_invalid() {
+        assert_eq!(parse_since_at("2026-02-30", 0), None); // Feb has 28 days
+        assert_eq!(parse_since_at("2026-13-01", 0), None); // month 13
+        assert_eq!(parse_since_at("2026-04-31", 0), None); // Apr has 30 days
+        assert_eq!(parse_since_at("2023-02-29", 0), None); // not a leap year
+        assert_eq!(parse_since_at("1969-12-31", 0), None); // before epoch
+        assert_eq!(parse_since_at("2026-3-1", 0), None); // not zero-padded
+    }
+
+    #[test]
+    fn result_matches_status_filter() {
+        let live = LiveEntityState {
+            status: "in_progress".into(),
+            updated_at: 1_000,
+            unavailable: false,
+        };
+        // Exact and case-insensitive matches pass; other statuses fail.
+        assert!(result_matches_filters(Some("in_progress"), None, &live));
+        assert!(result_matches_filters(Some("In_Progress"), None, &live));
+        assert!(!result_matches_filters(Some("done"), None, &live));
+        // No filter passes everything.
+        assert!(result_matches_filters(None, None, &live));
+    }
+
+    #[test]
+    fn result_matches_since_filter() {
+        let live = LiveEntityState {
+            status: String::new(),
+            updated_at: 1_000,
+            unavailable: false,
+        };
+        assert!(result_matches_filters(None, Some(1_000), &live)); // boundary: at cutoff
+        assert!(result_matches_filters(None, Some(999), &live));
+        assert!(!result_matches_filters(None, Some(1_001), &live));
+    }
+
+    #[test]
+    fn result_matches_filters_compose_with_and() {
+        let live = LiveEntityState {
+            status: "approved".into(),
+            updated_at: 5_000,
+            unavailable: false,
+        };
+        assert!(result_matches_filters(Some("approved"), Some(4_000), &live));
+        // Status matches but recency does not → dropped.
+        assert!(!result_matches_filters(
+            Some("approved"),
+            Some(6_000),
+            &live
+        ));
+        // Recency matches but status does not → dropped.
+        assert!(!result_matches_filters(Some("open"), Some(4_000), &live));
+    }
+    #[test]
+    fn result_matches_filters_drop_unavailable_state() {
+        // Unresolvable live state (no detail endpoint / deleted entity)
+        // can never satisfy a status or recency claim.
+        let live = LiveEntityState {
+            status: String::new(),
+            updated_at: 0,
+            unavailable: true,
+        };
+        assert!(!result_matches_filters(Some("approved"), None, &live));
+        assert!(!result_matches_filters(None, Some(1), &live));
+        // Without filters, nothing consults live state.
+        assert!(result_matches_filters(None, None, &live));
+    }
+    #[test]
+    fn suggest_filters_to_title_prefix() {
+        let results = client::SearchResponse {
+            query: "iden".into(),
+            total: 3,
+            results: vec![
+                client::SearchResult {
+                    entity_type: "spec".into(),
+                    entity_id: "system/identity-security.md".into(),
+                    title: "Identity & Security".into(),
+                    snippet: String::new(),
+                    score: 3.0,
+                    facets: Default::default(),
+                },
+                client::SearchResult {
+                    entity_type: "task".into(),
+                    entity_id: "task-042".into(),
+                    title: "Coincidental iden-tifier cleanup".into(),
+                    snippet: String::new(),
+                    score: 1.0,
+                    facets: Default::default(),
+                },
+                client::SearchResult {
+                    entity_type: "spec".into(),
+                    entity_id: "system/identity.md".into(),
+                    title: "identity model".into(),
+                    snippet: String::new(),
+                    score: 2.0,
+                    facets: Default::default(),
+                },
+            ],
+        };
+        let suggestions = collect_suggestions("iden", &results);
+        assert_eq!(
+            suggestions,
+            vec![
+                ("spec", "Identity & Security", "system/identity-security.md"),
+                ("spec", "identity model", "system/identity.md"),
+            ]
+        );
+    }
+
+    #[test]
+    fn suggest_prefix_is_case_insensitive() {
+        let results = client::SearchResponse {
+            query: "IDEN".into(),
+            total: 1,
+            results: vec![client::SearchResult {
+                entity_type: "spec".into(),
+                entity_id: "system/identity.md".into(),
+                title: "identity model".into(),
+                snippet: String::new(),
+                score: 2.0,
+                facets: Default::default(),
+            }],
+        };
+        assert_eq!(
+            collect_suggestions("IDEN", &results),
+            vec![("spec", "identity model", "system/identity.md")]
+        );
+    }
+
+    #[test]
+    fn suggest_no_prefix_match_reports_none() {
+        let results = client::SearchResponse {
+            query: "xyz".into(),
+            total: 1,
+            results: vec![client::SearchResult {
+                entity_type: "task".into(),
+                entity_id: "task-001".into(),
+                title: "unrelated".into(),
+                snippet: String::new(),
+                score: 1.0,
+                facets: Default::default(),
+            }],
+        };
+        assert!(collect_suggestions("xyz", &results).is_empty());
     }
 
     // ── Trace command tests ─────────────────────────────────────────────────
