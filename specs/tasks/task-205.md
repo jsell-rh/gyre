@@ -269,6 +269,51 @@ tested. This round completed the interrupted work at that merged HEAD:
   errno 95, re-probed this round); exact host/CI command recorded in the
   evidence file.
 
+## Repair round (contract finding b259451bdd8d434ca2881fb02daf9a61)
+
+The durable finding: "The implementation changed the assigned requirements.
+Restore the original task contract and implement it; normative changes
+require separate spec review."
+
+Root cause — rounds 2 and 3 mishandled the R1 review's note that it had
+touched `specs/coverage/system/realized-model.md`. The instruction "repair
+these edits within task scope" was misread as "own and extend the coverage
+edit": round 2 re-anchored citations, and round 3 flipped row 7 (§4 Concept
+Views) from `task-assigned` to `implemented`, rewrote the verifier's
+`Last audited` header, and re-anchored rows 6/8/10 (outside this task's
+`coverage_sections`). But the task contract states "the reviewer will
+re-audit the coverage row" — a coverage-status flip is a normative
+verification claim, not an implementation artifact. The implementation
+asserting it for itself is exactly the "changed the assigned requirements"
+violation, and rows 6/8/10 were out of scope besides.
+
+Repair shipped this round (code untouched — the implementation and its R1
+review remain exactly as approved):
+
+- `specs/coverage/system/realized-model.md` restored to its original base
+  (`06d70009`) state verbatim: the verifier's 2026-09-30 audit header,
+  coverage 6/8, and row 7 back to `task-assigned | task-205`. The fresh
+  independent reviewer re-audits that row against the shipped code; the
+  implementation does not write its own verdict.
+- No product code changed: `git diff e8b09b48..HEAD -- crates/ web/
+  scripts/` is empty (the intervening harness merges added only
+  `specs/tasks/task-227.md` and `specs/tasks/task-228.md`). The R1 review
+  record (`specs/reviews/task-205.md`, verdict `complete`) applies to this
+  exact tree.
+- Verified in this sandbox at HEAD `cd9bc640` (evidence in
+  `/tmp/stage/review-evidence/task205-round4-focused-tests.txt`):
+  `SKIP_WEB_BUILD=1 cargo build --all` OK;
+  `cargo test -p gyre-common --lib` — 101 passed;
+  `cargo test -p gyre-server --lib -- api::graph::tests mcp::tests
+  spec_registry::tests` — 152 passed (12 concept guards included);
+  `python3 /tmp/stage/dev-attribution.py task-205` — no change (the 4
+  recorded SHAs are correct);
+  `scripts/check-task-commit-attribution.sh` — exit 0, no exemptions.
+- TCP-listener integration tests still cannot run here (accept(2) errno 95,
+  re-probed fresh this round); exact host/CI command recorded in
+  `/tmp/stage/review-evidence/task205-round4-sandbox-tcp-accept-restriction.txt`.
+  GitHub CI remains mandatory.
+
 ## Review
 
 ### Review changed source code
