@@ -2,10 +2,11 @@
 title: "Business Continuity §5 — Data Retention: Real Enforcement for All 7 Data Types"
 spec_ref: "business-continuity.md §5. Data Retention Policies"
 depends_on: []
+review: specs/reviews/task-207.md
 progress: ready-for-review
 coverage_sections:
   - "business-continuity.md §5. Data Retention Policies"
-commits: ["d365e47f45f04b633516eef3a058d26a528662a0", "e57cbd2c13b1f4470940769ffdbf6d693d9066f1", "16e7c07affb1d27f3732c6208501607fb446957b", "5f58013e398a726ecb2d583e1e3294f042c353bf", "2b1fa2ae823dfc912d85cbd41d4e9069a9cc02b4", "3a3c727b1df1480c95b3c0929cc3297d2e5ae161", "d69ef5baf6ccae0700b4aaf74499189080333f17", "dbc06219e0500d33c08b0c578f6c9e3679f7bc88", "6a908460b4d37971938a6f9cc4bfca182fefd592"]
+commits: ["d365e47f45f04b633516eef3a058d26a528662a0", "e57cbd2c13b1f4470940769ffdbf6d693d9066f1", "16e7c07affb1d27f3732c6208501607fb446957b", "5f58013e398a726ecb2d583e1e3294f042c353bf", "2b1fa2ae823dfc912d85cbd41d4e9069a9cc02b4", "3a3c727b1df1480c95b3c0929cc3297d2e5ae161", "d69ef5baf6ccae0700b4aaf74499189080333f17", "dbc06219e0500d33c08b0c578f6c9e3679f7bc88", "6a908460b4d37971938a6f9cc4bfca182fefd592", "574d0c3c6f2f6309ec550c1f23aa1daab9157475"]
 ---
 
 ## Spec Excerpt
@@ -151,25 +152,26 @@ oneshot tests above; the listener-based test must run on host/CI
 admin_retention_list_and_update`). Recorded in
 /tmp/stage/review-evidence/task-207-transport-restriction.md.
 
-## Recovery round addendum (2026-10-10)
+## Recovery + contract-repair round addendum (2026-10-10)
 
-Assignment `445966d0f9834c8f87437f6f14708be2` was interrupted (agent exit
-130) while its full-suite probe was still running. This round verified the
-merged implementation at HEAD rather than changing it:
+Assignment `3f26fcf486214310b7b027971090931d` (repair, category `contract`:
+"The implementation changed the assigned requirements. Restore the original
+task contract and implement it"). Audit of the candidate vs the base
+(`770785f7`) found the implementation itself intact and contract-compliant
+— all 7 data types enforced, 02:00 UTC wall-clock scheduling, KV-persisted
+policies, full PUT validation (re-verified against source this round). The
+contract mutation was in this task file's frontmatter: the revision-round
+docs commit `acd1ba1d` dropped the `review: specs/reviews/task-207.md`
+pointer the verifier's R1 review commit `226859ed` had added, silently
+unscoping the R1 findings record from the task. Fixed this round:
 
-- Fixed the duplicate `progress:` key this round's assignment injection left
-  in the frontmatter above (invalid YAML: `needs-revision` and
-  `ready-for-review`); the single truthful value is `ready-for-review`,
-  matching the coverage row and the reachable commit set (all 9 listed SHAs
-  verified ancestors of HEAD).
-- Re-ran every focused probe fresh (isolated target dir, full cold build):
-  retention suite **29 passed / 0 failed**; adapters `delete_older_than`
-  **3 passed / 0 failed**; `telemetry_buffer_purge` **1 passed / 0 failed**;
-  `check-arch.sh`, `check-task-commit-attribution.sh`,
-  `check-mem-port-contracts.sh`, `check-in-memory-state-stores.sh`,
-  `check-byte-slice-truncation.sh` all OK; coverage summary idempotent.
-- Re-confirmed the transport restriction: the full `api_integration` file
-  (66 tests) fails identically under `--test-threads=1` including unrelated
-  endpoints — sandbox TCP `accept()` limitation (errno 95), not a code
-  defect. Evidence:
-  /tmp/stage/review-evidence/task-207-revision-round-evidence.md.
+- **Restored `review: specs/reviews/task-207.md`** in the frontmatter (the
+  review file itself was unchanged in the tree — only the pointer was lost).
+- **Single `progress: ready-for-review`** — this round's assignment
+  injection had left a duplicate `progress:` key (`needs-revision` +
+  `ready-for-review`, invalid YAML); resolved to the one truthful value.
+- **Attribution completed**: `574d0c3c` (the prior docs commit fixing the
+  same duplicate-key defect) added to `commits:`.
+- No production code changed — none was needed; the repair is the task
+  contract itself. Fresh probe evidence this round is recorded in
+  /tmp/stage/review-evidence/task-207-contract-repair-evidence.md.
