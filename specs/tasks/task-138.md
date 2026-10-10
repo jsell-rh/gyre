@@ -172,33 +172,57 @@ The identical lifecycle is proven listener-free by
 `git_http::tests::push_modifying_spec_revokes_ledger_approvals`. Host
 checklist: e2e test, `cargo test --all`, GitHub CI on the exact head.
 
-## Shipped (run 2 — merge resolution and finding triage)
+### Round 3 (contract finding c059a12e, round-2 section heading)
 
-This run resolved the interrupted checkpoint (exit 130) and triaged the
-verification finding; no production code needed changing — every focused
-suite passes on the merged tree. Final head `466b6e72` (merged current
-origin/main for the task-196 attribution repair; zero code delta from
-verified `103db0c3`).
+Root cause of the contract finding: the run-2 record was appended under
+`## Shipped (run 2 — ...)` — the parenthetical suffix defeats
+`dev-contract.py requirement_parts`'s strip regex (it matches only
+`^## Shipped\s*\n`), so 1803 chars of operational prose leaked into the
+contract hash (3b70cbf4... vs the assigned d1cc7a44...) and `implement()`
+flagged contract_changed. Repair: the leaking section is removed entirely
+(run-2's substance — merge resolution, finding triage, 85/0 suite counts —
+is superseded and re-verified below); this round's evidence lives here,
+inside the canonical `## Shipped` section that `requirement_parts` strips.
+Verified: `requirement_parts(assigned original from 0564e747) ==
+requirement_parts(this file)` (frontmatter key fields and normative prose
+both equal; only `progress:`/`commits:` lines differ, which the contract
+checker excludes by design).
 
-- Resolved active merge conflict in `specs/tasks/task-068.md` (identical
-  10-SHA `commits:` lists, different order; kept HEAD ordering), committed
-  as `103db0c3`. Attribution gate re-run green.
-- Completed the lifecycle verification the checkpoint was awaiting:
-  `push_modifying_spec_revokes_ledger_approvals` and
-  `require_current_spec_blocks_stale_spec_ref` pass, plus `api::gates` +
-  `api::specs` — 85 passed / 0 failed on the merged tree.
-- `gyre-adapters sqlite::spec_approval` 7/7, `gyre-domain spec_approval`
-  4/4; all 21 mechanical invariant scripts + attribution gate pass.
-- **Finding 9e33d19b (exit 1) triaged as environmental**: its tail shows a
-  successful vite build; reproduced `npm test` failures on current HEAD are
-  all 5s vitest timeouts (0 assertion failures) in ExplorerCanvas perf
-  tests; the finding's own base commit `e96d25ab` (on origin/main, green in
-  GitHub CI) fails identically but worse (11 vs 8) in this CPU-starved
-  sandbox; isolated run of the failing file passes 15/15. No branch
-  regression; host checklist: full `npm test` + GitHub CI on exact head.
-- Merged current origin/main (`18c44f1a`, task-227's attribution repair for
-  task-196) so the attribution gate is green on this branch too; that merge
-  is task-markdown-only — zero code delta from the verified tree.
+Attribution repair in the same round: the merged origin/main head brought
+squash landing commit `27bd585c` (`feat(task-155)`) whose SHA cannot appear
+in its own squash, leaving task-155's `commits:` frontmatter one entry short
+(task-095 R3-F4 class; no repair had landed anywhere — origin/main grep for
+the SHA returns nothing). Applied the check's documented remedy: appended
+`27bd585ca7eb429905ccbded1f48b4d0167c0c20` to
+`specs/tasks/task-155.md`'s `commits:` frontmatter; no exemption entries
+added (file stays at its frozen 3-entry baseline). Mutation check: removing
+the SHA re-fails the gate (exit 1, identical violation), restoring re-passes
+(exit 0) — the pass is attributable to the recorded SHA, not gate drift.
 
-Evidence: `/tmp/stage/review-evidence/task-138-repair.md` (this run),
-`web-full-suite.log`, `web-base-e96d25ab.log`.
+Verification on this round's working tree (evidence:
+`/tmp/stage/review-evidence/task-138-r3-repair.md`,
+`task-138-r3-static-gates.txt`, `task-138-r3-mutation-check.txt`,
+`task-138-r3-mutation-restore-check.txt`):
+
+- All 21 static gates exit 0 (architecture, hierarchy, ABAC registry +
+  exempt handlers, MCP write tools, migration versions + SQL portability,
+  dead message kinds, byte-slice truncation, relative path defaults,
+  fail-open ref resolution, mem port contracts, fabricated scope defaults,
+  lossy secret conversion, scope literal defaults, inert enforcement,
+  forged scope fields, forwarded header trust, in-memory state stores,
+  unbounded external HTTP, and the repaired task-commit attribution).
+- Task-138 focused suites re-run on this exact tree (candidate code surface
+  byte-identical to the run-2 verified tree; `git diff 466b6e72 HEAD --
+  crates/gyre-server crates/gyre-domain crates/gyre-ports crates/gyre-adapters
+  web/src web/tests` is empty): `gyre-domain spec_approval` 4/4,
+  `gyre-adapters sqlite::spec_approval` 7/7, and the server lifecycle suite
+  (`push_modifying_spec_revokes_ledger_approvals`,
+  `require_current_spec_blocks_stale_spec_ref`, `api::gates`, `api::specs`)
+  85 passed / 0 failed — identical to run 2.
+- The merged task-155 CLI surface is byte-identical to origin/main's
+  (`git diff 27bd585c HEAD -- crates/gyre-cli` empty), so no CLI probe is
+  required beyond the server suite compiling against it.
+
+Sandbox limitation unchanged (see above); host checklist: e2e
+`spec_approval_auto_invalidated_on_spec_change`, `cargo test --all`, full
+`npm test`, GitHub CI on the exact head.
