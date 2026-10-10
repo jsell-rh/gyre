@@ -212,3 +212,50 @@ Fresh evidence (this round, sandbox):
 
 Progress remains `ready-for-review` awaiting fresh review on this
 candidate.
+
+
+**Prerequisite-adoption round (2026-10-10).** Previous attempt 8188650c
+failed its baseline gate: `check-task-commit-attribution.sh` FAIL at
+repair base 8c2d1775 (a781ede2 task-210 unattributed). Prerequisite
+task-212 shipped a1751da1, which repairs that gate by recording the
+task-210/task-189 attribution in their commits: frontmatter. This round
+merged the repaired prerequisite into the pipeline branch (475e6082,
+merge-base = a1751da1 itself, no web/ or explorer-spec changes
+introduced by the merge — `git diff --stat 418745ab 475e6082 -- web/`
+is empty) and adopted the new `depends_on: [task-062, task-212]`
+contract (db84d6d1), resolving the baseline failure. No product code
+changed this round; the ExplorerCanvas lineage is carried by the branch
+and fully re-verified at the new head:
+
+- `bash scripts/check-task-commit-attribution.sh` at merged head → **OK,
+  exit 0** (evidence:
+  /tmp/stage/review-evidence/task-065-baseline-gate-head.txt).
+- `npm ci` → 169 packages (locked versions).
+- `cd web && npm test` → **56 files passed, 1513 passed | 41 skipped,
+  0 failed** (71s).
+- Focused `canvas-filters.test.js` + `ExplorerCanvas.test.js` → **157
+  passed**.
+- Mutation re-proof re-run in this sandbox (evidence:
+  /tmp/stage/review-evidence/task-065-post-prereq-adoption-evidence.txt):
+  dependencies→unconditional 0.1 dim → 2 fail; collectEdgeParticipants
+  drops target endpoint → 6 fail; dim constant 0.1→0.5 → 8 fail. Tree
+  restored pristine after each (md5-verified, git status clean).
+- Acceptance criteria re-verified at head with file:line evidence:
+  unified surface (MoldableView/FlowCanvas/FlowRenderer/
+  ExplorerFilterPanel/NodeBadge all deleted, zero references in
+  ExplorerView.svelte or ExplorerCanvas.svelte); three lens buttons
+  (ExplorerCanvas.svelte:4967-4972, Observable `aria-disabled` with
+  telemetry label); five filter presets (canvas-filters.js:37-54);
+  minimap (drawMinimap:3657, minimapToWorld:4554,
+  onMinimapMouseDown:4591); drill/breadcrumb (drillInto:4148,
+  onDblClick:4186, navigateBreadcrumb:4375); interactions (onMouseDown:
+  3843, onWheel:3908, onClick:4017); view-query rendering
+  (tiered_colors:2102, narrative:2606-2608, callouts:2007,
+  groups:2317-2318, annotation title/description:4920-4922);
+  §17 props (ExplorerCanvas.svelte:19-44).
+- Sandbox transport restriction (unchanged): TCP listener probe
+  unsupported (errno 95, /tmp/stage/capabilities.json) — live
+  dev-server browser check deferred to host verification (exact-head
+  GitHub CI plus manual UI check at localhost:3000).
+
+Progress remains `ready-for-review` on this head.
