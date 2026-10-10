@@ -100,7 +100,10 @@ impl RigVertexAiFactory {
         Ok(Self {
             project,
             location,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .context("failed to build Vertex AI HTTP client")?,
             token_cache: Arc::new(RwLock::new(TokenCache::default())),
         })
     }
@@ -615,7 +618,10 @@ async fn fetch_adc_token() -> Result<(String, u64)> {
 
 /// Fetch a token from the GCE instance metadata server.
 async fn fetch_metadata_token() -> Result<(String, u64)> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .context("failed to build metadata HTTP client")?;
     let resp = client
         .get(
             "http://metadata.google.internal/computeMetadata/v1/instance/\
@@ -694,7 +700,10 @@ async fn fetch_service_account_token() -> Result<(String, u64)> {
 
 /// Exchange an OAuth2 refresh token for an access token.
 async fn exchange_refresh_token(creds: &UserCredentials) -> Result<(String, u64)> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .context("failed to build OAuth token client")?;
     let resp = client
         .post("https://oauth2.googleapis.com/token")
         .form(&[
@@ -763,7 +772,10 @@ async fn exchange_service_account_jwt(creds: &ServiceAccountKey) -> Result<(Stri
     let jwt = format!("{}.{}", signing_input, base64url_encode(&signature));
 
     // Exchange JWT for access token.
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .context("failed to build OAuth token client")?;
     let resp = client
         .post("https://oauth2.googleapis.com/token")
         .form(&[

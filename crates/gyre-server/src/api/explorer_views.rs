@@ -449,6 +449,28 @@ pub async fn delete_explorer_view(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Validate a caller-supplied `repo_id` (request body scope field) against
+/// the workspace the caller is authorized for: the repo must exist and
+/// belong to that workspace. Returns Forbidden on cross-workspace repo_id,
+/// NotFound on unknown repo_id.
+async fn validate_repo_scope(
+    state: &AppState,
+    workspace_id: &Id,
+    repo_id: Option<&str>,
+) -> Result<(), ApiError> {
+    let Some(rid) = repo_id else {
+        return Ok(());
+    };
+    match state.repos.find_by_id(&Id::new(rid)).await {
+        Ok(Some(r)) if r.workspace_id == *workspace_id => Ok(()),
+        Ok(Some(_)) => Err(ApiError::Forbidden(
+            "repo does not belong to this workspace".into(),
+        )),
+        Ok(None) => Err(ApiError::NotFound(format!("repo {rid} not found"))),
+        Err(e) => Err(ApiError::Internal(e)),
+    }
+}
+
 // ── POST /api/v1/workspaces/:id/explorer-views/generate (SSE) ────────────────
 
 pub async fn generate_explorer_view(
@@ -492,24 +514,11 @@ pub async fn generate_explorer_view(
     let tenant_id = ws.tenant_id.to_string();
 
     let repo_filter: Option<Id> = req.repo_id.as_ref().map(|r| Id::new(r));
-    if let Some(rid) = &repo_filter {
+    if repo_filter.is_some() {
         // A repo_id from another workspace must not leak its graph into
-        // this prompt — validate ownership like the saved-views CRUD does.
-        match state.repos.find_by_id(rid).await {
-            Ok(Some(r)) if r.workspace_id == ws_id => {}
-            Ok(Some(_)) => {
-                return Err(ApiError::Forbidden(
-                    "repo does not belong to this workspace".into(),
-                ))
-            }
-            Ok(None) => {
-                return Err(ApiError::NotFound(format!(
-                    "repo {} not found",
-                    req.repo_id.clone().unwrap_or_default()
-                )))
-            }
-            Err(e) => return Err(ApiError::Internal(e)),
-        }
+        // this prompt — validate the caller-supplied repo scope against
+        // the workspace the caller is authorized for.
+        validate_repo_scope(&state, &ws_id, req.repo_id.as_deref()).await?;
     }
     let (node_type_summary, node_count) =
         crate::llm_helpers::workspace_graph_summary_parts(&state, &ws_id, repo_filter.as_ref())

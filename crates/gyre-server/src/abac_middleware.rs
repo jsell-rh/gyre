@@ -1210,4 +1210,106 @@ pub mod tests {
             .count();
         assert_eq!(count, 1);
     }
+
+    /// Regression (task-171, HSI spec-amendment table): without the
+    /// `developer-generate-access` Allow policy, `default-deny` blocks all
+    /// LLM generation and prompt editing. The three LLM endpoints
+    /// (`briefing/ask`, `explorer-views/generate`, `specs/assist`,
+    /// `prompts/save`) use `action_override: "generate"`, which no other
+    /// builtin Allow covers — a Developer-role JWT would be 403'd on every
+    /// LLM call.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn developer_jwt_can_generate_on_llm_endpoints() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use axum::routing::post;
+
+        let state_base = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state_base))
+        });
+        init_resolver();
+
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        // The LLM endpoints with `generate` action overrides.
+        let app = Router::new()
+            .route("/api/v1/workspaces/:id/briefing/ask", post(ok_handler))
+            .route(
+                "/api/v1/workspaces/:id/explorer-views/generate",
+                post(ok_handler),
+            )
+            .route("/api/v1/repos/:id/specs/assist", post(ok_handler))
+            .route("/api/v1/repos/:id/prompts/save", post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state_base.clone(),
+                abac_middleware,
+            ))
+            .with_state(state_base);
+
+        let token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "dev-llm-sub",
+                "preferred_username": "developer",
+                "realm_access": { "roles": ["developer"] },
+                "workspace_role": "Developer"
+            }),
+            3600,
+        );
+
+        for path in [
+            "/api/v1/workspaces/some-ws/briefing/ask",
+            "/api/v1/workspaces/some-ws/explorer-views/generate",
+            "/api/v1/repos/some-repo/specs/assist",
+            "/api/v1/repos/some-repo/prompts/save",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("Authorization", format!("Bearer {token}"))
+                        .header("content-type", "application/json")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "Developer must be allowed generate on {path}"
+            );
+        }
+
+        // Viewer workspace role must still be denied — the Allow is
+        // scoped to Developer/Admin workspace roles, not everyone.
+        let viewer_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "viewer-llm-sub",
+                "preferred_username": "viewer",
+                "realm_access": { "roles": ["developer"] },
+                "workspace_role": "Viewer"
+            }),
+            3600,
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/some-ws/briefing/ask")
+                    .header("Authorization", format!("Bearer {viewer_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "Viewer workspace role must be denied generate"
+        );
+    }
 }
