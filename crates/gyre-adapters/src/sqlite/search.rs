@@ -10,6 +10,15 @@
 //! backend too (FTS5 syntax would break it). It runs here, on the SQLite-only
 //! init path instead.
 
+// `QueryableByName`'s derive (diesel_derives 2.3.7) expands to
+// `Self { field: field, … }` with spans mapped onto the field declarations
+// below, so clippy::redundant_field_names fires on derive-generated code.
+// The generated construction sits in a dummy module that inherits neither
+// struct- nor field-level `#[allow]` (verified: both still warn), so the
+// lint is scoped off for this whole module instead. Every struct here is a
+// `QueryableByName` row carrier — nothing else in this file writes
+// `field: field` initializations by hand.
+#![allow(clippy::redundant_field_names)]
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
