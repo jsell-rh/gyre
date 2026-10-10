@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use git2::{BranchType, Repository};
-use gyre_domain::{BranchInfo, CommitInfo, DiffResult, FileDiff, MergeResult};
+use gyre_domain::{BranchInfo, CommitInfo, DiffResult, FileDiff, MergeResult, RevertResult};
 use gyre_ports::GitOpsPort;
 
 /// Recursively insert a blob into a tree at a nested path.
@@ -275,12 +275,13 @@ impl GitOpsPort for Git2OpsAdapter {
 
             // No fast-forward: even when target is an ancestor of source, we
             // create a true merge commit. The recovery protocol reverts the
-            // reported merge SHA by restoring parent(0)'s tree
-            // (platform-model.md §6), so the merge SHA must be a commit whose
-            // first parent is the pre-merge target tip — a fast-forward would
-            // report the source branch tip, whose parent(0) is the previous
-            // source-branch commit, and reverting it would reset main to a
-            // tree that never existed there (task-095 R2-2).
+            // reported merge SHA by applying the inverse patch of that
+            // commit's first-parent diff (platform-model.md §6), so the
+            // merge SHA must be a commit whose first parent is the
+            // pre-merge target tip — a fast-forward would report the source
+            // branch tip, whose parent(0) is the previous source-branch
+            // commit, and reverting it would undo the wrong diff
+            // (task-095 R2-2).
 
             // Three-way merge using trees (works for bare and non-bare repos).
             let merge_base_oid = repo.merge_base(source_commit.id(), target_commit.id())?;
@@ -642,7 +643,7 @@ impl GitOpsPort for Git2OpsAdapter {
         repo_path: &str,
         branch: &str,
         sha_to_revert: &str,
-    ) -> Result<String> {
+    ) -> Result<RevertResult> {
         let repo_path = repo_path.to_string();
         let branch = branch.to_string();
         let sha_to_revert = sha_to_revert.to_string();
@@ -657,15 +658,55 @@ impl GitOpsPort for Git2OpsAdapter {
             if revert_commit.parent_count() == 0 {
                 anyhow::bail!("cannot revert a root commit: {sha_to_revert}");
             }
-            // The revert restores the first parent's tree.
-            let parent_commit = revert_commit.parent(0)?;
-            let tree = parent_commit.tree()?;
 
-            // The new commit's parent is the current branch tip.
             let branch_ref = repo
                 .find_branch(&branch, BranchType::Local)
                 .with_context(|| format!("branch '{branch}' not found"))?;
             let tip_commit = branch_ref.get().peel_to_commit()?;
+
+            // `git revert -m 1` semantics (task-095 R4-F1): undo ONLY the
+            // changes the reverted commit introduced relative to its first
+            // parent, applied on top of the current tip. The three-way
+            // merge is:
+            //   ancestor = tree(M)        — the state M changed
+            //   ours     = tree(tip)      — current branch state
+            //   theirs   = tree(M^1)      — the pre-M state M moved away from
+            // so the merge result = tip + (M^1 − M). A later merge's
+            // changes (present in ours but untouched by the M^1−M patch)
+            // are preserved; the pre-fix snapshot semantics (tree = M^1
+            // wholesale) silently discarded every merge landed after M.
+            let ancestor_tree = revert_commit.tree()?;
+            let their_tree = revert_commit.parent(0)?.tree()?;
+            let our_tree = tip_commit.tree()?;
+
+            let mut index =
+                repo.merge_trees(&ancestor_tree, &our_tree, &their_tree, None)?;
+
+            if index.has_conflicts() {
+                // Same file changed by the reverted commit AND by a later
+                // commit: the inverse patch cannot be applied cleanly.
+                // Report the conflicting paths; the branch is untouched.
+                let mut paths: Vec<String> = Vec::new();
+                for conflict in index.conflicts()? {
+                    let c = conflict.context("failed to read conflict entry")?;
+                    let entry = c.our.or(c.their).or(c.ancestor);
+                    let path = entry
+                        .map(|e| String::from_utf8_lossy(&e.path).to_string())
+                        .unwrap_or_else(|| "<unknown>".to_string());
+                    paths.push(path);
+                }
+                paths.sort();
+                paths.dedup();
+                return Ok(RevertResult::Conflict {
+                    message: format!(
+                        "revert of {sha_to_revert} conflicts with later changes on '{branch}': {}",
+                        paths.join(", ")
+                    ),
+                });
+            }
+
+            let tree_id = index.write_tree_to(&repo)?;
+            let tree = repo.find_tree(tree_id)?;
 
             // Message mirrors `git revert`'s default.
             let subject = revert_commit
@@ -684,7 +725,9 @@ impl GitOpsPort for Git2OpsAdapter {
                 &tree,
                 &[&tip_commit],
             )?;
-            Ok(commit_id.to_string())
+            Ok(RevertResult::Success {
+                revert_commit_sha: commit_id.to_string(),
+            })
         })
         .await?
     }
@@ -798,11 +841,18 @@ mod tests {
             .await
             .unwrap();
 
-        // Revert the merge commit.
-        let revert_sha = adapter
+        // Revert the merge commit (tip-adjacent: the inverse patch applies
+        // to a tip identical to the merge's parent).
+        let revert_sha = match adapter
             .revert_commit(&workdir, "main", &merge_sha)
             .await
-            .unwrap();
+            .unwrap()
+        {
+            RevertResult::Success { revert_commit_sha } => revert_commit_sha,
+            RevertResult::Conflict { message } => {
+                panic!("tip-adjacent revert must not conflict: {message}")
+            }
+        };
 
         // Revert commit is the new main tip.
         let repo = Repository::open(&workdir).unwrap();
@@ -835,6 +885,194 @@ mod tests {
 
         let result = adapter.revert_commit(&workdir, "main", &root.to_string()).await;
         assert!(result.is_err());
+    }
+
+    /// Task-095 R4-F1: reverting a NON-tip merge must undo only that
+    /// merge's changes. Two sequential merges (A adds fileA, B adds
+    /// fileB); reverting A's merge commit must leave fileB intact. The
+    /// pre-fix snapshot semantics restored parent(0)'s tree wholesale,
+    /// silently destroying every later merge.
+    #[tokio::test]
+    async fn test_revert_commit_non_tip_preserves_later_merges() {
+        let dir = TempDir::new().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let adapter = Git2OpsAdapter::new();
+        let workdir = repo.workdir().unwrap().to_str().unwrap().to_string();
+
+        repo.set_head("refs/heads/main").unwrap();
+        make_file_commit(&repo, "base.txt", "base", "base");
+
+        // MR A: adds fileA (true merge commit via merge_branches —
+        // matches how the merge processor lands MRs).
+        create_branch(&repo, "mr-a");
+        repo.set_head("refs/heads/mr-a").unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .unwrap();
+        make_file_commit(&repo, "fileA.txt", "from A", "MR A");
+        repo.set_head("refs/heads/main").unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .unwrap();
+        let MergeResult::Success {
+            merge_commit_sha: merge_a,
+        } = adapter
+            .merge_branches(&workdir, "mr-a", "main")
+            .await
+            .unwrap()
+        else {
+            panic!("merge A failed")
+        };
+
+        // MR B: adds fileB, merged AFTER A.
+        create_branch(&repo, "mr-b");
+        repo.set_head("refs/heads/mr-b").unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .unwrap();
+        make_file_commit(&repo, "fileB.txt", "from B", "MR B");
+        repo.set_head("refs/heads/main").unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .unwrap();
+        let MergeResult::Success {
+            merge_commit_sha: merge_b,
+        } = adapter
+            .merge_branches(&workdir, "mr-b", "main")
+            .await
+            .unwrap()
+        else {
+            panic!("merge B failed")
+        };
+        let _ = merge_b; // B's merge sha is not the revert target
+
+        // Revert MR A's merge — a NON-tip commit (B's merge landed after).
+        let revert_sha = match adapter
+            .revert_commit(&workdir, "main", &merge_a)
+            .await
+            .unwrap()
+        {
+            RevertResult::Success { revert_commit_sha } => revert_commit_sha,
+            RevertResult::Conflict { message } => {
+                panic!("disjoint-file revert must not conflict: {message}")
+            }
+        };
+
+        let repo = Repository::open(&workdir).unwrap();
+        let branch = repo.find_branch("main", git2::BranchType::Local).unwrap();
+        let tip = branch.get().peel_to_commit().unwrap();
+        assert_eq!(tip.id().to_string(), revert_sha);
+
+        let read_blob = |name: &str| -> Option<String> {
+            tip.tree()
+                .unwrap()
+                .get_path(std::path::Path::new(name))
+                .ok()
+                .map(|e| repo.find_blob(e.id()).unwrap().content().to_vec())
+                .map(|b| String::from_utf8(b).unwrap())
+        };
+        assert_eq!(
+            read_blob("fileA.txt"),
+            None,
+            "fileA (added by reverted MR A) must be removed"
+        );
+        assert_eq!(
+            read_blob("fileB.txt").as_deref(),
+            Some("from B"),
+            "fileB (added by LATER MR B) must survive the revert of A — \
+             snapshot semantics destroyed it (task-095 R4-F1)"
+        );
+        assert_eq!(
+            read_blob("base.txt").as_deref(),
+            Some("base"),
+            "pre-existing files must survive"
+        );
+    }
+
+    /// Task-095 R4-F1: when the reverted merge's changes collide with
+    /// later changes on the same file, the revert must report a Conflict
+    /// and leave the branch untouched — never silently produce a wrong
+    /// tree.
+    #[tokio::test]
+    async fn test_revert_commit_conflict_leaves_branch_untouched() {
+        let dir = TempDir::new().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let adapter = Git2OpsAdapter::new();
+        let workdir = repo.workdir().unwrap().to_str().unwrap().to_string();
+
+        repo.set_head("refs/heads/main").unwrap();
+        make_file_commit(&repo, "shared.txt", "base", "base");
+
+        // MR A: changes shared.txt to "A".
+        create_branch(&repo, "mr-a");
+        repo.set_head("refs/heads/mr-a").unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .unwrap();
+        make_file_commit(&repo, "shared.txt", "A", "MR A");
+        repo.set_head("refs/heads/main").unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .unwrap();
+        let MergeResult::Success {
+            merge_commit_sha: merge_a,
+        } = adapter
+            .merge_branches(&workdir, "mr-a", "main")
+            .await
+            .unwrap()
+        else {
+            panic!("merge A failed")
+        };
+
+        // MR B: changes the SAME file to "B", merged after A.
+        create_branch(&repo, "mr-b");
+        repo.set_head("refs/heads/mr-b").unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .unwrap();
+        make_file_commit(&repo, "shared.txt", "B", "MR B");
+        repo.set_head("refs/heads/main").unwrap();
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .unwrap();
+        let MergeResult::Success {
+            merge_commit_sha: merge_b,
+        } = adapter
+            .merge_branches(&workdir, "mr-b", "main")
+            .await
+            .unwrap()
+        else {
+            panic!("merge B failed")
+        };
+
+        let pre_revert_tip = repo
+            .find_branch("main", git2::BranchType::Local)
+            .unwrap()
+            .get()
+            .peel_to_commit()
+            .unwrap()
+            .id();
+
+        // Reverting A must conflict: A's inverse patch (A→base) hits a
+        // file that B's merge later changed (base→B is not what's there).
+        match adapter
+            .revert_commit(&workdir, "main", &merge_a)
+            .await
+            .unwrap()
+        {
+            RevertResult::Success { .. } => {
+                panic!("revert of A after B touched the same file must conflict")
+            }
+            RevertResult::Conflict { message } => {
+                assert!(
+                    message.contains("shared.txt"),
+                    "conflict message must name the conflicting path: {message}"
+                );
+            }
+        }
+
+        // The branch is untouched.
+        let repo = Repository::open(&workdir).unwrap();
+        let tip = repo
+            .find_branch("main", git2::BranchType::Local)
+            .unwrap()
+            .get()
+            .peel_to_commit()
+            .unwrap();
+        assert_eq!(tip.id(), pre_revert_tip, "branch must be untouched on conflict");
+        assert_eq!(tip.id().to_string(), merge_b);
     }
 
     #[tokio::test]
@@ -997,11 +1235,19 @@ mod tests {
         assert_eq!(merge_commit.parent_count(), 2);
         assert_eq!(merge_commit.parent(0).unwrap().id(), pre_merge_tip);
 
-        // Reverting the merge restores the pre-merge default-branch tree.
-        let revert_sha = adapter
+        // Reverting the merge restores the pre-merge default-branch tree
+        // (tip-adjacent revert: inverse patch of the merge's first-parent
+        // diff applied on the tip).
+        let revert_sha = match adapter
             .revert_commit(&workdir, "main", &merge_commit_sha)
             .await
-            .unwrap();
+            .unwrap()
+        {
+            RevertResult::Success { revert_commit_sha } => revert_commit_sha,
+            RevertResult::Conflict { message } => {
+                panic!("tip-adjacent revert must not conflict: {message}")
+            }
+        };
         let repo = Repository::open(&workdir).unwrap();
         let branch = repo.find_branch("main", git2::BranchType::Local).unwrap();
         let tip = branch.get().peel_to_commit().unwrap();

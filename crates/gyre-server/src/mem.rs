@@ -170,8 +170,10 @@ impl GitOpsPort for NoopGitOps {
         _repo_path: &str,
         _branch: &str,
         _sha_to_revert: &str,
-    ) -> Result<String> {
-        Ok("0000000000000000000000000000000000000000".to_string())
+    ) -> Result<gyre_domain::RevertResult> {
+        Ok(gyre_domain::RevertResult::Success {
+            revert_commit_sha: "0000000000000000000000000000000000000000".to_string(),
+        })
     }
 }
 
@@ -182,6 +184,29 @@ impl GitOpsPort for NoopGitOps {
 #[cfg(test)]
 pub struct ConfigurableGitOps {
     pub conflict_branches: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// SHAs passed to `revert_commit`, in call order (task-095 R3-F1:
+    /// tests must be able to observe WHICH commit was reverted).
+    pub revert_calls: Arc<parking_lot::Mutex<Vec<String>>>,
+    /// When true, `revert_commit` fails — the double must be able to fail,
+    /// so error paths of the revert flow are testable (task-095 F8 lesson).
+    pub revert_fails: bool,
+    /// When true, `revert_commit` returns a Conflict — the R4-F1
+    /// conflict path must be testable without a real git repo.
+    pub revert_conflicts: bool,
+}
+
+#[cfg(test)]
+impl Default for ConfigurableGitOps {
+    fn default() -> Self {
+        Self {
+            conflict_branches: Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
+            revert_calls: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            revert_fails: false,
+            revert_conflicts: false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -191,6 +216,7 @@ impl ConfigurableGitOps {
             branches.into_iter().map(|s| s.to_string()).collect();
         Self {
             conflict_branches: Arc::new(std::sync::Mutex::new(set)),
+            ..Default::default()
         }
     }
 }
@@ -326,9 +352,24 @@ impl GitOpsPort for ConfigurableGitOps {
         &self,
         _repo_path: &str,
         _branch: &str,
-        _sha_to_revert: &str,
-    ) -> Result<String> {
-        Ok("0000000000000000000000000000000000000000".to_string())
+        sha_to_revert: &str,
+    ) -> Result<gyre_domain::RevertResult> {
+        if self.revert_fails {
+            return Err(anyhow::anyhow!(
+                "revert_commit failed (ConfigurableGitOps revert_fails)"
+            ));
+        }
+        self.revert_calls.lock().push(sha_to_revert.to_string());
+        if self.revert_conflicts {
+            return Ok(gyre_domain::RevertResult::Conflict {
+                message: format!(
+                    "revert of {sha_to_revert} conflicts with later changes (test double)"
+                ),
+            });
+        }
+        Ok(gyre_domain::RevertResult::Success {
+            revert_commit_sha: format!("revert-of-{sha_to_revert}"),
+        })
     }
 }
 

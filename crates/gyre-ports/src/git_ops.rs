@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
+use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult, RevertResult};
 
 #[async_trait]
 pub trait GitOpsPort: Send + Sync {
@@ -111,16 +111,21 @@ pub trait GitOpsPort: Send + Sync {
         file_path: &str,
     ) -> Result<Option<Vec<u8>>>;
 
-    /// Create a revert commit on `branch` that undoes `sha_to_revert`.
+    /// Create a revert commit on `branch` that undoes `sha_to_revert`
+    /// with `git revert -m 1` semantics: a three-way merge of the
+    /// reverted commit's first-parent tree against the current branch
+    /// tip, with the reverted commit's own tree as the merge base.
     ///
-    /// The revert commit's tree is the first parent's tree of `sha_to_revert`,
-    /// and its parent is the current tip of `branch`. Returns the revert
-    /// commit's SHA. Used by the post-merge recovery protocol
-    /// (platform-model.md §6).
+    /// Reverting a non-tip merge therefore undoes only that merge's
+    /// changes — every later merge on the branch is preserved (task-095
+    /// R4-F1: snapshot semantics would wipe them). Returns
+    /// [`RevertResult::Conflict`] when the inverse patch conflicts with
+    /// later changes (branch untouched); other failures are `Err`.
+    /// Used by the post-merge recovery protocol (platform-model.md §6).
     async fn revert_commit(
         &self,
         repo_path: &str,
         branch: &str,
         sha_to_revert: &str,
-    ) -> Result<String>;
+    ) -> Result<RevertResult>;
 }

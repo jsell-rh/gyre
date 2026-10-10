@@ -6,6 +6,21 @@ pub enum MergeResult {
     Conflict { message: String },
 }
 
+/// Result of creating a revert commit (git revert -m 1 semantics).
+///
+/// The revert is a three-way merge of the reverted commit's first-parent
+/// tree against the current branch tip, so reverting a non-tip merge
+/// undoes only that merge's changes and preserves every later merge
+/// (task-095 R4-F1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RevertResult {
+    Success { revert_commit_sha: String },
+    /// The inverse patch conflicts with changes that landed after the
+    /// reverted commit (same file modified both there and later). The
+    /// branch is untouched; the caller decides how to proceed.
+    Conflict { message: String },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BranchInfo {
     pub name: String,
