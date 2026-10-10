@@ -124,9 +124,14 @@ re-ran the focused gates on it:
   base commit `8c2d1775`** (ghost-overlay timeouts 2 vs 1; ExplorerCanvas-performance
   timeouts 10 vs 5, in an isolated worktree with locked deps), i.e. pre-existing
   sandbox-load flakes in files this task never touched, not regressions.
-- **Dist freshness**: committed `web/dist/assets/index-DJOFnUtw.js` carries `type==="all"`,
-  `created_sha`, the `~epoch` regex, and zero `last_commit_sha`; identical to the candidate
-  checkpoint; no source change post-dates the dist.
+- **Dist policy**: `web/dist` was restored to the base state by round 6 (`18811787`) after
+  the recovered checkpoint's committed rebuild failed the whitespace gate — the bundle's
+  minified vendor svelte-i18n whitespace-char class ends a line in a literal tab/newline
+  byte, so any diff-introduced rebuild trips `git diff --check` (rc=2, verification finding
+  `68edd07c`; the base's own `index-fzyK9GaC.js` carries the same pattern but no
+  diff-introduced lines). Task branches ship no dist rebuilds; CI builds from source
+  (`web/src` keeps the R4-verified fixes). On this HEAD `git diff 6bf777a6..HEAD --
+  web/dist/` is empty and `git diff --check 6bf777a6..HEAD` → rc=0.
 - **Attribution repair (this round's only source-tree change)**: `a781ede2`
   (`feat(task-210): Repair verified failure on main cd1c5f044e49`, product surface:
   `crates/gyre-server/src/api/admin.rs`, `web/src/*`, landed via base merge) was missing
@@ -139,3 +144,33 @@ re-ran the focused gates on it:
 No task-063 production code required changes this round — the recovered candidate was
 already the R4-approved implementation; the deliverables are the re-verification evidence
 above and the attribution-gate repair.
+
+## Shipped (round 7 — recovered-checkpoint continuation, attribution repair)
+
+Continuation of the interrupted `b36df580` assignment on merged tree `65bd78c0` (base
+`6bf777a6`). No task-063 production code changed this round; the implementation remains
+byte-identical to the R4-verified state (`git diff 656c1281..HEAD -- web/src/lib/
+ExplorerCanvas.svelte web/src/__tests__/ExplorerCanvas.test.js web/src/lib/
+view-query-validator.js crates/gyre-domain/src/view_query_resolver.rs` is empty).
+Evidence: `/tmp/stage/review-evidence/task-063-r7/`.
+
+- **Whitespace gate**: `git diff --check 6bf777a6..HEAD` → rc=0 (round-6 repair `18811787`
+  still holds; dist delta vs base is empty).
+- **Attribution repair (this round's only other-file change)**: merge base `6bf777a6`
+  (`feat(task-200)`, product surface `crates/gyre-common/src/message.rs`,
+  `crates/gyre-server/src/api/messages.rs`, `crates/gyre-server/src/mcp.rs`) is main's own
+  HEAD and was missing from `specs/tasks/task-200.md` `commits:` frontmatter — same
+  drift class as rounds 5/6 (`a781ede2`/task-210, `f4acb4eb`/task-189): a ship commit
+  cannot contain its own future SHA, so the recording is necessarily a follow-up and none
+  landed on main. Recorded the full SHA in task-200's frontmatter; the gate was failing on
+  this tree before (rc=1) and passes after (rc=0). No exemption entries added.
+- **Record repair**: the previous interrupted checkpoint deleted the round-6 ledger but
+  left the round-5 "Dist freshness" bullet claiming committed `index-DJOFnUtw.js` — false
+  on any post-`18811787` tree. Replaced with the dist-policy bullet above so the record
+  matches the tree.
+- **Focused suites on this HEAD**: `cargo test -p gyre-domain --lib view_query_resolver`
+  → 116 passed / 0 failed; ExplorerCanvas.test.js (`npm ci` with locked deps first) →
+  139 passed / 0 failed.
+- **Transport restriction** (unchanged): TCP listener unsupported in this sandbox
+  (`capabilities.json`: `Operation not supported`, errno 95); no server/browser probe
+  attempted — host verification and GitHub CI own the transport checks.
