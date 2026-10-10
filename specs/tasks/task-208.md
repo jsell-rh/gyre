@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is NOT"
-commits: ["98fd096e3972e7a6d1df78b700b63ea1dee15fe5"]
+commits: ["98fd096e3972e7a6d1df78b700b63ea1dee15fe5", "ad1121c5093cd2f1f2b3824ed88352ac4e181fd9", "ea006d52bb42e96e6f176b02b5390b6cb56a3116"]
 ---
 
 ## Spec Excerpt
@@ -279,3 +279,20 @@ Repair round (2026-10-10, review finding df83cb2e — 13th checkpoint-attributio
 - Restored the full three-SHA `commits:` attribution at the tip (commit `5046b488`) after the checkpoint pass's 15th clobber (candidate `3854045c` dropped `ad1121c5` and `ea006d52`; merge `0f198fa5` carried it forward). All three commits verified ancestors of the tip.
 - Repaired the base-inherited attribution gap the gate then exposed: the assigned base `27bd585c` is a task-155 product-surface commit unrecorded in task-155's frontmatter (verified base-inherited by reproducing the failure at the pure base; same class as round 8's task-200 repair). Commit `fa4c4a08`; attribution gate FAIL → **OK (exit 0)** at the final tip.
 - Product untouched: zero drift since `ad1121c5` on every task-208 surface; dead-code and dist forbidden-identifier greps clean; routes/ABAC registrations absent; kept-surface bundle sanity passes; ABAC route-registry + exempt-handlers + whitespace gates exit 0; spec amendment and both coverage matrices intact. Focused runtime probes stand on the round-12 reviewer's fresh runs at this exact source tree (zero source drift since). Evidence: `/tmp/stage/review-evidence/task-208-attribution-repair-round12.txt`.
+
+## Review
+
+*(Repair Round 13, 2026-10-10 — review finding e4ecdec3, clobber 16.)*
+
+- **Finding reproduced at the assigned candidate:** tip `6eba6bae` ("process: record task-208 branch commits") itself performed the 16th checkpoint-attribution clobber — it rewrote `commits:` from the fully-attributed three-SHA list (present at parent `0c30237e` and at `5046b488`/`fa4c4a08`/`659c54c5`) back to `["98fd096e"]`, dropping `ad1121c5093cd2f1f2b3824ed88352ac4e181fd9` (build(web): regenerate dist without my-stuff profile tabs — the F1 fix removing the shipped my-stuff surface from the RustEmbed bundle) and `ea006d52bb42e96e6f176b02b5390b6cb56a3116` (build(web): exempt generated dist bundles from whitespace gate). Both verified ancestors of the candidate. Same documented class (16th occurrence): the checkpoint pass rebuilds `commits:` from a product-surface regex `^(crates/|web/src|web/tests)` that excludes `web/dist/` and root `.gitattributes`; the in-repo gate shares the blind spot and passed at the candidate (exit 0, re-verified this round) — but the AGENTS.md invariant holds contractually: an unlisted commit is invisible to review scoping.
+- **Repair is mechanical, product untouched:** restored `commits: ["98fd096e...", "ad1121c5...", "ea006d52..."]` at the tip. Zero product drift on every task-208 surface since `ad1121c5` (`git diff --stat ad1121c5..HEAD` over users.rs, api/mod.rs, abac_middleware.rs, api.js, UserProfile.svelte, UserProfile.test.js, web/dist/ shows only `.gitattributes` — commit `ea006d52`'s own content — and an unrelated HSI-coverage navigation correction from the base merge); routes/ABAC registrations absent; both coverage matrices intact (HSI row 54 `implemented`, user-management row 22 `n/a`, row 23 task-114 untouched); zero `not-started` rows in either governed spec. Base-inherited task-155 repair from round 12 (`fa4c4a08`) still in place — attribution gate OK at HEAD.
+- **Focused runtime probes deliberately not re-run this round:** the round-13 reviewer verified product surfaces green at this exact candidate with fresh cold-build probes (router 404 test `my_stuff_endpoints_are_removed`, UserProfile.test.js 23/23 with the exact-six-tab guard, dead-code + committed-dist forbidden-identifier greps, deterministic dist rebuild match); zero source drift since — post-candidate commits on this branch touch only `specs/tasks/*.md`. Full suites remain owned by verification/publication.
+- Residual for the process owner (unchanged, now 16 occurrences): the checkpoint attribution pass may re-drop the `web/dist/`/`.gitattributes` commits at the next checkpoint; the in-repo gate shares the blind spot. Recorded here and in every prior round.
+- Evidence: `/tmp/stage/review-evidence/task-208-round13-attribution-repair.txt`.
+
+## Shipped
+
+*(Repair Round 13, 2026-10-10 — review finding e4ecdec3 (clobber 16). Product state unchanged from review round 2; see the Shipped section under Repair Round 6 for the landed behavior record. This round's delivery is the repair itself:)*
+
+- Restored the full three-SHA `commits:` attribution at the tip after the checkpoint pass's 16th clobber (candidate `6eba6bae` dropped `ad1121c5` and `ea006d52`; the base merge `912399d3` carried the one-SHA list to the branch tip). All three commits verified ancestors of the tip.
+- Product untouched: zero drift since `ad1121c5` on every task-208 surface; routes/ABAC registrations absent; attribution gate OK (exit 0) at HEAD including the round-12 base-inherited task-155 repair; spec amendment and both coverage matrices intact. Evidence: `/tmp/stage/review-evidence/task-208-round13-attribution-repair.txt`.
