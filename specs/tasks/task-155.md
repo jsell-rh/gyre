@@ -1,7 +1,7 @@
 ---
 title: "Implement gyre search CLI command"
 spec_ref: "search.md §CLI"
-depends_on: [task-218]
+depends_on: [task-218, task-224]
 progress: ready-for-review
 coverage_sections:
   - "search.md §CLI"
