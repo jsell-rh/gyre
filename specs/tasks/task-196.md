@@ -1,11 +1,11 @@
 ---
 title: "Ground Briefing Q&A in real briefing data with sources and history validation"
 spec_ref: "human-system-interface.md §9 Briefing Q&A (§1295-1332)"
-depends_on: []
+depends_on: [task-213]
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §47"
-commits: ["88b57180cf1397df7966381d3289b8d497c79c20"]
+commits: ["88b57180cf1397df7966381d3289b8d497c79c20", "abcfff04"]
 ---
 
 ## Spec Excerpt
@@ -174,3 +174,42 @@ c3174c12 with mutation probes), re-verified fresh in this round:
   payload-agnostic (assert 200/SSE content-type/`partial`+`complete` presence
   and 404) and compatible with the new payload; host verification must run
   `cargo test -p gyre-server --test graph_integration`.
+
+## Repair round (baseline finding d9546b22)
+
+The baseline gate at the old base 8c2d1775 failed on two findings:
+
+1. **rustfmt** — the recovered implementation checkpoint carried formatting
+   violations on its own changed lines in `graph.rs` (1204, 1301-1303,
+   1308-1309, 2160-2162, 2308-2309). Reproduced pre-fix at base 73a31e0b:
+   `python3 scripts/check-rustfmt-diff.py 73a31e0b` → exit 1. Fixed with
+   whole-file `rustfmt --edition 2021` (commit abcfff04, +8/-12, five
+   hunks — all inside task-196 changed lines, no unrelated debt touched).
+   Gate after fix: exit 0, "changed lines clean". Behavior-neutral
+   (whitespace/layout only); briefing tests re-run green after the change.
+2. **task-210 attribution** (`a781ede2` missing from task-210 frontmatter) —
+   repaired by prerequisite task-213 (commit 73a31e0b), now merged into this
+   branch (7c6b985c). Verified in this sandbox:
+   `bash scripts/check-task-commit-attribution.sh` → OK exit 0.
+
+Re-verified this round (sandbox tree at abcfff04):
+- `cargo test -p gyre-server --lib api::graph::tests::briefing` — 15/15.
+- `cd web && npx vitest run Briefing.test.js InlineChat.test.js
+  DetailPanelChat.test.js` — 49/49.
+- `bash scripts/check-arch.sh`, `check-abac-route-registry.sh`,
+  `check-byte-slice-truncation.sh`, `check-mcp-write-tools.sh`,
+  `check-mem-port-contracts.sh`, `check-lossy-secret-conversion.sh`,
+  `check-scope-literal-defaults.sh`, `check-task-commit-attribution.sh` —
+  all exit 0.
+- `git diff --check 73a31e0b HEAD` — clean. The accidental `web/dist`
+  rebuild triggered by build.rs during cargo test was dropped again
+  (task-210 round 12 precedent); `web/dist` is identical to main.
+- Sandbox limitation unchanged: loopback listeners unsupported
+  (`capabilities.json`: tcp_listener_probe errno 95), so
+  `tests/graph_integration.rs::test_briefing_ask_sse` and
+  `test_briefing_ask_not_found` still cannot run here; both are
+  payload-agnostic and host verification must run
+  `cargo test -p gyre-server --test graph_integration`.
+
+Evidence: `/tmp/stage/review-evidence/task-196-rustfmt-repair.txt`,
+`task-196-gates.txt`, `task-196-tests-repair-round.txt`.
