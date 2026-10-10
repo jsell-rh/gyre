@@ -58,14 +58,16 @@ const SWEEP_PROVENANCE_WINDOW_SECS: u64 = 30 * 86_400;
 /// least one terminal reconciliation task and zero open ones. Wave duration
 /// (trigger → last task terminal) is observed on the
 /// `gyre_reconciliation_duration_seconds{workspace}` histogram — measured
-/// from the wave's earliest reconciliation task creation, which is
-/// task-creation time in the same `run_reconciliation` call as the trigger
-/// (zero-latency feedback per forge-advantages.md).
+/// from the most recent wave's task creation, which is task-creation time in
+/// the same `run_reconciliation` call as the trigger (zero-latency feedback
+/// per forge-advantages.md).
 ///
 /// Multiple hooks can observe the same terminal transition (REST, MCP, and
 /// archive writers), and a re-check may run after the wave completes — the
 /// emission is deduplicated against persisted `reconciliation_completed`
-/// messages keyed on the wave's start time.
+/// messages keyed on the wave's identity (latest wave start + total task
+/// count), so each wave completes and emits exactly once, including a
+/// workspace's second and later waves.
 pub async fn maybe_emit_reconciliation_completed(state: &Arc<AppState>, workspace_id: &Id) {
     let tasks = match state.tasks.list_by_workspace(workspace_id).await {
         Ok(t) => t,
@@ -101,11 +103,22 @@ pub async fn maybe_emit_reconciliation_completed(state: &Arc<AppState>, workspac
         return;
     }
 
-    // Wave identity: the earliest reconciliation task's creation time. Every
-    // task in one `run_reconciliation` call is stamped with the same `now`,
-    // so this is the wave trigger time. A later wave (new set change) has a
-    // strictly later start and emits its own completion.
-    let wave_started_at = wave.iter().map(|t| t.created_at).min().unwrap_or(0);
+    // Wave identity: (start of the MOST RECENT wave, total reconciliation
+    // task count). Every task in one `run_reconciliation` call is stamped
+    // with the same `now`, so one wave's tasks share a creation time — but
+    // terminal tasks from PRIOR waves must not drag the identity back:
+    // after wave 1 completes and emits, wave 2 (new version → new title →
+    // new tasks, so creation-time dedup in `run_reconciliation` does not
+    // suppress it) also completes, and keying on the earliest task's
+    // creation would recompute wave 1's start, match the persisted
+    // `wave_started_at`, and silently suppress the wave-2 event, its
+    // MetaSpecDrift notifications, and its duration observation.
+    // `max(created_at)` is the latest wave's start; the total task count
+    // disambiguates successive waves created within the same wall-clock
+    // second (the count only grows — tasks are never removed), so a re-check
+    // of the same complete state matches exactly once.
+    let wave_started_at = wave.iter().map(|t| t.created_at).max().unwrap_or(0);
+    let task_count = wave.len() as u64;
 
     // Dedup against already-emitted completions (persisted Event-tier
     // messages): re-checks and multi-hook fan-in (REST + MCP + archive
@@ -128,6 +141,11 @@ pub async fn maybe_emit_reconciliation_completed(state: &Arc<AppState>, workspac
                     .and_then(|p| p.get("wave_started_at"))
                     .and_then(|v| v.as_u64())
                     == Some(wave_started_at)
+                    && m.payload
+                        .as_ref()
+                        .and_then(|p| p.get("task_count"))
+                        .and_then(|v| v.as_u64())
+                        == Some(task_count)
             })
         })
         .unwrap_or(false);
@@ -143,7 +161,6 @@ pub async fn maybe_emit_reconciliation_completed(state: &Arc<AppState>, workspac
         .reconciliation_duration_seconds
         .with_label_values(&[workspace_id.as_str()])
         .observe(duration_secs as f64);
-
     info!(
         workspace_id = %workspace_id,
         duration_secs,
@@ -155,6 +172,7 @@ pub async fn maybe_emit_reconciliation_completed(state: &Arc<AppState>, workspac
         Some(serde_json::json!({
             "workspace_id": workspace_id.to_string(),
             "wave_started_at": wave_started_at,
+            "task_count": task_count,
             "duration_secs": duration_secs,
         })),
     )
@@ -905,6 +923,7 @@ mod tests {
             approval_status: MetaSpecApprovalStatus::Approved,
             approved_by: Some("admin".to_string()),
             approved_at: Some(now()),
+            approved_content_hash: Some(sha256_hex(&format!("prompt for {name} v{version}"))),
             created_by: "admin".to_string(),
             created_at: now(),
             updated_at: now(),
@@ -1597,6 +1616,104 @@ mod tests {
         assert_eq!(
             count_completed(ws.clone()).await, 1,
             "idempotent: re-checking a complete wave must not re-emit"
+        );
+    }
+
+    /// A SECOND reconciliation wave must emit its own ReconciliationCompleted.
+    /// Regression for the wave-identity bug: identity was
+    /// min(created_at) over ALL reconciliation tasks — including terminal
+    /// tasks from prior waves — so after wave 1 completed and emitted, wave
+    /// 2's completion recomputed wave 1's start, matched the persisted
+    /// wave_started_at, and suppressed the wave-2 event. §11 requires the
+    /// event for every wave ("all reconciliation tasks for a workspace are
+    /// done" — true again when the second wave's tasks all go terminal).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn second_wave_emits_its_own_completion() {
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-wave2").await;
+        make_repo(&state, "repo-w2", "ws-wave2").await;
+        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+
+        let count_completed = || {
+            let state = state.clone();
+            let ws_id = ws.id.clone();
+            async move {
+                state
+                    .messages
+                    .list_by_workspace(&ws_id, Some("reconciliation_completed"), None, None, None, Some(50))
+                    .await
+                    .unwrap()
+                    .len()
+            }
+        };
+        let complete_all_open = || {
+            let state = state.clone();
+            let ws_id = ws.id.clone();
+            async move {
+                let tasks = state
+                    .tasks
+                    .list_by_workspace(&ws_id)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .filter(|t| {
+                        t.labels.iter().any(|l| l == RECONCILIATION_LABEL)
+                            && !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled)
+                    })
+                    .collect::<Vec<_>>();
+                for mut t in tasks {
+                    t.transition_status(TaskStatus::InProgress).unwrap();
+                    t.transition_status(TaskStatus::Review).unwrap();
+                    t.transition_status(TaskStatus::Done).unwrap();
+                    state.tasks.update(&t).await.unwrap();
+                }
+            }
+        };
+
+        // Wave 1: v4 → one task → complete → emit.
+        run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
+        complete_all_open().await;
+        maybe_emit_reconciliation_completed(&state, &ws.id).await;
+        assert_eq!(count_completed().await, 1, "wave 1 must emit exactly once");
+
+        // Wave 2: same spec bumped to v5 (new title → new task). Created
+        // within the same wall-clock second as wave 1 in the worst case —
+        // the identity must still distinguish the waves.
+        state
+            .meta_specs
+            .update(&MetaSpec {
+                version: 5,
+                ..ms.clone()
+            })
+            .await
+            .unwrap();
+        run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
+        let open = open_tasks_with_label(&state, RECONCILIATION_LABEL)
+            .await
+            .into_iter()
+            .filter(|t| !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled))
+            .count();
+        assert_eq!(open, 1, "wave 2 must create a new open task");
+
+        maybe_emit_reconciliation_completed(&state, &ws.id).await;
+        assert_eq!(
+            count_completed().await, 1,
+            "wave 2 open — no completion while in flight"
+        );
+
+        complete_all_open().await;
+        maybe_emit_reconciliation_completed(&state, &ws.id).await;
+        assert_eq!(
+            count_completed().await, 2,
+            "wave 2 completion must emit its own ReconciliationCompleted"
+        );
+
+        // Idempotency preserved: re-checking the complete state must not
+        // emit a third event for the same wave.
+        maybe_emit_reconciliation_completed(&state, &ws.id).await;
+        assert_eq!(
+            count_completed().await, 2,
+            "re-check must not re-emit wave 2"
         );
     }
 

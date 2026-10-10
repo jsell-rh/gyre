@@ -1113,6 +1113,7 @@ pub async fn create_meta_spec_registry(
         approval_status: MetaSpecApprovalStatus::Pending,
         approved_by: None,
         approved_at: None,
+        approved_content_hash: None,
         created_by: auth.agent_id.as_str().to_string(),
         created_at: now,
         updated_at: now,
@@ -1173,6 +1174,14 @@ pub async fn update_meta_spec_registry(
 
     let now = now_secs();
 
+    // Content hash the CURRENT approval covers, before this request mutates
+    // the record. The §6 reconciliation trigger compares it against the new
+    // content hash at approval time: approving content that differs from
+    // what was last approved is the trigger, regardless of whether the edit
+    // and the approval arrived in the same request or in the two-step
+    // edit-then-approve flow the shipped UI performs.
+    let previously_approved_hash = ms.approved_content_hash.clone();
+
     if let Some(name) = req.name {
         ms.name = name;
     }
@@ -1185,11 +1194,17 @@ pub async fn update_meta_spec_registry(
         ms.approved_by = None;
         ms.approved_at = None;
     }
+    if let Some(required) = req.required {
+        ms.required = required;
+    }
     if let Some(status_str) = &req.approval_status {
         let status = parse_approval_status(status_str)?;
         if status == MetaSpecApprovalStatus::Approved {
             ms.approved_by = Some(auth.agent_id.as_str().to_string());
             ms.approved_at = Some(now);
+            // Stamp the content this approval covers so the next approval
+            // can tell whether the content changed in between.
+            ms.approved_content_hash = Some(ms.content_hash.clone());
         }
         ms.approval_status = status;
     }
@@ -1208,10 +1223,21 @@ pub async fn update_meta_spec_registry(
         crate::reconciliation::emit_meta_spec_changed(&state, None, &ms).await;
     }
 
-    // Meta-spec change approved and rolled out (§6 trigger): content changed
-    // (new version) AND this update approves it. Every workspace whose
-    // meta-spec set binds this meta-spec reconciles.
-    if ms.approval_status == MetaSpecApprovalStatus::Approved && req.prompt.is_some() {
+    // Meta-spec change approved and rolled out (§6 trigger): the content
+    // under approval differs from what the previous approval covered, and
+    // this update leaves the spec Approved. Every workspace whose meta-spec
+    // set binds this meta-spec reconciles.
+    //
+    // Comparison is against the hash stamped by the LAST approval — not
+    // `req.prompt.is_some()` — so the two-step edit-then-approve flow the
+    // shipped UI performs (saveEdit PUTs {prompt}, handleApprove PUTs
+    // {approval_status}) triggers reconciliation exactly like the combined
+    // single-request flow. Re-approving unchanged content is a no-op.
+    let content_changed_since_last_approval =
+        previously_approved_hash.as_deref() != Some(ms.content_hash.as_str());
+    let newly_approved =
+        ms.approval_status == MetaSpecApprovalStatus::Approved && content_changed_since_last_approval;
+    if newly_approved {
         let spec_path = ms.name.clone();
         let workspaces = state.workspaces.list().await.unwrap_or_default();
         for ws in &workspaces {
@@ -1429,6 +1455,7 @@ mod registry_tests {
 
         // Update
         let update_resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("PUT")
@@ -1443,6 +1470,303 @@ mod registry_tests {
         assert_eq!(update_resp.status(), StatusCode::OK);
         let update_json = body_json(update_resp).await;
         assert_eq!(update_json["version"].as_u64().unwrap(), 2);
+    }
+
+    // -- regression: `required` field must persist (task-156 repair) -------
+
+    /// PUT {"required": true} on a registry entry must persist the flag.
+    /// Regression for the silent no-op dropped in 7aa240c0: the UI's
+    /// handleRequiredToggle sends exactly this body and toasts success.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn update_required_field_persists() {
+        let app = app();
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs-registry")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"kind":"meta:persona","name":"req-worker","scope":"Global","prompt":"p"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let create_json = body_json(create_resp).await;
+        let id = create_json["id"].as_str().unwrap().to_string();
+        assert_eq!(
+            create_json["required"].as_bool().unwrap(),
+            false,
+            "created entry defaults to required=false"
+        );
+
+        // Toggle required — the exact body handleRequiredToggle sends.
+        let put_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"required":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put_resp.status(), StatusCode::OK);
+        let put_json = body_json(put_resp).await;
+        assert_eq!(
+            put_json["required"].as_bool().unwrap(),
+            true,
+            "PUT required:true must be reflected in the response"
+        );
+
+        // Re-fetch: the flag must be persisted, not just echoed.
+        let get_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let get_json = body_json(get_resp).await;
+        assert_eq!(
+            get_json["required"].as_bool().unwrap(),
+            true,
+            "GET after PUT required:true must show required=true"
+        );
+    }
+
+    /// The two-step edit-then-approve lifecycle the shipped UI performs
+    /// (saveEdit PUTs {prompt}, handleApprove PUTs {approval_status}) must
+    /// trigger the §6 reconciliation. Keying the trigger on
+    /// `req.prompt.is_some()` missed the approval-only request; the trigger
+    /// now compares the content hash stamped at the last approval.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_step_edit_then_approve_triggers_reconciliation() {
+        use crate::mem::test_state;
+        use gyre_ports::TaskRepository;
+
+        let state = test_state();
+        let app: Router = crate::api::api_router().with_state(state.clone());
+
+        // Workspace + repo: reconciliation needs scope.
+        let ws_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"name": "ws-2step", "slug": "ws-2step"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_id = body_json(ws_resp).await["id"].as_str().unwrap().to_string();
+
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-2step"),
+            gyre_common::Id::new(&ws_id),
+            "repo-2step".to_string(),
+            "/tmp/does-not-matter/repo-2step".to_string(),
+            1_700_000_000,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        // Registry meta-spec, bound via the workspace set.
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs-registry")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"kind":"meta:persona","name":"2step-worker","scope":"Global","prompt":"v1"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let id = body_json(create_resp).await["id"].as_str().unwrap().to_string();
+
+        let set_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/meta-spec-set"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "personas": { "worker": { "path": "2step-worker", "sha": "a1" } },
+                            "principles": [], "standards": [], "process": []
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(set_resp.status(), StatusCode::OK);
+
+        let recon_count = || {
+            let state = state.clone();
+            let ws_id = ws_id.clone();
+            async move {
+                state
+                    .tasks
+                    .list_by_workspace(&gyre_common::Id::new(&ws_id))
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .filter(|t| {
+                        t.labels
+                            .iter()
+                            .any(|l| l == "meta-spec-reconciliation")
+                    })
+                    .count()
+            }
+        };
+
+        // Initial approval (Pending → Approved): first approval of content
+        // never approved before is a trigger.
+        let approve1 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"approval_status":"Approved"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(approve1.status(), StatusCode::OK);
+        assert_eq!(
+            recon_count().await,
+            1,
+            "first approval of never-approved content must trigger reconciliation"
+        );
+
+        // Terminal-complete wave 1 so the dedup set is empty again.
+        let tasks: Vec<_> = state
+            .tasks
+            .list_by_workspace(&gyre_common::Id::new(&ws_id))
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.labels.iter().any(|l| l == "meta-spec-reconciliation"))
+            .collect();
+        for mut t in tasks {
+            t.transition_status(gyre_domain::TaskStatus::InProgress).unwrap();
+            t.transition_status(gyre_domain::TaskStatus::Review).unwrap();
+            t.transition_status(gyre_domain::TaskStatus::Done).unwrap();
+            state.tasks.update(&t).await.unwrap();
+        }
+
+        // Step 1 of the UI flow: saveEdit PUTs only {prompt}. Editing
+        // content resets approval to Pending (§2).
+        let edit = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"prompt":"v2"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(edit.status(), StatusCode::OK);
+        let edit_json = body_json(edit).await;
+        assert_eq!(
+            edit_json["approval_status"].as_str().unwrap(),
+            "Pending",
+            "content edit must reset approval to Pending (§2)"
+        );
+        assert_eq!(
+            recon_count().await, 1,
+            "content edit alone (Pending) must not trigger reconciliation"
+        );
+
+        // Step 2 of the UI flow: handleApprove PUTs only
+        // {approval_status: Approved} — no prompt in the request. This is
+        // the request the old trigger condition missed.
+        let approve2 = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"approval_status":"Approved"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(approve2.status(), StatusCode::OK);
+        assert_eq!(
+            recon_count().await,
+            2,
+            "approval after content edit must trigger reconciliation (two-step UI flow)"
+        );
+
+        // Re-approving unchanged content must NOT trigger again.
+        let tasks: Vec<_> = state
+            .tasks
+            .list_by_workspace(&gyre_common::Id::new(&ws_id))
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.labels.iter().any(|l| l == "meta-spec-reconciliation"))
+            .collect();
+        for mut t in tasks {
+            if !matches!(t.status, gyre_domain::TaskStatus::Done | gyre_domain::TaskStatus::Cancelled) {
+                t.transition_status(gyre_domain::TaskStatus::InProgress).unwrap();
+                t.transition_status(gyre_domain::TaskStatus::Review).unwrap();
+                t.transition_status(gyre_domain::TaskStatus::Done).unwrap();
+                state.tasks.update(&t).await.unwrap();
+            }
+        }
+        let reapprove = app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"approval_status":"Approved"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reapprove.status(), StatusCode::OK);
+        assert_eq!(
+            recon_count().await, 2,
+            "re-approval of unchanged content must not trigger reconciliation"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
