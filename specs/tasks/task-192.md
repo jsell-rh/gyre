@@ -1,11 +1,11 @@
 ---
 title: "Add gyre budget CLI: show and set at repo/workspace/tenant scope"
 spec_ref: "platform-model.md §CLI"
-depends_on: []
-progress: not-started
+depends_on: [task-211]
+progress: ready-for-review
 coverage_sections:
   - "platform-model.md §CLI"
-commits: []
+commits: ["ed0669fb96d593756a62146bee3601686229a3c2", "2fe8149b019df51989c3f666c99b993c3870af0d", "97ee3df5cddf77c8e6a296925175801347240dbc", "87fae32e02d6d4bdeca2070de71e5bec2eb7d458", "6abdfdec95bf12b68c2bdf9ba3e759944524af3f", "4d16c6c5b2ded0f53c67e528f4ecf5299fd714ca", "6f4d1366b84193c972c2e7c13a1a42059da2806a", "a5a82183d3e67df0aac25f30e2ba16c5709081f2"]
 ---
 
 ## Spec Excerpt
@@ -64,3 +64,82 @@ The `SetBudgetRequest` shape (`crates/gyre-server/src/api/budget.rs:63-69`) acce
 - Match the existing CLI output/formatting and error-handling style (see the `Deps`/`Trace` handlers).
 - Confirm `SetBudgetRequest`/`BudgetResponse`/`TenantBudgetSummary` field names in `crates/gyre-server/src/api/budget.rs` before serializing.
 - Run only the touched crates' tests plus `scripts/check-arch.sh`; do not run the full workspace suite or formatters.
+
+## Shipped
+
+`gyre budget show|set` is implemented end-to-end in `crates/gyre-cli` against the three real server routes (`GET/PUT /api/v1/workspaces/:id/budget`, `GET /api/v1/budget/summary` — mod.rs:610-613). Recovered checkpoint commits (a5a8218, 6f4d136, 4d16c6c) supplied the base implementation; this assignment audited every acceptance criterion, fixed one real display defect, and re-verified all gates.
+
+**Behavior:**
+- `show` (no flags) resolves the current repo's owning workspace via the same `infer_repo_from_git_remote` + `resolve_workspace_slug` pair `deps`/`explore` use, then prints limits + live usage (tokens/cost/agents, used vs limit, % util). `--workspace-name <SLUG>` targets a named workspace; `--workspace` selects the same repo→workspace resolution explicitly. `--tenant` prints the tenant summary: tenant rows + per-workspace table + totals. `--tenant` combined with `--workspace/--workspace-name` is rejected.
+- `set` accepts `--llm-tokens/--llm-cost/--max-agents/--max-agent-lifetime-secs` (+ scope flags); the server PUT is a full config replace, so the client fetches the current config and sends it merged with the overrides — unset limits keep their values. `--tenant` on `set` bails with an explicit message (no tenant set endpoint exists). Errors surface the server body verbatim: `{"error": "only Admin role may update workspace budget limits"}` (403), cascade `workspace max_tokens_per_day (…) exceeds tenant limit (…)` (400).
+- Help text (command + subcommands, verified via the built binary) states repo scope maps to the owning workspace budget; no repo-keyed budget store is fabricated. `docs/cli.md` documents the commands.
+
+**Defect fixed this round:** `budget_util` rendered `100%+` for a `Some(0.0)` limit at zero usage — a workspace provisioned with a zero limit on an unused day printed full utilization. Now `0%` at zero usage, `100%+` for any usage. Boundary test `budget_util_zero_limit_and_boundary` added and mutation-checked (pre-fix logic fails it: `left: "100%+", right: "0%"`).
+
+**Test evidence** (saved under `/tmp/stage/review-evidence/task192-*.txt`):
+- `cargo test -p gyre-cli --bin gyre` → 107 passed, 0 failed (13 budget tests: 5 client route/body tests asserting exact method+URL+auth+serialized merged PUT body, server-shape parsing tests, verbatim 403/400 error-surfacing test, 6 CLI parse tests, 1 boundary test).
+- `bash scripts/check-arch.sh` → passed.
+- `cargo run -p gyre-cli -- budget --help` / `show --help` / `set --help` → exit 0, help text confirmed (evidence file `task192-budget-help.txt`).
+- `tests/ws_integration.rs::test_auth_and_ping_roundtrip` fails in this sandbox with `Os { code: 95, kind: Unsupported }` at the TCP listener bind — matches the recorded `capabilities.json` restriction (`tcp_listener_probe.supported=false`, errno 95). Infrastructure limitation, not a code defect; requires host/CI verification.
+
+**Checkpoint recovery round (merged head `d51ccc5`):** the assignment was
+recovered after an interruption and re-verified at the merged HEAD (base
+`a1751da1` merged into the branch; product surface byte-identical to the
+reviewed candidate — `git diff 02f861b9..HEAD -- crates/ docs/ scripts/` is
+empty). Fresh probes, evidence under `/tmp/stage/review-evidence/`:
+- `cargo test -p gyre-cli --bin gyre` → 107 passed, 0 failed (budget
+  filter: 13 passed) — `task192-cli-bin-tests.txt`,
+  `task192-budget-tests-only.txt`.
+- Mutation check at this HEAD: renaming the client URL `budget`→`budgets`
+  fails 2 wiring tests (`get_workspace_budget_builds_real_route`,
+  `set_workspace_budget_put_body_is_merged_config`); source restored
+  (md5-verified) and re-run green — `task192-mutation-url-check.txt`,
+  `task192-post-mutation-restore.txt`.
+- Live binary probes (refused port = the assertion; loopback listeners are
+  forbidden in this sandbox, errno 95): bare `budget show` from a repo with
+  remote `…/git/platform-team/widgets.git` reaches
+  `GET /api/v1/workspaces?slug=platform-team` (real git-remote→slug→id
+  resolution); `--tenant` reaches `GET /api/v1/budget/summary`;
+  `set --tenant`, empty `set`, and `--tenant --workspace` all exit 1 with
+  honest errors — `task192-live-url-probes.txt`.
+- `bash scripts/check-arch.sh`, `bash scripts/check-relative-path-defaults.sh`
+  (exemption line re-pointed to main.rs:1862 by the moved code),
+  `bash scripts/check-task-commit-attribution.sh` (post-merge frontmatter
+  intact) → all pass — `task192-check-arch.txt`,
+  `task192-relative-path-check.txt`, `task192-commit-attribution.txt`.
+- Help surfaces verified via the built binary (`task192-budget-cmd-help.txt`,
+  `task192-budget-subcommand-help.txt`): all three document that repo scope
+  maps to the owning workspace budget.
+- Live end-to-end HTTP against a running server could not be exercised here (sandbox cannot bind listeners); the client-level tests assert the exact request wire format (method, URL, auth header, JSON body) which the routes in `api/mod.rs:610-613` accept, and error paths are exercised with real `reqwest::Response` objects carrying the server's exact wire shape.
+
+**Merge round (merged head `175a5c80`, base `6bf777a6`):** the branch was
+merged with the new assignment base (task-200 message-bus work) and re-audited.
+Product surface is byte-identical to the reviewed candidate —
+`git diff d98af1ba HEAD -- crates/gyre-cli/ docs/cli.md` is empty. Fresh probes,
+evidence under `/tmp/stage/review-evidence/` (suffix `-merged-head`):
+- `cargo test -p gyre-cli --bin gyre` → 107 passed, 0 failed; budget filter →
+  13 passed, 0 failed — `task192-cli-bin-tests-merged-head.txt`,
+  `task192-budget-tests-merged-head.txt`.
+- `bash scripts/check-arch.sh` → passed;
+  `bash scripts/check-relative-path-defaults.sh` → OK (exemption pointer
+  `main.rs:1862` matches the actual code line at this HEAD);
+  `python3 scripts/check-rustfmt-diff.py 6bf777a6` → changed lines clean
+  (2 Rust files) — the rustfmt failures in the prior attempt's log were from
+  the superseded checkout, not this history.
+- One real gate failure found and repaired: `check-task-commit-attribution.sh`
+  exited 1 naming `6bf777a6 task-200` — the assignment base itself (a
+  task-200 product-surface commit: per-kind payload validation in
+  gyre-common/message.rs + api/messages.rs + mcp.rs) absent from task-200's
+  `commits:` frontmatter. Root cause is the landing commit's self-recording
+  limitation, upstream-drift class, same shape task-211 repaired for task-210.
+  Repair (the check's documented remedy, mirrors upstream task-220's fix
+  commit `4635b533` byte-for-byte): appended
+  `6bf777a6a44f28052ed5af28bf6fb013fde6df48` to task-200's `commits:` list.
+  Mutation-checked — removing the SHA re-fails the gate with the identical
+  violation, restore re-passes (exit 0). Exemption file untouched (frozen at
+  baseline). Evidence: `task192-commit-attribution-merged-head.txt`,
+  `task192-attribution-mutation-check.txt`,
+  `task192-attribution-after-restore.txt`.
+- Help surfaces re-verified via the built binary at this HEAD
+  (`task192-budget-help-merged-head.txt`): all three document repo scope maps
+  to the owning workspace budget.
