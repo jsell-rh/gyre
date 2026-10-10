@@ -279,6 +279,28 @@ describe('Briefing S4.3', () => {
         );
       });
     });
+
+    it('includes repo_id in the ask body when scoped to a repo', async () => {
+      const { api } = await import('../lib/api.js');
+      const mockResponse = new Response('data: {"type":"complete","text":"42"}\n\n', {
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
+      api.briefingAsk.mockResolvedValue(mockResponse);
+
+      render(Briefing, { props: { workspaceId: 'ws-1', repoId: 'repo-1', scope: 'repo' } });
+      await waitFor(() => screen.getByTestId('briefing-chat'));
+
+      const input = screen.getByRole('textbox');
+      await fireEvent.input(input, { target: { value: 'What happened in this repo?' } });
+      await fireEvent.click(screen.getByRole('button', { name: /send/i }));
+
+      await waitFor(() => {
+        expect(api.briefingAsk).toHaveBeenCalledWith(
+          'ws-1',
+          expect.objectContaining({ question: 'What happened in this repo?', repo_id: 'repo-1' })
+        );
+      });
+    });
   });
 
   describe('Mock/fallback data', () => {

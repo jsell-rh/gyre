@@ -2032,6 +2032,247 @@ mod tests {
         assert!(ct.to_str().unwrap().contains("text/event-stream"));
     }
 
+    // ── Briefing repo-scope guards (HSI §1.5 / task-083) ─────────────────
+
+    /// POST briefing/ask with a repo_id whose repo denies the caller via ABAC
+    /// policy must 403 (G6 caller-scope guard on the request-body repo scope).
+    ///
+    /// The caller is a Keycloak JWT with the Admin role: middleware ABAC
+    /// allows it through (Admin allows all), but it carries jwt_claims, so the
+    /// per-repo policy evaluation in the handler must still apply. Without the
+    /// handler guard, a JWT admin would bypass repo-level ABAC by just naming
+    /// any repo in the body.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn briefing_ask_repo_scope_abac_denied_returns_403() {
+        let state = crate::auth::test_helpers::make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(crate::abac_middleware::seed_builtin_policies(&state))
+        });
+        let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
+
+        // ABAC policy on repo-1 requiring a claim the JWT will not have.
+        let policies = vec![crate::abac::AbacPolicy {
+            resource_type: "repo".to_string(),
+            resource_id: None,
+            required_claims: std::iter::once(("scope".to_string(), "repo:special".to_string()))
+                .collect(),
+        }];
+        state
+            .kv_store
+            .kv_set(
+                "abac_policies",
+                "repo-1",
+                serde_json::to_string(&policies).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Keycloak-style JWT: Admin role (passes middleware for "generate"),
+        // raw claims (subject for the per-repo policy check).
+        let claims = serde_json::json!({
+            "sub": "admin-no-repo-scope",
+            "preferred_username": "admin-no-repo-scope",
+            "realm_access": { "roles": ["admin"] }
+        });
+        let jwt = crate::auth::test_helpers::sign_test_jwt(&claims, 3600);
+
+        let app = crate::build_router(state);
+        let body = serde_json::json!({"question": "What changed?", "repo_id": "repo-1"});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/briefing/ask"))
+                    .header("Authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "repo-scoped ask must be denied when the repo's ABAC policies reject the caller"
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_ask_unknown_repo_returns_404() {
+        let app = app();
+
+        let ws_body = serde_json::json!({"name": "ask-unknown-repo-ws", "tenant_id": "tenant-1"});
+        let ws_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ws_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_id = body_json(ws_resp).await["id"].as_str().unwrap().to_string();
+
+        let ask_body = serde_json::json!({"question": "What changed?", "repo_id": "no-such-repo"});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/briefing/ask"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ask_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// GET briefing with a valid ?repo_id= renders only that repo's items;
+    /// a repo belonging to a different workspace must 403; unknown 404s.
+    #[tokio::test]
+    async fn briefing_get_repo_filter_scopes_and_validates_at_http_level() {
+        let state = test_state();
+        let (ws_id, repo_id) = setup_workspace_and_repo(&state).await;
+
+        // A second workspace with its own repo (for the cross-workspace 403).
+        let ws2 = gyre_domain::Workspace::new(
+            Id::new("ws-briefing-other"),
+            Id::new("tenant-1"),
+            "briefing-other",
+            "briefing-other",
+            1000,
+        );
+        state.workspaces.create(&ws2).await.unwrap();
+        let foreign_repo = gyre_domain::Repository {
+            id: Id::new("repo-foreign"),
+            workspace_id: Id::new("ws-briefing-other"),
+            name: "foreign-service".to_string(),
+            path: "/repos/foreign-service".to_string(),
+            default_branch: "main".to_string(), // hardcoded-default:ok — test fixture
+            is_mirror: false,
+            mirror_url: None,
+            mirror_interval_secs: None,
+            last_mirror_sync: None,
+            description: None,
+            status: gyre_domain::RepoStatus::Active,
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        state.repos.create(&foreign_repo).await.unwrap();
+
+        // A merged MR in repo-1 and an in-progress task in repo-1.
+        let mut mr1 = gyre_domain::MergeRequest::new(
+            Id::new("mr-http-r1"),
+            Id::new("repo-1"),
+            "repo-1 merged work",
+            "feat/one",
+            "main",
+            2000,
+        );
+        mr1.workspace_id = Id::new("ws-briefing");
+        mr1.updated_at = 2000;
+        mr1.status = gyre_domain::MrStatus::Merged;
+        state.merge_requests.create(&mr1).await.unwrap();
+
+        let mut task1 = gyre_domain::Task::new(Id::new("task-http-r1"), "repo-1 task", 2000);
+        task1.workspace_id = Id::new("ws-briefing");
+        task1.repo_id = Id::new("repo-1");
+        task1.status = gyre_domain::TaskStatus::InProgress;
+        task1.updated_at = 2000;
+        state.tasks.create(&task1).await.unwrap();
+
+        // A merged MR bound to the foreign repo but stamped with ws-briefing —
+        // must NOT appear under repo-1 (repo binding, not workspace stamp).
+        let mut mr_foreign = gyre_domain::MergeRequest::new(
+            Id::new("mr-http-foreign"),
+            Id::new("repo-foreign"),
+            "foreign repo work",
+            "feat/foreign",
+            "main",
+            2000,
+        );
+        mr_foreign.workspace_id = Id::new("ws-briefing");
+        mr_foreign.updated_at = 2000;
+        mr_foreign.status = gyre_domain::MrStatus::Merged;
+        state.merge_requests.create(&mr_foreign).await.unwrap();
+
+        let app = crate::build_router(state.clone());
+
+        // Valid repo filter: only repo-1's items render.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/briefing?repo_id={repo_id}&since=1500"
+                    ))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(
+            json["completed"].as_array().unwrap().len(),
+            1,
+            "repo-filtered briefing must render only repo-1's merged MR: {json}"
+        );
+        assert_eq!(
+            json["completed"][0]["entity_id"].as_str(),
+            Some("mr-http-r1")
+        );
+        assert_eq!(
+            json["in_progress"].as_array().unwrap().len(),
+            1,
+            "repo-filtered briefing must render only repo-1's task"
+        );
+        assert_eq!(
+            json["in_progress"][0]["entity_id"].as_str(),
+            Some("task-http-r1")
+        );
+
+        // Cross-workspace repo: 403, not rendered data.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/briefing?repo_id=repo-foreign"
+                    ))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Unknown repo: 404.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/briefing?repo_id=no-such-repo"
+                    ))
+                    .header("Authorization", auth())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
     // ── Briefing cross_workspace + exceptions tests (TASK-013) ──────────
 
     /// Helper: create a workspace and repo, returning (workspace_id, repo_id).
