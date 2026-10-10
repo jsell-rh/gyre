@@ -2,7 +2,7 @@
 title: "Define AgentReview and AgentValidation gate types with review protocol"
 spec_ref: "agent-gates.md §Part 1"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Gate Types (Extended)"
   - "agent-gates.md §AgentReview Gate"
@@ -83,3 +83,53 @@ From `agent-gates.md` §Gate Types (Extended) and §AgentReview Gate:
 ## Agent Instructions
 
 Read `specs/system/agent-gates.md` Part 1 §Gate Types through §AgentReview Gate. Existing gate implementation: `gyre-server/src/api/gates.rs`, gate types in domain. Merge request reviews: `gyre-server/src/api/merge_requests.rs` (submit_review, list_reviews). Agent spawn: `gyre-server/src/api/spawn.rs`. Gate routes: `GET/POST /api/v1/repos/:id/gates` registered in `gyre-server/src/api/mod.rs` at line ~152. Persona resolution: `gyre-server/src/api/personas.rs` (resolve_persona). JWT minting: `gyre-server/src/auth.rs` (mint_with_workload). Check migration numbering: currently at 000049.
+
+## Shipped
+
+Both `agent-gates.md` coverage sections are implemented with real, production
+behavior (checkpoint commits `42d79754`…`1b40aacb`, recovered and verified in
+this assignment; the attribution repair from the interrupted run is included
+at `9bda8c17`).
+
+- **Gate types**: `AgentReview` and `AgentValidation` variants in
+  `gyre-common`'s `GateType`; `QualityGate` carries `persona` (existing) and
+  the new `validation_type` column (migration `2026-10-09-000056`), persisted
+  by both SQLite and Postgres adapters with an upsert round-trip test. Gate
+  CRUD (`api/gates.rs`) accepts/returns both types and `validation_type`
+  (tests: `create_agent_review_gate`, `create_agent_validation_gate`).
+- **Review spawn protocol** (`gate_executor.rs`): persona resolved
+  nearest-wins (repo → workspace → tenant, no fabricated tenant scope);
+  unresolvable persona/spec_ref fails the gate before any process spawns.
+  MR context gathered for real: full diff via `git_ops.diff`, spec content at
+  the pinned SHA via a new `read_file_at_commit` port (unknown SHA is an
+  error, not a silent None), MR title, and task description (acceptance
+  criteria carrier) via MR → author agent → task.
+- **Scoped token**: `AgentSigningKey::mint_scoped` mints a JWT with
+  `scope: review:submit` only. Enforcement is real and triple-layered:
+  `git_http` denies push (403 read-only), the ABAC middleware allow-lists
+  review routes only (403 outside), and `submit_review` binds the reviewer
+  identity to the token subject (forged `reviewer_agent_id` in the body is
+  ignored). All four behaviors covered by `tests/task134_review_probe.rs`
+  (4 passed) — oneshot router calls, no listener required.
+- **Verdict mapping**: Approved → Passed, ChangesRequested → Failed with the
+  agent's feedback surfaced in gate output; only the gate's own agent's
+  verdict counts; exit-0-without-review fails ("cannot determine state" is
+  not "state is fine"). Unit tests plus two end-to-end tests that bind a real
+  axum server, a real bare git repo with a spec pinned at a pre-tip SHA, and
+  drive the fixture `review_agent_driver.sh` through the live Review API.
+- **Teardown**: token revoked (`kv_remove`) on every exit path (verdict,
+  timeout, spawn failure) — asserted by tests; temp spec/diff files removed.
+- **AgentValidation**: spawns the configured validation agent with
+  `GYRE_VALIDATION_TYPE` delivered and attributed in output; pass/fail from
+  the exit code; no-command fails closed.
+
+Test evidence (this sandbox, branch `pipeline/task-134/24f2f8fe…-1`, in
+`/tmp/stage/review-evidence/task-134-verification.md`): gate_executor 33/33,
+task134_review_probe 4/4, api::gates 6/6, api::merge_requests 21/21, adapters
+quality_gate 1/1, git2 read_file_at_commit 3/3. All 15 frozen-baseline
+mechanical checks pass, plus migration versions/portability and commit
+attribution. The two `agent_review_end_to_end` tests SKIP here — this sandbox
+denies loopback `accept()` (errno 95, infrastructure restriction, recorded in
+capabilities); they must run on host/GitHub CI, which is mandatory for
+exact-head verification anyway. `cargo test --all` is owned by verification
+and publication; focused suites above cover every touched module.
