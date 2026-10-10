@@ -109,3 +109,58 @@ asymmetry each fail at least one test.
 
 R1: no findings — task meets platform-model.md §2 Built-In Personas. Progress set to
 complete.
+## R2 (independent re-review — retry of infrastructure-failed review)
+
+Comparison base: 8c2d177505852b3e39cd77f4f782fb355de245aa → HEAD 65e32bd29b6226ddc7a1403b174798f940b04452.
+Diff over the assigned base: 23 files, +748/−651. Product surface is the same code R1
+approved plus `e27cc0da` (CLI bootstrap personas single-sourced from
+`gyre_domain::BUILTIN_PERSONA_DEFS`; the CLI's four private prompt copies under
+`crates/gyre-cli/src/bootstrap/personas/` deleted). Task contract text (Spec Excerpt,
+Implementation Plan, Acceptance Criteria) is byte-identical to base — only progress
+metadata and the Shipped section were added, resolving durable finding 1beb150a
+("implementation changed the assigned requirements"): no requirement was changed.
+
+### R2 verification (all probes re-run at this head; evidence in
+/tmp/stage/review-evidence/task-140/evidence.txt)
+
+- `cargo test -p gyre-domain --lib builtin` → 2 passed.
+- `cargo test -p gyre-adapters --lib sqlite::workspace::persona` → 2 passed.
+- `cargo test -p gyre-server --lib seed_builtin_personas` → 3 passed.
+- `cargo test -p gyre-server --lib create_tenant_seeds` → 1 passed.
+- `cargo test -p gyre-cli --bin gyre bootstrap` → 15 passed.
+- **Mutation probe**: replacing the `seed_builtin_personas_for_tenant` call at
+  tenants.rs:80 with a comment makes `create_tenant_seeds_builtin_personas` FAIL —
+  the acceptance tests are not self-confirming. File restored (sha256-verified, tree
+  clean at 65e32bd2).
+- Invariant gates: check-arch, check-mem-port-contracts, check-in-memory-state-stores,
+  check-migration-versions, check-fabricated-scope-defaults, check-scope-literal-defaults,
+  check-byte-slice-truncation, check-inert-enforcement, check-lossy-secret-conversion →
+  all exit 0.
+
+### Attribution
+
+All four product commits (e27cc0da, 151cf7d2, fcb712c5, f16e969c) are in the task
+frontmatter and inside the review range. The remaining range commits are process-only,
+pipeline web/dist build artifacts, or merge commits of upstream fixes. The
+check-task-commit-attribution.sh failure on task-210's a781ede2 is pre-existing:
+that commit is an ancestor of the assigned base 8c2d1775, not introduced by this
+candidate. Not a finding against this task.
+
+### R2 notes (non-blocking)
+
+- N3: `specs/personas/repo-orchestrator.md` pre-existed the base (added by task-099's
+  c903a80) — coverage row 13's "repo-orchestrator missing" was already stale. The
+  acceptance criterion is the file existing with an appropriate definition, which
+  holds. The Shipped section's "created by fcb712c5" attribution is inaccurate but
+  non-substantive (fcb712c5 only renamed the adapters test module).
+- N4: sandbox cannot accept TCP connections (errno 95, capabilities.json), so the live
+  startup path was not exercised over HTTP. The exact host-verification checks are
+  recorded in the evidence file: boot with a SQLite GYRE_DATABASE_URL, GET
+  /api/v1/personas expecting the four built-ins Approved at Tenant scope, restart,
+  re-GET expecting the same four (no duplicates).
+
+## Verdict
+
+R2: approved — no findings. The durable R1-followup contract finding is resolved; the
+e27cc0da single-source-of-truth repair closes the CLI/server prompt-drift risk with a
+pointer-equality test making it mechanical.
