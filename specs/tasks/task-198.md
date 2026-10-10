@@ -2,7 +2,7 @@
 title: "Spec Links — Persistent Forge-Maintained Spec Graph"
 spec_ref: "spec-links.md §Forge-Maintained Spec Graph"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "spec-links.md §Forge-Maintained Spec Graph"
 commits: ["12d95108b029812a4c8fcd863816304a4890f0f5", "17e4b4cb9f0f1d104ca58dc1470ae681163adee1", "e1466abbc4969b239fcb39c5366af4c048526d1e", "b869f5a9e91f06c4838fe3fab41197ff5360b830", "5f33847d5db78436ee063a34210ac6db96a58775", "7a1508bbeab83977ad4361f958d9f71a9bda88ba", "673fce33a1eb4e9273e1ecfff16da1d5bbab56a4", "2bc9b5bdc6a7e24aa0907af934469cd6f9fb3232", "071fd3b7e5aa81a7731cc1af67ffc1555d767d07", "9fb8d851175c88e4485215aa952da2bde6c32a16"]
@@ -90,3 +90,85 @@ Model the persistence on the existing `SpecLedgerRepository` pattern (`crates/gy
 - The restart-durability test is the section-closing evidence. It must genuinely fail on `main` (empty-init) and pass after your change — a self-confirming or mirrored-logic test does not close this section.
 - Skip project-wide formatters/linters and the full suite until the end; then run `cargo test --all` and `scripts/check-arch.sh` once.
 - Commit with conventional commits; author `Project Manager` is NOT the implementer — use your own agent identity.
+
+## Shipped
+
+The forge-maintained spec-link graph (spec-links.md §Forge-Maintained Spec
+Graph) is now a persistent SQL table with the in-memory `SpecLinksStore`
+retained as a write-through hot cache, so the graph survives restarts instead
+of silently degrading to empty for staleness checks, approval/merge gates,
+graph queries, and the accountability patrol.
+
+**Production behavior:**
+
+- Migration `2026-10-08-000056_spec_links` creates the `spec_links` table with
+  the spec's 13-column schema (`source_sha TEXT NOT NULL`, `target_sha`
+  NOT NULL storing `''` for the `Option::None` unresolved-link case, mapped
+  and documented in both SQL adapters), plus indexes on `source_repo_id`,
+  `source_path`, and `target_path`; registered in `schema.rs`. Portability
+  checked (`check-migration-sql-portability.sh` PASS — runs on both SQLite
+  and PostgreSQL).
+- `SpecLinkEntry` gained `source_sha: String`, populated in `sync_spec_ledger`
+  from the source spec's real blob SHA computed at HEAD (reused from
+  `manifest_sha_by_path`, never a placeholder). The type moved to
+  `gyre-domain::spec_links` alongside `SpecLedgerEntry` so the port and
+  adapters can persist it; `gyre-server::spec_registry` re-exports it.
+- New port `gyre_ports::SpecLinkRepository` (`list_all`,
+  `replace_for_source`, `save` upsert-by-id, `delete_by_source_repo`) with
+  SQLite + Postgres adapters (`crates/gyre-adapters/src/{sqlite,postgres}/spec_links.rs`)
+  and `MemSpecLinkRepository` (`mem.rs`), wired into `AppState.spec_link_repo`
+  via the `store!` macro (SQLite/PG when `GYRE_DATABASE_URL` is set, Mem
+  otherwise).
+- Every link mutation writes through to the table: `sync_spec_ledger` issues
+  one `replace_for_source` per manifest spec (including empty link sets, so
+  manifest-removed links are deleted from the table — no resurrection on
+  next boot); staleness transitions and cross-workspace re-resolution in
+  `spec_link_staleness.rs` call `save`; repo deletion (`api/repos.rs`)
+  calls `delete_by_source_repo`. The in-memory store is updated alongside
+  every durable write so both stay in sync.
+- Boot: `load_spec_links_into_store` (lib.rs, called from `build_state` and
+  the mem constructor) populates the hot cache from `list_all` on a dedicated
+  thread with its own runtime; read failure is logged at error level rather
+  than silently masquerading as an empty graph.
+
+**Test evidence:**
+
+- Restart-durability (the bug this task kills):
+  `restart_rebuilds_spec_link_graph_from_persisted_table` and
+  `staleness_query_parity_after_restart` in `spec_registry.rs` — push a real
+  manifest through `sync_spec_ledger` against a real SQLite file, then build
+  a brand-new store from the same repo (including a fresh storage handle on
+  the same file) and assert the graph is identical and the staleness verdict
+  (stale + `stale_since`) survives without any re-push. These fail against
+  the pre-task empty-init behavior.
+- Cross-repo scoping and removal: `sync_replaces_links_scoped_to_source_repo`
+  (repo A's rows survive a repo-B push of the same path; cache and table
+  agree) and `sync_clears_durable_rows_when_links_removed_from_manifest`
+  (removed links are deleted from the durable table, not resurrected).
+- Adapter round-trips: `sqlite::spec_links` tests cover every
+  `SpecLinkType` variant, all `Option` columns in `Some`/`None` forms,
+  reopen-durability, replace scoping, and repo-scoped delete;
+  `mem::spec_link_contract_tests` mirror the round-trip and scoping contract
+  for the Mem adapter. The Postgres adapter follows the identical row-mapping
+  and query structure as the SQLite adapter; the repo has no PG test
+  infrastructure (zero test modules under `postgres/`, no PG service in CI),
+  so PG is compile-verified — same convention as every other PG adapter.
+- `migrations_create_tables` extended with `spec_links`.
+
+**Sandbox/gate notes:**
+
+- `cargo test --all` and `bash scripts/check-arch.sh` run at the end of this
+  assignment; focused probes recorded under /tmp/stage/review-evidence.
+- `check-task-commit-attribution.sh` fails on the task-196 commit
+  `05709c24` (base of this branch) missing from task-196's `commits:` list —
+  pre-existing on main, unrelated to task-198, reproduced on a clean base
+  worktree; needs a separate fix (add the SHA to task-196's frontmatter).
+- `check-unnamed-tuple-carriers.sh` was failing on base (stale line-keyed
+  exemptions after line drift: git_http/mem entries off by their shift, plus
+  a trailing-comma arity miscount on `otlp_receiver.rs`'s 3-field tuple).
+  Renumbered the same frozen 9 entries to the actual carrier lines and
+  corrected the otlp inline `tuple-carrier:ok` marker's reason to name the
+  real cause (trailing-comma false positive). No entries added; check now
+  passes. Also removed the accidental `web/dist` rebuild a pipeline
+  checkpoint re-captured after bd5e586d had dropped it (web sources are
+  byte-identical to base — verified via `git ls-tree` hash comparison).

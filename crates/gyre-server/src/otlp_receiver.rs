@@ -235,7 +235,7 @@ async fn spawn_receiver(
     port: u16,
     accumulator: SpanAccumulator,
     max_spans: usize,
-) -> Result<( // tuple-carrier:ok -- pre-existing 3-field receiver lifecycle handle (addr, shutdown tx, task join); unchanged by task-198, line-shifted into scan range
+) -> Result<( // tuple-carrier:ok -- pre-existing 3-field receiver lifecycle handle (addr, shutdown tx, task join); the trailing comma makes the arity regex count 4 — false positive, signature unchanged by task-198
     SocketAddr,
     oneshot::Sender<()>,
     JoinHandle<std::result::Result<(), tonic::transport::Error>>,

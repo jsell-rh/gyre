@@ -2745,6 +2745,105 @@ impl gyre_ports::SpecLinkRepository for MemSpecLinkRepository {
     }
 }
 
+/// Task-198 AC: `SpecLinkEntry` must round-trip losslessly through the mem
+/// adapter (used by the in-memory test constructor and mem-mode server) —
+/// every `SpecLinkType` variant and every `Option` column, with the same
+/// `(source_repo_id, source_path)` scoping contract the SQL adapters enforce.
+#[cfg(test)]
+mod spec_link_contract_tests {
+    use super::*;
+    use gyre_domain::spec_links::{SpecLinkEntry, SpecLinkType};
+    use gyre_ports::SpecLinkRepository;
+
+    fn entry(id: &str, link_type: SpecLinkType) -> SpecLinkEntry {
+        SpecLinkEntry {
+            id: id.to_string(),
+            source_path: format!("system/source-{id}.md"),
+            source_repo_id: Some("repo-1".to_string()),
+            source_sha: format!("sha-{id}"),
+            link_type,
+            target_path: "system/target.md".to_string(),
+            target_repo_id: Some("repo-2".to_string()),
+            target_display: Some("@ws/repo-2/system/target.md".to_string()),
+            target_sha: Some("target-sha".to_string()),
+            reason: Some("why".to_string()),
+            status: "active".to_string(),
+            created_at: 1_700_000_000,
+            stale_since: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn round_trips_every_link_type_and_option_columns() {
+        let repo = MemSpecLinkRepository::default();
+        let variants = [
+            SpecLinkType::Implements,
+            SpecLinkType::Supersedes,
+            SpecLinkType::DependsOn,
+            SpecLinkType::ConflictsWith,
+            SpecLinkType::Extends,
+            SpecLinkType::References,
+        ];
+        let mut expected: Vec<SpecLinkEntry> = Vec::new();
+        for (i, lt) in variants.iter().enumerate() {
+            let e = entry(&format!("link-{i}"), lt.clone());
+            repo.save(&e).await.unwrap();
+            expected.push(e);
+        }
+        // Option columns exercised in their None forms too.
+        let mut none_opts = entry("link-none", SpecLinkType::DependsOn);
+        none_opts.source_repo_id = None;
+        none_opts.target_repo_id = None;
+        none_opts.target_display = None;
+        none_opts.target_sha = None;
+        none_opts.reason = None;
+        none_opts.stale_since = Some(1_700_000_500);
+        repo.save(&none_opts).await.unwrap();
+        expected.push(none_opts);
+
+        let all = repo.list_all().await.unwrap();
+        assert_eq!(all.len(), expected.len());
+        for exp in &expected {
+            let got = all.iter().find(|l| l.id == exp.id).expect("link present");
+            assert_eq!(got, exp, "entry {id} must round-trip losslessly", id = exp.id);
+        }
+    }
+
+    #[tokio::test]
+    async fn replace_for_source_scopes_to_repo_and_path() {
+        let repo = MemSpecLinkRepository::default();
+        let old = entry("old-1", SpecLinkType::Implements);
+        repo.save(&old).await.unwrap();
+        // Unrelated link — must survive the replace.
+        let other = entry("other-1", SpecLinkType::Extends);
+        repo.save(&other).await.unwrap();
+
+        let replacement = entry("new-1", SpecLinkType::DependsOn);
+        repo.replace_for_source("repo-1", &old.source_path, std::slice::from_ref(&replacement))
+            .await
+            .unwrap();
+
+        let all = repo.list_all().await.unwrap();
+        assert_eq!(all.len(), 2, "old row replaced, unrelated row kept");
+        assert!(all.iter().any(|l| l.id == "new-1"));
+        assert!(all.iter().any(|l| l.id == "other-1"));
+        assert!(!all.iter().any(|l| l.id == "old-1"));
+    }
+
+    #[tokio::test]
+    async fn replace_for_source_empty_set_clears_rows() {
+        let repo = MemSpecLinkRepository::default();
+        let e = entry("gone-1", SpecLinkType::Implements);
+        repo.save(&e).await.unwrap();
+        // A manifest edit that removes all links must clear the rows, not
+        // skip them (an empty set is a delete, matching sync_spec_ledger).
+        repo.replace_for_source("repo-1", &e.source_path, &[])
+            .await
+            .unwrap();
+        assert!(repo.list_all().await.unwrap().is_empty());
+    }
+}
+
 #[derive(Default)]
 pub struct MemSpecApprovalEventRepository {
     store: Arc<Mutex<Vec<gyre_domain::SpecApprovalEvent>>>,
