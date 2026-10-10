@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Built-In Personas"
-commits: ["e27cc0dab572a10d96ead8578f72bfa1dd71409d", "151cf7d2fef662f87f0306ba70b8f3197fb41802", "fcb712c51c1f27b597e4a0cb798e63d7f341f6e9", "f16e969ce52622e8f6133deb60550d77dd7ed47e", "63e2eeff6d4ff682dafc3ddd27bbb130ca8a1d3b", "5945c0d50ec03938dd59866c5435cb26e1b857af"]
+commits: ["e27cc0dab572a10d96ead8578f72bfa1dd71409d", "151cf7d2fef662f87f0306ba70b8f3197fb41802", "fcb712c51c1f27b597e4a0cb798e63d7f341f6e9", "f16e969ce52622e8f6133deb60550d77dd7ed47e"]
 ---
 
 ## Spec Excerpt
