@@ -484,6 +484,58 @@ impl ComputeTarget for SshDockerTarget {
     }
 }
 
+/// Build an [`SshDockerTarget`] from a compute-target config blob
+/// (agent-runtime.md §3 Supported Backends — SSH).
+///
+/// Recognized keys: `user` (required in practice; defaults `root`),
+/// `host`, `port`, `identity_file`, `image`, `network`, `memory_limit`,
+/// `pids_limit`, `user_as` (container `--user`; named `user_as` to avoid
+/// colliding with the SSH login user), `docker_binary`.
+/// Absent security keys fall back to the spec defaults
+/// (`--network=none`, `--memory=2g`, `--pids-limit=512`,
+/// `--user=65534:65534`).
+pub fn ssh_docker_target_from_config(config: &serde_json::Value) -> SshDockerTarget {
+    let mut ssh = SshTarget::new(
+        config
+            .get("user")
+            .and_then(|v| v.as_str())
+            .unwrap_or("root"),
+        config
+            .get("host")
+            .and_then(|v| v.as_str())
+            .unwrap_or("localhost"),
+    );
+    if let Some(idf) = config.get("identity_file").and_then(|v| v.as_str()) {
+        ssh = ssh.with_identity(idf);
+    }
+    if let Some(port) = config.get("port").and_then(|v| v.as_u64()) {
+        ssh = ssh.with_port(port as u16);
+    }
+    let mut t = SshDockerTarget::new(
+        ssh,
+        config
+            .get("image")
+            .and_then(|v| v.as_str())
+            .unwrap_or("gyre-agent:latest"),
+    );
+    if let Some(n) = config.get("network").and_then(|v| v.as_str()) {
+        t = t.with_network(n);
+    }
+    if let Some(m) = config.get("memory_limit").and_then(|v| v.as_str()) {
+        t = t.with_memory_limit(m);
+    }
+    if let Some(p) = config.get("pids_limit").and_then(|v| v.as_u64()) {
+        t = t.with_pids_limit(p as u32);
+    }
+    if let Some(u) = config.get("user_as").and_then(|v| v.as_str()) {
+        t = t.with_user(u);
+    }
+    if let Some(b) = config.get("docker_binary").and_then(|v| v.as_str()) {
+        t = t.with_docker_binary(b);
+    }
+    t
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

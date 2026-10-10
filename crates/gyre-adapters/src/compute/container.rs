@@ -136,6 +136,38 @@ impl ContainerTarget {
             None => Runtime::detect().await,
         }
     }
+
+    /// Resolve the local image digest via `docker image inspect
+    /// --format {{.Id}}` (best-effort; `Err` when the runtime cannot
+    /// resolve the image). Callers use it for the `wl_image_hash`
+    /// attestation claim and must tolerate absence.
+    pub async fn image_digest(&self) -> Result<String> {
+        let runtime = self.resolve_runtime().await?;
+        let bin = runtime.binary();
+        let output = Command::new(bin)
+            .args(["image", "inspect", "--format={{.Id}}", &self.image])
+            .output()
+            .await
+            .with_context(|| format!("{} image inspect failed", bin))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!(
+                "{} image inspect for {} failed: {}",
+                bin,
+                self.image,
+                stderr
+            ));
+        }
+        let digest = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if digest.is_empty() {
+            return Err(anyhow::anyhow!(
+                "{} returned empty digest for {}",
+                bin,
+                self.image
+            ));
+        }
+        Ok(digest)
+    }
 }
 
 #[async_trait]
