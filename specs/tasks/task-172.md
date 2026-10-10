@@ -272,6 +272,36 @@ cover behavior, exact-head GitHub CI (`web-build`) remains mandatory.
 Evidence: /tmp/stage/review-evidence/task-172-verification-round7.md plus
 gate outputs (gate-round7.txt, gate-base-round7.txt).
 
+**Round-8 re-verification (2026-10-10, fresh sandbox):** inherited HEAD
+3cb67ac7 (merge of new base a1751da1 — task-212's specs-only ledger repair;
+no web/ changes between old and new base) with the fresh-assignment reset
+of this task file in the working tree; restored it from HEAD (recovering
+the 5-commit attribution and ready-for-review) and re-verified from
+scratch with no source changes needed or made. Contract re-verified:
+`git diff a1751da1 HEAD --name-only` touches only this task's own files —
+task-189.md and task-212.md are byte-identical to base, closing contract
+finding 0922e233 via the base merge; task-172.md normative sections
+byte-identical to base except checkbox state; SUMMARY.md changes only the
+ui-layout row. `npm ci` (169 locked packages) → EditorSplit + DetailPanel
+suites **66/66 passed** via the locked local `./node_modules/.bin/vitest`;
+`./node_modules/.bin/vite build` reproduced the committed dist
+byte-exactly (sha256 identical pre/post, empty `git status web/dist`).
+i18n audit — all 51 `$t()` keys used by the component (50
+`editor_split.*` + `common.dismiss`) are defined in en.json, zero missing,
+zero dead (interpolation-form calls counted; a naive quote-terminated
+regex undercounts by 6). **Attribution gate now passes at this branch
+head: `scripts/check-task-commit-attribution.sh` exit 0** — rounds 5–7
+recorded the same gate failing on the then-unrepaired upstream
+`f4acb4eb task-189` drift; the merged base a1751da1 (task-212's repair,
+on main) closes it, and this branch's frontmatter is unchanged by it.
+TCP listener probes remain unsupported (errno 95,
+/tmp/stage/capabilities.json) — no live server/browser run; jsdom suites
+cover behavior, exact-head GitHub CI (`web-build`) remains mandatory.
+Evidence: /tmp/stage/review-evidence/task-172-verification-round8.md plus
+task-172-round8-vitest.txt, task-172-round8-dist-before.txt/-after.txt,
+task-172-round8-attribution-gate.txt,
+task-172-round8-files-vs-base.txt.
+
 
 ## Agent Instructions
 
