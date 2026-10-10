@@ -4,6 +4,7 @@ use gyre_common::Id;
 use gyre_domain::User;
 
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait UserRepository: Send + Sync {
     /// Persist a user.
     ///

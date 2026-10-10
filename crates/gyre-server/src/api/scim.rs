@@ -524,7 +524,10 @@ mod tests {
             .unwrap();
         let created = body_json(create_resp).await;
         let id = created["id"].as_str().unwrap().to_string();
-        assert_eq!(created["userName"], "bob", "userName is sanitized on create");
+        assert_eq!(
+            created["userName"], "bob",
+            "userName is sanitized on create"
+        );
 
         let update = serde_json::json!({
             "userName": "bob-renamed",
@@ -542,7 +545,10 @@ mod tests {
             .unwrap();
         assert_eq!(upd_resp.status(), StatusCode::OK);
         let updated = body_json(upd_resp).await;
-        assert_eq!(updated["userName"], "bob", "username is immutable after creation");
+        assert_eq!(
+            updated["userName"], "bob",
+            "username is immutable after creation"
+        );
         assert_eq!(updated["displayName"], "Bob Updated");
 
         // externalId swap attempt did not take either (immutable join key).

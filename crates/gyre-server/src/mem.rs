@@ -956,12 +956,9 @@ impl UserRepository for MemUserRepository {
     async fn create(&self, user: &User) -> Result<()> {
         // Port contract: fail if id, external_id, or username already exists.
         let mut store = self.store.lock().await;
-        if store
-            .values()
-            .any(|u| u.id == user.id
-                || u.external_id == user.external_id
-                || u.username == user.username)
-        {
+        if store.values().any(|u| {
+            u.id == user.id || u.external_id == user.external_id || u.username == user.username
+        }) {
             anyhow::bail!(
                 "user already exists for username {}, external_id {}",
                 user.username,

@@ -393,16 +393,31 @@ mod tests {
             "jörg",
             &"x".repeat(65),
         ] {
-            assert!(User::validate_username(bad).is_err(), "{bad} should be invalid");
+            assert!(
+                User::validate_username(bad).is_err(),
+                "{bad} should be invalid"
+            );
         }
     }
 
     #[test]
     fn sanitize_username_normalizes() {
-        assert_eq!(User::sanitize_username("Jordan Sell").as_deref(), Some("jordan-sell"));
-        assert_eq!(User::sanitize_username("Alice_Smith").as_deref(), Some("alice-smith"));
-        assert_eq!(User::sanitize_username("bob@example.com").as_deref(), Some("bob-example-com"));
-        assert_eq!(User::sanitize_username("  --Carol--  ").as_deref(), Some("carol"));
+        assert_eq!(
+            User::sanitize_username("Jordan Sell").as_deref(),
+            Some("jordan-sell")
+        );
+        assert_eq!(
+            User::sanitize_username("Alice_Smith").as_deref(),
+            Some("alice-smith")
+        );
+        assert_eq!(
+            User::sanitize_username("bob@example.com").as_deref(),
+            Some("bob-example-com")
+        );
+        assert_eq!(
+            User::sanitize_username("  --Carol--  ").as_deref(),
+            Some("carol")
+        );
         assert_eq!(User::sanitize_username("!!!"), None);
         assert_eq!(User::sanitize_username(""), None);
     }
@@ -418,11 +433,13 @@ mod tests {
 
     #[test]
     fn preferences_json_roundtrip_includes_new_fields() {
-        let mut prefs = UserPreferences::default();
-        prefs.ui_density = UiDensity::Compact;
-        prefs.code_font_size = 16;
-        prefs.diff_view = DiffView::Unified;
-        prefs.activity_feed_scope = FeedScope::All;
+        let prefs = UserPreferences {
+            ui_density: UiDensity::Compact,
+            code_font_size: 16,
+            diff_view: DiffView::Unified,
+            activity_feed_scope: FeedScope::All,
+            ..UserPreferences::default()
+        };
         let json = serde_json::to_value(&prefs).unwrap();
         assert_eq!(json["ui_density"], "Compact");
         assert_eq!(json["code_font_size"], 16);

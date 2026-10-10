@@ -336,11 +336,7 @@ mod tests {
         let (pre, target): (Vec<_>, Vec<_>) = all
             .into_iter()
             .partition(|m| m.name().version().to_string() != "20261008000056");
-        assert_eq!(
-            target.len(),
-            1,
-            "000056 not found in embedded migrations"
-        );
+        assert_eq!(target.len(), 1, "000056 not found in embedded migrations");
         use diesel::migration::MigrationConnection;
         // run_migrations is the raw harness method — unlike
         // run_pending_migrations (used by SqliteStorage::new) it does not
@@ -377,6 +373,7 @@ mod tests {
         conn.run_migrations(&target).unwrap();
 
         #[derive(diesel::QueryableByName)]
+        #[allow(clippy::redundant_field_names)] // field name mirrors the column being selected
         struct Row {
             #[diesel(sql_type = diesel::sql_types::Text)]
             id: String,
@@ -386,10 +383,8 @@ mod tests {
         let rows: Vec<Row> = diesel::sql_query("SELECT id, username FROM users")
             .load(&mut conn)
             .unwrap();
-        let by_id: std::collections::HashMap<String, String> = rows
-            .into_iter()
-            .map(|r| (r.id, r.username))
-            .collect();
+        let by_id: std::collections::HashMap<String, String> =
+            rows.into_iter().map(|r| (r.id, r.username)).collect();
 
         let expected = [
             // Backfill from display name, lowercased, separators mapped.
@@ -437,6 +432,7 @@ mod tests {
 
         // Defaults backfilled for rows predating the new columns.
         #[derive(diesel::QueryableByName)]
+        #[allow(clippy::redundant_field_names)] // field names mirror the columns being selected
         struct Defaults {
             #[diesel(sql_type = diesel::sql_types::Text)]
             timezone: String,
@@ -457,8 +453,7 @@ mod tests {
         assert_eq!(d.timezone, "UTC");
         assert_eq!(d.locale, "en-US");
         assert_eq!(d.global_role, "Member");
-        let want_prefs =
-            serde_json::to_string(&gyre_domain::UserPreferences::default()).unwrap();
+        let want_prefs = serde_json::to_string(&gyre_domain::UserPreferences::default()).unwrap();
         assert_eq!(d.preferences.as_deref(), Some(want_prefs.as_str()));
     }
 

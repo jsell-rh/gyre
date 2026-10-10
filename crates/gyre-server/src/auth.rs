@@ -826,8 +826,8 @@ async fn find_or_create_user(
     // Derive the URL-safe username from the SSO preferred_username. When
     // sanitization leaves nothing usable, fall back to the subject (the
     // migration's backfill does the same for legacy rows).
-    let username = User::sanitize_username(preferred_username)
-        .unwrap_or_else(|| external_id.to_string());
+    let username =
+        User::sanitize_username(preferred_username).unwrap_or_else(|| external_id.to_string());
 
     let id = Id::new(uuid::Uuid::new_v4().to_string());
     let mut user = User::new_sso(
@@ -1480,7 +1480,10 @@ mod tests {
             user.display_name, "Jordan.Sell@example.com",
             "display name starts as the raw preferred_username"
         );
-        assert!(user.last_login_at.is_some(), "first login stamps last_login_at");
+        assert!(
+            user.last_login_at.is_some(),
+            "first login stamps last_login_at"
+        );
         assert_eq!(user.last_login_at, Some(user.updated_at));
     }
 
@@ -1545,8 +1548,14 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(second.username, "alice", "username is immutable after creation");
-        assert_eq!(second.display_name, "alice", "display name also stable across logins");
+        assert_eq!(
+            second.username, "alice",
+            "username is immutable after creation"
+        );
+        assert_eq!(
+            second.display_name, "alice",
+            "display name also stable across logins"
+        );
         let second_login = second.last_login_at.expect("re-login must re-stamp");
         assert!(
             second_login >= first_login,

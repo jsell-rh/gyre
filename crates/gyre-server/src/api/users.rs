@@ -163,13 +163,17 @@ pub async fn update_me(
     }
     if let Some(tz) = req.timezone {
         if tz.trim().is_empty() {
-            return Err(ApiError::InvalidInput("timezone must not be empty".to_string()));
+            return Err(ApiError::InvalidInput(
+                "timezone must not be empty".to_string(),
+            ));
         }
         user.timezone = tz;
     }
     if let Some(locale) = req.locale {
         if locale.trim().is_empty() {
-            return Err(ApiError::InvalidInput("locale must not be empty".to_string()));
+            return Err(ApiError::InvalidInput(
+                "locale must not be empty".to_string(),
+            ));
         }
         user.locale = locale;
     }
@@ -1304,9 +1308,7 @@ mod tests {
     /// return (state, user_id, raw_api_key). The API key authenticates as
     /// the new user, exercising the same auth extractor path production
     /// clients use.
-    async fn bootstrap_user(
-        username: &str,
-    ) -> (std::sync::Arc<crate::AppState>, String, String) {
+    async fn bootstrap_user(username: &str) -> (std::sync::Arc<crate::AppState>, String, String) {
         let state = test_state();
         let app = crate::api::api_router().with_state(state.clone());
         let resp = app
@@ -1354,9 +1356,7 @@ mod tests {
         assert_eq!(json["preferences"]["ui_density"], "Comfortable");
         assert_eq!(json["preferences"]["code_font_size"], 14);
         assert_eq!(json["preferences"]["diff_view"], "SideBySide");
-        assert_eq!(
-            json["preferences"]["activity_feed_scope"], "MyActivity"
-        );
+        assert_eq!(json["preferences"]["activity_feed_scope"], "MyActivity");
     }
 
     #[tokio::test]
@@ -1417,7 +1417,8 @@ mod tests {
             "omitted notification_channels must keep the stored value, not reset to default"
         );
         assert_eq!(
-            json2["preferences"]["default_workspace_id"], serde_json::Value::Null,
+            json2["preferences"]["default_workspace_id"],
+            serde_json::Value::Null,
             "omitted default_workspace_id must keep the stored value"
         );
     }
@@ -1461,7 +1462,10 @@ mod tests {
             .await
             .unwrap();
         let json2 = body_json(resp2).await;
-        assert_eq!(json2["display_name"], "put-me-bad", "rejected update must not partially apply");
+        assert_eq!(
+            json2["display_name"], "put-me-bad",
+            "rejected update must not partially apply"
+        );
     }
 
     #[tokio::test]

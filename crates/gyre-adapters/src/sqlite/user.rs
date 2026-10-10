@@ -62,9 +62,7 @@ impl From<UserRow> for User {
         u.email = r.email;
         u.roles = json_to_roles(&r.roles);
         u.updated_at = r.updated_at as u64;
-        u.display_name = r
-            .display_name
-            .unwrap_or_else(|| r.name.clone());
+        u.display_name = r.display_name.unwrap_or_else(|| r.name.clone());
         u.timezone = r.timezone.unwrap_or_else(|| "UTC".to_string());
         u.locale = r.locale.unwrap_or_else(|| "en".to_string());
         u.avatar_url = r.avatar_url;
@@ -244,9 +242,8 @@ impl UserRepository for SqliteStorage {
                 .first::<UserRow>(&mut *conn)
                 .optional()
                 .context("load user for update")?;
-            let existing = existing.ok_or_else(|| {
-                anyhow::anyhow!("cannot update user {}: not found", u.id)
-            })?;
+            let existing = existing
+                .ok_or_else(|| anyhow::anyhow!("cannot update user {}: not found", u.id))?;
             if existing.username != u.username {
                 anyhow::bail!(
                     "username is immutable: cannot change {} to {}",
@@ -451,11 +448,17 @@ mod tests {
             .unwrap();
         assert_eq!(found.username, "jsell", "username must persist");
         assert_eq!(found.display_name, "Jordan Sell");
-        assert_eq!(found.avatar_url.as_deref(), Some("https://example.com/a.png"));
+        assert_eq!(
+            found.avatar_url.as_deref(),
+            Some("https://example.com/a.png")
+        );
         assert_eq!(found.tenant_id, Some(Id::new("tenant-a")));
         assert_eq!(found.global_role, GlobalRole::TenantAdmin);
         assert_eq!(found.last_login_at, Some(1999));
-        assert_eq!(found.preferences, u.preferences, "preferences must persist as JSON");
+        assert_eq!(
+            found.preferences, u.preferences,
+            "preferences must persist as JSON"
+        );
 
         // find_by_username resolves the unique handle.
         let by_name = s.find_by_username("jsell").await.unwrap().unwrap();
