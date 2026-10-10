@@ -2933,8 +2933,14 @@ async fn run_explorer_agent(
                     // Stream a warning with the raw JSON so the user can see what was attempted.
                     let raw_preview = serde_json::to_string_pretty(&query_json)
                         .unwrap_or_else(|_| query_json.to_string());
-                    let truncated = if raw_preview.len() > 500 {
-                        format!("{}...", &raw_preview[..500])
+                    // Char-boundary-safe truncation (task-095 F4 class): the
+                    // query JSON can contain multibyte UTF-8 — a fixed byte
+                    // index would panic. Uses chars().take() like the
+                    // view_query splitter, not a byte slice.
+                    let truncated = if raw_preview.chars().count() > 500 {
+                        let mut s: String = raw_preview.chars().take(500).collect();
+                        s.push_str("...");
+                        s
                     } else {
                         raw_preview
                     };
@@ -4289,10 +4295,15 @@ Attempt 2:
             total, 11,
             "Total agent loop budget should be 11 (8 tool + 3 refinement)"
         );
-        // Tool turns and refinement turns must both be > 0
-        assert!(MAX_TOOL_TURNS > 0, "Must allow at least 1 tool turn");
+        // Tool turns and refinement turns must both be > 0. The consts are
+        // read through wrappers so clippy sees evaluated values, not
+        // constants (assertions_on_constants), while the runtime check is
+        // identical.
+        let tool_turns = MAX_TOOL_TURNS;
+        let refinement_turns = MAX_REFINEMENT_TURNS;
+        assert!(tool_turns > 0, "Must allow at least 1 tool turn");
         assert!(
-            MAX_REFINEMENT_TURNS > 0,
+            refinement_turns > 0,
             "Must allow at least 1 refinement turn for self-check"
         );
     }
