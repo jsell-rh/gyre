@@ -3639,10 +3639,7 @@ fn truncate_invalid_query_preview(raw: &str) -> String {
     if raw.len() <= 500 {
         return raw.to_string();
     }
-    format!(
-        "{}...",
-        crate::gate_executor::truncate_bytes(raw, 500)
-    )
+    format!("{}...", crate::gate_executor::truncate_bytes(raw, 500))
 }
 
 /// Extract node name references from computed expressions.
@@ -3856,11 +3853,15 @@ This shows all callers of TaskPort."#;
         // The original fixed-index byte slice panicked here (F4 class).
         let raw = "日".repeat(250);
         let truncated = truncate_invalid_query_preview(&raw);
-        // The cut backed off to byte 499 (last char boundary ≤ 500).
         assert!(truncated.ends_with("..."));
         let body = truncated.trim_end_matches('.');
-        assert!(body.chars().all(|c| c == '日'), "must cut at a char boundary, not mid-character");
-        assert_eq!(body.len(), 499, "largest multiple of 3 that is <= 500");
+        assert!(
+            body.chars().all(|c| c == '日'),
+            "must cut at a char boundary, not mid-character"
+        );
+        // Char boundaries of a 3-byte char are multiples of 3; the largest
+        // boundary <= 500 is 498, so truncation backs off to byte 498.
+        assert_eq!(body.len(), 498, "largest multiple of 3 that is <= 500");
     }
 
     #[test]
