@@ -833,6 +833,8 @@ async fn find_or_create_user(
     // migration's deterministic suffix scheme (base, base-2, base-3, ...)
     // instead of failing the login (a 401 that would repeat forever:
     // find_by_external_id keeps missing, and the username is immutable).
+    let base_username =
+        User::sanitize_username(preferred_username).unwrap_or_else(|| external_id.to_string());
     let id = Id::new(uuid::Uuid::new_v4().to_string());
     let username = match resolve_unique_username(state, &base_username).await {
         Ok(handle) => handle,
