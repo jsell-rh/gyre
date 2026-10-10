@@ -422,4 +422,58 @@ describe('Inbox', () => {
       );
     });
   });
+
+  // ── Review-round repair: header button structure ────────────────────
+  // The AccordionItem header is a real <button>. HTML's content model
+  // forbids interactive descendants of <button>, so quick links must not
+  // live inside the header snippet; they render as a sibling actions row.
+  describe('Header structure (no nested interactive elements)', () => {
+    const renderInbox = () => render(Inbox, {
+      context: new Map([['openDetailPanel', vi.fn()]]),
+    });
+
+    it('renders no interactive elements inside the accordion header button', async () => {
+      api.myNotifications.mockResolvedValue([makeNotification()]);
+      const { container, findByRole } = renderInbox();
+      await findByRole('button', { name: /Expand: Agent needs clarification/ });
+      const headers = container.querySelectorAll('.accordion-header');
+      expect(headers.length).toBeGreaterThan(0);
+      headers.forEach(h => {
+        expect(h.querySelectorAll('button, a, input, select, textarea, [role="button"], [tabindex]:not([tabindex="-1"])').length).toBe(0);
+      });
+    });
+
+    it('quick links render in a sibling actions row and open the detail panel without toggling', async () => {
+      api.myNotifications.mockResolvedValue([makeNotification()]);
+      const openDetailPanel = vi.fn();
+      const { container, findByRole } = render(Inbox, {
+        context: new Map([['openDetailPanel', openDetailPanel]]),
+      });
+      const header = await findByRole('button', { name: /Expand: Agent needs clarification/ });
+      expect(container.querySelector('.card-body')).toBeNull();
+
+      const quickLinks = container.querySelectorAll('.card-quick-link');
+      expect(quickLinks.length).toBe(2); // spec + agent for this fixture
+      // Sibling of the header button (accordion-actions row), not inside it.
+      quickLinks.forEach(l => expect(header.contains(l)).toBe(false));
+      expect(quickLinks[0].closest('.accordion-actions')).toBeTruthy();
+
+      await fireEvent.click(quickLinks[0]);
+      expect(openDetailPanel).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'spec' })
+      );
+      // Clicking a quick link must not have expanded the card.
+      expect(container.querySelector('.card-body')).toBeNull();
+      expect(header.getAttribute('aria-expanded')).toBe('false');
+    });
+
+    it('header carries the card-header class from headerClass', async () => {
+      api.myNotifications.mockResolvedValue([makeNotification()]);
+      const { findByRole } = renderInbox();
+      const header = await findByRole('button', { name: /Expand: Agent needs clarification/ });
+      expect(header.classList.contains('card-header')).toBe(true);
+      // The :global CSS rules that target it are guarded at compile time
+      // in AccordionScoping.test.js (node environment).
+    });
+  });
 });

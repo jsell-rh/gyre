@@ -348,4 +348,30 @@ describe('Briefing S4.3', () => {
       });
     });
   });
+
+  // ── Review-round repair: accordion header styling survives scoping ──
+  // The section-heading rules target the AccordionItem header button,
+  // which is authored inside AccordionItem.svelte and never carries
+  // Briefing's scoping hash class. Plain parent-scoped rules therefore
+  // never match it (and the base .section-heading for the metrics h2 was
+  // lost in the accordion conversion). jsdom cannot see either defect;
+  // compiling the component can.
+  describe('Accordion header styling (scoping contract)', () => {
+    it('header button carries the section-heading class from headerClass', async () => {
+      render(Briefing, { props: { workspaceId: 'ws-1', scope: 'workspace' } });
+      await waitFor(() => screen.getByTestId('section-toggle-completed'));
+      const header = screen.getByTestId('section-toggle-completed');
+      expect(header.classList.contains('section-heading')).toBe(true);
+      // The :global rules that target it are guarded at compile time in
+      // AccordionScoping.test.js (node environment).
+    });
+
+    it('section header button contains no interactive descendants', async () => {
+      render(Briefing, { props: { workspaceId: 'ws-1', scope: 'workspace' } });
+      await waitFor(() => screen.getByTestId('section-toggle-completed'));
+      screen.getAllByTestId(/section-toggle-/).forEach(h => {
+        expect(h.querySelectorAll('button, a, input, select, textarea, [role="button"]').length).toBe(0);
+      });
+    });
+  });
 });

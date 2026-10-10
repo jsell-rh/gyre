@@ -794,9 +794,12 @@
 
   /* Section accordion header (ui-layout.md §3 Inline Expansion): the
      AccordionItem's header button carries the section-heading identity.
-     `all: unset` in the component resets UA button styling; this restores
-     the heading look plus disclosure affordances. */
-  .accordion-header.section-heading {
+     The button is authored INSIDE AccordionItem.svelte, so it never gets
+     this component's scoping hash class — the rules must be :global()
+     (scoped on the left, global on the class) or they silently never
+     match. `all: unset` in the component resets UA button styling; this
+     restores the heading look plus disclosure affordances. */
+  .briefing-section :global(.accordion-header.section-heading) {
     display: flex;
     align-items: center;
     gap: var(--space-2);
@@ -811,10 +814,21 @@
     cursor: pointer;
     text-align: left;
   }
-  .accordion-header.section-heading:hover { color: var(--color-text); }
-  .expand-icon {
-    margin-left: auto;
-    font-size: 0.75em;
+  .briefing-section :global(.accordion-header.section-heading:hover) { color: var(--color-text); }
+
+  /* Base section-heading look for non-accordion headings (metrics h2). */
+  .section-heading {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-text-muted);
+    margin: 0 0 var(--space-3) 0;
+    padding-bottom: var(--space-2);
+    border-bottom: 1px solid var(--color-border);
   }
 
   .completed-icon { color: var(--color-success); }

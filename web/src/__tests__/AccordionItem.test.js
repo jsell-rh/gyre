@@ -11,6 +11,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { render, fireEvent } from '@testing-library/svelte';
+import AccordionActionsHost from '../lib/__accordion_actions_host.svelte';
 import AccordionGroup from '../lib/__accordion_group.svelte';
 import AccordionItem from '../lib/AccordionItem.svelte';
 
@@ -59,6 +60,43 @@ describe('AccordionItem (ui-layout.md §3 Inline Expansion)', () => {
     // path itself is covered by the click test above.
     expect(header.tagName).toBe('BUTTON');
     expect(header.getAttribute('type')).toBe('button');
+  });
+
+  it('header button id resolves the body region aria-labelledby and headingId override', () => {
+    const { container } = render(AccordionItem, {
+      props: { id: 'lbl', open: true, ontoggle: () => {}, headingId: 'custom-h' },
+    });
+    const header = container.querySelector('.accordion-header');
+    // headingId names the header button; the open body region points at it.
+    expect(header.id).toBe('custom-h');
+    const bodyEl = container.querySelector('.accordion-body');
+    expect(bodyEl.getAttribute('aria-labelledby')).toBe('custom-h');
+    expect(document.getElementById('custom-h')).toBe(header);
+  });
+
+  it('actions snippet renders as a sibling of the header button, never inside it', async () => {
+    // Compiled host (snippets are compiled fragment functions in Svelte 5,
+    // not runtime values) — same pattern as __accordion_group.svelte.
+    const { container } = render(AccordionActionsHost);
+    const header = container.querySelector('.accordion-header');
+    const probe = container.querySelector('.probe-action');
+    // Sibling, not descendant: HTML forbids interactive descendants of
+    // <button>; browsers may drop or mis-render nested buttons.
+    expect(probe).toBeTruthy();
+    expect(header.tagName).toBe('BUTTON');
+    expect(header.contains(probe)).toBe(false);
+    expect(probe.closest('.accordion-actions')).toBeTruthy();
+    // Clicking the action never toggles the accordion.
+    await fireEvent.click(probe);
+    expect(header.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('no actions row renders when no actions snippet is passed', () => {
+    const { container } = render(AccordionItem, {
+      props: { id: 'noact', open: false, ontoggle: () => {} },
+    });
+    expect(container.querySelector('.accordion-actions')).toBeNull();
+    expect(container.querySelector('.accordion-row').className).not.toContain('has-actions');
   });
 });
 

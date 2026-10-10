@@ -57,6 +57,7 @@
   <div class={`accordion-row${actions ? ' has-actions' : ''}`}>
     <button
       type="button"
+      id={headerId}
       class={`accordion-header${headerClass ? ' ' + headerClass : ''}`}
       aria-label={ariaLabel}
       data-testid={testId}
