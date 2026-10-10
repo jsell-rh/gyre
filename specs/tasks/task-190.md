@@ -2,7 +2,7 @@
 title: "Record real per-call LLM usage into budget counters and audit log"
 spec_ref: "platform-model.md §Budget Tracking"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "platform-model.md §Budget Tracking"
 commits: ["25feb84e5b870562c99b15814275c0f132c29cf2"]
@@ -140,3 +140,11 @@ rebuild is byte-identical to a fresh deterministic `npm run build` (rebuild prod
 Pre-existing, unrelated: `scripts/check-task-commit-attribution.sh` fails at the base commit
 `8c2d1775` for task-210 (`a781ede2` missing from that task's frontmatter) — present before this
 branch, not introduced or widened by it.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/api/spawn.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.

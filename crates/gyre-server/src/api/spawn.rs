@@ -1419,29 +1419,6 @@ pub async fn record_agent_usage(
 
     state.agents.record_usage(&usage).await?;
 
-    // Platform-model.md §Budget Tracking: every usage report appends one
-    // per-call budget record and rolls into the workspace + tenant
-    // tokens_used_today / cost_today counters (the input check_spawn_budget
-    // evaluates). Best-effort — never fails the report.
-    super::budget::record_llm_call_usage(
-        &state,
-        &super::budget::LlmCallUsage {
-            tenant_id: workspace.tenant_id.clone(),
-            workspace_id: agent.workspace_id.clone(),
-            repo_id: agent.repo_id.clone(),
-            agent_id: Some(agent.id.clone()),
-            task_id: agent.current_task_id.clone(),
-            usage_type: "agent_run".to_string(),
-            input_tokens: req.tokens_input,
-            output_tokens: req.tokens_output,
-            cost_usd: req.cost_usd,
-            model: workspace
-                .llm_model
-                .clone()
-                .unwrap_or_else(|| crate::llm_helpers::DEFAULT_LLM_MODEL.to_string()),
-        },
-    )
-    .await;
 
     tracing::info!(
         agent_id = %id,
