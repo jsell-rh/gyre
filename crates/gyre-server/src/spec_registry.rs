@@ -1129,6 +1129,90 @@ specs:
         assert!(m.defaults.requires_approval);
     }
 
+    /// The exact starter-kit manifest `gyre bootstrap --starter-kit` writes
+    /// (crates/gyre-cli/src/bootstrap/starter-manifest.yaml). Consumed via
+    /// include_str! so the test always sees the shipped bytes, never a copy
+    /// that could drift (task-099 F5 process fix #176: embedded templates
+    /// must round-trip through the consumer's real parser in a test). The
+    /// original F5 defect — `approval: human` instead of
+    /// `approval: {mode: human_only}` — parsed nowhere but the CLI's
+    /// structural check and silently emptied the spec ledger on push.
+    const CLI_STARTER_MANIFEST: &str =
+        include_str!("../../gyre-cli/src/bootstrap/starter-manifest.yaml");
+
+    #[test]
+    fn cli_starter_manifest_parses_with_real_parser() {
+        // Round-trip 1: the raw template must parse as SpecManifest.
+        let m = parse_manifest(CLI_STARTER_MANIFEST)
+            .expect("gyre bootstrap starter manifest must parse as SpecManifest");
+        assert_eq!(m.version, 1);
+        assert_eq!(m.specs.len(), 1, "starter kit registers one spec");
+        let entry = &m.specs[0];
+        assert_eq!(entry.path, "system/design-principles.md");
+        assert_eq!(entry.title, "Design Principles");
+        assert_eq!(entry.owner, "admin");
+        assert_eq!(entry.kind.as_deref(), Some("system"));
+        // The F5 defect shape: approval must be ApprovalConfig, and its
+        // effective mode must be a real ApprovalMode.
+        assert_eq!(entry.effective_approval_mode(), ApprovalMode::HumanOnly);
+        assert!(entry.effective_requires_approval(&m.defaults));
+    }
+
+    #[tokio::test]
+    async fn cli_starter_manifest_round_trips_through_ledger_sync() {
+        // Round-trip 2: the full consumer path. Build a real git repo with
+        // the starter kit's manifest + spec file, run the real
+        // sync_spec_ledger against it, and assert the ledger is populated —
+        // the exact path a pushed starter kit takes. If the template
+        // regresses to anything parse_manifest rejects, sync warn-returns
+        // and the ledger stays empty, failing this test.
+        let (dir, sha) = make_test_repo(&[
+            ("specs/manifest.yaml", CLI_STARTER_MANIFEST),
+            ("specs/index.md", "# Spec Index\n"),
+            (
+                "specs/system/design-principles.md",
+                "# Design Principles\n\nStarter kit template.\n",
+            ),
+        ])
+        .await;
+
+        let ledger: Arc<dyn gyre_ports::SpecLedgerRepository> =
+            Arc::new(crate::mem::MemSpecLedgerRepository::default());
+        let links_store: SpecLinksStore = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+        sync_spec_ledger(
+            &ledger,
+            &links_store,
+            dir.path().to_str().unwrap(),
+            &sha,
+            1_700_000_000,
+            Some("repo-1"),
+            Some("ws-1"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let entries = ledger.list_all().await.unwrap();
+        assert_eq!(
+            entries.len(),
+            1,
+            "starter-kit manifest must register its spec in the ledger"
+        );
+        let e = entries
+            .iter()
+            .find(|e| e.path == "system/design-principles.md")
+            .expect("starter spec must be in the ledger");
+        assert_eq!(e.title, "Design Principles");
+        assert_eq!(e.approval_mode, "human_only");
+        assert_eq!(e.approval_status, ApprovalStatus::Pending);
+        assert!(!e.current_sha.is_empty(), "blob SHA must resolve at HEAD");
+        assert_eq!(e.repo_id.as_deref(), Some("repo-1"));
+        assert_eq!(e.workspace_id.as_deref(), Some("ws-1"));
+    }
+
     #[test]
     fn test_approval_mode_human_only() {
         let m = parse_manifest(SAMPLE_MANIFEST).unwrap();

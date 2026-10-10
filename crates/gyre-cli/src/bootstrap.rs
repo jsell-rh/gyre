@@ -254,22 +254,13 @@ pub async fn push_and_sync_specs(
     Ok(synced.registered)
 }
 
-pub const STARTER_MANIFEST: &str = r#"version: 1
-
-defaults:
-  requires_approval: true
-  auto_create_tasks: true
-  auto_invalidate_on_change: true
-
-specs:
-  - path: system/design-principles.md
-    title: Design Principles
-    owner: admin
-    kind: system
-    approval:
-      mode: human_only
-    requires_approval: true
-"#;
+/// Starter-kit manifest template (§8 "Starter Kit": "Default manifest with
+/// design-principles spec"). Lives in its own file so the server's
+/// round-trip test (spec_registry tests) can consume the exact shipped
+/// bytes through the real `parse_manifest` — the F5 defect class was a
+/// template that parsed nowhere but the CLI's structural check.
+pub const STARTER_MANIFEST: &str =
+    include_str!("bootstrap/starter-manifest.yaml");
 
 const STARTER_INDEX: &str = r#"# Spec Index
 
