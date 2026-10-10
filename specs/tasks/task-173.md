@@ -9,7 +9,7 @@ coverage_sections:
   - "ui-layout.md §Drill-Down (Entity Detail)"
   - "ui-layout.md §Inline Expansion (Inbox/Briefing)"
   - "ui-layout.md §Contextual Chat"
-commits: ["99e99039f01c69ef3b7c19f712aeb8de3f83c864", "e25dd52404f06f48b170c4b9cabd9817b036e7f2", "add218c801f5c69ef5a547e9b5ad9c6277e6dd46"]
+commits: ["add218c8c0e9af1a21c20e2587f02d7f734e10ff", "3b28d8480fe841c3b602ad4d4eb38dc3bb215100", "99e99039f01c69ef3b7c19f712aeb8de3f83c864", "e25dd52404f06f48b170c4b9cabd9817b036e7f2"]
 ---
 
 ## Spec Excerpt
