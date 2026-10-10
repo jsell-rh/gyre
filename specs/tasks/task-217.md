@@ -2,7 +2,7 @@
 title: "Repair verified failure on main f4acb4ebcaf9"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 commits: ["c3cba0a64c71a53f1f708beda365e4a68dff881a"]
 ---
 
@@ -72,3 +72,11 @@ Assignment base: `653a696f` (candidate `1a64c45e` exited 130 mid-verification; c
 - **Changed-line gates vs assignment base `653a696f`** (diff = the round-2 production fix, 4 Rust files: `explorer_ws.rs`, `lib.rs`, `mem.rs`, `middleware.rs`): `check-rustfmt-diff.py` → changed lines clean, exit 0 (`rustfmt-diff-at-head.txt`); `check-clippy-diff.py` → changed lines clean, exit 0 (`clippy-diff-at-head.txt`). Standalone gates: `check-arch.sh`, `check-in-memory-state-stores.sh`, `check-task-commit-attribution.sh` all exit 0 (`gates-at-head.txt`).
 - **Transport restriction unchanged (recorded, not a code defect):** the 9 skipped tests and the `explorer_ws_integration` binary (7 tests) require `accept(2)`, which this sandbox's `tcp_listener_probe` reports unsupported (errno 95). The durable CI log remains their passing evidence: 1194 lib tests passed on the host (the 9 skipped here minus `explorer_ws` overlap = the 1194 vs 1191+4 count difference is the filtered-out non-explorer listener tests), and only `explorer_ws_delete_view` failed there — the bug fixed by `c3cba0a6`. **Host verification must still run:** `cargo test -p gyre-server --test explorer_ws_integration` (expects 7/7) and `cargo test --all`.
 - **This round's own attribution:** no product-surface commits added (docs-only continuation); `commits:` frontmatter remains `["c3cba0a64c71a53f1f708beda365e4a68dff881a"]`.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/explorer_ws.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.

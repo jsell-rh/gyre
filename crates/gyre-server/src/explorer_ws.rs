@@ -150,7 +150,8 @@ impl ExplorerSessionRegistry {
                 evicted_session = evicted.id,
                 "Explorer WS: evicting oldest session to make room for new connection"
             );
-            evicted.shutdown.notify_one();
+            // MUTATION: eviction signal disabled
+            // evicted.shutdown.notify_one();
         }
         slots.push(SessionSlot {
             id: session_id,
