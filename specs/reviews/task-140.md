@@ -109,3 +109,63 @@ asymmetry each fail at least one test.
 
 R1: no findings — task meets platform-model.md §2 Built-In Personas. Progress set to
 complete.
+
+## R2 — Independent re-review (retry after review-model infrastructure failure)
+
+Assignment: base `73a31e0b` → candidate `cbf89cb0` (merged tree `6fd54cc0` plus a
+process-only commit touching only `specs/tasks/task-140.md`). Working tree clean at
+`cbf89cb0` for every probe; all mutations restored (`git status --porcelain` empty).
+
+**Probes run (evidence: `/tmp/stage/review-evidence/probe-log.txt`):**
+
+- `cargo test -p gyre-domain --lib builtin` → 2 passed. Spec-table order/slugs, tenant
+  scope, `Approved`/`approved_by=system`/`approved_at`, version 1, and an independently
+  recomputed SHA-256 over prompt+capabilities.
+- `cargo test -p gyre-adapters --lib sqlite::workspace::persona` → 2 passed. Real
+  SQLite rows: round-trip of scope/approval/hash/prompt, and the check-then-insert
+  reseed loop finds existing rows (no restart duplication) — the production-storage
+  contract the mem adapter cannot prove.
+- `cargo test -p gyre-server --lib seed_builtin_personas` → 3 passed (four seeded +
+  idempotent, customized persona preserved, tenant isolation).
+- `cargo test -p gyre-server --lib create_tenant_seeds` → 1 passed, through the real
+  axum router (`POST /api/v1/tenants` then persona list by scope).
+- `cargo test -p gyre-cli --bin gyre bootstrap` → 15 passed, including
+  `builtin_personas_are_the_domain_seed_definitions` (pointer-equality with
+  `gyre_domain::BUILTIN_PERSONA_DEFS` — the e27cc0da single-source-of-truth repair
+  is mechanically enforced).
+- `cargo check -p gyre-server --bins` → clean; startup wiring at `main.rs:53-56`
+  (after `build_state`/migrations-era seeds, before `TcpListener::bind`).
+
+**Mutation probes (all caught, then reverted):**
+
+1. Removing the `find_by_slug_and_scope` existing-check (unconditional insert) →
+   `seed_builtin_personas_creates_four_and_is_idempotent` and
+   `seed_builtin_personas_preserves_existing` both FAIL (duplicate security persona).
+2. Dropping pre-approval (`Pending`, `approved_by=None`) →
+   `builtin_personas_are_pre_approved_tenant_scoped` FAILS.
+3. Changing the SHA-256 input (prompt only, no capabilities) → hash assertion FAILS
+   against the independently recomputed digest.
+
+So the tests genuinely guard the acceptance criteria; none are self-confirming.
+
+**Mechanical gates at candidate:** arch, task-commit-attribution, mem-port-contracts,
+scope-literal-defaults, fabricated-scope-defaults, in-memory-state-stores,
+forged-scope-fields, relative-path-defaults, byte-slice-truncation,
+inert-enforcement, dead-message-kinds — all exit 0.
+
+**Source-level cross-checks:** `build_state` wires `state.personas` to
+Pg/SqliteStorage when `GYRE_DATABASE_URL` is set (lib.rs:1003) — seeding is durable in
+DB deployments; scope-JSON symmetry between `create` and `find_by_slug_and_scope`
+verified in both SQLite and Postgres adapters; all tenant-creation sites in the server
+route through `seed_builtin_personas_for_tenant`; `specs/personas/repo-orchestrator.md`
+exists (94 lines) and is embedded via `include_str!` (compile-time failure if missing).
+
+**Sandbox restriction (not a code defect):** TCP listeners unsupported (errno 95,
+`/tmp/stage/capabilities.json`), so the live HTTP startup path was verified via the
+binary compile + wiring read + router-level tests. Host verification: start the server
+with `GYRE_DATABASE_URL=sqlite://<tmp>`, `GET /api/v1/personas?scope=tenant&scope_id=<id>`
+expecting the four slugs `Approved`; restart; expect still four (no duplicates).
+
+**R2 verdict: approved, no findings.** Candidate `cbf89cb0` satisfies
+platform-model.md §2 Built-In Personas and the task's acceptance criteria with real
+implementations and failure-capable tests.
