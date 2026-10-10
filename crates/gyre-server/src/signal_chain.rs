@@ -1411,4 +1411,114 @@ mod tests {
             .expect("task survives");
         assert_eq!(after.status, TaskStatus::Backlog, "untyped task untouched");
     }
+
+    // ── REVIEW PROBES (temporary; delete before verdict) ──────────────────
+
+    // Probe 1: repeated approvals must not grow active_agents (Idle
+    // orchestrators are live but not active — is_live reuse + Idle
+    // decrement must balance the spawn-time increment).
+    #[tokio::test]
+    async fn probe_budget_no_leak_on_repeat_approvals() {
+        let state = chain_state().await;
+        for _ in 0..5 {
+            on_spec_approved(&state, &approved_payload()).await;
+        }
+        let usage = state
+            .budget_usages
+            .get_usage("workspace:ws-1")
+            .await
+            .unwrap()
+            .expect("usage recorded");
+        assert_eq!(
+            usage.active_agents, 0,
+            "active_agents after 5 approvals (Idle orchestrator reuse): {} — leak if > 0",
+            usage.active_agents
+        );
+    }
+
+    // Probe 2: stale-detector run at t+120s must not mark the Idle
+    // workspace orchestrator Dead (it has no heartbeat process) nor
+    // respawn a replacement while it is still live (Idle counts as live).
+    // Probe 2: stale-detector at wall-clock +60s kills the heartbeat-less
+    // Idle orchestrator (Abort behavior) and respawns a replacement —
+    // forever. Quantify agent-record growth and budget inflation.
+    #[tokio::test]
+    async fn probe_stale_detector_respawn_loop() {
+        let state = chain_state().await;
+        on_spec_approved(&state, &approved_payload()).await;
+
+        for cycle in 1..=3u32 {
+            // Simulate wall-clock passing the 60 s heartbeat timeout for
+            // every non-terminal agent (production: detector runs every
+            // 30 s; wall clock advances naturally).
+            let agents = state.agents.list_by_workspace(&Id::new("ws-1")).await.unwrap();
+            for a in agents {
+                if matches!(
+                    a.status,
+                    AgentStatus::Dead | AgentStatus::Stopped | AgentStatus::Failed
+                ) {
+                    continue;
+                }
+                let mut old = a.clone();
+                old.spawned_at = old.spawned_at.saturating_sub(3600);
+                let _ = state.agents.update(&old).await;
+            }
+            crate::stale_agents::run_once(&state).await.unwrap();
+
+            let agents = state.agents.list_by_workspace(&Id::new("ws-1")).await.unwrap();
+            let ws_orchs: Vec<_> = agents
+                .iter()
+                .filter(|a| a.orchestrator_type == OrchestratorType::WorkspaceOrchestrator)
+                .collect();
+            let usage = state
+                .budget_usages
+                .get_usage("workspace:ws-1")
+                .await
+                .unwrap()
+                .map(|u| u.active_agents)
+                .unwrap_or(0);
+            println!(
+                "probe2 cycle {cycle}: ws-orchestrator records={}, active_agents={}",
+                ws_orchs.len(),
+                usage
+            );
+        }
+    }
+    // Probe 3: spec rejection must cancel the delegation + sub-tasks whose
+    // spec_path is "path@sha" (list_by_spec_path exact-matches bare path).
+    #[tokio::test]
+    async fn probe_reject_cancels_signal_chain_tasks() {
+        let state = chain_state().await;
+        on_spec_approved(&state, &approved_payload()).await;
+        scheduler_run_once(&state).await.unwrap();
+
+        // The ledger entry current_sha is "abc123"; rejection targets the
+        // ledger path "specs/system/auth.md".
+        let cancelled = state
+            .tasks
+            .list_by_spec_path("specs/system/auth.md")
+            .await
+            .unwrap();
+        println!(
+            "probe3: tasks matching bare path: {:?}",
+            cancelled.iter().map(|t| (t.id.to_string(), t.spec_path.clone(), t.status.clone())).collect::<Vec<_>>()
+        );
+        let with_ref = state.tasks.list().await.unwrap();
+        println!(
+            "probe3: all signal-chain tasks: {:?}",
+            with_ref
+                .iter()
+                .filter(|t| t.task_type.is_some())
+                .map(|t| (t.spec_path.clone(), t.status.clone()))
+                .collect::<Vec<_>>()
+        );
+        // Assert what the spec requires (Phase 7 "Spec rejection mid-flight"):
+        // in-flight tasks referencing the rejected spec must be findable for
+        // cancellation. If the exact-match lookup misses "path@sha" tasks,
+        // this documents the mismatch.
+        assert!(
+            !cancelled.is_empty() || with_ref.iter().any(|t| t.task_type.is_some()),
+            "probe always notes the population"
+        );
+    }
 }

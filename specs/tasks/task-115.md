@@ -2,7 +2,7 @@
 title: "Implement spec approval signal chain & orchestrators"
 spec_ref: "agent-runtime.md §1 Agent Lifecycle"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "agent-runtime.md §The Model"
   - "agent-runtime.md §1. Agent Lifecycle"
@@ -161,3 +161,11 @@ between the criteria and Agent Instructions. Restored all four contract
 sections byte-identical to the assignment template; completion is recorded
 only in the sanctioned places — frontmatter (`progress:`, `commits:`) and
 this end-of-file `## Shipped` section.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/signal_chain.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
