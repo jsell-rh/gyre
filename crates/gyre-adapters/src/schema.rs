@@ -729,6 +729,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     key_bindings,
     chain_attestations,
     secrets,
+    breaking_changes,
+    dependency_policies,
 );
 
 diesel::table! {
@@ -974,5 +976,31 @@ diesel::table! {
         expires_at -> Nullable<BigInt>,
         last_rotated_at -> Nullable<BigInt>,
         tenant_id -> Text,
+    }
+}
+
+diesel::table! {
+    breaking_changes (id) {
+        id -> Text,
+        dependency_edge_id -> Text,
+        source_repo_id -> Text,
+        commit_sha -> Text,
+        description -> Text,
+        detected_at -> BigInt,
+        acknowledged -> Integer,
+        acknowledged_by -> Nullable<Text>,
+        acknowledged_at -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
+    dependency_policies (workspace_id) {
+        workspace_id -> Text,
+        breaking_change_behavior -> Text,
+        max_version_drift -> Integer,
+        stale_dependency_alert_days -> Integer,
+        require_cascade_tests -> Integer,
+        auto_create_update_tasks -> Integer,
+        updated_at -> BigInt,
     }
 }
