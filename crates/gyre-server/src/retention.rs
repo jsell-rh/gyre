@@ -159,7 +159,15 @@ impl RetentionStore {
             )),
         }
     }
+}
 
+impl Default for RetentionStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RetentionStore {
     /// Load policies from the KV store, or persist the spec defaults on
     /// first boot. Called once from main after `build_state`.
     ///
