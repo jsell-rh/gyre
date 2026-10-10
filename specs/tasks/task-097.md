@@ -2,7 +2,7 @@
 title: "Platform Model Secrets Domain Types + Port"
 spec_ref: "platform-model.md §7 Secrets Delivery"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "platform-model.md §7 Secrets Delivery"
   - "platform-model.md §7 Principle"
@@ -204,3 +204,11 @@ and clippy-diff run cold on the merged crates — see probe logs). The four
 task-owned crates files, scripts, and specs are untouched by the repair;
 probe evidence under /tmp/stage/review-evidence (ws-findings.txt,
 gate-*.log, verification-repair-fd65ff50.md).
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/api/spawn.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.

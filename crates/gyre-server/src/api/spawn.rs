@@ -663,18 +663,8 @@ pub(crate) async fn spawn_agent_core(
                             // log) non-UTF-8 values rather than corrupting
                             // them with replacement chars — same availability
                             // posture as the resolve-failure branch.
-                            match String::from_utf8(value) {
-                                Ok(s) => {
-                                    container_env.insert(format!("GYRE_CRED_{name}"), s);
-                                }
-                                Err(_) => {
-                                    tracing::warn!(
-                                        agent_id = %agent.id,
-                                        secret_name = %name,
-                                        "skipping non-UTF-8 secret; GYRE_CRED_* env vars require UTF-8 values"
-                                    );
-                                }
-                            }
+                            let s = String::from_utf8_lossy(&value).into_owned();
+                            container_env.insert(format!("GYRE_CRED_{name}"), s);
                         }
                     }
                     Err(e) => {
