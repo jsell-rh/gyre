@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["7aec532de81863e9de2791434778c292838335a1", "a15de97ae12cd1b914f9e09025f4b3e5db083b35", "5f0602675167018a09ef08ff6adbfcafc7b612cd", "3eebbbb5ac640428868a8f5eb4ae229675c86891", "1f8277301936405de86d3ff5269304a61ab74a44", "dd84d9d00a5b69111ee5a8c131db0c5d1ead08bc", "ee479add261ad42c61d4044eecbbdca8ed6263c9", "a5bc917785f7c2e248e84e4d62117439fc08221e", "fe6a6642c7bbd8331bab9be3ce61164a33058075"]
+commits: ["a15de97ae12cd1b914f9e09025f4b3e5db083b35", "5f0602675167018a09ef08ff6adbfcafc7b612cd", "3eebbbb5ac640428868a8f5eb4ae229675c86891", "1f8277301936405de86d3ff5269304a61ab74a44", "dd84d9d00a5b69111ee5a8c131db0c5d1ead08bc", "ee479add261ad42c61d4044eecbbdca8ed6263c9", "a5bc917785f7c2e248e84e4d62117439fc08221e", "fe6a6642c7bbd8331bab9be3ce61164a33058075"]
 ---
 
 ## Spec Excerpt
@@ -115,9 +115,9 @@ properties, each covered by a passing per-event test:
 | Event | Emission sites | Test |
 |---|---|---|
 | task.status_changed | api/tasks.rs (transition), mcp.rs (autonomous path) | `task_status_transition_emits_analytics_event`, `update_task_records_status_changed_analytics_event` |
-| mr.merged | api/merge_requests.rs (HTTP transition), merge_processor.rs (queue) | `merge_transition...`, `queue_merge_records_mr_merged_analytics_event` |
+| mr.merged | api/merge_requests.rs (HTTP transition), merge_processor.rs (queue) | `merging_mr_emits_analytics_event_with_gate_count`, `queue_merge_records_mr_merged_analytics_event` |
 | mr.closed | api/merge_requests.rs (HTTP transition), api/repos.rs (archive), api/specs.rs (spec-reject) | `reject_spec_records_mr_closed_analytics_events`, repos archive test |
-| agent.spawned | api/spawn.rs, api/orchestrator.rs | `spawn_emits_agent_spawned_analytics_event`, `orchestrator_spawn_emits_agent_spawned_analytics_event` |
+| agent.spawned | api/spawn.rs, api/orchestrator.rs | `spawn_emits_agent_spawned_analytics_event` (covered under `-- analytics`), `orchestrator_spawn_emits_agent_spawned_analytics_event` |
 | agent.completed | api/spawn.rs (complete), mcp.rs (autonomous path) | `complete_agent_emits_analytics_event`, `agent_complete_records_agent_completed_analytics_event` |
 | agent.failed | api/spawn.rs (fail + kill), api/admin.rs (force-kill), stale_agents.rs (abort) | `fail_agent_emits_analytics_event`, `admin_kill_agent_sets_dead`, `abort_records_agent_failed_analytics_event` |
 | merge_queue.processed | merge_processor.rs (all three queue outcomes) | merge_processor suite (50/50 incl. `queue_merge_records_mr_merged_analytics_event`) |
@@ -134,16 +134,19 @@ repo_id, since/until (ISO8601 or unix-sec), limit, group_by
 (`query_filtered_matches_sqlite_filter_semantics`), and endpoint tests in
 api/analytics.rs.
 
-Repair-run verification (2026-10-10, HEAD 75703396, evidence:
-/tmp/stage/review-evidence/task-146-repair.md): domain 3/3, adapters 13/13,
-server `-- analytics` 42/42, `-- emits --skip ws_activity` 14/14,
-merge_processor 50/50, combined per-event filters 21/21 + 19/19. The
-`ws::tests::ws_activity_event_emits_to_telemetry` failure is environmental
-(real TCP listener; sandbox errno 95/104 — reproduced on the committed tree
-via stash); exact-head GitHub CI is the mandatory transport verification.
+Repair-run re-verification (2026-10-10, HEAD 1ef9dd52, evidence:
+/tmp/stage/review-evidence/task-146-repair.md and task-146-*.txt): domain
+3/3, adapters 13/13, server `-- analytics --skip ws_activity` 42/42,
+per-event `emits_analytics_event` 7/7 + `records_` 7/7, merge_processor
+50/50, budget_warning 2/2, admin_kill_agent 2/2, orchestrator spawn 1/1.
+The `ws::tests::ws_activity_event_emits_to_telemetry` failure is
+environmental (real TCP listener; sandbox errno 95/104, capabilities.json
+tcp_listener_probe unsupported); exact-head GitHub CI is the mandatory
+transport verification.
 
-Contract repair (finding c388cdad): out-of-scope edits reverted via merge
-75703396 (task-210.md and task-211.md restored to base; task-146.md kept at
-base contract with only progress/commits frontmatter; exemption files are
-line-number-only re-pins; SUMMARY.md is exact generator output). No new
-endpoints, no verifier weakening, no new exemption entries.
+Contract repairs (findings c388cdad, 54bc7621): out-of-scope edits reverted
+via merge 75703396 (task-210.md and task-211.md restored to base; task-146.md
+kept at base contract with only progress/commits frontmatter; exemption
+files are line-number-only re-pins at frozen entry counts; SUMMARY.md is
+exact generator output). No new endpoints, no verifier weakening, no new
+exemption entries.
