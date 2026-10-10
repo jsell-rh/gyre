@@ -682,7 +682,6 @@ pub async fn git_receive_pack(
         process_spec_lifecycle(
             &state_clone,
             &repo_id_clone,
-            &push_workspace_id,
             &repo_path_clone,
             &default_branch_clone,
             &ref_updates,
@@ -1377,7 +1376,6 @@ pub fn parse_spec_changes(diff_output: &str) -> Vec<(char, String, Option<String
 async fn process_spec_lifecycle(
     state: &Arc<AppState>,
     repo_id: &str,
-    workspace_id: &gyre_common::Id,
     repo_path: &str,
     default_branch: &str,
     ref_updates: &[RefUpdate],
@@ -1508,10 +1506,15 @@ async fn process_spec_lifecycle(
                 Err(e) => warn!(title, "spec-lifecycle: failed to create task: {e}"),
                 Ok(()) => {
                     info!(title, "spec-lifecycle: created task for spec change");
-                    // Workspace scope comes from the authorized repo
-                    // resolution at push admission — no store re-lookup and
-                    // no fabricated "default" fallback (task-097 F3 class).
-                    let ws_id = workspace_id.clone();
+                    // Look up workspace_id from repo for proper scoping.
+                    let ws_id = state
+                        .repos
+                        .find_by_id(&gyre_common::Id::new(repo_id))
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|r| r.workspace_id)
+                        .unwrap_or_else(|| gyre_common::Id::new("default"));
                     let change_kind = match status_char {
                         'A' => "added",
                         'M' => "modified",
