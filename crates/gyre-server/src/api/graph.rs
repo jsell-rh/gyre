@@ -837,7 +837,7 @@ pub async fn assemble_briefing(
     // Repo filter (HSI §1.5 repo-scope Briefing): MRs carry repository_id,
     // tasks carry repo_id. Applied uniformly to every repo-derived section.
     let repo_match = |mr_repo: &Id, filter: Option<&str>| -> bool {
-        filter.map_or(true, |f| mr_repo.as_str() == f)
+        filter.is_none_or(|f| mr_repo.as_str() == f)
     };
     let mrs: Vec<_> = all_mrs
         .iter()
@@ -909,11 +909,8 @@ pub async fn assemble_briefing(
                         .target_repo_id
                         .as_ref()
                         .is_some_and(|tid| !ws_repo_ids.contains(tid))
-                    && (link.created_at >= since
-                        || link.stale_since.is_some_and(|t| t >= since))
-                    && repo_filter.map_or(true, |f| {
-                        link.source_repo_id.as_deref() == Some(f)
-                    })
+                    && (link.created_at >= since || link.stale_since.is_some_and(|t| t >= since))
+                    && repo_filter.is_none_or(|f| link.source_repo_id.as_deref() == Some(f))
             })
             .map(|link| BriefingItem {
                 title: format!("Cross-workspace dependency: {}", link.target_path),
@@ -992,8 +989,7 @@ pub async fn assemble_briefing(
             n.notification_type == gyre_common::NotificationType::SpecAssertionFailure
                 && n.workspace_id == ws_id
                 && n.created_at >= since as i64
-                && repo_filter
-                    .map_or(true, |f| n.repo_id.as_deref() == Some(f))
+                && repo_filter.is_none_or(|f| n.repo_id.as_deref() == Some(f))
         }) {
             items.push(BriefingItem {
                 title: n.title.clone(),
@@ -1242,7 +1238,7 @@ pub async fn get_workspace_briefing(
 pub async fn briefing_ask(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    caller: AuthenticatedAgent,
+    auth: AuthenticatedAgent,
     Json(mut req): Json<BriefingAskRequest>,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError>
 {
@@ -1253,13 +1249,22 @@ pub async fn briefing_ask(
         let mut limiter = state.llm_rate_limiter.lock().await;
         if let Err(retry_after) = check_rate_limit(
             &mut limiter,
-            &caller.agent_id,
+            &auth.agent_id,
             &id,
             LLM_RATE_LIMIT,
             LLM_WINDOW_SECS,
         ) {
             return Err(ApiError::RateLimited(retry_after));
         }
+    }
+
+    // Caller-scope guard (G6): evaluate the repo's ABAC policies against the
+    // caller's JWT claims before accepting the request-body repo scope —
+    // same pattern as spawn/jj/orchestrator handlers.
+    if let Some(rid) = &req.repo_id {
+        crate::abac::check_repo_abac(&state, rid, &auth)
+            .await
+            .map_err(ApiError::Forbidden)?;
     }
 
     // Cap history at 20 entries (truncate oldest).
@@ -1273,7 +1278,7 @@ pub async fn briefing_ask(
     // Optional repo scope (HSI §1.5 repo-scope Briefing / ui-navigation.md §2
     // Architecture Briefing sub-tab): same validation as the GET briefing
     // repo filter — repo must exist AND belong to the path workspace.
-    let repo_scope = match &req.repo_id { // forged-scope-fields:ok — validated below: repo lookup + workspace containment vs the path workspace id
+    let repo_scope = match &req.repo_id {
         Some(rid) => {
             let repo = state
                 .repos
@@ -2628,7 +2633,7 @@ mod tests {
 
         // agent_completed messages for all three.
         let mk_msg = |agent_id: &str, created_at: u64| gyre_common::Message {
-            id: Id::new(&format!("msg-{agent_id}")),
+            id: Id::new(format!("msg-{agent_id}")),
             tenant_id: Id::new("tenant-1"),
             from: gyre_common::MessageOrigin::Agent(Id::new(agent_id)),
             workspace_id: Some(Id::new("ws-briefing")),
@@ -2640,12 +2645,12 @@ mod tests {
             key_id: None,
             acknowledged: false,
         };
-        for (agent_id, at) in [("agent-r1", 2_000_000u64), ("agent-r2", 2_000_000), ("agent-ws", 2_000_000)] {
-            state
-                .messages
-                .store(&mk_msg(agent_id, at))
-                .await
-                .unwrap();
+        for (agent_id, at) in [
+            ("agent-r1", 2_000_000u64),
+            ("agent-r2", 2_000_000),
+            ("agent-ws", 2_000_000),
+        ] {
+            state.messages.store(&mk_msg(agent_id, at)).await.unwrap();
         }
 
         // Filtered to repo-1: only agent-r1.
