@@ -104,3 +104,62 @@ Isolated worktree `/tmp/gyre-mut` (revision 51f29e9) with private
 All 8 attributed commits exist, are descendants of the comparison base, and are
 the only commits touching product files (crates/web/scripts/docs) in
 66422bd4..51f29e9 — no unlisted product commits.
+
+---
+
+# Independent Review (R14) — Candidate 271dfe74 vs Base 6bf777a6
+
+**Reviewer:** Independent review agent (fresh round — previous round's model
+did not complete)
+**Date:** 2026-10-10
+**Comparison base:** 6bf777a6a44f28052ed5af28bf6fb013fde6df48
+**Candidate:** 271dfe74162e52ae8c08db4b497297fae45a3c0a
+**Verdict:** complete — approved, no findings
+
+## Scope
+
+36 files, +2475/−65. Product surface re-inspected from the assigned base:
+parser/evaluator (gyre-domain/spec_assertions.rs), new
+SpecAssertionResultRepository port (SQLite + PostgreSQL + mem adapters,
+migration 2026-10-08-000056), push-check on all four push-equivalent paths
+(git receive-pack, sync_mirror handler, mirror_sync background cycle, initial
+mirror clone), GET /api/v1/repos/:id/specs/:path/assertions + POST
+spec-assertions/check, priority-9 Inbox notifications, ExplorerView inline
+✔/✘ with persisted-results fallback, Inbox/ActionNeeded/WorkspaceHome type
+normalization, i18n labels. This round's repair commits verified: dist regen
+reverted (web/dist has zero diff vs base), task-200 attribution fix
+byte-identical to origin/main (diff-of-diffs empty).
+
+## Probes (evidence: /tmp/stage/review-evidence/task180-independent-review.md)
+
+- `cargo test -p gyre-domain --lib spec_assertions` — 51 passed, 0 failed.
+- `cargo test -p gyre-server --lib spec_assertions` — 6 passed, 0 failed.
+- `cargo test -p gyre-server --lib push_check` — 3 passed, 0 failed
+  (persist/replace, stale-row sweep for emptied+deleted specs, priority-9
+  notify with Viewer exclusion, same-commit duplicate suppression, new-commit
+  re-notify).
+- **Parser reality probe** (new this round): ran the production
+  `parse_assertions` against this repo's own spec files
+  (system-explorer.md, task-014.md, task-180.md) — 0 live assertions from all
+  three. This is the decisive check that the fence-skip repair works on real
+  inputs: every gyre:assert comment in this repo is a fenced documentation
+  example, and without fence tracking all 9 would evaluate (and fail) on every
+  push, spamming priority-9 Inbox items forever.
+- Frontend (`npm ci`, locked deps): Inbox.test.js — 28 passed; filtered new
+  §9 test ("spec assertion failure card") — 1 passed (View Code + Update Spec
+  actions, danger styling, type-label normalization all asserted).
+- Invariant gates all exit 0: arch, mem-port-contracts, in-memory-state-stores,
+  fabricated-scope-defaults (7→6 exemptions — the repaired git_http fallback
+  removed), task-commit-attribution, abac-route-registry (53→52 — the exempt
+  spec-assertions/check route moved into the resolver), migration-versions
+  (000056 next unused), migration-sql-portability.
+
+## Notes
+
+- Sandbox cannot open TCP listeners (accept → EOPNOTSUPP), so live HTTP
+  exercise of the GET endpoint is deferred to host verification / CI; it is
+  covered in-process through the real router by the 6 api tests.
+- Fail-closed semantics confirmed by code read + tests: `all_have` fails on
+  zero subject nodes and unknown properties; `no_dependency`/`implements`
+  evaluate real graph edges; Module subjects also match Package nodes, matching
+  the real extracted graph shape.
