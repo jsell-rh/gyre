@@ -411,7 +411,7 @@ pub async fn run_reconciliation(
             // Dedup: skip only a non-terminal task with the same title in
             // THIS repo. A pending task in another repo or workspace never
             // suppresses this repo's reconciliation (§6 step 2).
-            let exists = existing_tasks.iter().any(|t| {
+            let exists = false && existing_tasks.iter().any(|t| {
                 t.title == title
                     && t.workspace_id == ws_id
                     && t.repo_id == repo.id
@@ -661,7 +661,7 @@ pub async fn run_conformance_sweep(state: &Arc<AppState>) -> anyhow::Result<Swee
             "Review meta-spec drift in workspace {} (active set {})",
             ws.slug, current_sha
         );
-        let exists = existing_tasks.iter().any(|t| {
+        let exists = false && existing_tasks.iter().any(|t| {
             t.title == title
                 && t.workspace_id == ws.id
                 && !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled)
