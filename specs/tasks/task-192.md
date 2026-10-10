@@ -111,3 +111,35 @@ empty). Fresh probes, evidence under `/tmp/stage/review-evidence/`:
   `task192-budget-subcommand-help.txt`): all three document that repo scope
   maps to the owning workspace budget.
 - Live end-to-end HTTP against a running server could not be exercised here (sandbox cannot bind listeners); the client-level tests assert the exact request wire format (method, URL, auth header, JSON body) which the routes in `api/mod.rs:610-613` accept, and error paths are exercised with real `reqwest::Response` objects carrying the server's exact wire shape.
+
+**Merge round (merged head `175a5c80`, base `6bf777a6`):** the branch was
+merged with the new assignment base (task-200 message-bus work) and re-audited.
+Product surface is byte-identical to the reviewed candidate —
+`git diff d98af1ba HEAD -- crates/gyre-cli/ docs/cli.md` is empty. Fresh probes,
+evidence under `/tmp/stage/review-evidence/` (suffix `-merged-head`):
+- `cargo test -p gyre-cli --bin gyre` → 107 passed, 0 failed; budget filter →
+  13 passed, 0 failed — `task192-cli-bin-tests-merged-head.txt`,
+  `task192-budget-tests-merged-head.txt`.
+- `bash scripts/check-arch.sh` → passed;
+  `bash scripts/check-relative-path-defaults.sh` → OK (exemption pointer
+  `main.rs:1862` matches the actual code line at this HEAD);
+  `python3 scripts/check-rustfmt-diff.py 6bf777a6` → changed lines clean
+  (2 Rust files) — the rustfmt failures in the prior attempt's log were from
+  the superseded checkout, not this history.
+- One real gate failure found and repaired: `check-task-commit-attribution.sh`
+  exited 1 naming `6bf777a6 task-200` — the assignment base itself (a
+  task-200 product-surface commit: per-kind payload validation in
+  gyre-common/message.rs + api/messages.rs + mcp.rs) absent from task-200's
+  `commits:` frontmatter. Root cause is the landing commit's self-recording
+  limitation, upstream-drift class, same shape task-211 repaired for task-210.
+  Repair (the check's documented remedy, mirrors upstream task-220's fix
+  commit `4635b533` byte-for-byte): appended
+  `6bf777a6a44f28052ed5af28bf6fb013fde6df48` to task-200's `commits:` list.
+  Mutation-checked — removing the SHA re-fails the gate with the identical
+  violation, restore re-passes (exit 0). Exemption file untouched (frozen at
+  baseline). Evidence: `task192-commit-attribution-merged-head.txt`,
+  `task192-attribution-mutation-check.txt`,
+  `task192-attribution-after-restore.txt`.
+- Help surfaces re-verified via the built binary at this HEAD
+  (`task192-budget-help-merged-head.txt`): all three document repo scope maps
+  to the owning workspace budget.
