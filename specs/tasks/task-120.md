@@ -7,7 +7,7 @@ coverage_sections:
   - "user-management.md §User Entity"
   - "user-management.md §Username vs Display Name"
   - "user-management.md §User Preferences"
-commits: ["c76b224d984ddcfe253dcc0b58f0de21093e5238", "7f00472ce2ac51518fae404a0783cd511b679b7e"]
+commits: ["c76b224d984ddcfe253dcc0b58f0de21093e5238", "7f00472ce2ac51518fae404a0783cd511b679b7e", "9391340519d34cfd5c45a711fc4c1fd98cea99b8"]
 review: specs/reviews/task-120.md
 ---
 
@@ -101,6 +101,28 @@ Preferences stored server-side (not localStorage). Persist across devices and se
 Read `specs/system/user-management.md` §User Entity through §User Preferences for full requirements. Existing User model: `gyre-domain/src/user.rs`. User port: `gyre-ports/src/user.rs` (or grep for `UserRepository`). SQLite adapter: grep for `impl UserRepository` in `gyre-adapters/`. Auth flow: `gyre-server/src/auth.rs`. User API: `gyre-server/src/api/users.rs`. Profile adapter: `gyre-adapters/src/sqlite/user_profile.rs`. Check migration numbering: `ls crates/gyre-adapters/migrations/ | tail -5` — currently at 000049.
 
 ## Shipped
+
+**Review-repair round (2026-10-10, evidence under
+/tmp/stage/review-evidence/task-120-pg-bigint-repair/):** repaired durable
+finding `158143620afc440dabd3987cc5d1f808` (review of candidate `465615b7`,
+checkpoint `c9bb159e`) with commit `93913405`: migration 000056's
+`users.last_login_at` column was declared `INTEGER` while every consumer is
+8-byte (`schema.rs` `Nullable<BigInt>`, both `UserRow`s `Option<i64>`) — on
+PostgreSQL (int4) diesel's `FromSql<BigInt, Pg> for i64` rejects the 4-byte
+value at read time, breaking every authenticated request for any user who has
+logged in once; SQLite's INTEGER affinity masked it. One-word fix
+(`INTEGER` → `BIGINT`), in-place: 000056 exists only on task-120 pipeline
+branches, not on main, so no deployment has executed the int4 version.
+Verified: `migration_000056_backfills_unique_url_safe_usernames` 1/1,
+`cargo test -p gyre-adapters --lib` **349 passed, 0 failed** (12 ignored,
+matching the reviewed baseline), migration-versions + SQL-portability gates
+OK, diesel's exact-8-byte `FromSql` check confirmed in the vendored 2.3.7
+source. No PG server/docker in this sandbox (and no postgres job in CI) —
+live-PG round-trip is a host-verification item, recorded in the evidence
+README. The pre-existing INTEGER-vs-BigInt mismatches on other tables
+(personas.updated_at 000012, approved_at 000010/000032) are confirmed present
+but out of scope per the finding's own note. The product surface is otherwise
+unchanged this round; earlier rounds below.
 
 Merge round (assignment base `6bf777a6` merged as `c817a5f6`; last code-touching
 commit `bad88ded`):
