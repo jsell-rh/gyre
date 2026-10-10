@@ -1786,4 +1786,41 @@ mod tests {
             .unwrap();
         assert_eq!(msgs.len(), 1, "identical re-PUT must not emit another event");
     }
+
+    // -- REVIEW PROBE: two distinct waves whose tasks share a created_at second --
+    #[tokio::test(flavor = "multi_thread")]
+    async fn probe_two_waves_same_second_completion() {
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-probe").await;
+        make_repo(&state, "repo-p1", "ws-probe").await;
+        let ms1 = make_meta_spec(&state, "spec-alpha", 4).await;
+        let ms2 = make_meta_spec(&state, "spec-beta", 2).await;
+
+        // Two separate reconciliation runs. run_reconciliation stamps each
+        // task with now_secs() at call time — both runs can easily land in
+        // the same wall-clock second.
+        run_reconciliation(&state, &ws.id, &[ms1.name.clone()]).await;
+        run_reconciliation(&state, &ws.id, &[ms2.name.clone()]).await;
+
+        let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
+        assert_eq!(tasks.len(), 2, "two waves, one task each");
+        let starts: Vec<u64> = tasks.iter().map(|t| t.created_at).collect();
+        println!("probe: task created_at values: {:?}", starts);
+
+        // Transition both to terminal (wave 2's task and wave 1's task).
+        for t in tasks {
+            let mut task = state.tasks.find_by_id(&t.id).await.unwrap().unwrap();
+            task.transition_status(TaskStatus::Cancelled).unwrap();
+            state.tasks.update(&task).await.unwrap();
+        }
+
+        maybe_emit_reconciliation_completed(&state, &ws.id).await;
+        let count = state
+            .messages
+            .list_by_workspace(&ws.id, Some("reconciliation_completed"), None, None, None, Some(50))
+            .await
+            .unwrap()
+            .len();
+        println!("probe: completed events after both waves terminal: {}", count);
+    }
 }
