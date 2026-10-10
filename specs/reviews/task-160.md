@@ -57,3 +57,81 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+
+## Round 5 — independent re-review of candidate 8b1807de (verdict: complete)
+
+Assignment: base `73a31e0b` → candidate `8b1807de` (previous round's review model
+did not complete; fresh review on the same candidate). Tree clean at `8b1807de`;
+task surface byte-identical to the assigned commit `ba78ab2a` (empty `git diff
+ba78ab2a 8b1807de -- scripts/ crates/gyre-adapters/ .github/ .pre-commit-config.yaml`)
+— the intervening commits are process/docs/rebase-repair only.
+
+**Rebase repair verified.** The durable finding (task-200 `commits:` conflict) is
+resolved in the merge `c4f1df9d`: all 14 SHAs in `specs/tasks/task-200.md`
+frontmatter resolve as commits (`task200-shas.txt`), including the 40-char
+`e44f1135…` the prior attempt had truncated to 38. The merge changes no
+task-160 surface. `check-task-commit-attribution.sh` exit 0.
+
+**Independent gate runs at 8b1807de (all fresh, this round):**
+`check-hierarchy.sh` exit 0; `check-tenant-filter.sh` exit 0 (111 read methods
+on tenant-column tables / 0 violations, 145 backlog methods on tenant-less
+tables reported non-failing); `check-api-auth.sh` exit 0 (middleware chain + 4
+non-ABAC handlers + delegated registry); `check-scope-literal-defaults.sh
+crates` OK (12 live exemption entries, count honest).
+`cargo test -p gyre-adapters --test tenant_isolation` → **2 passed / 0 failed**
+(cold build 21m34s); `cargo test -p gyre-adapters --lib` → **344 passed /
+0 failed / 12 ignored** (covers the modified in-file test setups).
+
+**Fresh mutation kills (isolated worktree, restored + removed after each):**
+`Task.workspace_id → Option<Id>` → hierarchy exit 1 naming `task.rs:60`;
+deleting `Task.workspace_id` entirely → hierarchy exit 1 ("missing from the
+struct" — the deleted-field direction); stripping the tenant predicate from
+`sqlite/secret.rs::resolve_for_agent` → tenant-filter exit 1 ("1 violation(s)
+out of 111", exact file:line); deleting the `RouteResourceMapping` for
+`/api/v1/activity` → api-auth exit 1 via the delegated registry check (exit
+code kills; see non-finding below for the cosmetic empty route list).
+
+**Route-coverage cross-check (independent of the delegated script):** re-derived
+`mod.rs` /api/v1/ literals vs `abac_middleware.rs` literals: 53 uncovered by
+the resolver = exactly the 53 frozen exemption entries, 0 missing beyond them,
+0 stale exemptions. All 252 route registrations live in `api/mod.rs` only
+(verified no non-test `Router::new().route` elsewhere in gyre-server), so the
+registry's extraction source is complete.
+
+**Non-ABAC handler tier:** all mutating outer-router handlers (git smart HTTP
+×3, mcp, ws-ticket, explorer) have auth extractors in their signatures; the
+WebSocket handlers (`ws`, `tty`) authenticate via the first-message Auth
+protocol inside the upgraded socket (ws.rs:31-40, tty.rs:42-50) — actual auth,
+not bypass; `conversations/:sha` carries `AuthenticatedAgent` and derives the
+tenant from it.
+
+**Non-finding (pre-existing, outside the diff — recorded for the next
+owner):** the delegated `check-abac-route-registry.sh` deletes its
+`comm -23` temp file before `cat`ing it, so the missing-route list prints empty
+(the count line still says "1 route(s) missing"). Exit-code enforcement is
+intact; the cosmetic bug is in a task-093-owned script untouched by this
+candidate. Repair is one-line (cat before rm); not a task-160 defect.
+
+**Observation, non-blocking (pre-existing write-path blind spot, documented in
+`write-path-survey.txt`):** the script's stated write-exclusion rationale —
+"tenant_id rides in the VALUES clause" — is true for insert/create but false
+for `diesel::update`/`diesel::delete`, which use bare `table.find(id)` with no
+tenant predicate in ~15 adapters on tenant-column tables (merge_request,
+repository, workspace, compute_target both backends; notification's
+id+user_id). Mutation probe: removing the tenant predicate from
+`sqlite/agent.rs`'s tenant-scoped update leaves the lint exit 0. This does NOT
+create a live leak today: every mutating HTTP route goes read-first through a
+tenant-filtered read or an explicit `tenant_id != caller` handler check
+(transition_mr_status, update_repo/delete_repo, update/delete_workspace,
+delete_compute_target, update_view, dismiss/resolve_notification all
+verified), and ABAC evaluates role/action per route. The unguarded writes are
+pre-existing code outside the task-160 diff, and the spec's own §3 exemption
+class (find_by_id, reads) matches what the lint checks. Worth a follow-up task
+to either extend the lint's write-path rule or add tenant predicates to the
+update/delete WHERE clauses as defense-in-depth; agent.rs/task.rs/
+trust_anchor.rs already show the pattern.
+
+Evidence: `/tmp/stage/review-evidence/task-160-review5/` — clean gate runs,
+4 mutation outputs, route-coverage cross-check, write-path survey,
+tenant-isolation + adapters-lib test records, task-200 SHA resolution.
