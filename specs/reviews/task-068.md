@@ -52,3 +52,82 @@ Comparison base 66422bd4 (per controller scope); task source at HEAD 0b74e20 ide
 ## Verdict
 
 **complete** — F1 resolved with evidence; no new findings. All round-1 verified behavior (§9 five tools over MCP incl. the envelope round-trip, §22 graph_summary six fields + real BFS test coverage, §23 dryrun resolution + boundary-tested warnings) stands, re-probed at HEAD where source changed. Source at final HEAD f134e8a is byte-identical to the evidence HEAD 0b74e20 (f134e8a touches only this review file), so round-2 probes remain valid.
+
+## Round 3 (independent review, candidate bf4b2e1a on base c9b0a6f9)
+
+Fresh model, same candidate source as round 2 plus the 8cdde883 clippy/rustfmt
+repair (map_or→is_some_and + formatting only, verified behavior-neutral by
+diff) and the bf4b2e1a task-file-only evidence refresh. Diff vs assigned base
+touches exactly: view_query_resolver.rs, mcp.rs, explorer_ws.rs,
+graph_integration.rs, byte-slice-truncation-exemptions.txt (-1 line, backed by
+the real `&d[..100]` removal), this review file, and the task file. All 9
+attributed commits are ancestors; every non-merge commit in range is
+task-068-labeled or `process:` attribution. admin.rs/personas.rs deltas vs the
+round-2 tree come from the base-branch merge (c9b0a6f9 side), not this task.
+
+### Independent probes (2026-10-10, this sandbox)
+
+- `cargo test -p gyre-server --lib mcp_graph` → 10/10 (all five §9 tools over
+  the real JSON-RPC router→AuthenticatedAgent→dispatch path, incl. tools/list
+  registration assertions via `mcp_tools_list` inside `mcp::`).
+- `cargo test -p gyre-domain view_query_resolver` → 124/124.
+- `cargo test -p gyre-server --lib mcp::` → 77/77.
+- **Mutation probe 1 (has-teeth):** `TEST_REACHABILITY_EDGES = &[EdgeType::Calls]`
+  → `&[]` makes `mcp_graph_summary_tool_call` FAIL — the §22 test_coverage BFS
+  is genuinely load-bearing. Restored; tree clean; green re-run.
+- **Mutation probe 2 (has-teeth):** removing the `search` tool block from
+  `tool_definitions()` makes `mcp_tools_list` FAIL — the fifth §9 tool's
+  registration assertion has teeth. Restored; tree clean.
+- Static gates pass: check-mcp-write-tools (five graph tools correctly absent
+  from `needs_write` — read-only handlers), check-byte-slice-truncation,
+  check-arch, check-task-commit-attribution, check-rustfmt-diff (vs base).
+- check-clippy-diff.py could not run: cargo cannot reach static.crates.io from
+  this sandbox (network restriction). Substitute: full clippy over
+  gyre-server+gyre-domain, intersected primary-span warning lines with the
+  candidate's added-line set extracted from `git diff --unified=0` — **zero
+  clippy warnings on candidate-added lines** (all 214 warnings are pre-existing
+  lines outside the diff hunks; view_query_resolver.rs:2381 map_or is
+  pre-existing at base and outside every hunk).
+- TCP twins (`tests/graph_integration.rs` test_mcp_graph_*): all five fail
+  here with reqwest `IncompleteMessage` — reproduced the recorded restriction:
+  a blocking `accept()` on a bound loopback listener never returns (probe hung,
+  killed by wrapper timeout). **Infrastructure restriction, not a code defect.**
+  Host verification / exact-head GitHub CI must run:
+  `cargo test -p gyre-server --test graph_integration test_mcp_graph`
+  (5 tests) and `python3 scripts/check-clippy-diff.py c9b0a6f9`.
+- Evidence: /tmp/stage/review-evidence/task-068-bf4b2e1a-{focused-tests,
+  mutation-probes,sandbox-tcp}.txt, clippy-changed-files.out.
+
+### Checked, no gap
+
+- §9: all five tools in `tool_definitions()` + `tools/call` dispatch; SDK
+  allowlist `scripts/explorer-agent.mjs:82-89` consumes `mcp__gyre__{...}`
+  names against the Bearer-token `mcpServers.gyre` HTTP config (allowlist
+  pre-existing at base; the task's delta closed the server-side registration
+  for `search`, the one tool missing at base).
+- §22: `GraphSummary` carries all six spec fields; test_coverage is a real
+  multi-source BFS over outgoing `Calls` edges only, soft-deleted edges
+  excluded in `build_adjacency`; spec-example arithmetic (180+85=265) is
+  consistent with counting test seeds as reachable.
+- §23: `{"query":…, "result":{DryRunResult}}` envelope matches the spec JSON
+  example; envelope round-trip proven in-process for tagged scope enums and
+  untagged zoom. Empty-scope, >200 cluttered (200/201 boundary),
+  >20 too-broad groups (25/5 boundary), unresolved callouts/narrative warnings
+  all present and boundary-tested. The `$clicked`/`$selected`-without-selection
+  interactive-mode message instead of "Scope matched 0 nodes" is a reasonable
+  UX refinement; the spec warning is covered on the non-interactive path.
+- `matched_node_names` switched from qualified_name to name — matches the
+  spec example values ("KnowledgeSpace", "Server").
+- repo_id is caller-supplied without per-repo ownership validation in the new
+  `search` handler — identical to the four pre-existing graph tool handlers at
+  base and to `gyre_search`; `/mcp` sits outside ABAC middleware pre-existing
+  at base. Same systemic pattern prior rounds already classified as outside
+  this task's diff (authentication still required via AuthenticatedAgent).
+- No test inflation: every §9/§22/§23 assertion exercised above fails under a
+  targeted mutation; no conditional-guard or assertionless tests in the diff.
+
+### Verdict (round 3)
+
+**complete / approved** — all acceptance criteria hold on independent
+evidence; the two runnable-gate gaps (TCP twins, official clippy-diff) are
+sandbox restrictions with exact host commands recorded above.
