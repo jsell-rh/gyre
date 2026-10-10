@@ -51,3 +51,29 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 11 (2026-10-10) — candidate 84c8bc2f: product verified green; 14th attribution clobber at tip
+
+Assignment: base `05709c24`, candidate `84c8bc2f` ("process: record task-208 branch commits"). Tree clean at candidate. Evidence: `/tmp/stage/review-evidence/task-208-round11-attribution-clobber.txt`.
+
+**Verdict: needs-revision (one mechanical finding).**
+
+### Finding (14th clobber, now at the exact assigned candidate)
+
+The candidate tip commit itself is the checkpoint-attribution clobber: `84c8bc2f` rewrote `commits:` from the fully-attributed list (restored at `9f32c396`) back to `["98fd096e..."]`, dropping `ad1121c5` (dist regeneration — the F1 fix; a task-labeled product-surface commit on the RustEmbed path) and `ea006d52` (.gitattributes whitespace-gate exemption). Both are ancestors of the candidate, so the F1 fix is invisible to review scoping at this exact SHA — the AGENTS.md task-commit-attribution invariant. The in-repo gate does not flag it (documented `web/dist/` + root-file regex blind spot; 14th occurrence).
+
+Reproduce: `git show 84c8bc2f -- specs/tasks/task-208.md` vs `git show 9f32c396:specs/tasks/task-208.md`. Repair is mechanical, product untouched: restore `commits: ["98fd096e3972e7a6d1df78b700b63ea1dee15fe5", "ad1121c5093cd2f1f2b3824ed88352ac4e181fd9", "ea006d52bb42e96e6f176b02b5390b6cb56a3116"]` at the tip.
+
+Note on the in-repo gate: `scripts/check-task-commit-attribution.sh` fails at the candidate on task-196 / `05709c24`, but that failure is base-inherited (the assigned base commit is itself missing from task-196's frontmatter) — not candidate-caused and not a task-208 finding.
+
+### Product verification at candidate (all green — bookkeeping-only defect)
+
+- Zero drift since `ad1121c5` over every task surface: `git diff --stat ad1121c5..84c8bc2f --` (users.rs, api/mod.rs, abac_middleware.rs, api.js, UserProfile.svelte, UserProfile.test.js, web/dist/, user-management spec + coverage) is empty.
+- Dead-code grep (`get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs` over `crates/` + `web/src/`) → no matches. Forbidden-identifier grep over the committed bundle (`index-KSqzVjd3.js`) → no matches; kept surfaces (`users/me/tokens`, `users/me/judgments`) present.
+- Fresh-bundle probe: build.rs regenerated dist from candidate sources during the cargo run; the fresh bundle is clean of all forbidden identifiers and retains kept surfaces. (Probe side effect restored; tree clean.)
+- `cargo test -p gyre-server --lib api::users::tests::my_stuff_endpoints_are_removed` → **1 passed** (real router oneshot, authenticated bearer, asserts 404 on all three URIs).
+- `cd web && npm ci && npx vitest run src/__tests__/UserProfile.test.js` → **23/23 passed**, including the exact-six-tab guard (`[role="tab"]` dataset ids `toEqual(['info','tokens','memberships','ledger','notif-prefs','notifications'])` + explicit forbidden-list assertion — fails on reintroduction).
+- `scripts/check-abac-route-registry.sh` → OK; `scripts/check-abac-exempt-handlers.sh` → OK (89 handlers).
+- Spec/coverage/milestone state intact: user-management.md supersession amendment, M22.8 removed-row strike, coverage rows 22 (n/a) / 54 (implemented), m22-platform-entities.md struck rows. `users.rs` module doc clean; remaining `/me` routes untouched; no orphaned i18n keys.
+- Verifier integrity: no exemption file touched in range; the only script change (`e2e-flow.sh`, in `98fd096e`) *strengthens* the removed-endpoint e2e step to assert HTTP 404.
+- Live HTTP probe not run (sandbox `tcp_listener_probe.supported=false`, errno 95 EOPNOTSUPP — infrastructure restriction, not a code defect); the in-process router test proves the 404 route table; live checks remain for host verification / CI, as recorded in prior rounds.
