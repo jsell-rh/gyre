@@ -1,0 +1,47 @@
+# Review — task-134 (Agent Gates §Part 1 — AgentReview/AgentValidation gate types with review protocol)
+
+Spec: `specs/system/agent-gates.md` §Gate Types (Extended) + §AgentReview Gate (coverage rows 4-5).
+Candidate under review: `7b6619da3f7db01dfecb3ae79c917b733b54c57d` (base `a1751da1b976858788ca0869a1b1aafb90a18b58`).
+Task checkpoint chain: `42d79754` (recovered product tree; identical source to task-labeled `f9bf8639`, web/dist only) … `1b40aacb`; all 11 commits in the task's `commits:` frontmatter are ancestors of the candidate and attribution passes `check-task-commit-attribution.sh`.
+Verdict: **needs-revision** (one major finding on test validity; production code verified real).
+
+## Round 1
+
+Sandbox: loopback `accept()` denied (errno 95; confirmed independently with a python bind/connect/accept probe). All focused probes use oneshot router calls; no listener required.
+
+Test runs (candidate checkout = HEAD `7b6619da`):
+
+- `cargo test -p gyre-server --lib gate_executor` → **33 passed, 0 failed** (the two e2e tests SKIP via the `loopback_http_works()` guard).
+- `cargo test -p gyre-server --test task134_review_probe` → **4 passed, 0 failed** (oneshot; scoped-token identity binding, allow-list denial, push denial, revocation).
+- `cargo test -p gyre-adapters --lib git2_ops::tests::test_read_file_at_commit` → **3 passed, 0 failed**.
+- `cargo test -p gyre-server --lib api::gates` → **6 passed**; `api::merge_requests` → **21 passed**; `abac_middleware` → **9 passed**; `sqlite::quality_gate` upsert test → **1 passed**.
+- `cargo test -p gyre-server --lib git_http` → **36 passed, 1 failed**: `git_clone_empty_repo_via_smart_http` fails with `getpeername() failed with errno 95` — the documented sandbox transport restriction on a PRE-EXISTING test (the candidate's only git_http.rs hunk is the receive-pack scope check at :245). Not a code defect.
+- All 15 frozen-baseline mechanical checks plus migration versions/portability: OK.
+
+Verified working (production code is real):
+
+- **Gate types & config**: `AgentReview`/`AgentValidation` in `gyre-common`'s `GateType` (present since the explorer merge; the task's scope was the protocol, correctly so). `validation_type` column via migration `2026-10-09-000056` (next number after 000055, portable SQL, both dialects), persisted by SQLite and Postgres adapters with a real upsert round-trip test that kills the required/validation_type drift class. Gate CRUD accepts/returns `validation_type` (create+list round-trip test).
+- **Fail-closed semantics**: the old auto-approve/auto-pass stubs are deleted. No command → gate fails. Unresolvable persona, missing MR/repo, diff failure, unresolvable pinned spec SHA (path absent at SHA, unknown SHA, non-UTF-8) → gate fails before any process spawns and before any token is minted (asserted: no `gate-*` tokens in `agent_tokens`).
+- **MR context is gathered for real**: full diff via `git_ops.diff` (same direction as the MR diff endpoint: target → source), spec content at the pinned SHA via the new `read_file_at_commit` port (3 adapter tests: pinned-content-not-tip, missing-file None, unknown-SHA Err), MR title, and task description resolved MR → author agent → task. Persona resolved nearest-wins repo → workspace → tenant with no fabricated tenant scope (workspace lookup failure skips the tenant scope, logged).
+- **Scoped token enforcement is real and layered**: `mint_scoped` issues an Ed25519 JWT with `scope: "review:submit"`; registered in `agent_tokens` so the auth extractor validates it and `kv_remove` revokes it (revocation test asserts 401 after teardown). Push is denied in `git_receive_pack` before repo resolution (403 read-only). The ABAC middleware allow-lists only review-relevant MR routes (+ public /version) and 403s everything else before policy evaluation. `submit_review` binds the reviewer identity to the token subject — the e2e driver deliberately submits a forged `reviewer_agent_id` and the probe test asserts the stored review carries the gate agent's subject. All proven by the 4 oneshot probe tests, which seed builtin policies.
+- **Verdict mapping**: Approved → Passed, ChangesRequested → Failed with the agent's review body surfaced in gate output; only the gate's own agent's verdict counts (another agent's approval does not satisfy the gate); exit-0-without-review fails. Merge integration is intact: `trigger_gates_for_mr` on enqueue, `check_gates_for_mr` blocks on Failed/Running required gates (existing, untouched).
+- **Teardown**: token revoked on every exit path (verdict, timeout, spawn failure — asserted by tests); temp spec/diff files removed after the run; JWT TTL (timeout+60s) outlives the process timeout so the token cannot expire mid-review.
+- **AgentValidation**: `GYRE_VALIDATION_TYPE` delivered to the process (proven with `printenv` echo + output attribution `validation_type=…`) and `<none>` when unset; pass/fail from exit code; scoped mint failure fails closed.
+
+Findings:
+
+- [-] **F1 (major, test-validity): the two flagship e2e tests have never been able to pass and will fail `cargo test --all` on the verification host / GitHub CI.** `agent_review_end_to_end_approved_verdict_passes_gate` and `agent_review_end_to_end_changes_requested_fails_gate` build the router from `crate::build_router(crate::build_state(...))` without seeding ABAC policies. `build_state` wires an empty `MemPolicyRepository`; builtin policies are seeded only by `main.rs` at startup or by an explicit `seed_builtin_policies` call. With zero policies, `policy_engine::evaluate` default-denies (step 3), so the driver script's review POST gets **403 `{"error":"insufficient permissions"}`** — the scoped-token allow-list passes (route is allow-listed) and the denial comes from the empty policy store afterward. Probe run in this sandbox with the exact e2e setup via oneshot: `STATUS=403` where 201 was expected (source and output in `/tmp/stage/review-evidence/e2e-policy-probe.rs` / `probe-e2e-abac.md`; probe file removed, tree clean). Control: `task134_review_probe.rs::scoped_review_token_reviewer_identity_is_bound` — identical setup plus one `seed_builtin_policies` call — passes with 201; every other listener-based integration test in `crates/gyre-server/tests/` also seeds. Consequences: (a) on a loopback-capable host the driver exits non-zero after the 403, the gate fails, and the approved-verdict test's `assert_eq!(status, Passed)` fails (the changes-requested test fails its output assertion the same way); (b) the task's Shipped claim that they "must run on host/GitHub CI" is unfalsified — they were never observed passing; (c) acceptance criterion "cargo test --all passes" breaks. The production chain itself is proven correct by the seeded probe tests, so the fix is one line per test: `abac_middleware::seed_builtin_policies(&state).await;` after `build_state`.
+- [-] **F2 (minor, scope tightness): AgentValidation agents carry `review:submit` capability.** `run_validation_agent_process` mints the same `review:submit`-scoped JWT (subject `gate-validate-*`). A validator, whose contract is exit-code pass/fail, can therefore submit Approved/ChangesRequested reviews on any MR through the live API; its review is bound to its own subject and does not affect AgentReview's own-agent verdict matching or merge gating, but it does appear in MR review listings and in review-approval surfaces (`ReviewRepository::is_approved` counts any Approved review). A distinct capability for validators (or excluding `gate-validate-*` subjects from review submission) would match the spec's single-purpose identity model more tightly.
+- [-] **F3 (minor, latent): `scope.contains("review:submit")`** at the three enforcement sites (abac_middleware.rs:829, merge_requests.rs:719, git_http.rs:259). Today only exact `review:submit` is ever minted (other agent JWTs carry `scope: "agent"`/orchestrator values), so nothing is exploitable, but substring matching would let any future scope value containing the substring inherit review-route access, identity binding, and push denial. Exact match is the cheap hardening.
+
+Minor (not blocking, recorded for completeness):
+
+- `GYRE_SPEC_CONTENT` still delivers the full spec via env var in addition to `GYRE_SPEC_FILE`; for very large specs this can hit `E2BIG` on the spawn (the temp-file path exists precisely for that). The diff itself is file-only — consistent.
+- Temp spec/diff files are written under `std::env::temp_dir()` with UUID names and removed on all post-spawn paths; a failure between write and spawn cleanup leaves a file behind — hygiene only, no data exposure (content is repo spec/diff, mode default).
+- `resolve_review_persona` mirrors `personas::resolve_persona`'s nearest-wins chain but tolerates a missing workspace (skips tenant scope) where the API handler 404s — reasonable divergence for a background gate (fail-closed on the persona miss either way).
+- The candidate includes the task-189 personas.rs scope-chain fix (merged via `329e625c`, ancestor of base as well) — outside this task's diff, attribution not affected.
+
+Host/CI verification required (sandbox cannot run listeners — infrastructure restriction, errno 95, recorded in capabilities.json):
+
+1. After the F1 fix: `cargo test -p gyre-server --lib gate_executor::tests::agent_review_end_to_end -- --nocapture` — both tests must actually RUN (no SKIP line) and pass.
+2. `cargo test --all` (acceptance criterion) — including `git_http::tests::git_clone_empty_repo_via_smart_http`, which fails only under this sandbox's errno-95 restriction.
