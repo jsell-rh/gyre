@@ -257,3 +257,49 @@ No new findings. F1/F2/F3 remain repaired (verified R2, unchanged by rebase), th
 coverage rows are implementer-authored and accurate, and the committed dist matches
 the fixed source. The task meets spec §4–9 on every verifiable surface.
 Setting `progress: complete`.
+
+## Round 10 (recovered-tree re-review of candidate `42902a91`)
+
+Comparison base `6bf777a6`, HEAD `42902a91` (exact assignment). This round's tree is the
+recovered pipeline continuation of the R4-approved implementation: the two production files
+are byte-identical to `656c1281` (`git diff 656c1281..42902a91 -- web/src/lib/ExplorerCanvas.svelte
+web/src/__tests__/ExplorerCanvas.test.js` → 0 lines); `14088b68 → 42902a91` touches only
+`specs/tasks/task-063.md` record-keeping; base→candidate ships zero Rust and zero `web/dist`
+changes. The base itself is a task-200-labeled ship commit, recorded into task-200's
+`commits:` by this branch (attribution repair; `check-task-commit-attribution.sh` OK).
+
+Independently verified (evidence under `/tmp/stage/review-evidence/task-063-r10/`):
+
+- **Scope §4**: Rust resolver 116/116 (`cargo test -p gyre-domain --lib view_query_resolver`);
+  client branches for all 6 scope types at ExplorerCanvas.svelte:1940-2076; diff reads
+  exactly the `GraphNodeResponse` fields (api/graph.rs:59-63), semantics matching
+  view_query_resolver.rs:722-818. `check-arch.sh` passed.
+- **Mutation probes re-run on this exact tree** (source restored clean after each): label
+  branch disabled → label test fails; `all` branch disabled → all-scope count test fails;
+  diff reverted to the dead `last_commit_sha` field → component diff-count test fails.
+  All three targeted tests kill their mutations.
+- **Emphasis/edges/zoom/annotation/bindings §5-§9**: line-cited spot checks all accurate
+  (dim :2117-2119, heat :2127-2177, tiered :2179-2186, label :3274-3287, badges :3290-3321,
+  edge restriction :3575-3582, zoom :4769-4801, annotation :4992-5009, `$clicked` :4160-4171,
+  `$selected` :71-87).
+- **Frontend**: after `npm ci` (locked), ExplorerCanvas.test.js **139/139** (twice),
+  view-query-validator.test.js **53/53**. Full-suite failures observed (ghost-overlay and
+  perf files) are 5s timeouts under sandbox load average 32 on 8 cores — A/B verified at
+  the BASE commit in an isolated worktree: perf-alone passed 15/15 once, then failed 9/15
+  (all timeouts) under the same load as candidate's 10/15; ghost tests pass 4/4 in
+  isolation; the perf tests never set `activeQuery` so the diff's changed regions are
+  unreachable in them. Load flakiness, not regressions.
+- **Dist/whitespace**: `git diff --check base..HEAD` rc 0; no dist changes on the branch
+  (bundle sha256 identical base↔candidate; task-branch no-dist-rebuild policy per durable
+  finding 68edd07c).
+- **Transport**: TCP listener unsupported here (capabilities.json errno 95); no
+  server/browser probe — host verification and GitHub CI own transport checks.
+
+Residuals (triaged, pre-existing, not introduced by this candidate): committed
+`web/dist` bundle is stale relative to `web/src` (byte-identical at base; CI builds from
+source); `filter.name_pattern` regex-vs-contains and `{{group_count}}` algorithm
+divergences from the Rust resolver (task-062-era, awaiting resolver unification); client
+scopes iterate raw `nodes` without the Rust resolver's `deleted_at` filter.
+
+No new findings. The task meets spec §4-§9 on every verifiable surface. Setting
+`progress: complete`.
