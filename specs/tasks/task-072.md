@@ -93,3 +93,9 @@ Evidence at merged HEAD `4c39d49d` (probes under `/tmp/stage/review-evidence/`, 
 - rustfmt: all seven branch-touched files clean (`rustfmt --check` exit 0 each). Repo-wide `cargo fmt --all --check` exits 1 with 100 hunks, byte-identical to base `770785f7` after path normalization (verified in a temp worktree at the base: same 100 hunks, same file set) — pre-existing main baseline in files this branch never touches, unchanged by this round.
 - Attribution stability: running the `dev-attribution.py` recorder at HEAD produces a zero-line diff on this file — the `commits:` list (incl. main-side `17c81d5a`, retained via its task-labeled subject) is stable across the base merge.
 - `web/dist`: `git diff 770785f7..HEAD -- web/` is 0 lines; the tracked dist bundle matches the base. No `.done` marker exists in git or any build script reference — it was an untracked local artifact of a previous run.
+
+Baseline-repair round (finding `c329b385df5a4ef0a922b29c742443ac`, prerequisite task-231):
+- The recorded baseline failure was the attribution gate tripping on main commit `27bd585c` (task-155's `commits:` frontmatter) — repaired on main by `7c6ac232` (task-231) and merged into this branch at `e73e2755` (merge of assigned base `7c6ac232`). `bash scripts/check-task-commit-attribution.sh` now exits 0 at HEAD.
+- Contract alignment: added `task-231` to `depends_on` (the assigned contract lists it; the branch file carried only `task-222`), attributed as process commit `e3db5f84`.
+- Merge-surface check: `git diff a7cf8ef1..HEAD -- crates/ web/src web/tests scripts/go-callgraph Dockerfile docs/` touches only task-155/222/231 surfaces (cli, api/graph.rs, Briefing, InlineChat); all seven task-072 files are byte-identical to candidate `a7cf8ef1`. No re-review of already-approved surface required.
+- `web/dist`: `git diff 7c6ac232..HEAD -- web/dist/` is 0 lines — the tracked dist bundle matches main.
