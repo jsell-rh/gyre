@@ -246,6 +246,32 @@ recorded in this task's frontmatter. Evidence:
 outputs (task-172-gate-round6.txt, task-172-gate-base-round6.txt) and
 test/dist-hash artifacts.
 
+**Round-7 re-verification (2026-10-10, fresh sandbox):** inherited HEAD
+da4b4106 (the round-6 contract repair) with the fresh-assignment reset of
+this task file in the working tree; restored it from HEAD (recovering the
+471563d7 attribution) and re-verified from scratch with no source changes
+needed or made. Contract re-verified: `git diff f4acb4eb HEAD --name-only`
+touches only this task's own files; task-172.md normative sections
+byte-identical to base f4acb4eb; coverage deltas carry only this task's
+in-scope ui-layout rows (the two out-of-scope SUMMARY rows restored by
+da4b4106 remain at base values). `npm ci` (169 locked packages) →
+EditorSplit + DetailPanel suites **66/66 passed** via the locked local
+`./node_modules/.bin/vitest`; `./node_modules/.bin/vite build` reproduced
+the committed dist byte-exactly (sha256 of every dist file identical
+pre/post, empty `git status web/dist`). i18n audit — all 51 `$t()` keys
+used by the component (50 `editor_split.*` + `common.dismiss`) are defined
+in en.json, zero missing, zero dead. Attribution gate at HEAD: exit 1 with
+the sole finding `f4acb4eb task-189` — byte-identical failure in a clean
+worktree checked out at base f4acb4eb, so the drift originates on main at
+the base commit, outside this task's contract (fixing task-189's ledger
+from here would repeat the prior contract violation); the gate raises no
+task-172 finding — all 5 product commits are recorded in frontmatter.
+TCP listener probes remain unsupported (errno 95,
+/tmp/stage/capabilities.json) — no live server/browser run; jsdom suites
+cover behavior, exact-head GitHub CI (`web-build`) remains mandatory.
+Evidence: /tmp/stage/review-evidence/task-172-verification-round7.md plus
+gate outputs (gate-round7.txt, gate-base-round7.txt).
+
 
 ## Agent Instructions
 
