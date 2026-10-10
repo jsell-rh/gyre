@@ -113,11 +113,20 @@ real git repos, real Ed25519 signatures, and real persisted state.
 `update_task_api_reassignment_bumps_generation` (PUT API) prove the bump.
 
 Evidence: `cargo test -p gyre-server --lib -- constraint_check` → 40 passed /
-0 failed; `gyre-common -p gyre-domain -p gyre-adapters` → 344+94+363 passed /
-0 failed; `check-arch.sh`, `check-migration-versions.sh`,
-`check-migration-sql-portability.sh`, `check-relative-path-defaults.sh`,
-`check-conditional-test-guards.sh` → EXIT 0. Full run details and the
-mutation proof at `/tmp/stage/review-evidence/test-results.md`.
+0 failed (checkpoint 3130b931); post-merge on branch head 3a9b7ab1, the four
+touched crates (gyre-common/-domain/-adapters/-server) are byte-identical to
+that checkpoint, and the wider focused filter (`constraint_check
+admin_reassign update_task_api reassign`) re-ran green there: 42 passed /
+0 failed. Mechanical gates on the merged head: `check-arch.sh`,
+`check-task-commit-attribution.sh` (after recording base commit 27bd585c
+in task-155's `commits:` frontmatter — a pre-existing main-side omission,
+reproduced at base, fixed per the gate's prescribed remediation),
+`check-migration-versions.sh`, `check-migration-sql-portability.sh`,
+`check-relative-path-defaults.sh`, `check-conditional-test-guards.sh`,
+`check-inert-enforcement.sh`, `check-scope-literal-defaults.sh`,
+`check-mem-port-contracts.sh`, `check-fabricated-scope-defaults.sh`,
+`check-no-em-dash.sh` → all EXIT 0. Full run details and the mutation proof
+at `/tmp/stage/review-evidence/test-results.md`.
 
 Sandbox restrictions recorded for host verification
 (`/tmp/stage/review-evidence/`): TCP `accept()` never completes (errno 95),
@@ -128,6 +137,14 @@ mawk 1.3.4 (gawk-only syntax) identically at the base commit — environment,
 not branch; manual confirmation of their intent for this diff recorded in
 `mechanical-checks.md`. Full workspace suite, all-target clippy, and
 exact-head GitHub CI remain with the verification stage as mandated.
+
+Post-merge continuation (branch head 3a9b7ab1, base 27bd585c merged in): the
+four touched crates are byte-identical to the tested checkpoint 3130b931
+(merge added only gyre-cli/docs/specs files). Focused tests re-ran green on
+the merged head (42 passed / 0 failed), the touched-crate suites re-ran green
+(344+97+371 passed / 0 failed), and all mechanical gates pass; the base-side
+task-155 attribution omission (27bd585c missing from its frontmatter,
+reproduced at base) was repaired per the gate's prescribed remediation.
 
 Scope note: the spec-approval signing endpoint (`api/specs.rs:610`) still
 creates SignedInputs with `expected_generation: None` — the signer-side pin
