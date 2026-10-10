@@ -7,6 +7,11 @@
 //! 2. All REQUIRED workspace meta-specs (same kind ordering)
 //! 3. Spec-level bindings at their pinned versions
 //!
+//! Approval gate (agent-runtime.md §2): only meta-specs whose current
+//! `approval_status` is `Approved` are injected in any band — editing a
+//! meta-spec resets it to Pending, and the new version cannot be used by
+//! agents until re-approved by a human.
+//!
 //! Deduplication: a meta-spec that is both required and bound to a spec is
 //! included only once, in the required section (the binding is redundant).
 //!
@@ -17,9 +22,9 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use gyre_common::Id;
-use gyre_domain::meta_spec::{MetaSpec, MetaSpecKind, MetaSpecScope, MetaSpecVersion};
-use gyre_domain::{MetaSpecUsed, Task};
+use gyre_domain::meta_spec::{
+    MetaSpec, MetaSpecApprovalStatus, MetaSpecKind, MetaSpecScope, MetaSpecVersion,
+};
 use sha2::{Digest, Sha256};
 
 use crate::AppState;
@@ -90,13 +95,30 @@ async fn prompt_at_version(
     Some((ver.prompt, ver.content_hash))
 }
 
-fn sort_by_kind(specs: &mut Vec<MetaSpec>) {
-    specs.sort_by(|a, b| {
-        kind_rank(&a.kind)
-            .cmp(&kind_rank(&b.kind))
-            .then_with(|| a.name.cmp(&b.name))
-            .then_with(|| a.id.as_str().cmp(b.id.as_str()))
-    });
+/// Drop meta-specs whose current approval status is not Approved.
+///
+/// agent-runtime.md §2: editing a meta-spec's content resets
+/// `approval_status` to Pending, and the new version "cannot be used by
+/// agents until re-approved by a human" — assembly must only ever inject
+/// approved content. Skips with a warning instead of failing the spawn: one
+/// unapproved meta-spec must not block every agent in the tenant.
+fn filter_approved(specs: Vec<MetaSpec>) -> Vec<MetaSpec> {
+    specs
+        .into_iter()
+        .filter(|ms| {
+            if ms.approval_status == MetaSpecApprovalStatus::Approved {
+                true
+            } else {
+                tracing::warn!(
+                    meta_spec_id = %ms.id,
+                    name = %ms.name,
+                    approval_status = ms.approval_status.as_str(),
+                    "skipping meta-spec: not approved for agent injection"
+                );
+                false
+            }
+        })
+        .collect()
 }
 
 /// Assemble the prompt set for an agent spawned in the task's workspace,
@@ -129,8 +151,8 @@ pub async fn assemble_prompt_set(state: &Arc<AppState>, task: &Task) -> PromptSe
         .await
         .unwrap_or_default();
 
-    let mut tenant = tenant;
-    let mut workspace = workspace;
+    let mut tenant = filter_approved(tenant);
+    let mut workspace = filter_approved(workspace);
     sort_by_kind(&mut tenant);
     sort_by_kind(&mut workspace);
 
@@ -186,6 +208,19 @@ pub async fn assemble_prompt_set(state: &Arc<AppState>, task: &Task) -> PromptSe
             else {
                 continue;
             };
+            // The entity's CURRENT approval status gates every pinned
+            // version: while a meta-spec is Pending/Rejected (e.g. after an
+            // edit), none of its versions may inject — fail closed until a
+            // human re-approves.
+            if ms.approval_status != MetaSpecApprovalStatus::Approved {
+                tracing::warn!(
+                    meta_spec_id = %binding.meta_spec_id,
+                    spec = %spec_path,
+                    approval_status = ms.approval_status.as_str(),
+                    "skipping binding: meta-spec not approved"
+                );
+                continue;
+            }
             let Some((prompt, content_hash)) =
                 prompt_at_version(state, &ms, binding.pinned_version).await
             else {
@@ -624,6 +659,55 @@ mod tests {
 
         let set = assemble_prompt_set(&state, &make_task(Some("specs/foo.md"))).await;
         assert!(set.sections.is_empty(), "unresolvable pin must be skipped, not wrong-version injected");
+    }
+
+    #[tokio::test]
+    async fn pending_required_meta_spec_excluded() {
+        let state = test_state();
+        // A required meta-spec whose edit reset approval to Pending must not
+        // inject (agent-runtime §2: re-approval is a human gate).
+        let mut pending = make_ms("pending-req", "unapproved-persona", MetaSpecKind::Persona, true, MetaSpecScope::Global, None);
+        pending.approval_status = MetaSpecApprovalStatus::Pending;
+        state.meta_specs.create(&pending).await.unwrap();
+        let mut rejected = make_ms("rejected-req", "rejected-standard", MetaSpecKind::Standard, true, MetaSpecScope::Workspace, Some("ws-1"));
+        rejected.approval_status = MetaSpecApprovalStatus::Rejected;
+        state.meta_specs.create(&rejected).await.unwrap();
+
+        let set = assemble_prompt_set(&state, &make_task(None)).await;
+        assert!(
+            set.sections.is_empty(),
+            "Pending/Rejected required meta-specs must not inject; got {:?}",
+            set.sections.iter().map(|s| s.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_bound_meta_spec_skipped() {
+        let state = test_state();
+        // Optional meta-spec bound to the spec, but its edit reset approval
+        // to Pending: the binding must not inject any version (fail closed
+        // pending human review).
+        let mut pending = make_ms("pending-opt", "sec", MetaSpecKind::Persona, false, MetaSpecScope::Global, None);
+        pending.approval_status = MetaSpecApprovalStatus::Pending;
+        state.meta_specs.create(&pending).await.unwrap();
+        state
+            .meta_spec_bindings
+            .create(&MetaSpecBinding {
+                id: Id::new("b1"),
+                spec_id: "specs/foo.md".to_string(),
+                meta_spec_id: Id::new("pending-opt"),
+                pinned_version: 1,
+                created_at: 1,
+            })
+            .await
+            .unwrap();
+
+        let set = assemble_prompt_set(&state, &make_task(Some("specs/foo.md"))).await;
+        assert!(
+            set.sections.is_empty(),
+            "binding to an unapproved meta-spec must be skipped; got {:?}",
+            set.sections.iter().map(|s| s.name.as_str()).collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]

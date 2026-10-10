@@ -3250,6 +3250,9 @@ fn test_state_inner(
 ) -> Arc<crate::AppState> {
     use std::collections::HashMap;
     use tokio::sync::{broadcast, Mutex};
+    // Shared binding store: the meta-spec delete guard must see bindings
+    // written through `meta_spec_bindings` (same wiring as lib.rs).
+    let meta_spec_binding_store = Arc::new(tokio::sync::RwLock::new(Vec::new()));
     Arc::new(crate::AppState {
         auth_token: "test-token".to_string(),
         base_url: "http://localhost:3000".to_string(),
@@ -3341,8 +3344,13 @@ fn test_state_inner(
             });
             tx
         },
-        agent_inbox_max: 1000,
-        user_workspace_state: Arc::new(MemUserWorkspaceStateRepository::default()),
+        meta_specs: Arc::new(MemMetaSpecRepository::with_binding_store(Arc::clone(
+            &meta_spec_binding_store,
+        ))),
+        meta_spec_bindings: Arc::new(MemMetaSpecBindingRepository::with_store(Arc::clone(
+            &meta_spec_binding_store,
+        ))),
+        meta_spec_sets: Arc::new(MemMetaSpecSetRepository::default()),
         last_seen_debounce: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         llm_rate_limiter: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         llm_configs: Arc::new(MemLlmConfigRepository::default()),
@@ -3818,6 +3826,27 @@ impl gyre_ports::UserNotificationPreferenceRepository for MemUserNotificationPre
 pub struct MemMetaSpecRepository {
     store: Arc<tokio::sync::RwLock<Vec<gyre_domain::MetaSpec>>>,
     versions: Arc<tokio::sync::RwLock<Vec<gyre_domain::MetaSpecVersion>>>,
+    /// Binding rows, shared with `MemMetaSpecBindingRepository` when both are
+    /// wired through `with_binding_store`/`with_store`. Mirrors the
+    /// `mem_policy_store` pattern: `delete` must enforce the port contract
+    /// ("Returns an error if bindings reference it") against the same rows
+    /// the binding repo writes — separate default stores would make the
+    /// guard blind to production bindings. In DB mode both ports are
+    /// implemented by one storage struct, so only the mem mode needs this.
+    bindings: Arc<tokio::sync::RwLock<Vec<gyre_domain::MetaSpecBinding>>>,
+}
+
+impl MemMetaSpecRepository {
+    /// Construct with a binding store shared with the binding repository
+    /// (see `MemMetaSpecBindingRepository::with_store`).
+    pub fn with_binding_store(
+        bindings: Arc<tokio::sync::RwLock<Vec<gyre_domain::MetaSpecBinding>>>,
+    ) -> Self {
+        Self {
+            bindings,
+            ..Default::default()
+        }
+    }
 }
 
 #[async_trait]
@@ -3892,6 +3921,23 @@ impl gyre_ports::MetaSpecRepository for MemMetaSpecRepository {
     }
 
     async fn delete(&self, id: &Id) -> Result<()> {
+        // Port contract (MetaSpecRepository::delete): "Returns an error if
+        // bindings reference it." The SQLite/Postgres adapters enforce this
+        // with a foreign-key count; the mem adapter guards in code against
+        // the shared binding store. Error text mirrors the SQLite adapter.
+        let referencing = self
+            .bindings
+            .read()
+            .await
+            .iter()
+            .filter(|b| &b.meta_spec_id == id)
+            .count();
+        if referencing > 0 {
+            let id_str = id.as_str();
+            anyhow::bail!(
+                "cannot delete meta_spec '{id_str}': {referencing} binding(s) reference it"
+            );
+        }
         self.store.write().await.retain(|m| &m.id != id);
         Ok(())
     }
@@ -4008,7 +4054,7 @@ pub struct MemJudgmentLedgerRepository;
 impl gyre_ports::JudgmentLedgerRepository for MemJudgmentLedgerRepository {
     async fn list_for_user(
         &self,
-        _approver_id: &str,
+        _user_id: &Id,
         _workspace_id: Option<&Id>,
         _judgment_type: Option<gyre_domain::JudgmentType>,
         _since: Option<u64>,
@@ -4024,6 +4070,17 @@ impl gyre_ports::JudgmentLedgerRepository for MemJudgmentLedgerRepository {
 #[derive(Default)]
 pub struct MemMetaSpecBindingRepository {
     store: Arc<tokio::sync::RwLock<Vec<gyre_domain::MetaSpecBinding>>>,
+}
+
+impl MemMetaSpecBindingRepository {
+    /// Construct with an externally owned store so rows written here are
+    /// visible to a `MemMetaSpecRepository` sharing the same Arc (pair via
+    /// `MemMetaSpecRepository::with_binding_store`).
+    pub fn with_store(
+        store: Arc<tokio::sync::RwLock<Vec<gyre_domain::MetaSpecBinding>>>,
+    ) -> Self {
+        Self { store }
+    }
 }
 
 #[async_trait]

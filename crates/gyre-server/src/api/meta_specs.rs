@@ -1294,25 +1294,59 @@ pub struct SetSpecBindingEntry {
 /// (or be the current version), and the meta-spec must exist. Required
 /// meta-specs need no binding (auto-injected); a binding for one is accepted
 /// but redundant — assembly dedups it.
+///
+/// Authorization: bindings are spec metadata AND prompt configuration —
+/// band 3 of `assemble_prompt_set` injects every bound meta-spec into every
+/// agent spawned for tasks under this spec, regardless of the caller's
+/// workspace. The gate therefore checks workspace membership, not just the
+/// JWT role: a global Admin may bind anything; otherwise the caller must be
+/// an Owner/Admin/Developer member of the workspace owning the spec (per its
+/// ledger entry). A spec with no workspace scope is admin-only. Each bound
+/// meta-spec must additionally be visible from that workspace: Global
+/// meta-specs always qualify, Workspace-scoped ones only in their own
+/// workspace.
 pub async fn put_spec_meta_spec_bindings(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
     Path(spec_path): Path<String>,
     Json(req): Json<SetSpecBindingsRequest>,
 ) -> Result<(StatusCode, Json<Vec<gyre_domain::MetaSpecBinding>>), ApiError> {
-    // The spec author owns bindings: Developer role or above (ABAC middleware
-    // already evaluated spec write; this gate is defense in depth for the
-    // mutation of spec metadata).
-    let can_write = auth.roles.iter().any(|r| {
-        matches!(
-            r,
-            gyre_domain::UserRole::Admin | gyre_domain::UserRole::Developer
-        )
-    });
-    if !can_write {
-        return Err(ApiError::Forbidden(
-            "spec bindings require Developer or Admin role".to_string(),
-        ));
+    let spec_ws: Option<String> = state
+        .spec_ledger
+        .find_by_path(&spec_path)
+        .await
+        .map_err(ApiError::Internal)?
+        .and_then(|e| e.workspace_id);
+
+    let is_global_admin = auth.roles.contains(&gyre_domain::UserRole::Admin);
+    if !is_global_admin {
+        let ws_id = spec_ws.as_deref().ok_or_else(|| {
+            ApiError::Forbidden(
+                "spec is not scoped to a workspace; only tenant Admin may change its meta-spec bindings"
+                    .to_string(),
+            )
+        })?;
+        // Agent tokens have no user identity — never workspace members.
+        let user_id = auth.user_id.as_ref().ok_or_else(|| {
+            ApiError::Forbidden(
+                "agent tokens cannot change spec meta-spec bindings".to_string(),
+            )
+        })?;
+        let member = state
+            .workspace_memberships
+            .find_by_user_and_workspace(user_id, &Id::new(ws_id))
+            .await
+            .map_err(ApiError::Internal)?;
+        match member.map(|m| m.role) {
+            Some(gyre_domain::WorkspaceRole::Owner)
+            | Some(gyre_domain::WorkspaceRole::Admin)
+            | Some(gyre_domain::WorkspaceRole::Developer) => {}
+            _ => {
+                return Err(ApiError::Forbidden(format!(
+                    "spec bindings require Developer membership in workspace '{ws_id}' (the workspace owning spec '{spec_path}')"
+                )));
+            }
+        }
     }
 
     let now = now_secs();
@@ -1331,6 +1365,23 @@ pub async fn put_spec_meta_spec_bindings(
                     entry.meta_spec_id
                 ))
             })?;
+            // Visibility: a Workspace-scoped meta-spec may only bind within
+            // its own workspace. Band 3 resolves bindings by spec_path alone,
+            // so binding a ws-A meta-spec to a ws-B (or unscoped) spec would
+            // inject its prompt into every agent for that spec — a
+            // cross-workspace prompt-injection leak.
+            if ms.scope == MetaSpecScope::Workspace
+                && ms.scope_id.as_deref() != spec_ws.as_deref()
+            {
+                let ms_ws = ms.scope_id.as_deref().unwrap_or("?");
+                let spec_ws_desc = match spec_ws.as_deref() {
+                    Some(w) => format!("workspace '{w}'"),
+                    None => "no workspace".to_string(),
+                };
+                return Err(ApiError::BadRequest(format!(
+                    "meta-spec '{}' is scoped to workspace '{ms_ws}' and cannot bind to spec '{spec_path}' ({spec_ws_desc})"
+                )));
+            }
         if entry.pinned_version > ms.version {
             return Err(ApiError::BadRequest(format!(
                 "pinned version {} exceeds current version {} of meta-spec '{}'",
