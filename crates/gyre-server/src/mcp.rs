@@ -5478,7 +5478,7 @@ mod tests {
                 json!({ "task_id": "t-1", "name": "w", "branch": "b" }),
             ),
             &token,
-        .await;
+        ).await;
         assert!(json["result"]["isError"].as_bool().unwrap());
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("repo-orchestrator"), "got: {text}");

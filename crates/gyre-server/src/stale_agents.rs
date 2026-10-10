@@ -203,6 +203,18 @@ async fn restart_orchestrator(state: &AppState, dead: &gyre_domain::Agent, now: 
         &dead.orchestrator_type.to_string(),
     );
 
+    // Register the replacement's token so the auth middleware accepts it —
+    // an unstored JWT leaves the restarted orchestrator unable to authenticate.
+    match token {
+        Ok(t) => {
+            let _ = state
+                .kv_store
+                .kv_set("agent_tokens", &replacement.id.to_string(), t)
+                .await;
+        }
+        Err(e) => warn!("restart: failed to mint orchestrator JWT: {e}"),
+    }
+
     // Keypair so the replacement can sign DerivedInputs for children.
     crate::api::spawn::bootstrap_agent_keypair(state, &replacement.id.to_string(), now).await;
 
