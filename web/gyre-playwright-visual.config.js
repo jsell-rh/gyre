@@ -6,6 +6,15 @@
 // native-fetch bootstrap calls (/api/v1/admin/seed, /api/v1/workspaces) are answered
 // by the static server itself.
 // Chromium in this sandbox additionally needs --no-zygote (zygote fork: EPERM).
+//
+// FONT TRUTH: CI (ubuntu-latest, network open) loads the Red Hat webfonts from
+// fonts.googleapis.com. This sandbox blocks that host, and chrome-headless-shell here
+// ignores fontconfig-installed system fonts — only data-URL @font-face works. The
+// spec file's beforeEach route hook (tests/e2e/explorer-visual.spec.js) rewrites the
+// Google Fonts CSS request to /tmp/google-fonts-replacement.css, which embeds the
+// same Red Hat woff2 faces (@fontsource/red-hat-*, same typeface Google serves) as
+// data URLs. Without this, text metrics differ (CJK default sans → +6px toolbar,
+// +4px canvas areas) and every screenshot comparison is meaningless.
 import { defineConfig } from '@playwright/test';
 
 export default defineConfig({

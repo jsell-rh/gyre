@@ -24,6 +24,11 @@
 
 import { test, expect, SEED_WORKSPACE_SLUG, SEED_REPO_NAME } from './fixtures/seeded.js';
 import { MOCK_GRAPH, VIEW_QUERY_WITH_ANNOTATIONS, BLAST_RADIUS_QUERY } from './fixtures/mock-graph.js';
+import { readFileSync } from 'node:fs';
+
+// Local replacement for fonts.googleapis.com CSS (sandbox font-truth parity;
+// absent on CI/dev machines where the real network serves the webfonts).
+const FONT_CSS_REPLACEMENT = '/tmp/google-fonts-replacement.css';
 
 const SEED_SLUG = SEED_WORKSPACE_SLUG;
 const SEED_REPO = SEED_REPO_NAME;
@@ -66,6 +71,20 @@ const MOCK_REPO = {
  * after navigation means the initial API calls are missed.
  */
 async function setupGraphIntercept(page) {
+  // ── Webfonts (sandbox font-truth parity) ──────────────────────────
+  // CI loads Red Hat webfonts from fonts.googleapis.com. Sandboxes that
+  // block that host must serve the same faces from a local CSS with
+  // data-URL @font-face entries (/tmp/google-fonts-replacement.css,
+  // generated from @fontsource/red-hat-* woff2 files). When the file is
+  // absent (CI, dev machines) the request falls through to the network.
+  try {
+    const localFontCss = readFileSync(FONT_CSS_REPLACEMENT, 'utf8');
+    await page.route('**/fonts.googleapis.com/**', (route) => {
+      route.fulfill({ status: 200, contentType: 'text/css', body: localFontCss });
+    });
+  } catch {
+    // No local replacement — network serves the real CSS (CI path).
+  }
   // ── Workspace & repo APIs ──────────────────────────────────────────
   await page.route('**/api/v1/workspaces', (route) => {
     if (route.request().method() === 'GET') {
