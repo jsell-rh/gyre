@@ -1026,6 +1026,7 @@ pub async fn create_meta_spec_registry(
         .create(&ms)
         .await
         .map_err(ApiError::Internal)?;
+    record_meta_spec_publish(&state, &auth, &ms).await?;
     Ok((StatusCode::CREATED, Json(ms)))
 }
 
@@ -1097,19 +1098,146 @@ pub async fn update_meta_spec_registry(
         .update(&ms)
         .await
         .map_err(ApiError::Internal)?;
+    record_meta_spec_publish(&state, &auth, &ms).await?;
     Ok(Json(ms))
 }
 
+/// HSI §12 Judgment Ledger: publishing a meta-spec version (initial create or
+/// version bump) is human judgment — record it so it surfaces in the
+/// publisher's ledger. Failure propagates: a silently dropped judgment event
+/// is audit theatre.
+async fn record_meta_spec_publish(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    ms: &MetaSpec,
+) -> Result<(), ApiError> {
+    let workspace_id = match ms.scope {
+        MetaSpecScope::Workspace => ms.scope_id.as_ref().map(Id::new),
+        MetaSpecScope::Global => None,
+    };
+    let event = gyre_domain::AuditEvent::new(
+        Id::new(uuid::Uuid::new_v4().to_string()),
+        gyre_domain::AuditEventType::MetaSpecPublish,
+        None,
+        auth.user_id.clone(),
+        None,
+        workspace_id,
+        None,
+        "meta_spec".to_string(),
+        Some(ms.id.as_str().to_string()),
+        gyre_domain::AuditOutcome::Success,
+        serde_json::json!({
+            "kind": ms.kind.as_str(),
+            "name": ms.name,
+            "version": ms.version,
+            "content_hash": ms.content_hash,
+        }),
+        None,
+        None,
+        now_secs(),
+    );
+    state
+        .audit
+        .record(&event)
+        .await
+        .map_err(ApiError::Internal)?;
+    let _ = state
+        .audit_broadcast_tx
+        .send(serde_json::to_string(&event).unwrap_or_default());
+    Ok(())
+}
 // ---------------------------------------------------------------------------
 // DELETE /api/v1/meta-specs-registry/:id
 // ---------------------------------------------------------------------------
 
+/// Per-handler authorization (agent-runtime §214 "Registry Levels": only
+/// admins at the meta-spec's own scope level manage registry entries — tenant
+/// admins for Global meta-specs, workspace Owner/Admin for Workspace-scoped
+/// ones; a workspace admin cannot touch tenant meta-specs, which would be
+/// privilege escalation). The route is ABAC-exempt, so this body is the only
+/// authorization surface.
+async fn authorize_meta_spec_delete(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    ms: &MetaSpec,
+) -> Result<(), ApiError> {
+    match ms.scope {
+        MetaSpecScope::Global => {
+            // Tenant-registry entry: tenant admin only.
+            if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+                return Err(ApiError::Forbidden(
+                    "only Admin role may delete tenant-level (Global) meta-specs".to_string(),
+                ));
+            }
+        }
+        MetaSpecScope::Workspace => {
+            let scope_id = ms.scope_id.as_deref().unwrap_or_default();
+            let ws_id = Id::new(scope_id);
+            let ws = state
+                .workspaces
+                .find_by_id(&ws_id)
+                .await
+                .map_err(ApiError::Internal)?
+                .ok_or_else(|| {
+                    // Dangling scope reference — treat as not found rather
+                    // than letting a stale row be deleted by an unscoped
+                    // caller.
+                    ApiError::NotFound(format!(
+                        "meta-spec '{id}' references missing workspace '{scope_id}'",
+                        id = ms.id.as_str()
+                    ))
+                })?;
+            // Tenant containment first: a caller scoped to another tenant
+            // must not even learn the meta-spec exists.
+            if ws.tenant_id.as_str() != auth.tenant_id {
+                return Err(ApiError::Forbidden(
+                    "cross-tenant meta-spec access denied".to_string(),
+                ));
+            }
+            // Workspace-registry entry: the caller must be an Owner/Admin
+            // member of that workspace (or a tenant Admin bypass).
+            let is_tenant_admin = auth.roles.contains(&gyre_domain::UserRole::Admin);
+            let is_ws_admin = match &auth.user_id {
+                Some(uid) => match state
+                    .workspace_memberships
+                    .find_by_user_and_workspace(uid, &ws_id)
+                    .await
+                    .map_err(ApiError::Internal)?
+                {
+                    Some(m) => {
+                        matches!(
+                            m.role,
+                            gyre_domain::WorkspaceRole::Owner | gyre_domain::WorkspaceRole::Admin
+                        )
+                    }
+                    None => false,
+                },
+                None => false,
+            };
+            if !is_tenant_admin && !is_ws_admin {
+                return Err(ApiError::Forbidden(
+                    "only workspace Owner/Admin (or tenant Admin) may delete workspace meta-specs"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn delete_meta_spec_registry(
     State(state): State<Arc<AppState>>,
-    _auth: AuthenticatedAgent,
+    auth: AuthenticatedAgent,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let rid = Id::new(&id);
+    let ms = state
+        .meta_specs
+        .get_by_id(&rid)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("meta-spec '{id}' not found")))?;
+    authorize_meta_spec_delete(&state, &auth, &ms).await?;
     let has_bindings = state
         .meta_spec_bindings
         .has_bindings_for(&rid)
@@ -1293,6 +1421,127 @@ mod registry_tests {
         assert_eq!(update_json["version"].as_u64().unwrap(), 2);
     }
 
+    /// HSI §12 Judgment Ledger: creating and version-bumping a registry
+    /// meta-spec must each write a `meta_spec_publish` audit event attributed
+    /// to the acting human user, carrying kind/name/version/content_hash —
+    /// the event the judgment ledger aggregates as `meta-spec` entries.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publish_writes_meta_spec_publish_audit_event() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use gyre_ports::AuditQueryFilter;
+
+        let state = make_test_state_with_jwt();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // A human (OIDC JWT) publishes a Workspace-scoped meta-spec.
+        let jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "ms-pub-sub",
+                "preferred_username": "ms-publisher",
+                "realm_access": { "roles": ["admin"] }
+            }),
+            3600,
+        );
+        let create_body = serde_json::json!({
+            "kind": "meta:principle",
+            "name": "conventional-commits",
+            "scope": "Workspace",
+            "scope_id": "ws-pub-1",
+            "prompt": "Use CC."
+        });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs-registry")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let id = body_json(create_resp).await["id"].as_str().unwrap().to_string();
+
+        let events = state
+            .audit
+            .query(&AuditQueryFilter {
+                event_type: Some("meta_spec_publish".to_string()),
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "create must record one publish event");
+        let ev = &events[0];
+        let acting_user = state
+            .users
+            .find_by_external_id("ms-pub-sub")
+            .await
+            .unwrap()
+            .expect("JWT auth must provision the acting user");
+        assert_eq!(ev.user_id.as_ref().map(|u| u.as_str()), Some(acting_user.id.as_str()));
+        assert_eq!(ev.resource_id.as_deref(), Some(id.as_str()));
+        // Workspace attribution from the meta-spec's own scope.
+        assert_eq!(ev.workspace_id.as_ref().map(|w| w.as_str()), Some("ws-pub-1"));
+        assert_eq!(ev.detail["kind"], "meta:principle");
+        assert_eq!(ev.detail["name"], "conventional-commits");
+        assert_eq!(ev.detail["version"], 1);
+        assert!(ev.detail["content_hash"].is_string(), "content_hash required");
+
+        // Version bump (update) records a second publish event.
+        let update_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"prompt":"Updated."}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(update_resp.status(), StatusCode::OK);
+        let events2 = state
+            .audit
+            .query(&AuditQueryFilter {
+                event_type: Some("meta_spec_publish".to_string()),
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(events2.len(), 2, "update must record a second publish event");
+        // Both events may share the same wall-clock second, so assert the
+        // version set rather than a specific order.
+        let versions: Vec<u64> = events2
+            .iter()
+            .map(|e| e.detail["version"].as_u64().unwrap_or(0))
+            .collect();
+        assert!(versions.contains(&1) && versions.contains(&2), "versions: {versions:?}");
+        let ledger = crate::api::api_router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/judgments?type=meta-spec")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ledger.status(), StatusCode::OK);
+        let ledger_json = body_json(ledger).await;
+        let items = ledger_json["judgments"].as_array().unwrap();
+        assert_eq!(items.len(), 2, "ledger must surface both publishes: {items:?}");
+        assert_eq!(items[0]["judgment_type"], "meta-spec");
+        assert_eq!(items[0]["entity_ref"], "conventional-commits");
+        assert_eq!(items[0]["workspace_id"], "ws-pub-1");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn get_not_found_returns_404() {
         let resp = app()
@@ -1345,5 +1594,241 @@ mod registry_tests {
             .await
             .unwrap();
         assert_eq!(del_resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    /// Per-handler authorization on DELETE (agent-runtime §214): the route is
+    /// ABAC-exempt, so the handler body is the only authorization surface.
+    /// These would fail on the pre-fix body, which consulted no auth at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delete_requires_admin_for_global_meta_specs() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+
+        let state = make_test_state_with_jwt();
+        let app = crate::api::api_router().with_state(state.clone());
+        // Create a Global meta-spec as the system admin.
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs-registry")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"kind":"meta:persona","name":"global-p","scope":"Global","prompt":"p"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let id = body_json(create_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // A non-admin human (developer role) must be forbidden.
+        let dev_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "del-dev-sub",
+                "preferred_username": "del-dev",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", format!("Bearer {dev_jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // The meta-spec must still exist (forbidden ≠ delete).
+        let get_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn delete_workspace_meta_spec_scopes_to_membership() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use gyre_domain::{Workspace, WorkspaceMembership, WorkspaceRole};
+
+        let state = make_test_state_with_jwt();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Seed a workspace in the caller's tenant ("default" for API-key/JWT
+        // auth without a tenant_id claim).
+        let ws = Workspace::new(
+            gyre_common::Id::new("ws-del-1"),
+            gyre_common::Id::new("default"),
+            "DelWs",
+            "del-ws",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+
+        // Create a Workspace-scoped meta-spec as the system admin.
+        let create_body = serde_json::json!({
+            "kind": "meta:standard",
+            "name": "ws-only-standard",
+            "scope": "Workspace",
+            "scope_id": "ws-del-1",
+            "prompt": "s"
+        });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs-registry")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&create_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let id = body_json(create_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // A developer who IS a workspace member — still forbidden (member,
+        // not workspace admin).
+        let member_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "del-member-sub",
+                "preferred_username": "del-member",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let member_user = gyre_domain::User::new(
+            gyre_common::Id::new("user-del-member"),
+            "del-member-sub",
+            "del-member",
+            0,
+        );
+        state.users.create(&member_user).await.unwrap();
+        state
+            .workspace_memberships
+            .create(&WorkspaceMembership::new(
+                gyre_common::Id::new("m-del-1"),
+                member_user.id.clone(),
+                gyre_common::Id::new("ws-del-1"),
+                WorkspaceRole::Developer,
+                gyre_common::Id::new("admin"),
+                0,
+            ))
+            .await
+            .unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", format!("Bearer {member_jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // A developer with NO membership at all — forbidden (not a member).
+        let outsider_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "del-outsider-sub",
+                "preferred_username": "del-outsider",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", format!("Bearer {outsider_jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // A workspace Owner member — allowed, and the delete takes effect.
+        let owner_jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "del-owner-sub",
+                "preferred_username": "del-owner",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let owner_user = gyre_domain::User::new(
+            gyre_common::Id::new("user-del-owner"),
+            "del-owner-sub",
+            "del-owner",
+            0,
+        );
+        state.users.create(&owner_user).await.unwrap();
+        state
+            .workspace_memberships
+            .create(&WorkspaceMembership::new(
+                gyre_common::Id::new("m-del-2"),
+                owner_user.id.clone(),
+                gyre_common::Id::new("ws-del-1"),
+                WorkspaceRole::Owner,
+                gyre_common::Id::new("admin"),
+                0,
+            ))
+            .await
+            .unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", format!("Bearer {owner_jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // Gone.
+        let get_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_resp.status(), StatusCode::NOT_FOUND);
     }
 }

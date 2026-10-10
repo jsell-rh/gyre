@@ -164,7 +164,8 @@ pub fn format_cef(event: &AuditEvent) -> String {
         gyre_domain::AuditEventType::ContainerCrashed => 7,
         gyre_domain::AuditEventType::ContainerOom => 8,
         gyre_domain::AuditEventType::ContainerNetworkBlocked => 6,
-        gyre_domain::AuditEventType::Custom(_) => 3,
+        gyre_domain::AuditEventType::Custom(_) | gyre_domain::AuditEventType::TrustChange
+        | gyre_domain::AuditEventType::GateOverride | gyre_domain::AuditEventType::MetaSpecPublish => 3,
     };
     let event_type = event.event_type.as_str();
     let mut extensions = format!(

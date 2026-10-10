@@ -175,10 +175,10 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/users/me/agents` | Agents spawned by the current user (M22.8) |
 | `GET` | `/api/v1/users/me/tasks` | Tasks assigned to the current user (M22.8) |
 | `GET` | `/api/v1/users/me/mrs` | MRs authored by the current user (M22.8) |
-| `GET/PUT` | `/api/v1/users/me/notification-preferences` | Get / update notification delivery preferences — per-type channels (email, in-app, webhook), quiet hours, digest frequency (HSI §12) |
+| `GET/PUT` | `/api/v1/users/me/notification-preferences` | Get / update notification preferences — per-`NotificationType` enable/disable toggles (`{notification_type, enabled}`; canonical type names, unknown names rejected 400); disabled types are excluded from the inbox list, unread badge, and MCP inbox tool (HSI §12) |
 | `POST/GET` | `/api/v1/users/me/tokens` | Create / list personal API tokens — `{name, scopes[], expires_at?}`; response includes `token` value only on creation (store it — not retrievable later) (HSI §12) |
 | `DELETE` | `/api/v1/users/me/tokens/{id}` | Revoke an API token (HSI §12) |
-| `GET` | `/api/v1/users/me/judgments` | Judgment ledger — history of human decisions (approve/reject/trust-adjust) made through the UI; used to personalize future LLM suggestions (HSI §12) |
+| `GET` | `/api/v1/users/me/judgments` | Judgment ledger — reverse-chronological history of the caller's human decisions across all workspaces, aggregated from `spec_approvals` (approvals/rejections) and `audit_events` (`gate_override` on human MR approvals past failed gates, `trust_change` on workspace trust transitions, `meta_spec_publish` on registry create/update); filter with `?workspace_id=&type=(approval|rejection|gate|trust|meta-spec)&since=&limit=&offset=` (HSI §12) |
 | `GET` | `/api/v1/users/me/notifications` | Notifications (16 `NotificationType` variants: `MrNeedsReview`, `GateFailure`, `MrMerged`, `SpecChanged`, `AgentCompleted`, etc.; 4 priority levels); **auto-created by server event pipeline**: spec changes, gate failures, agent complete/fail, MR merge, and workspace divergence events all emit notifications automatically — no explicit API call required (M22.8, event-notification pipeline) |
 | `PUT` | `/api/v1/users/me/notifications/{id}/read` | Mark notification read (M22.8) |
 | `POST` | `/api/v1/notifications/{id}/dismiss` | Dismiss a notification (removes from inbox view) (HSI §2) |

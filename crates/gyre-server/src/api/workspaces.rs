@@ -220,13 +220,14 @@ pub async fn update_workspace(
     if let Some(max_agents) = req.max_agents_per_repo {
         ws.max_agents_per_repo = Some(max_agents);
     }
-    let trust_changed = if let Some(tl) = req.trust_level {
+    let (trust_changed, trust_transition) = if let Some(tl) = req.trust_level {
         let new_trust = TrustLevel::from_db_str(&tl);
         let changed = new_trust != ws.trust_level;
-        ws.trust_level = new_trust;
-        changed
+        let from = ws.trust_level.clone();
+        ws.trust_level = new_trust.clone();
+        (changed, changed.then(|| (from, new_trust)))
     } else {
-        false
+        (false, None)
     };
     if let Some(model) = req.llm_model {
         ws.llm_model = Some(model);
@@ -260,6 +261,35 @@ pub async fn update_workspace(
                         .to_string(),
                 )
             })?;
+        // HSI §12 Judgment Ledger: a trust transition is human judgment — record
+        // it so it surfaces in the actor's ledger. Failure propagates: a silently
+        // dropped judgment event is audit theatre.
+        if let Some((from, to)) = &trust_transition {
+            let event = gyre_domain::AuditEvent::new(
+                new_id(),
+                gyre_domain::AuditEventType::TrustChange,
+                None,
+                auth.user_id.clone(),
+                None,
+                Some(ws.id.clone()),
+                None,
+                "workspace".to_string(),
+                Some(ws.id.as_str().to_string()),
+                gyre_domain::AuditOutcome::Success,
+                serde_json::json!({
+                    "workspace_id": ws.id.as_str(),
+                    "from": from.to_string(),
+                    "to": to.to_string(),
+                }),
+                None,
+                None,
+                now_secs(),
+            );
+            state.audit.record(&event).await?;
+            let _ = state
+                .audit_broadcast_tx
+                .send(serde_json::to_string(&event).unwrap_or_default());
+        }
     } else {
         // No trust change — only the non-trust workspace fields need updating.
         state.workspaces.update(&ws).await?;
@@ -384,6 +414,7 @@ pub async fn get_workspace_presence(
 mod tests {
     use crate::mem::test_state;
     use axum::{body::Body, Router};
+    use gyre_common::Id;
     use http::{Request, StatusCode};
     use tower::ServiceExt;
 
@@ -934,5 +965,114 @@ mod tests {
             !policies.iter().any(|p| p.name.starts_with("trust:")),
             "Guided preset must not seed trust: policies"
         );
+    }
+
+    /// HSI §12 Judgment Ledger: a successful trust transition via
+    /// PUT /workspaces/:id must write a `trust_change` audit event attributed
+    /// to the acting user, carrying from/to and workspace_id — the event the
+    /// judgment ledger aggregates. A no-change PUT must NOT write one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn trust_transition_writes_trust_change_audit_event() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use gyre_ports::AuditQueryFilter;
+
+        let state = make_test_state_with_jwt();
+        let app = crate::api::api_router().with_state(state.clone());
+
+        // Create a Guided workspace as the admin static token.
+        let body = serde_json::json!({ "tenant_id": "t1", "name": "W", "slug": "w", "trust_level": "Guided" });
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let ws_id = body_json(create_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // A human (OIDC JWT, admin role) performs the transition.
+        let jwt = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "judg-sub-1",
+                "preferred_username": "judge-1",
+                "realm_access": { "roles": ["admin"] }
+            }),
+            3600,
+        );
+
+        let update = serde_json::json!({ "trust_level": "Supervised" });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::from(serde_json::to_vec(&update).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The trust_change event exists, attributed to the acting human user.
+        // (AuditQueryFilter::default() has limit 0 — set it explicitly.)
+        let events = state
+            .audit
+            .query(&AuditQueryFilter {
+                event_type: Some("trust_change".to_string()),
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let ev = &events[0];
+        let acting_user = state
+            .users
+            .find_by_external_id("judg-sub-1")
+            .await
+            .unwrap()
+            .expect("JWT auth must provision the acting user");
+        assert_eq!(ev.user_id.as_ref().map(Id::as_str), Some(acting_user.id.as_str()));
+        assert_eq!(ev.workspace_id.as_ref().map(Id::as_str), Some(ws_id.as_str()));
+        assert_eq!(ev.detail["from"], "Guided");
+        assert_eq!(ev.detail["to"], "Supervised");
+
+        // Same-value PUT: no transition, no second event.
+        let same = serde_json::json!({ "trust_level": "Supervised" });
+        let resp2 = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {jwt}"))
+                    .body(Body::from(serde_json::to_vec(&same).unwrap()))
+                    .unwrap(),
+            )
+            .await
+        .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK, "same-value PUT must succeed");
+        let events2 = state
+            .audit
+            .query(&AuditQueryFilter {
+                event_type: Some("trust_change".to_string()),
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(events2.len(), 1, "no-change PUT must not write trust_change: {events2:?}");
     }
 }

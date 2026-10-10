@@ -180,6 +180,8 @@ diesel::table! {
         display_name -> Nullable<Text>,
         timezone -> Nullable<Text>,
         locale -> Nullable<Text>,
+        oidc_issuer -> Nullable<Text>,
+        last_login_at -> Nullable<BigInt>,
     }
 }
 
