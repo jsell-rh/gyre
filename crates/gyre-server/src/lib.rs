@@ -59,6 +59,7 @@ pub(crate) mod ws;
 
 use axum::{routing::get, Router};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use explorer_ws::ExplorerSessionRegistry;
 use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin, TelemetryBuffer};
 use gyre_common::Id;
 use gyre_ports::{
@@ -235,6 +236,10 @@ pub struct AppState {
     pub started_at_secs: u64,
     /// Compose sessions: compose_id -> list of agent_ids.
     pub compose_sessions: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// Live explorer WebSocket sessions per user (per-user concurrent-session
+    /// cap). Ephemeral connection state — deliberately not port-backed (see
+    /// `ExplorerSessionRegistry`).
+    pub explorer_sessions: Arc<ExplorerSessionRegistry>,
     /// Data retention policies.
     pub retention_store: RetentionStore,
     /// Background job registry.
@@ -892,6 +897,7 @@ pub fn build_state(
         metrics,
         started_at_secs,
         compose_sessions: Arc::new(Mutex::new(HashMap::new())),
+        explorer_sessions: Arc::new(ExplorerSessionRegistry::new()),
         retention_store: RetentionStore::new(),
         job_registry: Arc::new(JobRegistry::new()),
         analytics: store!(

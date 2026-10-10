@@ -230,6 +230,7 @@ mod tests {
             metrics: base.metrics.clone(),
             started_at_secs: base.started_at_secs,
             compose_sessions: base.compose_sessions.clone(),
+            explorer_sessions: base.explorer_sessions.clone(),
             retention_store: base.retention_store.clone(),
             job_registry: base.job_registry.clone(),
             analytics: base.analytics.clone(),
