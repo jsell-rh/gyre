@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["38c2c5e777fb71633ba6106f6cb8ff037c58e4ff"]
+commits: ["7aec532de81863e9de2791434778c292838335a1", "a15de97ae12cd1b914f9e09025f4b3e5db083b35", "5f0602675167018a09ef08ff6adbfcafc7b612cd", "3eebbbb5ac640428868a8f5eb4ae229675c86891", "1f8277301936405de86d3ff5269304a61ab74a44", "dd84d9d00a5b69111ee5a8c131db0c5d1ead08bc", "ee479add261ad42c61d4044eecbbdca8ed6263c9", "a5bc917785f7c2e248e84e4d62117439fc08221e", "fe6a6642c7bbd8331bab9be3ce61164a33058075"]
 ---
 
 ## Spec Excerpt
@@ -121,9 +121,9 @@ pub struct AnalyticsEvent {
   globally. That round re-verified analytics behavior directly at HEAD
   (zero analytics emit-site lines in the task-068 delta) and repaired
   main-side attribution drift (`a11ba8d3` added to task-068's frontmatter).
-- Contract repair round 2875494a (this round; agent exit 130 interrupted the
-  last one): candidate `5b3c2902` was again pure bookkeeping — a one-line
-  diff rewriting the nine-SHA list to the checkpoint SHA — and this round's
+- Contract repair round 2875494a (prior round; agent exit 130 interrupted
+  the one before it): candidate `5b3c2902` was again pure bookkeeping — a
+  diff rewriting the nine-SHA list to the checkpoint SHA — and that
   merge `5fe46437` (base `05709c24`, absorbing main's task-196) touched
   `crates/gyre-server/src/api/graph.rs` only (+431/−28), with zero
   analytics-relevant lines (0 hits for `record_event` or any of the 12
@@ -135,6 +135,16 @@ pub struct AnalyticsEvent {
   `05709c24` itself (worktree-verified); fixed by recording the SHA in the
   frontmatter per the gate's prescribed fix. No exemption file touched
   (frozen count 3).
+- Contract repair round 5cff2190 (this round): candidate `81435219` was
+  again pure bookkeeping — a one-line diff rewriting the nine-SHA list to
+  the checkpoint SHA `38c2c5e7`. The working tree restores the assignment
+  contract exactly. This round's merge `a3dc01bb` (base `06d70009`,
+  absorbing main's task-227/228) touched only spec/task files — zero
+  files in `crates/`+`web/` since the last-verified point `5fe46437`.
+  All 12 emit sites re-verified by direct read at HEAD `a3dc01bb` and
+  every focused suite re-run (evidence:
+  /tmp/stage/review-evidence/task-146-round-5cff2190.txt). No attribution
+  drift this round: the gate exits 0 at HEAD unchanged.
 
 ## Shipped
 
@@ -145,16 +155,16 @@ pub struct AnalyticsEvent {
   (:135-168) pins the shape via serde round-trip. Id-typed fields are stored
   as text (`Option<String>`) matching the storage layer's TEXT columns.
 - All 12 auto-emitted events record at real trigger points with the
-  spec-required properties. Emit sites re-verified at HEAD `5fe46437`:
+  spec-required properties. Emit sites re-verified at HEAD `a3dc01bb`:
   task.status_changed (api/tasks.rs:347 REST, mcp.rs:1064 MCP),
   mr.merged (api/merge_requests.rs:666 HTTP transition,
   merge_processor.rs:1864 `emit_mr_merged` for both queue paths incl.
   atomic groups), mr.closed (api/merge_requests.rs:666 HTTP transition,
-  api/repos.rs:320 repo-archive, api/specs.rs:947 spec-reject),
-  agent.spawned (api/spawn.rs:1085 direct, api/orchestrator.rs:141
-  orchestrator tiers), agent.completed (api/spawn.rs:1322 HTTP,
-  mcp.rs:1453 MCP), agent.failed (api/spawn.rs:1476 fail,
-  api/spawn.rs:1562 stop, api/admin.rs:338 admin-kill, stale_agents.rs:42
+  api/repos.rs:320 repo-archive, api/specs.rs:938 spec-reject),
+  agent.spawned (api/spawn.rs:1086 direct, api/orchestrator.rs:143
+  orchestrator tiers), agent.completed (api/spawn.rs:1323 HTTP,
+  mcp.rs:1454 MCP), agent.failed (api/spawn.rs:1477 fail,
+  api/spawn.rs:1563 stop, api/admin.rs:339 admin-kill, stale_agents.rs:43
   heartbeat-abort), merge_queue.processed (merge_processor.rs:759 group,
   :1536 single, :1823 `emit_queue_processed_failed`), gate.failed /
   gate.passed (gate_executor.rs:104/:114), spec.approved
@@ -169,25 +179,29 @@ pub struct AnalyticsEvent {
   (event_name/agent_id/workspace_id/day; unsupported fields rejected with
   400). `GET /api/v1/analytics/count` and `/daily` cover count and daily
   aggregation.
-- Test evidence (all re-run this round at HEAD `5fe46437`, all exit 0;
-  evidence file /tmp/stage/review-evidence/task-146-round-2875494a.txt):
+- Test evidence (all re-run this round at HEAD `a3dc01bb`, all exit 0;
+  evidence file /tmp/stage/review-evidence/task-146-round-5cff2190.txt):
   gyre-domain `--lib analytics` 3/3 (incl.
   `analytics_event_matches_spec_schema`); gyre-adapters `--lib
   sqlite::analytics` 13/13 (incl. `analytics_query_filtered_all_params`:
   prefix wildcard, conjunctive scope filters, inclusive since/until
-  bounds, limit); gyre-server `--lib api::analytics` 20/20; per-event
-  batch 23/23 (task.status_changed REST+MCP, agent.spawned direct+
-  orchestrator, agent.completed HTTP+MCP, agent.failed fail-path+
-  admin-kill+stale-abort, mr.closed HTTP transition+repo-archive+
-  spec-reject, mr.merged HTTP+queue with gate_count/queue_wait_secs,
-  merge_queue.processed via queue-merge and atomic-group suites, gate ×2,
-  spec.approved, budget.warning positive, search.query positive); negative
-  paths: `budget_warning_not_emitted_below_threshold` and
-  `empty_query_emits_no_analytics_event` both pass — every spec-required
-  property asserted at each site.
+  bounds, limit); gyre-server `--lib api::analytics` 20/20;
+  merge_processor 50/50; per-event batch 20/20
+  (task.status_changed REST+MCP, agent.spawned direct+orchestrator,
+  agent.completed HTTP+MCP, agent.failed fail-path+stale-abort,
+  mr.closed HTTP transition+spec-reject+repo-archive, mr.merged HTTP+
+  queue with gate_count/queue_wait_secs, merge_queue.processed via
+  queue-merge and atomic-group suites, gate ×2, spec.approved,
+  budget.warning positive, search.query positive); admin-kill
+  `admin_kill_agent_sets_dead` (asserts the agent.failed kill event)
+  and `archive_closes_open_mrs` also pass; negative paths:
+  `budget_warning_not_emitted_below_threshold` and
+  `empty_query_emits_no_analytics_event` both pass — every
+  spec-required property asserted at each site.
 - No verifier weakened: `scripts/check-task-commit-attribution.sh` exits 0
-  on the final tree (after recording `05709c24` in task-196's frontmatter);
-  exemption files unchanged (frozen count 3).
+  on the final tree (re-run this round at HEAD `a3dc01bb`; task-196's
+  `05709c24` attribution fix retained from round 2875494a); exemption
+  files unchanged (frozen count 3). `scripts/check-arch.sh` also passes.
 - Sandbox cannot bind a TCP listener (errno 95, /tmp/stage/capabilities.json),
   so no live HTTP probe was run here; exact-head GitHub checks remain the
   transport verification for `POST/GET /api/v1/analytics/events` (all
