@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["7aec532de81863e9de2791434778c292838335a1", "a15de97ae12cd1b914f9e09025f4b3e5db083b35", "5f0602675167018a09ef08ff6adbfcafc7b612cd", "3eebbbb5ac640428868a8f5eb4ae229675c86891", "1f8277301936405de86d3ff5269304a61ab74a44", "dd84d9d00a5b69111ee5a8c131db0c5d1ead08bc", "ee479add261ad42c61d4044eecbbdca8ed6263c9", "a5bc917785f7c2e248e84e4d62117439fc08221e", "fe6a6642c7bbd8331bab9be3ce61164a33058075"]
+commits: ["a15de97ae12cd1b914f9e09025f4b3e5db083b35", "5f0602675167018a09ef08ff6adbfcafc7b612cd", "3eebbbb5ac640428868a8f5eb4ae229675c86891", "1f8277301936405de86d3ff5269304a61ab74a44", "dd84d9d00a5b69111ee5a8c131db0c5d1ead08bc", "ee479add261ad42c61d4044eecbbdca8ed6263c9", "a5bc917785f7c2e248e84e4d62117439fc08221e", "fe6a6642c7bbd8331bab9be3ce61164a33058075"]
 ---
 
 ## Spec Excerpt
@@ -96,59 +96,54 @@ pub struct AnalyticsEvent {
 
 ## Implementation Notes
 
-- `AnalyticsEvent` (gyre-domain/src/analytics.rs) carries every spec field:
-  id, event_name, agent_id, user_id, session_id, workspace_id, repo_id,
-  properties, timestamp. Id-valued fields are stored as text
-  (`Option<String>`) — consistent with the pre-existing `agent_id: Option<String>`
-  and the storage layer's TEXT columns; the serde round-trip test pins the shape.
-- All 12 spec auto-emitted events now emit at their real trigger points
-  (see the emit-site table in /tmp/stage/review-evidence/task-146-evidence.md
-  at checkpoint time; canonical sites: tasks.rs:345, mcp.rs:1049,
-  merge_requests.rs:681, merge_processor.rs:757/1534/1821/1862, repos.rs:318,
-  specs.rs:701/936, spawn.rs:1084/1321/1475/1561, orchestrator.rs:141,
-  admin.rs:337, stale_agents.rs:41, gate_executor.rs:130, budget.rs:268,
-  search.rs:82). Multiple trigger paths are covered per event where the
-  spec's "fails or is killed" wording names several paths (agent.failed:
-  fail_agent, admin force-kill, stale-abort; mr.closed: HTTP transition,
-  repo deletion, spec-reject).
-- Query API: `QueryEventsParams` supports event_name, agent_id, user_id,
-  workspace_id, repo_id, since, until, limit (default 100, max 10_000),
-  group_by (event_name/agent_id/workspace_id/day). `event_name` supports
-  the spec's trailing-`*` prefix form (`mr.*`) via LIKE in BOTH the SQLite
-  and Postgres adapters. since/until accept ISO8601 or unix seconds.
-- Contract repairs kept intact from earlier rounds: the pre-existing
-  `mr.created` event (spawn.rs, emitted on agent completion MR creation)
-  and the spec_index `&e.current_sha[..8]` hex-sha slice + its exemption
-  entry were restored to base form; exemption-file diffs vs base are
-  line-number re-pins only (no new entries, no check weakened).
+- `AnalyticsEvent` (crates/gyre-domain/src/analytics.rs) carries all 9 spec
+  fields: id, event_name, agent_id, user_id, session_id, workspace_id,
+  repo_id, properties, timestamp. Id-valued fields are stored/serialized as
+  text (`Option<String>`), matching the storage layer's TEXT columns;
+  `analytics_event_matches_spec_schema` pins the shape (gyre-domain).
+- New migration `2026-10-08-000056_analytics_scope_columns` adds
+  user_id/session_id/workspace_id/repo_id columns + indexes (next unused
+  sequence; portable SQL, passes check-migration-versions and
+  check-migration-sql-portability).
+- `with_scope(...)` populates user/session/workspace/repo on emitted events.
 
 ## Shipped
 
-- Event schema: `AnalyticsEvent` has all 9 spec fields; unit test
-  `analytics_event_matches_spec_schema` asserts each field and a serde
-  round-trip (gyre-domain, 3/3 pass).
-- Auto-emitted events: all 12 recorded at real trigger points with all
-  spec-required properties. Per-event tests pass: task.status_changed
-  (old_status/new_status/task_id/assigned_to), mr.merged (mr_id/repo_id/
-  gate_count/queue_wait_secs — both the HTTP transition and queue merge
-  paths), mr.closed (mr_id/repo_id/reason), agent.spawned (agent_id/
-  task_id/compute_target/persona — direct and orchestrator paths),
-  agent.completed (agent_id/task_id/duration_secs), agent.failed
-  (agent_id/task_id/reason — fail, admin force-kill, stale-abort paths),
-  merge_queue.processed (mr_id/outcome/wait_secs), gate.failed
-  (gate_id/gate_type/mr_id/output_snippet), gate.passed (gate_id/
-  gate_type/mr_id/duration_secs), spec.approved (spec_path/approver_type/
-  approval_mode), budget.warning (workspace_id/metric/threshold_pct —
-  plus a not-emitted-below-threshold negative test), search.query
-  (query_length/entity_types/result_count/duration_ms — plus an
-  empty-query negative test).
-- Query API: all spec filter parameters work, including trailing-`*`
-  event-name prefix matching on both storage adapters
-  (`analytics_query_filtered_all_params`, 13/13 adapter tests pass).
-- Evidence: domain 3/3, adapters 13/13, server per-event suites
-  (9 + 6 + merge_processor 50/50 incl. queue-merge analytics, stale-abort,
-  admin kill) all green; full mechanical check suite A/B vs assignment
-  base shows identical failure sets (36 pre-existing both sides, zero
-  regressions — prior round's "expected 35" was a miscount of the same
-  baseline). Sandbox cannot bind a TCP listener (errno 95), so no live
-  HTTP probe; exact-head GitHub CI remains the transport verification.
+All 12 auto-emitted events fire at real trigger points with all spec-required
+properties, each covered by a passing per-event test:
+
+| Event | Emission sites | Test |
+|---|---|---|
+| task.status_changed | api/tasks.rs (transition), mcp.rs (autonomous path) | `task_status_transition_emits_analytics_event`, `update_task_records_status_changed_analytics_event` |
+| mr.merged | api/merge_requests.rs (HTTP transition), merge_processor.rs (queue) | `merge_transition...`, `queue_merge_records_mr_merged_analytics_event` |
+| mr.closed | api/merge_requests.rs (HTTP transition), api/repos.rs (archive), api/specs.rs (spec-reject) | `reject_spec_records_mr_closed_analytics_events`, repos archive test |
+| agent.spawned | api/spawn.rs, api/orchestrator.rs | `spawn_emits_agent_spawned_analytics_event`, `orchestrator_spawn_emits_agent_spawned_analytics_event` |
+| agent.completed | api/spawn.rs (complete), mcp.rs (autonomous path) | `complete_agent_emits_analytics_event`, `agent_complete_records_agent_completed_analytics_event` |
+| agent.failed | api/spawn.rs (fail + kill), api/admin.rs (force-kill), stale_agents.rs (abort) | `fail_agent_emits_analytics_event`, `admin_kill_agent_sets_dead`, `abort_records_agent_failed_analytics_event` |
+| merge_queue.processed | merge_processor.rs (all three queue outcomes) | merge_processor suite (50/50 incl. `queue_merge_records_mr_merged_analytics_event`) |
+| gate.failed / gate.passed | gate_executor.rs | `failing_gate_emits_gate_failed_analytics_event`, `passing_gate_emits_gate_passed_analytics_event` |
+| spec.approved | api/specs.rs | `approve_spec_emits_analytics_event` |
+| budget.warning | api/budget.rs (tokens + cost thresholds) | `budget_warning_emitted_when_threshold_crossed`, `budget_warning_not_emitted_below_threshold` |
+| search.query | api/search.rs (skips empty queries) | `search_emits_analytics_event`, `empty_query_emits_no_analytics_event` |
+
+Query API: routes unchanged from base (no new endpoints — contract). Filters
+event_name (incl. trailing-`*` prefix), agent_id, user_id, workspace_id,
+repo_id, since/until (ISO8601 or unix-sec), limit, group_by
+(event_name/agent_id/workspace_id/day; unsupported rejected) — exercised via
+`analytics_query_filtered_all_params` (SQLite), mem parity test
+(`query_filtered_matches_sqlite_filter_semantics`), and endpoint tests in
+api/analytics.rs.
+
+Repair-run verification (2026-10-10, HEAD 75703396, evidence:
+/tmp/stage/review-evidence/task-146-repair.md): domain 3/3, adapters 13/13,
+server `-- analytics` 42/42, `-- emits --skip ws_activity` 14/14,
+merge_processor 50/50, combined per-event filters 21/21 + 19/19. The
+`ws::tests::ws_activity_event_emits_to_telemetry` failure is environmental
+(real TCP listener; sandbox errno 95/104 — reproduced on the committed tree
+via stash); exact-head GitHub CI is the mandatory transport verification.
+
+Contract repair (finding c388cdad): out-of-scope edits reverted via merge
+75703396 (task-210.md and task-211.md restored to base; task-146.md kept at
+base contract with only progress/commits frontmatter; exemption files are
+line-number-only re-pins; SUMMARY.md is exact generator output). No new
+endpoints, no verifier weakening, no new exemption entries.
