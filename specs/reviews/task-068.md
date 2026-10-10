@@ -52,3 +52,51 @@ Comparison base 66422bd4 (per controller scope); task source at HEAD 0b74e20 ide
 ## Verdict
 
 **complete** — F1 resolved with evidence; no new findings. All round-1 verified behavior (§9 five tools over MCP incl. the envelope round-trip, §22 graph_summary six fields + real BFS test coverage, §23 dryrun resolution + boundary-tested warnings) stands, re-probed at HEAD where source changed. Source at final HEAD f134e8a is byte-identical to the evidence HEAD 0b74e20 (f134e8a touches only this review file), so round-2 probes remain valid.
+
+## Round 3 (independent review of candidate 6de2f028, 2026-10-10)
+
+Assigned base `8c2d1775` → candidate `6de2f028`. Previous assignment
+("review model did not complete") retried fresh on the same candidate. Diff
+re-inspected from the assigned base; source at HEAD byte-verified equal to the
+candidate before and after all probes (`cmp` clean, `git status --porcelain`
+empty).
+
+### Independent evidence (all commands, outputs, exit codes under /tmp/stage/review-evidence/)
+
+- Focused suites at the clean candidate: `cargo test -p gyre-domain --lib
+  view_query_resolver` 124/124; `cargo test -p gyre-server --lib mcp_graph`
+  10/10; `cargo test -p gyre-server --lib mcp` 78/78; `cargo test -p
+  gyre-server --test graph_integration --no-run` compiles clean.
+- **Mutation probes (source restored and byte-verified after each):**
+  removing the `"search"` dispatch arm fails `mcp_graph_search_tool_call`
+  (9 passed/1 failed); raising the clutter threshold to 200000 fails
+  `test_dry_run_warns_on_cluttered_scope` + `test_dry_run_warns_on_many_nodes`;
+  emptying `TEST_REACHABILITY_EDGES` fails 9 domain tests (incl.
+  `test_graph_summary_test_coverage_counts`,
+  `test_reachability_is_calls_only_not_implements_or_routes_to`) plus the
+  in-process `mcp_graph_summary_tool_call`. The tests guard the specced
+  behavior, not mirrors of it.
+- Mechanical gates: `check-mcp-write-tools.sh` OK (graph tools correctly
+  read-only, outside `needs_write` — handlers only call list_nodes/list_edges/
+  get_node); `check-byte-slice-truncation.sh` OK (exemption-line removal for
+  explorer_ws.rs:3437 is backed by a real fix: the inline search arm now
+  delegates to the domain `search_graph_nodes` with char-safe truncation).
+- Spec conformance re-checked directly: `GraphSummary`/
+  `TestCoverageSummary`/`DryRunResult`/`ResolvedGroup` serialize exactly the
+  §22/§23 field names; dry-run MCP handler wraps as `{"query", "result"}`
+  matching the §9 example; `matched_node_names` uses `name` (not
+  qualified_name) per the spec example.
+- Commit chain: all 8 frontmatter commits exist and are reachable; the only
+  attribution-lint failure (`a781ede2`, task-210) is an ancestor of the
+  assigned base — pre-existing, not introduced by this candidate.
+- TCP twins cannot run here (loopback accept() Errno 95, capabilities.json);
+  recorded as infrastructure restriction with the exact host command
+  (`SKIP_WEB_BUILD=1 cargo test -p gyre-server --test graph_integration --
+  test_mcp_graph`). In-process oneshot tests cover the same dispatch path.
+
+### Verdict (round 3)
+
+**approved** — no findings. Independent evidence supports the task contract:
+§9 five tools over the real MCP protocol path, §22 six graph_summary fields
+with real BFS test coverage, §23 dry-run resolution + all warning classes
+with boundary semantics, tests that fail when the behavior is broken.
