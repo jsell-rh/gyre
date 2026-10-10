@@ -325,6 +325,35 @@ server/browser run; jsdom suites cover behavior, exact-head GitHub CI
 task-172-round9-vitest.txt, task-172-round9-dist-before.txt/-after.txt,
 task-172-round9-attribution-gate.txt, task-172-round9-files-vs-base.txt.
 
+**Round-10 re-verification (2026-10-10, fresh sandbox):** inherited merged
+HEAD 3043a12d (round-9 8cc938f8 + base merge 19d65446) with the fresh
+assignment reset again reverting this task file in the working tree to the
+not-started snapshot while leaving the implementation at HEAD untouched —
+the same reset failure mode as round-9. Restored the task file from HEAD
+(recovering the 5-commit attribution 471563d7, 1ae8ca35, a53ade32, 80925c21,
+3688b5cd, checked boxes, ready-for-review); no source changes needed or
+made — the implementation at head is byte-identical to the round-8
+candidate that closed contract finding eff162384cd64e0db0e9447e8fe9ebd2.
+Contract re-verified against the assignment base 19d65446: `git diff
+19d65446 HEAD --name-only` touches only this task's own 12 files (task
+file, ui-layout coverage row + its SUMMARY row, EditorSplit.svelte, its
+test, en.json, rebuilt dist); task-file normative sections byte-identical
+to base except progress/commits/checkboxes; coverage delta vs base is
+exactly one row (ui-layout #13 Editor Split → implemented). `npm ci`
+(169 locked packages) → EditorSplit + DetailPanel suites **66/66 passed**
+via the locked local `./node_modules/.bin/vitest`;
+`./node_modules/.bin/vite build` reproduced the committed dist
+byte-exactly (sha256 of every dist file identical pre/post, clean
+`git status` after). **Attribution gate passes at head:
+`scripts/check-task-commit-attribution.sh` exit 0.** TCP listener probes
+remain unsupported (errno 95, /tmp/stage/capabilities.json) — no live
+server/browser run; jsdom suites cover behavior, exact-head GitHub CI
+(`web-build`) remains mandatory. Evidence:
+/tmp/stage/review-evidence/task-172-round10-vitest.txt,
+task-172-round10-dist-before.txt/-after.txt,
+task-172-round10-attribution-gate.txt,
+task-172-round10-files-vs-base.txt.
+
 
 ## Agent Instructions
 
