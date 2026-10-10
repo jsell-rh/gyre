@@ -402,6 +402,12 @@ pub struct AppState {
     pub secrets: Arc<dyn gyre_ports::SecretRepository>,
     /// Aggregated judgment ledger for user activity history (HSI §12).
     pub judgment_ledger: Arc<dyn gyre_ports::JudgmentLedgerRepository>,
+    /// Per-server registry of active explorer WebSocket sessions, keyed by
+    /// (tenant_id, agent_id). Used to enforce the per-user concurrent session
+    /// limit with oldest-first eviction. Process-local by design — matches
+    /// `presence` and `ws_connections` ownership, so each server instance
+    /// (and each test-built state) tracks its own sessions.
+    pub explorer_sessions: Arc<explorer_ws::ExplorerSessionRegistry>,
     /// WebSocket ticket store: short-lived, single-use tokens for WS auth.
     /// Replaces the insecure ?token= query parameter pattern.
     pub ws_tickets: auth::WsTicketStore,
@@ -1099,6 +1105,7 @@ pub fn build_state(
             mem::MemJudgmentLedgerRepository
         ),
         ws_tickets: auth::WsTicketStore::new(),
+        explorer_sessions: Arc::new(explorer_ws::ExplorerSessionRegistry::default()),
         llm: match std::env::var("GYRE_VERTEX_PROJECT") {
             Ok(_) => match gyre_adapters::RigVertexAiFactory::from_env() {
                 Ok(factory) => Some(Arc::new(factory) as Arc<dyn gyre_ports::LlmPortFactory>),
