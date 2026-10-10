@@ -2,14 +2,14 @@
 title: "Interaction Patterns — scope transitions, drill-down, inline expansion"
 spec_ref: "ui-layout.md §3"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "ui-layout.md §3. Interaction Patterns"
   - "ui-layout.md §Scope Transitions"
   - "ui-layout.md §Drill-Down (Entity Detail)"
   - "ui-layout.md §Inline Expansion (Inbox/Briefing)"
   - "ui-layout.md §Contextual Chat"
-commits: ["99e99039f01c69ef3b7c19f712aeb8de3f83c864", "e25dd52404f06f48b170c4b9cabd9817b036e7f2"]
+commits: ["99e99039f01c69ef3b7c19f712aeb8de3f83c864", "e25dd52404f06f48b170c4b9cabd9817b036e7f2", "add218c801f5c69ef5a547e9b5ad9c6277e6dd46"]
 ---
 
 ## Spec Excerpt
@@ -67,3 +67,19 @@ ui-layout.md §3 defines standardized interaction patterns used across all views
 ## Agent Instructions
 
 Read `ui-layout.md` §3 for the full interaction pattern definitions. Check existing App.svelte for the detail panel and fade implementations — much of this infrastructure exists but may need alignment with the spec's exact timing and behavior requirements. The AccordionItem component should be reusable across Inbox, Briefing, and any future accordion views. The ContextualChat component should be generic enough for agent messages, LLM Q&A, and spec editing.
+
+## Shipped
+
+Interaction patterns per ui-layout.md §3, recovered from two interrupted checkpoints (`99e99039`, `e25dd524`) and completed with the missing test coverage (`add218c8`):
+
+**Scope Transitions** — every scope change in `App.svelte` runs `fadeContent()` (150ms opacity cross-fade on `.content-inner`, `--transition-fast` = 150ms ease) then `history.pushState` (`goToWorkspaceHome`, `goToRepo`, `goToRepoTab`, `goToEntityDetail`, settings/rules/profile/cross-workspace). Breadcrumb renders from the same reactive state, so it updates immediately; the no-sidebar shell keeps the workspace segment in scope (repo-mode breadcrumb leads with the workspace name). No `location.href` assignment or reload anywhere on these paths. `ScopeTransitions.test.js` (new) proves all four spec points at App level with the real `WorkspaceHome`: URL change via a `pushState` spy (real implementation preserved), breadcrumb content, the `faded` class present during the 150ms window and cleared after (fake-timer test: still faded at +100ms, visible at +160ms), workspace segment persistence, and same content-root node survival (no reload).
+
+**Drill-Down (Entity Detail)** — `DetailPanel.svelte` slides in from the right with `transition: width 200ms ease-out` and compresses main to 60% (`.detail-panel.open` = 40% width; ExplorerView's node detail area and spec editor panels use the same 200ms ease-out slide-in). Panel open/close/Esc/✕ and tab behavior were already covered by `DetailPanel.test.js` / `DetailPanelChat.test.js` (38 tests). Double-click drill: `ExplorerCanvas.onDblClick` routes repo_id leaf nodes (no Contains children) to the new `onScopeDrill` callback; `WorkspaceHome` wires it to `onSelectRepo(repo, 'architecture')` → `App.goToRepo` (scope change, breadcrumb update, pushState, no reload); single-click still opens the detail panel without scope change. Covered three ways: `ExplorerCanvas.test.js` "scope drill-down" (double-click calls `onScopeDrill` not `onNodeDetail`/`drillInto`; single-click opens panel; nodes with Contains children keep in-graph drill; missing callback doesn't crash) and the new `WorkspaceHomeScopeDrill.test.js` (single-click → `openDetailPanel({type:'repo'})` no scope change; double-click → `onSelectRepo(repo,'architecture')` no panel; unknown repo_id → toast, no navigation). At Explorer workspace scope, `selectRepo` pushes `?repo=<name>` via pushState (deep-linkable) and `backToRepoList` pops it — new `ExplorerViewDrillUrl.test.js` asserts the URL param, graph load for the drilled repo, and Back removing it.
+
+**Inline Expansion** — reusable `AccordionItem.svelte` (controlled: parent owns `open`, header is a real `<button>` with `aria-expanded`/`aria-controls`, body conditionally rendered below). Applied to Inbox cards (`expandedId` single-expansion state, quick-link buttons stopPropagation) and Briefing sections (`expandedSection`, completed default-expanded). Entity references inside expanded items (View Spec, agent ref-link, MR ref-link, quick-link buttons) open the detail panel — now directly tested in `Inbox.test.js` (spec/agent/MR ref clicks each call `openDetailPanel` with the right entity) and `Briefing.test.js` (spec/agent/mr ref links). Single-expansion constraint tested in `AccordionItem.test.js` (group host), `Inbox.test.js`, and `Briefing.test.js`.
+
+**Contextual Chat** — `InlineChat.svelte` with explicit recipient indicator per spec (`Message to X ▸` / `Ask about X ▸` / `Edit spec: "…" ▸` via i18n, capability hints per recipient type: agent messages signed/persisted, LLM Q&A read-only, spec editing produces drafts). Integrated at the bottom of the agent detail panel (signed Directed-tier steering, `DetailPanel.svelte`), the MR chat tab (author agent), Briefing Q&A (`Ask about this briefing ▸`, SSE-streamed), MetaSpecs editing (`spec-edit` recipient), and WorkspaceHome agent messaging. `InlineChat.test.js` covers recipient display for all three types, send behavior, history, hints, and focus; `DetailPanelChat.test.js` covers the panel integration and message sending.
+
+Test evidence (`npx vitest run`, logs in `/tmp/stage/review-evidence/task-173/vitest-final.log`, final run at head `add218c8`): **8 files, 220 tests passed** — AccordionItem (7), InlineChat (16), Briefing (25), Inbox (30), ExplorerCanvas (136), WorkspaceHomeScopeDrill (3, new), ScopeTransitions (2, new), ExplorerViewDrillUrl (2, new). DetailPanel + DetailPanelChat (38) also verified green. No production source changed in `add218c8` — the implementation shipped in the two recovered checkpoints; this commit adds the missing wiring-level tests and restores `web/dist` to base `f4acb4eb` (the checkpoints accidentally shipped a rebuild; task branches build from source in CI — same policy as task-210 round 12).
+
+Sandbox limitation: TCP listener probe unsupported (capabilities.json `tcp_listener_probe.errno 95`), so no local browser/server smoke test was run; the interaction patterns are verified through the jsdom component tests above. Host verification and exact-head GitHub checks remain with the reviewer/CI.
