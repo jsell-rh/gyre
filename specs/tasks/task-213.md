@@ -1,7 +1,7 @@
 ---
 title: "Repair verified failure on main 8c2d17750585"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
-depends_on: []
+depends_on: [task-215]
 progress: ready-for-review
 commits: []
 ---
@@ -72,4 +72,14 @@ Reproduced the failure at base `8c2d1775` on this branch: `bash scripts/check-ta
 - After: probe OK exit 0 — `/tmp/stage/review-evidence/attribution-after.txt` and `attribution-after-commit.txt` (re-run after committing the repair, so the check scans the new task-labeled commit itself and still passes).
 - `git diff --check 8c2d1775 HEAD` clean.
 
-Sandbox transport probe unsupported (`accept` errno 95) per `/tmp/stage/capabilities.json` — no server/browser probes attempted; full verification and GitHub checks remain with the independent reviewer and the deterministic gates.
+Sandbox transport probe unsupported (`accept` errno 95) per `/tmp/stage/capabilities.json` — no server/browser probes attempted; full verification and GitHub checks remain with the independent reviewer and the deterministic gates. Round-2 scope below extends, not replaces, this constraint.
+
+**Round 2 (base moved to `19d65446`; repair prerequisite task-215).** The verified failure drifted with main: at the round-2 repair base `f4acb4eb` (main's task-189 squash, which touches `crates/gyre-server/src/api/personas.rs`), the gate fails again, now naming `f4acb4eb  task-189  feat(task-189): Fix persona scope resolution to walk the real parent chain` -- the ship commit was absent from `specs/tasks/task-189.md`'s `commits:` frontmatter (same squash-drift class as the round-1 `a781ede2`/task-210 drift). Main repaired this independently as task-215 (commit `19d65446`: appended the full SHA `f4acb4ebcaf930ada2f1318b8aa2adbf244e720f` to task-189's frontmatter, keeping the five pre-squash lineage SHAs as the review-scoping record). This branch carries that repair in its lineage: merge `81f8c910` brings `19d65446` into the round-1 branch, and `depends_on: [task-215]` records the prerequisite. No additional repair was needed on top of it: the branch delta vs `19d65446` is specs-only, so both drift instances (`a781ede2`/task-210, `f4acb4eb`/task-189) are cleared in this lineage, and the frozen exemption file stays at its 3 committed entries.
+
+**Round 2 verification (evidence under `/tmp/stage/review-evidence/`).**
+- Before: gate at pristine `f4acb4eb` in a detached worktree → FAIL exit 1, the exact round-2 baseline violation (`f4acb4eb task-189`) -- `task-213-round2-before-repair.log`.
+- After: gate at merged HEAD `81f8c910` (before this record commit) → OK exit 0 -- `task-213-round2-attribution-after.txt`; head and base recorded in `task-213-round2-head.txt` / `task-213-round2-base.txt`; post-commit re-run saved as `task-213-round2-after-record-commit.txt`.
+- Mutation check (test-the-test): in a detached worktree at HEAD, removing `f4acb4ebcaf930ada2f1318b8aa2adbf244e720f` from task-189's frontmatter re-fails the gate with the identical violation, exit 1 -- `task-213-round2-mutation-check.log`. The pass is attributable to the prerequisite repair, not gate drift.
+- Integrity: task-189 frontmatter parses; `commits` is a 6-entry JSON list containing the full repair SHA; task-210's list still carries `a781ede2ea21a5153dbcb49c65771f990344a093` (9 entries). Exemption file at its frozen 3 entries before and after. `git diff --check 19d65446..HEAD` clean; `git diff 19d65446..HEAD` touches only `specs/tasks/task-213.md`; no product-surface commit exists since base (`git log 19d65446..HEAD --no-merges -- crates web` empty). `python3 /tmp/stage/dev-attribution.py task-213` produces no change, so `commits: []` remains correct for this specs-only task.
+
+Sandbox transport probe unsupported (`accept` errno 95) per `/tmp/stage/capabilities.json`; no server/browser probes apply to this specs-only change. Full deterministic gates and exact-head GitHub checks remain with the independent reviewer, verification, and publication.
