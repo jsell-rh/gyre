@@ -118,9 +118,10 @@ All work in `crates/gyre-server/src/api/graph.rs` unless noted.
 
 ## Shipped
 
-Recovered interrupted assignment (checkpoint 88b57180); implementation is
-byte-identical to the previously reviewed tree (independently reviewed at
-c3174c12 with mutation probes), re-verified fresh in this round:
+Implementation recovered from interrupted assignment (checkpoint 88b57180),
+rustfmt-repaired in abcfff04 (formatting-only, five hunks inside task-196's
+own changed lines; `rustfmt --edition 2021`, gate re-run clean), re-verified
+fresh in each round:
 
 - **History cap (§1325):** `briefing_ask` rejects `history.len() > 20` with
   `ApiError::InvalidInput` → HTTP 400 after `require_workspace`, before the rate
@@ -150,22 +151,30 @@ c3174c12 with mutation probes), re-verified fresh in this round:
   `git diff --check` trailing-whitespace failure. `web/dist` is byte-identical
   to main again.
 
-### Verification (this round; product source at 88b57180, unchanged through 4b98f3b2)
+### Verification (product source at 88b57180, formatting-only delta in
+abcfff04; re-run fresh this contract-repair round on the restored tree)
 
 - `cargo test -p gyre-server --lib api::graph::tests::briefing` — 15/15 pass
   (400 cap incl. 20-accepted boundary, prompt grounding via PromptCaptureFactory
   asserting the seeded MR title + spec path + history replay in the captured
   system prompt, SSE `{answer, sources}` shape with answer == concatenated
   partials, non-empty sources for the seeded spec-linked MR, 503, rate limit).
-  Evidence: `/tmp/stage/review-evidence/task-196-server-briefing-tests.txt`.
+  Evidence: `/tmp/stage/review-evidence/task-196-contract-repair-briefing-tests.txt`
+  (fresh run this round; earlier rounds' logs:
+  `task-196-server-briefing-tests.txt`, `task-196-tests-repair-round.txt`).
 - `cd web && npx vitest run Briefing.test.js InlineChat.test.js
   DetailPanelChat.test.js` — 49/49 pass (complete-event `{answer, sources}`
   consumption, follow-up history accumulation, no regressions in shared
   InlineChat consumers). Evidence:
-  `/tmp/stage/review-evidence/task-196-frontend-tests.txt`.
+  `/tmp/stage/review-evidence/task-196-contract-repair-frontend-tests.txt`.
 - `bash scripts/check-arch.sh` — passes.
-- `git diff --check 8c2d1775 HEAD` — clean (dist rebuild whitespace failure
-  resolved).
+- `python3 scripts/check-rustfmt-diff.py 73a31e0b` — "changed lines clean",
+  exit 0.
+- `bash scripts/check-task-commit-attribution.sh` — OK exit 0 with the
+  canonical `commits:` list (abcfff04, 88b57180; re-derived by
+  `dev-attribution.py`, matching HEAD e6d79ec8).
+- `git diff --check 73a31e0b` (working tree) — clean; `git diff 73a31e0b HEAD
+  -- web/dist` empty.
 - No `MUTANT` markers in `crates/` or `web/src/`.
 - Sandbox limitation: loopback listeners are unsupported here
   (`capabilities.json`: tcp_listener_probe errno 95), so
@@ -175,41 +184,22 @@ c3174c12 with mutation probes), re-verified fresh in this round:
   and 404) and compatible with the new payload; host verification must run
   `cargo test -p gyre-server --test graph_integration`.
 
-## Repair round (baseline finding d9546b22)
+### Contract-repair round (finding 27dbc148, category=contract)
 
-The baseline gate at the old base 8c2d1775 failed on two findings:
-
-1. **rustfmt** — the recovered implementation checkpoint carried formatting
-   violations on its own changed lines in `graph.rs` (1204, 1301-1303,
-   1308-1309, 2160-2162, 2308-2309). Reproduced pre-fix at base 73a31e0b:
-   `python3 scripts/check-rustfmt-diff.py 73a31e0b` → exit 1. Fixed with
-   whole-file `rustfmt --edition 2021` (commit abcfff04, +8/-12, five
-   hunks — all inside task-196 changed lines, no unrelated debt touched).
-   Gate after fix: exit 0, "changed lines clean". Behavior-neutral
-   (whitespace/layout only); briefing tests re-run green after the change.
-2. **task-210 attribution** (`a781ede2` missing from task-210 frontmatter) —
-   repaired by prerequisite task-213 (commit 73a31e0b), now merged into this
-   branch (7c6b985c). Verified in this sandbox:
-   `bash scripts/check-task-commit-attribution.sh` → OK exit 0.
-
-Re-verified this round (sandbox tree at abcfff04):
-- `cargo test -p gyre-server --lib api::graph::tests::briefing` — 15/15.
-- `cd web && npx vitest run Briefing.test.js InlineChat.test.js
-  DetailPanelChat.test.js` — 49/49.
-- `bash scripts/check-arch.sh`, `check-abac-route-registry.sh`,
-  `check-byte-slice-truncation.sh`, `check-mcp-write-tools.sh`,
-  `check-mem-port-contracts.sh`, `check-lossy-secret-conversion.sh`,
-  `check-scope-literal-defaults.sh`, `check-task-commit-attribution.sh` —
-  all exit 0.
-- `git diff --check 73a31e0b HEAD` — clean. The accidental `web/dist`
-  rebuild triggered by build.rs during cargo test was dropped again
-  (task-210 round 12 precedent); `web/dist` is identical to main.
-- Sandbox limitation unchanged: loopback listeners unsupported
-  (`capabilities.json`: tcp_listener_probe errno 95), so
-  `tests/graph_integration.rs::test_briefing_ask_sse` and
-  `test_briefing_ask_not_found` still cannot run here; both are
-  payload-agnostic and host verification must run
-  `cargo test -p gyre-server --test graph_integration`.
-
-Evidence: `/tmp/stage/review-evidence/task-196-rustfmt-repair.txt`,
-`task-196-gates.txt`, `task-196-tests-repair-round.txt`.
+Audit: the assigned contract (Spec Excerpt, Why-open finding, Implementation
+Plan, Acceptance Criteria, Agent Instructions) is byte-identical to the
+decomposition commit — verified by hashing `scripts/dev-contract.py`
+`requirement_parts` prose (identical) and frontmatter (differs only in the
+lifecycle-managed `progress`/`commits` fields plus the assignment-issued
+`depends_on: [task-213]`). The finding's cause: the prior round recorded its
+repair narrative under `## Repair round (baseline finding d9546b22)` — an
+unknown heading, which the contract hash treats as normative prose, changing
+the requirement generation. Repaired by removing that section and recording
+this round under the canonical `## Shipped` operational heading only (this
+subsection is nested under it). Product files untouched this round:
+`git diff e6d79ec8 -- crates/ web/src/` empty; the only source-side delta on
+the branch remains 88b57180 + the formatting-only abcfff04 (verified hunk by
+hunk — whitespace/layout only). `commits:` retains the attribution-canonical
+list `["abcfff04...", "88b57180..."]` (re-derived via `dev-attribution.py`);
+the restore, not an exemption, keeps
+`bash scripts/check-task-commit-attribution.sh` at exit 0.
