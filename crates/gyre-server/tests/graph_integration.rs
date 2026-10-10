@@ -168,6 +168,49 @@ async fn create_repo(ctx: &Ctx, ws_id: &str) -> String {
     repo["id"].as_str().unwrap().to_string()
 }
 
+/// Concept manifest for concept-view projection tests: the `Auth` concept
+/// includes only types glob `*Provider*`.
+const CONCEPT_MANIFEST: &str = r#"
+version: 1
+specs:
+  - path: system/identity-security.md
+    title: Identity Security
+    owner: user:test
+concepts:
+  - name: Auth
+    description: "Auth-shaped things"
+    include:
+      - types: ["*Provider*"]
+"#;
+
+/// Create a real (non-bare) git repo at a tempdir with the given
+/// `specs/manifest.yaml` committed on `main`. Returns the repo path.
+fn init_manifest_repo(manifest_yaml: &str) -> (tempfile::TempDir, String) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let repo_path = tmp.path();
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        assert!(
+            status.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+    };
+    git(&["init", "--initial-branch=main"]);
+    git(&["config", "user.email", "test@gyre.dev"]);
+    git(&["config", "user.name", "Gyre Test"]);
+    std::fs::create_dir_all(repo_path.join("specs")).unwrap();
+    std::fs::write(repo_path.join("specs/manifest.yaml"), manifest_yaml).unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-m", "seed manifest"]);
+    let path_str = repo_path.to_str().unwrap().to_string();
+    (tmp, path_str)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 /// GET /api/v1/repos/{id}/graph — full graph (nodes + edges).
@@ -331,25 +374,57 @@ async fn test_graph_by_spec() {
     assert_eq!(nodes[0]["id"], nid.to_string());
 }
 
-/// GET /api/v1/repos/{id}/graph/concept/{name} — name-pattern concept view.
-#[tokio::test]
+/// GET /api/v1/repos/{id}/graph/concept/{name} — manifest-driven concept view
+/// projection (realized-model.md §4): the concept is resolved from the repo's
+/// specs/manifest.yaml and nodes matching its include patterns are returned.
+/// An undefined concept name 404s (no substring fallback — the distinct
+/// `?concept=` substring surface lives on GET /graph).
+#[tokio::test(flavor = "multi_thread")]
 async fn test_graph_concept() {
     let ctx = Ctx::new().await;
     let repo_id = create_repo(&ctx, "proj-7").await;
 
-    let auth_node = make_node(&repo_id, "AuthService", NodeType::Type);
-    let other = make_node(&repo_id, "TaskBoard", NodeType::Component);
-    ctx.state.graph_store.create_node(auth_node).await.unwrap();
-    ctx.state.graph_store.create_node(other).await.unwrap();
+    // Concept-matching node (types glob "*Provider*").
+    let provider = make_node(&repo_id, "JwtProvider", NodeType::Type);
+    // Substring decoy: contains the concept name "Auth" as a substring but
+    // matches no include pattern — must be excluded. Guards against a
+    // regression to substring matching.
+    let decoy = make_node(&repo_id, "AuthService", NodeType::Type);
+    let unrelated = make_node(&repo_id, "TaskBoard", NodeType::Component);
+    ctx.state.graph_store.create_node(provider).await.unwrap();
+    ctx.state.graph_store.create_node(decoy).await.unwrap();
+    ctx.state.graph_store.create_node(unrelated).await.unwrap();
+
+    // Point the repo at a real git checkout so the manifest resolves.
+    let (_tmp, repo_path) = init_manifest_repo(CONCEPT_MANIFEST);
+    let mut repo = ctx
+        .state
+        .repos
+        .find_by_id(&Id::new(&repo_id))
+        .await
+        .unwrap()
+        .unwrap();
+    repo.path = repo_path;
+    ctx.state.repos.update(&repo).await.unwrap();
 
     let resp = ctx
-        .get(&format!("/api/v1/repos/{repo_id}/graph/concept/auth"))
+        .get(&format!("/api/v1/repos/{repo_id}/graph/concept/Auth"))
         .await;
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     let nodes = body["nodes"].as_array().unwrap();
-    assert_eq!(nodes.len(), 1);
-    assert_eq!(nodes[0]["name"], "AuthService");
+    assert_eq!(
+        nodes.len(),
+        1,
+        "exactly the include-pattern-matching node: {nodes:?}"
+    );
+    assert_eq!(nodes[0]["name"], "JwtProvider");
+
+    // A name that is not a defined concept must 404, not substring-match.
+    let resp404 = ctx
+        .get(&format!("/api/v1/repos/{repo_id}/graph/concept/not-a-concept"))
+        .await;
+    assert_eq!(resp404.status(), 404);
 }
 
 /// GET /api/v1/repos/{id}/graph/timeline — returns deltas.
@@ -873,8 +948,12 @@ async fn test_full_graph_concept_query_param() {
     assert_eq!(body_all["edges"].as_array().unwrap().len(), 1);
 }
 
-/// GET /api/v1/workspaces/{id}/graph/concept/{name} — workspace-scoped concept search.
-#[tokio::test]
+/// GET /api/v1/workspaces/{id}/graph/concept/{name} — workspace-scoped union of
+/// per-repo concept-view projections: each repo in the workspace resolves the
+/// concept from its own specs/manifest.yaml; matched nodes are unioned. A repo
+/// that does not define the concept contributes nothing (empty union is a
+/// valid answer — the endpoint does not 404).
+#[tokio::test(flavor = "multi_thread")]
 async fn test_workspace_graph_concept() {
     use gyre_domain::Workspace;
     let ctx = Ctx::new().await;
@@ -888,28 +967,43 @@ async fn test_workspace_graph_concept() {
     let repo1_id = create_repo(&ctx, ws_id.as_str()).await;
     let repo2_id = create_repo(&ctx, ws_id.as_str()).await;
 
-    let n1 = make_node(&repo1_id, "AuthToken", NodeType::Type);
-    let n2 = make_node(&repo2_id, "AuthMiddleware", NodeType::Function);
-    let n3 = make_node(&repo1_id, "TaskQueue", NodeType::Type);
+    // repo-1 defines the concept and holds matching nodes.
+    let n1 = make_node(&repo1_id, "JwtProvider", NodeType::Type);
+    // Substring decoy in repo-1: contains "Auth" but matches no include
+    // pattern — excluded under manifest projection, included under the old
+    // substring behavior (guards the regression).
+    let n2 = make_node(&repo1_id, "AuthService", NodeType::Function);
     ctx.state.graph_store.create_node(n1).await.unwrap();
     ctx.state.graph_store.create_node(n2).await.unwrap();
+
+    // repo-2 has no manifest — its pattern-matching node must NOT appear.
+    let n3 = make_node(&repo2_id, "JwtProvider", NodeType::Type);
     ctx.state.graph_store.create_node(n3).await.unwrap();
 
+    let (_tmp, repo_path) = init_manifest_repo(CONCEPT_MANIFEST);
+    let mut repo1 = ctx
+        .state
+        .repos
+        .find_by_id(&Id::new(&repo1_id))
+        .await
+        .unwrap()
+        .unwrap();
+    repo1.path = repo_path;
+    ctx.state.repos.update(&repo1).await.unwrap();
+
     let resp = ctx
-        .get(&format!("/api/v1/workspaces/{ws_id}/graph/concept/auth"))
+        .get(&format!("/api/v1/workspaces/{ws_id}/graph/concept/Auth"))
         .await;
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await.unwrap();
     let nodes = body["nodes"].as_array().unwrap();
-    // AuthToken (repo1) and AuthMiddleware (repo2) match; TaskQueue does not.
     assert_eq!(
         nodes.len(),
-        2,
-        "expected 2 auth-matching nodes across repos"
+        1,
+        "expected only repo-1's include-pattern-matching node"
     );
-    let names: Vec<&str> = nodes.iter().map(|n| n["name"].as_str().unwrap()).collect();
-    assert!(names.contains(&"AuthToken"));
-    assert!(names.contains(&"AuthMiddleware"));
+    assert_eq!(nodes[0]["name"], "JwtProvider");
+    assert_eq!(nodes[0]["repo_id"], repo1_id);
 }
 
 /// GET /api/v1/workspaces/{id}/graph/concept/{name} — 404 for unknown workspace.

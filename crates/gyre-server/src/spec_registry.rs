@@ -27,6 +27,59 @@ pub struct SpecManifest {
     #[serde(default)]
     pub defaults: ManifestDefaults,
     pub specs: Vec<SpecEntry>,
+    /// Concept views of the knowledge graph (realized-model.md §4).
+    /// A manifest without a `concepts:` key parses with an empty vec.
+    #[serde(default)]
+    pub concepts: Vec<ConceptDef>,
+}
+
+/// A concept view declared in the manifest's `concepts:` block
+/// (realized-model.md §4). Converts to the domain `ConceptView` type.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConceptDef {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub include: Vec<ConceptInclude>,
+}
+
+/// One `- types: [...]` / `- traits: [...]` / ... entry in a concept's
+/// `include:` sequence of single-key maps.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ConceptInclude {
+    #[serde(default)]
+    pub types: Vec<String>,
+    #[serde(default)]
+    pub traits: Vec<String>,
+    #[serde(default)]
+    pub modules: Vec<String>,
+    #[serde(default)]
+    pub endpoints: Vec<String>,
+    #[serde(default)]
+    pub specs: Vec<String>,
+}
+
+impl From<&ConceptDef> for gyre_common::graph::ConceptView {
+    fn from(def: &ConceptDef) -> Self {
+        let mut view = gyre_common::graph::ConceptView {
+            name: def.name.clone(),
+            description: def.description.clone(),
+            include_types: vec![],
+            include_traits: vec![],
+            include_modules: vec![],
+            include_endpoints: vec![],
+            include_specs: vec![],
+        };
+        for inc in &def.include {
+            view.include_types.extend(inc.types.iter().cloned());
+            view.include_traits.extend(inc.traits.iter().cloned());
+            view.include_modules.extend(inc.modules.iter().cloned());
+            view.include_endpoints.extend(inc.endpoints.iter().cloned());
+            view.include_specs.extend(inc.specs.iter().cloned());
+        }
+        view
+    }
 }
 
 /// Default policies applied to all specs unless overridden per-entry.
@@ -1118,6 +1171,110 @@ specs:
     owner: user:jsell
     auto_create_tasks: false
 "#;
+
+    #[test]
+    fn test_manifest_without_concepts_parses_empty() {
+        let m = parse_manifest(SAMPLE_MANIFEST).expect("parse failed");
+        assert!(
+            m.concepts.is_empty(),
+            "manifest without concepts: key must parse to empty vec"
+        );
+    }
+
+    #[test]
+    fn test_parse_concepts_spec_examples() {
+        let yaml = r#"
+version: 1
+specs:
+  - path: system/source-control.md
+    title: Source Control
+    owner: user:jsell
+concepts:
+  - name: Authentication
+    description: "Token validation, RBAC, ABAC, JWT handling"
+    include:
+      - types: ["*Auth*", "*Token*", "*Rbac*", "*Abac*", "*Jwt*"]
+      - traits: ["*Auth*"]
+      - modules: ["*::auth*", "*::identity*"]
+      - endpoints: ["/api/v1/auth/*", "/.well-known/*"]
+      - specs: ["identity-security.md", "abac-policy-engine.md"]
+
+  - name: Merge Pipeline
+    description: "Merge queue, gates, MR lifecycle"
+    include:
+      - types: ["MergeRequest", "MergeQueueEntry", "Gate*", "QueueProcessor"]
+      - modules: ["*::merge*", "*::gates*"]
+      - specs: ["source-control.md", "agent-gates.md", "merge-dependencies.md"]
+"#;
+        let m = parse_manifest(yaml).expect("parse failed");
+        assert_eq!(m.concepts.len(), 2);
+
+        let auth = &m.concepts[0];
+        assert_eq!(auth.name, "Authentication");
+        assert_eq!(auth.description, "Token validation, RBAC, ABAC, JWT handling");
+        let view = gyre_common::graph::ConceptView::from(auth);
+        assert_eq!(
+            view.include_types,
+            vec!["*Auth*", "*Token*", "*Rbac*", "*Abac*", "*Jwt*"]
+        );
+        assert_eq!(view.include_traits, vec!["*Auth*"]);
+        assert_eq!(view.include_modules, vec!["*::auth*", "*::identity*"]);
+        assert_eq!(view.include_endpoints, vec!["/api/v1/auth/*", "/.well-known/*"]);
+        assert_eq!(
+            view.include_specs,
+            vec!["identity-security.md", "abac-policy-engine.md"]
+        );
+
+        let merge = &m.concepts[1];
+        assert_eq!(merge.name, "Merge Pipeline");
+        let view = gyre_common::graph::ConceptView::from(merge);
+        assert_eq!(
+            view.include_types,
+            vec!["MergeRequest", "MergeQueueEntry", "Gate*", "QueueProcessor"]
+        );
+        assert!(view.include_traits.is_empty());
+        assert_eq!(view.include_modules, vec!["*::merge*", "*::gates*"]);
+        assert!(view.include_endpoints.is_empty());
+        assert_eq!(
+            view.include_specs,
+            vec![
+                "source-control.md",
+                "agent-gates.md",
+                "merge-dependencies.md"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_concept_without_include_and_split_keys() {
+        let yaml = r#"
+version: 1
+specs:
+  - path: system/x.md
+    title: X
+    owner: user:jsell
+concepts:
+  - name: Bare
+  - name: Split
+    description: "same key across two include entries"
+    include:
+      - types: ["A*"]
+      - modules: ["m"]
+      - types: ["B*"]
+"#;
+        let m = parse_manifest(yaml).expect("parse failed");
+        assert_eq!(m.concepts.len(), 2);
+        let bare = &m.concepts[0];
+        assert_eq!(bare.name, "Bare");
+        let bare_view = gyre_common::graph::ConceptView::from(bare);
+        assert!(bare_view.include_types.is_empty());
+        assert!(bare_view.include_specs.is_empty());
+
+        // Same key appearing in multiple include entries aggregates.
+        let split_view = gyre_common::graph::ConceptView::from(&m.concepts[1]);
+        assert_eq!(split_view.include_types, vec!["A*", "B*"]);
+        assert_eq!(split_view.include_modules, vec!["m"]);
+    }
 
     #[test]
     fn test_parse_manifest_ok() {
