@@ -855,12 +855,7 @@ pub(crate) async fn launch_agent_process(
             ),
             Some(tenant_id) => match state
                 .secrets
-                .resolve_for_agent(
-                    &tenant_id,
-                    &repo.workspace_id.to_string(),
-                    repo_id,
-                    task_id,
-                )
+                .resolve_for_agent(&tenant_id, &repo.workspace_id.to_string(), repo_id, task_id)
                 .await
             {
                 Ok(resolved) => {

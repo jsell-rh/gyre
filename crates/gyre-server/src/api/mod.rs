@@ -732,7 +732,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
         // ABAC + tenant containment in the handlers. The static `preview`
         // segment outranks the `:path` wildcard above, so a meta-spec whose path
         // is literally `preview` has no reachable blast-radius lookup.
-        .route("/api/v1/meta-specs/preview", post(meta_specs::post_meta_spec_preview))
+        .route(
+            "/api/v1/meta-specs/preview",
+            post(meta_specs::post_meta_spec_preview),
+        )
         .route(
             "/api/v1/meta-specs/preview/:preview_id",
             get(meta_specs::get_meta_spec_preview_status)

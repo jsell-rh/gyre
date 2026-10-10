@@ -510,11 +510,10 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         .register(
             JobDefinition {
                 name: "meta_spec_preview_gc".to_string(),
-                description:
-                    "Tears down meta-spec preview runs past their TTL: kills agents, \
+                description: "Tears down meta-spec preview runs past their TTL: kills agents, \
              removes worktrees, deletes preview branches, revokes tokens, releases \
              budget slots"
-                        .to_string(),
+                    .to_string(),
                 interval_secs: crate::api::meta_specs::preview_gc_interval_secs_from_env(),
                 enabled: true,
                 run_at_utc_hour: None,

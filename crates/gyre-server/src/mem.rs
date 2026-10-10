@@ -3267,12 +3267,7 @@ fn shared_workspace_policy_pair(
 #[cfg(test)]
 pub fn test_state_with_git_ops(git_ops: Arc<dyn gyre_ports::GitOpsPort>) -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    Arc::new(test_state_inner(
-        git_ops,
-        workspaces,
-        policies,
-        None,
-    ))
+    Arc::new(test_state_inner(git_ops, workspaces, policies, None))
 }
 
 /// Build a test AppState with the meta-spec preview knobs pinned, so TTL expiry

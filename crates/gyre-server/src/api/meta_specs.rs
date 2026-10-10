@@ -430,7 +430,9 @@ pub async fn post_meta_spec_preview(
         ));
     }
     if req.targets.is_empty() {
-        return Err(ApiError::BadRequest("targets must not be empty".to_string()));
+        return Err(ApiError::BadRequest(
+            "targets must not be empty".to_string(),
+        ));
     }
 
     // ── Pass 1: resolve, authorize and validate every target. Nothing is
@@ -567,7 +569,10 @@ pub async fn post_meta_spec_preview(
         })
         .collect();
 
-    Ok((StatusCode::ACCEPTED, Json(PreviewResponse { preview_id, agents })))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(PreviewResponse { preview_id, agents }),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -652,7 +657,10 @@ pub(crate) async fn finish_preview_agent(state: &AppState, agent_id: &str) -> bo
         Err(e) => {
             // Cannot tell what this agent is, so do not claim it: the caller
             // applies the normal transition, and the sweep still owns cleanup.
-            tracing::warn!(agent_id, "preview agent lookup failed; treating as a normal agent: {e:#}");
+            tracing::warn!(
+                agent_id,
+                "preview agent lookup failed; treating as a normal agent: {e:#}"
+            );
             return false;
         }
     };
@@ -688,7 +696,10 @@ pub(crate) async fn finish_preview_agent(state: &AppState, agent_id: &str) -> bo
 
 /// True when `agent_id` belongs to a preview run.
 pub(crate) async fn is_preview_agent(state: &AppState, agent_id: &str) -> bool {
-    matches!(state.kv_store.kv_get(PREVIEW_AGENTS_NS, agent_id).await, Ok(Some(_)))
+    matches!(
+        state.kv_store.kv_get(PREVIEW_AGENTS_NS, agent_id).await,
+        Ok(Some(_))
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -746,7 +757,10 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
             }
         };
         let run_gone = !matches!(
-            state.kv_store.kv_get(PREVIEW_NS, &agent_ref.preview_id).await,
+            state
+                .kv_store
+                .kv_get(PREVIEW_NS, &agent_ref.preview_id)
+                .await,
             Ok(Some(_))
         );
         if !run_gone {
@@ -819,7 +833,10 @@ where
     let mut record = match load_preview(state, preview_id).await {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(preview_id, "preview record unavailable during update: {e:?}");
+            tracing::warn!(
+                preview_id,
+                "preview record unavailable during update: {e:?}"
+            );
             return;
         }
     };
@@ -889,7 +906,10 @@ async fn count_running_preview_agents(state: &AppState) -> u64 {
     for (agent_id, raw) in entries {
         // Only unreleased slots are live: a finished agent still has an index
         // entry (it is the process-exit discriminator) but holds no slot.
-        if serde_json::from_str::<PreviewAgentRef>(&raw).map(|a| a.released).unwrap_or(true) {
+        if serde_json::from_str::<PreviewAgentRef>(&raw)
+            .map(|a| a.released)
+            .unwrap_or(true)
+        {
             continue;
         }
         if let Ok(Some(a)) = state.agents.find_by_id(&Id::new(&agent_id)).await {
@@ -917,9 +937,7 @@ fn preview_agent_status_label(status: AgentStatus, finished: bool) -> &'static s
 
 async fn preview_agent_status(state: &AppState, agent_ref: &PreviewAgentRef) -> String {
     match state.agents.find_by_id(&Id::new(&agent_ref.agent_id)).await {
-        Ok(Some(agent)) => {
-            preview_agent_status_label(agent.status, agent_ref.released).to_string()
-        }
+        Ok(Some(agent)) => preview_agent_status_label(agent.status, agent_ref.released).to_string(),
         // Reporting-only fallback: the agent row is gone (or unreadable), so the
         // honest answer is "unknown". No safety decision reads this value.
         Ok(None) => "unknown".to_string(),
@@ -967,7 +985,11 @@ async fn preview_diff(state: &AppState, agent_ref: &PreviewAgentRef) -> Option<D
 /// `preview/{preview_id}/{slug}` — slug from the spec file stem, sanitized for
 /// git. Duplicate stems inside one request are disambiguated with the full
 /// path (`system-search.md` vs `specs/system/search.md`).
-fn preview_branch_name(preview_id: &str, spec_path: &str, used: &mut HashMap<String, u32>) -> String {
+fn preview_branch_name(
+    preview_id: &str,
+    spec_path: &str,
+    used: &mut HashMap<String, u32>,
+) -> String {
     let stem = std::path::Path::new(spec_path)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -982,7 +1004,11 @@ fn preview_branch_name(preview_id: &str, spec_path: &str, used: &mut HashMap<Str
                 .map(|(head, _)| head)
                 .unwrap_or(spec_path),
         );
-        slug = if qualified.is_empty() { slug } else { qualified };
+        slug = if qualified.is_empty() {
+            slug
+        } else {
+            qualified
+        };
     }
     let n = used.entry(slug.clone()).or_insert(0);
     *n += 1;
@@ -1034,10 +1060,12 @@ async fn provision_preview_agent(
     // preview — there is no spec content to implement.
     let base_sha = crate::git_refs::resolve_ref(&repo.path, &repo.default_branch)
         .await
-        .ok_or_else(|| ApiError::BadRequest(format!(
-            "repo '{}' has no commits on '{}' — push an initial commit before previewing",
-            repo.id, repo.default_branch
-        )))?;
+        .ok_or_else(|| {
+            ApiError::BadRequest(format!(
+                "repo '{}' has no commits on '{}' — push an initial commit before previewing",
+                repo.id, repo.default_branch
+            ))
+        })?;
 
     state
         .git_ops
@@ -1070,17 +1098,20 @@ async fn provision_preview_agent(
         .create_worktree(&repo.path, &worktree_path, branch)
         .await
     {
-        rollback_preview_agent(state, &PreviewAgentRef {
-            preview_id: preview_id.to_string(),
-            agent_id: agent.id.to_string(),
-            repo_id: repo.id.to_string(),
-            workspace_id: repo.workspace_id.to_string(),
-            spec_path: target.spec_path.clone(),
-            branch: branch.to_string(),
-            base_sha,
-            worktree_path,
-            released: false,
-        })
+        rollback_preview_agent(
+            state,
+            &PreviewAgentRef {
+                preview_id: preview_id.to_string(),
+                agent_id: agent.id.to_string(),
+                repo_id: repo.id.to_string(),
+                workspace_id: repo.workspace_id.to_string(),
+                spec_path: target.spec_path.clone(),
+                branch: branch.to_string(),
+                base_sha,
+                worktree_path,
+                released: false,
+            },
+        )
         .await;
         let msg = e.to_string().to_lowercase();
         if msg.contains("not a valid object") || msg.contains("bad default revision") {
@@ -1106,7 +1137,15 @@ async fn provision_preview_agent(
         now,
     );
     if let Err(e) = state.worktrees.create(&wt).await {
-        let mut partial = preview_agent_ref(preview_id, &agent, repo, &target.spec_path, branch, base_sha, worktree_path);
+        let mut partial = preview_agent_ref(
+            preview_id,
+            &agent,
+            repo,
+            &target.spec_path,
+            branch,
+            base_sha,
+            worktree_path,
+        );
         partial.released = true; // no slot was taken
         rollback_preview_agent(state, &partial).await;
         return Err(ApiError::Internal(e));
@@ -1123,10 +1162,20 @@ async fn provision_preview_agent(
     ) {
         Ok(token) => token,
         Err(e) => {
-            let mut partial = preview_agent_ref(preview_id, &agent, repo, &target.spec_path, branch, base_sha, worktree_path);
+            let mut partial = preview_agent_ref(
+                preview_id,
+                &agent,
+                repo,
+                &target.spec_path,
+                branch,
+                base_sha,
+                worktree_path,
+            );
             partial.released = true;
             rollback_preview_agent(state, &partial).await;
-            return Err(ApiError::Internal(anyhow::anyhow!("mint preview agent JWT: {e}")));
+            return Err(ApiError::Internal(anyhow::anyhow!(
+                "mint preview agent JWT: {e}"
+            )));
         }
     };
     if let Err(e) = state
@@ -1134,7 +1183,15 @@ async fn provision_preview_agent(
         .kv_set("agent_tokens", &agent.id.to_string(), token.clone())
         .await
     {
-        let mut partial = preview_agent_ref(preview_id, &agent, repo, &target.spec_path, branch, base_sha, worktree_path);
+        let mut partial = preview_agent_ref(
+            preview_id,
+            &agent,
+            repo,
+            &target.spec_path,
+            branch,
+            base_sha,
+            worktree_path,
+        );
         partial.released = true;
         rollback_preview_agent(state, &partial).await;
         return Err(ApiError::Internal(anyhow::anyhow!(
@@ -1147,7 +1204,15 @@ async fn provision_preview_agent(
     super::budget::increment_active_agents(state, repo.workspace_id.as_str()).await;
 
     Ok(Provisioned {
-        agent_ref: preview_agent_ref(preview_id, &agent, repo, &target.spec_path, branch, base_sha, worktree_path),
+        agent_ref: preview_agent_ref(
+            preview_id,
+            &agent,
+            repo,
+            &target.spec_path,
+            branch,
+            base_sha,
+            worktree_path,
+        ),
         token,
         agent,
         repo: repo.clone(),
@@ -1187,20 +1252,17 @@ async fn launch_preview_agent(
 ) -> Result<(), String> {
     // No compute target in the preview body: resolve the workspace assignment,
     // then the tenant default, exactly like a normal spawn.
-    let ct_entity: Option<ComputeTargetEntity> = if let Some(ct_id) = p
-        .workspace
-        .compute_target_id
-        .clone()
-    {
-        state.compute_targets.get_by_id(&ct_id).await.ok().flatten()
-    } else {
-        state
-            .compute_targets
-            .get_default_for_tenant(&p.workspace.tenant_id)
-            .await
-            .ok()
-            .flatten()
-    };
+    let ct_entity: Option<ComputeTargetEntity> =
+        if let Some(ct_id) = p.workspace.compute_target_id.clone() {
+            state.compute_targets.get_by_id(&ct_id).await.ok().flatten()
+        } else {
+            state
+                .compute_targets
+                .get_default_for_tenant(&p.workspace.tenant_id)
+                .await
+                .ok()
+                .flatten()
+        };
     let target_type = ct_entity
         .as_ref()
         .map(|e| match e.target_type {
@@ -1220,10 +1282,19 @@ async fn launch_preview_agent(
     // The draft travels out-of-band, in the environment only. `GYRE_TASK_ID` is
     // deliberately absent — a preview agent has no task.
     let mut extra_env = HashMap::new();
-    extra_env.insert("GYRE_PREVIEW_ID".to_string(), p.agent_ref.preview_id.clone());
+    extra_env.insert(
+        "GYRE_PREVIEW_ID".to_string(),
+        p.agent_ref.preview_id.clone(),
+    );
     extra_env.insert("GYRE_META_SPEC_DRAFT_KIND".to_string(), draft.kind.clone());
-    extra_env.insert("GYRE_META_SPEC_DRAFT_CONTENT".to_string(), draft.content.clone());
-    extra_env.insert("GYRE_TARGET_SPEC_PATH".to_string(), p.agent_ref.spec_path.clone());
+    extra_env.insert(
+        "GYRE_META_SPEC_DRAFT_CONTENT".to_string(),
+        draft.content.clone(),
+    );
+    extra_env.insert(
+        "GYRE_TARGET_SPEC_PATH".to_string(),
+        p.agent_ref.spec_path.clone(),
+    );
 
     let clone_url = super::spawn::build_clone_url(state, Some(&p.workspace), &p.repo);
     let outcome = super::spawn::launch_agent_process(super::spawn::AgentLaunchParams {
@@ -1274,11 +1345,7 @@ async fn mark_preview_agent_failed(state: &AppState, preview_id: &str, p: &mut P
     }
     let agent_id = p.agent_ref.agent_id.clone();
     mutate_preview(state, preview_id, |record| {
-        if let Some(entry) = record
-            .agents
-            .iter_mut()
-            .find(|a| a.agent_id == agent_id)
-        {
+        if let Some(entry) = record.agents.iter_mut().find(|a| a.agent_id == agent_id) {
             entry.released = true;
         }
     })
@@ -1322,7 +1389,11 @@ async fn rollback_preview_agent(state: &AppState, agent_ref: &PreviewAgentRef) {
     remove_preview_worktree(state, agent_ref).await;
     delete_preview_branch(state, agent_ref).await;
     revoke_preview_token(state, &agent_ref.agent_id).await;
-    if let Ok(wts) = state.worktrees.find_by_agent(&Id::new(&agent_ref.agent_id)).await {
+    if let Ok(wts) = state
+        .worktrees
+        .find_by_agent(&Id::new(&agent_ref.agent_id))
+        .await
+    {
         for wt in wts {
             let _ = state.worktrees.delete(&wt.id).await;
         }
@@ -1382,7 +1453,11 @@ async fn remove_preview_worktree(state: &AppState, agent_ref: &PreviewAgentRef) 
             );
         }
     }
-    if let Ok(wts) = state.worktrees.find_by_agent(&Id::new(&agent_ref.agent_id)).await {
+    if let Ok(wts) = state
+        .worktrees
+        .find_by_agent(&Id::new(&agent_ref.agent_id))
+        .await
+    {
         for wt in wts {
             let _ = state.worktrees.delete(&wt.id).await;
         }
@@ -1419,11 +1494,7 @@ async fn release_preview_slot(state: &AppState, agent_ref: &PreviewAgentRef) {
     super::budget::decrement_active_agents(state, &agent_ref.workspace_id).await;
     let agent_id = agent_ref.agent_id.clone();
     mutate_preview(state, &agent_ref.preview_id, |record| {
-        if let Some(entry) = record
-            .agents
-            .iter_mut()
-            .find(|a| a.agent_id == agent_id)
-        {
+        if let Some(entry) = record.agents.iter_mut().find(|a| a.agent_id == agent_id) {
             entry.released = true;
         }
     })
@@ -1615,11 +1686,7 @@ mod tests {
         git(&workdir, &["commit", "-m", "seed specs"]);
         git(
             &workdir,
-            &[
-                "push",
-                repo_dir.to_str().unwrap(),
-                "HEAD:refs/heads/main",
-            ],
+            &["push", repo_dir.to_str().unwrap(), "HEAD:refs/heads/main"],
         );
 
         let state = crate::mem::test_state_with_preview_config(
@@ -1774,10 +1841,17 @@ mod tests {
         with_agent_command(script.to_str().unwrap(), || async {
             let resp = post_preview(
                 &app,
-                preview_body(&repo_id, &["specs/system/search.md", "specs/system/identity.md"]),
+                preview_body(
+                    &repo_id,
+                    &["specs/system/search.md", "specs/system/identity.md"],
+                ),
             )
             .await;
-            assert_eq!(resp.status(), StatusCode::ACCEPTED, "preview must be accepted");
+            assert_eq!(
+                resp.status(),
+                StatusCode::ACCEPTED,
+                "preview must be accepted"
+            );
             let json = body_json(resp).await;
 
             let preview_id = json["preview_id"].as_str().unwrap().to_string();
@@ -1785,7 +1859,10 @@ mod tests {
             let agents = json["agents"].as_array().unwrap();
             assert_eq!(agents.len(), 2, "one agent per target: {json}");
 
-            let mut branches: Vec<&str> = agents.iter().map(|a| a["branch"].as_str().unwrap()).collect();
+            let mut branches: Vec<&str> = agents
+                .iter()
+                .map(|a| a["branch"].as_str().unwrap())
+                .collect();
             branches.sort();
             assert_eq!(
                 branches,
@@ -1797,7 +1874,10 @@ mod tests {
             );
             for a in agents {
                 assert_eq!(a["repo_id"].as_str().unwrap(), repo_id);
-                assert!(a["spec_path"].as_str().unwrap().starts_with("specs/system/"));
+                assert!(a["spec_path"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("specs/system/"));
                 assert!(!a["agent_id"].as_str().unwrap().is_empty());
             }
 
@@ -1850,7 +1930,9 @@ mod tests {
             // shell creates the redirect target before `env` writes it, so
             // poll until the dump has content, not merely exists.
             let env = soon(|| {
-                std::fs::read_to_string(&env_out).ok().filter(|s| !s.is_empty())
+                std::fs::read_to_string(&env_out)
+                    .ok()
+                    .filter(|s| !s.is_empty())
             })
             .await;
             assert!(
@@ -1886,7 +1968,10 @@ mod tests {
                 "preview must not create tasks"
             );
             let provenance = state.kv_store.kv_list("agent_provenance").await.unwrap();
-            assert!(provenance.is_empty(), "no provenance recording: {provenance:?}");
+            assert!(
+                provenance.is_empty(),
+                "no provenance recording: {provenance:?}"
+            );
             let agent_refs = crate::git_refs::count_refs_under(&repo.path, "refs/agents/").await;
             assert_eq!(agent_refs, 0, "no refs/agents/* writes in preview mode");
             let task_refs = crate::git_refs::count_refs_under(&repo.path, "refs/tasks/").await;
@@ -1920,7 +2005,10 @@ mod tests {
                 .await
                 .unwrap()
                 .expect("usage row must exist after preview spawn");
-            assert!(usage.active_agents >= 2, "two preview agents must be counted");
+            assert!(
+                usage.active_agents >= 2,
+                "two preview agents must be counted"
+            );
 
             // Status reflects the real Active state while the process runs.
             let status_resp = get_preview_status(&app, &preview_id).await;
@@ -1958,7 +2046,8 @@ mod tests {
         let script = env_dump_script(dir.path(), &env_out);
 
         with_agent_command(script.to_str().unwrap(), || async {
-            let resp = post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+            let resp =
+                post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
             assert_eq!(resp.status(), StatusCode::ACCEPTED);
             let json = body_json(resp).await;
             let preview_id = json["preview_id"].as_str().unwrap().to_string();
@@ -1985,24 +2074,24 @@ mod tests {
             assert_eq!(del.status(), StatusCode::NO_CONTENT);
 
             // Branch gone, worktree gone, kv records gone.
-            assert!(!state.git_ops.branch_exists(&repo.path, &branch).await.unwrap());
+            assert!(!state
+                .git_ops
+                .branch_exists(&repo.path, &branch)
+                .await
+                .unwrap());
             assert!(!std::path::Path::new(&wt_path).exists());
-            assert!(
-                state
-                    .kv_store
-                    .kv_get("meta_spec_previews", &preview_id)
-                    .await
-                    .unwrap()
-                    .is_none()
-            );
-            assert!(
-                state
-                    .kv_store
-                    .kv_get("preview_agents", &agent_id)
-                    .await
-                    .unwrap()
-                    .is_none()
-            );
+            assert!(state
+                .kv_store
+                .kv_get("meta_spec_previews", &preview_id)
+                .await
+                .unwrap()
+                .is_none());
+            assert!(state
+                .kv_store
+                .kv_get("preview_agents", &agent_id)
+                .await
+                .unwrap()
+                .is_none());
             assert!(
                 state
                     .kv_store
@@ -2061,7 +2150,8 @@ mod tests {
         make_executable(&script_path);
 
         with_agent_command(script_path.to_str().unwrap(), || async {
-            let resp = post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+            let resp =
+                post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
             assert_eq!(resp.status(), StatusCode::ACCEPTED);
             let json = body_json(resp).await;
             let preview_id = json["preview_id"].as_str().unwrap().to_string();
@@ -2103,9 +2193,16 @@ mod tests {
 
             // Worktree removed on completion; branch survives for diffing.
             let wt_path = format!("{}/worktrees/{}", repo.path, branch.replace('/', "-"));
-            assert!(!std::path::Path::new(&wt_path).exists(), "worktree removed on finish");
             assert!(
-                state.git_ops.branch_exists(&repo.path, &branch).await.unwrap(),
+                !std::path::Path::new(&wt_path).exists(),
+                "worktree removed on finish"
+            );
+            assert!(
+                state
+                    .git_ops
+                    .branch_exists(&repo.path, &branch)
+                    .await
+                    .unwrap(),
                 "branch survives for diffing"
             );
             assert!(
@@ -2159,13 +2256,20 @@ mod tests {
         // Unknown repo.
         let resp = post_preview(
             &app,
-            preview_body("00000000-0000-0000-0000-000000000000", &["specs/system/search.md"]),
+            preview_body(
+                "00000000-0000-0000-0000-000000000000",
+                &["specs/system/search.md"],
+            ),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         // Spec path that does not exist in the repo.
-        let resp = post_preview(&app, preview_body(&repo_id, &["specs/system/does-not-exist.md"])).await;
+        let resp = post_preview(
+            &app,
+            preview_body(&repo_id, &["specs/system/does-not-exist.md"]),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
         // Read-only caller → 403 (no agents spawned, so no env lock needed).
@@ -2218,13 +2322,15 @@ mod tests {
         let script = env_dump_script(dir.path(), &env_out);
 
         with_agent_command(script.to_str().unwrap(), || async {
-            let resp = post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+            let resp =
+                post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
             assert_eq!(resp.status(), StatusCode::ACCEPTED);
             let first = body_json(resp).await;
             let preview_id = first["preview_id"].as_str().unwrap().to_string();
 
             // One preview agent already running; the cap is 1.
-            let resp = post_preview(&app, preview_body(&repo_id, &["specs/system/identity.md"])).await;
+            let resp =
+                post_preview(&app, preview_body(&repo_id, &["specs/system/identity.md"])).await;
             assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
 
             delete_preview(&app, &preview_id).await;
@@ -2245,7 +2351,8 @@ mod tests {
         let script = env_dump_script(dir.path(), &env_out);
 
         with_agent_command(script.to_str().unwrap(), || async {
-            let resp = post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+            let resp =
+                post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
             assert_eq!(resp.status(), StatusCode::ACCEPTED);
             let old = body_json(resp).await;
             let old_id = old["preview_id"].as_str().unwrap().to_string();
@@ -2266,7 +2373,8 @@ mod tests {
                 .unwrap();
 
             // A second run, left fresh (created_at = now ⇒ just under TTL).
-            let resp = post_preview(&app, preview_body(&repo_id, &["specs/system/identity.md"])).await;
+            let resp =
+                post_preview(&app, preview_body(&repo_id, &["specs/system/identity.md"])).await;
             assert_eq!(resp.status(), StatusCode::ACCEPTED);
             let fresh = body_json(resp).await;
             let fresh_id = fresh["preview_id"].as_str().unwrap().to_string();
@@ -2447,7 +2555,11 @@ async fn require_registry_scope(
         ));
     };
     match state.workspaces.find_by_id(&Id::new(ws_id)).await? {
-        Some(ws) if ws.tenant_id.as_str() == auth.tenant_id || auth.roles.contains(&UserRole::Admin) => Ok(()),
+        Some(ws)
+            if ws.tenant_id.as_str() == auth.tenant_id || auth.roles.contains(&UserRole::Admin) =>
+        {
+            Ok(())
+        }
         Some(_) => Err(ApiError::Forbidden(format!(
             "workspace-scoped meta-spec '{ws_id}' is outside the caller's tenant"
         ))),
@@ -2702,9 +2814,7 @@ pub async fn get_meta_spec_version(
         .await
         .map_err(ApiError::Internal)?
         .ok_or_else(|| {
-            ApiError::NotFound(format!(
-                "version {version} of meta-spec '{id}' not found"
-            ))
+            ApiError::NotFound(format!("version {version} of meta-spec '{id}' not found"))
         })?;
     Ok(Json(ver))
 }

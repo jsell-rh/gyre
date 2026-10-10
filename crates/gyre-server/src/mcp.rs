@@ -5104,8 +5104,7 @@ mod tests {
     /// process — the MCP guard keys off the kv record, not the process.
     async fn register_preview_agent(state: &std::sync::Arc<crate::AppState>) -> (String, String) {
         let agent_id = "preview-agent-1".to_string();
-        let mut agent =
-            gyre_domain::Agent::new(gyre_common::Id::new(&agent_id), "preview", 0);
+        let mut agent = gyre_domain::Agent::new(gyre_common::Id::new(&agent_id), "preview", 0);
         agent.workspace_id = gyre_common::Id::new("ws-1");
         agent
             .transition_status(gyre_domain::AgentStatus::Active)
@@ -5164,19 +5163,12 @@ mod tests {
                 "gyre_create_mr",
                 json!({ "repo_id": "r-1", "source_branch": "b", "title": "t" }),
             ),
-            (
-                "gyre_agent_complete",
-                json!({ "agent_id": agent_id }),
-            ),
+            ("gyre_agent_complete", json!({ "agent_id": agent_id })),
             ("conversation_upload", json!({ "data": "" })),
         ];
         for (tool, args) in ceremony_tools {
-            let (_status, json) = mcp_post_with_token(
-                app.clone(),
-                tool_call(tool, args),
-                &token,
-            )
-            .await;
+            let (_status, json) =
+                mcp_post_with_token(app.clone(), tool_call(tool, args), &token).await;
             // The guard refuses before dispatch, so the error surfaces as a
             // JSON-RPC error object, not as a tool result.
             let text = json["error"]["message"]
