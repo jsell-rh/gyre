@@ -620,6 +620,58 @@ pub(crate) async fn reevaluate_lineage_deps(state: &AppState, mr_id: &Id) {
     }
 }
 
+/// Select the open MRs whose lineage dependencies must be re-evaluated
+/// after a push moved `branches` in `repo_id`.
+///
+/// merge-dependencies.md §2 requires re-evaluation in both directions:
+/// - The MRs whose own source branch was pushed (the pushed branch may
+///   have been rebased onto / away from another MR's branch).
+/// - The MRs that depend (via a `BranchLineage` edge) on an MR whose
+///   source branch was pushed — when the *parent* MR is rebased, the
+///   child's lineage edge may go stale even though the child's branch
+///   itself never moved.
+///
+/// Private to the crate so git_http post-receive processing and tests
+/// share one selection rule.
+pub(crate) async fn mrs_needing_lineage_reeval(
+    state: &AppState,
+    repo_id: &Id,
+    branches: &[String],
+) -> Vec<Id> {
+    let mrs = match state.merge_requests.list_by_repo(repo_id).await {
+        Ok(mrs) => mrs,
+        Err(e) => {
+            tracing::warn!(%repo_id, error = %e, "lineage re-eval: failed to list MRs");
+            return vec![];
+        }
+    };
+    let pushed: std::collections::HashSet<&str> = branches.iter().map(|b| b.as_str()).collect();
+    let mut selected: Vec<Id> = Vec::new();
+    for mr in &mrs {
+        if mr.status != MrStatus::Open {
+            continue;
+        }
+        let own_branch_pushed = pushed.contains(mr.source_branch.as_str());
+        // Parent-direction re-evaluation (spec §2 item 3): a lineage edge
+        // targets the parent MR by id; re-check the child when the parent
+        // MR's source branch moved. The parent's branch name is looked up
+        // from the stored MR (the child stores only the MR id).
+        let lineage_parent_branch_pushed = mr
+            .depends_on
+            .iter()
+            .filter(|d| d.source == DependencySource::BranchLineage)
+            .any(|d| {
+                mrs.iter()
+                    .find(|m| m.id == d.target_mr_id)
+                    .is_some_and(|parent| pushed.contains(parent.source_branch.as_str()))
+            });
+        if own_branch_pushed || lineage_parent_branch_pushed {
+            selected.push(mr.id.clone());
+        }
+    }
+    selected
+}
+
 pub async fn list_mrs(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListMrsQuery>,
@@ -1727,10 +1779,6 @@ mod tests {
             self.git(&["update-ref", &format!("refs/heads/{branch}"), sha]);
         }
 
-        fn rev_parse(&self, rev: &str) -> String {
-            self.git(&["rev-parse", rev])
-        }
-
         async fn create_mr(&self, source: &str) -> serde_json::Value {
             let app = crate::api::api_router()
                 .with_state(self.state.clone())
@@ -1971,6 +2019,7 @@ mod tests {
                     .method("PUT")
                     .uri(format!("/api/v1/merge-requests/{mr_b_id}/dependencies"))
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
                 )
@@ -1990,5 +2039,55 @@ mod tests {
             .collect();
         assert!(sources.contains(&"explicit"));
         assert!(sources.contains(&"branch-lineage"));
+    }
+
+    #[tokio::test]
+    async fn lineage_parent_rebase_rechecks_dependents() {
+        // merge-dependencies.md §2 item 3: "If the parent MR is later
+        // rebased, the dependency is re-evaluated." The PARENT's branch is
+        // pushed; the child's branch never moves. The push-triggered
+        // selection must still pick the child MR for re-evaluation and
+        // drop the stale edge (parent's new tip is no longer the child's
+        // merge base).
+        let repo = LineageRepo::new().await;
+
+        let base = repo.commit_on("main", None, "base");
+        let a = repo.commit_on("feat/a", Some(&base), "feat A");
+        let _mr_a = repo.create_mr("feat/a").await;
+        let _b = repo.commit_on("feat/b", Some(&a), "feat B forked from A");
+        let mr_b = repo.create_mr("feat/b").await;
+        let mr_b_id = mr_b["id"].as_str().unwrap().to_string();
+        assert_eq!(repo.deps_of(&mr_b_id).await.len(), 1);
+
+        // Parent rebases onto a fresh main — its new tip is NOT an
+        // ancestor of feat/b anymore.
+        let new_main = repo.commit_on("main", Some(&base), "main moves on");
+        let a_rebased = repo.commit_on("feat/a2", Some(&new_main), "A rebased");
+        repo.rebase_branch_to("feat/a", &a_rebased);
+        repo.git(&["update-ref", "-d", "refs/heads/feat/a2"]);
+
+        // Push-triggered selection exactly as the post-receive hook runs it:
+        // only feat/a was pushed, yet the child holding the lineage edge
+        // must be selected and re-evaluated.
+        let selected = super::mrs_needing_lineage_reeval(
+            &repo.state,
+            &repo.repo_id,
+            &["feat/a".to_string()],
+        )
+        .await;
+        assert!(
+            selected.contains(&Id::new(&mr_b_id)),
+            "child MR must be selected when only the parent branch was pushed"
+        );
+
+        for mr_id in selected {
+            super::reevaluate_lineage_deps(&repo.state, &mr_id).await;
+        }
+
+        let deps = repo.deps_of(&mr_b_id).await;
+        assert!(
+            deps.is_empty(),
+            "parent rebased away from child: stale lineage edge must be dropped: {deps:?}"
+        );
     }
 }

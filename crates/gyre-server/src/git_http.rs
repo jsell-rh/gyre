@@ -674,28 +674,25 @@ pub async fn git_receive_pack(
         .await;
 
         // merge-dependencies.md §2: re-evaluate branch lineage dependencies
-        // when a push updates an MR's source branch (e.g. a rebase). The
-        // pushed branch may have been rebased onto the default branch (drop
-        // stale lineage deps) or forked onto another MR's branch (add new
-        // ones). Runs for every branch ref pushed, not just the default.
-        for update in ref_updates.iter() {
-            let Some(branch) = update.refname.strip_prefix("refs/heads/") else {
-                continue;
-            };
-            let pushed_branch = branch.to_string();
-            let mrs = state_clone
-                .merge_requests
-                .list_by_repo(&gyre_common::Id::new(&repo_id_clone))
-                .await
-                .unwrap_or_default();
-            for mr in mrs {
-                if mr.source_branch == pushed_branch && mr.status == gyre_domain::MrStatus::Open {
-                    crate::api::merge_requests::reevaluate_lineage_deps(
-                        &state_clone,
-                        &mr.id,
-                    )
-                    .await;
-                }
+        // when a push updates branches. Covers both directions:
+        // - the pushed branch itself was rebased/forked (own MR re-checked),
+        // - the pushed branch is a *parent* in a lineage edge (spec §2
+        //   item 3: "if the parent MR is later rebased, the dependency is
+        //   re-evaluated") — the dependent child's edge is re-checked even
+        //   though the child's branch never moved.
+        let pushed_branches: Vec<String> = ref_updates
+            .iter()
+            .filter_map(|u| u.refname.strip_prefix("refs/heads/").map(str::to_string))
+            .collect();
+        if !pushed_branches.is_empty() {
+            for mr_id in crate::api::merge_requests::mrs_needing_lineage_reeval(
+                &state_clone,
+                &gyre_common::Id::new(&repo_id_clone),
+                &pushed_branches,
+            )
+            .await
+            {
+                crate::api::merge_requests::reevaluate_lineage_deps(&state_clone, &mr_id).await;
             }
         }
         // Spec registry: sync ledger from manifest on pushes to the default branch (M21.1).
@@ -4524,5 +4521,202 @@ mod tests {
         assert_eq!(explicit.len(), 1, "should have 1 explicit constraint");
         assert_eq!(gate.len(), 1, "should have 1 gate constraint");
         assert_eq!(gate[0].gate_name, "Code Review");
+    }
+
+    /// TASK-167 / merge-dependencies.md §2: an end-to-end push through
+    /// `git_receive_pack` (stateless receive-pack body, real git) must
+    /// trigger lineage re-evaluation in post-receive processing. The
+    /// parent MR's branch is pushed; the child's stale lineage edge must
+    /// be dropped even though the child's branch never moved.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_rebases_parent_branch_drops_child_lineage_dep() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        // Author commits with git plumbing directly in the bare repo.
+        let git = |args: &[&str]| -> String {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let commit_on = |branch: &str, parent: Option<&str>, msg: &str| -> String {
+            let tree = git(&["mktree"]);
+            let sha = match parent {
+                Some(p) => git(&["commit-tree", &tree, "-p", p, "-m", msg]),
+                None => git(&["commit-tree", &tree, "-m", msg]),
+            };
+            git(&["update-ref", &format!("refs/heads/{branch}"), &sha]);
+            sha
+        };
+
+        // main → feat/a (MR A) → feat/b (MR B, forked from feat/a).
+        let base = commit_on("main", None, "base");
+        let a = commit_on("feat/a", Some(&base), "feat A");
+        let _b = commit_on("feat/b", Some(&a), "feat B on A");
+
+        let repo = state
+            .repos
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| r.name == TEST_REPO_NAME)
+            .unwrap();
+        let mr_a_id = {
+            let mut mr = gyre_domain::MergeRequest::new(
+                gyre_common::Id::new("mr-a"),
+                repo.id.clone(),
+                "A",
+                "feat/a".to_string(),
+                "main".to_string(),
+                0,
+            );
+            mr.workspace_id = gyre_common::Id::new("ws-test");
+            state.merge_requests.create(&mr).await.unwrap();
+            mr.id.to_string()
+        };
+        let mr_b_id = {
+            let mut mr = gyre_domain::MergeRequest::new(
+                gyre_common::Id::new("mr-b"),
+                repo.id.clone(),
+                "B",
+                "feat/b".to_string(),
+                "main".to_string(),
+                0,
+            );
+            mr.workspace_id = gyre_common::Id::new("ws-test");
+            state.merge_requests.create(&mr).await.unwrap();
+            mr.id.to_string()
+        };
+
+        // B's MR is created via the domain path (no REST in this module's
+        // harness) — seed its lineage edge by running the creation-time
+        // detection directly, exactly what create_mr does.
+        let lineage = crate::api::merge_requests::detect_lineage_deps(
+            &state,
+            &repo.id,
+            &repo.path,
+            "feat/b",
+            "main",
+        )
+        .await;
+        assert_eq!(lineage.len(), 1, "B must detect lineage on A");
+        {
+            let mut mr_b = state
+                .merge_requests
+                .find_by_id(&gyre_common::Id::new(&mr_b_id))
+                .await
+                .unwrap()
+                .unwrap();
+            mr_b.depends_on = lineage;
+            state.merge_requests.update(&mr_b).await.unwrap();
+        }
+
+        // Rebase feat/a onto a fresh main commit: the rebased commit is
+        // authored on a temp branch so feat/a's current tip stays the
+        // pre-rebase commit; the push below then moves feat/a for real
+        // (non-fast-forward is accepted by default in a bare repo).
+        let new_main = commit_on("main", Some(&base), "main moves on");
+        let a2 = commit_on("feat/a2", Some(&new_main), "A rebased");
+
+        // Push feat/a through the real HTTP handler: pkt-line
+        // `{old} {new} refs/heads/feat/a` + flush-pkt + a packfile
+        // containing the new commit (receive-pack requires the objects,
+        // even though they already exist in the repo).
+        let old_a = git(&["rev-parse", "refs/heads/feat/a"]);
+        let line = format!("{old_a} {a2} refs/heads/feat/a");
+        let mut body = super::pkt_line(&line);
+        body.extend_from_slice(b"0000");
+        let pack = {
+            let mut child = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_path)
+                .args(["pack-objects", "--stdout"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            use std::io::Write as _;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(format!("{a2}\n").as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "pack-objects failed");
+            out.stdout
+        };
+        assert!(!pack.is_empty(), "pack-objects produced empty pack");
+        body.extend_from_slice(&pack);
+        // The push must actually move the ref (verified below before
+        // asserting on the lineage effect).
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", "Bearer test-token")
+                    .header("content-type", "application/x-git-receive-pack-request")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The push itself must have moved feat/a (else the test would pass
+        // vacuously — parse_ref_updates only records non-deletion updates
+        // with valid SHAs).
+        assert_eq!(
+            git(&["rev-parse", "refs/heads/feat/a"]),
+            a2,
+            "receive-pack did not move refs/heads/feat/a to the rebased commit"
+        );
+
+        // Post-receive processing runs in a spawned task — poll until the
+        // child's lineage edge is dropped (bounded).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let mr_b = state
+                .merge_requests
+                .find_by_id(&gyre_common::Id::new(&mr_b_id))
+                .await
+                .unwrap()
+                .unwrap();
+            if mr_b.depends_on.is_empty() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "lineage re-evaluation after parent-branch push never ran; \
+                 mr_b still depends on: {:?}",
+                mr_b.depends_on
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        // The parent's own MR stays dep-free (detection is one-directional).
+        let mr_a = state
+            .merge_requests
+            .find_by_id(&gyre_common::Id::new(&mr_a_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(mr_a.depends_on.is_empty());
     }
 }
