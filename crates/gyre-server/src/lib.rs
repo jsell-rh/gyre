@@ -265,8 +265,13 @@ pub struct AppState {
     /// backend owning its handle. Lets kill/is_alive reach the right
     /// orchestrator (docker/podman, remote SSH docker, or kubectl)
     /// instead of assuming a local pid (agent-runtime.md §3).
+    ///
+    /// Values are `Arc` so the exit monitor can clone the backend and drop
+    /// the lock BEFORE probing liveness — an SSH probe can block for the
+    /// TCP connect timeout, and holding this lock across it would stall
+    /// admin kills and every new spawn.
     pub spawned_backends:
-        Arc<Mutex<HashMap<String, crate::api::spawn::SpawnBackend>>>,
+        Arc<Mutex<HashMap<String, std::sync::Arc<crate::api::spawn::SpawnBackend>>>>,
     /// Per-agent log buffers: agent_id -> lines in "[ts] message" format.
     pub agent_logs: Arc<Mutex<HashMap<String, Vec<String>>>>,
     /// Per-agent broadcast channels for live log SSE streaming.

@@ -281,7 +281,7 @@ pub async fn admin_kill_agent(
     // agents whose backend is unknown (pre-task-117 records).
     if let Some(handle) = state.process_registry.lock().await.remove(&id) {
         let backend = state.spawned_backends.lock().await.remove(&id);
-        let kill_result = match &backend {
+        let kill_result = match backend.as_deref() {
             Some(b) => gyre_ports::ComputeTarget::kill_process(b, &handle).await,
             None => {
                 gyre_ports::ComputeTarget::kill_process(

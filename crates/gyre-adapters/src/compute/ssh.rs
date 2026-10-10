@@ -43,6 +43,12 @@ impl SshTarget {
             "StrictHostKeyChecking=accept-new".to_string(),
             "-o".to_string(),
             "BatchMode=yes".to_string(),
+            // Bound the connection setup: without this a blackholed host
+            // stalls the caller for the OS TCP timeout (~2min), which
+            // blocks kill/is_alive probes far beyond the exit monitor's
+            // poll interval.
+            "-o".to_string(),
+            "ConnectTimeout=10".to_string(),
         ];
         if let Some(port) = self.port {
             args.push("-p".to_string());
@@ -579,6 +585,25 @@ mod tests {
         let target = SshTarget::new("user", "host");
         let args = target.base_ssh_args();
         assert!(args.contains(&"BatchMode=yes".to_string()));
+    }
+
+    #[test]
+    fn ssh_base_args_bound_connect_timeout() {
+        // A blackholed remote must fail within ~10s, not the OS TCP
+        // timeout — kill/is_alive probes hold no locks but still gate
+        // the exit monitor loop.
+        let target = SshTarget::new("user", "host");
+        let args = target.base_ssh_args();
+        let idx = args
+            .iter()
+            .position(|a| a.starts_with("ConnectTimeout="))
+            .expect("ConnectTimeout option missing");
+        let secs: u64 = args[idx]
+            .split('=')
+            .nth(1)
+            .and_then(|v| v.parse().ok())
+            .expect("ConnectTimeout value must be numeric");
+        assert!(secs <= 15, "ConnectTimeout must bound probes tightly, got {secs}s");
     }
 
     #[test]

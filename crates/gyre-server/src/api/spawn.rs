@@ -741,7 +741,14 @@ pub(crate) async fn spawn_agent_core(
                     Ok(handle) => {
                         spawned_pid = handle.pid;
                         spawned_container_id = Some(handle.id.clone());
-                        spawned_container_image = Some(image.clone());
+                        // Workload-attestation image hash: the resolved
+                        // image digest (sha256:...), not the image name —
+                        // `derive_attestation_level` treats a non-empty
+                        // image_hash as a Level-3 "Gyre-managed runtime"
+                        // signal, so a bare tag must not inflate it.
+                        // Best-effort: no runtime / unresolvable image →
+                        // None (level stays 2).
+                        spawned_container_image = ct.image_digest().await.ok();
 
                         // M19.3: Capture container audit record (best-effort).
                         let runtime_str = cfg.config["runtime"]
@@ -864,7 +871,11 @@ pub(crate) async fn spawn_agent_core(
                         Ok(handle) => {
                             spawned_pid = handle.pid;
                             spawned_container_id = Some(handle.id.clone());
-                            spawned_container_image = Some(ssh_docker.image.clone());
+                            // Resolved digest from the REMOTE docker daemon
+                            // (see container arm: image_hash must be a
+                            // digest, not a tag, to count as Level 3).
+                            spawned_container_image =
+                                ssh_docker.remote_image_digest().await.ok();
                             register_spawned_agent(
                                 state,
                                 &agent,
@@ -941,7 +952,10 @@ pub(crate) async fn spawn_agent_core(
                     Ok(handle) => {
                         spawned_pid = handle.pid;
                         spawned_container_id = Some(handle.id.clone());
-                        spawned_container_image = Some(k8s.image.clone());
+                        // Digest the cluster actually pulled (imageID), not
+                        // the image tag (see container arm).
+                        spawned_container_image =
+                            k8s.pod_image_digest(&handle.id).await.ok();
                         register_spawned_agent(
                             state,
                             &agent,
@@ -979,7 +993,8 @@ pub(crate) async fn spawn_agent_core(
                             Ok(handle) => {
                                 spawned_pid = handle.pid;
                                 spawned_container_id = Some(handle.id.clone());
-                                spawned_container_image = Some(image.clone());
+                                // Digest, not image name (see container arm).
+                                spawned_container_image = ct.image_digest().await.ok();
                                 register_spawned_agent(
                                     state,
                                     &agent,
@@ -1242,7 +1257,7 @@ async fn register_spawned_agent(
         .spawned_backends
         .lock()
         .await
-        .insert(agent_id_str.clone(), backend);
+        .insert(agent_id_str.clone(), std::sync::Arc::new(backend));
 
     // Background monitor: watch for process/container/Pod exit and update
     // agent status. Cloning the Arc'd state keeps the loop running after
@@ -1270,21 +1285,22 @@ async fn monitor_spawned_agent_exit(state: Arc<AppState>, agent_id: String) {
             }
         };
 
-        // Probe the backend that owns this handle. Holding the backends
-        // lock across the await is fine: it is only ever taken briefly by
-        // registration (spawn) and unregistration (kill / monitor exit),
-        // never by another probe.
-        let alive = {
+        // Probe the backend that owns this handle. Clone the Arc out and
+        // DROP the lock before awaiting: an SSH probe can block for the
+        // TCP connect timeout, and holding the lock across it would stall
+        // admin kills and every new spawn registration.
+        let backend = {
             let backends = state.spawned_backends.lock().await;
             match backends.get(&agent_id) {
-                Some(b) => {
-                    gyre_ports::ComputeTarget::is_alive(b, &handle)
-                        .await
-                        .unwrap_or(false)
-                }
+                Some(b) => std::sync::Arc::clone(b),
+                // Already unregistered (killed, or another monitor iteration
+                // finished first) — nothing left to watch.
                 None => break,
             }
         };
+        let alive = gyre_ports::ComputeTarget::is_alive(backend.as_ref(), &handle)
+            .await
+            .unwrap_or(false);
 
         if !alive {
             state.process_registry.lock().await.remove(&agent_id);
@@ -2031,6 +2047,8 @@ async fn create_derived_input_for_agent(
 
 #[cfg(test)]
 mod tests {
+    use super::{register_spawned_agent, SpawnBackend};
+    use gyre_ports::ComputeTarget as _;
     use crate::mem::test_state;
     use axum::{body::Body, Router};
     use http::{Request, StatusCode};

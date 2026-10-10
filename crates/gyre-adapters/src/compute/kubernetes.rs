@@ -83,12 +83,51 @@ impl KubernetesTarget {
         }
         cmd
     }
+
+    /// Resolve the digest the cluster actually pulled for the agent image
+    /// (`status.containerStatuses[0].imageID`), e.g.
+    /// `docker-pullable://registry/gyre-agent@sha256:...`.
+    ///
+    /// Best-effort: `Err` when the Pod is not yet scheduled or the cluster
+    /// is unreachable. Callers use it for the `wl_image_hash` attestation
+    /// claim and must tolerate absence.
+    pub async fn pod_image_digest(&self, pod: &str) -> Result<String> {
+        let output = self
+            .kubectl()
+            .arg("get")
+            .arg("pod")
+            .arg(pod)
+            .arg("-o")
+            .arg("jsonpath={.status.containerStatuses[0].imageID}")
+            .output()
+            .await
+            .with_context(|| format!("kubectl get pod {pod} (imageID) failed"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!(
+                "kubectl get pod {pod} imageID failed: {}",
+                stderr
+            ));
+        }
+        let digest = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if digest.is_empty() {
+            return Err(anyhow!(
+                "pod {pod} has no imageID yet (not scheduled)"
+            ));
+        }
+        Ok(digest)
+    }
 }
 
 
 /// Build the Pod manifest passed to `kubectl apply`. Kept as a separate
 /// function so tests can assert the generated security defaults.
+///
+/// The Pod name is the RFC 1123-sanitized form of the agent name — the same
+/// `pod_name()` that `spawn_process` returns in the `ProcessHandle`, so the
+/// manifest, wait, kill, and is_alive paths all address the same Pod.
 fn build_pod_manifest(target: &KubernetesTarget, config: &SpawnConfig) -> serde_json::Value {
+    let name = pod_name(&config.name);
     // Spec security defaults (agent-runtime.md §3): --memory=2g,
     // --pids-limit=512 equivalents. Kubernetes has no direct pids-limit
     // field; it is enforced via the pod-level `pids` cgroup limit which
@@ -127,9 +166,6 @@ fn build_pod_manifest(target: &KubernetesTarget, config: &SpawnConfig) -> serde_
         },
     });
 
-    if let Some(sa) = &target.service_account {
-        container["serviceAccountName"] = serde_json::Value::String(sa.clone());
-    }
     if let Some(policy) = &target.image_pull_policy {
         container["imagePullPolicy"] = serde_json::Value::String(policy.clone());
     }
@@ -138,10 +174,10 @@ fn build_pod_manifest(target: &KubernetesTarget, config: &SpawnConfig) -> serde_
         "apiVersion": "v1",
         "kind": "Pod",
         "metadata": {
-            "name": config.name,
+            "name": name,
             "labels": {
                 "app.kubernetes.io/managed-by": "gyre",
-                "gyre-agent": config.name,
+                "gyre-agent": name,
             },
         },
         "spec": {
@@ -154,6 +190,9 @@ fn build_pod_manifest(target: &KubernetesTarget, config: &SpawnConfig) -> serde_
         },
     });
 
+    // serviceAccountName is a Pod-spec field, NOT a container field —
+    // server-side validation (strict by default since k8s 1.27) rejects
+    // unknown container fields, which would fail the whole apply.
     if let Some(sa) = &target.service_account {
         pod["spec"]["serviceAccountName"] = serde_json::Value::String(sa.clone());
     }
@@ -410,6 +449,28 @@ mod tests {
         assert_eq!(m["spec"]["serviceAccountName"], "gyre-agent");
         assert_eq!(m["spec"]["containers"][0]["resources"]["limits"]["memory"], "4Gi");
         assert_eq!(m["spec"]["containers"][0]["resources"]["limits"]["cpu"], "4");
+        // serviceAccountName must NOT appear at the container level —
+        // strict server-side validation rejects unknown container fields,
+        // which would fail the whole apply.
+        assert!(
+            m["spec"]["containers"][0].get("serviceAccountName").is_none(),
+            "serviceAccountName leaked into container spec"
+        );
+    }
+
+    /// The manifest name must be the same sanitized Pod name that
+    /// spawn_process puts in the ProcessHandle — otherwise kill/is_alive
+    /// address a Pod that never exists (or the apply is rejected for an
+    /// invalid name).
+    #[test]
+    fn manifest_name_matches_handle_name_for_names_needing_sanitization() {
+        let t = KubernetesTarget::new("gyre-agent:test");
+        let cfg = spawn_config("My_Agent.1");
+        let m = build_pod_manifest(&t, &cfg);
+        let expected = pod_name(&cfg.name);
+        assert_eq!(expected, "my-agent.1");
+        assert_eq!(m["metadata"]["name"], expected);
+        assert_eq!(m["metadata"]["labels"]["gyre-agent"], expected);
     }
 
     #[test]
