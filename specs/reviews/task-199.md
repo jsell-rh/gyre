@@ -35,3 +35,35 @@ All probes run in a dedicated git worktree (`/tmp/task199-review-wt`, detached a
 ### Coverage section closure
 
 `dependency-graph.md` §Dependency Entity (coverage row 4, the last `task-assigned` row in that file): the specced behavior — the dependency graph surviving a restart via the `store!`-selected adapters — is now enforced in production wiring and pinned by a mutation-proven restart test. Row 4 can be promoted from `task-assigned` to `verified` (controller's auditor call; the `breaking_changes`/`dependency_policies` persistence portion remains open under task-163, per the task's own scope note).
+
+## Round 2 (candidate c8ea0b39, assigned base 918f16bf)
+
+Independent re-review after the 092c0a73 contract repair. Comparison base `918f16bf` →
+candidate `c8ea0b39`: exactly 4 files changed — `crates/gyre-server/src/lib.rs` (+5/−1,
+the store! wiring), `crates/gyre-server/tests/dependency_persistence.rs` (new, 120 lines),
+`specs/reviews/task-199.md` (this file), `specs/tasks/task-199.md` (progress/commits +
+hash-excluded Shipped section only). Contract hash re-verified with
+`scripts/dev-contract.py requirement_parts`: frontmatter contract fields and requirement
+prose byte-identical to base; AC checkboxes remain `- [ ]`.
+
+Verdict: **approved** (evidence under `/tmp/stage/review-evidence/task-199/review-c8ea0b39.md`).
+
+- Good run at `c8ea0b39`: `cargo test -p gyre-server --test dependency_persistence` → 1
+  passed; 0 failed; exit 0 (cold build, test-binary hash `dffbac45…` identical to Round 1's).
+- Mutation probe (independent): dependencies field reverted to
+  `Arc::new(mem::MemDependencyRepository::default())` in the working tree only → test FAILED
+  at tests/dependency_persistence.rs:70 "edge must survive restart on SQLite-backed state"
+  (0 passed; 1 failed). Source restored byte-identical (sha256 re-verified), post-restore
+  run green (1 passed).
+- Mem-mode regression: `env -u GYRE_DATABASE_URL cargo test -p gyre-server --lib --
+  api::dependencies dep_staleness` → 72 passed; 0 failed; exit 0.
+  `bash scripts/check-arch.sh` and `bash scripts/check-task-commit-attribution.sh` both pass.
+- Scope re-verified: `breaking_changes`/`dependency_policies` still mem-wired (task-163);
+  mem.rs and gyre-adapters untouched; the only remaining mem literals are `#[cfg(test)]`
+  test-state builders and a doc comment. Product surface byte-identical to the Round 1
+  reviewed commit `dff6ee4c`; commits between are merges carrying other tasks' work plus
+  process/bookkeeping commits, none re-touching the task-199 surface. Checkpoint `67aafc0a`
+  is the product-surface commit listed in the frontmatter.
+- Sandbox: TCP listeners unsupported (Errno 95) — no server-transport probe; HTTP restart
+  check recorded for host/CI in the evidence file. Full workspace suite left to
+  verification gates per review protocol.
