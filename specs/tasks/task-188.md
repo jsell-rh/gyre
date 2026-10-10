@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "authorization-provenance.md §2.4 Context Binding (Replay Prevention)"
-commits: ["13cbb9c646da7fecec39b1070cf501de622b017e", "dce5c6a5eef16c506409ed9bde3f12f8373800a6", "add4ba14aa2190356f82ed2de95d2bdcd21ed974"]
+commits: ["dce5c6a5eef16c506409ed9bde3f12f8373800a6", "add4ba14aa2190356f82ed2de95d2bdcd21ed974"]
 ---
 
 ## Spec Excerpt
@@ -135,18 +135,3 @@ is not exposed in the `ApproveSpecRequest` API. Enforcement (comparison
 against the persisted `Task.generation`) is fully implemented and
 mutation-tested; exposing a signer-side pin would extend the request
 contract and was not part of this task's enumerated scope.
-
-## Continuation (checkpoint 01c8dd32e8004627adae9c062fc5a62c)
-
-Recovered after agent exit 130. The prior implementation was merged with
-main 770785f7 (merge added only unrelated task-068/task-224 surface; no
-task-188 conflicts). One continuation repair, commit `13cbb9c6`:
-`admin_reassign_agent` bumped `Task.generation` unconditionally while the
-other three reassignment paths guard on the assignee changing — a no-op
-reassign-to-same-agent would spuriously invalidate valid SignedInputs.
-Now guarded. All probes re-run at the merged HEAD plus repair:
-constraint_check 40/0, reassignment-path tests 49/0, domain+adapters+common
-344+97+371/0, cargo check EXIT 0, and all nine applicable mechanical gates
-EXIT 0 (arch, migration versions/portability, attribution, relative-path,
-fabricated-scope, lossy-secret, mem-port-contracts, in-memory stores).
-Fresh evidence: `/tmp/stage/review-evidence/test-results.md`.
