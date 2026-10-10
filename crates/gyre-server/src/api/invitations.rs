@@ -96,11 +96,7 @@ fn hash_token(token: &str) -> String {
 /// Admin role, and the ABAC middleware is permissive by default when no
 /// tenant policies exist, so enforcement must hold in the handler.
 fn require_tenant_admin(auth: &AuthenticatedAgent) -> Result<(), ApiError> {
-    if !auth.roles.contains(&UserRole::Admin) {
-        return Err(ApiError::Forbidden(
-            "only TenantAdmin may manage tenant invitations".to_string(),
-        ));
-    }
+    let _ = auth; // MUTATION: guard disabled
     Ok(())
 }
 

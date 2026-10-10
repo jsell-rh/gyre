@@ -2,7 +2,7 @@
 title: "Implement tenant & workspace invitation flow"
 spec_ref: "user-management.md §Tenant-Level User Onboarding"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "user-management.md §Tenant-Level User Onboarding"
   - "user-management.md §Workspace Invitation Flow"
@@ -195,3 +195,11 @@ Test evidence (this exact head, this sandbox; files under
   (invite → accept → re-use 409 → revoke-blocks-accept → bulk → list,
   exact curl steps recorded in the evidence log) remains for host
   verification / CI at the PR head.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/api/invitations.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
