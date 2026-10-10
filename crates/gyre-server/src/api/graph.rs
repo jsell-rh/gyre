@@ -1201,7 +1201,6 @@ fn briefing_sources(briefing: &BriefingResponse) -> Vec<BriefingSource> {
     sources
 }
 
-
 /// POST /api/v1/workspaces/{id}/briefing/ask
 /// SSE streaming Q&A grounded in briefing data (HSI §9). ABAC: workspace/generate.
 pub async fn briefing_ask(
@@ -1298,15 +1297,15 @@ pub async fn briefing_ask(
 
     let mut events: Vec<Result<Event, std::convert::Infallible>> = Vec::new();
     for chunk in &chunks {
-        let data =
-            serde_json::to_string(&serde_json::json!({"type": "partial", "text": chunk}))
-                .unwrap_or_default();
+        let data = serde_json::to_string(&serde_json::json!({"type": "partial", "text": chunk}))
+            .unwrap_or_default();
         events.push(Ok(Event::default().event("partial").data(data)));
     }
     // Terminal event carries the spec §1325 response object {answer, sources}.
-    let complete_data =
-        serde_json::to_string(&serde_json::json!({"type": "complete", "answer": full_text, "sources": sources}))
-            .unwrap_or_default();
+    let complete_data = serde_json::to_string(
+        &serde_json::json!({"type": "complete", "answer": full_text, "sources": sources}),
+    )
+    .unwrap_or_default();
     events.push(Ok(Event::default().event("complete").data(complete_data)));
 
     Ok(Sse::new(stream::iter(events)).keep_alive(
@@ -2157,9 +2156,7 @@ mod tests {
         ) -> anyhow::Result<
             std::pin::Pin<Box<dyn futures_util::Stream<Item = anyhow::Result<String>> + Send>>,
         > {
-            self.prompts
-                .lock()
-                .push(system_prompt.to_string());
+            self.prompts.lock().push(system_prompt.to_string());
             let text = system_prompt.to_string();
             Ok(Box::pin(futures_util::stream::iter(vec![Ok(text)])))
         }
@@ -2305,8 +2302,7 @@ mod tests {
             "seeded spec-linked MR must yield at least one source, got: {sources:?}"
         );
         assert!(
-            sources.iter().any(|s| s
-                ["spec_path"]
+            sources.iter().any(|s| s["spec_path"]
                 .as_str()
                 .is_some_and(|p| p.contains("specs/system/payment-retry.md"))),
             "sources must include the seeded MR spec path, got: {sources:?}"
