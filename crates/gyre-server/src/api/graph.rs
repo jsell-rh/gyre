@@ -22,7 +22,7 @@ use axum::{
     response::sse::{Event, Sse},
     Json,
 };
-use futures_util::{stream, StreamExt as _};
+use futures_util::stream;
 use gyre_common::GateStatus;
 use gyre_common::{
     graph::{ArchitecturalDelta, EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence},
@@ -1318,7 +1318,8 @@ pub async fn briefing_ask(
         serde_json::to_string(&serde_json::json!({"text": full_text})).unwrap_or_default();
     events.push(Ok(Event::default().event("complete").data(complete_data)));
 
-    Ok(Sse::new(stream::iter(events)).keep_alive(
+    let s = stream::iter(events);
+    Ok(Sse::new(s).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("ping"),
@@ -1380,7 +1381,7 @@ pub async fn link_node_to_spec(
 /// "If the LLM connection fails entirely, `event: error` fires instead").
 fn sse_error_stream(
     message: String,
-) -> Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>> {
+) -> Sse<futures_util::stream::Iter<std::vec::IntoIter<Result<Event, std::convert::Infallible>>>> {
     let error_data =
         serde_json::to_string(&serde_json::json!({"error": message})).unwrap_or_default();
     let events: Vec<Result<Event, std::convert::Infallible>> =

@@ -11,7 +11,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use futures_util::{stream, StreamExt as _};
+use futures_util::stream;
 use gyre_common::{Id, Notification, NotificationType};
 use gyre_domain::{CostEntry, MergeRequest, MrStatus};
 use serde::{Deserialize, Serialize};
@@ -86,6 +86,23 @@ fn spec_path_slug(spec_path: &str) -> String {
         .bytes()
         .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
     format!("{}-{:04x}", slug, hash & 0xffff)
+}
+
+/// Build a single-event SSE stream carrying `event: error` (ui-layout.md §2:
+/// "If the LLM connection fails entirely, `event: error` fires instead").
+/// Mirrors the private helper in `graph.rs`.
+fn sse_error_stream(
+    message: String,
+) -> Sse<futures_util::stream::Iter<std::vec::IntoIter<Result<Event, std::convert::Infallible>>>> {
+    let error_data =
+        serde_json::to_string(&serde_json::json!({"error": message})).unwrap_or_default();
+    let events: Vec<Result<Event, std::convert::Infallible>> =
+        vec![Ok(Event::default().event("error").data(error_data))];
+    Sse::new(stream::iter(events)).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ping"),
+    )
 }
 
 /// A single line in an LCS-based text diff between two spec versions.
