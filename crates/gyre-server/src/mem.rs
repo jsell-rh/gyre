@@ -3368,6 +3368,7 @@ fn test_state_inner(
         judgment_ledger: Arc::new(MemJudgmentLedgerRepository),
         secrets: Arc::new(MemSecretRepository::default()),
         ws_tickets: crate::auth::WsTicketStore::new(),
+        explorer_sessions: Default::default(),
     })
 }
 

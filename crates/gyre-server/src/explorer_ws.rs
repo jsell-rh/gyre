@@ -94,6 +94,8 @@ async fn maybe_send_ping(
 }
 
 /// Monotonic session ID counter for ordering sessions (oldest-first eviction).
+/// Shared across every `ExplorerSessionRegistry` because slot IDs only need to
+/// be unique per process, not per server instance.
 static SESSION_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Per-session slot: stores a unique ID and a shutdown signal so we can evict
@@ -104,13 +106,71 @@ struct SessionSlot {
     shutdown: Arc<tokio::sync::Notify>,
 }
 
-/// Global per-user session tracker, keyed by (tenant_id, agent_id).
-/// Uses std::sync::Mutex for Drop compatibility (Drop cannot be async).
-/// Each user has a Vec of active SessionSlots, ordered oldest-first.
-static ACTIVE_SESSIONS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Vec<SessionSlot>>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+/// Per-user session tracker, keyed by (tenant_id, agent_id), scoped to ONE
+/// server instance (one `AppState`). Uses std::sync::Mutex for Drop
+/// compatibility (Drop cannot be async). Each user has a Vec of active
+/// SessionSlots, ordered oldest-first.
+///
+/// Per-instance scoping is load-bearing: every test in
+/// `tests/explorer_ws_integration.rs` builds its own server via
+/// `build_state`, but in a single test process they all authenticate as the
+/// same `default:system` dev-token user. A process-global registry made the
+/// 4th..Nth test's connection evict the OLDEST still-running test's session
+/// (max 3 per user), closing that test's socket mid-run — observed on the
+/// verification host as 2/7 tests failing with the socket closed before the
+/// expected response (missing `view_query` after `load_view`, missing
+/// rate-limit error after the second rapid message) while the other 5 passed.
+/// Production semantics are unchanged: one process runs one server, so its
+/// registry is effectively process-wide.
+#[derive(Clone, Default)]
+pub struct ExplorerSessionRegistry {
+    sessions: Arc<std::sync::Mutex<HashMap<String, Vec<SessionSlot>>>>,
+}
 
-/// Maximum concurrent explorer sessions per user.
+impl ExplorerSessionRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a new session for `user_key`. When the per-user limit
+    /// (max_sessions_per_user) is reached, evicts (signals) the oldest
+    /// sessions first. Returns this session's ID and shutdown handle.
+    fn register(
+        &self,
+        user_key: String,
+    ) -> (u64, Arc<tokio::sync::Notify>) {
+        let session_id = SESSION_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let slots = sessions.entry(user_key).or_default();
+        while slots.len() >= max_sessions_per_user() {
+            let evicted = slots.remove(0);
+            info!(
+                evicted_session = evicted.id,
+                "Explorer WS: evicting oldest session to make room for new connection"
+            );
+            evicted.shutdown.notify_one();
+        }
+        slots.push(SessionSlot {
+            id: session_id,
+            shutdown: Arc::clone(&shutdown_notify),
+        });
+        (session_id, shutdown_notify)
+    }
+
+    /// Remove a session slot (on drop, including panics).
+    fn unregister(&self, user_key: &str, session_id: u64) {
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(slots) = sessions.get_mut(user_key) {
+            slots.retain(|s| s.id != session_id);
+            if slots.is_empty() {
+                sessions.remove(user_key);
+            }
+        }
+    }
+}
+
+/// Maximum concurrent explorer sessions per user (per server instance).
 /// Override with GYRE_EXPLORER_MAX_SESSIONS env var.
 fn max_sessions_per_user() -> usize {
     std::env::var("GYRE_EXPLORER_MAX_SESSIONS")
@@ -199,47 +259,25 @@ async fn handle_explorer_session(
     // When the limit is reached, the oldest session is evicted (signalled to close)
     // rather than rejecting the new connection. This handles zombie sessions from
     // unclean disconnects (browser crash, tab close, navigation) gracefully.
+    // The registry is per-AppState (per server instance), NOT process-global —
+    // see ExplorerSessionRegistry for why that scoping is load-bearing.
     let session_user = format!("{}:{}", auth.tenant_id, auth.agent_id);
-    let session_id = SESSION_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+    let (session_id, shutdown_notify) = state.explorer_sessions.register(session_user.clone());
 
     // Guard: remove this session's slot on drop (even if we return early or panic).
-    struct SessionGuard {
+    struct SessionGuard<'a> {
+        registry: &'a ExplorerSessionRegistry,
         user_key: String,
         session_id: u64,
     }
-    impl Drop for SessionGuard {
+    impl Drop for SessionGuard<'_> {
         fn drop(&mut self) {
-            let mut sessions = ACTIVE_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(slots) = sessions.get_mut(&self.user_key) {
-                slots.retain(|s| s.id != self.session_id);
-                if slots.is_empty() {
-                    sessions.remove(&self.user_key);
-                }
-            }
+            self.registry.unregister(&self.user_key, self.session_id);
         }
-    }
-
-    {
-        let mut sessions = ACTIVE_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-        let slots = sessions.entry(session_user.clone()).or_default();
-        // Evict oldest sessions if at the limit.
-        while slots.len() >= max_sessions_per_user() {
-            let evicted = slots.remove(0);
-            info!(
-                user = %session_user,
-                evicted_session = evicted.id,
-                "Explorer WS: evicting oldest session to make room for new connection"
-            );
-            evicted.shutdown.notify_one();
-        }
-        slots.push(SessionSlot {
-            id: session_id,
-            shutdown: Arc::clone(&shutdown_notify),
-        });
     }
     // Create guard immediately after registration so any subsequent panic cleans up.
     let _session_guard = SessionGuard {
+        registry: &state.explorer_sessions,
         user_key: session_user,
         session_id,
     };
@@ -4240,5 +4278,114 @@ Attempt 2:
             MAX_REFINEMENT_TURNS > 0,
             "Must allow at least 1 refinement turn for self-check"
         );
+    }
+
+    // ── ExplorerSessionRegistry: per-instance session limiting ────────────
+    //
+    // These tests exist to fail on the exact defect observed on the
+    // verification host (durable finding b5ed01bfe, explorer_ws_integration:
+    // 5 passed / 2 failed): the registry was a process-global static, so
+    // independently-built servers sharing one test process — all
+    // authenticating as the same dev-token user `default:system` — evicted
+    // each other's sessions at the 3-per-user limit, closing in-flight test
+    // sockets. They are listener-free: the registry is exercised directly,
+    // no TCP is needed.
+
+    #[tokio::test]
+    async fn registry_sessions_are_isolated_per_instance() {
+        // Two independent server instances (as built by build_state per test).
+        let registry_a = ExplorerSessionRegistry::new();
+        let registry_b = ExplorerSessionRegistry::new();
+        let user = "default:system".to_string();
+
+        // Fill instance A to the per-user limit (default 3).
+        let mut a_handles = Vec::new();
+        for _ in 0..max_sessions_per_user() {
+            a_handles.push(registry_a.register(user.clone()));
+        }
+
+        // Instance B registering the same user must NOT evict any of A's
+        // sessions: the limit is per server instance, not per process.
+        let (_b_id, _b_shutdown) = registry_b.register(user.clone());
+        for (_id, shutdown) in &a_handles {
+            assert_not_signalled(shutdown).await;
+        }
+
+        // And instance A still evicts its own oldest when a new session
+        // arrives at the limit — the production safeguard is intact.
+        let (new_id, _new_shutdown) = registry_a.register(user.clone());
+        assert!(
+            new_id > a_handles[0].0,
+            "New session must be younger than the oldest"
+        );
+        assert_signalled(&a_handles[0].1).await;
+        assert_not_signalled(&a_handles[1].1).await;
+    }
+
+    #[tokio::test]
+    async fn registry_unregister_removes_slot_and_cleans_up_user_key() {
+        let registry = ExplorerSessionRegistry::new();
+        let user = "tenant-1:agent-1".to_string();
+        let (id, _shutdown) = registry.register(user.clone());
+
+        registry.unregister(&user, id);
+
+        // Registering again must not evict anything (the slot was removed).
+        let (id2, shutdown2) = registry.register(user.clone());
+        assert!(id2 > id, "IDs are monotonic across registrations");
+        assert_not_signalled(&shutdown2).await;
+        // Double-unregister (drop of a stale guard) must be a no-op.
+        registry.unregister(&user, id);
+    }
+
+    #[tokio::test]
+    async fn registry_evicts_oldest_first_at_limit_within_one_instance() {
+        let registry = ExplorerSessionRegistry::new();
+        let user = "t:u".to_string();
+
+        let h0 = registry.register(user.clone());
+        let h1 = registry.register(user.clone());
+        let h2 = registry.register(user.clone());
+
+        // Fourth registration on the same instance: limit reached, oldest evicted.
+        let _h3 = registry.register(user.clone());
+        assert_signalled(&h0.1).await;
+        assert_not_signalled(&h1.1).await;
+        assert_not_signalled(&h2.1).await;
+
+        // After the evicted session's guard drops, the slot count returns to
+        // the limit, so the next-oldest is evicted on the next registration.
+        registry.unregister(&user, h0.0);
+        let _h4 = registry.register(user.clone());
+        assert_signalled(&h1.1).await;
+    }
+
+    /// A signalled session holds a latched permit: awaiting `notified()`
+    /// completes immediately. Use a 50ms timeout so an unsignalled session
+    /// fails fast instead of hanging.
+    async fn assert_signalled(shutdown: &Arc<tokio::sync::Notify>) {
+        if tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            shutdown.notified(),
+        )
+        .await
+        .is_err()
+        {
+            panic!("session should have been signalled for eviction");
+        }
+    }
+
+    /// An unsignalled session has no permit: `notified()` stays pending.
+    /// Await with a short timeout and require it to time out.
+    async fn assert_not_signalled(shutdown: &Arc<tokio::sync::Notify>) {
+        if tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            shutdown.notified(),
+        )
+        .await
+        .is_ok()
+        {
+            panic!("session should NOT have been signalled");
+        }
     }
 }

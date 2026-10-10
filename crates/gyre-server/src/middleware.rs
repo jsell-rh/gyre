@@ -306,6 +306,7 @@ mod tests {
             ws_tickets: base.ws_tickets.clone(),
             meta_specs: base.meta_specs.clone(),
             meta_spec_bindings: base.meta_spec_bindings.clone(),
+            explorer_sessions: base.explorer_sessions.clone(),
         });
         crate::build_router(state)
     }

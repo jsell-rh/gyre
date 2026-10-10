@@ -405,6 +405,13 @@ pub struct AppState {
     /// WebSocket ticket store: short-lived, single-use tokens for WS auth.
     /// Replaces the insecure ?token= query parameter pattern.
     pub ws_tickets: auth::WsTicketStore,
+    /// Explorer WebSocket session registry: per-user concurrent session
+    /// limiting and oldest-first eviction. Per-instance (not process-global)
+    /// so independent servers — e.g. concurrently-running integration tests
+    /// that all authenticate as the same dev-token user — do not evict each
+    /// other's sessions. Ephemeral connection-tracking state, not durable
+    /// data: a restart legitimately starts with zero active sessions.
+    pub explorer_sessions: explorer_ws::ExplorerSessionRegistry,
 }
 
 /// Compute the SHA-256 hash of a workspace's meta-spec set JSON.
@@ -1099,6 +1106,7 @@ pub fn build_state(
             mem::MemJudgmentLedgerRepository
         ),
         ws_tickets: auth::WsTicketStore::new(),
+        explorer_sessions: explorer_ws::ExplorerSessionRegistry::new(),
         llm: match std::env::var("GYRE_VERTEX_PROJECT") {
             Ok(_) => match gyre_adapters::RigVertexAiFactory::from_env() {
                 Ok(factory) => Some(Arc::new(factory) as Arc<dyn gyre_ports::LlmPortFactory>),
