@@ -180,3 +180,27 @@ frontmatter; it is not yet merged to main. The attribution gate is
 baseline-compared by dev-static-gate.py, which classifies a base-failing
 gate as exit 81 (main baseline) rather than candidate repair, so this
 branch carries no obligation to duplicate task-220's owned repair.
+
+### Verification repair (attempt fd65ff50, verification)
+
+The verification stage's `checks.sh` (dev-check.sh) exited 1 on candidate
+`c527425c` against base `653a696f`. Replicated the exact stage merge (approved
+commit `83fae29d`, `--no-ff` into base with first-parent topology) → merge
+`c75557f3`; `git diff --check HEAD^1 HEAD` exits 2 with exactly one finding:
+`web/dist/assets/index-D4CX8rVo.js:5: trailing whitespace.` Root cause:
+checkpoint `9997b253` swept an accidental build.rs SPA rebuild into web/dist
+(task-097 is crates-only — web/src is unchanged versus base), and the
+regenerated svelte-i18n bundle line 5 embeds the Svelte 5 runtime
+whitespace-class template literal (space+TAB before the raw newline), which
+the whitespace gate rejects on newly-added dist lines; base's own committed
+bundle contains the identical bytes but predates the gate (dbbe4fe3). Repair:
+commit `f5167f47` reverts web/dist to the base `653a696f` state per the
+`eb4477d0`/`420e961e` precedent (task branches don't ship dist rebuilds; the
+gate rebuilds the SPA from source and restores web/dist itself). A
+`.gitattributes -whitespace` marking was tested and rejected — it would
+weaken the verifier for all future dist changes. All other gates green on the
+merged tree (rustfmt-diff, exemption-delta, 21 static gates incl. hierarchy,
+and clippy-diff run cold on the merged crates — see probe logs). The four
+task-owned crates files, scripts, and specs are untouched by the repair;
+probe evidence under /tmp/stage/review-evidence (ws-findings.txt,
+gate-*.log, verification-repair-fd65ff50.md).
