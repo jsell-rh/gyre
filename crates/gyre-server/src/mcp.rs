@@ -647,6 +647,18 @@ fn is_agent_jwt(auth: &AuthenticatedAgent) -> bool {
         .is_some_and(|arr| !arr.is_empty())
 }
 
+/// True when the caller's token carries at least one `repo:{name}:{right}`
+/// scope entry (worker / repo-orchestrator tier).
+fn has_repo_scopes(auth: &AuthenticatedAgent) -> bool {
+    auth.scope.iter().any(|s| s.starts_with("repo:"))
+}
+
+/// True when the caller's token carries at least one
+/// `workspace:{id}:{right}` scope entry (workspace-orchestrator tier).
+fn has_workspace_scopes(auth: &AuthenticatedAgent) -> bool {
+    auth.scope.iter().any(|s| s.starts_with("workspace:"))
+}
+
 /// Scope validation for a single MCP tool call (platform-model.md §1 Token
 /// Scoping — "The MCP server validates scope on every tool call").
 ///
@@ -699,18 +711,47 @@ fn validate_tool_scope(
                 .unwrap_or("");
             check_repo_read_scope(auth, Some(repo), tool_name)
         }
-        // Repo-tier spawning (repo orchestrator persona).
-        "gyre_spawn_worker" | "gyre_spawn_repo_orchestrator" => {
-            let repo = args.get("repo_id").and_then(|v| v.as_str()).unwrap_or("");
-            check_repo_scope(auth, Some(repo), true, tool_name)
+        // Repo-tier spawning (repo orchestrator persona). A token carrying
+        // repo scopes must hold `repo:{target}:spawn` — a worker's
+        // write-only token is rejected here. A workspace-tier token carries
+        // no repo scopes; its tier mismatch is enforced by the handler
+        // ("requires a repo-orchestrator token"), the denial shape the
+        // task-093 contract pins.
+        "gyre_spawn_worker" => {
+            if has_repo_scopes(auth) {
+                let repo = args.get("repo_id").and_then(|v| v.as_str()).unwrap_or("");
+                check_repo_scope(auth, Some(repo), true, tool_name)
+            } else {
+                Ok(())
+            }
+        }
+        // Workspace-tier spawning (workspace orchestrator persona): the
+        // caller's token must hold `workspace:{ws}:spawn`. The target
+        // repo's membership in the caller's workspace is enforced by the
+        // handler against real state (repo→workspace is not derivable
+        // from the token); repo-tier tokens carry no workspace scopes and
+        // are denied by the handler's tier check.
+        "gyre_spawn_repo_orchestrator" => {
+            if has_workspace_scopes(auth) {
+                check_workspace_scope(auth, None, true, tool_name)
+            } else {
+                Ok(())
+            }
         }
         // Workspace-tier tools (workspace orchestrator persona).
-        "gyre_list_repo_orchestrators" | "gyre_cross_repo_task" => {
+        "gyre_list_repo_orchestrators" => {
             let ws = args
                 .get("workspace_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            check_workspace_scope(auth, Some(ws), tool_name)
+            check_workspace_scope(auth, Some(ws), false, tool_name)
+        }
+        "gyre_cross_repo_task" => {
+            let ws = args
+                .get("workspace_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            check_workspace_scope(auth, Some(ws), true, tool_name)
         }
         // Cross-tier creation tools: accept either a matching repo scope or a
         // matching workspace scope (both orchestrator tiers may create tasks).
@@ -775,20 +816,37 @@ fn check_repo_scope(
         .iter()
         .filter(|s| s.starts_with("repo:"))
         .collect();
-    // No explicit target: a single repo scope in the token identifies the
-    // caller's own repo (workers); multiple or none is ambiguous.
+    // No explicit target: the token's repo scopes must name exactly one
+    // distinct repo (a worker or repo orchestrator may carry multiple
+    // rights on its single repo — write + spawn — which is unambiguous).
+    // Multiple distinct repos or none is ambiguous.
     let target = match repo {
         Some(r) if !r.is_empty() => r.to_string(),
-        _ if repo_scopes.len() == 1 => repo_scopes[0]
-            .trim_start_matches("repo:")
-            .rsplit_once(':')
-            .map(|(name, _)| name.to_string())
-            .unwrap_or_default(),
         _ => {
-            return Err(format!(
-                "PERMISSION_DENIED: token carries no single repo scope for {action} (scopes: {:?})",
-                auth.scope
-            ));
+            let distinct: Vec<&str> = repo_scopes
+                .iter()
+                .map(|s| {
+                    s.trim_start_matches("repo:")
+                        .rsplit_once(':')
+                        .map(|(name, _)| name)
+                        .unwrap_or("")
+                })
+                .collect();
+            let mut unique: Vec<&str> = Vec::new();
+            for name in &distinct {
+                if !unique.contains(name) {
+                    unique.push(name);
+                }
+            }
+            match unique.len() {
+                1 => unique[0].to_string(),
+                _ => {
+                    return Err(format!(
+                        "PERMISSION_DENIED: token carries no single repo scope for {action} (scopes: {:?})",
+                        auth.scope
+                    ));
+                }
+            }
         }
     };
     let allowed = repo_scopes.iter().any(|s| {
@@ -819,6 +877,7 @@ fn check_repo_scope(
 fn check_workspace_scope(
     auth: &AuthenticatedAgent,
     workspace: Option<&str>,
+    require_spawn_right: bool,
     action: &str,
 ) -> Result<(), String> {
     let ws_scopes: Vec<&String> = auth
@@ -826,26 +885,50 @@ fn check_workspace_scope(
         .iter()
         .filter(|s| s.starts_with("workspace:"))
         .collect();
+    // No explicit target: the token's workspace scopes must name exactly
+    // one distinct workspace (a workspace orchestrator carries read +
+    // spawn on its single workspace — unambiguous). Multiple distinct
+    // workspaces or none is ambiguous.
     let target = match workspace {
         Some(w) if !w.is_empty() => w.to_string(),
-        _ => match ws_scopes.len() {
-            1 => ws_scopes[0]
-                .trim_start_matches("workspace:")
-                .trim_end_matches(":read")
-                .trim_end_matches(":spawn")
-                .to_string(),
-            _ => {
-                return Err(format!(
-                    "PERMISSION_DENIED: token carries no single workspace scope for {action} (scopes: {:?})",
-                    auth.scope
-                ))
+        _ => {
+            let distinct: Vec<&str> = ws_scopes
+                .iter()
+                .map(|s| {
+                    s.trim_start_matches("workspace:")
+                        .rsplit_once(':')
+                        .map(|(name, _)| name)
+                        .unwrap_or("")
+                })
+                .collect();
+            let mut unique: Vec<&str> = Vec::new();
+            for name in &distinct {
+                if !unique.contains(name) {
+                    unique.push(name);
+                }
             }
-        },
+            match unique.len() {
+                1 => unique[0].to_string(),
+                _ => {
+                    return Err(format!(
+                        "PERMISSION_DENIED: token carries no single workspace scope for {action} (scopes: {:?})",
+                        auth.scope
+                    ));
+                }
+            }
+        }
     };
     let allowed = ws_scopes.iter().any(|s| {
-        s.trim_start_matches("workspace:")
-            .rsplit_once(':')
-            .is_some_and(|(name, _)| name == target)
+        let (name, right) = match s.trim_start_matches("workspace:").rsplit_once(':') {
+            Some(parts) => parts,
+            None => return false,
+        };
+        name == target
+            && if require_spawn_right {
+                right == "spawn"
+            } else {
+                right == "read" || right == "spawn"
+            }
     });
     if allowed {
         Ok(())
@@ -6108,7 +6191,8 @@ mod tests {
             .unwrap();
         state.agents.create(&agent).await.unwrap();
         // Spawned workers always carry a worktree (spawn_agent_core creates
-        // one); TASK-216's repo-scope check on gyre_create_mr relies on it.
+        // and persists one); TASK-216's repo-scope check on gyre_create_mr
+        // reads it back from the worktrees store.
         let wt = gyre_domain::AgentWorktree::new(
             gyre_common::Id::new(format!("wt-{agent_id}")),
             agent.id.clone(),
@@ -6118,6 +6202,7 @@ mod tests {
             &format!("/tmp/worktrees/{agent_id}"),
             0,
         );
+        state.worktrees.create(&wt).await.unwrap();
         let tenant_id = state
             .workspaces
             .find_by_id(&repo.workspace_id)
