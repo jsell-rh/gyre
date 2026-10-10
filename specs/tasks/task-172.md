@@ -121,4 +121,13 @@ accumulate a round-by-round diagnostic ledger; per the current assignment
 ("do not reproduce old diagnostic ledgers in the task") it is reduced to the
 original contract (normative sections byte-identical to base, acceptance
 boxes left unchecked as lifecycle state lives in `progress:`) plus this
-concise Shipped. Product code is unchanged by this round.
+concise Shipped.
+
+Checkpoint-recovery round (merge head `1a8e908f`, base `c9b0a6f9` merged into
+candidate `636a13a7`): merge added only unrelated task files (task-216/218);
+product code unchanged. All probes re-run at this head with results
+unchanged: 66/66 (fresh artifacts under /tmp/stage/review-evidence/),
+bug-injection probe still fails exactly the Accept test, `vite build`
+reproduces committed dist byte-exactly, attribution gate exit 0, 50/50
+i18n keys. Exact-head GitHub CI (`web-build`) remains mandatory after
+independent review.
