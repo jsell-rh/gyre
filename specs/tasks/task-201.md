@@ -7,7 +7,7 @@ coverage_sections:
   - "search.md §Search Index"
   - "search.md §Technology"
   - "search.md §Index Schema"
-commits: ["a970c75633d707e30e04fb8b6b6d176c9feeda32", "88c715dae50edc514db3beef6f57034c25416f52", "f154a73cae223f5f1ff5d315d52ca66830ec4fdd", "4b2a7b0730aed3a341aff3fd59ac70e4f31dd9d9", "06149be2c21de14e8a3c310cbe9dc6251e49bdfd", "a550da3739d298561cde9eaace74ae7d6fdd0097", "88ab2a656b4477456b83c1788ff22b6e2d91b2ec", "e4cf94f49c2222cda5030e4bd52270c7e721a068", "4319f2bb63eb94de4fc819ebdeaeb9ca6d30e4e8", "0c980dda5cfdd9cebe56cdabe4c1a0db74da56e0"]
+commits: ["a970c75633d707e30e04fb8b6b6d176c9feeda32", "88c715dae50edc514db3beef6f57034c25416f52", "f154a73cae223f5f1ff5d315d52ca66830ec4fdd", "4b2a7b0730aed3a341aff3fd59ac70e4f31dd9d9", "06149be2c21de14e8a3c310cbe9dc6251e49bdfd", "a550da3739d298561cde9eaace74ae7d6fdd0097", "88ab2a656b4477456b83c1788ff22b6e2d91b2ec", "e4cf94f49c2222cda5030e4bd52270c7e721a068", "4319f2bb63eb94de4fc819ebdeaeb9ca6d30e4e8", "0c980dda5cfdd9cebe56cdabe4c1a0db74da56e0", "519eb1366d4ec18ead1edefec7ea09eebda1370f", "5dab2c3c4c6cb1f25ccb42907f7870b7243ad8d0"]
 ---
 
 ## Spec Excerpt
@@ -114,7 +114,10 @@ filter/limit/upsert semantics. Zero external search dependencies.
 (tasks.rs, merge_requests.rs, agents.rs) are unchanged and now exercise the
 durable backend under `GYRE_DATABASE_URL=sqlite://…`.
 
-**Test evidence** (full log: `/tmp/stage/review-evidence/task-201-verification.txt`):
+**Test evidence** — re-verified at the recovered-and-merged head (base
+`f4acb4eb` merged via `8ee82dd9`; logs:
+`/tmp/stage/review-evidence/task-201-recovered-verification.txt`,
+`task-201-wiring-verification.txt`):
 - `cargo test -p gyre-adapters --lib sqlite::search` — 8 passed. Includes
   schema assertion against `sqlite_master` (exact columns + tokenizer), porter
   stemming (`running` matches `runs` — fails under any substring/LIKE
@@ -126,12 +129,17 @@ durable backend under `GYRE_DATABASE_URL=sqlite://…`.
   that the real POST /api/v1/tasks → GET /api/v1/search flow returns stemmed
   matches with snippet markers, positive score, and facet round-trip. Uses
   `tower::ServiceExt::oneshot` so it stays valid where loopback TCP is
-  unavailable.
-- `cargo test -p gyre-adapters --lib` (full) — 352 passed, 0 failed.
-- `bash scripts/check-arch.sh` — pass; all other mechanical invariant scripts
-  pass except `check-task-commit-attribution.sh`, whose failure is pre-existing
-  on base 8c2d1775 (task-210 drift `a781ede2`, fix on an unmerged task-190
-  branch) — verified identical on the pristine base via a separate worktree.
+  unavailable. This suite also exercises `gyre-server` (incl. the
+  `personas.rs` code the base merge brought in) building clean with the
+  search backend.
+- `bash scripts/check-arch.sh` — pass. Mechanical invariants all pass:
+  `check-migration-sql-portability`, `check-migration-versions`,
+  `check-in-memory-state-stores`, `check-relative-path-defaults`,
+  `check-fail-open-ref-resolution`, `check-lossy-secret-conversion`,
+  `check-inert-enforcement`, `check-task-commit-attribution` (the last after
+  recording base commit `f4acb4eb` in task-189's frontmatter — the commit is
+  task-189-labeled but was missing from that task's `commits:` list on the
+  pristine base; pre-existing drift, fixed in the same change).
 
 **Host-verification note (sandbox transport restriction):** this sandbox
 cannot `accept()` on TCP (errno 95, see capabilities.json), so the listener-
@@ -139,6 +147,7 @@ binding `api_integration` suite cannot run here. Required on a listener-capable
 host / GitHub CI: `cargo test --all` and
 `cargo test -p gyre-server --test api_integration`.
 
-Commits: this work is the interrupted-assignment recovery of the task-201
-branch; implementation commits are the `wip(task-201)` / checkpoint SHAs
-already recorded in this file's `commits:` frontmatter (head `708b9a2e`).
+Commits: this is the second recovery of the task-201 branch. Implementation
+lives in the `wip(task-201)`/checkpoint SHAs recorded in this file's
+`commits:` frontmatter; base `f4acb4eb` merged via `8ee82dd9`; the
+task-189 attribution fix and this evidence refresh are the recovery commit.
