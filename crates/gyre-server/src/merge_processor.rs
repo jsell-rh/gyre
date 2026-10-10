@@ -5765,6 +5765,68 @@ mod tests {
         assert!(merge_queue_paused(&state, &repo.id).await);
     }
 
+    /// Task-095 R4-F1: when the recovery revert's inverse patch conflicts
+    /// with later changes on the default branch, the branch is untouched —
+    /// the protocol must stay paused, escalate to a human, and apply NO
+    /// per-MR side effects (the MR is still merged; marking it Reverted
+    /// would record a revert that never happened).
+    #[tokio::test]
+    async fn post_merge_recovery_revert_conflict_stays_paused_without_side_effects() {
+        let mut git = crate::mem::ConfigurableGitOps::default();
+        git.revert_conflicts = true;
+        let revert_calls = git.revert_calls.clone();
+        let state = crate::mem::test_state_with_git_ops(Arc::new(git));
+        let (repo, mr) = setup_recovery_mr(&state).await;
+
+        // Required post-merge gate always fails → recovery protocol runs.
+        create_post_merge_gate(&state, &repo.id, "false", true).await;
+
+        process_next(&state).await.unwrap();
+
+        // The recovery attempted exactly one revert of the merge commit.
+        assert_eq!(revert_calls.lock().len(), 1, "one revert attempt");
+
+        // Queue stays paused (never resumed — main is not green).
+        assert!(
+            merge_queue_paused(&state, &repo.id).await,
+            "queue must stay paused when the revert conflicts"
+        );
+
+        // No per-MR side effects: the MR remains Merged with no revert
+        // recorded — the branch is untouched, so claiming a revert would
+        // be a false record.
+        let updated = state
+            .merge_requests
+            .find_by_id(&mr.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, MrStatus::Merged);
+        assert!(updated.revert_commit_sha.is_none());
+        assert!(updated.reverted_at.is_none());
+
+        // Escalated to the author's spawner (a human), not silently dropped.
+        let notifs = state
+            .notifications
+            .list_for_user(&Id::new("user-recov"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .await
+            .unwrap();
+        assert!(
+            notifs
+                .iter()
+                .any(|n| n.notification_type == gyre_common::NotificationType::MergeQueueEscalation),
+            "revert conflict must escalate to a human, got {:?}",
+            notifs.iter().map(|n| &n.notification_type).collect::<Vec<_>>()
+        );
+
+        // No remediation task — there is no confirmed revert to remediate.
+        let tasks = state.tasks.list_by_repo(&repo.id).await.unwrap();
+        assert!(
+            tasks.is_empty(),
+            "conflicting revert must not create remediation tasks"
+        );
+    }
+
     #[tokio::test]
     async fn paused_queue_skips_entries_and_resume_processes_next() {
         let state = test_state();
@@ -6177,6 +6239,105 @@ mod tests {
         // 6. Escalation branch: the noop adapter's revert SHA fails the
         // re-run, so the queue stays paused (escalated to a human).
         assert!(merge_queue_paused(&state, &repo.id).await);
+    }
+
+    /// Task-095 R4-F1: when a group member's recovery revert conflicts
+    /// with later changes, the group recovery must stop (no partial revert
+    /// records), stay paused, and escalate to a human. Members whose
+    /// reverts never happened must stay Merged with no revert recorded.
+    #[tokio::test]
+    async fn atomic_group_recovery_revert_conflict_stops_group_reverts() {
+        let mut git = crate::mem::ConfigurableGitOps::default();
+        git.revert_conflicts = true;
+        let revert_calls = git.revert_calls.clone();
+        let state = crate::mem::test_state_with_git_ops(Arc::new(git));
+        let repo = create_repo_in_workspace(&state, "recovery-repo", "ws-1").await;
+
+        let mut agent_a = gyre_domain::Agent::new(Id::new("agent-grpa"), "agent-grpa", 1000);
+        agent_a.spawned_by = Some("user-grpa".to_string());
+        agent_a.workspace_id = Id::new("ws-1");
+        state.agents.create(&agent_a).await.unwrap();
+
+        let mut agent_b = gyre_domain::Agent::new(Id::new("agent-grpb"), "agent-grpb", 1000);
+        agent_b.spawned_by = Some("user-grpb".to_string());
+        agent_b.workspace_id = Id::new("ws-1");
+        state.agents.create(&agent_b).await.unwrap();
+
+        create_mr_in_group(
+            &state,
+            "mr-grpm-a",
+            &repo.id,
+            "ws-1",
+            "bundle",
+            "feat/grpm-a",
+            Some("agent-grpa"),
+        )
+        .await;
+        create_mr_in_group(
+            &state,
+            "mr-grpm-b",
+            &repo.id,
+            "ws-1",
+            "bundle",
+            "feat/grpm-b",
+            Some("agent-grpb"),
+        )
+        .await;
+        enqueue_mr(&state, "mr-grpm-a", 100, 1000).await;
+        enqueue_mr(&state, "mr-grpm-b", 100, 1001).await;
+
+        // Required post-merge gate always fails → group recovery runs.
+        create_post_merge_gate(&state, &repo.id, "false", true).await;
+
+        process_next(&state).await.unwrap();
+
+        // The group revert loop attempted exactly one revert (the newest
+        // member's merge commit) before the Conflict stopped it.
+        assert_eq!(
+            revert_calls.lock().len(),
+            1,
+            "group revert loop must stop at the first conflict"
+        );
+
+        // Queue stays paused — main was not restored.
+        assert!(
+            merge_queue_paused(&state, &repo.id).await,
+            "queue must stay paused when a group revert conflicts"
+        );
+
+        // No member is marked Reverted: the side effects run only after
+        // the whole group reverts, and no revert commit exists.
+        for mr_id in ["mr-grpm-a", "mr-grpm-b"] {
+            let updated = state
+                .merge_requests
+                .find_by_id(&Id::new(mr_id))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(updated.status, MrStatus::Merged, "{mr_id} should stay Merged");
+            assert!(updated.revert_commit_sha.is_none(), "{mr_id} must record no revert");
+        }
+
+        // Escalated to a human (the first member's author spawner).
+        let notifs = state
+            .notifications
+            .list_for_user(&Id::new("user-grpa"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .await
+            .unwrap();
+        assert!(
+            notifs
+                .iter()
+                .any(|n| n.notification_type == gyre_common::NotificationType::MergeQueueEscalation),
+            "group revert conflict must escalate to a human, got {:?}",
+            notifs.iter().map(|n| &n.notification_type).collect::<Vec<_>>()
+        );
+
+        // No remediation tasks for a revert that did not happen.
+        let tasks = state.tasks.list_by_repo(&repo.id).await.unwrap();
+        assert!(
+            tasks.is_empty(),
+            "conflicting group revert must not create remediation tasks"
+        );
     }
 
     #[tokio::test]
