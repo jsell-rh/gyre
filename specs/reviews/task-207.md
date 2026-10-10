@@ -42,3 +42,82 @@ Minor (not blocking, recorded for completeness):
 - `RetentionStore::init` (`retention.rs:124-139`) resets to defaults without a warn log when the persisted KV blob fails to parse, and `persist_best_effort` is fire-and-forget after the PUT response returns (a crash in that window loses the change silently). Both are low-severity robustness gaps; spec's "survive server restart" holds in normal operation.
 
 Scope note: task-207's `commits:` frontmatter lists only `6a908460`; docs commit `ff3fbb87` is attributed to the task lifecycle, not the product surface, so no commit-attribution finding. Postgres adapter tests are absent for the new `delete_older_than` methods — consistent with the repo-wide pattern (Postgres is never integration-tested; `scripts/check-migration-sql-portability.sh` covers SQL portability), not a finding against this task.
+
+## Round 2 (2026-10-10) — candidate `6d0c53ff` vs base `18c44f1a`
+
+Verdict: **approved**.
+
+Scope: the full diff base→candidate (41 commits; the 9 task-attributed product
+commits plus pipeline merge/checkpoint noise). Independent probes run in this
+sandbox on the candidate working tree (`SKIP_WEB_BUILD=1`, isolated target):
+evidence in `/tmp/stage/review-evidence/task-207-review-evidence.md`.
+
+Round-1 findings F1–F4 verified closed in code and by test:
+
+- **F1 (activity_events hollow)** — closed for real: the dead `ActivityRepository`
+  port + SQLite/Postgres adapters were *removed* (no writer existed for the
+  activity_events table; live activity data is the telemetry ring), and the
+  90-day policy is now enforced by `TelemetryBuffer::purge_older_than`
+  (message.rs:847, hard age eviction, epoch-ms matching the buffer's real
+  `created_at` units) driven from `run_cleanup`'s activity arm with
+  `cutoff * 1000`. Both-direction + idempotency + configured-policy tests pass
+  (gyre-common 1/1, gyre-server retention 29/29). The unwired-port-methods
+  exemption entry was retired by deletion (check green, no growth).
+- **F2 (snapshot tiers not configurable)** — closed: `SnapshotTiers` lives on
+  the `snapshots` policy row, flows from `PUT /admin/retention` through
+  `run_cleanup` into `purge_snapshots`; bands are age-fixed with no spillover
+  (the `snapshot_tiering_window_cap_not_defeated_by_cascade` test guards
+  exactly the old cascade defect). Configured-tiers test proves a non-default
+  row changes the decision, pure and on disk.
+- **F3 (no disk-level snapshot test)** — closed: real-tempdir/real-mtime tests
+  assert the exact survivor set both directions, idempotency, missing-dir
+  no-op, and non-`.json` survival; filenames match `create_snapshot`'s
+  `<unix_secs>.json` output.
+- **F4 (unvalidated PUT)** — closed: `validate_policies` requires exactly the
+  7 spec types each once, `max_age_days >= 1`, mandatory read≤unread
+  notification split, tier counts ≥ 1, attestations pinned to `u64::MAX`;
+  rejection tests per class plus an endpoint-level 400-with-policies-untouched
+  test, and the integration test's old single-type PUT body (which previously
+  *passed* and silently disabled 6 types) was rewritten to the valid 7-type
+  body with a negative case.
+
+Additional verification this round (no findings):
+
+- All seven data types purge through real code paths; DELETEs are hard
+  diesel deletes with row counts in SQLite + Postgres + mem adapters. Unit
+  consistency verified against production writers on every path (audit secs,
+  analytics secs, notifications secs, agent-log `[secs]` prefix, telemetry
+  ms) — no ms/s cutoff mismatch anywhere.
+- 02:00 UTC wall-clock scheduling is real: `run_at_utc_hour` +
+  `next_daily_run_secs` (unit-tested boundaries), spawn loop sleeps to the
+  next h:00 UTC, `retention_cleanup` registered `Some(2)` and spawned from
+  main after `RetentionStore::init` loads policies from the KV store (which
+  is SQLite/PG-backed in DB mode). Round-1 minor (fire-and-forget PUT
+  persist) also fixed: `update()` persists before acking; corrupt-blob
+  self-heal and read-failure never-overwrite are both tested.
+- Mechanical checks green: arch, unwired-port-methods, mem-port-contracts,
+  in-memory-state-stores, byte-slice-truncation, dead-message-kinds,
+  inert-enforcement, fail-open-ref-resolution, lossy-secret-conversion,
+  migration-sql-portability, relative-path-defaults, abac-route-registry,
+  task-commit-attribution (all 9 attributed commits reachable from the
+  candidate; `6a908460` is an ancestor via main).
+- `scripts/update-coverage-summary.sh` reproduces the candidate SUMMARY.md
+  byte-identically. The HSI row delta (19/20 → 20/19 n/a/assigned) is a
+  regeneration correcting a stale base row: the HSI coverage file itself
+  (unchanged in this range since `acd20917`, an ancestor of the base) already
+  read 20 n/a / 19 assigned — verified by recounting the base file.
+- web/dist hashed-bundle churn is unexplained-by-diff rebuild noise from a
+  checkpoint commit with no web/src changes in range — repo-recognized churn
+  class (task-205 reverted identical churn on its branch); not a product
+  defect. No production code under `crates/` is affected.
+- Transport restriction (not a code defect): `admin_retention_list_and_update`
+  and every listener-based test in api_integration.rs fail identically at the
+  first request in this sandbox (no TCP accept, errno 95 per
+  /tmp/stage/capabilities.json — control test `health_returns_ok` fails the
+  same way). The endpoint contract is covered in-process by the green oneshot
+  tests. Host/CI must run:
+  `cargo test -p gyre-server --test api_integration admin_retention_list_and_update`.
+
+All acceptance criteria (1–7) are satisfied by shipped production code and
+hard tests; both directions (purge happens / within-policy data retained) are
+asserted for every purge path.
