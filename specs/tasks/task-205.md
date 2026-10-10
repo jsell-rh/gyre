@@ -232,10 +232,46 @@ Re-verification at repaired HEAD (`2076ba76`):
   above); the exact commands are recorded in the evidence file for host
   verification and GitHub CI.
 
+## Repair round (checkpoint 3501ed42, exit 130) — merged-HEAD verification
+
+The interrupted round died mid-mutation-probe; the harness then merged base
+`05709c24` (task-196 Briefing Q&A, +459 lines in `api/graph.rs`) into this
+branch, producing HEAD `f6b6a79e` — a merge that had never been built or
+tested. This round completed the interrupted work at that merged HEAD:
+
+- `SKIP_WEB_BUILD=1 cargo build --all` — OK (first post-merge build).
+- `cargo test -p gyre-common --lib` — 101 passed; `cargo test -p gyre-server
+  --lib -- api::graph::tests mcp::tests spec_registry::tests` — 152 passed
+  (the +10 over the prior round's 142 is merged task-196 briefing tests).
+- The interrupted substring-revert mutation probe, re-run at `f6b6a79e` in
+  an isolated worktree: all 4 projection guards FAIL under the mutant
+  (exit 101; the MCP guard returns only the `user_authentication_service`
+  decoy) and the 404 guards correctly still pass. Evidence:
+  `/tmp/stage/review-evidence/task205-round3-mutation-merged-head-f6b6a79e.md`.
+- R1 review's flagged source edit (`specs/coverage/system/realized-model.md`
+  row 7 + drifted anchors in rows 6/8/10) owned by this task: row-note
+  citations re-anchored to `f6b6a79e` (concept handler :704,
+  resolve_concept_view :681, workspace concept :1419, timeline :771, risks
+  :724, diff :792, route block mod.rs:864-910, extractor convention
+  gyre-domain/src/rust_extractor.rs:474-507). Statuses unchanged.
+- Checkpoint `3501ed42` had re-introduced the `web/dist` hashed-bundle churn
+  (embedded `npm run build` at checkpoint compile; zero `web/src` delta) —
+  reverted to the merge-base state again; all cargo runs this round used
+  `SKIP_WEB_BUILD=1`.
+- `scripts/check-task-commit-attribution.sh` failed at the merged HEAD
+  because the merge base itself (`05709c24`, landed task-196 squash) was
+  absent from task-196's frontmatter — recorded it there (the check's
+  documented remedy, same as round 2's task-189 case). Gate now passes;
+  no exemptions added.
+- `check-arch.sh`, `check-abac-route-registry.sh`, `check-mcp-write-tools.sh`,
+  `check-mem-port-contracts.sh`, `check-dead-message-kinds.sh` — all pass.
+- TCP-listener integration tests still cannot run in this sandbox (accept(2)
+  errno 95, re-probed this round); exact host/CI command recorded in the
+  evidence file.
+
 ## Review
 
 ### Review changed source code
-
 - specs/coverage/system/realized-model.md
 
 Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
