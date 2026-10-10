@@ -5,7 +5,7 @@ depends_on: [task-211]
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §CLI"
-commits: ["2fe8149b019df51989c3f666c99b993c3870af0d", "97ee3df5cddf77c8e6a296925175801347240dbc", "87fae32e02d6d4bdeca2070de71e5bec2eb7d458", "6abdfdec95bf12b68c2bdf9ba3e759944524af3f", "4d16c6c5b2ded0f53c67e528f4ecf5299fd714ca", "6f4d1366b84193c972c2e7c13a1a42059da2806a", "a5a82183d3e67df0aac25f30e2ba16c5709081f2"]
+commits: ["87fae32e02d6d4bdeca2070de71e5bec2eb7d458", "6abdfdec95bf12b68c2bdf9ba3e759944524af3f", "4d16c6c5b2ded0f53c67e528f4ecf5299fd714ca", "6f4d1366b84193c972c2e7c13a1a42059da2806a", "a5a82183d3e67df0aac25f30e2ba16c5709081f2"]
 ---
 
 ## Spec Excerpt
@@ -82,11 +82,3 @@ The `SetBudgetRequest` shape (`crates/gyre-server/src/api/budget.rs:63-69`) acce
 - `cargo run -p gyre-cli -- budget --help` / `show --help` / `set --help` → exit 0, help text confirmed (evidence file `task192-budget-help.txt`).
 - `tests/ws_integration.rs::test_auth_and_ping_roundtrip` fails in this sandbox with `Os { code: 95, kind: Unsupported }` at the TCP listener bind — matches the recorded `capabilities.json` restriction (`tcp_listener_probe.supported=false`, errno 95). Infrastructure limitation, not a code defect; requires host/CI verification.
 - Live end-to-end HTTP against a running server could not be exercised here (sandbox cannot bind listeners); the client-level tests assert the exact request wire format (method, URL, auth header, JSON body) which the routes in `api/mod.rs:610-613` accept, and error paths are exercised with real `reqwest::Response` objects carrying the server's exact wire shape.
-
-## Repair round 3 (contract finding 57e6fef2)
-
-Durable finding: repair commit 97ee3df5 **changed the assigned requirements** — it made `gyre init --starter-kit` require `--repo-path` (a normative behavior change to `run_bootstrap`, a task-099-revision-round-owned surface), with help-text, `docs/cli.md`, and exemption-file side effects. Out of this task's contract; normative changes require separate spec review.
-
-Restored at `2fe8149b` to the exact base `f4acb4eb` starter-kit surface (byte-identical code, help, and docs; the task-099 F6 hazard re-exempted at the line this branch's budget additions shifted it to, `main.rs:1862` — mutation-checked: a wrong-line entry fails `check-relative-path-defaults.sh`, the correct entry passes). The in-contract rustfmt changed-line fixes from 97ee3df5 were kept; the budget CLI itself is unchanged and re-verified.
-
-Evidence: `/tmp/stage/review-evidence/task192-contract-repair-{gates,tests}.txt` — 107 passed / 0 failed; rustfmt-diff, relative-path-defaults, arch all clean. Attribution: 97ee3df5 and 2fe8149b both listed above; the `f4acb4eb` task-189 attribution failure is pre-existing at clean `origin/main` (verified by checkout), unrelated to this branch — recorded for the task-189/task-95 owners, not patched here (another task's lifecycle file is out of contract).
