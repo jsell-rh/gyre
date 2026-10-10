@@ -165,22 +165,28 @@ describe('ExplorerCanvas — large graph performance', () => {
     expect(nodes.length).toBeGreaterThanOrEqual(10000);
     expect(edges.length).toBeGreaterThanOrEqual(20000);
 
-    // Measure render time — jsdom timing is not identical to browser timing
-    // but serves as a regression guard for computational performance.
+    // Measure CPU time — jsdom timing is not identical to browser timing but
+    // serves as a regression guard for computational performance. CPU time is
+    // measured instead of wall time so the guard stays deterministic when the
+    // full suite runs workers in parallel and the event loop is contended:
+    // under load, wall time inflates (observed 16s for this render in a full
+    // suite run vs ~3s isolated) while CPU time does not.
     // The AC target is <100ms in a real browser. In jsdom, rendering 10k nodes
     // takes several seconds because jsdom is single-threaded JS without GPU
     // acceleration. We use a generous threshold as a regression guard —
     // a sudden 10x increase would indicate an algorithmic regression.
-    const start = performance.now();
+    const startCpu = process.cpuUsage();
     render(ExplorerCanvas, {
       props: { nodes, edges },
     });
-    const elapsed = performance.now() - start;
+    const cpuUsed = process.cpuUsage(startCpu);
+    const cpuMs = (cpuUsed.user + cpuUsed.system) / 1000;
 
     // jsdom regression guard — not the AC target (which requires real browser).
-    // Typical jsdom: 2-5s for 10k nodes. Threshold set at 15s to avoid flaky CI.
-    expect(elapsed).toBeLessThan(15000);
-  });
+    // Typical jsdom: ~3s CPU for 10k nodes. Threshold set at 15s to catch a
+    // sudden algorithmic regression without flaky CI.
+    expect(cpuMs).toBeLessThan(15000);
+  }, 30000);
 
   it('10k graph renders a canvas element', () => {
     const { nodes, edges } = generateLargeGraph(10000, 20000);
@@ -199,7 +205,7 @@ describe('ExplorerCanvas — large graph performance', () => {
     const stats = container.querySelector('.treemap-stats');
     // Stats should show the actual node count (10000+)
     expect(stats?.textContent).toMatch(/10\d{3}/);
-  });
+  }, 30000);
 
   it('10k graph triggers canvas draw calls', () => {
     const { nodes, edges } = generateLargeGraph(10000, 20000);
@@ -208,7 +214,7 @@ describe('ExplorerCanvas — large graph performance', () => {
     });
     // Canvas should have received draw calls (fillRect for background + nodes)
     expect(mockCtx.fillRect).toHaveBeenCalled();
-  });
+  }, 30000);
 
   it('viewport culling reduces draw calls for off-screen nodes', () => {
     // With a default camera at origin, many nodes in a 10k graph will be off-screen.
@@ -228,7 +234,7 @@ describe('ExplorerCanvas — large graph performance', () => {
     expect(totalFillRects).toBeLessThan(50000);
     // Verify canvas drew something (not zero)
     expect(totalFillRects).toBeGreaterThan(0);
-  });
+  }, 30000);
 
   it('edge bundling activates for large edge counts (>5000)', () => {
     // When edge count > 5000, drawEdges should use bundled mode.
@@ -241,7 +247,23 @@ describe('ExplorerCanvas — large graph performance', () => {
     // The moveTo calls should be much less than 20k (bundled = group-to-group arrows).
     const moveToCount = mockCtx.moveTo.mock.calls.length;
     expect(moveToCount).toBeLessThan(edges.length);
-  });
+  }, 30000);
+
+  it('text width cache prevents redundant measureText calls', () => {
+    // With 10k nodes, many will share the same labels (node_type names).
+    // The LRU text width cache should reduce measureText calls.
+    const { nodes, edges } = generateLargeGraph(10000, 20000);
+    render(ExplorerCanvas, {
+      props: { nodes, edges },
+    });
+
+    const measureTextCalls = mockCtx.measureText.mock.calls.length;
+    // Text cache should limit measurements. With 10k nodes there are only
+    // ~10 unique node_type values, so even if labels differ, the cache
+    // reduces calls significantly compared to naive per-label measurement.
+    expect(measureTextCalls).toBeLessThan(10000);
+  }, 30000);
+
 
   it('generates hierarchical containment correctly', () => {
     const { nodes, edges } = generateLargeGraph(10000, 20000);
@@ -268,31 +290,19 @@ describe('ExplorerCanvas — large graph performance', () => {
     const { nodes, edges } = generateLargeGraph(15000, 30000);
     expect(nodes.length).toBeGreaterThanOrEqual(15000);
 
-    const start = performance.now();
+    const startCpu = process.cpuUsage();
     render(ExplorerCanvas, {
       props: { nodes, edges },
     });
-    const elapsed = performance.now() - start;
+    const cpuUsed = process.cpuUsage(startCpu);
+    const cpuMs = (cpuUsed.user + cpuUsed.system) / 1000;
 
-    // jsdom regression guard for 15k graph. Typical: 3-8s.
-    // Real browser target would be <200ms; jsdom is orders of magnitude slower.
-    expect(elapsed).toBeLessThan(20000);
+    // jsdom regression guard for 15k graph (CPU time — see 10k test above).
+    // Typical: ~5s CPU. Real browser target would be <200ms; jsdom is
+    // orders of magnitude slower.
+    expect(cpuMs).toBeLessThan(20000);
   }, 30000);
 
-  it('text width cache prevents redundant measureText calls', () => {
-    // With 10k nodes, many will share the same labels (node_type names).
-    // The LRU text width cache should reduce measureText calls.
-    const { nodes, edges } = generateLargeGraph(10000, 20000);
-    render(ExplorerCanvas, {
-      props: { nodes, edges },
-    });
-
-    const measureTextCalls = mockCtx.measureText.mock.calls.length;
-    // Text cache should limit measurements. With 10k nodes there are only
-    // ~10 unique node_type values, so even if labels differ, the cache
-    // reduces calls significantly compared to naive per-label measurement.
-    expect(measureTextCalls).toBeLessThan(10000);
-  });
 });
 
 describe('ExplorerCanvas — semantic zoom via component rendering', () => {
@@ -333,7 +343,7 @@ describe('ExplorerCanvas — semantic zoom via component rendering', () => {
     // Large graph should have far fewer text calls per node than the small graph,
     // demonstrating LOD text reduction at lower effective zoom
     expect(largeTextPerNode).toBeLessThan(smallTextPerNode);
-  });
+  }, 30000);
 
   it('at default zoom with 10k nodes, text calls are far fewer than node count', () => {
     // With semantic zoom + viewport culling, text is rendered only for
@@ -346,7 +356,7 @@ describe('ExplorerCanvas — semantic zoom via component rendering', () => {
     // than total nodes. If LOD were broken and all 10k nodes got text,
     // we'd see thousands of fillText calls.
     expect(textCalls).toBeLessThan(nodes.length);
-  });
+  }, 30000);
 });
 
 describe('ExplorerCanvas — viewport culling via component rendering', () => {
@@ -363,7 +373,7 @@ describe('ExplorerCanvas — viewport culling via component rendering', () => {
     const fillRectCalls = mockCtx.fillRect.mock.calls.length;
     expect(fillRectCalls).toBeLessThan(50000);
     expect(fillRectCalls).toBeGreaterThan(0);
-  });
+  }, 30000);
 
   it('100-node graph produces draw calls for visible nodes', () => {
     // With 100 nodes near the origin, the layout engine positions them
@@ -397,7 +407,7 @@ describe('ExplorerCanvas — edge culling via component rendering', () => {
     const moveToCount = mockCtx.moveTo.mock.calls.length;
     // Bundled edges = group-to-group, far fewer than 20k individual edges
     expect(moveToCount).toBeLessThan(edges.length);
-  });
+  }, 30000);
 
   it('small graph edges are individually drawn (not bundled)', () => {
     // With <5000 edges, individual edge rendering is used.
