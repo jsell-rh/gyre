@@ -2511,6 +2511,16 @@ async fn handle_spec_assist(state: &AppState, args: &Value, auth: &Authenticated
     )
     .await;
 
+    // Meta-spec-set binding (ui-layout.md §2, MCP parity with REST handler):
+    // inject the workspace's pinned personas/principles/standards/process
+    // as `{{meta_spec_context}}`.
+    let meta_spec_context = crate::llm_helpers::workspace_meta_spec_context(
+        state,
+        &repo.workspace_id,
+        Some(&repo.id),
+    )
+    .await;
+
     // Spec content and graph context travel in the system template as
     // grounding variables; the instruction is the user prompt only
     // (injection containment — blank its template placeholder).
@@ -2520,6 +2530,7 @@ async fn handle_spec_assist(state: &AppState, args: &Value, auth: &Authenticated
             ("spec_path", spec_path.as_str()),
             ("spec_content", spec_content.as_str()),
             ("graph_context", graph_context.as_str()),
+            ("meta_spec_context", meta_spec_context.as_str()),
             ("instruction", ""),
         ],
     );

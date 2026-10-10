@@ -405,6 +405,13 @@ pub async fn assist_spec(
         crate::llm_defaults::PROMPT_SPECS_ASSIST,
     )
     .await;
+    // Meta-spec-set binding (ui-layout.md §2: templates are "Bound to the
+    // workspace's meta-spec-set"): the workspace's pinned personas,
+    // principles, standards, and process specs are injected as
+    // `{{meta_spec_context}}`.
+    let meta_spec_context =
+        crate::llm_helpers::workspace_meta_spec_context(&state, &repo.workspace_id, Some(&repo.id))
+            .await;
     // Spec content and graph context travel in the system template as
     // grounding variables; the instruction is the user prompt only
     // (injection containment — blank its template placeholder).
@@ -414,6 +421,7 @@ pub async fn assist_spec(
             ("spec_path", req.spec_path.as_str()),
             ("spec_content", spec_content.as_str()),
             ("graph_context", graph_context.as_str()),
+            ("meta_spec_context", meta_spec_context.as_str()),
             ("instruction", ""),
         ],
     );
@@ -422,14 +430,42 @@ pub async fn assist_spec(
     // Resolve model and call streaming LLM.
     let (model, max_tokens) =
         crate::llm_helpers::resolve_llm_model(&state, &repo.workspace_id, "specs-assist").await;
-    let llm_stream = factory
+    // LLM connection failure is an `event: error` SSE event, not an HTTP
+    // 500 (ui-layout.md §2). Mid-stream chunk failures must surface as
+    // `event: error` too — a truncated response must not masquerade as a
+    // `complete` event (the old `filter_map(|r| r.ok())` silently dropped
+    // them).
+    let llm_stream = match factory
         .for_model(&model)
         .stream_complete(&system_prompt, &user_prompt, max_tokens)
         .await
-        .map_err(ApiError::Internal)?;
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(repo_id = %repo_id, model = %model, error = ?e, "LLM stream_complete failed in assist_spec");
+            return Ok(sse_error_stream(format!("LLM request failed: {e}")));
+        }
+    };
 
-    let chunks: Vec<String> = llm_stream.filter_map(|r| async { r.ok() }).collect().await;
+    let mut chunks: Vec<String> = Vec::new();
+    let mut stream_error: Option<String> = None;
+    {
+        use futures_util::StreamExt as _;
+        let mut stream = std::pin::pin!(llm_stream);
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(chunk) => chunks.push(chunk),
+                Err(e) => {
+                    stream_error = Some(format!("LLM stream failed mid-generation: {e}"));
+                    break;
+                }
+            }
+        }
+    }
     let full_text = chunks.join("");
+    if let Some(err) = stream_error {
+        return Ok(sse_error_stream(err));
+    }
 
     // Budget tracking: charge workspace for LLM usage (ui-layout.md §3 line 158).
     let estimated_input = (user_prompt.len() + system_prompt.len()) / 4;

@@ -4325,7 +4325,8 @@ impl gyre_ports::TrustAnchorRepository for MemTrustAnchorRepository {
 
 #[cfg(test)]
 mod budget_call_tests {
-    use super::*;
+    use gyre_ports::BudgetCallRepository;
+     use super::*;
 
     fn record(id: &str) -> gyre_domain::BudgetCallRecord {
         gyre_domain::BudgetCallRecord {

@@ -18,6 +18,21 @@ use std::sync::Arc;
 /// Used in tests and when Vertex AI credentials are unavailable.
 pub struct MockLlmAdapter {
     pub response: String,
+    /// When set, every LLM call fails with this error — simulates an LLM
+    /// connection failure so SSE `event: error` handling is testable
+    /// (ui-layout.md §2: "If the LLM connection fails entirely, `event:
+    /// error` fires instead").
+    pub failure: Option<String>,
+    /// When set, `stream_complete` succeeds but the stream errors mid-way
+    /// after emitting the partial chunks — simulates a dropped LLM
+    /// connection mid-generation so truncated-response handling is
+    /// testable.
+    pub stream_error_after: Option<usize>,
+    /// Chunks emitted by `stream_complete` before the mid-stream error.
+    pub partial_chunks: Vec<String>,
+    /// The error emitted after the partial chunks in `stream_error_after`
+    /// mode.
+    pub stream_error_message: String,
 }
 
 impl MockLlmAdapter {
@@ -25,6 +40,10 @@ impl MockLlmAdapter {
     pub fn new(response: impl Into<String>) -> Self {
         Self {
             response: response.into(),
+            failure: None,
+            stream_error_after: None,
+            partial_chunks: vec![],
+            stream_error_message: String::new(),
         }
     }
 
@@ -38,6 +57,31 @@ impl MockLlmAdapter {
     /// Create an adapter that always returns a serialized JSON value.
     pub fn json_response(v: serde_json::Value) -> Self {
         Self::new(serde_json::to_string(&v).unwrap())
+    }
+
+    /// Create an adapter whose every LLM call fails — for testing SSE
+    /// `event: error` behavior.
+    pub fn failing(message: impl Into<String>) -> Self {
+        Self {
+            response: String::new(),
+            failure: Some(message.into()),
+            stream_error_after: None,
+            partial_chunks: vec![],
+            stream_error_message: String::new(),
+        }
+    }
+
+    /// Create an adapter that streams `chunks` and then errors — for
+    /// testing mid-stream failure handling (a truncated response must not
+    /// masquerade as a `complete` event).
+    pub fn stream_error_after(chunks: Vec<String>, message: impl Into<String>) -> Self {
+        Self {
+            response: String::new(),
+            failure: None,
+            stream_error_after: Some(chunks.len()),
+            partial_chunks: chunks,
+            stream_error_message: message.into(),
+        }
     }
 
     fn resolve_text(&self, user_prompt: &str) -> String {
@@ -57,6 +101,9 @@ impl LlmPort for MockLlmAdapter {
         user_prompt: &str,
         _max_tokens: Option<u32>,
     ) -> Result<String> {
+        if let Some(msg) = &self.failure {
+            return Err(anyhow::anyhow!("{msg}"));
+        }
         Ok(self.resolve_text(user_prompt))
     }
 
@@ -66,6 +113,9 @@ impl LlmPort for MockLlmAdapter {
         user_prompt: &str,
         _max_tokens: Option<u32>,
     ) -> Result<serde_json::Value> {
+        if let Some(msg) = &self.failure {
+            return Err(anyhow::anyhow!("{msg}"));
+        }
         if self.response == "__echo__" {
             Ok(serde_json::json!([{
                 "type": "test",
@@ -85,6 +135,22 @@ impl LlmPort for MockLlmAdapter {
         user_prompt: &str,
         _max_tokens: Option<u32>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+        if let Some(msg) = &self.failure {
+            return Err(anyhow::anyhow!("{msg}"));
+        }
+        if let Some(n) = self.stream_error_after {
+            // Emit the partial chunks, then error — a mid-stream failure
+            // the handler must surface as `event: error`, not `complete`.
+            let msg = self.stream_error_message.clone();
+            let chunks: Vec<Result<String>> = self
+                .partial_chunks
+                .iter()
+                .take(n)
+                .map(|c| Ok(c.clone()))
+                .chain(std::iter::once(Err(anyhow::anyhow!("{msg}"))))
+                .collect();
+            return Ok(Box::pin(futures_util::stream::iter(chunks)));
+        }
         let text = self.resolve_text(user_prompt);
         // Emit in (up to) 3 chunks to simulate streaming behaviour.
         let chars: Vec<char> = text.chars().collect();
@@ -192,6 +258,23 @@ mod tests {
         assert_eq!(chunks.join(""), "hello world");
         // Stream must terminate (we collected it).
         assert!(!chunks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn mock_failing_adapter_fails_every_call() {
+        let adapter = MockLlmAdapter::failing("connection refused");
+        assert!(adapter.complete("s", "u", None).await.is_err());
+        assert!(adapter.predict_json("s", "u", None).await.is_err());
+        assert!(adapter.stream_complete("s", "u", None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn mock_stream_error_after_emits_partial_then_fails() {
+        let adapter =
+            MockLlmAdapter::stream_error_after(vec!["par".into()], "dropped mid-generation");
+        let mut stream = adapter.stream_complete("s", "u", None).await.unwrap();
+        assert_eq!(stream.next().await.unwrap().unwrap(), "par");
+        assert!(stream.next().await.unwrap().is_err());
     }
 
     #[test]

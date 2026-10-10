@@ -1213,6 +1213,10 @@ pub async fn briefing_ask(
     // git provenance for the cost entry. Variables match the committed
     // template (`{{briefing_json}}`, `{{graph_summary}}`, `{{history}}`);
     // the hardcoded default uses `{{context}}` — both are substituted.
+    // The user's question travels as the user prompt only (injection
+    // containment), so the template's `{{question}}` placeholder is
+    // explicitly blanked — the same rule the other two LLM endpoints
+    // apply — rather than leaking literal placeholder text.
     let graph_summary =
         crate::llm_helpers::workspace_graph_summary(&state, &workspace_id_obj, None).await;
     let history_json = serde_json::to_string(&history).unwrap_or_default();
@@ -1224,6 +1228,7 @@ pub async fn briefing_ask(
             ("briefing_json", briefing_context.as_str()),
             ("graph_summary", graph_summary.as_str()),
             ("history", history_json.as_str()),
+            ("question", ""),
         ],
     );
     let user_prompt = req.question.clone();
@@ -1231,14 +1236,42 @@ pub async fn briefing_ask(
     // Model + per-endpoint max output tokens (ui-layout.md §2).
     let (model, max_tokens) =
         crate::llm_helpers::resolve_llm_model(&state, &workspace_id_obj, "briefing-ask").await;
-    let stream = factory
+    // LLM connection failure is an `event: error` SSE event, not an HTTP
+    // 500 (ui-layout.md §2). Mid-stream chunk failures must surface as
+    // `event: error` too — a truncated response must not masquerade as a
+    // `complete` event (the old `filter_map(|r| r.ok())` silently dropped
+    // them).
+    let stream = match factory
         .for_model(&model)
         .stream_complete(&system_prompt, &user_prompt, max_tokens)
         .await
-        .map_err(ApiError::Internal)?;
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(model = %model, workspace_id = %id, error = ?e, "LLM stream_complete failed in briefing_ask");
+            return Ok(sse_error_stream(format!("LLM request failed: {e}")));
+        }
+    };
 
-    let chunks: Vec<String> = stream.filter_map(|r| async { r.ok() }).collect().await;
+    let mut chunks: Vec<String> = Vec::new();
+    let mut stream_error: Option<String> = None;
+    {
+        use futures_util::StreamExt as _;
+        let mut stream = std::pin::pin!(stream);
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(chunk) => chunks.push(chunk),
+                Err(e) => {
+                    stream_error = Some(format!("LLM stream failed mid-generation: {e}"));
+                    break;
+                }
+            }
+        }
+    }
     let full_text = chunks.join("");
+    if let Some(err) = stream_error {
+        return Ok(sse_error_stream(err));
+    }
     // Budget Tracking (platform-model.md §5): charge the workspace for the
     // briefing Q&A as an `llm_query` budget call — persist the audit record
     // (with prompt-template git SHA, ui-layout.md §2) and increment the
@@ -1341,6 +1374,22 @@ pub async fn link_node_to_spec(
             confidence: confidence_str.to_string(),
         }),
     ))
+}
+
+/// Build a single-event SSE stream carrying `event: error` (ui-layout.md §2:
+/// "If the LLM connection fails entirely, `event: error` fires instead").
+fn sse_error_stream(
+    message: String,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>> {
+    let error_data =
+        serde_json::to_string(&serde_json::json!({"error": message})).unwrap_or_default();
+    let events: Vec<Result<Event, std::convert::Infallible>> =
+        vec![Ok(Event::default().event("error").data(error_data))];
+    Sse::new(stream::iter(events)).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ping"),
+    )
 }
 
 /// GET /workspaces/{id}/graph/concept/{name}

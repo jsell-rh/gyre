@@ -546,15 +546,32 @@ pub async fn generate_explorer_view(
     // Model + per-endpoint max output tokens (ui-layout.md §2).
     let (model, max_tokens) =
         crate::llm_helpers::resolve_llm_model(&state, &ws_id, "explorer-generate").await;
-    let result = factory
+    // LLM connection failure is an `event: error` SSE event, not an HTTP
+    // 500 (ui-layout.md §2: "If the LLM connection fails entirely,
+    // `event: error` fires instead (no fallback available)"). The stream
+    // has already been set up by this point; the SSE content type is
+    // fixed, so we return a single-event error stream.
+    let result = match factory
         .for_model(&model)
         .predict_json(&system_prompt, &user_prompt, max_tokens)
         .await
-        .map_err(|e| {
+    {
+        Ok(v) => v,
+        Err(e) => {
             tracing::error!(model = %model, workspace_id = %workspace_id, error = ?e, "LLM predict_json failed in generate_explorer_view");
-            ApiError::Internal(e)
-        })?;
-
+            let error_data = serde_json::to_string(&json!({
+                "error": format!("LLM request failed: {e}"),
+            }))
+            .unwrap_or_default();
+            let events: Vec<Result<Event, std::convert::Infallible>> =
+                vec![Ok(Event::default().event("error").data(error_data))];
+            return Ok(Sse::new(stream::iter(events)).keep_alive(
+                axum::response::sse::KeepAlive::new()
+                    .interval(Duration::from_secs(15))
+                    .text("keep-alive"),
+            ));
+        }
+    };
     // Budget charging: `llm_query` cost entries (ui-layout.md §2). The
     // LlmPort does not report actual usage, so estimate from prompt size
     // (~4 chars/token) plus a response overhead floor. Structured view

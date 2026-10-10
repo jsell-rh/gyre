@@ -190,6 +190,122 @@ pub async fn resolve_prompt_template(
         sha: None,
     }
 }
+/// Render the workspace's meta-spec-set as the `{{meta_spec_context}}`
+/// prompt variable (ui-layout.md §2: templates are "Bound to the
+/// workspace's meta-spec-set — if the workspace has custom principles or
+/// standards, those are injected into the prompt context").
+///
+/// Resolves each pinned entry (personas, principles, standards, process)
+/// by reading `path` from the repo's git tree. A pin that cannot be
+/// resolved (missing repo, missing blob) is reported by path so the prompt
+/// stays honest about what is bound, instead of silently dropping the
+/// workspace's governance rules. When the workspace has no meta-spec set,
+/// returns a short note saying so (the template's "Active personas and
+/// standards" section still renders something meaningful rather than an
+/// empty code fence).
+pub async fn workspace_meta_spec_context(
+    state: &AppState,
+    workspace_id: &Id,
+    repo_hint: Option<&Id>,
+) -> String {
+    let json = match state.meta_spec_sets.get(workspace_id).await {
+        Ok(Some(json)) => json,
+        _ => return "No meta-spec set is bound to this workspace.".to_string(),
+    };
+    let set: serde_json::Value = match serde_json::from_str(&json) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(workspace_id = %workspace_id, "corrupt meta_spec_set: {e}");
+            return "Workspace meta-spec set could not be read.".to_string();
+        }
+    };
+
+    // Candidate repos whose git trees may carry the pinned meta-specs: the
+    // request's own repo first, else every repo in the workspace.
+    let repos: Vec<gyre_domain::Repository> = match repo_hint {
+        Some(rid) => state.repos.find_by_id(rid).await.ok().flatten().into_iter().collect(),
+        None => state
+            .repos
+            .list_by_workspace(workspace_id)
+            .await
+            .unwrap_or_default(),
+    };
+
+    let mut lines: Vec<String> = Vec::new();
+    // Section order mirrors MetaSpecSet's field order (personas, principles,
+    // standards, process) so the rendered context is stable.
+    for (label, entries) in [
+        ("Personas", &set["personas"]),
+        ("Principles", &set["principles"]),
+        ("Standards", &set["standards"]),
+        ("Process", &set["process"]),
+    ] {
+        let arr: Vec<(String, String)> = match &entries {
+            serde_json::Value::Object(map) => map
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        v["sha"].as_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .collect(),
+            serde_json::Value::Array(items) => items
+                .iter()
+                .map(|v| {
+                    (
+                        v["path"].as_str().unwrap_or_default().to_string(),
+                        v["sha"].as_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .collect(),
+            _ => continue,
+        };
+        if arr.is_empty() {
+            continue;
+        }
+        lines.push(format!("### {label}\n"));
+        for (path, _sha) in &arr {
+            lines.push(match resolve_pinned_content(state, &repos, path).await {
+                Some(content) => {
+                    // Each bound meta-spec contributes its content, capped
+                    // so one large pin cannot crowd out the spec itself.
+                    let capped: String =
+                        content.lines().take(80).collect::<Vec<&str>>().join("\n");
+                    format!("--- {path} ---\n{capped}\n")
+                }
+                None => format!("--- {path} ---\n(bound but unreadable in the repo git tree)\n"),
+            });
+        }
+    }
+
+    if lines.is_empty() {
+        "No meta-spec set is bound to this workspace.".to_string()
+    } else {
+        lines.join("")
+    }
+}
+
+/// Read a pinned meta-spec's content from the first repo whose git tree
+/// contains `path` on its default branch.
+async fn resolve_pinned_content(
+    state: &AppState,
+    repos: &[gyre_domain::Repository],
+    path: &str,
+) -> Option<String> {
+    for repo in repos {
+        if let Ok(Some(bytes)) = state
+            .git_ops
+            .read_file(&repo.path, &repo.default_branch, path)
+            .await
+        {
+            if let Ok(content) = String::from_utf8(bytes) {
+                return Some(content);
+            }
+        }
+    }
+    None
+}
 
 /// Compact workspace graph summary for LLM grounding (node types and counts,
 /// per ui-layout.md §2 "Available Data": explorer-generate and briefing-ask
