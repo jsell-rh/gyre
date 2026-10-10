@@ -593,7 +593,25 @@ pub(crate) async fn spawn_agent_core(
             worktree_path.clone(),
             now,
         );
-        state.worktrees.create(&wt).await?;
+        if let Err(wt_err) = state.worktrees.create(&wt).await {
+            // Compensating rollback (same pattern as the interrogation
+            // fail-closed path above): the agent record was already created;
+            // leaving it behind would occupy the workspace's agent slot and
+            // show a spawnable agent with no worktree. Delete it (and its
+            // token) so a failed spawn leaves no orphaned entities.
+            if let Err(del_err) = state.agents.delete(&agent.id).await {
+                tracing::error!(
+                    agent_id = %agent.id,
+                    error = %del_err,
+                    "failed to delete agent record after worktree creation failure"
+                );
+            }
+            let _ = state
+                .kv_store
+                .kv_remove("agent_tokens", &agent.id.to_string())
+                .await;
+            return Err(wt_err.into());
+        }
 
         change_id
     } else {
@@ -648,7 +666,7 @@ pub(crate) async fn spawn_agent_core(
     {
         // Docker requires an absolute working directory path. Canonicalize the
         // worktree path to ensure it's absolute even when GYRE_REPOS_PATH is
-        // relative (e.g. the default "./repos/").
+        // configured as a relative directory.
         let effective_work_dir = if std::path::Path::new(&worktree_path).exists() {
             std::fs::canonicalize(&worktree_path)
                 .map(|p| p.to_string_lossy().into_owned())
@@ -694,32 +712,58 @@ pub(crate) async fn spawn_agent_core(
         // process starts — raw values are never in the agent env.
         // Failure is logged and skipped: a missing/undecryptable secret must
         // not block spawning the agent itself.
-        let tenant_id = workspace
-            .as_ref()
-            .map(|ws| ws.tenant_id.to_string())
-            .unwrap_or_else(|| "default".to_string());
-        match state
-            .secrets
-            .resolve_for_agent(
-                &tenant_id,
-                &repo.workspace_id.to_string(),
-                &req.repo_id,
-                Some(&req.task_id),
-            )
-            .await
-        {
-            Ok(resolved) => {
-                for (name, value) in resolved {
-                    container_env.insert(
-                        format!("GYRE_CRED_{name}"),
-                        String::from_utf8_lossy(&value).into_owned(),
-                    );
+        // Secret scoping requires the workspace's real tenant identity. A
+        // workspace that cannot be resolved has no determinable scope —
+        // fabricating a "default" tenant would re-target resolution (and
+        // leak another tenant's secrets if one is literally named
+        // "default"). Skip delivery and log, per the scope-identity rule.
+        let tenant_id = workspace.as_ref().map(|ws| ws.tenant_id.to_string());
+        match tenant_id {
+            Some(tenant_id) => {
+                match state
+                    .secrets
+                    .resolve_for_agent(
+                        &tenant_id,
+                        &repo.workspace_id.to_string(),
+                        &req.repo_id,
+                        Some(&req.task_id),
+                    )
+                    .await
+                {
+                    Ok(resolved) => {
+                        for (name, value) in resolved {
+                            // Env vars are UTF-8 strings. A secret that is
+                            // not valid UTF-8 would be silently mangled by
+                            // a lossy conversion (U+FFFD) and the consumer
+                            // would use a corrupted credential — skip it
+                            // and log, naming it.
+                            match String::from_utf8(value) {
+                                Ok(v) => {
+                                    container_env.insert(format!("GYRE_CRED_{name}"), v);
+                                }
+                                Err(_) => {
+                                    tracing::warn!(
+                                        agent_id = %agent.id,
+                                        secret_name = %name,
+                                        "secret value is not valid UTF-8; skipping GYRE_CRED_{name} delivery"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            agent_id = %agent.id,
+                            "secret resolution failed; continuing without GYRE_CRED_* env vars: {e:#}"
+                        );
+                    }
                 }
             }
-            Err(e) => {
+            None => {
                 tracing::warn!(
                     agent_id = %agent.id,
-                    "secret resolution failed; continuing without GYRE_CRED_* env vars: {e:#}"
+                    workspace_id = %repo.workspace_id,
+                    "workspace could not be loaded; skipping GYRE_CRED_* secret delivery — tenant scope is not determinable"
                 );
             }
         }

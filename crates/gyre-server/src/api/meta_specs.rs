@@ -967,9 +967,18 @@ fn parse_approval_status(s: &str) -> Result<MetaSpecApprovalStatus, ApiError> {
 
 pub async fn list_meta_specs_registry(
     State(state): State<Arc<AppState>>,
-    _auth: AuthenticatedAgent,
+    auth: AuthenticatedAgent,
     Query(q): Query<ListMetaSpecsQuery>,
 ) -> Result<Json<Vec<MetaSpec>>, ApiError> {
+    // Admin-only: the registry is tenant-wide governance configuration (it
+    // defines the meta-specs that can be bound to any workspace). This route
+    // is ABAC-exempt, so the handler is the only authorization surface —
+    // any authenticated agent must not enumerate cross-workspace governance.
+    if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may list the meta-specs registry".to_string(),
+        ));
+    }
     let scope = match q.scope.as_deref() {
         None => None,
         Some(s) => Some(parse_scope(s)?),
@@ -1001,6 +1010,14 @@ pub async fn create_meta_spec_registry(
     auth: AuthenticatedAgent,
     Json(req): Json<CreateMetaSpecRequest>,
 ) -> Result<(StatusCode, Json<MetaSpec>), ApiError> {
+    // Admin-only (ABAC-exempt route — the handler is the authorization
+    // surface): creating registry entries defines tenant-wide governance;
+    // non-Admin callers must not mint meta-specs.
+    if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may create meta-specs registry entries".to_string(),
+        ));
+    }
     let kind = parse_kind(&req.kind)?;
     let scope = parse_scope(&req.scope)?;
     let prompt = req.prompt.unwrap_or_default();
@@ -1061,6 +1078,14 @@ pub async fn update_meta_spec_registry(
     Path(id): Path<String>,
     Json(req): Json<UpdateMetaSpecRequest>,
 ) -> Result<Json<MetaSpec>, ApiError> {
+    // Admin-only (docs: "Admin only for PUT/DELETE"; ABAC-exempt route —
+    // the handler is the authorization surface). Without this gate, any
+    // authenticated agent could edit governance prompts and reset approvals.
+    if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may update meta-specs registry entries".to_string(),
+        ));
+    }
     let mut ms = state
         .meta_specs
         .get_by_id(&Id::new(&id))
@@ -1110,9 +1135,16 @@ pub async fn update_meta_spec_registry(
 
 pub async fn delete_meta_spec_registry(
     State(state): State<Arc<AppState>>,
-    _auth: AuthenticatedAgent,
+    auth: AuthenticatedAgent,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    // Admin-only (docs: "Admin only for PUT/DELETE"; ABAC-exempt route —
+    // the handler is the authorization surface).
+    if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may delete meta-specs registry entries".to_string(),
+        ));
+    }
     let rid = Id::new(&id);
     let has_bindings = state
         .meta_spec_bindings
@@ -1295,6 +1327,90 @@ mod registry_tests {
         assert_eq!(update_resp.status(), StatusCode::OK);
         let update_json = body_json(update_resp).await;
         assert_eq!(update_json["version"].as_u64().unwrap(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn registry_endpoints_reject_non_admin() {
+        // The meta-specs-registry routes are ABAC-exempt (legacy exemption
+        // file), so the handler is the only authorization surface. A
+        // Developer-role JWT must get 403 from every registry mutation and
+        // from the list — governance configuration is Admin-only (docs:
+        // "Admin only for PUT/DELETE"; list/create follow the same class).
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        let state = make_test_state_with_jwt();
+        let router = crate::api::api_router().with_state(state);
+
+        let dev_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "dev-sub",
+                "preferred_username": "developer-user",
+                "realm_access": { "roles": ["developer"] }
+            }),
+            3600,
+        );
+        let auth = format!("Bearer {dev_token}");
+
+        // LIST
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/meta-specs-registry")
+                    .header("authorization", &auth)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // CREATE
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs-registry")
+                    .header("authorization", &auth)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"kind":"meta:principle","name":"x","scope":"Global","prompt":"p"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // UPDATE + DELETE against a known id shape (403 must precede 404 —
+        // the gate runs before the store lookup).
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/meta-specs-registry/whatever")
+                    .header("authorization", &auth)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"prompt":"p2"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/meta-specs-registry/whatever")
+                    .header("authorization", &auth)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test(flavor = "multi_thread")]

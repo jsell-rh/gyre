@@ -1760,9 +1760,14 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
         }
     }
     if args.starter_kit {
-        let target = repo_path
-            .clone()
-            .unwrap_or_else(|| std::path::PathBuf::from(&repo_name));
+        let target = repo_path.clone().unwrap_or_else(|| {
+            // Absolute default: a bare name would resolve against the
+            // process cwd anyway, but implicit cwd-dependence breaks
+            // scripted invocations that later cd. Anchor it explicitly.
+            std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join(&repo_name)
+        });
         bootstrap::write_starter_kit(&target)?;
         println!("  Starter kit written to {}", target.display());
     }

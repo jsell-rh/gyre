@@ -113,7 +113,22 @@ pub async fn compose_apply(
             None
         };
 
-        state.agents.create(&agent).await?;
+        if let Err(agent_err) = state.agents.create(&agent).await {
+            // Compensating rollback: the task for this item was already
+            // created; leaving it behind would orphan a task assigned to an
+            // agent that does not exist. Delete it so a failed item leaves
+            // no partial records (earlier items are independent and stay).
+            if let Some(tid) = task_id.clone() {
+                if let Err(del_err) = state.tasks.delete(&Id::new(tid)).await {
+                    tracing::error!(
+                        agent_id = %agent_id,
+                        error = %del_err,
+                        "failed to delete task after agent creation failure in compose apply"
+                    );
+                }
+            }
+            return Err(agent_err.into());
+        }
 
         name_to_agent_id.insert(agent_spec.name.clone(), agent_id.to_string());
         agent_ids.push(agent_id.to_string());
