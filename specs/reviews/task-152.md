@@ -57,3 +57,71 @@ Round-2 verdict: the fix is strictly better than the old gate — removes all fa
 - LLM-synthesized briefing architecture narrative over grounded delta facts (prompt-template + model-config aware, 10s-bounded) with template narratives as the quality floor on every failure mode.
 - Docs: api-reference timeline/briefing rows corrected to the shipped response shapes.
 - Gate repair: template-substitution gate's const-span swallowed the next const's `/// Variables:` doc block (7 false positives on pristine main, pre-commit-only so CI never saw it); fixed by comment-stripping the span, proven non-blinding by planted-bug probes for both true-positive classes.
+
+## Round 5 — independent re-review of candidate 494128e0 (base f4acb4eb)
+
+Full history re-verified at the exact assigned candidate (HEAD == 494128e0). Scope: the assigned
+diff `f4acb4eb..494128e0` (narrative.rs new, graph.rs, graph_extraction.rs, graph.rs API wiring,
+llm_defaults.rs, common graph.rs, gate hardening, docs, coverage row 9, task file) plus the merge
+topology — candidate is base `f4acb4eb` (task-189) merged into the recovered round-3 checkpoint
+`03b928c5` at `f29a4fdc`, with round-4 repairs `e5d4452e`; narrative/product files byte-identical to
+reviewed `c14e5769`; no unrelated-file drift (personas.rs, task-189/210 files identical to base).
+
+Test runs on the candidate tree (`CARGO_HOME=/tmp/cargo`, `CARGO_TARGET_DIR=/tmp/gyre-target`;
+logs under `/tmp/stage/review-evidence/`):
+
+- `cargo test -p gyre-domain --lib narrative` → 15 passed, 0 failed.
+- `cargo test -p gyre-domain --lib` → 378 passed, 0 failed.
+- `cargo test -p gyre-common --lib` → 94 passed, 0 failed.
+- `cargo test -p gyre-server --lib -- narrative briefing` → 20 passed, 0 failed (incl. the three
+  task tests: timeline narrative, template fallback without LLM, LLM path used when configured).
+- `cargo test -p gyre-server --lib graph_extraction` → 20 passed, 0 failed (incl.
+  `compact_delta_records_true_removed_edge_count` driving the real pipeline over a real bare git
+  repo).
+- Mechanical gates: 20/20 PASS (arch, template-substitution, byte-slice-truncation,
+  task-commit-attribution, migration-versions, dead-message-kinds, unbounded-external-http,
+  inert-enforcement, lossy-secret-conversion, forged-scope-fields, relative-path-defaults,
+  mem-port-contracts, mcp-write-tools, abac-route-registry, abac-exempt-handlers,
+  scope-literal-defaults, fabricated-scope-defaults, migration-sql-portability,
+  forwarded-header-trust, in-memory-state-stores).
+
+Mutation probes (source mutated, test run, source restored byte-exact; tree verified clean after):
+
+1. Dropped `edges_removed_count += 1` from the removed-edges loop (the round-4 fix) →
+   `compact_delta_records_true_removed_edge_count` FAILS (`left: 0, right: 1`). Discriminating.
+2. Disabled grounding in `load_narrative_grounding` (returned `NarrativeGrounding::default()`) →
+   `timeline_endpoint_returns_grounded_narrative` FAILS (narrative degrades to ungrounded
+   qualified-name fallback; "Governed by spec"/"Implements trait" clauses vanish). Discriminating.
+3. Replaced the LLM success arm with the template fallback (`Ok(Ok(text)) => fallback`) →
+   `briefing_summary_uses_llm_narrative_when_configured` FAILS. Discriminating — the LLM path is
+   genuinely exercised via `MockLlmPortFactory::echo()` (verified: `complete` returns the user
+   prompt, and the test asserts the echoed prompt appears AND template text does not).
+4. Planted `{{rogue_review_var}}` in `PROMPT_GRAPH_NARRATIVE`'s string value →
+   check-template-substitution.sh exits 1 naming the narrative consumer. The hardened gate
+   (single-awk spans, here-string grep) is non-blinding for the new template.
+
+Findings assessed and judged non-blocking:
+
+- **`graph-narrative` missing from `LLM_FUNCTION_KEYS`/`VALID_FUNCTION_KEYS`.** The narrative LLM
+  path reads `prompt_templates.get_effective(ws, "graph-narrative")` and
+  `resolve_llm_model(ws, "graph-narrative")`, but neither registry lists the key, so the
+  REST prompt-template / LLM-config CRUD rejects `graph-narrative` (404/400 "unknown function
+  key"). In practice the hardcoded `PROMPT_GRAPH_NARRATIVE` fallback and
+  `DEFAULT_LLM_MODEL`/`GYRE_LLM_MODEL` serve both resolutions, so the §6 acceptance criteria
+  (narrative + fallback) are met; the key gap only blocks workspace-level override of the
+  narrative prompt/model. `explorer-generate` shows the registration pattern for a follow-up.
+  Recorded here as tracked follow-up debt, not a §6 contract breach.
+- **`agent_personas` kv writes exist only in tests** (constraint_check.rs test seed, this task's
+  test seed). The persona in "Produced by agent Y under persona Z." renders only when some
+  external actor seeds that binding. The lookup mirrors the pre-existing production reader
+  (constraint_check.rs:964, introduced d7940e85), so this task did not widen the gap, and the
+  attribution degrades honestly to "agent Y" without it. Non-blocking.
+- `delta_attribution` falls back to the stored agent id when the agent row is gone — real recorded
+  provenance, not fabricated identity; consistent with the no-fabrication rules.
+- Timeline narrative ordering follows SQLite's `timestamp ASC`; Mem store is insertion-order.
+  Pre-existing adapter divergence, out of this task's scope.
+
+Verdict: **complete** — every §6 acceptance criterion is satisfied by production code at the
+reviewed commits, tests discriminate (proven by mutation), gates pass, hexagonal boundary holds
+(narrative.rs is pure domain; LLM call lives in gyre-server), and the review scope matches the
+`commits:` frontmatter (all three SHAs verified ancestors of the candidate).
