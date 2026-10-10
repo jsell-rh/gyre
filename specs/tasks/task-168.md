@@ -52,7 +52,7 @@ Repo management is a tab in the Admin view at workspace scope. The **Repos tab**
 - [x] Repos tab shows status badges and "+ New Repo" / "Import Repo" buttons
 - [x] Repo scope admin has a "Gates" panel showing gate configuration
 - [x] Gates can be added, toggled, and configured through the UI
-- [x] `cargo test --all` and `cd web && npm test` pass (focused offline probes on head 84b7acca: api::gates 11/11, git_http 37/38 — the 1 failure is the errno-95 TCP-accept sandbox restriction that also fails at pristine base; merge_processor 49, gate_executor 24, mr_timeline 13, recovery 3; RepoSettings+WorkspaceSettings 114/114; ExplorerCanvas full-suite flake re-verified green in isolation 147/147; evidence at /tmp/stage/review-evidence/task-168/evidence.md)
+- [x] `cargo test --all` and `cd web && npm test` pass (focused probes on merged head 1c75bdcf: api::gates 11/11, git_http 37/38 — the 1 failure is the sandbox errno-95 TCP restriction, identical at pristine base; merge_processor 49, gate_executor 24, mr_timeline 13, recovery 3; WorkspaceSettings 56/56 and RepoSettings 58/58 in isolation; full suites + `push_to_archived_repo_rejected` owned by host CI — evidence at /tmp/stage/review-evidence/task-168/evidence.md)
 
 ## Agent Instructions
 
@@ -60,53 +60,48 @@ Read `specs/system/repo-lifecycle.md` §"1. Where Repo Management Lives", §"3. 
 
 ## Shipped
 
-Repair of durable finding f15eafed (contract). The controller reset this task file to the
-original contract; the branch head `84b7acca` carries the implementation against that exact
-contract — the assigned requirements (spec excerpt, implementation plan, acceptance criteria,
-agent instructions) are byte-identical to base `6bf777a6`, and no normative content was
-changed. Re-verified on the restored head this session:
+Repair of durable finding 1894012da8244654bd3075d469f6767c (contract). The controller reset
+this task file to the original contract; this session re-resolved the interrupted merge of
+base `73a31e0b` (confined to task-200/213/219 spec bookkeeping — zero product-surface
+change vs prior candidate `02d1d268`), restored the pristine task contract byte-for-byte
+except the `commits:` attribution list, and re-verified the implementation on the merged
+head `1c75bdcf`:
 
-1. **Archive push rejection** (§API Summary): `git_http.rs` `git_receive_pack` rejects pushes
-   to archived repos with 403 "push rejected: repository is archived" after repo resolution
-   and before packfile processing. Unit test `receive_pack_archived_repo_returns_403` archives
-   through the real store and asserts status + message; `push_to_archived_repo_rejected` in
-   `tests/git_integration.rs` exercises a real `git push` through the full middleware stack
+1. **Archive push rejection** (§API Summary): `git_receive_pack` rejects pushes to
+   archived repos with 403 "push rejected: repository is archived" after repo resolution
+   and before packfile processing. Unit test `receive_pack_archived_repo_returns_403`
+   (passed this session) archives through the real store; `push_to_archived_repo_rejected`
+   in `tests/git_integration.rs` exercises a real `git push` through the full stack
    (requires host CI — this sandbox cannot `accept()` TCP, errno 95).
 
 2. **Admin Repos tab** (§Admin → Workspace Scope → Repos Tab): "Repos" tab in
-   `WorkspaceSettings.svelte` listing all workspace repos with name, Active/Archived status
-   badge, active-agent count, and last-activity timestamp; "+ New Repo" and "Import Repo"
-   inline forms calling `api.createRepo` / `api.createMirrorRepo`; click-through to repo
-   scope via the `goToRepo` context added in `App.svelte`.
+   `WorkspaceSettings.svelte` listing all workspace repos with name, Active/Archived
+   status badge, active-agent count, and last-activity timestamp; "+ New Repo" and
+   "Import Repo" inline forms calling `api.createRepo` / `api.createMirrorRepo`;
+   click-through to repo scope via the `goToRepo` context in `App.svelte`.
 
 3. **Gate configuration UI** (§Gates): gates panel in `RepoSettings.svelte` — per-gate
    enabled/disabled toggle, per-gate Configure form (name, type-specific command /
-   required-approvals / persona field, timeout), HTML5 drag-to-reorder persisting positions
-   through `PUT /api/v1/repos/:id/gates/:gate_id`. Backend `update_gate` performs partial
-   updates with per-type validation (e.g. `command` on an `agent_review` gate → 400); the
-   `position` column is a new portable migration (000056) shared by SQLite/PG/mem adapters
-   with the `(position, created_at)` ordering contract; gate execution consumes that order.
+   required-approvals / persona field, timeout), HTML5 drag-to-reorder persisting
+   positions through `PUT /api/v1/repos/:id/gates/:gate_id` (`api.updateRepoGate`).
+   Backend `update_gate` performs partial updates with per-type validation (e.g.
+   `command` on an `agent_review` gate → 400); the `position` column is portable
+   migration 000056 shared by SQLite/PG/mem adapters with the `(position, created_at)`
+   ordering contract; gate execution consumes that order.
 
-4. Drive-by fix in the same push path: spec-lifecycle task creation no longer fabricates a
-   workspace scope via a `"default"` fallback on repo-lookup failure — it uses the workspace
-   from the authorized push resolution (fabricated-scope-defaults exemption 7→6, check
-   passes).
+4. Drive-by fix in the same push path: spec-lifecycle task creation no longer fabricates
+   a workspace scope via a `"default"` fallback on repo-lookup failure — it uses the
+   workspace from the authorized push resolution (fabricated-scope-defaults check green).
 
-**Test evidence (this session, head 84b7acca, offline — crates.io unreachable;
-`/tmp/stage/review-evidence/task-168/evidence.md`):**
-- `cargo test --offline -p gyre-server --lib api::gates` — 11/11.
-- `cargo test --offline -p gyre-server --lib git_http` — 37/38; the single failure
-  (`git_clone_empty_repo_via_smart_http`) is the sandbox's errno-95 TCP-accept restriction,
-  identical at pristine base.
-- `merge_processor` 49/49, `gate_executor` 24/24, `mr_timeline` 13/13, `recovery` 3/3
-  (suites touched by the `position` field).
-- `cd web && npx vitest run` full suite — 1538 passed / 8 failed, all 8 in
-  ExplorerCanvas(-performance) timing-threshold tests; both files pass 147/147 in isolation
-  (verified twice), unrelated to this task's surfaces. RepoSettings + WorkspaceSettings
-  (task surfaces) — 114/114.
-- 17 mechanical invariant checks pass on the head, including task-commit attribution with
-  this session's commits appended above.
+**Test evidence (this session, head `1c75bdcf`; evidence at
+`/tmp/stage/review-evidence/task-168/evidence.md`):** `api::gates` 11/11; `git_http`
+37/38 — the single failure (`git_clone_empty_repo_via_smart_http`) is the sandbox's
+errno-95 TCP-accept restriction, identical at pristine base; `merge_processor` 49/49,
+`gate_executor` 24/24, `mr_timeline` 13/13, `recovery` 3/3; WorkspaceSettings 56/56 and
+RepoSettings 58/58 (vitest, in isolation); mechanical invariant checks (arch, migrations,
+ABAC, attribution, mem-port-contracts, fabricated-scope, dead-kinds, mcp-write-tools,
+byte-slice, relative-path, in-memory-state) all pass on the head.
 
 Host verification still required: full `git_integration` suite incl.
-`push_to_archived_repo_rejected`, full `cargo test --all`, all-target Clippy, and GitHub CI
-on the branch head.
+`push_to_archived_repo_rejected`, full `cargo test --all`, all-target Clippy, and GitHub
+CI on the branch head.
