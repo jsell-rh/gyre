@@ -2560,6 +2560,26 @@ mod tests {
         name: &str,
         workspace_id: &str,
     ) -> Repository {
+        // Seed the workspace record (idempotent): emissions resolve the
+        // tenant scope from it and skip when it does not exist (task-099 F1),
+        // so the workspace a fixture references must be real for event and
+        // notification assertions to observe anything.
+        if state
+            .workspaces
+            .find_by_id(&Id::new(workspace_id))
+            .await
+            .unwrap()
+            .is_none()
+        {
+            let ws = gyre_domain::Workspace::new(
+                Id::new(workspace_id),
+                Id::new("t1"),
+                workspace_id,
+                workspace_id,
+                0,
+            );
+            state.workspaces.create(&ws).await.unwrap();
+        }
         let repo = Repository::new(
             Id::new(uuid::Uuid::new_v4().to_string()),
             Id::new(workspace_id),

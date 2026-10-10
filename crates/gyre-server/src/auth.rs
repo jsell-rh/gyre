@@ -1524,7 +1524,11 @@ mod tests {
 
         let state = test_state();
         let now = 1000u64;
-        let user = User::new(Id::new("u1"), "ext-1", "frank", now);
+        // The user must carry a tenant binding (task-099 F1): API-key auth
+        // resolves the tenant scope from user.tenant_id and fail-closes
+        // when it is absent, so an unbound user would 403 here.
+        let mut user = User::new(Id::new("u1"), "ext-1", "frank", now);
+        user.tenant_id = Some(Id::new("t1"));
         state.users.create(&user).await.unwrap();
         // Store the SHA-256 hash of the API key (matching auth extractor behaviour).
         let raw_key = "gyre_test_api_key";
@@ -1553,6 +1557,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bytes.as_ref(), b"frank");
+    }
+
+    #[tokio::test]
+    async fn api_key_auth_rejects_user_without_tenant_binding() {
+        // task-099 F1: an API-key user with no tenant binding must fail
+        // closed (403), never authenticate as a fabricated tenant scope.
+        use gyre_common::Id;
+        use gyre_domain::User;
+
+        let state = test_state();
+        let user = User::new(Id::new("u2"), "ext-2", "orphan", 1000);
+        state.users.create(&user).await.unwrap();
+        let raw_key = "gyre_orphan_key";
+        state
+            .api_keys
+            .create(&super::hash_api_key(raw_key), &user.id, "orphan-key")
+            .await
+            .unwrap();
+
+        let app = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", "Bearer gyre_orphan_key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

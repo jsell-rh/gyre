@@ -1587,6 +1587,20 @@ mod tests {
         );
     }
 
+    /// Seed a workspace so event/telemetry emissions can resolve the tenant
+    /// scope from the workspace record (task-099 F1: emissions skip when the
+    /// workspace does not exist instead of fabricating a tenant).
+    async fn seed_ws(state: &crate::AppState, workspace_id: &str) {
+        let ws = gyre_domain::Workspace::new(
+            Id::new(workspace_id),
+            Id::new("t1"),
+            workspace_id,
+            workspace_id,
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+    }
+
     /// Create a temporary git repository with two commits.
     ///
     /// Returns (tempdir, initial_commit_sha, second_commit_sha). The second
@@ -1703,11 +1717,13 @@ mod tests {
         let repo_path = tmp.path().to_str().unwrap();
 
         let state = crate::mem::test_state();
+        // Emissions resolve the tenant scope from the workspace record and
+        // skip when it does not exist (task-099 F1) — seed ws-1.
+        seed_ws(&state, "ws-1").await;
 
         // Seed workspace meta-spec set and agent persona so build_agent_context
         // produces valid values matching the InputContent.
         let meta_sha = seed_agent_context(&state, "ws-1", "agent-1").await;
-
         // Store a SignedInput attestation with a constraint that FAILS when
         // the commit changes any file (the test commit adds a file, so
         // output.changed_files.size() > 0 → the constraint output.changed_files.size() == 0 fails).
@@ -1783,6 +1799,9 @@ mod tests {
     #[tokio::test]
     async fn emit_constraint_violations_creates_events() {
         let state = crate::mem::test_state();
+        // Emissions resolve the tenant scope from the workspace record and
+        // skip when it does not exist (task-099 F1) — seed ws-1.
+        seed_ws(&state, "ws-1").await;
         let ws_id = Id::new("ws-1");
 
         // Subscribe to broadcast before emitting.
@@ -1961,7 +1980,9 @@ mod tests {
         let repo_path = tmp.path().to_str().unwrap();
 
         let state = crate::mem::test_state();
-
+        // Emissions resolve the tenant scope from the workspace record and
+        // skip when it does not exist (task-099 F1) — seed ws-1.
+        seed_ws(&state, "ws-1").await;
         // Seed workspace meta-spec set and agent persona.
         let meta_sha = seed_agent_context(&state, "ws-1", "agent-merge-2").await;
 

@@ -919,6 +919,17 @@ mod tests {
     #[tokio::test]
     async fn admin_audit_returns_events() {
         let state = test_state();
+        // emit_telemetry resolves the tenant scope from the workspace
+        // record (task-099 F1) and skips the emission when the workspace
+        // does not exist — seed it so the event is actually emitted.
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("default"),
+            gyre_common::Id::new("default"),
+            "Default",
+            "default",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
         state.emit_telemetry(
             gyre_common::Id::new("default"),
             gyre_common::message::MessageKind::StateChanged,
@@ -951,6 +962,16 @@ mod tests {
     #[tokio::test]
     async fn admin_audit_filters_by_agent_id() {
         let state = test_state();
+        // Same as admin_audit_returns_events: seed the workspace so the
+        // telemetry emission resolves a tenant scope (task-099 F1).
+        let ws = gyre_domain::Workspace::new(
+            gyre_common::Id::new("default"),
+            gyre_common::Id::new("default"),
+            "Default",
+            "default",
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
         state.emit_telemetry(
             gyre_common::Id::new("default"),
             gyre_common::message::MessageKind::StateChanged,
