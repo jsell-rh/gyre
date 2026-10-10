@@ -87,3 +87,72 @@ The rejected integration's only preserved item was `specs/coverage/SUMMARY.md`. 
 All three findings repaired with real implementations and regression tests that fail on the original failure classes. No new exemptions, no gate weakening, no deleted tests, no unrelated changes — the round-2 diff beyond the F1/F2/F3 product repairs is spec/coverage bookkeeping and this task file. **progress: complete.**
 
 — Reviewer, 2026-10-09
+
+## Round 3 (2026-10-10) — candidate `1e326c9a` vs base `e96d25ab`, verdict NEEDS-REVISION
+
+Independent review of the exact assigned candidate (all 17 commits from base
+`e96d25ab` to head `1e326c9a`; product surface = the six task-120 product
+commits + PG-BIGINT repair `93913405` + merges).
+
+### Durable-finding repair verified
+
+`93913405`: migration 000056 `users.last_login_at` is now `BIGINT`
+(up.sql line 23), matching `schema.rs Nullable<BigInt>` and both `UserRow`
+`Option<i64>` mappings. `migration_000056_backfills_unique_url_safe_usernames`
+passes 1/1 on this tree (fresh run, evidence `migration-000056-test.txt`).
+No PG server in this sandbox — live-PG round-trip remains a host-verification
+item (carried over from the repair round's README; unchanged).
+
+### Fresh verification (evidence under /tmp/stage/review-evidence/task-120-final/)
+
+- `cargo test -p gyre-domain --lib user` → 11 passed, 0 failed.
+- `cargo test -p gyre-adapters --lib sqlite::user` → 15 passed, 0 failed
+  (incl. `username_immutable_on_update`, `username_unique_across_users`,
+  `user_entity_fields_round_trip`, `update_persists_login_stamp_and_preferences`).
+- `cargo test -p gyre-server --lib api::users` → 14 passed; `api::scim` → 9
+  passed; `auth::` → 39 passed (incl. the three new login-derivation tests).
+- Mechanical gates: migration versions, SQL portability, mem-port contracts,
+  arch, commit attribution, scope-literal defaults, forged scope fields,
+  ABAC exempt handlers — all OK.
+
+### Finding F4 (major): SSO first-login has no username-collision handling — permanent 401 lockout for a distinct new user
+
+`auth.rs` `find_or_create_user` (lines 829-846): the derived handle is
+`sanitize_username(preferred_username)` with only a subject fallback when
+sanitization yields *nothing* — no fallback when the derived handle is
+*taken by a different user*. `sanitize_username` is lossy (SSO
+`preferred_username` values `Jordan Sell` and `Jordan_Sell` are distinct IdP
+usernames but both sanitize to `jordan-sell`), usernames are globally unique
+(idx_users_username + create() port contract), and `create()` bails on the
+conflict. `validate_jwt` maps the error to 401, and since
+`find_by_external_id` misses on every retry, the second user is
+deterministically locked out forever: no request authenticates, `PUT
+/users/me` cannot run pre-auth, and username immutability offers no admin
+recovery path. The migration's own backfill dedups colliding legacy handles
+with numeric suffixes (pass 1 `-2`, `-3`), proving collision resolution is
+the intended behavior class — the runtime provisioning path has none.
+
+Reproduced on this exact tree: temporary test
+`probe_second_sso_user_colliding_handle_can_log_in` (two JWTs, distinct
+subs `sub-one`/`sub-two`, preferred_username `Jordan Sell`/`Jordan_Sell`)
+→ **401 vs expected 200** (probe source + output persisted:
+`probe-collision-source.rs`, `probe-collision-test.txt`; worktree restored
+to HEAD after, md5-verified). This is the exact failure class the spec's
+"unique, derived from SSO preferred_username on first login" contract
+requires provisioning to resolve, and no existing test covers it — the
+reviewed auth tests only exercise distinct handles.
+
+Fix shape: in `find_or_create_user`, on a username conflict (or preemptively
+via `find_by_username`), derive a unique handle using the migration's own
+suffix scheme (base-2, base-3, ... — deterministic, mirrors backfill pass 1)
+or fall back to the SSO subject (unique per user), then retry create. Add a
+regression test with two colliding sanitized handles asserting both users
+authenticate and both are provisioned with distinct valid handles.
+
+Everything else re-verified green on this exact tree: domain model field
+conformance, port/adapter parity across sqlite/postgres/mem (duplicate +
+immutability contracts enforced in all three), SCIM sanitize/fallback/409/
+immutability cutover, PUT /users/me partial-update semantics with malformed
+payload rejection, migration backfill regression, all mechanical gates.
+
+— Reviewer, 2026-10-10
