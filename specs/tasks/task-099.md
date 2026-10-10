@@ -109,46 +109,72 @@ When any agent is spawned, the MCP server injects:
 
 ## Implementation Notes
 
-- **Server**: `POST /api/v1/users` added in `crates/gyre-server/src/api/users.rs::create_user`
-  — Admin-only (per-handler role check), mints an authenticating API key in the
-  same call (stored via `state.api_keys`, the store the auth extractor consults;
-  only the SHA-256 hash is persisted). `external_id = "local:{username}"` gives
-  stable duplicate detection. Route registered in `api/mod.rs`.
+- **Server**: `POST /api/v1/users` in `crates/gyre-server/src/api/users.rs::create_user`
+  — Admin-only (per-handler role check), REQUIRES `tenant_id` referencing an
+  existing tenant (the user is scoped at creation; a typo'd or foreign id is
+  rejected), mints an authenticating API key in the same call (stored via
+  `state.api_keys`, the store the auth extractor consults; only the SHA-256
+  hash is persisted). `external_id = "local:{username}"` gives stable
+  duplicate detection. Migration `2026-10-09-000056_user_tenant_id` adds the
+  `users.tenant_id` column; the auth extractor resolves API-key tenant scope
+  from `user.tenant_id` and fail-closes (403) on unbound users instead of
+  fabricating "default" (F1).
 - **CLI**: `crates/gyre-cli/src/bootstrap.rs` holds pure logic (persona prompt
   registry via `include_str!`, slug derivation, gate detection, starter-kit
   writer, summary renderer); orchestration lives in `main.rs::run_bootstrap`
   with a `StepTracker` reporting completed steps + resume hint on failure.
-- **Client**: 10 new `GyreClient` methods (`health`, `create_tenant`,
+- **Client**: `GyreClient` methods for every step (`health`, `create_tenant`,
   `create_user`, `create_workspace`, `create_repo`, `create_persona`,
-  `approve_persona`, `create_gate`, `create_task`, `spawn_agent`).
+  `approve_persona`, `create_gate`, `find_*` resume lookups, `sync_specs`,
+  `spawn_repo_orchestrator`).
 - **Personas**: `specs/personas/repo-orchestrator.md` authored (referenced by
   platform-model.md §3 but previously missing); all four prompts embedded in
   the CLI at `crates/gyre-cli/src/bootstrap/personas/`.
-- **Spec registry step**: report-only — no REST registration endpoint exists;
-  the spec ledger syncs on push to the default branch (stated in output).
-- **Orchestrator spawn**: creates task first with `task_type: "implementation"`
-  (spawn rejects tasks without it), then `POST /api/v1/agents/spawn`.
-- Tests: 3 server handler tests (key authenticates as new user, duplicate
-  rejected, unknown role rejected) + 11 CLI tests (parse/flags, slug, gates,
-  starter kit, manifest shape, summary rendering, persona coverage).
+- **Spec registry step (F4/F5)**: REAL — `push_and_sync_specs` pushes the
+  local checkout to the server's bare repo (committing starter-kit files
+  first when `--starter-kit` left them uncommitted), then calls
+  `POST /api/v1/repos/:id/sync-specs`, which runs the same
+  `sync_spec_ledger` the post-receive hook runs. The starter manifest
+  (`bootstrap.rs::STARTER_MANIFEST`) uses `approval: {mode: human_only}` —
+  the `ApprovalConfig` shape the server's manifest parser requires.
+- **Orchestrator spawn (F2/F3)**: uses the task-093 orchestrator endpoint
+  `POST /api/v1/repos/:id/orchestrator/spawn`. The server resolves the
+  `repo-orchestrator` persona from `state.personas` (repo > workspace >
+  tenant scope chain, fail-closed on missing or unapproved), persists
+  `agent.persona_id` (migration `2026-10-09-000057_agent_persona_id`), and
+  launches the orchestrator process on the workspace's compute target
+  (mirroring `api/spawn.rs`: target config -> `GYRE_ORCHESTRATOR_COMMAND` ->
+  `GYRE_AGENT_COMMAND` -> local `/gyre/entrypoint.sh`). The spawn response
+  carries `launch_status` ("running"|"launch_failed") + `launch_detail`;
+  the CLI summary reports the truthful outcome and never claims "running"
+  for a row whose process failed to launch.
+- **Starter kit (F6)**: `--starter-kit` requires `--repo-path` (error, not a
+  cwd-relative default).
+- Tests: server — orchestrator persona attach + launch outcome + scoped JWT
+  tests (`api/orchestrator.rs`), `create_user` handler tests incl. full-router
+  API-key auth with tenant binding (`api/users.rs`); CLI — parse/flags, slug,
+  gates, starter kit, manifest shape (parses as the server's `SpecManifest`),
+  summary rendering (running / launch_failed / already-live), persona
+  coverage, spawn-response parsing.
 
-## Verification
+## Verification (revision round)
 
-- `cargo build --all` — zero warnings
-- `cargo test --all` — all pass (server: 1159, cli: 93+1)
-- Check scripts: arch, cli-spec-parity, assertionless-tests, no-em-dash,
-  api-auth, type-discriminator-values, notification-priority all pass
-  (dead-components exit 0 with pre-existing findings only)
-- End-to-end smoke test against a live server:
-  - `gyre bootstrap --dev --repo gyre-demo --repo-path ... --starter-kit`:
-    tenant dev, workspace default, repo, 4 personas pre-approved, 3 gates
-    detected from Cargo.toml + check-arch.sh, starter kit written,
-    orchestrator spawned, summary printed, exit 0
-  - `gyre bootstrap --tenant "Acme Corp" --admin-user jsell`: admin user
-    created, API key minted and shown once, config saved to `~/.gyre/config`,
-    subsequent steps authenticated as the new admin, exit 0
-  - Failure paths: server down → exit 1; `--dev --tenant` → rejected;
-    missing `--tenant` without `--dev` → rejected
+- `cargo test -p gyre-server orchestrator` — persona attach, scoped JWTs,
+  409 exactly-one-live, stale-detector restart, escalation, truthful launch
+  outcome (all in `api/orchestrator.rs` tests).
+- `cargo test -p gyre-server users::` — create_user + API-key auth through
+  the real router with tenant binding, duplicate/unknown-tenant/unknown-role
+  rejection.
+- `cargo test -p gyre-cli bootstrap` — CLI-side pure-logic tests.
+- `sqlite3` probe: both new migrations apply cleanly on a fresh database and
+  leave `users.tenant_id` / `agents.persona_id` in place (regression caught:
+  the first cut of 000056's up.sql accidentally contained the down statement
+  and dropped the column it just added; fixed in this round).
+- Check scripts affected by the revision: `check-inert-enforcement.sh` F2
+  exemptions removed (`validate_persona` is gone), frozen exemption counts
+  updated DOWNWARD (scope-literal 24 -> 13; task-099-owned sites removed,
+  none added). Full script battery + end-to-end smoke test owned by
+  verification.
 
 ## Agent Instructions
 

@@ -562,12 +562,32 @@ pub(crate) async fn spawn_workspace_orchestrator_core(
 ///
 /// Spawn the single workspace orchestrator for a workspace.
 /// Returns 409 Conflict when a live workspace orchestrator already exists.
+///
+/// Per-handler authorization: the workspace's tenant must match the
+/// caller's tenant (the route runs without middleware ABAC, so this is the
+/// only cross-tenant containment). The global system token (agent_id
+/// "system") bypasses — its tenant is the bootstrap principal, not a
+/// tenant scope (see auth.rs `system_principal_tenant`).
 pub async fn spawn_workspace_orchestrator(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
     Path(workspace_id): Path<String>,
     Json(req): Json<SpawnOrchestratorRequest>,
 ) -> Result<(StatusCode, Json<SpawnOrchestratorResponse>), ApiError> {
+    // Tenant containment: load the workspace, compare its tenant against
+    // the caller's resolved tenant.
+    let ws_id = Id::new(workspace_id.clone());
+    let workspace = state
+        .workspaces
+        .find_by_id(&ws_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {workspace_id} not found")))?;
+    if auth.agent_id != "system" && auth.tenant_id != workspace.tenant_id.to_string() {
+        return Err(ApiError::Forbidden(
+            "workspace does not belong to the caller's tenant".to_string(),
+        ));
+    }
+
     let (agent, token, launch) =
         spawn_workspace_orchestrator_core(&state, &workspace_id, req, &auth.agent_id).await?;
 
@@ -661,6 +681,14 @@ pub(crate) async fn spawn_repo_orchestrator_core(
 ///
 /// Spawn the single repo orchestrator for a repo. Returns 409 Conflict when
 /// a live repo orchestrator already exists for that repo.
+///
+/// Authorization: JWT bearers are evaluated against the repo's ABAC policy
+/// (G6), AND every caller is tenant-contained — the repo's workspace tenant
+/// must match the caller's resolved tenant. The ABAC layer alone is not
+/// containment: it returns Ok when no per-repo policies are stored and
+/// bypasses for global tokens / API keys. The global system token
+/// (agent_id "system") bypasses the tenant comparison — its tenant is the
+/// bootstrap principal, not a tenant scope.
 pub async fn spawn_repo_orchestrator(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
@@ -671,6 +699,23 @@ pub async fn spawn_repo_orchestrator(
     crate::abac::check_repo_abac(&state, &repo_id, &auth)
         .await
         .map_err(ApiError::Forbidden)?;
+
+    // Tenant containment: load the repo, resolve its workspace, compare the
+    // workspace's tenant against the caller's.
+    let rid = Id::new(repo_id.clone());
+    let repo = state
+        .repos
+        .find_by_id(&rid)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
+    let workspace = state.workspaces.find_by_id(&repo.workspace_id).await?;
+    if let Some(ws) = workspace {
+        if auth.agent_id != "system" && auth.tenant_id != ws.tenant_id.to_string() {
+            return Err(ApiError::Forbidden(
+                "repo does not belong to the caller's tenant".to_string(),
+            ));
+        }
+    }
 
     let (agent, token, launch) =
         spawn_repo_orchestrator_core(&state, &repo_id, req, &auth.agent_id).await?;
