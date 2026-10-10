@@ -2933,11 +2933,7 @@ async fn run_explorer_agent(
                     // Stream a warning with the raw JSON so the user can see what was attempted.
                     let raw_preview = serde_json::to_string_pretty(&query_json)
                         .unwrap_or_else(|_| query_json.to_string());
-                    let truncated = if raw_preview.len() > 500 {
-                        format!("{}...", &raw_preview[..500])
-                    } else {
-                        raw_preview
-                    };
+                    let truncated = truncate_invalid_query_preview(&raw_preview);
                     stream_text(
                         sender,
                         &format!(
@@ -3636,6 +3632,19 @@ fn system_default_views() -> Vec<(&'static str, &'static str, serde_json::Value)
         .collect()
 }
 
+/// Truncate a raw view-query JSON preview to at most 500 bytes on a UTF-8
+/// char boundary (task-095 F4 class: pretty-printed JSON from the LLM can
+/// be multibyte, and a fixed byte index panics mid-character).
+fn truncate_invalid_query_preview(raw: &str) -> String {
+    if raw.len() <= 500 {
+        return raw.to_string();
+    }
+    format!(
+        "{}...",
+        crate::gate_executor::truncate_bytes(raw, 500)
+    )
+}
+
 /// Extract node name references from computed expressions.
 /// E.g. `$governed_by('my-spec.md')` yields `"my-spec.md"`;
 /// `$intersect($callers(FooService), $governed_by('bar.md'))` yields
@@ -3837,6 +3846,37 @@ This shows all callers of TaskPort."#;
             prompt.contains("EVERY claim must be traceable"),
             "System prompt should require grounded claims"
         );
+    }
+
+    // ── truncate_invalid_query_preview (task-095 F4: byte-index panic) ─────
+
+    #[test]
+    fn test_truncate_invalid_query_preview_multibyte_no_panic() {
+        // 250 three-byte chars = 750 bytes; byte 500 falls inside a char.
+        // The original fixed-index byte slice panicked here (F4 class).
+        let raw = "日".repeat(250);
+        let truncated = truncate_invalid_query_preview(&raw);
+        // The cut backed off to byte 499 (last char boundary ≤ 500).
+        assert!(truncated.ends_with("..."));
+        let body = truncated.trim_end_matches('.');
+        assert!(body.chars().all(|c| c == '日'), "must cut at a char boundary, not mid-character");
+        assert_eq!(body.len(), 499, "largest multiple of 3 that is <= 500");
+    }
+
+    #[test]
+    fn test_truncate_invalid_query_preview_short_input_passthrough() {
+        let raw = r#"{"scope": {"type": "all"}}"#.to_string();
+        assert_eq!(truncate_invalid_query_preview(&raw), raw);
+    }
+
+    #[test]
+    fn test_truncate_invalid_query_preview_ascii_at_limit() {
+        let raw = "x".repeat(501);
+        let truncated = truncate_invalid_query_preview(&raw);
+        // ASCII input: exactly 500 bytes kept, matching the pre-fix cap.
+        assert!(truncated.starts_with(&"x".repeat(500)));
+        assert!(truncated.ends_with("..."));
+        assert_eq!(truncated.len(), 500 + 3);
     }
 
     // ── parse_view_query_from_text with malformed JSON ──────────────────────
