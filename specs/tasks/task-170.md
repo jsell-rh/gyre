@@ -12,7 +12,7 @@ coverage_sections:
   - "ui-layout.md §Encoding Layer"
   - "ui-layout.md §Extensibility"
   - "ui-layout.md §LLM Constraints"
-commits: ["9447554ca17555cc49bf1ffa92000fc933230588", "5cf54bce14c1b459045b4477d98a893bdbda5212", "c76fa1fd697ad44ae0fc08e22b70e5768e5b5026", "b69e01002b21ef5d2b7fa446067aca61e3890d0b", "088316309803e92cd7cf96cac53239431c059185", "95801f2b4ebbe93543bfe7d31fce386ce665be42", "49614e41c1b313f0c981d93013dcf6ddbc26c636", "9aa19ef9c94c075ed9d6fd154b037855542ca27b", "3c41b41997c20414f1167d4e8da6746b6e55a875"]
+commits: ["5cf54bce14c1b459045b4477d98a893bdbda5212", "c76fa1fd697ad44ae0fc08e22b70e5768e5b5026", "b69e01002b21ef5d2b7fa446067aca61e3890d0b", "088316309803e92cd7cf96cac53239431c059185", "95801f2b4ebbe93543bfe7d31fce386ce665be42", "49614e41c1b313f0c981d93013dcf6ddbc26c636", "9aa19ef9c94c075ed9d6fd154b037855542ca27b", "3c41b41997c20414f1167d4e8da6746b6e55a875"]
 ---
 
 ## Spec Excerpt
@@ -69,15 +69,15 @@ Read `ui-layout.md` §4 thoroughly — it contains extensive detail on each laye
 
 ## Shipped
 
-**Contract-repair round (assignment 949578bc):** the prior candidate was
-rejected for a contract violation — its checkpoint commit `9447554c` was cut
-from a chain predating the assignment base `f38abb7e` and therefore deleted
-`specs/tasks/task-211.md` and stripped `a781ede2` from task-210's `commits:`
-frontmatter (normative changes outside this task's scope). The merge
-`aff0d3a0` (candidate + base) restored both files; this round verified them
-byte-identical to base and confirmed this task's own contract text is
-unchanged from its original creation commit `1cb1509b`. No attributed commit
-modified the requirements, plan, or acceptance criteria.
+**Contract-repair round (assignment 8dd76606):** the prior candidate `99259f16`
+was rejected for a contract violation — it was cut from older `f38abb7e`, so
+against assignment base `f4acb4eb` its tree deleted `specs/reviews/task-189.md`
+and rewound `specs/tasks/task-189.md` (normative changes outside task-170's
+scope). The merge `6f2339a6` (candidate + base) restored both; this round
+verified them byte-identical to base and confirmed the only specs/ change
+base→HEAD is task-170's own lifecycle fields (progress, commits, checked
+criteria, appended Shipped sections). Requirements, plan, and acceptance
+criteria unchanged from creation.
 
 **Grammar types + validation, both sides (belt and suspenders):**
 - `web/src/lib/types/view-spec.ts` — `ViewSpec`/`DataLayer`/`LayoutType`/
@@ -108,8 +108,8 @@ modified the requirements, plan, or acceptance criteria.
   closed for modification); `MoldableView.svelte` dispatches renderer
   components through the registry (§4 Extensibility).
 
-**Test evidence (fresh runs this round, recorded in
-`/tmp/stage/review-evidence/task-170-contract-repair-verification.txt`):**
+**Test evidence (fresh runs this round at HEAD `6f2339a6`, recorded in
+`/tmp/stage/review-evidence/task-170-round-8dd76606-verification.txt`):**
 - `cargo test -p gyre-common --lib view_spec` — 13 passed, 0 failed.
 - `cargo test -p gyre-server --lib api::explorer_views` — 16 passed, 0 failed
   (400 on flow-without-trace_source, nested side-by-side,
@@ -120,18 +120,25 @@ modified the requirements, plan, or acceptance criteria.
 - vitest `--pool=threads` (forks pool cannot start in this sandbox — TCP
   listener probe unsupported, `accept` errno 95 per
   `/tmp/stage/capabilities.json`; infra limitation, not a code defect):
-  view-spec 17, viewEvents 9, MoldableViewListView 1,
-  MoldableViewNodeTypeFilter 5 — 32 passed, 0 failed.
-- `scripts/check-abac-route-registry.sh` and
-  `scripts/check-task-commit-attribution.sh` both exit 0 at HEAD; all 8
-  attributed SHAs verified ancestors of HEAD.
+  task-scoped files `view-spec.test.js` (17), `MoldableViewListView.test.js`
+  (1), `viewEvents.test.js` (9) — 27/27 passed; MoldableView dispatch also
+  covered by pre-existing `MoldableViewNodeTypeFilter.test.js` (5).
+- `check-abac-route-registry.sh` — exit 0.
+- `check-task-commit-attribution.sh` — exit 1, **pre-existing base defect**:
+  pristine base `f4acb4eb` fails its own check (task-189's head commit
+  missing from task-189's frontmatter; verified in a throwaway worktree at
+  the base). Repairing requires editing task-189's contract — out of scope
+  for this task. Task-170's own attribution is clean: all 8 listed SHAs are
+  HEAD ancestors and no task-170-labeled commit is unlisted.
 
-**Scope note:** the live Explorer render surface is the single-canvas
-ExplorerView/ExplorerCanvas per draft `explorer-implementation.md` (task-065+),
-with the ViewQuery grammar (`view-query-grammar.md`, task-062+) superseding
-ViewSpec for rendering; the registry-dispatched MoldableView surface is
-exercised through its test suite. This task delivers the §4 ViewSpec grammar
-layer it was scoped for: types, both-side validation, layout registry, 400
-enforcement. `parse_and_validate` accepts both grammars on storage endpoints
-(the six system default views seed as ViewQuery) with hybrid payloads
-rejected.
+**Full-suite context:** full vitest run (60 files) shows 9 timeout failures
+in `ExplorerCanvas.test.js` ghost-overlay tests — pre-existing on the
+pristine base `f4acb4eb` (fails 1/132 in isolation at base; passes 132/132
+in isolation at HEAD; no task-170 module in its import graph). Not a
+task-170 regression; recorded for verification.
+
+**Sandbox restriction recorded:** TCP-listener probes unsupported (`accept`
+errno 95). HTTP enforcement is covered by in-process
+`axum::Router::oneshot` tests exercising the full request/response path
+minus TCP transport. Full workspace suites, Clippy, arch checks, and GitHub
+CI not repeated this round — owned by verification/publication.
