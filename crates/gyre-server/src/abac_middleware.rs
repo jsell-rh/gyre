@@ -3009,25 +3009,35 @@ pub mod tests {
     /// (spec → repo → workspace → tenant) for a resource whose route does
     /// not name any scope ids. The dynamic-reference form
     /// (`$subject.tenant_id`) must compare against it.
+    ///
+    /// Discriminating form: a Deny at priority 810 (above the builtin
+    /// developer-write-access Allow at 800) keyed on cross-tenant mismatch.
+    /// `member_jwt()` carries no `tenant_id` claim → `subject.tenant_id`
+    /// is "default", while the seeded chain resolves the spec's tenant to
+    /// t-1 — so the deny must match. A Deny (not a same-tenant Allow) is
+    /// required here: a non-matching Allow would fall through to the
+    /// builtin Developer Allow at 800, which grants read regardless of
+    /// tenant, masking both a correct lookup and a fabricated one.
     #[tokio::test(flavor = "multi_thread")]
     async fn spec_resource_tenant_resolves_via_scope_chain() {
         let state = setup_entity_state().await;
 
-        // Allow spec reads only when the resource's tenant equals the
-        // subject's tenant (cross-tenant read → no allow → default deny).
+        // Deny spec reads when the resource's tenant differs from the
+        // subject's tenant (cross-tenant read → deny, outranking the
+        // builtin Developer read allow at 800).
         state
             .policies
             .create(&Policy {
-                id: gyre_common::Id::new("test-tenant-match-allow"),
-                name: "same-tenant-read".to_string(),
+                id: gyre_common::Id::new("test-tenant-mismatch-deny"),
+                name: "cross-tenant-read-deny".to_string(),
                 description: String::new(),
                 scope: PolicyScope::Tenant,
                 scope_id: None,
                 priority: 810,
-                effect: PolicyEffect::Allow,
+                effect: PolicyEffect::Deny,
                 conditions: vec![Condition {
                     attribute: "resource.tenant_id".to_string(),
-                    operator: ConditionOp::Equals,
+                    operator: ConditionOp::NotEquals,
                     value: ConditionValue::String("$subject.tenant_id".to_string()),
                 }],
                 actions: vec!["read".to_string()],
@@ -3054,10 +3064,11 @@ pub mod tests {
             ))
             .with_state(state.clone());
 
-        // member_jwt's tenant: the test state's auth config. The seeded chain
-        // uses tenant t-1, so the same-tenant allow must NOT match → deny.
+        // member_jwt's tenant is "default" (no tenant_id claim); the seeded
+        // chain uses tenant t-1, so the cross-tenant deny must match → 403.
         // (This also proves the tenant is really looked up, not fabricated
-        // from the path or a default.)
+        // from the path or a default: a fabricated "default" would make the
+        // NotEquals fail and the builtin Developer Allow at 800 would grant.)
         let resp = app
             .oneshot(
                 Request::builder()
