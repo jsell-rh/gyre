@@ -14,5 +14,5 @@
 #
 # See: specs/reviews/task-087.md F2 (the finding that created this check)
 #
-# --- task-087 revision round owns these (in-memory trace payloads) ---
-crates/gyre-server/src/mem.rs:3558   # MemTraceRepository.payloads read by get_span_payload but store() never inserts — in-memory mode 404s every span payload. Fix: populate payloads in store()/set_permanent paths, mirroring the SQLite adapter's build_payload_blob, plus a mem round-trip test.
+# --- task-087 F2 fixed in task-097's verification repair (store() now
+# populates payloads; see mem.rs trace_payload_tests) ---

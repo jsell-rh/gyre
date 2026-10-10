@@ -149,3 +149,26 @@ spawn 34) were run green by the implementation agent and the round-3 reviewer on
 trees whose crates/ bytes are identical to HEAD (git diff on the four task-owned
 product files vs both trees is empty; this continuation's time budget did not allow
 another cold gyre-server build). Probe logs under /tmp/stage/review-evidence.
+
+## Verification repair (attempt 562bef39, exit 1 on checks.sh)
+
+Root cause: the verification exemption-freeze gate (`dev-check.sh`, "The candidate
+must not grant itself new exemptions, including replacement entries") compares
+whole-line strings. The task's mem.rs secret-adapter insertions shifted the
+pre-existing task-087 F2 exemption entry (`MemTraceRepository.payloads`, mem.rs
+3504 -> 3558) and the candidate renumbered that entry to keep it accurate; a
+renumbered entry is a replacement entry, so the gate failed ("new verification
+exemptions forbidden: scripts/unwritten-store-fields-exemptions.txt"). The web
+build in the log tail succeeded; the exit-1 came from this earlier gate.
+
+Repair (prescribes by the exemption file itself): fix the underlying task-087 F2
+site instead of keeping the exemption -- `MemTraceRepository.store()` now
+populates `payloads` from each span's input/output summaries mirroring the SQLite
+adapter's `build_payload_blob` (both-absent -> no payload entry; empty-summary ->
+None on read, matching `decode_payload_blob`), a replacement capture drops the
+previous run's payloads (SQLite: delete + cascade to trace_spans), and
+`delete_by_mr` removes the deleted MR's payloads while promoted traces keep
+theirs. Six round-trip tests added (`mem::trace_payload_tests`); the exemption
+entry is deleted (pure removal, passes the freeze gate in both script
+orientations). check-unwritten-store-fields green with both candidate and base
+script versions against the repaired tree.

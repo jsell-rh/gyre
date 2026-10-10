@@ -3538,11 +3538,41 @@ pub struct MemTraceRepository {
 impl gyre_ports::TraceRepository for MemTraceRepository {
     async fn store(&self, trace: &gyre_common::GateTrace) -> Result<()> {
         let mut guard = self.store.lock().await;
+        // Capture the previous trace's run id before replacement: the SQLite
+        // delete of the replaced trace cascades to its trace_spans rows, so
+        // the mem replacement must drop the previous run's payloads with it.
+        let old_run_ids: Vec<String> = guard
+            .values()
+            .filter(|v| v.mr_id == trace.mr_id)
+            .map(|v| v.gate_run_id.as_str().to_string())
+            .collect();
         // Replace any existing trace for same MR (capped at most recent).
         // A fresh capture is non-permanent (SQLite inserts permanent=0).
         self.permanent.lock().await.remove(trace.mr_id.as_str());
         guard.retain(|_, v| v.mr_id != trace.mr_id);
         guard.insert(trace.mr_id.as_str().to_string(), trace.clone());
+
+        // Mirror the SQLite adapter: every span's payload blob is written at
+        // store() time (sqlite/trace.rs builds it from input/output before
+        // insert), keyed by gate_run_id + span_id.
+        let mut payloads = self.payloads.lock().await;
+        for run_id in &old_run_ids {
+            payloads.retain(|(rid, _), _| rid != run_id);
+        }
+        for span in &trace.spans {
+            // build_payload_blob semantics: a span with BOTH summaries absent
+            // has no payload row (NULL blob) -- skip it entirely.
+            if span.input_summary.is_none() && span.output_summary.is_none() {
+                continue;
+            }
+            payloads.insert(
+                (trace.gate_run_id.as_str().to_string(), span.span_id.clone()),
+                gyre_ports::trace::SpanPayload {
+                    input: span.input_summary.as_ref().map(|s| s.clone().into_bytes()),
+                    output: span.output_summary.as_ref().map(|s| s.clone().into_bytes()),
+                },
+            );
+        }
         Ok(())
     }
 
@@ -3557,9 +3587,17 @@ impl gyre_ports::TraceRepository for MemTraceRepository {
     ) -> Result<Option<gyre_ports::trace::SpanPayload>> {
         let guard = self.payloads.lock().await;
         let key = (gate_run_id.as_str().to_string(), span_id.to_string());
+        // decode_payload_blob parity (sqlite/trace.rs): empty input/output
+        // byte sections come back as None, not Some(vec![]).
+        let empty_to_none = |v: &Option<Vec<u8>>| -> Option<Vec<u8>> {
+            match v {
+                Some(b) if b.is_empty() => None,
+                other => other.clone(),
+            }
+        };
         Ok(guard.get(&key).map(|p| gyre_ports::trace::SpanPayload {
-            input: p.input.clone(),
-            output: p.output.clone(),
+            input: empty_to_none(&p.input),
+            output: empty_to_none(&p.output),
         }))
     }
 
@@ -3576,7 +3614,16 @@ impl gyre_ports::TraceRepository for MemTraceRepository {
         if self.permanent.lock().await.contains(mr_id.as_str()) {
             return Ok(());
         }
-        self.store.lock().await.remove(mr_id.as_str());
+        // SQLite's ON DELETE CASCADE removes the trace's span rows with the
+        // gate_traces row; drop this MR's span payloads with it.
+        let removed = self.store.lock().await.remove(mr_id.as_str());
+        if let Some(trace) = removed {
+            let run_id = trace.gate_run_id.as_str().to_string();
+            self.payloads
+                .lock()
+                .await
+                .retain(|(rid, _), _| rid != &run_id);
+        }
         Ok(())
     }
 }
@@ -4369,5 +4416,197 @@ mod secret_contract_tests {
         let b = sample_secret("sec-2", "BETA", SecretScope::Workspace, "ws-1", "tenant-a");
         repo.create(&a, b"v1").await.unwrap();
         repo.create(&b, b"v2").await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod trace_payload_tests {
+    //! Task-087 F2 / task-097 repair: MemTraceRepository.payloads must be
+    //! populated by store() exactly like the SQLite adapter builds its
+    //! payload blobs -- in-memory mode previously 404'd every span payload.
+    //! These mirror sqlite/trace.rs's round-trip tests plus the
+    //! replacement/cascade semantics the ON DELETE CASCADE gives SQLite.
+    use super::*;
+    use gyre_ports::TraceRepository as _;
+
+    fn span(span_id: &str, input: Option<&str>, output: Option<&str>) -> gyre_common::TraceSpan {
+        gyre_common::TraceSpan {
+            span_id: span_id.to_string(),
+            parent_span_id: None,
+            operation_name: "GET /api/health".to_string(),
+            service_name: "gyre-server".to_string(),
+            kind: gyre_common::SpanKind::Server,
+            start_time: 1_000_000,
+            duration_us: 2_000,
+            attributes: std::collections::HashMap::new(),
+            input_summary: input.map(str::to_string),
+            output_summary: output.map(str::to_string),
+            status: gyre_common::SpanStatus::Ok,
+            graph_node_id: None,
+        }
+    }
+
+    fn trace(
+        mr_id: &str,
+        gate_run_id: &str,
+        spans: Vec<gyre_common::TraceSpan>,
+    ) -> gyre_common::GateTrace {
+        gyre_common::GateTrace {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            mr_id: Id::new(mr_id),
+            gate_run_id: Id::new(gate_run_id),
+            commit_sha: "abc123".to_string(),
+            spans,
+            captured_at: 1_700_000_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn get_span_payload_roundtrip() {
+        let repo = MemTraceRepository::default();
+        repo.store(&trace(
+            "mr-1",
+            "gate-run-1",
+            vec![span("span-1", Some("{}"), Some(r#"{"ok":true}"#))],
+        ))
+        .await
+        .unwrap();
+
+        let payload = repo
+            .get_span_payload(&Id::new("gate-run-1"), "span-1")
+            .await
+            .unwrap()
+            .expect("stored span with summaries must have a payload");
+        let input = payload.input.map(|b| String::from_utf8(b).unwrap());
+        let output = payload.output.map(|b| String::from_utf8(b).unwrap());
+        assert_eq!(input.as_deref(), Some("{}"));
+        assert_eq!(output.as_deref(), Some(r#"{"ok":true}"#));
+    }
+
+    #[tokio::test]
+    async fn span_with_no_payload_returns_none() {
+        let repo = MemTraceRepository::default();
+        repo.store(&trace(
+            "mr-1",
+            "gate-run-1",
+            vec![span("span-1", None, None)],
+        ))
+        .await
+        .unwrap();
+
+        let payload = repo
+            .get_span_payload(&Id::new("gate-run-1"), "span-1")
+            .await
+            .unwrap();
+        assert!(
+            payload.is_none(),
+            "both-summaries-absent span has no payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_span_or_run_returns_none() {
+        let repo = MemTraceRepository::default();
+        repo.store(&trace(
+            "mr-1",
+            "gate-run-1",
+            vec![span("span-1", Some("i"), Some("o"))],
+        ))
+        .await
+        .unwrap();
+
+        // Span id is only unique within a trace: a different run's id must
+        // not resolve this run's payload.
+        assert!(repo
+            .get_span_payload(&Id::new("gate-run-2"), "span-1")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(repo
+            .get_span_payload(&Id::new("gate-run-1"), "span-2")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn store_replaces_previous_run_payloads() {
+        let repo = MemTraceRepository::default();
+        repo.store(&trace(
+            "mr-1",
+            "gate-run-1",
+            vec![span("span-1", Some("old-input"), Some("old-output"))],
+        ))
+        .await
+        .unwrap();
+        repo.store(&trace(
+            "mr-1",
+            "gate-run-2",
+            vec![span("span-1", Some("new-input"), None)],
+        ))
+        .await
+        .unwrap();
+
+        // Old run's payload went away with the replaced trace (SQLite:
+        // delete + cascade to trace_spans, then re-insert).
+        assert!(repo
+            .get_span_payload(&Id::new("gate-run-1"), "span-1")
+            .await
+            .unwrap()
+            .is_none());
+        let payload = repo
+            .get_span_payload(&Id::new("gate-run-2"), "span-1")
+            .await
+            .unwrap()
+            .expect("new run's span payload must resolve");
+        let input = payload.input.map(|b| String::from_utf8(b).unwrap());
+        let output = payload.output.map(|b| String::from_utf8(b).unwrap());
+        assert_eq!(input.as_deref(), Some("new-input"));
+        assert_eq!(output.as_deref(), None, "None summary stays absent");
+    }
+
+    #[tokio::test]
+    async fn delete_by_mr_removes_payloads() {
+        let repo = MemTraceRepository::default();
+        repo.store(&trace(
+            "mr-1",
+            "gate-run-1",
+            vec![span("span-1", Some("i"), Some("o"))],
+        ))
+        .await
+        .unwrap();
+
+        repo.delete_by_mr(&Id::new("mr-1")).await.unwrap();
+
+        assert!(repo
+            .get_span_payload(&Id::new("gate-run-1"), "span-1")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn promote_to_attestation_preserves_payloads() {
+        let repo = MemTraceRepository::default();
+        repo.store(&trace(
+            "mr-1",
+            "gate-run-1",
+            vec![span("span-1", Some("i"), Some("o"))],
+        ))
+        .await
+        .unwrap();
+        repo.promote_to_attestation(&Id::new("mr-1")).await.unwrap();
+
+        // Promoted trace survives delete_by_mr (permanent=1 rows survive) --
+        // its payloads must survive with it, mirroring SQLite.
+        repo.delete_by_mr(&Id::new("mr-1")).await.unwrap();
+
+        let payload = repo
+            .get_span_payload(&Id::new("gate-run-1"), "span-1")
+            .await
+            .unwrap()
+            .expect("promoted trace's payloads must survive delete_by_mr");
+        let input = payload.input.map(|b| String::from_utf8(b).unwrap());
+        assert_eq!(input.as_deref(), Some("i"));
     }
 }
