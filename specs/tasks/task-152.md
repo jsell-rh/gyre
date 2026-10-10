@@ -153,16 +153,41 @@ progress and evidence live in frontmatter and this operational section.
   threshold, malformed-entry skipping, facts-JSON edge details) + 2 extraction tests
   (`edge_entry` qualified-name resolution and unknown-endpoint skipping) + 1 compact-delta test.
 
-Test evidence this round (exact commands and output under `/tmp/stage/review-evidence/`,
-`CARGO_HOME=/tmp/cargo-home`, `CARGO_TARGET_DIR=/tmp/gyre-target`):
+- **Round 4 (recovered checkpoint, merged tree)**: the interrupted round-3 checkpoint
+  (`03b928c5`) was resumed after merging base `f4acb4eb` (task-189, `personas.rs` — no overlap
+  with narrative attribution, which reads the `agent_personas` kv binding, not persona scope
+  resolution; narrative files byte-identical to reviewed `c14e5769`). Three repairs shipped:
+  (1) `check-template-substitution.sh` second SIGPIPE repair — the checkpoint's `grep -n -m1`
+  substitution still raced: `grep -m1` exits at its match while `tail` keeps writing, `pipefail`
+  reports 141, and `|| echo` APPENDS a fallback line to partially-captured output, poisoning
+  `FN_END` arithmetic ("38\n200" syntax error observed live) which, inside the `while read`
+  loop, left the previous iteration's stale function span — a potential false pass. Both
+  `NEXT_CONST_LINE` and `FN_END_SEARCH` now use a single `awk` process (no upstream writer to
+  SIGPIPE); `FN_START` probed and found not racy. Non-blinding re-proven (planted rogue var in
+  template value and dropped `.replace("{{facts}}")` both still exit 1; clean tree exit 0;
+  8 loaded runs no stderr). (2) Real bug fixed in `graph_extraction.rs`: the edge-entry
+  refactor (`c14e5769`) dropped `edges_removed_count += 1;` from the removed-edges loop, so
+  the compact no-agent `delta_json` persisted `"edges_removed": 0` while edges were actually
+  removed (surfaced as an `unused_mut` warning on the merged tree). New discriminating test
+  `compact_delta_records_true_removed_edge_count` drives the real pipeline over a real bare
+  git repo (two commits; second drops a `pub fn` → its Contains edge disappears) and asserts
+  the persisted count; verified failing `left: 0, right: 1` with the increment removed, passing
+  with it. (3) Inherited attribution drift cleared: base commit `f4acb4eb` recorded in
+  `specs/tasks/task-189.md` `commits:` (task-210/`04ce9194` precedent; no exemption entries).
 
-- `cargo test -p gyre-domain --lib narrative` → **15 passed, 0 failed** (11 prior + 4 new
-  edge-detail tests) (`domain-narrative-r3b.log`).
-- `cargo test -p gyre-domain --lib` → **378 passed, 0 failed** (full lib).
-- `cargo test -p gyre-common --lib` → **94 passed, 0 failed** (full lib, `DeltaEdgeEntry`).
-- `cargo test -p gyre-server --lib -- narrative briefing` → **20 passed, 0 failed**
-  (`server-narrative-briefing-r3.log`; includes the 3 task tests driving the real router and the
-  LLM echo/fallback paths).
+Test evidence round 4 (merged tree `f29a4fdc` + round-4 repairs; exact commands and output under
+`/tmp/stage/review-evidence/`, `CARGO_HOME=/tmp/cargo-home`, `CARGO_TARGET_DIR=/tmp/gyre-target`):
+
+- `cargo test -p gyre-domain --lib narrative` → **15 passed, 0 failed** (`domain-narrative-r4-merged.log`).
+- `cargo test -p gyre-domain --lib` → **378 passed, 0 failed**.
+- `cargo test -p gyre-common --lib` → **94 passed, 0 failed**.
+- `cargo test -p gyre-server --lib -- narrative briefing` → **20 passed, 0 failed**.
+- `cargo test -p gyre-server --lib graph_extraction` → **20 passed, 0 failed** (19 prior + the new
+  `compact_delta_records_true_removed_edge_count` regression test) (`r4-verification.log`).
+- Mechanical gates: **17/17 PASS** on the final tree (`gates-r4-final.log`), including the
+  attribution gate after the task-189 record repair.
+
+Test evidence round 3 (checkpoint `c14e5769`, pre-merge; logs from the interrupted run):
 - `cargo test -p gyre-server --lib graph_extraction` → **19 passed, 0 failed** (17 prior + 2 new
   `edge_entry` tests) (`server-extraction-r3b.log`).
 - Mechanical gates: 21/21 PASS including arch, template-substitution, byte-slice-truncation,

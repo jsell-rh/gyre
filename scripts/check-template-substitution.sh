@@ -47,13 +47,19 @@ for const_name in $PROMPT_CONSTS; do
     CONST_LINE=$(grep -n -m1 "pub const $const_name" "$DEFAULTS_FILE" | cut -d: -f1)
     [ -z "$CONST_LINE" ] && continue
 
-    # grep -m1 instead of `| head -1`: under load, head can exit before grep
-    # finishes writing, SIGPIPE-ing grep; with `set -o pipefail` that aborts
-    # the whole script (exit 141) mid-run — a flaky gate. grep -m1 stops on
-    # the first match itself, so no downstream consumer can race it.
-    NEXT_CONST_LINE=$(tail -n +"$((CONST_LINE + 1))" "$DEFAULTS_FILE" \
-        | grep -n -m1 'pub const PROMPT_' \
-        | cut -d: -f1 || echo "")
+    # Find the next const's definition to bound this one's span. Single awk
+    # process reading the file directly — no `tail | grep -n -m1 | cut`
+    # pipeline: grep -m1 exits at its match while tail is still writing, and
+    # under `set -o pipefail` the pipeline reports 141, so the `|| echo`
+    # fallback fires and APPENDS a second line to the partial output already
+    # captured. That poisons the line arithmetic ("38\n200" → bash syntax
+    # error) and, inside the consumer loop, silently leaves the previous
+    # iteration's stale span — a false pass. awk exits after printing the
+    # first match; empty output means "no next const" (span to EOF).
+    NEXT_CONST_LINE=$(awk -v first="$((CONST_LINE + 1))" \
+        'NR >= first && /pub const PROMPT_/ { print NR - first + 1; exit }' \
+        "$DEFAULTS_FILE")
+
 
     if [ -n "$NEXT_CONST_LINE" ]; then
         END_LINE=$((CONST_LINE + NEXT_CONST_LINE - 1))
@@ -97,11 +103,16 @@ for const_name in $PROMPT_CONSTS; do
                 | grep -n 'async fn \|pub fn \|fn ' \
                 | tail -1 \
                 | cut -d: -f1 || echo "1")
-
-            # Find function end (next fn definition or +200 lines, whichever is first)
-            FN_END_SEARCH=$(tail -n +"$((ref_lineno + 1))" "$consumer_file" \
-                | grep -n -m1 'async fn \|pub fn ' \
-                | cut -d: -f1 || echo "200")
+            # Find function end (next fn definition or +200 lines, whichever
+            # comes first). Same single-awk pattern as NEXT_CONST_LINE: the
+            # old `tail | grep -n -m1 | cut || echo 200` raced identically
+            # (grep -m1 exit → tail SIGPIPE → 141 under pipefail → fallback
+            # appends to partial output → poisoned/stale FN_END). Empty awk
+            # output (no next fn) defaults to the +200 cap.
+            FN_END_SEARCH=$(awk -v first="$((ref_lineno + 1))" \
+                'NR >= first && /async fn |pub fn / { print NR - first + 1; exit }' \
+                "$consumer_file")
+            FN_END_SEARCH=${FN_END_SEARCH:-200}
             FN_END=$((ref_lineno + FN_END_SEARCH))
 
             fn_name=$(sed -n "${FN_START}p" "$consumer_file" \

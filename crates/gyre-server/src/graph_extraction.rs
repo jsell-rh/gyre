@@ -314,6 +314,7 @@ async fn do_extract(
     for (key, edge) in &old_edge_map {
         if !new_edge_map.contains_key(key) {
             graph_store.delete_edge(&edge.id).await?;
+            edges_removed_count += 1;
             if let Some(e) = edge_entry(edge, &old_qn_by_id) {
                 delta_edges_removed.push(e);
             }
@@ -1386,6 +1387,128 @@ mod tests {
         assert_eq!(calls[0].source_id, caller.id);
         assert_eq!(calls[0].target_id, callee.id);
         assert_eq!(calls[0].edge_type, EdgeType::Calls);
+    }
+
+    // ── Compact-delta edge counts (realized-model.md §6, task-152) ─────────────
+
+    /// Drive the REAL end-to-end extraction pipeline over a real bare git repo:
+    /// commit 1 extracts nodes + a Contains edge; commit 2 removes the child
+    /// file so the edge disappears. With no agent context the delta takes the
+    /// compact count-only format, and `"edges_removed"` must record the TRUE
+    /// removed-edge count. Regression test for the c14e5769 refactor that
+    /// dropped `edges_removed_count += 1` from the removal loop (persisted
+    /// `"edges_removed": 0` while edges were actually removed).
+    #[tokio::test]
+    async fn compact_delta_records_true_removed_edge_count() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bare = tmp.path().join("repo.git");
+        std::fs::create_dir_all(&bare).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .arg("init")
+                .arg("--bare")
+                .arg(&bare)
+                .status()
+                .unwrap()
+                .success(),
+            "git init --bare failed"
+        );
+
+        // Working clone for authoring commits.
+        let work = tmp.path().join("work");
+        std::process::Command::new("git")
+            .args(["clone", bare.to_str().unwrap(), work.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(["-C", work.to_str().unwrap()])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out
+        };
+
+        // RustExtractor.detect requires a Cargo.toml at the repo root.
+        std::fs::write(
+            work.join("Cargo.toml"),
+            "[package]\nname = \"edge-count-fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        // Commit 1: two public functions → two Contains edges (module → fn).
+        std::fs::write(
+            work.join("lib.rs"),
+            "pub fn find() {}\npub fn index() {}\n",
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "one"]);
+        let sha1 = String::from_utf8_lossy(&git(&["rev-parse", "HEAD"]).stdout)
+            .trim()
+            .to_string();
+
+        let store = Arc::new(MemGraphStore::new());
+        let repo_id = Id::new("repo-edge-count");
+        extract_and_store_graph(
+            work.to_str().unwrap(),
+            repo_id.as_str(),
+            &sha1,
+            Arc::clone(&store) as Arc<dyn GraphPort>,
+            "git",
+            None,
+            None,
+        )
+        .await;
+
+        let edges_after_first = store
+            .list_edges(&repo_id, None)
+            .await
+            .unwrap()
+            .len();
+        assert!(
+            edges_after_first >= 2,
+            "commit 1 must extract two Contains edges, got {edges_after_first}"
+        );
+
+        // Commit 2: drop one function → its Contains edge disappears.
+        std::fs::write(work.join("lib.rs"), "pub fn find() {}\n").unwrap();
+        git(&["add", "."]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "two"]);
+        let sha2 = String::from_utf8_lossy(&git(&["rev-parse", "HEAD"]).stdout)
+            .trim()
+            .to_string();
+
+
+        extract_and_store_graph(
+            work.to_str().unwrap(),
+            repo_id.as_str(),
+            &sha2,
+            Arc::clone(&store) as Arc<dyn GraphPort>,
+            "git",
+            None,
+            None,
+        )
+        .await;
+
+        // The second delta must record the removed edge: compact format, no
+        // agent ctx. Read it back through the port, not the in-memory write.
+        let deltas = store.list_deltas(&repo_id, None, None).await.unwrap();
+        assert_eq!(deltas.len(), 2, "one delta per extraction");
+        let second = &deltas[1];
+        let facts: serde_json::Value = serde_json::from_str(&second.delta_json).unwrap();
+        let removed = facts["edges_removed"].as_u64().unwrap_or(999);
+        assert_eq!(
+            removed, 1,
+            "compact delta must record the true removed-edge count (delta_json: {})",
+            second.delta_json
+        );
     }
 
     #[tokio::test]
