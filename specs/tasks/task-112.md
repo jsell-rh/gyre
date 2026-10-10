@@ -2,13 +2,78 @@
 title: "Implement notification delivery channels & routing"
 spec_ref: "user-management.md §Delivery Channels"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "user-management.md §Delivery Channels"
   - "user-management.md §Who Gets Notified"
   - "user-management.md §Notification Routing for Agent Escalations"
 commits: ["5c37f969f35a81916ec3f276b2693fae9af22e69", "ee4e434251595b7b664b73d99be3ea3c80c25044", "896c9055969f118b82c0abb688da60453a9028a5", "94cf2f62088dba6d0b7136d792167e0ca7e6e3dd", "a3a3ea0f7f3a0cd48aff40ca57f1c33fbbdea6da"]
 ---
+
+## Shipped
+
+Real production implementation of user-management.md §Delivery Channels,
+§Who Gets Notified, §Notification Routing for Agent Escalations.
+
+**Domain types** (`gyre-domain/src/user.rs`): `NotificationChannels` extended
+with `email: EmailConfig`, `webhook: Option<WebhookConfig>`,
+`slack: Option<SlackConfig>`; `NotificationPriority` (Low..Urgent, ordered),
+`DigestFrequency` (Off/Hourly/Daily/Weekly). `Default` keeps `in_app` true.
+
+**Dispatcher** (`gyre-server/src/notification_dispatcher.rs`): fans each
+persisted in-app notification out to the recipient's configured channels with
+per-channel `min_priority` threshold filtering. Webhook POSTs the JSON payload
+signed with HMAC-SHA256 (`X-Gyre-Signature`, ring). Slack POSTs to the incoming
+webhook URL (channel override honored). Email queues a durable outbox entry in
+`kv_store` (`email_outbox` ns) for the digest sender — the interface contract
+per the task plan (SMTP transport is deployment's concern). All outbound HTTP
+is latency-bounded (`CHANNEL_HTTP_TIMEOUT_SECS` = 10 s, reqwest with timeout —
+`check-unbounded-external-http.sh` invariant).
+
+**Routing engine** (§Who Gets Notified): `escalation_recipients` implements the
+agent-escalation chain — `spawned_by` primary; offline spawner adds workspace
+Admins; Urgent always adds workspace Owners (dedup'd). Helpers cover persona
+approval → owner, merge queue paused → all Admins/Owners, budget warning →
+spawner + Admins, budget exhausted → spawner + Owner, security finding →
+Workspace Owner + tenant Admin. Existing creation paths already cover the
+remaining rows (spec approval → manifest approvers, gate failure → MR author,
+MR merged/reverted, invitation → invited user).
+
+**Wiring**: `notifications::notify`/`notify_rich` (the central creation
+helpers) fan out through `dispatch_to_channels`, so every emitting path
+(gate failure, spec patrol, merge queue, abandoned branch, trust suggestion,
+spec-link staleness, git_http, mcp) delivers to configured channels.
+`spawn.rs` calls `notify_agent_escalation` on Overseer escalation.
+
+**Preferences API**: `GET/PUT /api/v1/notifications/preferences` (self-scope,
+per-handler auth; ABAC-exempt with documented self-scope invariant). PUT
+rejects `in_app: false` (spec: "can't disable") and non-absolute webhook/Slack
+URLs. Storage: new `user_channel_preferences` table (migration 000056, portable
+SQLite/PG SQL), `UserChannelPreferenceRepository` port with SQLite and mem
+adapters (both enforce the upsert contract).
+
+**Test evidence** (all on merged HEAD 5c91da97):
+- `cargo test -p gyre-server --lib notification_dispatcher`: 15 passed
+  (HMAC signing + threshold filtering, slack posting + channel override,
+  email outbox durability + filtering, escalation recipient chain incl.
+  offline-spawner and Urgent fan-out, in-app records per recipient, persona
+  approval, merge-queue-paused, budget warning/exhausted, security finding)
+- `cargo test -p gyre-server --lib users`: 17 passed (channel prefs API)
+- `cargo test -p gyre-server --lib spawn::`: 29 passed
+- `cargo test -p gyre-server --lib notifications`: 10 passed
+- `cargo test -p gyre-server --lib mcp`: 71 passed
+- `cargo test -p gyre-server --lib merge_processor`: 49 passed
+- `cargo test -p gyre-adapters --lib user_profile`: 5 passed
+- `cargo test -p gyre-domain --lib user::`: 5 passed
+- Prior checkpoint gates (unchanged by merge, which touched only spec .md
+  files): rustfmt + changed-lines clippy clean, `SKIP_WEB_BUILD=1 cargo
+  build -p gyre-server --lib` clean.
+- `scripts/check-abac-exempt-handlers.sh`: OK (91 handlers).
+
+Sandbox restriction recorded: TCP listener probe unsupported (`accept` →
+errno 95), so live HTTP round-trip verification against a local listener is
+deferred to host verification; channel delivery is covered by the captured
+`HttpSender` test double asserting URL, headers (HMAC signature), and body.
 
 ## Spec Excerpt
 
