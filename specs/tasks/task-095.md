@@ -184,31 +184,46 @@ the recovery merge, same R3-F4 drift class),
 `check-dead-message-kinds`, `check-arch`, `check-inert-enforcement`,
 `check-mem-port-contracts`.
 
-## Rebase Repair (Round 5)
-
-Rebased the branch onto the current pipeline base
-`7c6ac232ad1e43c977540034381e41c47548aa81` (merge commit
-`393e96a9`). One content conflict in `specs/tasks/task-068.md`
-`commits:` frontmatter — both sides held the identical 10-commit set
-differing only in ordering; resolved by keeping the HEAD ordering
-previously verified green by `check-task-commit-attribution`.
-
-The merge brought the base branch's web sources (task-196
-Briefing/InlineChat) while `web/dist` was stale from the task-095
-side; regenerated dist from the merged sources (commit `3668aef6`,
-same convention as `44a8187f`), after `npm ci` with the locked
-versions and a passing `npx vitest run
-src/__tests__/Briefing.test.js` (24/24) on the merged sources.
-
-All focused probes re-run green at final head `3668aef6`:
-`merge_processor` 54/54, `git2_ops` 31/31, `api::recovery` 6/6,
-`api::merge_queue` 8/8, `check-task-commit-attribution`,
-`check-abac-route-registry`, `check-fail-open-ref-resolution`.
-Evidence: `/tmp/stage/review-evidence/rebase-repair-393e96a9.txt`.
-Tree clean at `3668aef6`.
-
 Sandbox limitation recorded: the TCP listener probe is unsupported in
 this runtime (`errno 95`, `/tmp/stage/capabilities.json`), so no live
 server/browser smoke test was performed here; behavior is verified by
 the in-process axum `oneshot` handler tests above. GitHub CI on the
 branch head remains the authoritative transport-level check.
+
+## Contract Repair (Round 6)
+
+Pipeline repair finding `889064f6` (category `contract`): the
+implementation had changed the assigned task requirements — the
+round-3 fix for R3-F4 (commit `e6a6db47`) rewrote
+`specs/tasks/task-096.md`'s contract from "Platform Model Rollback
+Circuit Breaker + CLI/UI" down to "Platform Model Rollback UI",
+reassigning the §6 Circuit Breaker and CLI coverage sections to
+task-095 as "already delivered". That is a normative decomposition
+change made inside an implementation round; it belongs to the
+decomposition owner (PM cycle), not to this branch.
+
+Restored `specs/tasks/task-096.md` byte-identical to the
+decomposition commit `07a6e68c` (blob `dc25b61b`, sha256 match),
+re-aligning it with the coverage matrix, which still assigns rows
+36–38 (§6 Circuit Breaker, CLI, UI) to task-096. No other normative
+task-contract text on this branch's own line diverges from the
+decomposition — verified by diffing every `specs/tasks/` file this
+branch's own commits touched against `07a6e68c`; the remaining deltas
+are progress/review/commits frontmatter, AC checkmarks, and Shipped
+essays on already-decomposed tasks (evidence:
+`/tmp/stage/review-evidence/contract-diff-baseline.txt`).
+
+The superseded "Round 5 Rebase Repair" section was dropped from this
+file by the executor before this round; its operational content
+(rebase onto `7c6ac232`, dist regeneration `3668aef6`, green probes at
+the merged head) is preserved in the pipeline's durable findings and
+`/tmp/stage/review-evidence/rebase-repair-393e96a9.txt`.
+
+Open item for the decomposition owner (not actionable on this branch):
+rows 36 (Circuit Breaker) and 37 (CLI) carry 2026-10-05 audit notes
+"LANDED via `5aaded213`, no longer Hollow" while their task
+(task-096, restored) still declares them `not-started`; the duplicate
+delivery recorded under this task's R3-F2/R3-F1 revision commits needs
+a PM-cycle decision (rescope task-096 to §6 UI-only, or record the
+delivered rows against it) — either way, decided in spec review, not
+by an implementation branch editing the contract.
