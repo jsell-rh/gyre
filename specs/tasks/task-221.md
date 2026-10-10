@@ -3,7 +3,7 @@ title: "Repair verified failure on main 6bf777a6a44f"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
 progress: ready-for-review
-commits: []
+commits: ["dcbd107a63440b5e9a927e1875fbae111cc8360e"]
 ---
 
 ## Required behavior
@@ -67,3 +67,46 @@ GYRE_BASELINE_FAILURE_JSON {"base": "6bf777a6a44f28052ed5af28bf6fb013fde6df48", 
 - Other baseline-log probes verified clean at this HEAD: `python3 scripts/check-rustfmt-diff.py 6bf777a6a44f28052ed5af28bf6fb013fde6df48` -> `changed lines clean (0 Rust files checked)` exit 0 (repair touches `specs/` only); `git diff --check 6bf777a6a44f...` clean exit 0. Clippy unchanged from baseline (no Rust files touched). No cargo build or suite run - no Rust source changed; per the smallest-relevant-probe constraint and this sandbox's unsupported listener probe (`capabilities.json` tcp errno 95), HTTP-surface verification is deferred to host verification and required GitHub CI.
 - Attribution for this task: `commits: []` is correct - the only branch commit touches `specs/` only, no product surface. Verified with `python3 /tmp/stage/dev-attribution.py task-221` (no change produced to the list).
 - Independent review, full deterministic gates, and GitHub checks remain required before merge (per assignment).
+
+## Shipped (round 2 — explorer WS session registry)
+
+Base: `73a31e0b6c5280b0a4df563b08fa503ad476113a` (extends the same task; prior round shipped the task-200 attribution repair above). Fix commit: `dcbd107a63440b5e9a927e1875fbae111cc8360e` (`fix(task-221): scope explorer WS session registry to AppState`, 4 files, +175/-36 Rust).
+
+### Baseline failure (reproduced by failure-signature analysis, not re-run — see sandbox restriction below)
+
+`cargo test --all --quiet` at base: 2/7 tests in `crates/gyre-server/tests/explorer_ws_integration.rs` fail:
+- `explorer_ws_connect_and_list_views` — panics at line 166: first WS response is `{"type":"error"}` instead of `views`.
+- `explorer_ws_save_and_load_view` — panics at line 233: socket closed before the `view_query` response; save round-trip had already succeeded.
+
+Binary finished in 0.17s (5 passed, 2 failed) — no read timeouts, instant failures.
+
+### Root cause
+
+`ACTIVE_SESSIONS` was a **process-global static** keyed by `tenant:agent` (identity `default:system` for all dev-token connections), limit 3 via `max_sessions_per_user()` (env `GYRE_EXPLORER_MAX_SESSIONS`, default 3). The test binary runs 7 tests in parallel — each spins its own server via `build_state()` but all authenticate as the same dev token → same identity. Connections 4–7 evicted the oldest still-open sessions mid-test, killing the two slowest tests (both do view-seeding round-trips). Eviction sends `{"type":"error","message":"Session replaced by a newer connection."}` then closes the socket (explorer_ws.rs eviction select arms) — matching both failure signatures; the 0.17s total runtime rules out 5s read-timeout paths. In production one process = one server, so the shared-static design was masked.
+
+### Repair (real ownership fix, not a test change)
+
+Moved the registry from process-global static into `AppState` as `explorer_sessions: Arc<ExplorerSessionRegistry>` — per-server ownership, matching every sibling (`presence`, `ws_connections`, `ws_connection_counter`). The integration test file is untouched: the tests are correct, the handler was wrong. Eviction semantics, per-user limit, env override, tenant-scoped keying, oldest-first eviction, and the `Notify` shutdown signal are all preserved exactly. Also clamped a zero per-user limit to 1 in `register()` — `GYRE_EXPLORER_MAX_SESSIONS=0` would have panicked at `slots.remove(0)` on an empty Vec in the old code.
+
+### Unit tests (the deterministic local proof)
+
+Three new `#[tokio::test]`s in `explorer_ws.rs::tests` pin the observable semantics with a deterministic eviction oracle — `Notify::notify_one()` stores a permit when no waiter is registered, so `timeout(50ms, notified())` observes whether eviction fired without sleeps:
+- `test_session_registry_evicts_oldest_at_limit` — below-limit: nothing evicted; at limit: oldest evicted, newest survives; unregister makes room; limit 0 clamps to 1.
+- `test_session_registry_users_are_independent` — cross-user and cross-tenant registrations never evict another user's session.
+- `test_session_registries_are_per_server` — THE regression test: two independent registries (two AppStates), same user key; server B registering past its limit must never evict server A's sessions. This is exactly the failure that killed the parallel integration-test servers.
+
+### Local verification (this sandbox)
+
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib explorer_ws::tests::test_session` → **3 passed, 0 failed** (evidence: `/tmp/stage/review-evidence/cargo-test-unit.log`).
+- `python3 scripts/check-rustfmt-diff.py 73a31e0b` → clean, 4 Rust files (post-commit).
+- `SKIP_WEB_BUILD=1 python3 scripts/check-clippy-diff.py 73a31e0b` → clean, 4 Rust files, 1145 existing warnings outside changes (post-commit).
+- `bash scripts/check-in-memory-state-stores.sh` → OK (registry is a struct field, not a bare type alias; per-server state goes through AppState, not a process-global).
+- `bash scripts/check-arch.sh` → passed.
+- All three gyre-server `AppState` literal sites updated (`lib.rs` build_state, `mem.rs` test_state_inner — flows to all 84+ test callers, `middleware.rs` test literal).
+
+### Host verification REQUIRED (cannot run in this sandbox)
+
+This sandbox's TCP `accept()` fails with errno 95 (`Operation not supported`; verified live, recorded in `/tmp/stage/capabilities.json`) — bind/listen/connect work, but no listener can accept, so every test needing an inbound HTTP/WS connection is unrunnable here. On host / GitHub CI:
+- `cargo test -p gyre-server --test explorer_ws_integration` — all 7 tests; THE reproduction of the baseline failure.
+- `cargo test --all --quiet` — the original failing command.
+- GitHub CI (full gates).
