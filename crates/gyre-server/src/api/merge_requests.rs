@@ -501,6 +501,125 @@ pub(crate) async fn detect_lineage_deps(
     deps
 }
 
+/// Re-evaluate branch lineage dependencies for an existing MR after its
+/// source branch was pushed (rebased or updated).
+///
+/// merge-dependencies.md §2: "If the parent MR is later rebased, the
+/// dependency is re-evaluated." Removes stale lineage dependencies (the
+/// branch no longer descends from the parent MR's branch, or the parent MR
+/// is no longer open) and adds newly detected ones. Explicit and
+/// agent-declared dependencies are never touched — only `BranchLineage`
+/// edges are auto-managed, and agents or the orchestrator can override
+/// them by declaring an explicit dependency (which takes precedence and is
+/// preserved here).
+///
+/// New lineage edges are added only if they cannot create a cycle in the
+/// repo's dependency graph.
+pub(crate) async fn reevaluate_lineage_deps(state: &AppState, mr_id: &Id) {
+    let mr = match state.merge_requests.find_by_id(mr_id).await {
+        Ok(Some(m)) => m,
+        _ => return,
+    };
+    // Only open MRs participate in lineage tracking.
+    if mr.status != MrStatus::Open {
+        return;
+    }
+    let repo = match state.repos.find_by_id(&mr.repository_id).await {
+        Ok(Some(r)) => r,
+        _ => return,
+    };
+
+    let detected = detect_lineage_deps(
+        state,
+        &mr.repository_id,
+        &repo.path,
+        &mr.source_branch,
+        &mr.target_branch,
+    )
+    .await;
+    let detected_ids: std::collections::HashSet<String> = detected
+        .iter()
+        .map(|d| d.target_mr_id.to_string())
+        .collect();
+
+    // Keep every non-lineage dependency; drop lineage edges that are no
+    // longer detected (stale); re-add the current detection result.
+    let mut new_deps: Vec<MergeRequestDependency> = mr
+        .depends_on
+        .iter()
+        .filter(|d| d.source != DependencySource::BranchLineage)
+        .cloned()
+        .collect();
+    for dep in detected {
+        // Skip lineage edges that duplicate an explicit/agent-declared dep.
+        if new_deps
+            .iter()
+            .any(|d| d.target_mr_id == dep.target_mr_id)
+        {
+            continue;
+        }
+        new_deps.push(dep);
+    }
+
+    // Persist only when the set actually changed.
+    let changed = new_deps.len() != mr.depends_on.len()
+        || new_deps
+            .iter()
+            .zip(mr.depends_on.iter())
+            .any(|(a, b)| a.target_mr_id != b.target_mr_id || a.source != b.source);
+    if !changed {
+        return;
+    }
+
+    // Guard against cycles before writing: recompute adjacency from stored
+    // state with this MR's new edges applied, then check reachability.
+    let all_mrs = state.merge_requests.list().await.unwrap_or_default();
+    let mut adj: HashMap<String, Vec<String>> = HashMap::new();
+    for m in &all_mrs {
+        adj.insert(
+            m.id.to_string(),
+            m.depends_on
+                .iter()
+                .map(|d| d.target_mr_id.to_string())
+                .collect(),
+        );
+    }
+    let mr_id_str = mr_id.to_string();
+    let new_dep_ids: Vec<String> = new_deps
+        .iter()
+        .map(|d| d.target_mr_id.to_string())
+        .collect();
+    if super::merge_deps::would_create_cycle(&mr_id_str, &new_dep_ids, &adj) {
+        tracing::warn!(
+            mr_id = %mr_id,
+            "lineage re-evaluation skipped: would create a dependency cycle"
+        );
+        return;
+    }
+
+    let removed: Vec<String> = mr
+        .depends_on
+        .iter()
+        .filter(|d| d.source == DependencySource::BranchLineage)
+        .filter(|d| !detected_ids.contains(&d.target_mr_id.to_string()))
+        .map(|d| d.target_mr_id.to_string())
+        .collect();
+    let added: Vec<String> = detected_ids.iter().cloned().collect();
+    info!(
+        mr_id = %mr_id,
+        ?removed,
+        ?added,
+        "re-evaluated branch lineage dependencies"
+    );
+
+    let mut updated = mr;
+    updated.depends_on = new_deps;
+    updated.updated_at = now_secs();
+    if let Err(e) = state.merge_requests.update(&updated).await {
+        tracing::warn!(mr_id = %mr_id, error = %e, "failed to persist lineage re-evaluation");
+    }
+}
+
 pub async fn list_mrs(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListMrsQuery>,
@@ -1505,5 +1624,371 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::CREATED);
         let json = body_json(resp).await;
         assert_eq!(json["depends_on"].as_array().unwrap().len(), 0);
+    }
+
+    // ── Branch lineage auto-detection tests (TASK-167) ──────────────────
+    //
+    // These exercise detect_lineage_deps / reevaluate_lineage_deps against
+    // a REAL on-disk git repository built with git plumbing (commit-tree),
+    // through the REST MR-creation surface. No git mocks.
+    use gyre_common::Id;
+    use std::sync::Arc;
+
+    /// Scaffolding: AppState + bare repo with `main`, plus helpers to add
+    /// commits/branches via git plumbing. The TempDir lives in the harness.
+    struct LineageRepo {
+        state: Arc<crate::AppState>,
+        _tmp: tempfile::TempDir,
+        repo_path: String,
+        repo_id: Id,
+    }
+
+    impl LineageRepo {
+        async fn new() -> Self {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let repo_path = tmp.path().join("lineage.git");
+            // git init --bare -b main (git >= 2.28); fall back for older git.
+            let init = std::process::Command::new("git")
+                .args(["init", "--bare", "-b", "main"])
+                .arg(&repo_path)
+                .output()
+                .unwrap();
+            if !init.status.success() {
+                let _ = std::process::Command::new("git")
+                    .args(["init", "--bare"])
+                    .arg(&repo_path)
+                    .output()
+                    .unwrap();
+                let out = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo_path)
+                    .args(["symbolic-ref", "HEAD", "refs/heads/main"])
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success(),
+                    "git symbolic-ref failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+
+            let state = test_state();
+            let repo_id = Id::new("repo-lineage");
+            let repo = gyre_domain::Repository::new(
+                repo_id.clone(),
+                Id::new("ws-test"),
+                "lineage-repo",
+                repo_path.to_str().unwrap(),
+                0,
+            );
+            state.repos.create(&repo).await.unwrap();
+            Self {
+                state,
+                _tmp: tmp,
+                repo_path: repo_path.to_str().unwrap().to_string(),
+                repo_id,
+            }
+        }
+
+        fn git(&self, args: &[&str]) -> String {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&self.repo_path)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+
+        /// Create a commit whose parent is `parent` (empty tree) and point
+        /// `branch` at it. Returns the new commit SHA.
+        fn commit_on(&self, branch: &str, parent: Option<&str>, msg: &str) -> String {
+            let tree = self.git(&["mktree"]);
+            let sha = match parent {
+                Some(p) => self.git(&["commit-tree", &tree, "-p", p, "-m", msg]),
+                None => self.git(&["commit-tree", &tree, "-m", msg]),
+            };
+            self.git(&["update-ref", &format!("refs/heads/{branch}"), &sha]);
+            sha
+        }
+
+        /// Move `branch` to an existing commit (rebase simulation).
+        fn rebase_branch_to(&self, branch: &str, sha: &str) {
+            self.git(&["update-ref", &format!("refs/heads/{branch}"), sha]);
+        }
+
+        fn rev_parse(&self, rev: &str) -> String {
+            self.git(&["rev-parse", rev])
+        }
+
+        async fn create_mr(&self, source: &str) -> serde_json::Value {
+            let app = crate::api::api_router()
+                .with_state(self.state.clone())
+                .clone();
+            let body = serde_json::json!({
+                "repository_id": self.repo_id.to_string(),
+                "title": format!("MR for {source}"),
+                "source_branch": source,
+                "target_branch": "main",
+            });
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/merge-requests")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+            body_json(resp).await
+        }
+
+        async fn deps_of(&self, mr_id: &str) -> Vec<serde_json::Value> {
+            let app = crate::api::api_router().with_state(self.state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/merge-requests/{mr_id}/dependencies"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let json = body_json(resp).await;
+            json["depends_on"].as_array().unwrap().clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn lineage_forked_from_mr_branch_creates_dependency() {
+        let repo = LineageRepo::new().await;
+
+        // main: A --- B (feat/a head)
+        let base = repo.commit_on("main", None, "base");
+        let a = repo.commit_on("feat/a", Some(&base), "feat A");
+
+        // MR A targets main.
+        let mr_a = repo.create_mr("feat/a").await;
+        let mr_a_id = mr_a["id"].as_str().unwrap().to_string();
+
+        // feat/b forked from feat/a's head (not from main).
+        let _b = repo.commit_on("feat/b", Some(&a), "feat B on top of A");
+
+        let mr_b = repo.create_mr("feat/b").await;
+        let mr_b_id = mr_b["id"].as_str().unwrap().to_string();
+
+        let deps = repo.deps_of(&mr_b_id).await;
+        assert_eq!(
+            deps.len(),
+            1,
+            "B forked from A's branch must auto-depend on A: {deps:?}"
+        );
+        assert_eq!(deps[0]["mr_id"], mr_a_id);
+        assert_eq!(deps[0]["source"], "branch-lineage");
+
+        // A itself must NOT depend on B (detection is one-directional).
+        let deps_a = repo.deps_of(&mr_a_id).await;
+        assert!(deps_a.is_empty(), "A must not depend on B: {deps_a:?}");
+    }
+
+    #[tokio::test]
+    async fn lineage_forked_from_main_no_dependency() {
+        let repo = LineageRepo::new().await;
+
+        let base = repo.commit_on("main", None, "base");
+        let _a = repo.commit_on("feat/a", Some(&base), "feat A");
+        let _c = repo.commit_on("feat/c", Some(&base), "feat C also from main");
+
+        repo.create_mr("feat/a").await;
+        let mr_c = repo.create_mr("feat/c").await;
+        let mr_c_id = mr_c["id"].as_str().unwrap().to_string();
+
+        let deps = repo.deps_of(&mr_c_id).await;
+        assert!(
+            deps.is_empty(),
+            "C forked from main must have no auto-dependency: {deps:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lineage_parent_merged_satisfies_dependency() {
+        let repo = LineageRepo::new().await;
+
+        let base = repo.commit_on("main", None, "base");
+        let a = repo.commit_on("feat/a", Some(&base), "feat A");
+        let mr_a = repo.create_mr("feat/a").await;
+        let mr_a_id = mr_a["id"].as_str().unwrap().to_string();
+        let _b = repo.commit_on("feat/b", Some(&a), "feat B");
+        let mr_b = repo.create_mr("feat/b").await;
+        let mr_b_id = mr_b["id"].as_str().unwrap().to_string();
+
+        // Sanity: B depends on A.
+        let deps = repo.deps_of(&mr_b_id).await;
+        assert_eq!(deps.len(), 1);
+
+        // Merge A (Open → Approved → Merged via REST transitions).
+        let app = crate::api::api_router().with_state(repo.state.clone());
+        for status in ["approved", "merged"] {
+            let body = serde_json::json!({ "status": status });
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/api/v1/merge-requests/{mr_a_id}/status"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "transition to {status}");
+        }
+
+        // The stored dependency now points at a Merged MR — the merge
+        // processor's dependencies_satisfied treats it as satisfied.
+        let mr = repo
+            .state
+            .merge_requests
+            .find_by_id(&Id::new(&mr_b_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(mr.depends_on.len(), 1);
+        let parent = repo
+            .state
+            .merge_requests
+            .find_by_id(&mr.depends_on[0].target_mr_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(parent.status, gyre_domain::MrStatus::Merged);
+    }
+
+    #[tokio::test]
+    async fn lineage_reevaluated_on_rebase_removes_stale_dep() {
+        let repo = LineageRepo::new().await;
+
+        let base = repo.commit_on("main", None, "base");
+        let a = repo.commit_on("feat/a", Some(&base), "feat A");
+        let _ = repo.create_mr("feat/a").await;
+        let _b = repo.commit_on("feat/b", Some(&a), "feat B forked from A");
+        let mr_b = repo.create_mr("feat/b").await;
+        let mr_b_id = mr_b["id"].as_str().unwrap().to_string();
+
+        // B depends on A.
+        let deps = repo.deps_of(&mr_b_id).await;
+        assert_eq!(deps.len(), 1, "pre-rebase: B must depend on A");
+
+        // Rebase feat/b onto main (no longer descends from feat/a).
+        let new_main = repo.commit_on("main", Some(&base), "main moves on");
+        let rebased = repo.commit_on("feat/b2", Some(&new_main), "B rebased");
+        // Point feat/b at the rebased commit (descends only from main).
+        repo.rebase_branch_to("feat/b", &rebased);
+        // Delete the temp branch used to author the rebased commit.
+        repo.git(&["update-ref", "-d", "refs/heads/feat/b2"]);
+
+        // Re-evaluate as the post-receive hook would.
+        super::reevaluate_lineage_deps(&repo.state, &Id::new(&mr_b_id)).await;
+
+        let deps = repo.deps_of(&mr_b_id).await;
+        assert!(
+            deps.is_empty(),
+            "post-rebase: stale lineage dependency must be removed: {deps:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lineage_reevaluation_adds_new_dep_after_fork() {
+        let repo = LineageRepo::new().await;
+
+        // B forked from main — no dependency at creation.
+        let base = repo.commit_on("main", None, "base");
+        let _b0 = repo.commit_on("feat/b", Some(&base), "B starts from main");
+        let mr_b = repo.create_mr("feat/b").await;
+        let mr_b_id = mr_b["id"].as_str().unwrap().to_string();
+        assert!(repo.deps_of(&mr_b_id).await.is_empty());
+
+        // Later, A's branch is created and pushed AFTER B's MR existed.
+        let a = repo.commit_on("feat/a", Some(&base), "feat A");
+        let _mr_a = repo.create_mr("feat/a").await;
+
+        // B is rebased (re-pushed) on top of A's branch.
+        let b_new = repo.commit_on("feat/b2", Some(&a), "B now on top of A");
+        repo.rebase_branch_to("feat/b", &b_new);
+        repo.git(&["update-ref", "-d", "refs/heads/feat/b2"]);
+
+        super::reevaluate_lineage_deps(&repo.state, &Id::new(&mr_b_id)).await;
+
+        let deps = repo.deps_of(&mr_b_id).await;
+        assert_eq!(
+            deps.len(),
+            1,
+            "post-fork re-push: lineage dep on A must be added: {deps:?}"
+        );
+        assert_eq!(deps[0]["source"], "branch-lineage");
+    }
+
+    #[tokio::test]
+    async fn lineage_reevaluation_preserves_explicit_deps() {
+        let repo = LineageRepo::new().await;
+
+        let base = repo.commit_on("main", None, "base");
+        let a = repo.commit_on("feat/a", Some(&base), "feat A");
+        let _ = repo.create_mr("feat/a").await;
+        let _b = repo.commit_on("feat/b", Some(&a), "B forked from A");
+        let mr_b = repo.create_mr("feat/b").await;
+        let mr_b_id = mr_b["id"].as_str().unwrap().to_string();
+
+        // Replace deps with an explicit declaration (drops the lineage edge).
+        let other = repo.commit_on("feat/other", Some(&base), "other");
+        let mr_other = repo.create_mr("feat/other").await;
+        let mr_other_id = mr_other["id"].as_str().unwrap().to_string();
+        drop(other);
+
+        let app = crate::api::api_router().with_state(repo.state.clone());
+        let body = serde_json::json!({
+            "depends_on": [mr_other_id],
+            "reason": "orchestrator override"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/merge-requests/{mr_b_id}/dependencies"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+                )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Re-evaluation must not clobber the explicit dep even though the
+        // lineage signal (B descends from A) still holds.
+        super::reevaluate_lineage_deps(&repo.state, &Id::new(&mr_b_id)).await;
+
+        let deps = repo.deps_of(&mr_b_id).await;
+        assert_eq!(deps.len(), 2, "explicit + re-detected lineage: {deps:?}");
+        let sources: Vec<&str> = deps
+            .iter()
+            .map(|d| d["source"].as_str().unwrap())
+            .collect();
+        assert!(sources.contains(&"explicit"));
+        assert!(sources.contains(&"branch-lineage"));
     }
 }

@@ -672,6 +672,32 @@ pub async fn git_receive_pack(
             &ref_updates,
         )
         .await;
+
+        // merge-dependencies.md §2: re-evaluate branch lineage dependencies
+        // when a push updates an MR's source branch (e.g. a rebase). The
+        // pushed branch may have been rebased onto the default branch (drop
+        // stale lineage deps) or forked onto another MR's branch (add new
+        // ones). Runs for every branch ref pushed, not just the default.
+        for update in ref_updates.iter() {
+            let Some(branch) = update.refname.strip_prefix("refs/heads/") else {
+                continue;
+            };
+            let pushed_branch = branch.to_string();
+            let mrs = state_clone
+                .merge_requests
+                .list_by_repo(&gyre_common::Id::new(&repo_id_clone))
+                .await
+                .unwrap_or_default();
+            for mr in mrs {
+                if mr.source_branch == pushed_branch && mr.status == gyre_domain::MrStatus::Open {
+                    crate::api::merge_requests::reevaluate_lineage_deps(
+                        &state_clone,
+                        &mr.id,
+                    )
+                    .await;
+                }
+            }
+        }
         // Spec registry: sync ledger from manifest on pushes to the default branch (M21.1).
         let default_ref = format!("refs/heads/{default_branch_clone}");
         // Resolve workspace tenant_id for cross-workspace link resolution.
