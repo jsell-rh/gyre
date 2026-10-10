@@ -331,6 +331,50 @@ pub async fn git_receive_pack(
         }
     }
 
+    // TASK-165: Supply-chain policy enforcement — minimum attestation level
+    // + gyre-stack.lock drift (supply-chain.md §Policy per Level). Runs for
+    // every push to a policy-bearing repo (unlike opt-in pre-accept gates).
+    // Must run synchronously before returning the response so refs can be
+    // undone on Block-mode rejection.
+    let mut push_attestation_level: Option<u8> = None;
+    if !ref_updates.is_empty() {
+        match enforce_stack_policy(
+            &state,
+            &repo_id,
+            &repo_path,
+            &repo_workspace_id,
+            &ref_updates,
+            &auth.agent_id,
+            auth.jwt_claims.as_ref(),
+        )
+        .await
+        {
+            Err(rejection) => {
+                undo_ref_updates(&repo_path, &ref_updates).await;
+                state
+                    .emit_event(
+                        Some(repo_workspace_id.clone()),
+                        gyre_common::message::Destination::Workspace(repo_workspace_id.clone()),
+                        gyre_common::message::MessageKind::PushRejected,
+                        Some(serde_json::json!({
+                            "repo_id": repo_id,
+                            "branch": ref_updates.first().map(|u| u.refname.clone()).unwrap_or_default(),
+                            "agent_id": auth.agent_id,
+                            "reason": rejection,
+                        })),
+                    )
+                    .await;
+                return (StatusCode::FORBIDDEN, rejection).into_response();
+            }
+            Ok(level) => {
+                // Store the resolved level on the agent record (best-effort;
+                // skips when the pusher is not an Agent entity).
+                store_attestation_level(&state, &auth.agent_id, level).await;
+                push_attestation_level = Some(level);
+            }
+        }
+    }
+
     // Phase 3 (TASK-008): Enforcement — reject pushes with invalid/missing
     // attestation chains or constraint violations. Must run synchronously before
     // returning the response so we can undo refs on failure.
@@ -469,31 +513,15 @@ pub async fn git_receive_pack(
     output_with_feedback.extend_from_slice(&feedback);
 
     // Post-receive: record agent-commit mappings + broadcast PushAccepted event.
-    // M14.2: Compute attestation level for commit provenance.
-    let attestation_level = {
-        let has_stack = state
-            .kv_store
-            .kv_get("agent_stacks", auth.agent_id.as_str())
-            .await
-            .ok()
-            .flatten()
-            .is_some();
-        if has_stack {
-            let has_policy = state
-                .kv_store
-                .kv_get("repo_stack_policies", repo_id.as_str())
-                .await
-                .ok()
-                .flatten()
-                .is_some();
-            if has_policy {
-                "server-verified"
-            } else {
-                "self-reported"
-            }
-        } else {
-            "unattested"
-        }
+    // M14.2 / TASK-165: map the push-resolved attestation level (supply-chain.md
+    // §Attestation Levels) to the commit-provenance label:
+    //   3 (Gyre-managed container, server-verified) → "server-verified"
+    //   2 (registered stack, self-reported)          → "self-reported"
+    //   1 (raw push, no attestation)                 → "unattested"
+    let attestation_level = match push_attestation_level {
+        Some(3) => "server-verified",
+        Some(2) => "self-reported",
+        _ => "unattested",
     };
 
     let state_clone = state.clone();
@@ -1214,6 +1242,210 @@ async fn check_pre_accept_gates(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// TASK-165: Supply chain — attestation level resolution + policy enforcement
+// (supply-chain.md §Attestation Levels, §Policy per Level, §gyre-stack.lock)
+// ---------------------------------------------------------------------------
+
+/// Resolve the pushing agent's attestation level (supply-chain.md
+/// §Attestation Levels) from server-side context:
+///
+/// - Level 3 (Gyre-managed runtime): the server recorded container identity
+///   for the agent's spawn (workload attestation KV carries container_id +
+///   image_hash), or the agent's JWT carries wl_container_id + wl_image_hash.
+/// - Level 2 (Gyre CLI, self-reported): the agent registered a stack
+///   (KV `agent_stacks` holds an `AgentStack`).
+/// - Level 1 (raw push): no stack attestation at all.
+///
+/// Note: `constraint_check::derive_attestation_level` is a DIFFERENT
+/// taxonomy (0..=3) feeding CEL merge constraints; this one implements the
+/// spec's three-level model for push-time policy enforcement.
+async fn resolve_push_attestation_level(
+    state: &Arc<AppState>,
+    agent_id: &str,
+    jwt_claims: Option<&serde_json::Value>,
+) -> u8 {
+    // Level 3: container identity — server-side workload attestation record
+    // (written at spawn, spawn.rs) or embedded wl_container_id/wl_image_hash
+    // JWT claims.
+    let wl = state
+        .kv_store
+        .kv_get("workload_attestations", agent_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| {
+            serde_json::from_str::<crate::workload_attestation::WorkloadAttestation>(&s).ok()
+        });
+    let has_container_kv = wl
+        .as_ref()
+        .is_some_and(|w| w.container_id.is_some() && w.image_hash.is_some());
+    let has_container_jwt = jwt_claims.is_some_and(|c| {
+        c.get("wl_container_id").and_then(|v| v.as_str()).is_some()
+            && c.get("wl_image_hash").and_then(|v| v.as_str()).is_some()
+    });
+    if has_container_kv || has_container_jwt {
+        return 3;
+    }
+
+    // Level 2: registered stack (self-reported fingerprint).
+    let has_stack = state
+        .kv_store
+        .kv_get("agent_stacks", agent_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    if has_stack {
+        return 2;
+    }
+
+    // Level 1: raw git push, no attestation.
+    1
+}
+
+/// Store the resolved attestation level on the agent record (TASK-165).
+/// Skips silently when no Agent entity exists — `agent_id` can be "system"
+/// or a username for global-token / user-JWT pushes, which have no record.
+async fn store_attestation_level(state: &Arc<AppState>, agent_id: &str, level: u8) {
+    if let Ok(Some(mut agent)) = state.agents.find_by_id(&Id::new(agent_id)).await {
+        if agent.attestation_level != Some(level) {
+            agent.attestation_level = Some(level);
+            if let Err(e) = state.agents.update(&agent).await {
+                warn!(agent_id, level, "failed to store attestation level: {e}");
+            }
+        }
+    }
+}
+
+/// Enforce the repo's stack policy (TASK-165): minimum attestation level and
+/// gyre-stack.lock drift. Runs for every push to a repo with a policy
+/// (unlike pre-accept gates, which only run when a repo registers them —
+/// the spec's "Policy per Level" is repo policy, not gate opt-in).
+///
+/// - Below `min_attestation_level`: Block mode → `Err(reason)` (caller
+///   undoes refs and rejects); Warn mode → `constraint_violation` event +
+///   log, push accepted.
+/// - gyre-stack.lock present in the pushed tree: integrity-check the
+///   embedded fingerprint, then compare against the pushing agent's
+///   attested stack (drift). Drift follows the same enforcement mode.
+///
+/// Returns the resolved attestation level so the caller can store it on the
+/// agent record.
+async fn enforce_stack_policy(
+    state: &Arc<AppState>,
+    repo_id: &str,
+    repo_path: &str,
+    repo_workspace_id: &Id,
+    ref_updates: &[RefUpdate],
+    agent_id: &str,
+    jwt_claims: Option<&serde_json::Value>,
+) -> Result<u8, String> {
+    let raw_policy = state
+        .kv_store
+        .kv_get("repo_stack_policies", repo_id)
+        .await
+        .ok()
+        .flatten();
+    let policy = raw_policy.map(|v| crate::api::stack_attest::parse_stack_policy(&v));
+
+    let level = resolve_push_attestation_level(state, agent_id, jwt_claims).await;
+
+    if let Some(policy) = &policy {
+        let mode_block = policy.enforcement == crate::api::stack_attest::StackEnforcement::Block;
+
+        // Minimum attestation level (supply-chain.md §Policy per Level).
+        if level < policy.min_attestation_level {
+            let reason = format!(
+                "push rejected: agent attestation level {level} is below repo minimum {} (fingerprint policy {})",
+                policy.min_attestation_level, policy.fingerprint
+            );
+            if mode_block {
+                return Err(reason);
+            }
+            warn!(repo_id, agent_id, level, %reason, "stack policy violation (warn mode)");
+            state
+                .emit_event(
+                    Some(repo_workspace_id.clone()),
+                    gyre_common::message::Destination::Workspace(repo_workspace_id.clone()),
+                    gyre_common::message::MessageKind::ConstraintViolation,
+                    Some(serde_json::json!({
+                        "repo_id": repo_id,
+                        "agent_id": agent_id,
+                        "attestation_level": level,
+                        "min_attestation_level": policy.min_attestation_level,
+                        "reason": reason,
+                    })),
+                )
+                .await;
+        }
+
+        // gyre-stack.lock drift detection (supply-chain.md §gyre-stack.lock,
+        // §The Laptop Problem): compare the lock in the pushed tree against
+        // the pushing agent's attested stack. Absent lockfile → opt-in
+        // feature not used, no drift check.
+        let attested_stack = state
+            .kv_store
+            .kv_get("agent_stacks", agent_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| {
+                serde_json::from_str::<crate::api::stack_attest::AgentStack>(&s).ok()
+            });
+        if let Some(attested) = &attested_stack {
+            let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+            for update in ref_updates {
+                if let Some(content) = crate::spec_registry::read_git_file(
+                    &git_bin,
+                    repo_path,
+                    &update.new_sha,
+                    "gyre-stack.lock",
+                )
+                .await
+                {
+                    let drift_result = match crate::api::stack_attest::StackLockfile::parse(
+                        &content,
+                    ) {
+                        Err(e) => Err(e),
+                        Ok(lock) => lock
+                            .verify_integrity()
+                            .and_then(|()| lock.check_drift(attested)),
+                    };
+                    if let Err(reason) = drift_result {
+                        if mode_block {
+                            return Err(format!("push rejected: {reason}"));
+                        }
+                        warn!(repo_id, agent_id, refname = %update.refname, %reason,
+                              "stack drift detected (warn mode)");
+                        state
+                            .emit_event(
+                                Some(repo_workspace_id.clone()),
+                                gyre_common::message::Destination::Workspace(
+                                    repo_workspace_id.clone(),
+                                ),
+                                gyre_common::message::MessageKind::ConstraintViolation,
+                                Some(serde_json::json!({
+                                    "repo_id": repo_id,
+                                    "agent_id": agent_id,
+                                    "branch": update
+                                        .refname
+                                        .trim_start_matches("refs/heads/"),
+                                    "reason": reason,
+                                })),
+                            )
+                            .await;
+                    }
+                    // One lockfile per tree — first ref update settles it.
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(level)
 }
 
 /// Undo ref updates in the repository (e.g., after a gate rejection).
@@ -4498,5 +4730,495 @@ mod tests {
         assert_eq!(explicit.len(), 1, "should have 1 explicit constraint");
         assert_eq!(gate.len(), 1, "should have 1 gate constraint");
         assert_eq!(gate[0].gate_name, "Code Review");
+    }
+}    // ── TASK-165: stack policy enforcement tests ─────────────────────────
+
+    use gyre_domain::Agent;
+    use gyre_domain::stack::{AgentStack, HookEntry, McpServerEntry, StackLockfile};
+
+    fn test_stack(model: &str) -> AgentStack {
+        AgentStack {
+            agents_md_hash: "agents-md-hash".to_string(),
+            hooks: vec![HookEntry {
+                id: "block-secrets".to_string(),
+                hash: "hook-hash".to_string(),
+                enabled: true,
+            }],
+            mcp_servers: vec![McpServerEntry {
+                name: "odis".to_string(),
+                version: "1.0".to_string(),
+                config_hash: "cfg".to_string(),
+            }],
+            model: model.to_string(),
+            cli_version: "0.1.0".to_string(),
+            settings_hash: "settings-hash".to_string(),
+            persona_hash: None,
+        }
+    }
+
+    /// Push a real commit into the bare repo via plumbing, returning the new SHA.
+    async fn make_commit(repo_path: &str, files: &[(&str, String)]) -> String {
+        // Build a tree from {path: content}.
+        let mut tree = std::process::Command::new("git")
+            .args(["-C", repo_path, "mktree"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut input = String::new();
+        for (path, content) in files {
+            let blob_sha = std::process::Command::new("git")
+                .args(["-C", repo_path, "hash-object", "-w", "--stdin"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            use std::io::Write as _;
+            blob_sha
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(content.as_bytes())
+                .unwrap();
+            let out = blob_sha.wait_with_output().unwrap();
+            let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            input.push_str(&format!("100644 blob {sha}\t{path}\n"));
+        }
+        use std::io::Write as _;
+        tree.stdin
+            .as_mut()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let out = tree.wait_with_output().unwrap();
+        let tree_sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+        // Commit the tree.
+        let out = std::process::Command::new("git")
+            .args([
+                "-C",
+                repo_path,
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit-tree",
+                &tree_sha,
+                "-m",
+                "test commit",
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "commit-tree failed");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn receive_pack_body(new_sha: &str, refname: &str) -> Vec<u8> {
+        let zeros = "0000000000000000000000000000000000000000";
+        let line = format!("{zeros} {new_sha} {refname}\n");
+        let mut body = pkt_line(&line);
+        body.extend_from_slice(b"0000");
+        body
+    }
+
+    async fn seed_agent_and_stack(state: &Arc<crate::AppState>, agent_id: &str, stack: &AgentStack) {
+        let agent = Agent::new(Id::new(agent_id), "push-agent", 0);
+        state.agents.create(&agent).await.unwrap();
+        state
+            .kv_store
+            .kv_set(
+                "agent_stacks",
+                agent_id,
+                serde_json::to_string(stack).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_below_min_attestation_level_blocked() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        // Level-1 pusher: no stack, no workload attestation.
+        let agent = Agent::new(Id::new("agent-l1"), "l1-agent", 0);
+        state.agents.create(&agent).await.unwrap();
+
+        // Policy: min level 2, block.
+        let policy = serde_json::json!({
+            "fingerprint": "fp-min2",
+            "required_level": 2,
+            "min_attestation_level": 2,
+            "enforcement": "block"
+        });
+        state
+            .kv_store
+            .kv_set(
+                "repo_stack_policies",
+                "repo-1",
+                serde_json::to_string(&policy).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let sha = make_commit(&repo_path, &[("README.md", "hello\n".to_string())]).await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", auth_header())
+                    .header("content-type", "application/x-git-receive-pack")
+                    .body(Body::from(receive_pack_body(&sha, "refs/heads/feat")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("attestation level 1 is below repo minimum 2"),
+            "unexpected body: {text}"
+        );
+
+        // Ref must have been undone (deleted — it was a new branch).
+        let out = std::process::Command::new("git")
+            .args(["-C", &repo_path, "rev-parse", "--verify", "refs/heads/feat"])
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "ref must be deleted after rejection");
+
+        // Agent record keeps level 1 (resolved and stored before rejection? no —
+        // stored only on accept; level 1 pusher was rejected, so no record
+        // write happens through the accept path).
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_below_min_level_warn_mode_flagged_and_accepted() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        let agent = Agent::new(Id::new("agent-l1-warn"), "l1-agent", 0);
+        state.agents.create(&agent).await.unwrap();
+
+        let policy = serde_json::json!({
+            "fingerprint": "fp-min2-warn",
+            "required_level": 2,
+            "min_attestation_level": 2,
+            "enforcement": "warn"
+        });
+        state
+            .kv_store
+            .kv_set(
+                "repo_stack_policies",
+                "repo-1",
+                serde_json::to_string(&policy).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let sha = make_commit(&repo_path, &[("README.md", "warn\n".to_string())]).await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", auth_header())
+                    .header("content-type", "application/x-git-receive-pack")
+                    .body(Body::from(receive_pack_body(&sha, "refs/heads/warn-branch")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // ConstraintViolation event was emitted to the workspace.
+        let msgs = state
+            .messages
+            .list_by_workspace(
+                &Id::new("ws-test"),
+                Some("constraint_violation"),
+                None,
+                None,
+                None,
+                Some(50),
+            )
+            .await
+            .unwrap();
+        assert!(
+            msgs.iter().any(|m| m
+                .payload
+                .as_ref()
+                .and_then(|p| p.get("reason"))
+                .and_then(|r| r.as_str())
+                .is_some_and(|r| r.contains("below repo minimum"))),
+            "expected a below-minimum constraint_violation event, got {} messages",
+            msgs.len()
+        );
+
+        // Agent record stores the resolved level 1.
+        let stored = state.agents.find_by_id(&Id::new("agent-l1-warn")).await.unwrap();
+        assert_eq!(stored.and_then(|a| a.attestation_level), Some(1));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_meeting_min_level_accepted_and_level_stored() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        // Level-2 pusher: registered stack.
+        seed_agent_and_stack(&state, "agent-l2", &test_stack("claude-sonnet-4-6")).await;
+
+        let policy = serde_json::json!({
+            "fingerprint": "fp-min2-ok",
+            "required_level": 2,
+            "min_attestation_level": 2,
+            "enforcement": "block"
+        });
+        state
+            .kv_store
+            .kv_set(
+                "repo_stack_policies",
+                "repo-1",
+                serde_json::to_string(&policy).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let sha = make_commit(&repo_path, &[("README.md", "ok\n".to_string())]).await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", auth_header())
+                    .header("content-type", "application/x-git-receive-pack")
+                    .body(Body::from(receive_pack_body(&sha, "refs/heads/l2-branch")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let stored = state.agents.find_by_id(&Id::new("agent-l2")).await.unwrap();
+        assert_eq!(stored.and_then(|a| a.attestation_level), Some(2));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn level3_detected_from_workload_attestation() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        // Level-3 pusher: registered stack + workload attestation with
+        // container identity (as spawn.rs writes for container targets).
+        seed_agent_and_stack(&state, "agent-l3", &test_stack("claude-opus-4-6")).await;
+        let wl = crate::workload_attestation::attest_agent_with_container(
+            "agent-l3",
+            Some(4242),
+            "local",
+            "",
+            Some("container-abc".to_string()),
+            Some("sha256:deadbeef".to_string()),
+        );
+        state
+            .kv_store
+            .kv_set(
+                "workload_attestations",
+                "agent-l3",
+                serde_json::to_string(&wl).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Policy requiring the highest level.
+        let policy = serde_json::json!({
+            "fingerprint": "fp-min3",
+            "required_level": 3,
+            "min_attestation_level": 3,
+            "enforcement": "block"
+        });
+        state
+            .kv_store
+            .kv_set(
+                "repo_stack_policies",
+                "repo-1",
+                serde_json::to_string(&policy).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let sha = make_commit(&repo_path, &[("README.md", "l3\n".to_string())]).await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", auth_header())
+                    .header("content-type", "application/x-git-receive-pack")
+                    .body(Body::from(receive_pack_body(&sha, "refs/heads/l3-branch")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let stored = state.agents.find_by_id(&Id::new("agent-l3")).await.unwrap();
+        assert_eq!(stored.and_then(|a| a.attestation_level), Some(3));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lockfile_drift_blocked_in_block_mode() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        // Repo pins a stack; pushing agent attests a DIFFERENT stack.
+        let pinned = test_stack("claude-sonnet-4-6");
+        let lock = StackLockfile::from_stack(&pinned, 1_700_000_000);
+        seed_agent_and_stack(&state, "agent-drift", &test_stack("claude-opus-4-6")).await;
+
+        // Any policy entry enables the drift check; fingerprint itself is
+        // enforced separately by the stack-attestation gate.
+        let policy = serde_json::json!({
+            "fingerprint": "fp-drift",
+            "required_level": 2,
+            "min_attestation_level": 2,
+            "enforcement": "block"
+        });
+        state
+            .kv_store
+            .kv_set(
+                "repo_stack_policies",
+                "repo-1",
+                serde_json::to_string(&policy).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Commit contains gyre-stack.lock pinning the OLD stack.
+        let sha = make_commit(
+            &repo_path,
+            &[("gyre-stack.lock", lock.to_toml().unwrap())],
+        )
+        .await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", auth_header())
+                    .header("content-type", "application/x-git-receive-pack")
+                    .body(Body::from(receive_pack_body(&sha, "refs/heads/drift")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("stack drift"),
+            "unexpected body: {text}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lockfile_match_accepted() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        // Lock pins exactly the pushing agent's stack.
+        let stack = test_stack("claude-sonnet-4-6");
+        let lock = StackLockfile::from_stack(&stack, 1_700_000_000);
+        seed_agent_and_stack(&state, "agent-match", &stack).await;
+
+        let policy = serde_json::json!({
+            "fingerprint": "fp-match",
+            "required_level": 2,
+            "min_attestation_level": 2,
+            "enforcement": "block"
+        });
+        state
+            .kv_store
+            .kv_set(
+                "repo_stack_policies",
+                "repo-1",
+                serde_json::to_string(&policy).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let sha = make_commit(
+            &repo_path,
+            &[("gyre-stack.lock", lock.to_toml().unwrap())],
+        )
+        .await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", auth_header())
+                    .header("content-type", "application/x-git-receive-pack")
+                    .body(Body::from(receive_pack_body(&sha, "refs/heads/match")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tampered_lockfile_rejected_by_integrity_check() {
+        let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
+
+        let stack = test_stack("claude-sonnet-4-6");
+        seed_agent_and_stack(&state, "agent-tamper", &stack).await;
+
+        let policy = serde_json::json!({
+            "fingerprint": "fp-tamper",
+            "required_level": 2,
+            "min_attestation_level": 2,
+            "enforcement": "block"
+        });
+        state
+            .kv_store
+            .kv_set(
+                "repo_stack_policies",
+                "repo-1",
+                serde_json::to_string(&policy).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Lock with an edited component but the ORIGINAL fingerprint.
+        let mut lock = StackLockfile::from_stack(&stack, 0);
+        lock.model = "claude-opus-4-6".to_string();
+        let sha = make_commit(
+            &repo_path,
+            &[("gyre-stack.lock", lock.to_toml().unwrap())],
+        )
+        .await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
+                    .header("Authorization", auth_header())
+                    .header("content-type", "application/x-git-receive-pack")
+                    .body(Body::from(receive_pack_body(&sha, "refs/heads/tamper")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("integrity failure"),
+            "unexpected body: {text}"
+        );
     }
 }

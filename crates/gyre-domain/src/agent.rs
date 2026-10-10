@@ -129,6 +129,13 @@ pub struct Agent {
     /// Defaults to true for orchestrators (exactly-one-live semantics).
     #[serde(default)]
     pub restart_on_failure: bool,
+    /// Attestation level (supply-chain.md §Attestation Levels) resolved from
+    /// the agent's execution context at push time:
+    /// 3 = Gyre-managed container (server-verified), 2 = registered stack
+    /// (self-reported fingerprint), 1 = no stack attestation (raw push).
+    /// `None` until the first push resolves it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation_level: Option<u8>,
 }
 
 impl Agent {
@@ -150,6 +157,7 @@ impl Agent {
             orchestrator_type: OrchestratorType::default(),
             repo_id: None,
             restart_on_failure: false,
+            attestation_level: None,
         }
     }
 

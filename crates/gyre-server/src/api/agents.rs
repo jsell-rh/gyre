@@ -57,6 +57,11 @@ pub struct AgentResponse {
     /// MR ID created by this agent (enriched at query time).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mr_id: Option<String>,
+    /// Attestation level resolved at push time (supply-chain.md §Attestation
+    /// Levels): 3 = Gyre-managed container, 2 = registered stack, 1 = raw
+    /// push. `None` until the agent's first push.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attestation_level: Option<u8>,
 }
 
 /// Returned only from POST /api/v1/agents — includes a one-time auth token.
@@ -80,9 +85,8 @@ impl From<Agent> for AgentResponse {
             workspace_id: a.workspace_id.to_string(),
             repo_id: None,
             branch: None,
-            task_id: None,
-            completed_at: None,
             spec_path: None,
+            attestation_level: a.attestation_level,
             mr_id: None,
         }
     }

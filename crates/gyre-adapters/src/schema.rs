@@ -39,6 +39,7 @@ diesel::table! {
         orchestrator_type -> Text,
         repo_id -> Nullable<Text>,
         restart_on_failure -> Bool,
+        attestation_level -> Nullable<Integer>,
     }
 }
 

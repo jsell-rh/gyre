@@ -28,6 +28,13 @@ pub struct RegisterAgentResponse {
     pub status: String,
     pub auth_token: String,
 }
+#[derive(Deserialize, Debug, Clone)]
+pub struct AgentStackResponse {
+    pub agent_id: String,
+    pub stack: gyre_domain::stack::AgentStack,
+    pub fingerprint: String,
+}
+
 
 #[derive(Deserialize, Debug, Clone)]
 #[allow(dead_code)]
@@ -195,6 +202,23 @@ impl GyreClient {
             anyhow::bail!("get agent failed (HTTP {status}): {text}");
         }
         serde_json::from_str(&text).context("parsing agent response")
+    }
+
+    /// Fetch an agent's registered stack (stack attestation).
+    pub async fn get_agent_stack(&self, agent_id: &str) -> Result<AgentStackResponse> {
+        let resp = self
+            .client
+            .get(format!("{}/api/v1/agents/{agent_id}/stack", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("get agent stack failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing agent stack response")
     }
 
     /// List tasks with optional filters.
