@@ -1424,8 +1424,8 @@ mod tests {
     #[test]
     fn validate_policies_rejects_missing_and_unknown_types() {
         // (a) partial list — omission silently disables enforcement.
-        let mut partial = default_policies();
-        partial.truncate(1);
+        let partial: Vec<RetentionPolicy> =
+            default_policies().into_iter().take(1).collect();
         let err = validate_policies(&partial).unwrap_err();
         assert!(err.contains("missing required data_type"), "{err}");
 
