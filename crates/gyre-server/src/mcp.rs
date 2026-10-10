@@ -763,10 +763,10 @@ fn validate_tool_scope(
                 .unwrap_or("");
             if !repo.is_empty() {
                 return check_repo_scope(auth, Some(repo), false, tool_name)
-                    .or_else(|_| check_workspace_scope(auth, Some(ws), tool_name));
+                    .or_else(|_| check_workspace_scope(auth, Some(ws), false, tool_name));
             }
             if !ws.is_empty() {
-                return check_workspace_scope(auth, Some(ws), tool_name);
+                return check_workspace_scope(auth, Some(ws), false, tool_name);
             }
             Ok(())
         }
