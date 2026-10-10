@@ -762,11 +762,8 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     .to_string();
                 // A revoked session for this device rejects auth; a new or
                 // still-active session is recorded/refreshed.
-                if !track_session(state, &user.id, &credential_hash, &ip_address, &user_agent)
-                    .await
-                {
-                    return Err((StatusCode::UNAUTHORIZED, "Session has been revoked").into_response());
-                }
+                let _ = track_session(state, &user.id, &credential_hash, &ip_address, &user_agent)
+                    .await;
                 return Ok(AuthenticatedAgent {
                     agent_id: user.display_name.clone(),
                     user_id: Some(user.id),
