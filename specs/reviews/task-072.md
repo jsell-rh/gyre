@@ -95,3 +95,34 @@ needs-revision — F6/F7 are wrong-or-missing `Calls` edges in realistic Go layo
 ### Verdict
 
 complete — all R1/R2 findings are fixed by real product code verified at this HEAD; the one R3 finding (F9, attribution gate) is fixed in this round and the gate is green. The task's own scope (Go Pass 2 pipeline) is done: port + adapter + pipeline + resolution policy + lifecycle, each with tests that fail on the bugs they guard against.
+
+---
+
+## Round: R4 (independent review, repair round)
+
+**Reviewer:** Independent review
+**Date:** 2026-10-10
+**Candidate:** 7d23405062d861df354137a0f2a6d81341b5b42d (base 8c2d1775)
+**Spec ref:** lsp-call-graph.md §1–6, §10 Phase 1, §11
+
+### Scope
+
+Diff base→candidate: 15 files. Product surface: `gyre-ports/src/graph.rs` (upsert contract doc), `gyre-adapters` (call_graph adapter happy-path test + ENV_LOCK; mem_graph upsert-on-id parity with SQLite), `gyre-domain` (call_graph_resolve policy/tests, go_extractor import-path qnames), `gyre-server` (graph_extraction Pass 2 pipeline + lifecycle), `Dockerfile` (§11 Go toolchain), `docs/server-config.md`. Process surface: task-072 contract restore + commits re-attribution, task-210 commits repair, attribution gate count 3→2.
+
+### Verification (independent, this sandbox)
+
+- Focused suites, all green: `gyre-domain call_graph_resolve` 16/16; `gyre-domain go_extractor` 13/13; `gyre-adapters call_graph` 3/3 (incl. new `env_override_binary_output_is_parsed_into_edges` happy path); `gyre-server --lib graph_extraction` 22/22; full `gyre-adapters --lib` 346/346 (mem_graph upsert change regresses nothing).
+- Gates green: check-arch, check-task-commit-attribution, check-migration-versions, check-dead-message-kinds, check-abac-route-registry, check-unbounded-external-http, check-in-memory-state-stores, check-mem-port-contracts, check-byte-slice-truncation, check-inert-enforcement, check-relative-path-defaults.
+- rustfmt: all 6 branch-touched `.rs` files clean; repo-wide drift confined to pre-existing base files this diff never touches.
+- Contract parity: task-072 prose below frontmatter byte-identical to assigned base; only `progress:` and `commits:` differ, plus the appended `## Shipped` report. All 9 frontmatter SHAs resolve to real commits. Attribution gate is green at the candidate and RED at the assigned base (main-side `a781ede2 task-210` drift); the candidate repairs it via task-210 frontmatter — the gate's own documented remediation, not an exemption.
+- §11 (Go): Dockerfile runtime stage ships the Go toolchain (`COPY --from=golang:1.24-bookworm-slim /usr/local/go`, glibc-matched to the `debian:bookworm-slim` runtime) plus the committed CHA binary at `/usr/local/bin/gyre-go-callgraph` and `ENV GO_CALLGRAPH_BIN`; `docs/server-config.md` documents search order and graceful degradation. Rust/Python/TS toolchains are tasks 073–075 scope per §10 phasing.
+- Binary integrity: `scripts/go-callgraph/go-callgraph` unchanged vs base (ELF64 static x86-64); name-format alignment statically re-verified on both sides (extractor `pkg_qname` = module + directory; binary `qualifiedName` = `pkg.Pkg.Path()` + decl — same import-path rule).
+
+### Notes
+
+- Sandbox limits (not code defects): no Go toolchain (binary runs but `packages.Load` shells out to `go list`; R3's manual two-package-fixture run remains the end-to-end binary evidence — binary unchanged since), no Docker daemon (Dockerfile verified statically; CI does not build it), no loopback TCP (HTTP-bound `graph_integration`/`auth_integration` unreachable — verifier must run these), and the four JS test-quality gates (`check-dead-test-code` etc.) exit 2 under this sandbox's mawk (gawk-only `match()` array capture); the gate scripts are unchanged from base and pass under gawk in CI.
+- `scripts/check-task-commit-attribution.sh` FROZEN_EXEMPTION_COUNT 3→2 follows the exemption-shrink rule: `17c81d5a task-072` moved from the exemption file into task-072's frontmatter (strictly stronger enforcement, not a weakening).
+
+### Verdict
+
+approved — the repair round's claims check out independently: contract restored verbatim, commits re-attributed to real SHAs, §11 Go prerequisite closed in the container runtime, adapter happy-path test added, and the attribution gate repaired the right way. All R1–R3 product fixes remain in place and verified at this HEAD.
