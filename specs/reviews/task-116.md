@@ -197,3 +197,106 @@ Repair (this round):
 - Stale pin detection (hourly job, priority-6 drift notifications with dedup)
   and merge attestation recording `meta_specs_used` from the spawn-time
   prompt-set record; 9 default meta-specs seeded at first startup.
+
+## Round 6
+
+Round: 6 (independent full re-review of candidate `63d66b469f22a153f56253bbc152f4bc2904f170`
+against base `8c2d177505852b3e39cd77f4f782fb355de245aa`; product delta = the task's
+single `commits:` entry `5d428e7c`).
+
+### Verdict (round 6): NOT approved
+
+Two confirmed spec violations (both demonstrated by focused probes, both on the exact
+production path), plus one inherited adapter-contract divergence. Prior rounds' findings
+remain valid and were re-verified; the two new holes are on surfaces earlier rounds did
+not probe.
+
+#### Defect A (blocking) — unapproved meta-specs are injected into agents
+
+`agent-runtime.md` §2: "editing a meta-spec's content resets `approval_status` to
+`Pending`, and **the new version cannot be used by agents until re-approved by a
+human**."
+
+`assemble_prompt_set` (`crates/gyre-server/src/prompt_assembly.rs:107-223`) has no
+`approval_status` filter on any band: required tenant, required workspace, or
+spec-level binding resolution. The lifecycle half is real — `put_meta_spec`
+(`api/meta_specs.rs:1155-1161`) does reset approval to `Pending` on prompt edit —
+so the enforcement half is the missing one. Chain: admin PUTs a prompt edit →
+status resets to Pending → the next agent spawned in that scope injects the edited,
+unreviewed prompt (and attests it in `meta_specs_used`).
+
+Probe (temp test, removed after run): create a Global meta-spec with
+`approval_status: Pending`, `required: true`; call `assemble_prompt_set(&state, &task)`;
+it returns 1 injected section containing the unapproved prompt. Output:
+`PROBE-A: Pending required meta-spec produced 1 injected section(s)` — assertion
+`sections.is_empty()` failed. Evidence:
+`/tmp/stage/review-evidence/probe-approval-gating.log`.
+
+Required repair: filter required-band collection AND binding resolution to
+`approval_status == Approved`, skipping with a warn (consistent with the existing
+unresolvable-pin handling) so unapproved content never reaches `PromptSection` or
+`MetaSpecUsed`.
+
+#### Defect B (blocking) — bindings route has no workspace-scope authorization
+
+`put_spec_meta_spec_bindings` (`api/meta_specs.rs:1297-1316`) checks only that the
+caller's JWT roles contain Admin or Developer. It never resolves the workspace that
+owns the target spec, so a Developer with zero workspace memberships can bind
+meta-specs to a spec owned by another workspace. Assembly band 3 then injects the
+bound prompt (at its pinned version) into every agent spawned for tasks under that
+spec — the identical cross-workspace prompt-injection threat rounds 4–5 closed for
+registry CRUD via `check_scope_admin`. The route is also exempt from middleware scope
+resolution, so nothing downstream re-checks.
+
+Probe (temp test, removed after run): Developer JWT (`sub: "dev-sub"`,
+`realm_access.roles: ["developer"]`, no memberships), spec ledger entry
+`system/victim.md` with `workspace_id: Some("ws-b")`, Global meta-spec `ms-x`;
+`PUT /api/v1/specs/system%2Fvictim.md/meta-spec-bindings` with
+`{"bindings":[{"meta_spec_id":"ms-x","pinned_version":1}]}` → **200 OK** where 403 is
+required. Evidence: `/tmp/stage/review-evidence/probe-binding-scope.log`
+(`PROBE-B: developer binding PUT status = 200 OK`).
+
+Required repair: resolve the spec's workspace via `state.spec_ledger.find_by_path`
+(entry carries `workspace_id: Option<String>`), require caller membership in that
+workspace (Developer+ / Admin, mirroring `check_scope_admin` membership semantics),
+and validate each bound meta-spec is visible in the spec's scope (Global or same
+workspace).
+
+#### Defect C (reportable, inherited) — mem adapter ignores delete binding guard
+
+Port contract (`gyre-ports/src/meta_spec_repository.rs:41-42`): "Delete a meta-spec
+by ID. Returns an error if bindings reference it." `MemMetaSpecRepository::delete`
+(`mem.rs:3894-3897`) retains unconditionally and returns `Ok(())`; SQLite enforces
+the guard (`sqlite/meta_spec.rs:343-353`). Identical code exists at base
+`8c2d1775`, so this predates the task — but the task modified this same trait impl
+(added `list_all`) without closing the divergence, and `check-mem-port-contracts.sh`
+audits create-side guards only, so CI cannot catch it. Repair: mirror the sqlite
+binding-count guard in mem before retaining.
+
+### Confirmed-correct this round (re-verified)
+
+- Product diff vs base is exactly `5d428e7c`'s content; process-only commits
+  (`8c8d24d3`, `68cab408`, `63d66b46`) touch no product surface.
+- Focused suites pass at candidate: `prompt_assembly` 8/8, `api::meta_specs` 18/18,
+  adapters `meta_spec` 9/9, `api::spawn` 29/29, agent-runner node tests 12/12. All 11
+  applicable mechanical invariant scripts pass (logs under
+  `/tmp/stage/review-evidence/`).
+- Assembly order/dedup/pinned-version resolution, stale-pin job, bootstrap seeding
+  (9 entries, idempotent, real SHA-256), merge attestation population, env delivery
+  on local/container/ssh backends — all still as validated in rounds 1–5.
+
+### Test-quality note
+
+The existing suites are genuinely strong where they exist (mutation-verified in
+rounds 3 and 5), but the two confirmed holes are exactly where tests are absent:
+no test covers approval gating of injection, and no test covers bindings-route
+scope. The probes that failed this round are the missing tests.
+
+### Verification run this round
+
+- `cargo test -p gyre-server --lib probe_pending_required_meta_spec_is_injected` →
+  FAILED at the gap assertion (defect A evidence).
+- `cargo test -p gyre-server --lib probe_binding_route_scope` → FAILED at the gap
+  assertion (defect B evidence).
+- Both temp probes removed; working tree pristine at `63d66b46`
+  (`git status --porcelain` empty after restore).
