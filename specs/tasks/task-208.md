@@ -271,3 +271,11 @@ Repair round (2026-10-10, review finding df83cb2e — 13th checkpoint-attributio
 - **Sandbox transport restriction (recorded, unchanged):** TCP `accept` blocked (EOPNOTSUPP errno 95; `/tmp/stage/capabilities.json`) — live HTTP probes impossible here. Host verification / GitHub CI must run the live checks.
 - Residual for the process owner (unchanged, now 15 occurrences): the checkpoint attribution pass may re-drop the `web/dist/`/`.gitattributes` commits at the next checkpoint; the in-repo gate shares the blind spot. Recorded here and in every prior round.
 - Evidence: `/tmp/stage/review-evidence/task-208-attribution-repair-round12.txt` (reproduction, pre/post frontmatter, base-inheritance proof, zero-drift diffs, greps with exit codes, gate outputs, coverage-matrix rows).
+
+## Shipped
+
+*(Repair Round 12, 2026-10-10 — review finding b71d9c5d (clobber 15). Product state unchanged from review round 2; see the Shipped section under Repair Round 6 for the landed behavior record. This round's delivery is the repair itself:)*
+
+- Restored the full three-SHA `commits:` attribution at the tip (commit `5046b488`) after the checkpoint pass's 15th clobber (candidate `3854045c` dropped `ad1121c5` and `ea006d52`; merge `0f198fa5` carried it forward). All three commits verified ancestors of the tip.
+- Repaired the base-inherited attribution gap the gate then exposed: the assigned base `27bd585c` is a task-155 product-surface commit unrecorded in task-155's frontmatter (verified base-inherited by reproducing the failure at the pure base; same class as round 8's task-200 repair). Commit `fa4c4a08`; attribution gate FAIL → **OK (exit 0)** at the final tip.
+- Product untouched: zero drift since `ad1121c5` on every task-208 surface; dead-code and dist forbidden-identifier greps clean; routes/ABAC registrations absent; kept-surface bundle sanity passes; ABAC route-registry + exempt-handlers + whitespace gates exit 0; spec amendment and both coverage matrices intact. Focused runtime probes stand on the round-12 reviewer's fresh runs at this exact source tree (zero source drift since). Evidence: `/tmp/stage/review-evidence/task-208-attribution-repair-round12.txt`.
