@@ -151,3 +151,38 @@ from the upstream base: task-210's main-merge commit `a781ede2`
 `specs/tasks/task-210.md`'s `commits:` frontmatter; recorded via a
 specs-only `process(task-107)` commit per the check's prescribed fix
 (`scripts/check-task-commit-attribution.sh` now passes).
+
+Wire-format repair round (checkpoint `607cb30f` merged onto base
+`a11ba8d3`, head `30de515b`): the review-5 finding that both production
+decoders treated Fulcio's `chain.certificates` and the v2 trust bundle
+as base64(DER) while upstream serves PEM STRINGS is fixed.
+`chain_element_der` (sigstore.rs) now tries PEM text, raw DER, then
+base64(DER) — mutually unambiguous encodings — in the sign path, the
+trust-bundle root match, and the mock stack; the in-module mock was
+converted to the upstream PEM contract, and an INDEPENDENT
+upstream-conformance probe
+(`crates/gyre-server/tests/task107_upstream_conformance.rs`) builds its
+own Fulcio from the upstream proto documentation (PEM chains, PEM
+bundle, real PoP verification, real PEM-only publicKey rejection) and
+drives the real production `sign_commit_keyless` and
+`verify_signature_fulcio`, so a regression to base64-only decoding
+fails even when the in-module unit suite stays green.
+
+Verification evidence this round (head `30de515b`, outputs under
+`/tmp/stage/review-evidence/`): upstream-conformance probe 3/3 passed
+(`probe-upstream-conformance.txt`; before the fix the sign leg failed
+with "fulcio chain element is not base64 DER: Invalid symbol 45"),
+gyre-server focused suites 40 passed / 0 failed — sigstore 15,
+api::jj 14, api::provenance 6, commit_signatures 5
+(`gyre-server-focused-suites.txt`), adapters commit_signature 5/5
+(`adapters-commit-signature.txt`), and mechanical gates arch, ABAC
+route registry, in-memory state stores, unbounded external HTTP,
+migration versions, migration SQL portability, mem port contracts all
+pass; task-commit-attribution was repaired to pass by recording base
+merge commit `a11ba8d3` in `specs/tasks/task-068.md`'s `commits:`
+frontmatter (a pre-existing gap inherited from the upstream base, same
+class as the prior round's task-210 repair; specs-only
+`process(task-107)` commit). Live Fulcio interop remains blocked by
+sandbox network policy (fulcio.sigstore.dev:443 connect refused,
+`live-fulcio-check.txt` records the restriction and the exact host
+verification steps); exact-head GitHub CI is mandatory after review.
