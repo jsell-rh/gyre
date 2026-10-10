@@ -109,6 +109,34 @@ base) but was absent from `specs/tasks/task-210.md` frontmatter, failing
 `commits:` list; no exemption added, frozen exemption file untouched. Gate
 passes.
 
+**Contract-repair round (2026-10-10, HEAD fa6e6952; evidence:
+`/tmp/stage/review-evidence/task-160-contract-repair/`):** the prior
+checkpoint-recovery attempt appended a suffixed `## Shipped (2026-10-10
+refresh …)` header, which the pipeline contract guard
+(`scripts/dev-contract.py requirement_parts`) does not strip as operational
+prose — it read the refresh log as a normative contract amendment and
+rejected the attempt ("changed the assigned requirements"). Repair: contract
+restored byte-exact to the assigned body (frontmatter + prose equal,
+verified against the assigned `job` body with `requirement_parts`) in
+fa6e6952; the task surface (scripts/adapters/wiring) is unchanged from the
+round-4-reviewed candidate — empty diff on those paths. No source change was
+needed; this round is fresh verification only:
+
+- Clean gates at fa6e6952: `check-hierarchy.sh` exit 0;
+  `check-tenant-filter.sh` exit 0 (111 read methods on tenant-column
+  tables / 0 violations); `check-api-auth.sh` exit 0 (3 checks incl.
+  delegated frozen-baseline registry cross-reference);
+  `check-scope-literal-defaults.sh crates` OK; `check-arch.sh` OK;
+  `check-task-commit-attribution.sh` OK.
+- Fresh mutation kills (isolated worktree `/tmp/stage/task160-repair`,
+  restored after each): `Task.workspace_id → Option<Id>` → hierarchy
+  exit 1 naming `task.rs:60` (mut1); tenant predicate stripped from
+  `sqlite/secret.rs::resolve_for_agent` → tenant-filter exit 1 naming
+  `secret.rs:293` (mut2); `RouteResourceMapping` for `/api/v1/activity`
+  deleted → api-auth exit 1 via the delegated registry check (mut3).
+- `cargo test -p gyre-adapters --test tenant_isolation` at fa6e6952:
+  see `tenant-isolation.txt` in the evidence dir for the run record.
+
 Review history: rounds 1–4 in `specs/reviews/task-160.md` (round-3 findings
 F1 dead exemptions / F2 read-name blind spot fixed in 06df8bfb and verified
 complete in round 4).
