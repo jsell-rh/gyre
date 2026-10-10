@@ -183,9 +183,9 @@ const VIEW_SPEC_FIELDS: &[&str] = &[
 ];
 
 fn parse_and_validate(spec_json: &serde_json::Value) -> Result<(), ApiError> {
-    let obj = spec_json.as_object().ok_or_else(|| {
-        ApiError::BadRequest("view spec must be a JSON object".to_string())
-    })?;
+    let obj = spec_json
+        .as_object()
+        .ok_or_else(|| ApiError::BadRequest("view spec must be a JSON object".to_string()))?;
     // The two grammars have disjoint top-level field sets (view-query-grammar.md
     // supersedes ui-layout.md §4's grammar but saved views in either format are
     // accepted). serde ignores unknown fields by default, so "try ViewQuery
@@ -1173,7 +1173,8 @@ mod tests {
         let payload = complete_event_payload(&sse);
         assert!(payload["view_spec"].is_null(), "payload: {payload}");
         assert_eq!(
-            payload["explanation"], "Generated view was invalid — try rephrasing"
+            payload["explanation"],
+            "Generated view was invalid — try rephrasing"
         );
         assert_eq!(payload["fallback"]["layout"], "list");
     }

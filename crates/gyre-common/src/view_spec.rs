@@ -137,7 +137,7 @@ pub fn validate_view_spec(spec: &ViewSpec) -> Result<(), String> {
     // otherwise never see them).
     if spec.layout != LayoutType::SideBySide && (spec.left.is_some() || spec.right.is_some()) {
         return Err(
-            "'left'/'right' sub-views are only allowed with layout 'side-by-side'".to_string()
+            "'left'/'right' sub-views are only allowed with layout 'side-by-side'".to_string(),
         );
     }
     if spec.layout == LayoutType::SideBySide {
@@ -145,7 +145,7 @@ pub fn validate_view_spec(spec: &ViewSpec) -> Result<(), String> {
             (Some(l), Some(r)) => (l, r),
             _ => {
                 return Err(
-                    "layout 'side-by-side' requires both 'left' and 'right' sub-views".to_string()
+                    "layout 'side-by-side' requires both 'left' and 'right' sub-views".to_string(),
                 )
             }
         };
