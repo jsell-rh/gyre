@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "spec-links.md §Forge-Maintained Spec Graph"
-commits: ["57f548f620b71856726e7bada6b61ebaad39cc54", "12d95108b029812a4c8fcd863816304a4890f0f5", "17e4b4cb9f0f1d104ca58dc1470ae681163adee1", "e1466abbc4969b239fcb39c5366af4c048526d1e", "b869f5a9e91f06c4838fe3fab41197ff5360b830", "5f33847d5db78436ee063a34210ac6db96a58775", "7a1508bbeab83977ad4361f958d9f71a9bda88ba", "673fce33a1eb4e9273e1ecfff16da1d5bbab56a4", "2bc9b5bdc6a7e24aa0907af934469cd6f9fb3232", "071fd3b7e5aa81a7731cc1af67ffc1555d767d07", "9fb8d851175c88e4485215aa952da2bde6c32a16"]
+commits: ["57f548f620b71856726e7bada6b61ebaad39cc54", "12d95108b029812a4c8fcd863816304a4890f0f5", "17e4b4cb9f0f1d104ca58dc1470ae681163adee1", "e1466abbc4969b239fcb39c5366af4c048526d1e", "b869f5a9e91f06c4838fe3fab41197ff5360b830", "5f33847d5db78436ee063a34210ac6db96a58775", "7a1508bbeab83977ad4361f958d9f71a9bda88ba", "673fce33a1eb4e9273e1ecfff16da1d5bbab56a4", "2bc9b5bdc6a7e24aa0907af934469cd6f9fb3232", "071fd3b7e5aa81a7731cc1af67ffc1555d767d07", "9fb8d851175c88e4485215aa952da2bde6c32a16", "caa0f93b2f4d2922f5342e20d6907c8322e29268", "733ba1701f197e0558702b9d01f5b99a8ff0c39a"]
 ---
 
 ## Spec Excerpt
@@ -155,20 +155,48 @@ graph queries, and the accountability patrol.
   so PG is compile-verified — same convention as every other PG adapter.
 - `migrations_create_tables` extended with `spec_links`.
 
+**Verification evidence (repair session, HEAD 733ba170, base 18c44f1a):**
+
+- Focused probes, all PASS (records under /tmp/stage/review-evidence):
+  - `cargo test -p gyre-server --lib spec_registry::tests -- restart_rebuilds_spec_link_graph_from_persisted_table staleness_query_parity_after_restart sync_replaces_links_scoped_to_source_repo sync_clears_durable_rows_when_links_removed_from_manifest`
+    — ok. 46 passed; 0 failed (includes all four section-closing tests).
+  - `cargo test -p gyre-adapters --lib sqlite::spec_links` — ok. 4 passed;
+    0 failed (round-trip, replace scoping, reopened-database durability,
+    repo-scoped delete).
+  - `cargo test -p gyre-server --lib mem::spec_link_contract_tests` — ok.
+    3 passed; 0 failed.
+  - Reader modules with the new field/persistence: `spec_link_staleness` +
+    `spec_patrol` (25 passed), `api::specs` (72), `api::graph` (23),
+    `merge_processor` (49), `migrations_create_tables` (1) — all 0 failed.
+  - `scripts/check-arch.sh` PASS; `check-migration-sql-portability.sh`,
+    `check-mem-port-contracts.sh`, `check-in-memory-state-stores.sh`,
+    `check-unnamed-tuple-carriers.sh`, `check-task-commit-attribution.sh`
+    all PASS at HEAD.
+- `cargo test --all` (full workspace suite) remains owned by verification
+  and publication per the assignment; the previous assignment's full-suite
+  run was interrupted by an infrastructure timeout mid-compile, not a test
+  failure.
+- Postgres adapter is compile-verified: `postgres` is unconditionally
+  compiled in gyre-adapters (no feature gate; workspace diesel includes the
+  postgres backend), so the sqlite adapter test build compiled
+  `postgres::spec_links` in the same crate.
+
 **Sandbox/gate notes:**
 
-- `cargo test --all` and `bash scripts/check-arch.sh` run at the end of this
-  assignment; focused probes recorded under /tmp/stage/review-evidence.
-- `check-task-commit-attribution.sh` fails on the task-196 commit
-  `05709c24` (base of this branch) missing from task-196's `commits:` list —
-  pre-existing on main, unrelated to task-198, reproduced on a clean base
-  worktree; needs a separate fix (add the SHA to task-196's frontmatter).
+- `check-task-commit-attribution.sh` previously failed on task-196 commit
+  `05709c24` missing from that task's frontmatter — fixed on main by the
+  task-227 repair (base commit 18c44f1a); the check now passes at HEAD.
 - `check-unnamed-tuple-carriers.sh` was failing on base (stale line-keyed
   exemptions after line drift: git_http/mem entries off by their shift, plus
   a trailing-comma arity miscount on `otlp_receiver.rs`'s 3-field tuple).
   Renumbered the same frozen 9 entries to the actual carrier lines and
   corrected the otlp inline `tuple-carrier:ok` marker's reason to name the
   real cause (trailing-comma false positive). No entries added; check now
-  passes. Also removed the accidental `web/dist` rebuild a pipeline
-  checkpoint re-captured after bd5e586d had dropped it (web sources are
-  byte-identical to base — verified via `git ls-tree` hash comparison).
+  passes.
+- Removed the accidental `web/dist` rebuild a pipeline checkpoint
+  re-captured after bd5e586d had dropped it (commits caa0f93b + 733ba170;
+  web sources are byte-identical to base — `web/dist` now matches the base
+  tree exactly, verified `git diff 18c44f1a..HEAD -- web/dist` is empty).
+  The gyre-server build script re-runs `npm ci && npm run build` whenever
+  `web/node_modules` is absent (fresh sandbox), so any full-build gate will
+  re-dirty `web/dist`; that rebuild is environmental, not a source change.
