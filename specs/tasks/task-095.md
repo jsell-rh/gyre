@@ -184,6 +184,29 @@ the recovery merge, same R3-F4 drift class),
 `check-dead-message-kinds`, `check-arch`, `check-inert-enforcement`,
 `check-mem-port-contracts`.
 
+## Rebase Repair (Round 5)
+
+Rebased the branch onto the current pipeline base
+`7c6ac232ad1e43c977540034381e41c47548aa81` (merge commit
+`393e96a9`). One content conflict in `specs/tasks/task-068.md`
+`commits:` frontmatter — both sides held the identical 10-commit set
+differing only in ordering; resolved by keeping the HEAD ordering
+previously verified green by `check-task-commit-attribution`.
+
+The merge brought the base branch's web sources (task-196
+Briefing/InlineChat) while `web/dist` was stale from the task-095
+side; regenerated dist from the merged sources (commit `3668aef6`,
+same convention as `44a8187f`), after `npm ci` with the locked
+versions and a passing `npx vitest run
+src/__tests__/Briefing.test.js` (24/24) on the merged sources.
+
+All focused probes re-run green at final head `3668aef6`:
+`merge_processor` 54/54, `git2_ops` 31/31, `api::recovery` 6/6,
+`api::merge_queue` 8/8, `check-task-commit-attribution`,
+`check-abac-route-registry`, `check-fail-open-ref-resolution`.
+Evidence: `/tmp/stage/review-evidence/rebase-repair-393e96a9.txt`.
+Tree clean at `3668aef6`.
+
 Sandbox limitation recorded: the TCP listener probe is unsupported in
 this runtime (`errno 95`, `/tmp/stage/capabilities.json`), so no live
 server/browser smoke test was performed here; behavior is verified by
