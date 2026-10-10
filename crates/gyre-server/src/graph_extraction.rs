@@ -42,6 +42,11 @@ pub struct AgentPushContext {
     pub tenant_id: String,
 }
 
+/// Post-create delivery-channel fan-out callback (email/webhook/slack per
+/// user-management.md §Delivery Channels). `None` in port-level tests.
+pub type ChannelFanoutCallback =
+    Box<dyn Fn(&Notification) -> futures_util::future::BoxFuture<'static, ()> + Send + Sync>;
+
 /// Port references needed only for the post-extraction divergence check.
 ///
 /// Bundled into a single struct to stay within clippy's argument-count limit.
@@ -50,8 +55,7 @@ pub struct DivergencePorts<'a> {
     pub membership_repo: &'a dyn WorkspaceMembershipRepository,
     /// Post-create channel fan-out (email/webhook/slack per
     /// user-management.md §Delivery Channels). `None` in port-level tests.
-    pub on_created:
-        Option<Box<dyn Fn(&Notification) -> futures_util::future::BoxFuture<'static, ()> + Send + Sync>>,
+    pub on_created: Option<ChannelFanoutCallback>,
 }
 
 /// Identity/scope parameters for a divergence check.

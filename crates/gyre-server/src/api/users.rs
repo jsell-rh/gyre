@@ -1343,7 +1343,10 @@ mod tests {
         let channels = &json["channels"];
         assert_eq!(channels["in_app"], true, "in_app defaults on");
         assert_eq!(channels["email"]["enabled"], false, "email defaults off");
-        assert!(channels["webhook"].is_null(), "webhook defaults unconfigured");
+        assert!(
+            channels["webhook"].is_null(),
+            "webhook defaults unconfigured"
+        );
         assert!(channels["slack"].is_null(), "slack defaults unconfigured");
     }
 
@@ -1384,7 +1387,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK, "valid config must be accepted");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "valid config must be accepted"
+        );
 
         // A fresh router over the same state must read the persisted config
         // (durable store, not in-handler memory).
@@ -1404,7 +1411,10 @@ mod tests {
         let channels = &json["channels"];
         assert_eq!(channels["email"]["enabled"], true);
         assert_eq!(channels["email"]["digest"], "Daily");
-        assert_eq!(channels["webhook"]["url"], "https://hooks.example.test/gyre");
+        assert_eq!(
+            channels["webhook"]["url"],
+            "https://hooks.example.test/gyre"
+        );
         assert_eq!(channels["webhook"]["min_priority"], "High");
         assert_eq!(channels["slack"]["channel"], "#ops");
     }

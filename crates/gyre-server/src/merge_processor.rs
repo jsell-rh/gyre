@@ -5580,7 +5580,15 @@ mod tests {
         //     MR author + workspace Admin).
         let admin_notifs = state
             .notifications
-            .list_for_user(&Id::new("admin-recov"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .list_for_user(
+                &Id::new("admin-recov"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                100,
+                0,
+            )
             .await
             .unwrap();
         assert!(
@@ -5588,7 +5596,10 @@ mod tests {
                 .iter()
                 .any(|n| n.notification_type == NotificationType::MrReverted),
             "workspace Admin should receive MrReverted notification, got {:?}",
-            admin_notifs.iter().map(|n| &n.notification_type).collect::<Vec<_>>()
+            admin_notifs
+                .iter()
+                .map(|n| &n.notification_type)
+                .collect::<Vec<_>>()
         );
 
         // 5. Remediation task created with the failure reason.
@@ -5794,7 +5805,10 @@ mod tests {
         assert!(
             notifs.is_empty(),
             "no notifications expected while paused, got {:?}",
-            notifs.iter().map(|n| &n.notification_type).collect::<Vec<_>>()
+            notifs
+                .iter()
+                .map(|n| &n.notification_type)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -5808,13 +5822,8 @@ mod tests {
         // Seed the workspace record: notify_mr_reverted resolves the tenant
         // from it and skips (never fabricates a "default" tenant) when the
         // workspace is missing.
-        let ws = gyre_domain::Workspace::new(
-            Id::new("ws-1"),
-            Id::new("tenant-grp"),
-            "ws-1",
-            "ws-1",
-            0,
-        );
+        let ws =
+            gyre_domain::Workspace::new(Id::new("ws-1"), Id::new("tenant-grp"), "ws-1", "ws-1", 0);
         state.workspaces.create(&ws).await.unwrap();
         let repo = create_repo_in_workspace(&state, "recovery-repo", "ws-1").await;
 

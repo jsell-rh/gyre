@@ -3830,7 +3830,11 @@ impl gyre_ports::UserChannelPreferenceRepository for MemUserChannelPreferenceRep
             .map(|(_, ch)| ch.clone()))
     }
 
-    async fn upsert(&self, user_id: &Id, channels: &gyre_domain::NotificationChannels) -> Result<()> {
+    async fn upsert(
+        &self,
+        user_id: &Id,
+        channels: &gyre_domain::NotificationChannels,
+    ) -> Result<()> {
         let mut guard = self.channels.write().await;
         if let Some(existing) = guard.iter_mut().find(|(uid, _)| uid == user_id) {
             existing.1 = channels.clone();

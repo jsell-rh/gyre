@@ -107,7 +107,6 @@ pub use search::{SearchDocument, SearchPort, SearchQuery, SearchResult};
 pub use secret::SecretRepository;
 pub use spawn_log::{SpawnLogEntry, SpawnLogRepository};
 pub use spec_approval::SpecApprovalRepository;
-pub use user_profile::UserChannelPreferenceRepository;
 pub use spec_approval_event_repo::SpecApprovalEventRepository;
 pub use spec_ledger_repo::SpecLedgerRepository;
 pub use spec_policy_repo::SpecPolicyRepository;
@@ -119,7 +118,8 @@ pub use trace::{SpanPayload, TraceRepository};
 pub use trust_anchor::TrustAnchorRepository;
 pub use user::{ApiKeyRepository, UserRepository};
 pub use user_profile::{
-    JudgmentLedgerRepository, UserNotificationPreferenceRepository, UserTokenRepository,
+    JudgmentLedgerRepository, UserChannelPreferenceRepository, UserNotificationPreferenceRepository,
+    UserTokenRepository,
 };
 pub use user_workspace_state::UserWorkspaceStateRepository;
 pub use workspace::{PersonaRepository, WorkspaceRepository};

@@ -152,11 +152,8 @@ pub async fn create_persona(
     // Persona is created Pending; notify its owner that approval is
     // requested (user-management.md §Who Gets Notified: "Persona approval
     // requested" → Persona's `owner`).
-    crate::notification_dispatcher::notify_persona_approval_requested(
-        state.as_ref(),
-        &persona,
-    )
-    .await;
+    crate::notification_dispatcher::notify_persona_approval_requested(state.as_ref(), &persona)
+        .await;
 
     Ok((StatusCode::CREATED, Json(PersonaResponse::from(persona))))
 }

@@ -109,7 +109,7 @@ pub async fn notify_gate_failure(
         .ok()
         .flatten()
         .map(|mr| format!("'{}'", mr.title))
-        .unwrap_or_else(|| mr_id[..8.min(mr_id.len())].to_string());
+        .unwrap_or_else(|| mr_id.chars().take(8).collect());
 
     let body_json = serde_json::json!({
         "gate_name": gate_name,
@@ -162,7 +162,7 @@ pub async fn notify_mr_merged(
         .ok()
         .flatten()
         .map(|mr| format!("'{}'", mr.title))
-        .unwrap_or_else(|| mr_id[..8.min(mr_id.len())].to_string());
+        .unwrap_or_else(|| mr_id.chars().take(8).collect());
 
     let body_json = serde_json::json!({
         "mr_id": mr_id,

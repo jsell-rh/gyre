@@ -42,20 +42,22 @@ impl UserChannelPreferenceRepository for PgStorage {
     async fn find(&self, user_id: &Id) -> Result<Option<gyre_domain::NotificationChannels>> {
         let pool = Arc::clone(&self.pool);
         let uid = user_id.as_str().to_string();
-        tokio::task::spawn_blocking(move || -> Result<Option<gyre_domain::NotificationChannels>> {
-            let mut conn = pool.get().context("get db connection")?;
-            let row = user_channel_preferences::table
-                .find(&uid)
-                .first::<ChannelPrefRow>(&mut *conn)
-                .optional()
-                .context("find user channel preferences")?;
-            match row {
-                Some(r) => serde_json::from_str(&r.channels)
-                    .map(Some)
-                    .map_err(|e| anyhow::anyhow!("corrupt channel preferences for {uid}: {e}")),
-                None => Ok(None),
-            }
-        })
+        tokio::task::spawn_blocking(
+            move || -> Result<Option<gyre_domain::NotificationChannels>> {
+                let mut conn = pool.get().context("get db connection")?;
+                let row = user_channel_preferences::table
+                    .find(&uid)
+                    .first::<ChannelPrefRow>(&mut *conn)
+                    .optional()
+                    .context("find user channel preferences")?;
+                match row {
+                    Some(r) => serde_json::from_str(&r.channels)
+                        .map(Some)
+                        .map_err(|e| anyhow::anyhow!("corrupt channel preferences for {uid}: {e}")),
+                    None => Ok(None),
+                }
+            },
+        )
         .await?
     }
 

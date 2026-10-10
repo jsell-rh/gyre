@@ -274,12 +274,14 @@ async fn notify_workspace_members(
 /// spec's ledger entry (`owner`, `user:<name>` form); the workspace scope
 /// also comes from the entry. No-op when the spec has no ledger entry or
 /// no owner.
-async fn notify_spec_owner_of_drift(
-    state: &AppState,
-    source_path: &str,
-    target_path: &str,
-) {
-    let Some(entry) = state.spec_ledger.find_by_path(source_path).await.ok().flatten() else {
+async fn notify_spec_owner_of_drift(state: &AppState, source_path: &str, target_path: &str) {
+    let Some(entry) = state
+        .spec_ledger
+        .find_by_path(source_path)
+        .await
+        .ok()
+        .flatten()
+    else {
         return;
     };
     let owner = entry.owner.strip_prefix("user:").unwrap_or(&entry.owner);

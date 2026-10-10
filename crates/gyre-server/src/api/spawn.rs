@@ -1466,12 +1466,14 @@ pub async fn fail_agent(
         crate::notification_dispatcher::notify_agent_escalation(
             state.as_ref(),
             &agent,
-            gyre_common::NotificationType::AgentEscalation,
-            &format!("Agent '{}' failed and needs attention", agent.name),
-            &tenant_id,
-            None,
-            Some(agent.id.to_string()),
-            None,
+            crate::notification_dispatcher::EscalationContent {
+                notification_type: gyre_common::NotificationType::AgentEscalation,
+                title: &format!("Agent '{}' failed and needs attention", agent.name),
+                tenant_id: &tenant_id,
+                body: None,
+                entity_ref: Some(agent.id.to_string()),
+                repo_id: None,
+            },
         )
         .await;
     }

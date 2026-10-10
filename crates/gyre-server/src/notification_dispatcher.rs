@@ -22,8 +22,14 @@ const CHANNEL_HTTP_TIMEOUT_SECS: u64 = 10;
 
 /// Abstracts the outbound HTTP POST so tests can capture deliveries.
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait HttpSender: Send + Sync {
-    async fn post_json(&self, url: &str, body: &str, headers: &[(&str, &str)]) -> anyhow::Result<()>;
+    async fn post_json(
+        &self,
+        url: &str,
+        body: &str,
+        headers: &[(&str, &str)],
+    ) -> anyhow::Result<()>;
 }
 
 /// Production HTTP sender backed by reqwest, latency-bounded.
@@ -44,8 +50,16 @@ impl Default for ReqwestSender {
 
 #[async_trait]
 impl HttpSender for ReqwestSender {
-    async fn post_json(&self, url: &str, body: &str, headers: &[(&str, &str)]) -> anyhow::Result<()> {
-        let mut req = self.client.post(url).header("Content-Type", "application/json");
+    async fn post_json(
+        &self,
+        url: &str,
+        body: &str,
+        headers: &[(&str, &str)],
+    ) -> anyhow::Result<()> {
+        let mut req = self
+            .client
+            .post(url)
+            .header("Content-Type", "application/json");
         for (k, v) in headers {
             req = req.header(*k, *v);
         }
@@ -91,7 +105,6 @@ pub async fn dispatch_with<S: HttpSender>(
     channels: &NotificationChannels,
     sender: &S,
 ) {
-
     // In-app is always delivered (in_app can't be disabled) — the caller has
     // already persisted the notification, which IS in-app delivery.
 
@@ -265,19 +278,25 @@ pub async fn escalation_recipients(
     recipients
 }
 
+/// Content of an agent-escalation notification (bundled to keep
+/// `notify_agent_escalation` within clippy's 7-argument limit).
+pub struct EscalationContent<'a> {
+    pub notification_type: NotificationType,
+    pub title: &'a str,
+    pub tenant_id: &'a str,
+    pub body: Option<String>,
+    pub entity_ref: Option<String>,
+    pub repo_id: Option<String>,
+}
+
 /// Deliver an agent-escalation notification to the routing-table recipients
 /// (in-app record per recipient + channel fan-out per recipient config).
 pub async fn notify_agent_escalation(
     state: &AppState,
     agent: &gyre_domain::Agent,
-    notification_type: NotificationType,
-    title: &str,
-    tenant_id: &str,
-    body: Option<String>,
-    entity_ref: Option<String>,
-    repo_id: Option<String>,
+    content: EscalationContent<'_>,
 ) {
-    let priority = NotificationPriority::from_band(notification_type.default_priority());
+    let priority = NotificationPriority::from_band(content.notification_type.default_priority());
     let recipients = escalation_recipients(state, agent, priority).await;
     let now = crate::api::now_secs() as i64;
     for user_id in recipients {
@@ -286,14 +305,14 @@ pub async fn notify_agent_escalation(
             notif_id,
             agent.workspace_id.clone(),
             user_id.clone(),
-            notification_type.clone(),
-            title.to_string(),
-            tenant_id,
+            content.notification_type.clone(),
+            content.title.to_string(),
+            content.tenant_id,
             now,
         );
-        notif.body = body.clone();
-        notif.entity_ref = entity_ref.clone();
-        notif.repo_id = repo_id.clone();
+        notif.body = content.body.clone();
+        notif.entity_ref = content.entity_ref.clone();
+        notif.repo_id = content.repo_id.clone();
         if let Err(e) = state.notifications.create(&notif).await {
             tracing::warn!(
                 user_id = %user_id,
@@ -309,10 +328,7 @@ pub async fn notify_agent_escalation(
 /// Deliver a "persona approval requested" notification to the persona's
 /// owner (user-management.md §Who Gets Notified). No-op when the persona has
 /// no owner or the owner id is empty.
-pub async fn notify_persona_approval_requested(
-    state: &AppState,
-    persona: &gyre_domain::Persona,
-) {
+pub async fn notify_persona_approval_requested(state: &AppState, persona: &gyre_domain::Persona) {
     let Some(owner) = persona.owner.as_deref() else {
         return;
     };
@@ -399,8 +415,12 @@ pub async fn notify_merge_queue_paused(
             return;
         }
     };
-    let recipients =
-        members_with_roles(state, workspace_id, &[WorkspaceRole::Admin, WorkspaceRole::Owner]).await;
+    let recipients = members_with_roles(
+        state,
+        workspace_id,
+        &[WorkspaceRole::Admin, WorkspaceRole::Owner],
+    )
+    .await;
     let body = serde_json::json!({
         "repo_id": repo.id.to_string(),
         "repo_name": repo.name,
@@ -612,9 +632,12 @@ mod tests {
         assert_eq!(band(1), NotificationPriority::Urgent);
     }
 
+    /// One captured outbound HTTP delivery: (url, body, headers).
+    type CapturedCall = (String, String, Vec<(String, String)>);
+
     /// Captures every outbound HTTP delivery for assertions.
     struct CapturingSender {
-        calls: parking_lot::Mutex<Vec<(String, String, Vec<(String, String)>)>>,
+        calls: parking_lot::Mutex<Vec<CapturedCall>>,
     }
 
     #[async_trait]
@@ -844,21 +867,17 @@ mod tests {
         seed_member(&state, &ws, "owner-1", WorkspaceRole::Owner).await;
 
         // Bring spawner online: presence entry keyed by user id string.
-        state
-            .presence
-            .write()
-            .await
-            .insert(
-                ("spawner-1".to_string(), "sess-1".to_string()),
-                crate::PresenceEntry {
-                    workspace_id: "ws-1".to_string(),
-                    view: "inbox".to_string(),
-                    editing_entity: None,
-                    timestamp: 1,
-                    server_last_seen: u64::MAX, // never idle-evicted
-                    connection_id: 1,
-                },
-            );
+        state.presence.write().await.insert(
+            ("spawner-1".to_string(), "sess-1".to_string()),
+            crate::PresenceEntry {
+                workspace_id: "ws-1".to_string(),
+                view: "inbox".to_string(),
+                editing_entity: None,
+                timestamp: 1,
+                server_last_seen: u64::MAX, // never idle-evicted
+                connection_id: 1,
+            },
+        );
 
         let agent = agent_spawned_by(&ws, Some("spawner-1"));
         let recipients = escalation_recipients(&state, &agent, NotificationPriority::High).await;
@@ -895,21 +914,17 @@ mod tests {
         seed_member(&state, &ws, "owner-1", WorkspaceRole::Owner).await;
 
         // Spawner online, but Urgent forces Owners.
-        state
-            .presence
-            .write()
-            .await
-            .insert(
-                ("spawner-1".to_string(), "sess-1".to_string()),
-                crate::PresenceEntry {
-                    workspace_id: "ws-1".to_string(),
-                    view: "inbox".to_string(),
-                    editing_entity: None,
-                    timestamp: 1,
-                    server_last_seen: u64::MAX,
-                    connection_id: 1,
-                },
-            );
+        state.presence.write().await.insert(
+            ("spawner-1".to_string(), "sess-1".to_string()),
+            crate::PresenceEntry {
+                workspace_id: "ws-1".to_string(),
+                view: "inbox".to_string(),
+                editing_entity: None,
+                timestamp: 1,
+                server_last_seen: u64::MAX,
+                connection_id: 1,
+            },
+        );
 
         let agent = agent_spawned_by(&ws, Some("spawner-1"));
         let recipients = escalation_recipients(&state, &agent, NotificationPriority::Urgent).await;
@@ -930,12 +945,14 @@ mod tests {
         notify_agent_escalation(
             &state,
             &agent,
-            NotificationType::AgentEscalation,
-            "Agent 'worker-1' failed and needs attention",
-            "tenant-1",
-            None,
-            Some("agent-1".to_string()),
-            None,
+            EscalationContent {
+                notification_type: NotificationType::AgentEscalation,
+                title: "Agent 'worker-1' failed and needs attention",
+                tenant_id: "tenant-1",
+                body: None,
+                entity_ref: Some("agent-1".to_string()),
+                repo_id: None,
+            },
         )
         .await;
 
@@ -986,7 +1003,15 @@ mod tests {
         // Owner (with "user:" prefix stripped) got the notification.
         let owner_notifs = state
             .notifications
-            .list_for_user(&Id::new("persona-owner"), Some(&ws), None, None, None, 50, 0)
+            .list_for_user(
+                &Id::new("persona-owner"),
+                Some(&ws),
+                None,
+                None,
+                None,
+                50,
+                0,
+            )
             .await
             .unwrap();
         assert_eq!(owner_notifs.len(), 1, "persona owner must be notified");
@@ -1066,7 +1091,10 @@ mod tests {
                 1,
                 "{user} (Admin/Owner) must receive the pause notification"
             );
-            assert_eq!(notifs[0].notification_type, NotificationType::MergeQueuePaused);
+            assert_eq!(
+                notifs[0].notification_type,
+                NotificationType::MergeQueuePaused
+            );
             assert_eq!(notifs[0].repo_id.as_deref(), Some("repo-pause"));
         }
         for user in ["dev-1", "viewer-1"] {
@@ -1137,7 +1165,10 @@ mod tests {
                 1,
                 "{user} must receive the budget-exhausted notification (spawner + Owner)"
             );
-            assert_eq!(notifs[0].notification_type, NotificationType::BudgetExhausted);
+            assert_eq!(
+                notifs[0].notification_type,
+                NotificationType::BudgetExhausted
+            );
         }
         let admin_notifs = state
             .notifications
@@ -1191,7 +1222,10 @@ mod tests {
                 1,
                 "{user} (Owner / tenant Admin) must receive the security finding"
             );
-            assert_eq!(notifs[0].notification_type, NotificationType::SecurityFinding);
+            assert_eq!(
+                notifs[0].notification_type,
+                NotificationType::SecurityFinding
+            );
             assert_eq!(notifs[0].title, "[Critical] SQL injection in query builder");
             assert_eq!(notifs[0].entity_ref.as_deref(), Some("mr-42"));
             assert_eq!(notifs[0].repo_id.as_deref(), Some("repo-1"));

@@ -680,13 +680,9 @@ pub async fn save_spec(
     // registered user maps to the "system" inbox so the request is still
     // visible rather than dropped.
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
-    let manifest_yaml = crate::spec_registry::read_git_file(
-        &git_bin,
-        &repo.path,
-        "HEAD",
-        "specs/manifest.yaml",
-    )
-    .await;
+    let manifest_yaml =
+        crate::spec_registry::read_git_file(&git_bin, &repo.path, "HEAD", "specs/manifest.yaml")
+            .await;
     let mut approval_recipients: Vec<Id> = Vec::new();
     let spec_rel_path = req
         .spec_path
