@@ -302,6 +302,29 @@ task-172-round8-vitest.txt, task-172-round8-dist-before.txt/-after.txt,
 task-172-round8-attribution-gate.txt,
 task-172-round8-files-vs-base.txt.
 
+**Round-9 re-verification (2026-10-10, fresh sandbox):** inherited HEAD
+296bb77b (round-8) with the fresh-assignment reset of this task file in the
+working tree; restored it from HEAD (recovering the 5-commit attribution,
+checked boxes, and ready-for-review) and re-verified from scratch with no
+source changes needed or made — the implementation at head is byte-identical
+to the round-8 candidate that closed contract finding
+eff162384cd64e0db0e9447e8fe9ebd2. Contract re-verified: `git diff
+a1751da1 HEAD --name-only` touches only this task's own files (task file,
+ui-layout coverage row + its SUMMARY row, EditorSplit.svelte, its test,
+en.json, rebuilt dist); task-172.md normative sections byte-identical to
+base except progress/commits/checkboxes. `npm ci` (169 locked packages) →
+EditorSplit + DetailPanel suites **66/66 passed** via the locked local
+`./node_modules/.bin/vitest`; `./node_modules/.bin/vite build` reproduced
+the committed dist byte-exactly (sha256 of every dist file identical
+pre/post, clean `git status` after). **Attribution gate passes at head:
+`scripts/check-task-commit-attribution.sh` exit 0.** TCP listener probes
+remain unsupported (errno 95, /tmp/stage/capabilities.json) — no live
+server/browser run; jsdom suites cover behavior, exact-head GitHub CI
+(`web-build`) remains mandatory. Evidence:
+/tmp/stage/review-evidence/task-172-verification-round9.md plus
+task-172-round9-vitest.txt, task-172-round9-dist-before.txt/-after.txt,
+task-172-round9-attribution-gate.txt, task-172-round9-files-vs-base.txt.
+
 
 ## Agent Instructions
 
