@@ -449,7 +449,12 @@ pub async fn assist_spec(
 
     // Per-call budget record + workspace/tenant counter increment
     // (platform-model.md §Budget Tracking).
-    let ws_for_budget = state.workspaces.find_by_id(&repo.workspace_id).await.ok().flatten();
+    let ws_for_budget = state
+        .workspaces
+        .find_by_id(&repo.workspace_id)
+        .await
+        .ok()
+        .flatten();
     if let Some(ws) = ws_for_budget {
         super::budget::record_llm_call_usage(
             &state,

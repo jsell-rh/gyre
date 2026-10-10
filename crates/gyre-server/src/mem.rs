@@ -3,7 +3,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use gyre_common::Id;
-use gyre_domain::{BudgetCallRecord, BudgetUsage};
 use gyre_domain::{
     Agent, AgentCommit, AgentStatus, AgentUsage, AgentWorktree, AnalyticsEvent, AuditEvent,
     CostEntry, DependencyEdge, LlmFunctionConfig, MergeQueueEntry, MergeQueueEntryStatus,
@@ -12,14 +11,15 @@ use gyre_domain::{
 };
 #[cfg(test)]
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
+use gyre_domain::{BudgetCallRecord, BudgetUsage};
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
     AuditQueryFilter, AuditRepository, BudgetCallRepository, BudgetRepository,
-    BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore,
-    LlmConfigRepository, MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository,
-    NetworkPeerRepository, PersonaRepository, RepoRepository, ReviewRepository, SpawnLogEntry,
-    SpawnLogRepository, TaskRepository, TenantRepository, UserRepository,
-    UserWorkspaceStateRepository, WorkspaceRepository, WorktreeRepository,
+    BudgetUsageRepository, CostRepository, DependencyRepository, KvJsonStore, LlmConfigRepository,
+    MergeQueueRepository, MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository,
+    PersonaRepository, RepoRepository, ReviewRepository, SpawnLogEntry, SpawnLogRepository,
+    TaskRepository, TenantRepository, UserRepository, UserWorkspaceStateRepository,
+    WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -2417,10 +2417,7 @@ pub struct MemBudgetCallRepository {
 impl BudgetCallRepository for MemBudgetCallRepository {
     async fn save(&self, record: &BudgetCallRecord) -> Result<()> {
         let mut store = self.store.lock().await;
-        if store
-            .iter()
-            .any(|r| r.id.as_str() == record.id.as_str())
-        {
+        if store.iter().any(|r| r.id.as_str() == record.id.as_str()) {
             anyhow::bail!("budget call record {} already exists", record.id.as_str());
         }
         store.push(record.clone());

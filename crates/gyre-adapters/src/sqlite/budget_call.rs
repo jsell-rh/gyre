@@ -125,8 +125,7 @@ mod tests {
 
     fn setup() -> (NamedTempFile, SqliteStorage) {
         let tmp = NamedTempFile::new().unwrap();
-        let s =
-            SqliteStorage::new_for_tenant(tmp.path().to_str().unwrap(), "tenant-1").unwrap();
+        let s = SqliteStorage::new_for_tenant(tmp.path().to_str().unwrap(), "tenant-1").unwrap();
         (tmp, s)
     }
 

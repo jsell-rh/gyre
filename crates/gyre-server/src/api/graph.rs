@@ -1231,7 +1231,12 @@ pub async fn briefing_ask(
     // Per-call budget record + workspace/tenant counter increment
     // (platform-model.md §Budget Tracking). User-initiated query:
     // agent_id/task_id/repo_id are None.
-    let ws_for_budget = state.workspaces.find_by_id(&workspace_id_obj).await.ok().flatten();
+    let ws_for_budget = state
+        .workspaces
+        .find_by_id(&workspace_id_obj)
+        .await
+        .ok()
+        .flatten();
     if let Some(ws) = ws_for_budget {
         super::budget::record_llm_call_usage(
             &state,

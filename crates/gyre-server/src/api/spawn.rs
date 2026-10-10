@@ -2698,13 +2698,7 @@ mod tests {
         let (app, ws_id) = create_workspace(app, "ws-usage-budget").await;
         let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
         let (app, task_id) = create_task(app, "usage budget task").await;
-        let (_, spawn_json) = do_spawn(
-            app.clone(),
-            &repo_id,
-            &task_id,
-            "feat/usage-budget",
-        )
-        .await;
+        let (_, spawn_json) = do_spawn(app.clone(), &repo_id, &task_id, "feat/usage-budget").await;
         let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
 
         let body = serde_json::json!({
