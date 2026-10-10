@@ -2,7 +2,7 @@
 title: "Platform Model Orchestrator Lifecycle Protocol"
 spec_ref: "platform-model.md §3 Two-Level Orchestration"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "platform-model.md §3 Two-Level Orchestration"
   - "platform-model.md §3 Workspace Orchestrator"
@@ -92,3 +92,11 @@ Two-level orchestrator lifecycle per platform-model.md §3: `OrchestratorType` o
 Contract-repair round (this assignment, candidate `58adea4f`): the prior checkpoint's task file added an `## Integration Repair` section, which the pipeline's `requirement_parts` does not strip — it read as a contract amendment and forced the contract finding. The assigned contract above is restored verbatim (only this operational `## Shipped` section is new). Product fix landed in the same scope: default-name orchestrator respawn deadlock — after an orchestrator dies, `spawn_orchestrator`'s name-exists check rejected the per-scope default name forever because the dead agent's tombstone row holds it, so a workspace whose orchestrator died could never be re-orchestrated via the default-name path despite §3.2's freed slot (one-live check and budget both pass; only the tombstone blocks). Fix: `spawn_orchestrator` now takes the default name and the explicit name separately — explicit names keep the strict 400 on any collision; default names auto-suffix (`-2`, `-3`, …) via `unique_default_name` when taken, deterministically across mem/SQLite/Postgres. Verified: `api::orchestrator` 19/19 (3 new kill tests: workspace default-name respawn across three death cycles with exactly-one-live asserted, repo-tier respawn, explicit-name conflict still rejected against a dead holder); `mcp::tests::mcp_message_send` 9/9; mechanical checks green (ABAC route registry, MCP write-tools, exempt-handlers, inert-enforcement with the two `validate_persona` exemption anchors re-anchored 187→231/311→353 for the line shift, arch). rustfmt clean on the changed file (the gate class that rejected round 3's integration candidate). Evidence: `/tmp/stage/review-evidence/task-093-contract-repair.txt`.
 
 Verification-repair round (this assignment, base `f4acb4eb` merged): completed the interrupted checkpoint `a48134cf` (exit 130). That checkpoint had already landed both halves of the round-4 review fix — terminal-state guards in `fail_agent`/`stop_agent` (spawn.rs) plus the one-live-per-scope gate inside `restart_orchestrator` (stale_agents.rs), the two kill-tests, and the exemption re-anchor 231/353→222/344 — but its test run never completed and it left four rustfmt violations in the changed regions (the gate class that rejected round 3's candidate). This round: (1) fixed the four formatting sites (`d7e588d9`, no behavior change); (2) proved both kill-tests kill — with the handler guards disabled both fail (terminal-status-stability and budget net-one assertions); (3) added a backstop test pinning `restart_orchestrator`'s scope gate (`c9743839`), which is otherwise unexercised by the sequential terminal paths and could be deleted as redundant — kill-proven too (disabled gate → 3 live orchestrators). Evidence: `api::orchestrator` 22/22, `api::spawn` 29/29, `mcp::tests::mcp_message_send` 9/9, inert-enforcement/ABAC-registry/MCP-write-tools/exempt-handlers/arch checks all green. Sandbox cannot bind a TCP listener (capabilities.json), so no live server smoke test; exact-head GitHub CI remains the host gate. Probe log: `/tmp/stage/review-evidence/task-093-verify-repair.txt`.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/api/orchestrator.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.

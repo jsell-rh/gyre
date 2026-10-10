@@ -1352,3 +1352,82 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod review_probe {
+    use super::*;
+    use crate::mem::test_state;
+
+    fn req(name: Option<&str>) -> SpawnOrchestratorRequest {
+        SpawnOrchestratorRequest {
+            name: name.map(|n| n.to_string()),
+            parent_id: None,
+        }
+    }
+
+    async fn seed(state: &crate::AppState) {
+        let ws = gyre_domain::Workspace::new(Id::new("ws-1"), Id::new("t1"), "Ws", "ws", 0);
+        state.workspaces.create(&ws).await.unwrap();
+    }
+
+    /// Reviewer probe (temporary): corpse is ACTUALLY Dead in the store
+    /// (as run_once leaves it), then the shared death handling is entered
+    /// twice — the contract-violating re-entry the fail/stop guards can't
+    /// see. §3.2 requires exactly one live orchestrator after the second
+    /// entry.
+    #[tokio::test]
+    async fn review_probe_dead_corpse_double_death_entry() {
+        let state = test_state();
+        seed(&state).await;
+
+        let (agent, _t) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1")
+                .await
+                .unwrap();
+
+        // Make the corpse actually terminal in the store (run_once's state).
+        let mut dead = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        dead.transition_status(AgentStatus::Dead).unwrap();
+        state.agents.update(&dead).await.unwrap();
+        // Mirror the real caller: every terminal path (run_once Abort,
+        // fail, stop) decrements the budget BEFORE the shared death
+        // handling.
+        crate::api::budget::decrement_active_agents(&state, "ws-1").await;
+
+        // First entry: legit death of a Dead corpse → replacement minted.
+        crate::stale_agents::handle_orchestrator_death(&state, &dead, 1_000, "probe").await;
+
+        // Contract-violating second entry on the same corpse.
+        crate::stale_agents::handle_orchestrator_death(&state, &dead, 1_000, "probe").await;
+
+        let peers = state
+            .agents
+            .list_by_workspace(&Id::new("ws-1"))
+            .await
+            .unwrap();
+        let live: Vec<_> = peers
+            .iter()
+            .filter(|a| {
+                a.orchestrator_type == OrchestratorType::WorkspaceOrchestrator && is_live(a)
+            })
+            .collect();
+        assert_eq!(
+            live.len(),
+            1,
+            "double entry on a Dead corpse must leave exactly one live orchestrator; live: {:?}",
+            live.iter().map(|a| a.name.clone()).collect::<Vec<_>>()
+        );
+
+        // Budget must also stay net-one.
+        let usage = state
+            .budget_usages
+            .get_usage("workspace:ws-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            usage.active_agents, 1,
+            "double death entry must not double-increment the budget"
+        );
+    }
+}
