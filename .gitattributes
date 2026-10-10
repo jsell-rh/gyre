@@ -1,0 +1,4 @@
+# Generated minified bundles carry semantic whitespace inside string
+# literals (e.g. Svelte class-list separator constants), so the git
+# whitespace gate must not flag them. Hand-written code is unaffected.
+web/dist/** -whitespace
