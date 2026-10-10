@@ -160,3 +160,38 @@ lives in the `wip(task-201)`/checkpoint SHAs recorded in this file's
 `commits:` frontmatter; base `6bf777a6` merged via `207e9c6a`; the clippy
 gate repair, the task-200 attribution fix, and this evidence refresh are
 commit `3b3fb0c7`.
+
+## Recovery: rebase onto 06d70009 (merge 72bbae0a)
+
+The branch was rebased onto `06d70009a1a89dc9aaaa80e68741aaa5ca74d2a1`.
+The sole merge conflict — `specs/tasks/task-200.md` `commits:` frontmatter —
+had byte-identical sides on both parents (verified with `git show` + `diff`),
+resolved by taking ours; committed as `72bbae0a`. No product code changed in
+the resolution.
+
+Post-merge verification on `72bbae0a` (evidence:
+`/tmp/stage/review-evidence/task-201-rebase-recovery.txt`; this sandbox has
+no crates.io access so all cargo runs are `--offline`, and cargo builds were
+serialized after two parallel invocations deadlocked on the target lock):
+
+- `cargo test --offline -p gyre-adapters --lib sqlite::search` — 8 passed,
+  0 failed.
+- `cargo test --offline -p gyre-server --test search_wiring` — 1 passed,
+  0 failed.
+- `bash scripts/check-arch.sh` — pass.
+- `python3 scripts/check-rustfmt-diff.py 06d70009` — exit 0, changed lines
+  clean.
+- `python3 scripts/check-clippy-diff.py 06d70009` — exit 0, changed lines
+  clean.
+- `bash scripts/check-task-commit-attribution.sh` — pass on the merged tree.
+
+Postgres adapter note: the workspace pins
+`diesel = { features = ["sqlite", "postgres", ...] }`, so there is no
+separate `postgres` cargo feature — the default `gyre-adapters` build
+compiles `postgres/search.rs` unconditionally (compiled in the lib test
+build above). The PG `tsvector` DDL stays on the PG-only init path, outside
+the shared portable `migrations/` dir.
+
+Host verification still required (unchanged): `cargo test --all` and
+`cargo test -p gyre-server --test api_integration` on a listener-capable
+host / GitHub CI — this sandbox cannot `accept()` on TCP (errno 95).
