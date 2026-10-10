@@ -1,7 +1,7 @@
 ---
 title: "Enhance User entity with profile fields and preferences"
 spec_ref: "user-management.md §User Entity"
-depends_on: []
+depends_on: [task-216]
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §User Entity"
