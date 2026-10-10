@@ -322,6 +322,18 @@ impl PolicyRepository for PgStorage {
         let id = id.to_string();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
+            // Port contract: "Returns an error if the policy is built-in."
+            // The DB schema cannot express this guard, so it is enforced in
+            // code — same contract the mem adapter enforces (mem.rs).
+            let built_in: Option<i32> = policies::table
+                .find(&id)
+                .select(policies::built_in)
+                .first(&mut *conn)
+                .optional()
+                .context("check policy built_in")?;
+            if built_in == Some(1) {
+                anyhow::bail!("cannot delete built-in policy '{id}'");
+            }
             diesel::delete(policies::table.find(&id))
                 .execute(&mut *conn)
                 .context("delete policy")?;
