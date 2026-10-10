@@ -18,6 +18,13 @@
 //! DB-based one-live check in the spawn core remains the durable guard —
 //! the registry mutex serializes concurrent signals within this process.
 
+/// Age after which a claimed (InProgress) Delegation/Coordination task is
+/// considered stale and re-claimed by the scheduler. Matches the stale-agent
+/// detector's heartbeat timeout (60 s); the scheduler cycle is 30 s, so a
+/// healthy in-flight run — whose LLM calls are not internally time-bounded —
+/// is never re-selected mid-run.
+const SCHEDULER_CLAIM_STALENESS_SECS: u64 = 60;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -309,8 +316,11 @@ async fn run_workspace_orchestrator(
         // spec_ref pins the approved SHA (agent-runtime.md §1 Phase 2.3):
         // the repo orchestrator decomposes against this exact blob, so a
         // later push (which invalidates the approval) cannot redirect
-        // decomposition to unapproved content.
-        task.spec_path = Some(spec_ref.clone());
+        // decomposition to unapproved content. spec_path stays the bare
+        // path — list_by_spec_path consumers (rejection cancellation,
+        // spec progress) match on it exactly.
+        task.spec_path = Some(spec_path.clone());
+        task.spec_ref = Some(spec_ref.clone());
         task.description = Some(format!(
             "Delegation task created by workspace orchestrator {} for approved spec {spec_ref} (agent-runtime.md §1 Phase 2).",
             orchestrator.id
@@ -472,10 +482,28 @@ async fn notify_cross_workspace_change(
 /// worker-spawn path, intentionally excluded by the task_type
 /// discriminator. Tasks with unresolved repos are left Backlog.
 pub async fn scheduler_run_once(state: &AppState) -> anyhow::Result<()> {
+    // Candidate set: Backlog (never claimed), Blocked (the failure-release
+    // state — a later cycle retries the orchestrator run), and InProgress
+    // only when stale: a run claimed within the last cycle-interval band
+    // may still be executing (LLM calls are not internally bounded), so a
+    // fresh claim is never re-selected. The staleness bound matches the
+    // stale-agent detector's heartbeat timeout (60 s) — one scheduler
+    // cycle (30 s) is inside it, so a healthy in-flight run is never
+    // double-claimed by the loop.
     let now = crate::api::now_secs();
-    let backlog = state.tasks.list_by_status(&TaskStatus::Backlog).await?;
+    let mut candidates = state.tasks.list_by_status(&TaskStatus::Backlog).await?;
+    candidates.extend(state.tasks.list_by_status(&TaskStatus::Blocked).await?);
+    let stale_before = now - SCHEDULER_CLAIM_STALENESS_SECS;
+    candidates.extend(
+        state
+            .tasks
+            .list_by_status(&TaskStatus::InProgress)
+            .await?
+            .into_iter()
+            .filter(|t| t.updated_at <= stale_before),
+    );
 
-    for mut task in backlog {
+    for mut task in candidates {
         let Some(task_type) = task.task_type.clone() else {
             continue; // pre-approval push-hook tasks have no task_type (Phase 4)
         };
@@ -490,23 +518,41 @@ pub async fn scheduler_run_once(state: &AppState) -> anyhow::Result<()> {
             rid => state.repos.find_by_id(&rid).await?,
         };
         let Some(repo) = repo else {
-            tracing::warn!(
-                task_id = %task.id,
-                task_type = ?task_type,
-                "signal-chain scheduler: task has no resolvable repo; leaving Backlog"
-            );
+            // A re-claimed (InProgress/Blocked) task with no resolvable
+            // repo would otherwise retry forever; surface it and leave it.
+            if task.status != TaskStatus::Backlog {
+                tracing::error!(
+                    task_id = %task.id,
+                    task_status = ?task.status,
+                    "signal-chain scheduler: claimed task has no resolvable repo; leaving as-is"
+                );
+            } else {
+                tracing::warn!(
+                    task_id = %task.id,
+                    task_type = ?task_type,
+                    "signal-chain scheduler: task has no resolvable repo; leaving Backlog"
+                );
+            }
             continue;
         };
 
-        // Claim: Backlog→InProgress so concurrent cycles (and the 30 s loop
+        // Claim: →InProgress so concurrent cycles (and the 30 s loop
         // re-entering while a run is in flight) cannot double-process.
-        if task.transition_status(TaskStatus::InProgress).is_err() {
-            continue;
-        }
-        task.updated_at = now;
-        if let Err(e) = state.tasks.update(&task).await {
-            tracing::warn!(task_id = %task.id, "signal-chain scheduler: claim failed: {e}");
-            continue;
+        // Backlog→InProgress is the fresh claim; Blocked→InProgress and a
+        // stale InProgress re-claim use the same terminal state.
+        if task.status != TaskStatus::InProgress {
+            if let Err(e) = task.transition_status(TaskStatus::InProgress) {
+                tracing::warn!(
+                    task_id = %task.id,
+                    "signal-chain scheduler: claim transition failed: {e}"
+                );
+                continue;
+            }
+            task.updated_at = now;
+            if let Err(e) = state.tasks.update(&task).await {
+                tracing::warn!(task_id = %task.id, "signal-chain scheduler: claim failed: {e}");
+                continue;
+            }
         }
 
         // Serialize per repo: a second Delegation for the same repo waits
@@ -515,11 +561,37 @@ pub async fn scheduler_run_once(state: &AppState) -> anyhow::Result<()> {
         let _guard = lock.lock().await;
 
         if let Err(e) = run_repo_orchestrator(state, &repo, &task).await {
-            // Release the claim so a later cycle retries after the failure.
-            let _ = task.transition_status(TaskStatus::Backlog);
+            // Release the claim so a later cycle retries. InProgress→Blocked
+            // is the valid domain transition (InProgress→Backlog is not —
+            // the pre-fix code discarded that Err and left the task
+            // stranded InProgress forever with no retry and no surfaced
+            // error). Blocked candidates are re-selected by the scan
+            // above, so the retry actually happens.
+            let released = match task.transition_status(TaskStatus::Blocked) {
+                Err(te) => {
+                    tracing::error!(
+                        task_id = %task.id,
+                        "signal-chain scheduler: could not release claim to Blocked (task stays InProgress until the stale re-claim): {te}"
+                    );
+                    false
+                }
+                Ok(()) => {
+                    task.updated_at = now;
+                    if let Err(ue) = state.tasks.update(&task).await {
+                        tracing::error!(
+                            task_id = %task.id,
+                            "signal-chain scheduler: persisting Blocked release failed (task stays InProgress until the stale re-claim): {ue}"
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                }
+            };
             tracing::error!(
                 task_id = %task.id,
                 repo_id = %repo.id,
+                released_to_blocked = released,
                 "signal-chain: repo orchestrator run failed: {e:#}"
             );
         }
@@ -577,38 +649,41 @@ async fn decompose_delegation(
 ) -> anyhow::Result<()> {
     let now = crate::api::now_secs();
 
-    // 1. Read the delegation task's approved spec. `spec_path` carries
-    //    `path@sha` from Phase 2 when set; fall back to the ledger's
-    //    current SHA for tasks created by other paths (e.g. MCP).
-    let (spec_path, spec_sha) = match task.spec_path.as_deref() {
-        Some(p) if p.contains('@') => {
-            let (path, sha) = p.split_once('@').unwrap();
+    // 1. Read the delegation task's approved spec. `spec_ref` carries the
+    //    pinned "path@sha" from Phase 2; when it is absent, fall back to
+    //    the bare `spec_path` + the ledger's current SHA for tasks created
+    //    by other paths (e.g. MCP task.create).
+    let (spec_path, spec_sha) = match task.spec_ref.as_deref() {
+        Some(r) if r.contains('@') => {
+            let (path, sha) = r.split_once('@').unwrap();
             (path.to_string(), sha.to_string())
         }
-        Some(p) => {
-            let sha = state
-                .spec_ledger
-                .find_by_path(p)
-                .await?
-                .map(|e| e.current_sha)
-                .unwrap_or_default();
-            (p.to_string(), sha)
-        }
-        None => {
-            // No spec reference: nothing to decompose from. Complete the
-            // delegation as a no-op rather than leaving it InProgress
-            // forever, and record why in the description.
-            let mut done = task.clone();
-            done.transition_status(TaskStatus::Review)?;
-            done.transition_status(TaskStatus::Done)?;
-            done.updated_at = now;
-            state.tasks.update(&done).await?;
-            tracing::warn!(
-                task_id = %task.id,
-                "signal-chain: delegation task has no spec_path; marked Done without decomposition"
-            );
-            return Ok(());
-        }
+        _ => match task.spec_path.as_deref() {
+            Some(p) if !p.is_empty() => {
+                let sha = state
+                    .spec_ledger
+                    .find_by_path(p)
+                    .await?
+                    .map(|e| e.current_sha)
+                    .unwrap_or_default();
+                (p.to_string(), sha)
+            }
+            _ => {
+                // No spec reference: nothing to decompose from. Complete
+                // the delegation as a no-op rather than leaving it
+                // InProgress forever, and record why in the log.
+                let mut done = task.clone();
+                done.transition_status(TaskStatus::Review)?;
+                done.transition_status(TaskStatus::Done)?;
+                done.updated_at = now;
+                state.tasks.update(&done).await?;
+                tracing::warn!(
+                    task_id = %task.id,
+                    "signal-chain: delegation task has no spec reference; marked Done without decomposition"
+                );
+                return Ok(());
+            }
+        },
     };
 
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
@@ -639,9 +714,8 @@ async fn decompose_delegation(
         );
         sub.description = Some(st.description.clone());
         sub.task_type = Some(TaskType::Implementation);
-        sub.repo_id = repo.id.clone();
-        sub.workspace_id = repo.workspace_id.clone();
-        sub.spec_path = Some(spec_ref.clone());
+        sub.spec_path = Some(spec_path.clone());
+        sub.spec_ref = Some(spec_ref.clone());
         sub.parent_task_id = Some(task.id.clone());
         sub.order = Some(st.order.unwrap_or(i as u32));
         if let Some(dep) = &prev_id {
@@ -701,6 +775,7 @@ async fn assess_coordination(
         sub.workspace_id = repo.workspace_id.clone();
         sub.parent_task_id = Some(task.id.clone());
         sub.spec_path = task.spec_path.clone();
+        sub.spec_ref = task.spec_ref.clone();
         state.tasks.create(&sub).await?;
     }
 
@@ -1171,7 +1246,13 @@ mod tests {
         assert_eq!(delegation.workspace_id, Id::new("ws-1"));
         assert_eq!(
             delegation.spec_path.as_deref(),
-            Some("specs/system/auth.md@abc123")
+            Some("specs/system/auth.md"),
+            "spec_path is the bare path (list_by_spec_path match key)"
+        );
+        assert_eq!(
+            delegation.spec_ref.as_deref(),
+            Some("specs/system/auth.md@abc123"),
+            "spec_ref pins the approved blob"
         );
         assert_eq!(delegation.assigned_to.as_ref(), Some(&orch[0].id));
         assert_eq!(delegation.status, TaskStatus::Backlog);
@@ -1324,7 +1405,12 @@ mod tests {
             assert_eq!(sub.parent_task_id.as_ref(), Some(&delegation.id));
             assert_eq!(sub.repo_id, Id::new("r-1"));
             assert!(sub.order.is_some(), "sub-task has an order");
-            assert!(sub.spec_path.as_deref().unwrap_or("").contains('@'));
+            assert_eq!(sub.spec_path.as_deref(), Some("specs/system/auth.md"));
+            assert_eq!(
+                sub.spec_ref.as_deref(),
+                Some("specs/system/auth.md@abc123"),
+                "sub-task pins the approved spec blob"
+            );
         }
         // Ordering: depends_on chains previous sub-task IDs in order.
         let mut sorted: Vec<&gyre_domain::Task> = subs.clone();

@@ -61,7 +61,14 @@ pub struct Task {
     /// Repo that owns the spec this task implements. Non-optional per M34 hierarchy enforcement.
     pub repo_id: Id,
     /// Spec path this task was created to implement/review (e.g. "specs/system/agent-gates.md").
+    /// Bare path — matched exactly by `list_by_spec_path` (rejection cancellation,
+    /// spec progress). Never carries the SHA; the pinned blob is `spec_ref`.
     pub spec_path: Option<String>,
+    /// Pinned approved spec blob this task implements: "path@sha"
+    /// (agent-runtime.md §1 Phase 3 sub-task shape). Decomposition reads
+    /// the spec at this exact SHA; consumers match `spec_path` on the bare
+    /// path, so rejection cancellation reaches chain-created tasks.
+    pub spec_ref: Option<String>,
     /// Unix timestamp when this task was cancelled. Set when status → Cancelled.
     pub cancelled_at: Option<u64>,
     /// Human-readable reason for cancellation.
@@ -87,8 +94,8 @@ impl Task {
             labels: Vec::new(),
             branch: None,
             pr_link: None,
-            created_at,
-            updated_at: created_at,
+            spec_path: None,
+            spec_ref: None,
             workspace_id: Id::new("default"),
             repo_id: Id::new(""),
             spec_path: None,

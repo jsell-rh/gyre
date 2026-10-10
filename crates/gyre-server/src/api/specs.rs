@@ -2267,6 +2267,11 @@ mod tests {
         assert_eq!(delegation.repo_id, gyre_common::Id::new("r-9"));
         assert_eq!(
             delegation.spec_path.as_deref(),
+            Some("system/auth.md"),
+            "spec_path is the bare path so list_by_spec_path (rejection cancellation, progress) matches"
+        );
+        assert_eq!(
+            delegation.spec_ref.as_deref(),
             Some(format!("system/auth.md@{sha}")).as_deref(),
             "delegation task pins spec_ref path@sha"
         );

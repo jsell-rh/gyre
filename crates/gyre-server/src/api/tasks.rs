@@ -28,8 +28,11 @@ pub struct CreateTaskRequest {
     pub order: Option<u32>,
     /// Task IDs that must complete before this task starts.
     pub depends_on: Option<Vec<String>>,
-    /// Spec path this task implements (e.g. "system/hello-world.md").
+    /// Spec path this task implements (e.g. "system/hello-world.md"). Bare path.
     pub spec_path: Option<String>,
+    /// Pinned approved spec blob this task implements: "path@sha". Optional;
+    /// when absent, decomposition falls back to the ledger's current SHA.
+    pub spec_ref: Option<String>,
     /// Workspace ID to scope this task to.
     pub workspace_id: Option<String>,
     /// Repository ID this task targets.
@@ -72,11 +75,10 @@ pub struct TaskResponse {
     pub parent_task_id: Option<String>,
     pub labels: Vec<String>,
     pub branch: Option<String>,
-    pub pr_link: Option<String>,
-    pub created_at: u64,
-    pub updated_at: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spec_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -96,8 +98,8 @@ impl From<Task> for TaskResponse {
             status: task_status_str(&t.status),
             priority: task_priority_str(&t.priority),
             assigned_to: t.assigned_to.map(|id| id.to_string()),
-            parent_task_id: t.parent_task_id.map(|id| id.to_string()),
-            labels: t.labels,
+            spec_path: t.spec_path,
+            spec_ref: t.spec_ref,
             branch: t.branch,
             pr_link: t.pr_link,
             created_at: t.created_at,
@@ -197,6 +199,7 @@ pub async fn create_task(
         .map(Id::new)
         .collect();
     task.spec_path = req.spec_path;
+    task.spec_ref = req.spec_ref;
     if let Some(ws_id) = req.workspace_id {
         task.workspace_id = Id::new(ws_id);
     }

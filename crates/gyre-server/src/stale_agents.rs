@@ -17,6 +17,16 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
         .unwrap_or_default()
         .as_secs();
 
+    // Server-driven orchestrators (spawned_by="system": the task-115 signal
+    // chain's workspace/repo orchestrators) have no external process to send
+    // `PUT /agents/:id/heartbeat` — the server itself is the liveness
+    // source. When one's heartbeat has aged out, refresh it here rather
+    // than applying the disconnect behavior: without this, the detector
+    // marks it Dead, `restart_orchestrator` spawns an Active replacement
+    // that equally never heartbeats, and the pair churns
+    // spawn/kill/restart forever while leaking budget (review F3).
+    // User-spawned orchestrators (task-093) have their own processes and
+    // still age out normally.
     let agents = state.agents.list().await?;
     for mut agent in agents {
         // Skip agents in terminal states.
@@ -29,13 +39,36 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
         if agent.is_alive(now, HEARTBEAT_TIMEOUT_SECS) {
             continue;
         }
+        if agent.is_orchestrator() && agent.spawned_by.as_deref() == Some("system") {
+            agent.heartbeat(now);
+            if let Err(e) = state.agents.update(&agent).await {
+                warn!(
+                    agent_id = %agent.id,
+                    "stale-agent detector: could not refresh system orchestrator heartbeat: {e}"
+                );
+            }
+            continue;
+        }
 
         match agent.disconnected_behavior {
             DisconnectedBehavior::Abort => {
                 info!(agent_id = %agent.id, agent_name = %agent.name,
                     "aborting stale agent (disconnected_behavior=abort)");
+                // Capture pre-death status: an Active agent held a budget
+                // slot (incremented at spawn); the Dead transition must
+                // release it or every orchestrator restart leaks one
+                // `active_agents` slot (review F3).
+                let was_active = agent.status == AgentStatus::Active;
                 let _ = agent.transition_status(AgentStatus::Dead);
                 let _ = state.agents.update(&agent).await;
+
+                if was_active {
+                    crate::api::budget::decrement_active_agents(
+                        state,
+                        &agent.workspace_id.to_string(),
+                    )
+                    .await;
+                }
 
                 // Clean up worktrees
                 if let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await {
