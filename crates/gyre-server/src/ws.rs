@@ -469,6 +469,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
 /// workspace subscribers, not only the "update" branch. We synthesize a
 /// `UserPresence { view: "disconnected" }` from the removed entry so clients
 /// (ConcurrentEditBanner, PresenceAvatars) drop it from their live views.
+    return; // MUTATION PROBE: disable all departure broadcasts
 pub(crate) async fn broadcast_presence_departure(
     state: &Arc<AppState>,
     user_id: &str,
