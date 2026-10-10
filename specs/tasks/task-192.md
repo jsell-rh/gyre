@@ -81,4 +81,33 @@ The `SetBudgetRequest` shape (`crates/gyre-server/src/api/budget.rs:63-69`) acce
 - `bash scripts/check-arch.sh` → passed.
 - `cargo run -p gyre-cli -- budget --help` / `show --help` / `set --help` → exit 0, help text confirmed (evidence file `task192-budget-help.txt`).
 - `tests/ws_integration.rs::test_auth_and_ping_roundtrip` fails in this sandbox with `Os { code: 95, kind: Unsupported }` at the TCP listener bind — matches the recorded `capabilities.json` restriction (`tcp_listener_probe.supported=false`, errno 95). Infrastructure limitation, not a code defect; requires host/CI verification.
+
+**Checkpoint recovery round (merged head `d51ccc5`):** the assignment was
+recovered after an interruption and re-verified at the merged HEAD (base
+`a1751da1` merged into the branch; product surface byte-identical to the
+reviewed candidate — `git diff 02f861b9..HEAD -- crates/ docs/ scripts/` is
+empty). Fresh probes, evidence under `/tmp/stage/review-evidence/`:
+- `cargo test -p gyre-cli --bin gyre` → 107 passed, 0 failed (budget
+  filter: 13 passed) — `task192-cli-bin-tests.txt`,
+  `task192-budget-tests-only.txt`.
+- Mutation check at this HEAD: renaming the client URL `budget`→`budgets`
+  fails 2 wiring tests (`get_workspace_budget_builds_real_route`,
+  `set_workspace_budget_put_body_is_merged_config`); source restored
+  (md5-verified) and re-run green — `task192-mutation-url-check.txt`,
+  `task192-post-mutation-restore.txt`.
+- Live binary probes (refused port = the assertion; loopback listeners are
+  forbidden in this sandbox, errno 95): bare `budget show` from a repo with
+  remote `…/git/platform-team/widgets.git` reaches
+  `GET /api/v1/workspaces?slug=platform-team` (real git-remote→slug→id
+  resolution); `--tenant` reaches `GET /api/v1/budget/summary`;
+  `set --tenant`, empty `set`, and `--tenant --workspace` all exit 1 with
+  honest errors — `task192-live-url-probes.txt`.
+- `bash scripts/check-arch.sh`, `bash scripts/check-relative-path-defaults.sh`
+  (exemption line re-pointed to main.rs:1862 by the moved code),
+  `bash scripts/check-task-commit-attribution.sh` (post-merge frontmatter
+  intact) → all pass — `task192-check-arch.txt`,
+  `task192-relative-path-check.txt`, `task192-commit-attribution.txt`.
+- Help surfaces verified via the built binary (`task192-budget-cmd-help.txt`,
+  `task192-budget-subcommand-help.txt`): all three document that repo scope
+  maps to the owning workspace budget.
 - Live end-to-end HTTP against a running server could not be exercised here (sandbox cannot bind listeners); the client-level tests assert the exact request wire format (method, URL, auth header, JSON body) which the routes in `api/mod.rs:610-613` accept, and error paths are exercised with real `reqwest::Response` objects carrying the server's exact wire shape.
