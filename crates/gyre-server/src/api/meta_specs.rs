@@ -981,102 +981,18 @@ async fn check_scope_admin(
     scope: &MetaSpecScope,
     scope_id: &Option<String>,
 ) -> Result<(), ApiError> {
-    let is_global_admin = auth.roles.contains(&gyre_domain::UserRole::Admin);
-    match scope {
-        MetaSpecScope::Global => {
-            if is_global_admin {
-                Ok(())
-            } else {
-                Err(ApiError::Forbidden(
-                    "only tenant Admin may write Global meta-specs".to_string(),
-                ))
-            }
-        }
-        MetaSpecScope::Workspace => {
-            if is_global_admin {
-                return Ok(());
-            }
-            let ws_id = scope_id
-                .as_deref()
-                .ok_or_else(|| {
-                    ApiError::BadRequest(
-                        "workspace-scoped meta-spec requires scope_id".to_string(),
-                    )
-                })?;
-            let user_id = auth.user_id.as_ref().ok_or_else(|| {
-                ApiError::Forbidden(
-                    "only workspace admins may write workspace meta-specs".to_string(),
-                )
-            })?;
-            let membership = state
-                .workspace_memberships
-                .find_by_user_and_workspace(user_id, &Id::new(ws_id))
-                .await
-                .map_err(ApiError::Internal)?;
-            match membership.map(|m| m.role) {
-                Some(gyre_domain::WorkspaceRole::Owner)
-                | Some(gyre_domain::WorkspaceRole::Admin) => Ok(()),
-                _ => Err(ApiError::Forbidden(
-                    "only workspace Owner/Admin members may write workspace meta-specs"
-                        .to_string(),
-                )),
-            }
-        }
+    let can_write = auth.roles.iter().any(|r| {
+        matches!(
+            r,
+            gyre_domain::UserRole::Admin | gyre_domain::UserRole::Developer
+        )
+    });
+    if !can_write {
+        return Err(ApiError::Forbidden(
+            "spec bindings require Developer or Admin role".to_string(),
+        ));
     }
-}
 
-// ---------------------------------------------------------------------------
-// GET /api/v1/meta-specs
-// ---------------------------------------------------------------------------
-
-pub async fn list_meta_specs_registry(
-    State(state): State<Arc<AppState>>,
-    _auth: AuthenticatedAgent,
-    Query(q): Query<ListMetaSpecsQuery>,
-) -> Result<Json<Vec<MetaSpec>>, ApiError> {
-    let scope = match q.scope.as_deref() {
-        None => None,
-        Some(s) => Some(parse_scope(s)?),
-    };
-    let kind = match q.kind.as_deref() {
-        None => None,
-        Some(k) => Some(parse_kind(k)?),
-    };
-    let filter = MetaSpecFilter {
-        scope,
-        scope_id: q.scope_id,
-        kind,
-        required: q.required,
-    };
-    let results = state
-        .meta_specs
-        .list(&filter)
-        .await
-        .map_err(ApiError::Internal)?;
-    Ok(Json(results))
-}
-
-// ---------------------------------------------------------------------------
-// POST /api/v1/meta-specs
-// ---------------------------------------------------------------------------
-
-pub async fn create_meta_spec_registry(
-    State(state): State<Arc<AppState>>,
-    auth: AuthenticatedAgent,
-    Json(req): Json<CreateMetaSpecRequest>,
-) -> Result<(StatusCode, Json<MetaSpec>), ApiError> {
-    let kind = parse_kind(&req.kind)?;
-    let scope = parse_scope(&req.scope)?;
-    // Registry writes are scope-admin-gated (agent-runtime §2 + NEW-26):
-    // a workspace-scoped entry is injected into every agent spawned in that
-    // workspace (assembly band 2), so an entry created in a workspace the
-    // caller has no membership in is cross-workspace prompt injection. Agent
-    // tokens (no user identity) are never scope admins. This also subsumes
-    // the §2 "only scope-level admins can set required" gate — same
-    // permission set.
-    check_scope_admin(&state, &auth, &scope, &req.scope_id).await?;
-    let prompt = req.prompt.unwrap_or_default();
-    let content_hash = sha256_hex(&prompt);
     let now = now_secs();
 
     let ms = MetaSpec {
