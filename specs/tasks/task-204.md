@@ -87,8 +87,14 @@ Every finding escalates to the workspace orchestrator as a REAL persisted
 (`spec` resource, write action) — real policy evaluation, no exemption file
 entry.
 
-This repair round removed a leftover kill-test mutant (`if true { return 0; }`
-stubbing `escalate_findings`) from the interrupted assignment's checkpoint.
+This repair round (contract finding `57f0e9e2`) restored the assigned task
+contract: the candidate lineage had carried an unqualified `web/dist` rebuild
+(no `web/src` change — task-204 is backend-only) and reclassified the HSI
+coverage row in `specs/coverage/SUMMARY.md` (a spec this task does not own).
+Both are reverted to the assigned base `a11ba8d3`; the task-vs-base diff now
+touches only this task's contract surface. The earlier lineage's
+task-068/exemption-file deltas had already been resolved back to base by the
+seed merge.
 
 ## Test evidence
 
@@ -111,18 +117,32 @@ stubbing `escalate_findings`) from the interrupted assignment's checkpoint.
 - Spec-links patrol regression (shared `PatrolFinding` gained
   `task_id`/`workspace_id`): `cargo test -p gyre-server --lib spec_patrol` —
   19 passed.
-- `bash scripts/check-arch.sh` passed; `check-abac-route-registry.sh`,
+- 23 mechanical check scripts re-run at the repaired head — 22 pass,
+  including `check-arch.sh`, `check-abac-route-registry.sh`,
   `check-fabricated-scope-defaults.sh`, `check-scope-literal-defaults.sh`,
   `check-mem-port-contracts.sh`, `check-dead-message-kinds.sh`,
-  `check-task-commit-attribution.sh` (full history available) all passed.
+  `check-byte-slice-truncation.sh`, `check-relative-path-defaults.sh`,
+  `check-migration-versions.sh`, `check-mcp-write-tools.sh`,
+  `check-forwarded-header-trust.sh`, `check-in-memory-state-stores.sh`,
+  `check-unbounded-external-http.sh`, `check-fail-open-ref-resolution.sh`,
+  `check-lossy-secret-conversion.sh`, `check-inert-enforcement.sh`,
+  `check-migration-sql-portability.sh`, `check-forged-scope-fields.sh`,
+  `check-abac-exempt-handlers.sh`
+  (`/tmp/stage/review-evidence/task204-check-scripts.log`).
+- `check-task-commit-attribution.sh` fails on exactly one commit:
+  `a11ba8d3` — the assigned base itself (origin/main tip, task-068's
+  landing commit, absent from task-068.md's frontmatter). Verified
+  pre-existing on main: the check fails identically on pure `origin/main`
+  in an isolated worktree (the prior round passed only because the
+  candidate branched pre-task-068, before the seed merge brought main's
+  tip into ancestry). Fixing it requires editing task-068's frontmatter
+  (out of scope for this contract-scope repair) or growing the frozen
+  exemption file (prohibited); it is main-inherited drift for main's
+  owners, recorded here truthfully rather than hidden.
 - HTTP checks deferred to host verification: this sandbox's listener probe is
   unsupported (`accept` → `Errno 95`, see `/tmp/stage/capabilities.json`), so
   the route was verified through the in-process router tests above; exact-head
   GitHub CI checks remain mandatory for the deployed transport check.
-- Re-verified at the merged head `c33058b5` (base `653a696f` + candidate
-  `f5e093a8`; the base merge touched no `crates/` code, so the
-  previously-passing clippy-diff gate result carries over unchanged): all
-  probes above re-run clean on the cold build, kill-test re-applied from the
-  retained stash and reverted — evidence regenerated under
-  `/tmp/stage/review-evidence/` (module/endpoint/regression logs,
-  per-check-script exit codes).
+- Re-verified at the repaired head on the current base `a11ba8d3`: clean
+  suites, kill-test, and check scripts re-run with evidence regenerated under
+  `/tmp/stage/review-evidence/`.
