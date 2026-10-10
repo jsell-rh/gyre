@@ -3,7 +3,7 @@ title: "Explorer WebSocket Protocol & Server Handler"
 spec_ref: "explorer-implementation.md §3–6, §20–21"
 depends_on:
   - task-068
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "explorer-implementation.md §3 WebSocket Protocol"
   - "explorer-implementation.md §4 Endpoint"
@@ -11,7 +11,7 @@ coverage_sections:
   - "explorer-implementation.md §6 Messages: Server → Client"
   - "explorer-implementation.md §20 Server Implementation"
   - "explorer-implementation.md §21 Explorer WebSocket Handler"
-commits: []
+commits: ["30dc28260cce7cede699be712d0f1773de3994be"]
 ---
 
 ## Spec Excerpt
@@ -95,3 +95,63 @@ The handler already exists and is substantial. This task is an audit + gap-fill.
 3. Missing `save_view`/`load_view`/`list_views` handling in the WebSocket handler (these might only be REST endpoints currently)
 
 Verify by grepping `mod.rs` for the route before writing code.
+
+## Shipped
+
+Audit + gap-fill against spec §3–6, §20–21. The handler
+(`crates/gyre-server/src/explorer_ws.rs`) already carried the full surface:
+route `WS /api/v1/repos/:repo_id/explorer` (registered in `lib.rs:671-674`,
+outside the ABAC-body middleware — auth enforced in-handler via
+`AuthenticatedAgent` + tenant/workspace/membership checks, `?token=` with
+deprecation warning, `POST /api/v1/ws-ticket` ticket flow), all four client
+messages (`message`, `save_view`, `load_view`, `list_views`, plus `delete_view`
+and `cancel` extensions) dispatched in the session loop, all four server
+messages (`text` streamed with `done` flag, `view_query`, `views`, `status`),
+view CRUD with scoping/creator-or-admin delete, and rate/session limits.
+
+The one real defect found and fixed: **off-contract status values**. Three
+send sites emitted free-form strings ("Thinking...", "Analyzing...",
+"Synthesizing answer...") where spec §6 mandates exactly
+`"thinking" | "refining" | "ready"` — and the frontend
+(`ExplorerChat.svelte`) maps only those three, silently dropping anything
+else, leaving the status indicator stale.
+
+- `STATUS_THINKING`/`STATUS_REFINING`/`STATUS_READY` constants are now the
+  single source of truth; all nine status send sites use them.
+- Per-turn status ("Thinking..."/"Analyzing...") → `thinking`; forced
+  synthesis after max tool turns ("Synthesizing answer...") → `refining`
+  (synthesis is the final refinement pass).
+- `normalize_status()` guards the SDK subprocess forward path: the bundled
+  script emits spec values, but `GYRE_EXPLORER_SDK_PATH` is swappable, so an
+  alternate script's statuses are mapped into the protocol (unknown →
+  `thinking`) before hitting the wire.
+- Adjacent hazard fixed in the same message path: `&raw_preview[..500]`
+  (JSON preview in the invalid-view-query warning) panicked on multibyte
+  UTF-8 at the byte boundary; now char-boundary-safe via `chars().take(500)`.
+  Its `byte-slice-truncation-exemptions.txt` entry is removed (exemptions
+  shrink, never grow).
+
+Test evidence (2026-10-10, HEAD `30dc2826` on base `a11ba8d3`):
+
+- `cargo test -p gyre-server --lib explorer_ws` → 39 passed, 0 failed
+  (includes 4 new: constants match spec exactly; Status message serializes
+  spec values end-to-end through the serializer; `normalize_status` passes
+  known values through; maps off-contract literals to valid spec values).
+- `cargo test -p gyre-server --test explorer_ws_integration --no-run` →
+  EXIT=0 (new `explorer_ws_status_progression` test compiles: drives a
+  message turn on the no-LLM fallback path, asserts every observed status ∈
+  {thinking, refining, ready}, thinking observed, terminal ready observed,
+  text done=true + view_query received).
+- Static gates at HEAD: arch, byte-slice-truncation (with the exemption
+  entry removed), abac-route-registry, mem-port-contracts,
+  inert-enforcement, fabricated-scope-defaults — all pass.
+- WS integration tests cannot run in this sandbox: loopback `accept()` is
+  seccomp-blocked (errno 95; all 8 tests in `explorer_ws_integration.rs`
+  fail identically at `WsCtx::new()`'s first HTTP request — the 7
+  pre-existing ones too; recorded in
+  `/tmp/stage/review-evidence/task-069-sandbox-listener-restriction.txt`).
+  Exact-head GitHub CI must run `explorer_ws_status_progression` and its
+  7 siblings.
+- `scripts/check-assertionless-tests.sh` exits 2 in this sandbox on clean
+  HEAD as well — mawk lacks gawk's 3-arg `match()`; CI (gawk) passes it.
+  Not task-related.
