@@ -13,7 +13,7 @@ coverage_sections:
   - "explorer-implementation.md §16 Frontend Components"
   - "explorer-implementation.md §17 ExplorerCanvas (Svelte)"
   - "explorer-implementation.md §25 Phase 1: Canvas + Filters"
-commits: ["b5fd081f626e0f47b06d6b520c9b2049fb54047a", "d4bbe5769a504cb177aa8bf5f7aae0dd0b4ed22f", "db9f944bd9631a742f93a0512e87f4eb450931dd", "240aab15ab9b5b67a013a204be74b2864dc68000", "3fb05db28561b78c30f12bbc9e8450fe79a9f89d", "6110fe43dbbf19aee4ef9dbf5cab751d89007e90", "58dddc244728efcb163cf07c3f0109a6937d93fc", "d82a5a560e2d6e9b1420da503951b75a97763a16"]
+commits: ["b5fd081f626e0f47b06d6b520c9b2049fb54047a", "d4bbe5769a504cb177aa8bf5f7aae0dd0b4ed22f", "db9f944bd9631a742f93a0512e87f4eb450931dd", "240aab15ab9b5b67a013a204be74b2864dc68000", "3fb05db28561b78c30f12bbc9e8450fe79a9f89d", "6110fe43dbbf19aee4ef9dbf5cab751d89007e90", "58dddc244728efcb163cf07c3f0109a6937d93fc", "d82a5a560e2d6e9b1420da503951b75a97763a16", "d14fa4469d921deed79f563158d0cb7e49d28a37"]
 ---
 
 ## Spec Excerpt
@@ -322,3 +322,52 @@ before touching these baselines again — do not regenerate from a
 different font environment.
 
 Progress remains `ready-for-review` on this head (b5fd081f lineage).
+
+**Whitespace-gate repair round (2026-10-10).** The controller's
+`git diff --check HEAD^1 HEAD` (dev-check.sh:8) failed on this branch's
+merge of base db37fd02 with one error: trailing whitespace at
+web/dist/assets/index-CsSeHtzc.js:5 (the checkpoint-rebuilt bundle).
+The flagged byte is a literal TAB inside a JS string literal — the
+minified whitespace character class `bv=[...\` \t\n\r\f\xa0\uFEFF\`]`
+(class-list separator scanner) — and cannot be stripped without
+corrupting the shipped bundle. Main's own committed bundle
+index-fzyK9GaC.js carries the identical byte; main's dist regens pass
+the gate only because they are direct commits rather than
+base-relative additions.
+
+Shipped (commit d14fa446): root `.gitattributes` with
+`web/dist/** -whitespace`, declaring the generated-artifact class once
+for every consumer of git's whitespace machinery without editing any
+verifier script. No hand-written path is exempted; the frozen
+`scripts/*-exemptions.txt` baselines are untouched; task-208's review
+record (verification finding e1de0aac) approved this identical repair
+for this identical false-positive class.
+
+Test evidence (this round, sandbox, at d14fa446):
+
+- `git diff --check db37fd02 HEAD`: exit 2 pre-fix (1 error) →
+  **exit 0** post-fix. `git diff --check HEAD^1 HEAD`: exit 0.
+- `git check-attr whitespace`: all web/dist files `unset`;
+  hand-written crates/, web/src, scripts/ paths `unspecified` (gated).
+- Negative control: a trailing-whitespace line appended to
+  scripts/dev-check.sh IS still flagged by `git diff --check` — the
+  gate on hand-written code is fully preserved.
+- `cd web && npm test` → **56 files passed, 1513 passed | 41 skipped,
+  0 failed** (no frontend regression; the repair touches no code
+  path).
+- Attribution gate at d14fa446: check-task-commit-attribution.sh
+  **OK, exit 0**.
+- Evidence: /tmp/stage/review-evidence/task-065-whitespace-repair.txt.
+
+dist was deliberately NOT regenerated this round: CI builds its own
+dist (`cd web && npm run build` in e2e.yml) and dev-check.sh restores
+committed dist after its build gate, so a regen adds review surface
+without addressing any finding (same reasoning as task-208's approved
+round). One caveat recorded for the reviewer: `git diff --check
+base merge` applies attributes from the *worktree* checkout — if the
+controller's verify merge is checked out at base (no .gitattributes in
+worktree), the historical error would resurface; attributes are read
+from the candidate tree at merge checkout, which is the normal
+controller path (checkout of the merge result).
+
+Progress remains `ready-for-review` on this head (d14fa446 lineage).
