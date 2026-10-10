@@ -1687,6 +1687,55 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    // REVIEW PROBE (temporary, do not commit): GET ?repo_id= vs POST /ask
+    // repo_id ABAC parity. Same policy+claims as the ask-side 403 test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn review_probe_get_briefing_repo_abac_asymmetry() {
+        let state = crate::auth::test_helpers::make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(crate::abac_middleware::seed_builtin_policies(&state))
+        });
+        let (ws_id, repo_id) = setup_workspace_and_repo(&state).await;
+
+        let policies = vec![crate::abac::AbacPolicy {
+            resource_type: "repo".to_string(),
+            resource_id: None,
+            required_claims: std::iter::once(("scope".to_string(), "repo:special".to_string()))
+                .collect(),
+        }];
+        state
+            .kv_store
+            .kv_set("abac_policies", "repo-1", serde_json::to_string(&policies).unwrap())
+            .await
+            .unwrap();
+
+        let claims = serde_json::json!({
+            "sub": "admin-no-repo-scope",
+            "preferred_username": "admin-no-repo-scope",
+            "realm_access": { "roles": ["admin"] }
+        });
+        let jwt = crate::auth::test_helpers::sign_test_jwt(&claims, 3600);
+
+        let app = crate::build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/briefing?repo_id={repo_id}&since=1500"
+                    ))
+                    .header("Authorization", format!("Bearer {jwt}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Document the observed status; assert 200 to record that the GET
+        // path serves repo-filtered data to claims the ask-side would 403.
+        assert_eq!(resp.status(), StatusCode::OK);
+        println!("PROBE: GET briefing?repo_id= with ABAC-denied claims -> 200 (ask-side returns 403 for same repo+claims)");
+    }
+
     #[tokio::test]
     async fn briefing_ask_rate_limited_after_10_requests() {
         let app = app();
