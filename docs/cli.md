@@ -51,7 +51,9 @@ gyre bootstrap --dev
 
 # Also write a starter spec structure (specs/manifest.yaml, specs/index.md,
 # specs/system/design-principles.md, AGENTS.md, .prek.yaml) into --repo-path
-gyre bootstrap --dev --starter-kit --repo-path ./myrepo
+# (required: --starter-kit without --repo-path is an error — the kit must land
+# at an explicit path, never a cwd-relative default)
+gyre bootstrap --dev --starter-kit --repo-path /home/user/code/myrepo
 ```
 
 Steps performed in order: health check → create tenant → create admin user

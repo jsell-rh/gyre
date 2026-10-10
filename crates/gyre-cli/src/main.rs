@@ -1845,9 +1845,14 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
         _ => println!("  No spec manifest found - spec registry stays empty until specs are pushed"),
     }
     if args.starter_kit {
-        let target = repo_path
-            .clone()
-            .unwrap_or_else(|| std::path::PathBuf::from(&repo_name));
+        // A bare `repo_name` here would default to a RELATIVE path resolved
+        // against the process cwd (task-099 F6) — the starter kit must land
+        // at an explicit, operator-visible location instead.
+        let target = repo_path.clone().ok_or_else(|| {
+            step.fail(anyhow::anyhow!(
+                "--starter-kit needs --repo-path: pass the directory to write the kit into"
+            ))
+        })?;
         bootstrap::write_starter_kit(&target)?;
         println!("  Starter kit written to {}", target.display());
     }
@@ -2546,7 +2551,13 @@ fn collect_suggestions<'a>(
         .results
         .iter()
         .filter(|r| r.title.to_lowercase().starts_with(&p))
-        .map(|r| (r.entity_type.as_str(), r.title.as_str(), r.entity_id.as_str()))
+        .map(|r| {
+            (
+                r.entity_type.as_str(),
+                r.title.as_str(),
+                r.entity_id.as_str(),
+            )
+        })
         .collect()
 }
 
@@ -3409,13 +3420,7 @@ mod tests {
     #[test]
     fn cli_search_suggest_parses() {
         let args = Cli::try_parse_from(["gyre", "search", "--suggest", "iden"]);
-        assert!(args.is_ok());
-        if let Commands::Search {
-            query,
-            suggest,
-            ..
-        } = args.unwrap().command
-        {
+        if let Commands::Search { query, suggest, .. } = args.unwrap().command {
             assert!(query.is_none());
             assert_eq!(suggest.as_deref(), Some("iden"));
         } else {
@@ -3518,11 +3523,14 @@ mod tests {
         };
         assert!(result_matches_filters(Some("approved"), Some(4_000), &live));
         // Status matches but recency does not → dropped.
-        assert!(!result_matches_filters(Some("approved"), Some(6_000), &live));
+        assert!(!result_matches_filters(
+            Some("approved"),
+            Some(6_000),
+            &live
+        ));
         // Recency matches but status does not → dropped.
         assert!(!result_matches_filters(Some("open"), Some(4_000), &live));
     }
-
     #[test]
     fn result_matches_filters_drop_unavailable_state() {
         // Unresolvable live state (no detail endpoint / deleted entity)
