@@ -26,9 +26,13 @@ import { test, expect, SEED_WORKSPACE_SLUG, SEED_REPO_NAME } from './fixtures/se
 import { MOCK_GRAPH, VIEW_QUERY_WITH_ANNOTATIONS, BLAST_RADIUS_QUERY } from './fixtures/mock-graph.js';
 import { readFileSync } from 'node:fs';
 
-// Local replacement for fonts.googleapis.com CSS (sandbox font-truth parity;
-// absent on CI/dev machines where the real network serves the webfonts).
-const FONT_CSS_REPLACEMENT = '/tmp/google-fonts-replacement.css';
+// Deterministic webfont fixtures (see fixtures/forced-fonts.css for rationale).
+// Served via route interception so sandbox and CI rasterize identical font
+// binaries — the app's system-ui/'SF Mono' stacks and the fonts.googleapis.com
+// link never reach fontconfig or the network from these tests.
+const FIXTURES_DIR = new URL('./fixtures/', import.meta.url);
+const FORCED_FONTS_CSS = new URL('./fixtures/forced-fonts.css', import.meta.url);
+const FONTS_DIR = new URL('./fixtures/fonts/', import.meta.url);
 
 const SEED_SLUG = SEED_WORKSPACE_SLUG;
 const SEED_REPO = SEED_REPO_NAME;
@@ -71,20 +75,79 @@ const MOCK_REPO = {
  * after navigation means the initial API calls are missed.
  */
 async function setupGraphIntercept(page) {
-  // ── Webfonts (sandbox font-truth parity) ──────────────────────────
-  // CI loads Red Hat webfonts from fonts.googleapis.com. Sandboxes that
-  // block that host must serve the same faces from a local CSS with
-  // data-URL @font-face entries (/tmp/google-fonts-replacement.css,
-  // generated from @fontsource/red-hat-* woff2 files). When the file is
-  // absent (CI, dev machines) the request falls through to the network.
-  try {
-    const localFontCss = readFileSync(FONT_CSS_REPLACEMENT, 'utf8');
-    await page.route('**/fonts.googleapis.com/**', (route) => {
-      route.fulfill({ status: 200, contentType: 'text/css', body: localFontCss });
-    });
-  } catch {
-    // No local replacement — network serves the real CSS (CI path).
-  }
+  // ── Deterministic webfonts (font-truth parity) ────────────────────
+  // Every glyph in every baseline must come from the same font binary in
+  // every environment. Three sources are pinned:
+  //   a) fonts.googleapis.com is served an empty stylesheet so the network
+  //      never decides which Red Hat faces load (sandbox: host blocked;
+  //      CI: real webfonts — different subsetting/rasterization).
+  //   b) The forced-fonts.css fixture (committed) declares @font-face for
+  //      the Red Hat families from committed woff2 binaries and overrides
+  //      every literal font stack the Explorer surface uses. It is injected
+  //      at document_start, before the app boots.
+  //   c) Canvas ctx.font strings patch 'system-ui' → 'Red Hat Text' and
+  //      "'SF Mono', Menlo, monospace" → 'Red Hat Mono' through the context
+  //      prototype so canvas labels also bypass fontconfig.
+  const forcedFontsCss = readFileSync(FORCED_FONTS_CSS, 'utf8');
+  await page.route('**/fonts.googleapis.com/**', (route) => {
+    route.fulfill({ status: 200, contentType: 'text/css', body: '' });
+  });
+  await page.route('**/test-assets/fonts/**', (route) => {
+    const name = route.request().url().split('/test-assets/fonts/')[1].split(/[?#]/)[0];
+    try {
+      const body = readFileSync(new URL(`fonts/${name}`, FONTS_DIR));
+      route.fulfill({
+        status: 200,
+        contentType: 'font/woff2',
+        body,
+      });
+    } catch {
+      route.fulfill({ status: 404, body: '' });
+    }
+  });
+  await page.addInitScript(
+    ({ css }) => {
+      // Inject before any app script runs: <style> with @font-face + stack
+      // overrides (!important — later app styles cannot re-enable fontconfig
+      // stacks), rewritten so font urls hit the route above.
+      const style = document.createElement('style');
+      style.textContent = css.replace(
+        /url\('fonts\//g,
+        "url('/test-assets/fonts/",
+      );
+      document.addEventListener('DOMContentLoaded', () => {
+        document.head.appendChild(style);
+      });
+      // document_start: head may not exist yet — also append immediately when
+      // possible so @font-face exist before first fonts.load()/layout.
+      (document.head || document.documentElement).appendChild(style);
+      // Patch canvas font shorthand so ctx.font strings resolve to the
+      // committed webfonts instead of fontconfig generics.
+      const proto = CanvasRenderingContext2D.prototype;
+      const desc = Object.getOwnPropertyDescriptor(proto, 'font');
+      if (desc && desc.set) {
+        Object.defineProperty(proto, 'font', {
+          ...desc,
+          set(value) {
+            desc.set.call(
+              this,
+              String(value)
+                .replace(/system-ui/g, "'Red Hat Text'")
+                .replace(/'SF Mono', Menlo, monospace/g, "'Red Hat Mono'"),
+            );
+          },
+        });
+      }
+      // Eagerly decode every face at document_start; by the time the app
+      // fetches graph data and runs its first drawFrame, fonts are loaded.
+      for (const family of ['Red Hat Text', 'Red Hat Mono', 'Red Hat Display']) {
+        for (const weight of [400, 500, 600, 700]) {
+          document.fonts.load(`${weight} 13px '${family}'`, 'A').catch(() => {});
+        }
+      }
+    },
+    { css: forcedFontsCss },
+  );
   // ── Workspace & repo APIs ──────────────────────────────────────────
   await page.route('**/api/v1/workspaces', (route) => {
     if (route.request().method() === 'GET') {
