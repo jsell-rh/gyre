@@ -127,45 +127,6 @@ re-ran the focused gates on it:
 - **Dist freshness**: committed `web/dist/assets/index-DJOFnUtw.js` carries `type==="all"`,
   `created_sha`, the `~epoch` regex, and zero `last_commit_sha`; identical to the candidate
   checkpoint; no source change post-dates the dist.
-
-## Shipped (round 6 — recovered-checkpoint continuation, gate repairs)
-
-Continuation of the interrupted `c1d6554c` assignment on recovered tree `164a99b8`
-(base `f4acb4eb`). No task-063 production code changed this round — the implementation
-remains the R1–R4-reviewed one, byte-identical on this HEAD
-(`git diff 656c1281 HEAD -- web/src/lib/ExplorerCanvas.svelte web/src/__tests__/ExplorerCanvas.test.js`
-is empty; no crates/ delta vs base). This round cleared the two failing deterministic
-gates the recovered log predicted, with evidence under `/tmp/stage/review-evidence/task-063-r6/`:
-
-- **Whitespace gate** (`git diff --check f4acb4eb HEAD`, was rc=2): the recovered
-  checkpoint `08f616e0` carried a build.rs-produced `web/dist` rebuild whose bundle
-  `index-DJOFnUtw.js:5` ends inside a minified vendor template-literal whitespace-char
-  class (`[...\` \t\n \r \f \v \uFEFF\`]` — real newline byte; semantic string content,
-  any rebuild reproduces it; the base's own `index-fzyK9GaC.js:5` carries the same
-  pattern). Restored `web/dist` to the base state (`18811787`), following the identical
-  task-196 `b0657d9a` / task-210 round-12 precedent: task branches don't ship dist
-  rebuilds; CI builds from source. Post-repair `git diff --check f4acb4eb HEAD` → rc=0.
-  This supersedes the R3/R4 "fresh dist" narrative: the committed dist is now the base
-  bundle while `web/src` keeps the R4-verified changes — a source/dist divergence that
-  exists on main for every task under this policy, resolved identically by CI's own
-  build-from-source.
-- **Attribution gate** (`check-task-commit-attribution.sh`, was rc=1): commit
-  `f4acb4eb` (`feat(task-189)`, product surface `crates/gyre-server/src/api/personas.rs`)
-  landed on main labeled task-189 but was absent from task-189's `commits:` frontmatter
-  — the same drift class as `a781ede2` repaired in round 5. Recorded the full SHA
-  (`0828c0bf`), the script's prescribed repair, identical to the recordings shipped on
-  five sibling branches. No exemption entries added; gate now passes on this tree.
-- **All 21 static gates + the whitespace check pass** on this tree
-  (static-gates-post-repair.txt: 22× PASS, 0 FAIL).
-- **Focused suites on this HEAD**: `cargo test -p gyre-domain --lib view_query_resolver`
-  → 116 passed / 0 failed; ExplorerCanvas.test.js → 139 passed / 0 failed
-  (`npm ci` with locked deps first). Prior-round failures shown to reproduce
-  worse-or-equal on the clean base (`8c2d1775`) remain characterized as sandbox-load
-  flakes outside this task's files (round-5 evidence).
-- **Transport restriction**: TCP listener unsupported in this sandbox
-  (`tcp_listener_probe: Operation not supported, errno 95` — capabilities.json); no
-  server/browser probe attempted, host verification and GitHub CI own the transport checks.
-
 - **Attribution repair (this round's only source-tree change)**: `a781ede2`
   (`feat(task-210): Repair verified failure on main cd1c5f044e49`, product surface:
   `crates/gyre-server/src/api/admin.rs`, `web/src/*`, landed via base merge) was missing
@@ -174,8 +135,6 @@ gates the recovered log predicted, with evidence under `/tmp/stage/review-eviden
   task-210's frontmatter — the script's prescribed repair, mirroring the identical recording
   already shipped on sibling pipeline branches (e.g. `f4fae4e2`, task-095). No exemption
   entries were added; check now passes on this tree.
-
-(Round 5's attribution repair, recorded above for history, remains in place.)
 
 No task-063 production code required changes this round — the recovered candidate was
 already the R4-approved implementation; the deliverables are the re-verification evidence
