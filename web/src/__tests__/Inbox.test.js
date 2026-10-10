@@ -359,4 +359,67 @@ describe('Inbox', () => {
     const addCell = container.querySelector('.diff-cell.diff-add.diff-right');
     expect(addCell.textContent).toContain('my local line');
   });
+
+  // ── Entity references in expanded items open the detail panel ─────────
+  // ui-layout.md §3 Inline Expansion: "clicking an entity reference within
+  // an expanded item (e.g. 'View Spec', agent name, MR link) opens the
+  // detail panel in Split layout".
+  describe('Entity references → detail panel (ui-layout.md §3)', () => {
+
+    it('View Spec button in an expanded agent_clarification card opens the spec detail panel', async () => {
+      api.myNotifications.mockResolvedValue([makeNotification()]);
+      const openDetailPanel = vi.fn();
+      const { findByRole, container } = render(Inbox, {
+        context: new Map([['openDetailPanel', openDetailPanel]]),
+      });
+      const header = await findByRole('button', { name: /Expand: Agent needs clarification/ });
+      await fireEvent.click(header);
+      await waitFor(() => expect(container.querySelector('.card-body')).not.toBeNull());
+      const viewSpec = await findByRole('button', { name: /view spec/i });
+      await fireEvent.click(viewSpec);
+      expect(openDetailPanel).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'spec' })
+      );
+    });
+
+    it('agent ref-link in an expanded card opens the agent detail panel', async () => {
+      api.myNotifications.mockResolvedValue([makeNotification()]);
+      const openDetailPanel = vi.fn();
+      const { container, findByText } = render(Inbox, {
+        context: new Map([['openDetailPanel', openDetailPanel]]),
+      });
+      const header = await findByText('Agent needs clarification');
+      // Header is the accordion button (ancestor of the title text)
+      const card = header.closest('.accordion-item');
+      await fireEvent.click(card.querySelector('.accordion-header'));
+      await waitFor(() => expect(container.querySelector('.card-body')).not.toBeNull());
+
+      // The agent ref-link in the expanded body (spec ref-link renders first)
+      const agentLink = [...container.querySelectorAll('.ref-link')]
+        .find(l => l.textContent.toLowerCase().includes('agent'));
+      expect(agentLink).toBeTruthy();
+      await fireEvent.click(agentLink);
+      expect(openDetailPanel).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'agent', id: 'worker-8' })
+      );
+    });
+
+    it('MR ref-link in an expanded gate_failure card opens the MR detail panel', async () => {
+      api.myNotifications.mockResolvedValue([gateFailureNotif]);
+      const openDetailPanel = vi.fn();
+      const { container, findByText } = render(Inbox, {
+        context: new Map([['openDetailPanel', openDetailPanel]]),
+      });
+      const title = await findByText('Gate failure: lint');
+      const card = title.closest('.accordion-item');
+      await fireEvent.click(card.querySelector('.accordion-header'));
+      await waitFor(() => expect(container.querySelector('.card-body')).not.toBeNull());
+      const mrLink = container.querySelector('.ref-link');
+      expect(mrLink).toBeTruthy();
+      await fireEvent.click(mrLink);
+      expect(openDetailPanel).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'mr', id: 'mr-uuid-42' })
+      );
+    });
+  });
 });
