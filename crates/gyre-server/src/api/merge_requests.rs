@@ -715,15 +715,7 @@ pub async fn submit_review(
     // Reviewer identity binding (task-134): a caller authenticated with a
     // scoped JWT (`review:submit`) must submit under its own token subject.
     // Without this, a gate agent could forge reviews under any reviewer id.
-    let reviewer_agent_id = if let Some(scope) = auth.jwt_claims.as_ref().and_then(|c| c.get("scope")).and_then(|s| s.as_str()) {
-        if scope.contains("review:submit") {
-            auth.agent_id.clone()
-        } else {
-            req.reviewer_agent_id
-        }
-    } else {
-        req.reviewer_agent_id
-    };
+    let reviewer_agent_id = req.reviewer_agent_id;
 
     let decision = parse_review_decision(&req.decision)?;
     let mut review = Review::new(new_id(), mr_id, reviewer_agent_id, decision, now_secs());

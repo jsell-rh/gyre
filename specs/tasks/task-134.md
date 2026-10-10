@@ -2,7 +2,7 @@
 title: "Define AgentReview and AgentValidation gate types with review protocol"
 spec_ref: "agent-gates.md §Part 1"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "agent-gates.md §Gate Types (Extended)"
   - "agent-gates.md §AgentReview Gate"
@@ -133,3 +133,11 @@ denies loopback `accept()` (errno 95, infrastructure restriction, recorded in
 capabilities); they must run on host/GitHub CI, which is mandatory for
 exact-head verification anyway. `cargo test --all` is owned by verification
 and publication; focused suites above cover every touched module.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/api/merge_requests.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
