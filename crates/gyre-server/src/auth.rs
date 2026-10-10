@@ -825,11 +825,34 @@ async fn find_or_create_user(
 
     // Derive the URL-safe username from the SSO preferred_username. When
     // sanitization leaves nothing usable, fall back to the subject (the
-    // migration's backfill does the same for legacy rows).
-    let username =
-        User::sanitize_username(preferred_username).unwrap_or_else(|| external_id.to_string());
-
+    // migration's backfill does the same for legacy rows). sanitize_username
+    // is lossy — distinct IdP handles ("Jordan Sell" / "Jordan_Sell") can
+    // derive the same URL-safe username — and usernames are globally unique
+    // (idx_users_username + the create() port contract), so the first login
+    // of a second user whose derived handle collides resolves it with the
+    // migration's deterministic suffix scheme (base, base-2, base-3, ...)
+    // instead of failing the login (a 401 that would repeat forever:
+    // find_by_external_id keeps missing, and the username is immutable).
     let id = Id::new(uuid::Uuid::new_v4().to_string());
+    let username = match resolve_unique_username(state, &base_username).await {
+        Ok(handle) => handle,
+        Err(e) => {
+            // Every Err means the base handle is already taken (the walk
+            // probes the base first), so falling back to the subject
+            // verbatim would fail create() and reproduce the lockout.
+            // Instead mirror migration 000056's escape hatch for
+            // unsanitizable names: "u-<row id>", URL-safe and unique by
+            // the freshly generated primary key.
+            tracing::warn!(
+                external_id,
+                base = %base_username,
+                error = %e,
+                "no unique handle derivable from the SSO username; assigning a generated handle"
+            );
+            format!("u-{}", id.as_str())
+        }
+    };
+
     let mut user = User::new_sso(
         id,
         external_id,
@@ -843,8 +866,68 @@ async fn find_or_create_user(
     }
     user.last_login_at = Some(now);
 
+    // create() can still fail on the unique index if another user was
+    // provisioned with the same handle between the uniqueness probe and the
+    // insert (TOCTOU): the next login re-runs this resolution, so the
+    // transient conflict self-heals rather than locking the user out.
     state.users.create(&user).await?;
     Ok(user)
+}
+
+/// Derive a globally-unique handle for a freshly provisioned user.
+///
+/// Mirrors migration 000056's dedup pass 1: the first user keeps the base
+/// handle, later colliding users get deterministic numeric suffixes
+/// (base-2, base-3, ...). An exhausted suffix space bails and the caller
+/// assigns a generated `u-<id>` handle (unique by the fresh primary key).
+async fn resolve_unique_username(
+    state: &Arc<AppState>,
+    base: &str,
+) -> anyhow::Result<String> {
+    let mut candidate = base.to_string();
+    // Bounded at 2..=10_000 so a pathological store cannot pin this loop
+    // open; an exhausted space bails to the generated-handle fallback.
+    for n in 2u32..=10_000 {
+        if state.users.find_by_username(&candidate).await?.is_none() {
+            return Ok(candidate);
+        }
+        candidate = suffixed_username(base, n)?;
+    }
+    anyhow::bail!("username suffix space exhausted for base {base:?}");
+}
+
+/// Build the `n`-th collision candidate for a base handle: the base
+/// truncated so `base-{n}` fits the 64-char cap, with any truncation
+/// artifact repaired so the candidate passes the URL-safe handle contract.
+///
+/// Pure (no storage probe) so it is directly unit-testable. Fails only when
+/// no prefix of `base` can carry a suffix.
+fn suffixed_username(base: &str, n: u32) -> anyhow::Result<String> {
+    let suffix = format!("-{n}");
+    // Handles are ASCII-only (validate_username), so byte length is char
+    // length and byte slicing cannot split a char.
+    let budget = 64usize.saturating_sub(suffix.len());
+    let mut stem = base
+        .as_bytes()
+        .get(..budget)
+        .unwrap_or(base.as_bytes())
+        .to_vec();
+    // Truncation can leave a trailing separator or a dangling "--": pop
+    // until the stem itself passes the handle contract.
+    while !User::validate_username(std::str::from_utf8(&stem)
+        .map_err(|_| anyhow::anyhow!("username base {base:?} is not ASCII"))?)
+    .is_ok()
+    {
+        if stem.is_empty() {
+            anyhow::bail!("no URL-safe prefix of username {base:?} fits the 64-char cap");
+        }
+        stem.pop();
+    }
+    Ok(format!(
+        "{}{}",
+        std::str::from_utf8(&stem).expect("stem is ASCII (validated above)"),
+        suffix
+    ))
 }
 
 // -- Federation JWT validation (G11) ------------------------------------------
@@ -1595,6 +1678,183 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(user.username, "opaque-sub-42");
+    }
+
+    #[tokio::test]
+    async fn colliding_derived_username_resolves_with_suffix_and_logs_in() {
+        // sanitize_username is lossy: distinct IdP handles ("Jordan Sell"
+        // and "Jordan_Sell") both derive "jordan-sell", and usernames are
+        // globally unique. The second SSO user's first login must resolve
+        // the collision with the migration's suffix scheme (base-2) instead
+        // of failing with a 401 that would repeat forever (find_by_external_id
+        // keeps missing, username immutable, no pre-auth recovery path).
+        let state = make_test_state_with_jwt();
+        let app: Router = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state.clone());
+
+        let first_claims = serde_json::json!({
+            "sub": "collision-sub-1",
+            "preferred_username": "Jordan Sell"
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", sign_test_jwt(&first_claims, 3600)),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let second_claims = serde_json::json!({
+            "sub": "collision-sub-2",
+            "preferred_username": "Jordan_Sell"
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header(
+                        "Authorization",
+                        format!("Bearer {}", sign_test_jwt(&second_claims, 3600)),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a distinct SSO user whose derived handle collides must not be locked out"
+        );
+
+        let first = state
+            .users
+            .find_by_external_id("collision-sub-1")
+            .await
+            .unwrap()
+            .expect("first user provisioned");
+        assert_eq!(first.username, "jordan-sell");
+        let second = state
+            .users
+            .find_by_external_id("collision-sub-2")
+            .await
+            .unwrap()
+            .expect("second user provisioned");
+        // Migration dedup pass 1 scheme: base keeps the handle, the next
+        // colliding user gets "-2".
+        assert_eq!(second.username, "jordan-sell-2");
+        assert_eq!(second.display_name, "Jordan_Sell");
+        assert!(second.last_login_at.is_some());
+        assert_ne!(first.id, second.id);
+    }
+
+    #[tokio::test]
+    async fn colliding_derived_username_uses_next_suffix_for_third_user() {
+        use gyre_common::Id;
+        use gyre_domain::User;
+
+        // A pre-existing handle that already occupies the "-2" slot forces
+        // the third user onto "-3" (the same walk the migration performs
+        // before creating idx_users_username).
+        let state = make_test_state_with_jwt();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut squatter = User::new_sso(
+            Id::new("u-squatter".to_string()),
+            "squatter-sub",
+            "jordan-sell-2",
+            "Squatter",
+            now,
+        );
+        squatter.roles = vec![UserRole::ReadOnly];
+        state.users.create(&squatter).await.unwrap();
+
+        let app: Router = Router::new()
+            .route("/protected", get(authenticated_handler))
+            .with_state(state.clone());
+        for (sub, preferred) in [
+            ("collision-sub-1", "Jordan Sell"),
+            ("collision-sub-2", "Jordan_Sell"),
+        ] {
+            let claims = serde_json::json!({
+                "sub": sub,
+                "preferred_username": preferred
+            });
+            let resp = app
+                .clone()
+                .oneshot(
+                   Request::builder()
+                        .uri("/protected")
+                        .header(
+                            "Authorization",
+                            format!("Bearer {}", sign_test_jwt(&claims, 3600)),
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "login must succeed for {sub} even with the -2 slot squatted"
+            );
+        }
+
+        let first = state
+            .users
+            .find_by_external_id("collision-sub-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.username, "jordan-sell");
+        let second = state
+            .users
+            .find_by_external_id("collision-sub-2")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            second.username, "jordan-sell-3",
+            "the -2 slot is occupied, so the walk must continue to -3"
+        );
+    }
+
+    #[test]
+    fn suffixed_username_truncates_and_repairs_the_stem() {
+        use super::suffixed_username;
+        use gyre_domain::User;
+
+        // Pure helper: the 64-char cap truncates the base, and truncation
+        // artifacts (trailing separator, dangling "--") are repaired so the
+        // candidate still passes the handle contract.
+        let long = "a".repeat(70);
+        let got = suffixed_username(&long, 2).unwrap();
+        assert_eq!(got, format!("{}-2", "a".repeat(62)));
+        assert!(User::validate_username(&got).is_ok());
+
+        // Base whose 62-char prefix ends in a separator: the stem must be
+        // trimmed back to the last alphanumeric before the suffix.
+        let mut sp = "a".repeat(61);
+        sp.push('-');
+        let got = suffixed_username(&sp, 2).unwrap();
+        assert_eq!(got, format!("{}-2", "a".repeat(61)));
+        assert!(User::validate_username(&got).is_ok());
+
+        // A non-ASCII base cannot produce an ASCII handle: hard error, not
+        // a silently mangled fallback.
+        assert!(suffixed_username("jörg", 2).is_err());
     }
 
     #[tokio::test]
