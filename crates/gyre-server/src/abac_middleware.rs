@@ -630,6 +630,55 @@ pub fn m34_builtin_policies() -> Vec<Policy> {
             created_at: now,
             updated_at: now,
         },
+        // Priority 800: Developer workspace role → allow LLM generation
+        // (`generate` action) on explorer_view / spec / workspace resources.
+        //
+        // HSI §1444-1445 (spec-amendment table): `generate` is distinct from
+        // `write` so policies can permit LLM generation while restricting
+        // CRUD. The four LLM endpoints (`explorer-views/generate`,
+        // `briefing/ask`, `specs/assist`, `prompts/save`) use
+        // `action_override: "generate"`, which no other builtin Allow
+        // covers — without this policy, `default-deny` 403s every LLM call
+        // for non-Admin users.
+        //
+        // Keyed on `subject.workspace_role` (from JWT claims), not the
+        // global role: LLM generation is a workspace-scoped capability
+        // (HSI §1325 "Requires workspace membership"), so a user with a
+        // global Developer role but Viewer workspace role must be denied.
+        // `briefing/ask` maps to resource_type `workspace` (HSI §1325),
+        // so `workspace` must be covered alongside the spec's
+        // `explorer_view` and `spec` (hierarchy-enforcement.md built-ins
+        // table).
+        Policy {
+            id: Id::new("builtin-developer-generate-access"),
+            name: "developer-generate-access".to_string(),
+            description: "Developer and Admin workspace roles can perform the generate action on LLM endpoints".to_string(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 800,
+            effect: PolicyEffect::Allow,
+            conditions: vec![Condition {
+                attribute: "subject.workspace_role".to_string(),
+                operator: ConditionOp::In,
+                value: ConditionValue::StringList(vec![
+                    "Owner".to_string(),
+                    "Admin".to_string(),
+                    "Developer".to_string(),
+                ]),
+            }],
+            actions: vec!["generate".to_string()],
+            resource_types: vec![
+                "explorer_view".to_string(),
+                "spec".to_string(),
+                "workspace".to_string(),
+            ],
+            enabled: true,
+            built_in: true,
+            immutable: false,
+            created_by: by.clone(),
+            created_at: now,
+            updated_at: now,
+        },
         // Priority 600: ReadOnly role → allow only read.
         Policy {
             id: Id::new("builtin-readonly-get-only"),
