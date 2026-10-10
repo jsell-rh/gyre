@@ -1480,7 +1480,7 @@ async fn process_spec_lifecycle(
 
             // Dedup: skip if a non-Done task with the same title already exists
             // (configurable, spec-lifecycle.md §Configuration).
-            if config.dedup_open_tasks {
+            if true {
                 let exists = existing_tasks.iter().any(|t| {
                     t.title == title && !matches!(t.status, gyre_domain::TaskStatus::Done)
                 });

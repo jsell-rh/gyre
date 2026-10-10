@@ -2,7 +2,7 @@
 title: "Externalize spec lifecycle configuration"
 spec_ref: "spec-lifecycle.md §Configuration"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "spec-lifecycle.md §Configuration"
 commits: ["caadfea4b4707d80b0217f8ebd8771e195180fb7", "a9b7d4945979728e7461906fc5532000013b07c9", "483559c07e9276be64746e96fa5fde1c005c0250", "8cf379a075e2ecb069fc3084f0edbcd298a7400b", "219b976d5634ab1a393c2a18b88d8b108eaf00d1", "8f512ea3ce235e80fd0e751b4ed625ce22ccaa16", "be0b113d055d0a2e690b1cb47c5fde53420bfb00", "8fce2a130fb6b2d75d840ab4445cf411186512db", "e74159d30c0ea5f639597e3c9e366335ebce2e28"]
@@ -176,3 +176,11 @@ verification stage per assignment instructions; this sandbox cannot run TCP
 listeners (capability probe errno 95, `capabilities.json`), so the
 `git_clone_empty_repo_via_smart_http` test and live-UI browser drive
 require host verification.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/git_http.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
