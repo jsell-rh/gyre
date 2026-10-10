@@ -99,43 +99,35 @@ The scope resolver is the core deliverable. It takes a `Scope` enum variant + th
 
 ## Shipped
 
-Recovered-interrupted-assignment continuation. The implementation itself was complete and
-independently reviewed through four rounds (`specs/reviews/task-063.md` R1–R4; R4 set
-`progress: complete` on the F1/F2/F3 repairs). This round re-verified the recovered tree and
-re-ran the focused gates on it:
+Recovered-interrupted-assignment continuation (repair id `423d57a0`, candidate `14088b68`).
+The implementation is unchanged from the R4-approved state — no task-063 production code
+required changes; this round verified the recovered tree end-to-end:
 
-- **Scope resolution, all 6 types**: Rust resolver `crates/gyre-domain/src/view_query_resolver.rs`
-  (Diff :722–818; scope unit tests incl. 3 Diff tests) — `cargo test -p gyre-domain --lib
-  view_query_resolver` → **116 passed, 0 failed** (gcc linker override; workspace mold/clang
-  absent — environmental). Client resolution `web/src/lib/ExplorerCanvas.svelte:1940–2076`
-  covers all/focus/filter/test_gaps/concept/diff, reads the real `GraphNodeResponse` fields
-  (`created_sha`/`last_modified_sha`/`created_at`/`last_modified_at`) and mirrors server Diff
-  semantics (`~epoch` half-open temporal, ≥7-char SHA prefix, from-exclusion).
-- **Emphasis/edges/zoom/annotation/interactive bindings**: verified present in the working
-  tree at the R4-cited lines; `web/src/lib/ExplorerCanvas.svelte` and
+- **Tree integrity**: `web/src/lib/ExplorerCanvas.svelte` and
   `web/src/__tests__/ExplorerCanvas.test.js` are byte-identical to the R4-verified commit
-  `656c1281` (`git diff 656c1281..HEAD -- <files>` is empty; the web/src delta since then is
-  other tasks' no-sidebar/WorkspaceHome work, which does not touch these files).
-- **Focused suites on this HEAD**: `cargo test -p gyre-domain --lib view_query_resolver`
-  → 116 passed / 0 failed; ExplorerCanvas.test.js (after `npm ci`, locked deps) →
-  **139 passed, 0 failed**.
-- **Dist policy**: `web/dist` was restored to the base state by round 6 (`18811787`) after
-  the recovered checkpoint's committed rebuild failed the whitespace gate — the bundle's
-  minified vendor svelte-i18n whitespace-char class ends a line in a literal tab/newline
-  byte, so any diff-introduced rebuild trips `git diff --check` (rc=2, verification finding
-  `68edd07c`; the base's own `index-fzyK9GaC.js` carries the same pattern but no
-  diff-introduced lines). Task branches ship no dist rebuilds; CI builds from source
-  (`web/src` keeps the R4-verified fixes). On this HEAD `git diff 6bf777a6..HEAD --
-  web/dist/` is empty and `git diff --check 6bf777a6..HEAD` → rc=0.
+  `656c1281` (diff 0 lines). All 5 frontmatter SHAs resolve. F1/F2/F3 repairs confirmed
+  present: zero `last_commit_sha` in production source (3 occurrences in tests are
+  explanatory comments), `type === 'all'` branch at ExplorerCanvas.svelte:1940.
+- **Scope resolution, all 6 types**: Rust resolver `crates/gyre-domain/src/view_query_resolver.rs`
+  (Diff :722–818, scope unit tests incl. 3 Diff tests) — `cargo test -p gyre-domain --lib
+  view_query_resolver` → **116 passed, 0 failed** (gcc linker override; workspace mold/clang
+  absent — environmental). Client resolution `ExplorerCanvas.svelte:1940–2076` covers
+  all/focus/filter/test_gaps/concept/diff against the real `GraphNodeResponse` fields,
+  mirroring server Diff semantics (`~epoch` half-open temporal, ≥7-char SHA prefix,
+  from-exclusion).
+- **Emphasis/edges/zoom/annotation/interactive bindings**: verified present at the
+  R4-cited lines (dim :2117–2119, edge restriction :3575–3578, annotation :4992–5009,
+  `$clicked` :4160–4171); coverage rows 4–9 spot-checked against the current tree —
+  accurate, no drift.
+- **Focused web suite**: after `npm ci` (locked deps, rc=0), `npx vitest run
+  src/__tests__/ExplorerCanvas.test.js` → **139 passed, 0 failed**.
+- **Dist policy**: task branches ship no dist rebuilds (whitespace gate finding
+  `68edd07c`); `git diff 6bf777a6..HEAD -- web/dist/` is empty and
+  `git diff --check 6bf777a6..HEAD` → rc=0. CI builds from source.
+- **Attribution**: `scripts/check-task-commit-attribution.sh` → OK rc=0 on this tree;
+  no exemption entries added.
 - **Transport restriction** (unchanged): TCP listener unsupported in this sandbox
-  (`capabilities.json`: `Operation not supported`, errno 95); no server/browser probe
-  attempted — host verification and GitHub CI own the transport checks.
-- **Attribution repair (prior round's source-tree change, still holding)**: `6bf777a6`
-  (task-200), `a781ede2` (task-210), and `f4acb4eb` (task-189) — main-side product-surface
-  commits that landed via base merges — are recorded in their tasks' `commits:` frontmatter;
-  `scripts/check-task-commit-attribution.sh` passes rc=0 on this tree. No exemption entries
-  were added.
+  (`capabilities.json` errno 95); no server/browser probe attempted — host verification
+  and GitHub CI own transport checks.
 
-No task-063 production code required changes this round — the recovered candidate was
-already the R4-approved implementation; the deliverables are the re-verification evidence
-above and the gate repairs. Evidence: `/tmp/stage/review-evidence/task-063-r8/`.
+Evidence: `/tmp/stage/review-evidence/task-063-r9/`.
