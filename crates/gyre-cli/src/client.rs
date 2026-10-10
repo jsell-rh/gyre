@@ -28,7 +28,10 @@ pub struct RegisterAgentResponse {
     pub status: String,
     pub auth_token: String,
 }
+/// GET /api/v1/agents/:id/stack response. `agent_id` echoes the request
+/// path; kept for response-shape fidelity with the server, not read locally.
 #[derive(Deserialize, Debug, Clone)]
+#[allow(dead_code)]
 pub struct AgentStackResponse {
     pub agent_id: String,
     pub stack: gyre_domain::stack::AgentStack,

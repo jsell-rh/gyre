@@ -21,7 +21,6 @@ use axum::{
 };
 use gyre_common::Id;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 use crate::{auth::AuthenticatedAgent, AppState};

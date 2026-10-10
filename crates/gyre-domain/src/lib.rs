@@ -109,6 +109,7 @@ pub use spec_assertions::{
     evaluate_assertions, parse_assertions, AssertionResult, Comparison, ParsedAssertion, Predicate,
     Subject,
 };
+pub use spec_ledger::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry};
 pub use spec_policy::SpecPolicy;
 pub use stack::{AgentStack, HookEntry, McpServerEntry, StackLockfile};
 pub use task::{Task, TaskError, TaskPriority, TaskStatus, TaskType};

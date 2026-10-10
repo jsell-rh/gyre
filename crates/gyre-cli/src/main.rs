@@ -1528,7 +1528,7 @@ async fn run_stack_lock(output: Option<String>) -> Result<()> {
         .unwrap_or_default()
         .as_secs();
     let lock = gyre_domain::stack::StackLockfile::from_stack(&resp.stack, now);
-    let content = lock.to_toml()?;
+    let content = lock.to_toml().map_err(anyhow::Error::msg)?;
 
     let path = output.unwrap_or_else(|| "gyre-stack.lock".to_string());
     std::fs::write(&path, &content)?;

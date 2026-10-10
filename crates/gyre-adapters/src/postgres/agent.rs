@@ -73,7 +73,8 @@ struct AgentRow {
     usage_cost_usd: Option<f64>,
     orchestrator_type: String,
     repo_id: Option<String>,
-    attestation_level: Option<i64>,
+    restart_on_failure: bool,
+    attestation_level: Option<i32>,
 }
 
 impl AgentRow {
@@ -117,7 +118,7 @@ struct NewAgentRow<'a> {
     orchestrator_type: &'a str,
     repo_id: Option<&'a str>,
     restart_on_failure: bool,
-    attestation_level: Option<i64>,
+    attestation_level: Option<i32>,
 }
 
 #[async_trait]
@@ -143,7 +144,7 @@ impl AgentRepository for PgStorage {
                 orchestrator_type: orchestrator_type_to_str(&a.orchestrator_type),
                 repo_id: a.repo_id.as_ref().map(|id| id.as_str()),
                 restart_on_failure: a.restart_on_failure,
-                attestation_level: a.attestation_level.map(|v| v as i64),
+                attestation_level: a.attestation_level.map(|v| v as i32),
             };
             diesel::insert_into(agents::table)
                 .values(&row)
@@ -257,7 +258,7 @@ impl AgentRepository for PgStorage {
                 agents::orchestrator_type.eq(orchestrator_type_to_str(&a.orchestrator_type)),
                 agents::repo_id.eq(a.repo_id.as_ref().map(|id| id.as_str())),
                 agents::restart_on_failure.eq(a.restart_on_failure),
-                agents::attestation_level.eq(a.attestation_level.map(|v| v as i64)),
+                agents::attestation_level.eq(a.attestation_level.map(|v| v as i32)),
             ))
             .execute(&mut *conn)
             .context("update agent")?;

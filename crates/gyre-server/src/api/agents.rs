@@ -86,6 +86,8 @@ impl From<Agent> for AgentResponse {
             repo_id: None,
             branch: None,
             spec_path: None,
+            task_id: None,
+            completed_at: None,
             attestation_level: a.attestation_level,
             mr_id: None,
         }

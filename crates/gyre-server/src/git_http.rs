@@ -4731,7 +4731,6 @@ mod tests {
         assert_eq!(gate.len(), 1, "should have 1 gate constraint");
         assert_eq!(gate[0].gate_name, "Code Review");
     }
-}    // ── TASK-165: stack policy enforcement tests ─────────────────────────
 
     use gyre_domain::Agent;
     use gyre_domain::stack::{AgentStack, HookEntry, McpServerEntry, StackLockfile};
@@ -4768,7 +4767,7 @@ mod tests {
             .unwrap();
         let mut input = String::new();
         for (path, content) in files {
-            let blob_sha = std::process::Command::new("git")
+            let mut blob_sha = std::process::Command::new("git")
                 .args(["-C", repo_path, "hash-object", "-w", "--stdin"])
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
@@ -4823,6 +4822,9 @@ mod tests {
         body
     }
 
+    /// Seed an agent with a registered stack AND a per-agent push token, so
+    /// the test pushes AS the agent (the global test token authenticates as
+    /// "system", which would resolve the wrong attestation context).
     async fn seed_agent_and_stack(state: &Arc<crate::AppState>, agent_id: &str, stack: &AgentStack) {
         let agent = Agent::new(Id::new(agent_id), "push-agent", 0);
         state.agents.create(&agent).await.unwrap();
@@ -4835,6 +4837,34 @@ mod tests {
             )
             .await
             .unwrap();
+        state
+            .kv_store
+            .kv_set(
+                "agent_tokens",
+                agent_id,
+                format!("tok-{agent_id}"),
+            )
+            .await
+            .unwrap();
+    }
+
+    /// Register a per-agent push token for an agent with no stack (level 1).
+    async fn seed_agent_token(state: &Arc<crate::AppState>, agent_id: &str) {
+        let agent = Agent::new(Id::new(agent_id), "push-agent", 0);
+        state.agents.create(&agent).await.unwrap();
+        state
+            .kv_store
+            .kv_set(
+                "agent_tokens",
+                agent_id,
+                format!("tok-{agent_id}"),
+            )
+            .await
+            .unwrap();
+    }
+
+    fn agent_auth(agent_id: &str) -> String {
+        format!("Bearer tok-{agent_id}")
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4842,8 +4872,7 @@ mod tests {
         let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
 
         // Level-1 pusher: no stack, no workload attestation.
-        let agent = Agent::new(Id::new("agent-l1"), "l1-agent", 0);
-        state.agents.create(&agent).await.unwrap();
+        seed_agent_token(&state, "agent-l1").await;
 
         // Policy: min level 2, block.
         let policy = serde_json::json!({
@@ -4868,7 +4897,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
-                    .header("Authorization", auth_header())
+                    .header("Authorization", agent_auth("agent-l1"))
                     .header("content-type", "application/x-git-receive-pack")
                     .body(Body::from(receive_pack_body(&sha, "refs/heads/feat")))
                     .unwrap(),
@@ -4892,17 +4921,18 @@ mod tests {
             .unwrap();
         assert!(!out.status.success(), "ref must be deleted after rejection");
 
-        // Agent record keeps level 1 (resolved and stored before rejection? no —
-        // stored only on accept; level 1 pusher was rejected, so no record
-        // write happens through the accept path).
+        // Level 1 is not stored on rejection: store_attestation_level runs
+        // only on the accept path (enforce_stack_policy returned Err here).
+        let stored = state.agents.find_by_id(&Id::new("agent-l1")).await.unwrap();
+        assert_eq!(stored.and_then(|a| a.attestation_level), None);
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn push_below_min_level_warn_mode_flagged_and_accepted() {
         let (app, state, _tmp, ws_slug, repo_name, repo_path) = git_app_with_repo().await;
 
-        let agent = Agent::new(Id::new("agent-l1-warn"), "l1-agent", 0);
-        state.agents.create(&agent).await.unwrap();
+        // Level-1 pusher (no stack) authenticating with its own token.
+        seed_agent_token(&state, "agent-l1-warn").await;
 
         let policy = serde_json::json!({
             "fingerprint": "fp-min2-warn",
@@ -4926,7 +4956,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
-                    .header("Authorization", auth_header())
+                    .header("Authorization", agent_auth("agent-l1-warn"))
                     .header("content-type", "application/x-git-receive-pack")
                     .body(Body::from(receive_pack_body(&sha, "refs/heads/warn-branch")))
                     .unwrap(),
@@ -4993,7 +5023,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
-                    .header("Authorization", auth_header())
+                    .header("Authorization", agent_auth("agent-l2"))
                     .header("content-type", "application/x-git-receive-pack")
                     .body(Body::from(receive_pack_body(&sha, "refs/heads/l2-branch")))
                     .unwrap(),
@@ -5054,7 +5084,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
-                    .header("Authorization", auth_header())
+                    .header("Authorization", agent_auth("agent-l3"))
                     .header("content-type", "application/x-git-receive-pack")
                     .body(Body::from(receive_pack_body(&sha, "refs/heads/l3-branch")))
                     .unwrap(),
@@ -5105,7 +5135,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
-                    .header("Authorization", auth_header())
+                    .header("Authorization", agent_auth("agent-drift"))
                     .header("content-type", "application/x-git-receive-pack")
                     .body(Body::from(receive_pack_body(&sha, "refs/heads/drift")))
                     .unwrap(),
@@ -5158,7 +5188,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
-                    .header("Authorization", auth_header())
+                    .header("Authorization", agent_auth("agent-match"))
                     .header("content-type", "application/x-git-receive-pack")
                     .body(Body::from(receive_pack_body(&sha, "refs/heads/match")))
                     .unwrap(),
@@ -5204,7 +5234,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri(format!("/git/{ws_slug}/{repo_name}/git-receive-pack"))
-                    .header("Authorization", auth_header())
+                    .header("Authorization", agent_auth("agent-tamper"))
                     .header("content-type", "application/x-git-receive-pack")
                     .body(Body::from(receive_pack_body(&sha, "refs/heads/tamper")))
                     .unwrap(),
