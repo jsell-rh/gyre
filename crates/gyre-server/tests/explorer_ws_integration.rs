@@ -394,6 +394,84 @@ async fn explorer_ws_rate_limiting() {
 }
 
 #[tokio::test]
+async fn explorer_ws_status_progression() {
+    let ctx = WsCtx::new().await;
+    let repo_id = ctx.repo_id().await;
+    let (mut sink, mut stream) = ctx.connect(&repo_id).await;
+
+    // No LLM is configured in tests, so the agent takes the no-LLM fallback
+    // path. Expected wire sequence for a message turn (spec §6):
+    //   status(thinking) [from the session loop]
+    //   status(thinking, agent_path=native) [from run_explorer_agent]
+    //   text(done=true) + view_query [from handle_no_llm_fallback]
+    //   status(ready) [from the session loop after the agent completes]
+    // Every observed status value MUST be one of the three spec values —
+    // the frontend maps only those (ExplorerChat.svelte) and silently drops
+    // anything else, leaving the status indicator stale.
+    sink.send(Message::Text(
+        json!({
+            "type": "message",
+            "text": "what is the blast radius of TaskPort?",
+            "canvas_state": {}
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+
+    let mut saw_text_done = false;
+    let mut saw_view_query = false;
+    let mut saw_ready = false;
+    let mut observed_statuses: Vec<String> = Vec::new();
+
+    for _ in 0..30 {
+        let Some(msg) = WsCtx::read_msg(&mut stream).await else {
+            break;
+        };
+        match msg["type"].as_str() {
+            Some("status") => {
+                let status = msg["status"].as_str().unwrap_or_default().to_string();
+                assert!(
+                    status == "thinking" || status == "refining" || status == "ready",
+                    "Off-contract status value on the wire: {status:?} (spec §6: \
+                     thinking | refining | ready)"
+                );
+                observed_statuses.push(status.clone());
+                if status == "ready" {
+                    saw_ready = true;
+                    // ready is the terminal status for the turn
+                    break;
+                }
+            }
+            Some("text") => {
+                if msg["done"] == serde_json::json!(true) {
+                    saw_text_done = true;
+                }
+            }
+            Some("view_query") => {
+                saw_view_query = true;
+            }
+            _ => {} // warnings, pings, etc.
+        }
+    }
+
+    assert!(
+        !observed_statuses.is_empty(),
+        "Should receive at least one status message"
+    );
+    assert!(
+        observed_statuses
+            .iter()
+            .any(|s| s == "thinking"),
+        "Should see thinking status while the agent works, got {observed_statuses:?}"
+    );
+    assert!(saw_ready, "Should see terminal ready status, got {observed_statuses:?}");
+    assert!(saw_text_done, "Should receive final text (done=true)");
+    assert!(saw_view_query, "Should receive a view_query for blast-radius question");
+}
+
+#[tokio::test]
 async fn explorer_ws_save_view_validation() {
     let ctx = WsCtx::new().await;
     let repo_id = ctx.repo_id().await;

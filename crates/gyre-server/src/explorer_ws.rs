@@ -129,6 +129,30 @@ const MAX_TOOL_TURNS: usize = 8;
 /// Per spec: 3 dedicated refinement turns for the self-check loop.
 /// These are tracked independently from tool-use turns.
 const MAX_REFINEMENT_TURNS: usize = 3;
+/// Explorer status protocol values (spec: explorer-implementation.md §6).
+/// The Status message's `status` field MUST be one of exactly these three
+/// values — the frontend status indicator maps only these (ExplorerChat.svelte);
+/// any other string is silently dropped and the indicator goes stale.
+const STATUS_THINKING: &str = "thinking";
+const STATUS_REFINING: &str = "refining";
+const STATUS_READY: &str = "ready";
+
+/// Normalize a status string from the SDK subprocess to the three-value
+/// status protocol. The bundled SDK script emits spec-conformant values, but
+/// the subprocess is swappable (`GYRE_EXPLORER_SDK_PATH`), so an alternate
+/// script's free-form statuses ("Analyzing...", "Synthesizing answer...")
+/// must not leak onto the wire off-contract. Unknown values map to `thinking`
+/// (the "agent is working" default).
+fn normalize_status(raw: &str) -> &'static str {
+    let lowered = raw.trim().to_lowercase();
+    if lowered.contains(STATUS_REFINING) {
+        STATUS_REFINING
+    } else if lowered.contains(STATUS_READY) {
+        STATUS_READY
+    } else {
+        STATUS_THINKING
+    }
+}
 
 /// Max messages per session before requiring reconnect (prevents unbounded history).
 /// Set high enough for deep conversational exploration (100 back-and-forth turns).
@@ -704,7 +728,7 @@ async fn handle_explorer_session(
                 }
 
                 // Send thinking status
-                send_status(&mut sender, "thinking").await;
+                send_status(&mut sender, STATUS_THINKING).await;
 
                 // Reset cancel signal for this run
                 let _ = cancel_tx.send(false);
@@ -817,7 +841,7 @@ async fn handle_explorer_session(
 
                 // Include graph data age so the UI can display freshness
                 let age = cache_time.elapsed().as_secs();
-                send_status_full(&mut sender, "ready", None, Some(age)).await;
+                send_status_full(&mut sender, STATUS_READY, None, Some(age)).await;
             }
 
             ExplorerClientMessage::SaveView {
@@ -1906,7 +1930,7 @@ async fn run_explorer_agent_sdk(
                             }
                             "status" => {
                                 if let Some(status) = msg.get("status").and_then(|s| s.as_str()) {
-                                    if !send_status(sender, status).await {
+                                    if !send_status(sender, normalize_status(status)).await {
                                         break; // Client disconnected
                                     }
                                 }
@@ -2353,7 +2377,7 @@ async fn run_explorer_agent(
                 "Non-admin attempted SDK explorer path — falling through to native LLM"
             );
         } else {
-            send_status_with_path(sender, "thinking", Some("sdk")).await;
+            send_status_with_path(sender, STATUS_THINKING, Some("sdk")).await;
             return run_explorer_agent_sdk(
                 state,
                 repo_id,
@@ -2371,7 +2395,7 @@ async fn run_explorer_agent(
     }
 
     // Send agent path indicator for native LLM path
-    send_status_with_path(sender, "thinking", Some("native")).await;
+    send_status_with_path(sender, STATUS_THINKING, Some("native")).await;
 
     let llm = match &state.llm {
         Some(llm) => llm.clone(),
@@ -2788,21 +2812,9 @@ async fn run_explorer_agent(
 
         // Send a status update so the user sees feedback during LLM inference
         // (which can take 3-15 seconds). Without this the UI appears frozen.
-        let status_text = if tool_turn_count > 0 {
-            "Analyzing..."
-        } else {
-            "Thinking..."
-        };
-        let status_msg = ExplorerServerMessage::Status {
-            status: status_text.to_string(),
-            agent_path: None,
-            graph_data_age_secs: None,
-        };
-        let _ = sender
-            .send(Message::Text(
-                serialize_msg(&status_msg).unwrap_or_default().into(),
-            ))
-            .await;
+        // Both first-turn (thinking) and tool-turn (analyzing) phases map to
+        // the spec's "thinking" status — the working state before refinement.
+        let _ = send_status(sender, STATUS_THINKING).await;
 
         // Timeout on LLM calls to prevent blocking the session indefinitely.
         // If the client disconnects, subsequent send() calls will fail and break the loop.
@@ -2878,8 +2890,8 @@ async fn run_explorer_agent(
                     // Stream a warning with the raw JSON so the user can see what was attempted.
                     let raw_preview = serde_json::to_string_pretty(&query_json)
                         .unwrap_or_else(|_| query_json.to_string());
-                    let truncated = if raw_preview.len() > 500 {
-                        format!("{}...", &raw_preview[..500])
+                    let truncated = if raw_preview.chars().count() > 500 {
+                        format!("{}...", raw_preview.chars().take(500).collect::<String>())
                     } else {
                         raw_preview
                     };
@@ -2952,7 +2964,7 @@ async fn run_explorer_agent(
                         // tool-use architecture for refinement (rather than a plain
                         // user text message which breaks the tool-use flow).
                         refinement_count += 1;
-                        send_status(sender, "refining").await;
+                        send_status(sender, STATUS_REFINING).await;
 
                         // Synthetic tool_use ID for the dry-run self-check
                         let synthetic_tool_id = format!("selfcheck_{}", refinement_count);
@@ -3065,7 +3077,7 @@ async fn run_explorer_agent(
             break;
         }
 
-        if !send_status(sender, "refining").await {
+        if !send_status(sender, STATUS_REFINING).await {
             break; // Client disconnected
         }
 
@@ -3120,17 +3132,9 @@ async fn run_explorer_agent(
         tool_turn_count += 1;
         if tool_turn_count >= MAX_TOOL_TURNS {
             info!("Explorer agent hit max tool turns ({MAX_TOOL_TURNS}), forcing final response");
-            // Notify the user that we're synthesizing the final answer
-            let status_msg = ExplorerServerMessage::Status {
-                status: "Synthesizing answer...".to_string(),
-                agent_path: None,
-                graph_data_age_secs: None,
-            };
-            let _ = sender
-                .send(Message::Text(
-                    serialize_msg(&status_msg).unwrap_or_default().into(),
-                ))
-                .await;
+            // Notify the user that we're synthesizing the final answer.
+            // Synthesis is the final refinement pass — spec status "refining".
+            let _ = send_status(sender, STATUS_REFINING).await;
             // Force one final response without tools so the LLM synthesizes.
             // Add a nudge to ensure a view query is emitted, not just text.
             let mut final_history = conversation_history.clone();
@@ -3698,6 +3702,54 @@ This shows all callers of TaskPort."#;
             MAX_REFINEMENT_TURNS, 3,
             "Spec requires max 3 dedicated refinement turns for self-check"
         );
+    }
+
+    #[test]
+    fn test_status_values_match_spec_protocol() {
+        // Spec §6: status is exactly "thinking" | "refining" | "ready".
+        // The frontend (ExplorerChat.svelte) maps only these three strings —
+        // any other value is silently dropped and the indicator goes stale.
+        assert_eq!(STATUS_THINKING, "thinking");
+        assert_eq!(STATUS_REFINING, "refining");
+        assert_eq!(STATUS_READY, "ready");
+    }
+
+    #[test]
+    fn test_status_message_serializes_spec_values() {
+        // The Status wire message must carry exactly the spec value — verify
+        // end-to-end through the serializer, not just the constants.
+        for status in [STATUS_THINKING, STATUS_REFINING, STATUS_READY] {
+            let msg = ExplorerServerMessage::Status {
+                status: status.to_string(),
+                agent_path: None,
+                graph_data_age_secs: None,
+            };
+            let json = serialize_msg(&msg).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed["type"], "status");
+            assert_eq!(parsed["status"], status);
+        }
+    }
+
+    #[test]
+    fn test_normalize_status_maps_known_values() {
+        // Bundled SDK script values pass through unchanged.
+        assert_eq!(normalize_status("thinking"), STATUS_THINKING);
+        assert_eq!(normalize_status("refining"), STATUS_REFINING);
+        assert_eq!(normalize_status("ready"), STATUS_READY);
+    }
+
+    #[test]
+    fn test_normalize_status_maps_off_contract_values() {
+        // Historical free-form literals and alternate-SDK values must never
+        // leak off-contract onto the wire — they map to a valid spec status.
+        assert_eq!(normalize_status("Analyzing..."), STATUS_THINKING);
+        assert_eq!(normalize_status("Thinking..."), STATUS_THINKING);
+        assert_eq!(normalize_status("Synthesizing answer..."), STATUS_THINKING);
+        assert_eq!(normalize_status("Refining query..."), STATUS_REFINING);
+        assert_eq!(normalize_status("  READY "), STATUS_READY);
+        assert_eq!(normalize_status(""), STATUS_THINKING);
+        assert_eq!(normalize_status("something else"), STATUS_THINKING);
     }
 
     #[test]
