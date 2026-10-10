@@ -2293,6 +2293,12 @@ specs:\n\
         let parent = make_test_ledger_entry("system/parent.md", "new_current_sha", ApprovalStatus::Approved);
         ledger.save(&parent).await.unwrap();
 
+        // Context repos for cross-workspace resolution (None-linked tests
+        // don't resolve, but pass real stores to match server wiring).
+        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
+            Arc::new(MemWorkspaceRepository::default());
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> =
+            Arc::new(MemRepoRepository::default());
         sync_spec_ledger(
             &ledger,
             &links_store,
@@ -2302,8 +2308,8 @@ specs:\n\
             1_700_000_000,
             Some("repo-1"),
             Some("ws-1"),
-            Some(&Arc::new(MemWorkspaceRepository::default()) as Arc<dyn gyre_ports::WorkspaceRepository>),
-            Some(&Arc::new(MemRepoRepository::default()) as Arc<dyn gyre_ports::RepoRepository>),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
             None,
             None,
         )
@@ -2390,6 +2396,10 @@ specs:\n\
         let parent = make_test_ledger_entry("system/parent.md", "new_current_sha", ApprovalStatus::Approved);
         ledger.save(&parent).await.unwrap();
 
+        let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
+            Arc::new(MemWorkspaceRepository::default());
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> =
+            Arc::new(MemRepoRepository::default());
         sync_spec_ledger(
             &ledger,
             &links_store,
@@ -2399,8 +2409,8 @@ specs:\n\
             1_700_000_000,
             Some("repo-1"),
             Some("ws-1"),
-            Some(&Arc::new(MemWorkspaceRepository::default()) as Arc<dyn gyre_ports::WorkspaceRepository>),
-            Some(&Arc::new(MemRepoRepository::default()) as Arc<dyn gyre_ports::RepoRepository>),
+            Some(&ws_ctx),
+            Some(&repos_ctx),
             None,
             None,
         )

@@ -50,7 +50,7 @@ impl std::str::FromStr for SpecLinkType {
 }
 
 /// A resolved link entry stored in the forge's spec link graph.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SpecLinkEntry {
     pub id: String,
     /// Source spec path (the spec that declares this link).
