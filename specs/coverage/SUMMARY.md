@@ -1,10 +1,10 @@
 # Spec Coverage Summary
 
-**Last updated:** 2026-10-10
+**Last updated:** 2026-10-08
 
 | Spec | Total | n/a | Not Started | Assigned | Implemented | Verified | Coverage |
 |------|-------|-----|-------------|----------|-------------|----------|----------|
-| abac-policy-engine.md | 19 | 2 | 0 | 11 | 6 | 0 | 35% |
+| abac-policy-engine.md | 19 | 2 | 0 | 17 | 0 | 0 | 0% |
 | activity-dashboard.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
 | admin-panel.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
 | agent-gates.md | 25 | 9 | 0 | 16 | 0 | 0 | 0% |
@@ -44,4 +44,4 @@
 | user-management.md | 36 | 10 | 0 | 26 | 0 | 0 | 0% |
 | view-query-grammar.md | 16 | 0 | 0 | 16 | 0 | 0 | 0% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **218** | **0** | **306** | **115** | **163** | **48%** |
+| **TOTAL** | **802** | **218** | **0** | **312** | **109** | **163** | **46%** |

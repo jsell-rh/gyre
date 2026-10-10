@@ -2,7 +2,7 @@
 title: "Implement ABAC policy engine core: entity, conditions, and attribute model"
 spec_ref: "abac-policy-engine.md §Core Concepts"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "abac-policy-engine.md §Core Concepts"
   - "abac-policy-engine.md §Attributes"
@@ -10,7 +10,7 @@ coverage_sections:
   - "abac-policy-engine.md §Policy Entity"
   - "abac-policy-engine.md §Conditions"
   - "abac-policy-engine.md §Policy Examples"
-commits: ["26f362f861e3edfaca9c689604fe67f28989c926", "5619065f3214f44090da9e07151de246f0803e56", "02abc91adb59fed1151a72c18c3e77ec5dac7ac1", "28be3d1ab7b2db2f49753d1a31792b2ba85d1fca", "f39fe0fa40b0a20270a90a7e6d2c9dbb4613f518", "67a2536ef90de29242a03019590e20e2d9715f6f", "b49200a53f08fa3ff0187ab5b2b60fcf8686cfa5", "4d85c076a6f13058d8b723055b3160de4983dfcb"]
+commits: ["5619065f3214f44090da9e07151de246f0803e56", "02abc91adb59fed1151a72c18c3e77ec5dac7ac1", "28be3d1ab7b2db2f49753d1a31792b2ba85d1fca", "f39fe0fa40b0a20270a90a7e6d2c9dbb4613f518", "67a2536ef90de29242a03019590e20e2d9715f6f", "b49200a53f08fa3ff0187ab5b2b60fcf8686cfa5", "4d85c076a6f13058d8b723055b3160de4983dfcb", "26f362f861e3edfaca9c689604fe67f28989c926"]
 ---
 
 ## Spec Excerpt
@@ -108,16 +108,16 @@ Conditions support dynamic references (e.g., `"$resource.repo_id"`) for comparin
 
 ## Acceptance Criteria
 
-- [x] Policy entity matches spec (all fields including immutable, scope, conditions)
-- [x] PolicyScope: Tenant, Workspace, Repo
-- [x] PolicyEffect: Allow, Deny
-- [x] Condition with all 8 ConditionOp variants
-- [x] ConditionValue: String, StringList, Number, Bool
-- [x] Dynamic references (`$resource.*`, `$subject.*`) resolve at evaluation time
-- [x] PolicyRepository port trait with CRUD + scope-based listing
-- [x] SQLite adapter with migration
-- [x] Subject/Resource/Environment attribute extraction from auth context
-- [x] `cargo test --all` passes
+- [ ] Policy entity matches spec (all fields including immutable, scope, conditions)
+- [ ] PolicyScope: Tenant, Workspace, Repo
+- [ ] PolicyEffect: Allow, Deny
+- [ ] Condition with all 8 ConditionOp variants
+- [ ] ConditionValue: String, StringList, Number, Bool
+- [ ] Dynamic references (`$resource.*`, `$subject.*`) resolve at evaluation time
+- [ ] PolicyRepository port trait with CRUD + scope-based listing
+- [ ] SQLite adapter with migration
+- [ ] Subject/Resource/Environment attribute extraction from auth context
+- [ ] `cargo test --all` passes
 
 ## Agent Instructions
 
