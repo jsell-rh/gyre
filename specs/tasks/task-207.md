@@ -152,26 +152,43 @@ oneshot tests above; the listener-based test must run on host/CI
 admin_retention_list_and_update`). Recorded in
 /tmp/stage/review-evidence/task-207-transport-restriction.md.
 
-## Recovery + contract-repair round addendum (2026-10-10)
 
-Assignment `3f26fcf486214310b7b027971090931d` (repair, category `contract`:
-"The implementation changed the assigned requirements. Restore the original
-task contract and implement it"). Audit of the candidate vs the base
-(`770785f7`) found the implementation itself intact and contract-compliant
-— all 7 data types enforced, 02:00 UTC wall-clock scheduling, KV-persisted
-policies, full PUT validation (re-verified against source this round). The
-contract mutation was in this task file's frontmatter: the revision-round
-docs commit `acd1ba1d` dropped the `review: specs/reviews/task-207.md`
-pointer the verifier's R1 review commit `226859ed` had added, silently
-unscoping the R1 findings record from the task. Fixed this round:
+## Review
+
+### Recovery + contract-repair round (2026-10-10, assignment 3f26fcf486214310b7b027971090931d)
+
+Repair category `contract`: "The implementation changed the assigned
+requirements." Audit of the candidate vs the base (`770785f7`) found the
+implementation itself intact and contract-compliant — all 7 data types
+enforced, 02:00 UTC wall-clock scheduling, KV-persisted policies, full PUT
+validation (re-verified against source that round):
 
 - **Restored `review: specs/reviews/task-207.md`** in the frontmatter (the
-  review file itself was unchanged in the tree — only the pointer was lost).
-- **Single `progress: ready-for-review`** — this round's assignment
+  review file itself was unchanged in the tree — only the pointer had been
+  dropped).
+- **Single `progress: ready-for-review`** — that round's assignment
   injection had left a duplicate `progress:` key (`needs-revision` +
   `ready-for-review`, invalid YAML); resolved to the one truthful value.
-- **Attribution completed**: `574d0c3c` (the prior docs commit fixing the
-  same duplicate-key defect) added to `commits:`.
-- No production code changed — none was needed; the repair is the task
-  contract itself. Fresh probe evidence this round is recorded in
-  /tmp/stage/review-evidence/task-207-contract-repair-evidence.md.
+- **Attribution completed**: `574d0c3c` added to `commits:`.
+- No production code changed — the repair was the task contract itself.
+
+### Contract-repair round 2 (2026-10-10, assignment 1f636918df8f4689825666ceabed6db7)
+
+Same finding class, root-caused and reproduced this round with
+`scripts/dev-contract.py requirement_parts`: the detector compares
+`task['body']` vs `result['task_body']` (scripts/pipeline/stages.py:72),
+stripping only the operational headings `Shipped`, `Implementation Notes`,
+`Implementation Log`, `Review`. The prior round had recorded its history
+under a non-whitelisted `## Recovery + contract-repair round addendum`
+heading, which registered as a normative contract amendment — so this
+round's injection (which strips non-whitelisted sections when composing the
+assigned body) guaranteed a re-fire. Reproduced: frontmatter tracked keys
+identical; the sole prose delta was that appendix.
+
+Repair this round: operational history consolidated under `## Review`
+(whitelisted — history appends can no longer register as contract
+changes); `review:` pointer restored; duplicate `progress:` key resolved to
+the single truthful `ready-for-review`; attribution extended with
+`1c366396` and `0e5d012a`. No production code changed — none was needed.
+Root-cause reproduction and evidence:
+/tmp/stage/review-evidence/task-207-contract-repair-r2-root-cause.md
