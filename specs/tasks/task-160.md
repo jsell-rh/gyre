@@ -171,6 +171,27 @@ bookkeeping repair:
   untouched). `check-task-commit-attribution.sh` FAIL exit 1 before,
   OK exit 0 after.
 
+- **Rebase-repair round (2026-10-10, HEAD c4f1df9d; evidence:
+  `/tmp/stage/review-evidence/task-160-rebase-repair/`):** resolved the
+  assigned rebase — `specs/tasks/task-200.md` conflicted on its `commits:`
+  line because the candidate-side repair 72bd51d1 had truncated the SHA
+  `e44f11354629cf2dab7fd7846c8a0a0a1d2d9591` to 38 chars (unresolvable),
+  while base 73a31e0b carried the valid 40-char object. Resolved to the
+  valid side; all 14 task-200 `commits:` SHAs resolve. The merge changes
+  no task-160 surface (empty `git diff 04380470 c4f1df9d -- scripts/
+  crates/gyre-adapters/`); it adds task-213/219 spec files and fixes the
+  task-200 SHA. Clean gates at c4f1df9d: hierarchy, tenant-filter
+  (111/0), api-auth, arch, scope-literal-defaults, attribution all exit 0.
+  Fresh mutation kills in isolated worktree `/tmp/stage/task160-rebase-mut`
+  (restored after each; worktree removed after):
+  `Task.workspace_id → Option<Id>` → hierarchy exit 1 naming `task.rs:60`;
+  tenant predicate stripped from `sqlite/secret.rs::resolve_for_agent`
+  (line 328) → tenant-filter exit 1 ("1 violation(s) out of 111"); deleted
+  `RouteResourceMapping` for `/api/v1/activity` → api-auth exit 1 via the
+  delegated registry check. `cargo test -p gyre-adapters --test
+  tenant_isolation`: **2 passed / 0 failed** (7m 21s compile; run record
+  `tenant-isolation.txt` in the evidence dir).
+
 Review history: rounds 1–4 in `specs/reviews/task-160.md` (round-3 findings
 F1 dead exemptions / F2 read-name blind spot fixed in 06df8bfb and verified
 complete in round 4).
