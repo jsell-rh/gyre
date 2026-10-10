@@ -57,3 +57,58 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+## Round 5 — final candidate verification (candidate 04380470, base 6bf777a6)
+
+Assignment: exact candidate `04380470c7f846f55b50ef5c3068cf011c8adefa` against base
+`6bf777a6a44f28052ed5af28bf6fb013fde6df48` (task-200 merge point; the task-160
+surface is byte-identical to the round-4-reviewed candidate on
+scripts/adapters/wiring). Evidence: `/tmp/stage/review-evidence/task-160-review5/`.
+
+**Clean gates at candidate:** `check-hierarchy.sh` exit 0;
+`check-tenant-filter.sh` exit 0 (111 read methods on tenant-column tables /
+0 violations, 145 backlog read methods on tenant-less tables reported);
+`check-api-auth.sh` exit 0 (middleware chain + 4 non-ABAC handlers +
+delegated frozen-baseline registry); `check-arch.sh` OK;
+`check-scope-literal-defaults.sh crates` OK;
+`check-task-commit-attribution.sh` OK; `check-migration-sql-portability.sh` OK;
+`check-abac-exempt-handlers.sh` OK; `check-mem-port-contracts.sh` OK;
+`check-fabricated-scope-defaults.sh` OK.
+
+**Fresh mutation kills (isolated worktree, restored after each):**
+`Task.workspace_id → Option<Id>` → hierarchy exit 1 naming task.rs:60 (mut1);
+`Task.repo_id` field deleted → hierarchy exit 1 "missing from the struct"
+(mut1b); tenant predicate stripped from `sqlite/secret.rs::resolve_for_agent`
+→ tenant-filter exit 1 naming secret.rs:293 (mut2, 1/111 violations);
+`RouteResourceMapping` for `/api/v1/activity` deleted → api-auth exit 1 via the
+delegated registry check (mut3); `abac_middleware` layer removed from the api
+router chain → api-auth exit 1 Check 1 (mut3b); `AuthenticatedAgent`
+extractor removed from `mcp_handler` → api-auth exit 1 Check 2 (mut3c).
+
+**Test suite at candidate:** `cargo test -p gyre-adapters` → 344 lib passed /
+0 failed / 12 ignored, tenant_isolation 2 passed / 0 failed, doc-tests 0.
+Negative control: deleting the tenant filter from
+`sqlite/workspace.rs::list` makes `tenant_isolation.rs` FAIL with exact leak
+diagnostics (`tenant A's workspace list leaked ["ws-a","ws-b"]`) — the test
+is not self-confirming.
+
+**Inherited-drift repairs verified honest:** `check-scope-literal-defaults.sh`
+FAILS at the base (lib.rs:494/538 literals vs stale exemption lines 490/534 —
+pre-existing drift; lib.rs is byte-identical base→candidate) and passes at the
+candidate with 12 exemptions / `FROZEN_EXEMPTION_COUNT=12`; the six adapter
+entries were deleted because their sites are genuinely fixed. task-200
+frontmatter records base SHA `6bf777a6` (attribution gate passes).
+
+**Findings (one, non-blocking):** the `check-hierarchy.sh` awk header regex
+`/struct[ \t]/` also matches comment lines — a `// ... struct Task ...`
+comment in a domain file registers a phantom struct header and fails the gate
+with "missing from the struct" (probe: synthetic `zzz_probe.rs`, exit 1;
+`probe-hierarchy-comment-fp.txt`). No live domain file currently triggers it
+(checked: no comment line names Task/Agent/MergeRequest/Repository/Workspace
+after `struct` outside `mod tests`). False-positive direction only — it can
+never miss a real violation, and the gate fails closed. Latent robustness
+issue for the script owner, not a contract breach.
+
+Verdict: **complete** — the task contract (three real scanners, wired
+blocking, mutation-sensitive, adapter fixes real, tests green) is satisfied;
+coverage rows 10/14/27 `implemented` with evidence is accurate.
