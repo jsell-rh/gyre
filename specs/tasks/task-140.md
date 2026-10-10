@@ -68,14 +68,16 @@ Implemented in `151cf7d2` (domain defs + adapters + server seeding), `fcb712c5` 
 - CLI: `gyre bootstrap` registers the same four personas by re-exporting the domain defs (`crates/gyre-cli/src/bootstrap.rs`).
 - `specs/personas/repo-orchestrator.md` exists (created by `fcb712c5`; required by the spec table).
 
-**Verification (focused probes, all green at `e27cc0da`):**
-- `cargo test -p gyre-domain --lib builtin` — 2 passed (spec-table coverage, pre-approved tenant scope)
+**Verification (focused probes, re-run green at merged tree `6fd54cc0` = candidate `9cce476c` + base `73a31e0b`; the base merge brought only foreign spec files, no code):**
+- `cargo test -p gyre-domain --lib builtin` — 2 passed (spec-table coverage, pre-approved tenant scope, independently recomputed SHA-256 hashes)
 - `cargo test -p gyre-adapters --lib sqlite::workspace::persona` — 2 passed (round-trip through SQLite, slug+scope lookup for idempotent reseed)
-- `cargo test -p gyre-server --lib seed_builtin_personas` — 3 passed (creates four + idempotent, scoped to own tenant, preserves existing)
-- `cargo test -p gyre-server --lib create_tenant_seeds` — 1 passed (tenant-create hook seeds)
+- `cargo test -p gyre-server --lib seed_builtin_personas` — 3 passed (creates four + idempotent, scoped to own tenant, preserves existing) — this re-run is the interaction probe for task-189's persona scope-resolution changes (`f4acb4eb`, landed after the original green run at `e27cc0da`)
+- `cargo test -p gyre-server --lib create_tenant_seeds` — 1 passed (tenant-create hook seeds through the real router)
 - `cargo test -p gyre-cli --bin gyre bootstrap` — 15 passed (incl. `builtin_personas_are_the_domain_seed_definitions`: pointer-equality with `gyre_domain::BUILTIN_PERSONA_DEFS`, making the single source of truth mechanical)
+- Mechanical gates at `6fd54cc0`: `check-task-commit-attribution.sh`, `check-arch.sh`, `check-mem-port-contracts.sh`, `check-scope-literal-defaults.sh`, `check-fabricated-scope-defaults.sh`, `check-in-memory-state-stores.sh`, `check-forged-scope-fields.sh`, `check-relative-path-defaults.sh`, `check-byte-slice-truncation.sh`, `check-inert-enforcement.sh` — all exit 0; coverage SUMMARY.md in sync. (`check-early-return-side-effects.sh` errors on mawk in this sandbox — gawk-only `\s` regex, script untouched by task-140, not invoked by CI — environmental, pre-existing.)
+- Evidence: `/tmp/stage/review-evidence/probe-all-final.log` (tree SHA, per-suite output, exit codes).
 
-**Sandbox restriction:** TCP listeners are unsupported in this sandbox (errno 95), so the live startup path could not be exercised over HTTP; it is verified via the `main.rs:55` wiring plus the router-level tests above. Live HTTP verification belongs to host verification/CI.
+**Sandbox restriction:** TCP listeners are unsupported in this sandbox (errno 95, `/tmp/stage/capabilities.json`), so the live startup path could not be exercised over HTTP; it is verified via the `main.rs:55` wiring plus the router-level tests above. Live HTTP verification belongs to host verification/CI.
 
 **Contract repair (finding 763d5ad1):** checkpoint `19969af2` had committed a `## Verification Repair (finding 41db4f79)` ledger section into this task file; that heading is not in the pipeline's operational-section strip list (`scripts/dev-contract.py` `requirement_parts`: Shipped / Implementation Notes / Implementation Log / Review), so it registered as an assignment-contract amendment and filed the contract repair. The section is deleted — the task file is now byte-identical to the assigned contract. The underlying dist repair is durably recorded in the `63e2eeff` / `5945c0d5` commit messages (web/dist reverted to main's committed state after checkpoint `ba5227a7` swept regenerated bundles into the branch); no verifier, exemption, or test was touched. Coverage row 13 (platform-model.md §Built-In Personas) is updated to `implemented` with code evidence, SUMMARY.md regenerated.
 
