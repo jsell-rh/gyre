@@ -2,7 +2,7 @@
 title: "Integrate Sigstore/Fulcio for keyless commit signing"
 spec_ref: "identity-security.md §Layer 3: Sigstore/Fulcio"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 review: specs/reviews/task-107.md
 coverage_sections:
   - "identity-security.md §Layer 3: Sigstore/Fulcio"
@@ -186,3 +186,11 @@ class as the prior round's task-210 repair; specs-only
 sandbox network policy (fulcio.sigstore.dev:443 connect refused,
 `live-fulcio-check.txt` records the restriction and the exact host
 verification steps); exact-head GitHub CI is mandatory after review.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/tests/task107_leaf_chain_binding_probe.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
