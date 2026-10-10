@@ -102,6 +102,47 @@ Read `specs/system/user-management.md` §User Entity through §User Preferences 
 
 ## Shipped
 
+Merge round (assignment base `6bf777a6` merged as `c817a5f6`; last code-touching
+commit `bad88ded`):
+the task-120 product surface is unchanged by the merge — `git diff
+0ceae938..HEAD -- crates/` touches only the merged task-200 files
+(`gyre-common/src/message.rs`, `api/messages.rs`, `mcp.rs`), all ten task-120
+paths byte-identical — and the full implementation (six product commits,
+Round-1 F1/F2/F3 repairs, Round-2 bookkeeping repair) remains as reviewed in
+`specs/reviews/task-120.md` Round 2 (PASS). This round's work: fresh
+post-merge evidence, two bookkeeping repairs, and removal of stray probe
+artifacts. Earlier rounds' details below.
+
+### Merge-round verification (2026-10-10, evidence under
+/tmp/stage/review-evidence/task-120-merge-c817a5f6/)
+
+- Product surface identity: `git diff 0ceae938..HEAD -- crates/` → only the
+  three merged task-200 files; all ten task-120 paths byte-identical to the
+  reviewed Round-2 tree.
+- `cargo test -p gyre-domain --lib user` → **11 passed, 0 failed**.
+- `cargo test -p gyre-server --lib auth::` → **39 passed, 0 failed**
+  (`auth-suite.txt`).
+- `cargo test -p gyre-server --lib api::users` → **14 passed**;
+  `api::scim` → **9 passed** (`users-api-suite.txt`, `scim-suite.txt`).
+- `cargo test -p gyre-adapters --lib` → **349 passed, 0 failed** (12 ignored;
+  includes `migration_000056_backfills_unique_url_safe_usernames` and every
+  `SqliteStorage::new` boot path) — `adapters-lib.txt`.
+- Mechanical gates: migration versions, SQL portability, mem-port contracts,
+  arch — OK.
+- Bookkeeping repairs this round:
+  - `SUMMARY.md` merge conflict resolved by recomputing TOTAL from the merged
+  table rows (802/219/0/308/112/163/47%, row formula verified against
+  per-spec rows); merge committed as `c817a5f6`.
+  - task-200 publication commit `6bf777a6` recorded in
+  `specs/tasks/task-200.md` frontmatter (commit `1616755f`) — the merge made
+  it reachable here while its SHA was missing there, the same drift class
+  repaired for task-210 in `4dd13430`. Attribution gate now OK.
+  - Stray `.rlib`/`.rmeta` probe artifacts tracked by the `c76b224d`
+  checkpoint commit removed (commit `bad88ded`) — dead build outputs, no
+  source changes.
+- `web/dist` churn from local test-builds (no `SKIP_WEB_BUILD`) was discarded;
+  committed dist untouched (`git diff 0ceae938..HEAD -- web/` → empty).
+
 Checkpoint round (recovered assignment, tree `7f00472c` → this head): the full
 task-120 implementation — all six product commits, the Round-1 F1/F2/F3 repairs,
 and the Round-2 integration-rejection bookkeeping repair — was preserved by the
