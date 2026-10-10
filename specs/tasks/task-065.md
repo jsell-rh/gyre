@@ -1,8 +1,7 @@
 ---
 title: "ExplorerCanvas — Unified Canvas with Semantic Zoom Treemap"
 spec_ref: "explorer-canvas.md §1–3, §8; explorer-implementation.md §1–2, §17, §25"
-depends_on:
-  - task-062
+depends_on: [task-062, task-212]
 progress: ready-for-review
 coverage_sections:
   - "explorer-canvas.md §1 Problem"
