@@ -92,9 +92,15 @@ Read `specs/system/agent-runtime.md` §1 (all of it, Phases 1-8) for full contex
 
 ## Shipped
 
-Implementation: `7f9f113c` (retained from the checkpointed round; product
-surface unchanged this round — this repair restores the task file's recording
-state only).
+Checkpoint-recovery round (2026-10-10, assignment base `a1751da1`, candidate
+`4519192e`, HEAD under review `309c7000` = merge of the base into this
+branch): product surface at HEAD verified byte-identical to the candidate
+(`git diff 4519192e..HEAD -- crates/ scripts/` → empty); all four
+attribution commits in HEAD ancestry. No product files changed this round —
+this round rebuilt, re-ran the focused probes, and recorded fresh evidence.
+
+Implementation: `7f9f113c` (retained from the checkpointed rounds; product
+surface unchanged since).
 
 - **Phase 1** (`api/specs.rs`): `approve_spec` records the ledger approval,
   emits the bus `SpecApproved` message (`Destination::Workspace(ws)`,
@@ -127,33 +133,31 @@ state only).
   deterministic), then Done. `Implementation` and untyped tasks stay Backlog —
   Phase 4's worker-spawn path (task-118); `spawn_agent_core` independently
   rejects Delegation/Coordination task types.
-- **Incidental fix** (this branch's diff shifted the frozen exemption line):
-  `reject_spec`'s notification fanout fabricated a tenant scope via
-  `entry.repo_id.unwrap_or("default")` — also a repo/tenant type confusion.
-  Now resolves the tenant from the workspace record, skips+logs when
-  unresolvable; exemption entry deleted, `FROZEN_EXEMPTION_COUNT` 7→6.
+- **Incidental fix**: `reject_spec`'s notification fanout fabricated a tenant
+  scope via `entry.repo_id.unwrap_or("default")` — also a repo/tenant type
+  confusion. Now resolves the tenant from the workspace record, skips+logs
+  when unresolvable; exemption entry deleted, `FROZEN_EXEMPTION_COUNT` 7→6.
 
-Test evidence (all run this round at HEAD `f9531138` + this repair):
+Test evidence (all run fresh this round at HEAD `309c7000`):
 `cargo test -p gyre-server --lib signal_chain` → 10 passed, 0 failed;
 `--lib api::specs` → 73 passed, 0 failed (incl.
-`approve_spec_emits_spec_approved_and_triggers_chain`); `--lib mcp` → 71
-passed, 0 failed; `--lib api::orchestrator` → 6 passed, 0 failed;
-`cargo build -p gyre-server` → exit 0. Attribution gate
-(`check-task-commit-attribution.sh`) and
+`approve_spec_emits_spec_approved_and_triggers_chain`); `--lib
+api::orchestrator` → 6 passed, 0 failed; `--lib jobs` → 11 passed, 0 failed;
+`cargo build -p gyre-server` → exit 0 (15m 16s). `mcp.rs` is untouched by
+this branch and the base merge — prior 71/71 applies to identical source.
+Attribution gate (`check-task-commit-attribution.sh`) and
 `check-fabricated-scope-defaults.sh` → OK. Sandbox transport restriction
 recorded (`tcp_listener_probe: unsupported, errno 95`,
 `/tmp/stage/capabilities.json`): listener-bound tests (`tty::`, `ws::`,
 `otlp_receiver::`, `git_http::`, gyre-cli `ws_integration`) cannot run here —
-unchanged from base, must run on host/CI; `cargo test --all` remains for the
-verification gate. Evidence: `/tmp/stage/review-evidence/task-115-evidence.txt`.
+unchanged from base, must run on host/CI; `cargo test --all` and exact-head
+GitHub checks remain for the verification gate. Evidence:
+`/tmp/stage/review-evidence/task-115-evidence.txt`.
 
 Contract repair (finding `4ba66d19`, 2026-10-10): the prior round recorded
 completion by editing the contract itself — ticking the Acceptance Criteria
 checklist, rewriting the last criterion's text, and inserting `## Shipped`
-between the criteria and Agent Instructions. This round restores all four
-contract sections byte-identical to the assignment template (verified:
-`awk` section diff vs `f4acb4eb` → identical for Spec Excerpt, Implementation
-Plan, Acceptance Criteria, Agent Instructions) and records completion only in
-the sanctioned places — frontmatter (`progress:`, `commits:` including
-`7f9f113c`, which the attribution gate required) and this end-of-file
-`## Shipped` section. No product files touched this round.
+between the criteria and Agent Instructions. Restored all four contract
+sections byte-identical to the assignment template; completion is recorded
+only in the sanctioned places — frontmatter (`progress:`, `commits:`) and
+this end-of-file `## Shipped` section.
