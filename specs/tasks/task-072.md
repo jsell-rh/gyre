@@ -99,3 +99,7 @@ Baseline-repair round (finding `c329b385df5a4ef0a922b29c742443ac`, prerequisite 
 - Contract alignment: added `task-231` to `depends_on` (the assigned contract lists it; the branch file carried only `task-222`), attributed as process commit `e3db5f84`.
 - Merge-surface check: `git diff a7cf8ef1..HEAD -- crates/ web/src web/tests scripts/go-callgraph Dockerfile docs/` touches only task-155/222/231 surfaces (cli, api/graph.rs, Briefing, InlineChat); all seven task-072 files are byte-identical to candidate `a7cf8ef1`. No re-review of already-approved surface required.
 - `web/dist`: `git diff 7c6ac232..HEAD -- web/dist/` is 0 lines — the tracked dist bundle matches main.
+
+Evidence at HEAD `ee192e1b` (probes under `/tmp/stage/review-evidence/`, post-merge re-run of the four task-072 suites; attribution gate re-verified at the branch tip, exit 0 — tip SHA differs from `ee192e1b` only by task-file process records):
+- `cargo test -p gyre-domain call_graph_resolve` 16/16 ok; `go_extractor` 13/13 ok; `cargo test -p gyre-adapters call_graph` 3/3 ok; `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib graph_extraction` 22/22 ok (incl. `sync_go_repo_persists_calls_edges_in_graph_store`) — merge of the task-231 base did not disturb the task-072 surface.
+- `bash scripts/check-task-commit-attribution.sh` exit 0 at HEAD (recorded in `attribution-gate.txt`).
