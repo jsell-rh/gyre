@@ -1640,7 +1640,7 @@ mod tests {
         state.presence.write().await.insert(
             ("user-b".to_string(), "sess-b".to_string()),
             PresenceEntry {
-                workspace_id: "ws-conf".to_string(),
+                workspace_id: "ws-OTHER-WORKSPACE".to_string(),
                 view: "specs".to_string(),
                 editing_entity: Some("spec:specs/system/conflict.md".to_string()),
                 timestamp: 0,
