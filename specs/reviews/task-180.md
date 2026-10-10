@@ -104,3 +104,64 @@ Isolated worktree `/tmp/gyre-mut` (revision 51f29e9) with private
 All 8 attributed commits exist, are descendants of the comparison base, and are
 the only commits touching product files (crates/web/scripts/docs) in
 66422bd4..51f29e9 — no unlisted product commits.
+
+---
+
+## Review: recovery round (candidate bc905beaf1443ba5ab63a75cabb4c04896ee3a2f)
+
+**Reviewer:** Reviewer (independent)
+**Date:** 2026-10-10
+**Comparison base:** 19d65446917e983dd8f85f5e6f0d681999cd3012
+**Candidate:** bc905beaf1443ba5ab63a75cabb4c04896ee3a2f
+**Verdict:** approved (no findings)
+
+The recovery round merged base 19d65446 into the branch (merge delta touches
+only unrelated specs/tasks files), left the checkpoint's product code
+byte-identical, and completed the interrupted verification. Full evidence in
+`/tmp/stage/review-evidence/task180-candidate-bc905be.md`.
+
+### Independently re-run tests (all at candidate HEAD, clean tree)
+
+- `cargo test -p gyre-domain --lib spec_assertions` — 51 passed (includes the
+  three fence-awareness tests added by the repair).
+- `cargo test -p gyre-server --lib push_check` — 3 passed (persistence,
+  stale-row sweep, priority-9 notifications with duplicate suppression).
+- `cargo test -p gyre-server --lib spec_assertions` — 6 passed (GET endpoint:
+  stored rows, empty set, unknown-repo 404; POST live check).
+- `cargo test -p gyre-server --lib delete_repo_removes` — 1 passed.
+- `cd web && npx vitest run src/__tests__/Inbox.test.js` — 28 passed
+  (includes the §9 View Code / Update Spec card test); ExplorerView suites
+  (Scope 5, responsive 8) also pass.
+- Invariant gates exit 0: check-arch, check-abac-route-registry,
+  check-abac-exempt-handlers, check-mem-port-contracts,
+  check-migration-versions, check-migration-sql-portability,
+  check-in-memory-state-stores, check-dead-message-kinds,
+  check-fabricated-scope-defaults, check-task-commit-attribution.
+
+### New probes (this review)
+
+- **Live-tree parser probe:** ran the production `parse_assertions` over this
+  repo's real `specs/` tree — 0 live assertions. The 17 prose mentions of
+  `gyre:assert` (coverage tables, task prose) do not match the comment form;
+  all `<!-- gyre:assert -->` examples live inside fences, including
+  blockquote-nested fences (`> ```markdown`, task-014's excerpt). The
+  self-hosting notification-spam defect is genuinely fixed.
+- **Evaluator probe:** the §9 `no_dependency` assertion resolves real
+  extractor output shapes (Package nodes from Cargo.toml + DependsOn edges
+  from declared dependencies): passes with no edge, fails when the violating
+  edge is added.
+- **§9 example params probe:** the exact §9 example block parses to 3
+  assertions with correct types/params/lines.
+
+### Notes (not defects)
+
+- The GET fallback path (ExplorerView catch branch) feeds stored rows into a
+  renderer expecting `assertion_text`/`explanation`; icons, counts, and
+  pass/fail styling (driven by `passed`) render correctly, item text is blank
+  in that secondary path. Primary live-check path renders full text.
+- TCP listener unsupported in this sandbox (EOPNOTSUPP) — live HTTP exercise
+  of the GET endpoint deferred to host verification / GitHub CI; recorded
+  exact curl checks in the evidence file.
+- Commit attribution: all 12 attributed commits present in
+  19d65446..bc905bea; the only product-surface commits in range are
+  attributed; recovery-round delta touches only specs/tasks/task-180.md.
