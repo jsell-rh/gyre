@@ -2,9 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
 use gyre_common::Id;
-use gyre_domain::policy::{
-    Condition, ConditionOp, ConditionValue, Policy, PolicyDecision, PolicyEffect, PolicyScope,
-};
+use gyre_domain::policy::{Condition, Policy, PolicyDecision, PolicyEffect, PolicyScope};
 use gyre_ports::PolicyRepository;
 use std::sync::Arc;
 
@@ -453,6 +451,7 @@ impl PolicyRepository for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gyre_domain::policy::{ConditionOp, ConditionValue};
     use tempfile::NamedTempFile;
 
     fn tmp_storage() -> (NamedTempFile, SqliteStorage) {

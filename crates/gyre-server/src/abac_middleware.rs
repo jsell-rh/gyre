@@ -1959,8 +1959,6 @@ pub mod tests {
     /// live evaluation from a real minted JWT.
     #[tokio::test(flavor = "multi_thread")]
     async fn agent_jwt_persona_and_attestation_level_reach_live_evaluation() {
-        use axum::routing::get;
-
         let state = crate::mem::test_state();
         tokio::task::block_in_place(|| {
             let h = tokio::runtime::Handle::current();

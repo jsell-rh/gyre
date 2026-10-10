@@ -2,7 +2,7 @@
 title: "Implement ABAC policy engine core: entity, conditions, and attribute model"
 spec_ref: "abac-policy-engine.md §Core Concepts"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "abac-policy-engine.md §Core Concepts"
   - "abac-policy-engine.md §Attributes"
@@ -108,16 +108,16 @@ Conditions support dynamic references (e.g., `"$resource.repo_id"`) for comparin
 
 ## Acceptance Criteria
 
-- [ ] Policy entity matches spec (all fields including immutable, scope, conditions)
-- [ ] PolicyScope: Tenant, Workspace, Repo
-- [ ] PolicyEffect: Allow, Deny
-- [ ] Condition with all 8 ConditionOp variants
-- [ ] ConditionValue: String, StringList, Number, Bool
-- [ ] Dynamic references (`$resource.*`, `$subject.*`) resolve at evaluation time
-- [ ] PolicyRepository port trait with CRUD + scope-based listing
-- [ ] SQLite adapter with migration
-- [ ] Subject/Resource/Environment attribute extraction from auth context
-- [ ] `cargo test --all` passes
+- [x] Policy entity matches spec (all fields including immutable, scope, conditions)
+- [x] PolicyScope: Tenant, Workspace, Repo
+- [x] PolicyEffect: Allow, Deny
+- [x] Condition with all 8 ConditionOp variants
+- [x] ConditionValue: String, StringList, Number, Bool
+- [x] Dynamic references (`$resource.*`, `$subject.*`) resolve at evaluation time
+- [x] PolicyRepository port trait with CRUD + scope-based listing
+- [x] SQLite adapter with migration
+- [x] Subject/Resource/Environment attribute extraction from auth context
+- [x] `cargo test --all` passes
 
 ## Agent Instructions
 
