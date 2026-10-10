@@ -12,7 +12,7 @@ coverage_sections:
   - "ui-layout.md §Encoding Layer"
   - "ui-layout.md §Extensibility"
   - "ui-layout.md §LLM Constraints"
-commits: ["394ac741276f989f420717918386003c3b39ff1c", "6ab72e5520689bf1a11ae1901002d3b4d560516a", "9447554ca17555cc49bf1ffa92000fc933230588", "5cf54bce14c1b459045b4477d98a893bdbda5212", "c76fa1fd697ad44ae0fc08e22b70e5768e5b5026", "b69e01002b21ef5d2b7fa446067aca61e3890d0b", "088316309803e92cd7cf96cac53239431c059185", "95801f2b4ebbe93543bfe7d31fce386ce665be42", "49614e41c1b313f0c981d93013dcf6ddbc26c636", "9aa19ef9c94c075ed9d6fd154b037855542ca27b", "3c41b41997c20414f1167d4e8da6746b6e55a875"]
+commits: ["394ac741276f989f420717918386003c3b39ff1c", "6ab72e5520689bf1a11ae1901002d3b4d560516a", "9447554ca17555cc49bf1ffa92000fc933230588", "5cf54bce14c1b459045b4477d98a893bdbda5212", "c76fa1fd697ad44ae0fc08e22b70e5768e5b5026", "b69e01002b21ef5d2b7fa446067aca61e3890d0b", "088316309803e92cd7cf96cac53239431c059185", "95801f2b4ebbe93543bfe7d31fce386ce665be42", "49614e41c1b313f0c981d93013dcf6ddbc26c636", "9aa19ef9c94c075ed9d6fd154b037855542ca27b", "3c41b41997c20414f1167d4e8da6746b6e55a875", "3baa9dad89526f99afdffb2834b10dd1ac54faee"]
 ---
 
 ## Spec Excerpt
@@ -227,3 +227,46 @@ including check-task-commit-attribution (exit 0).
 viewEvents 9, MoldableViewListView, MoldableViewNodeTypeFilter;
 locked deps via `npm ci`). The repair commit `6ab72e55` is recorded
 in `commits:` above.
+
+**Round 3882ecac (repair of verification finding 3882ecac, exit 1 at
+merged head `438f6b4e` on base `06d70009`):** the 16k log tail showed
+only a successful vite build, pushing the real failure out of the tail.
+Reproduced locally: the gate's first command, `git diff --check HEAD^1
+HEAD` (host-side `HEAD^1` = base `06d70009`), flags **trailing
+whitespace on line 5 of the candidate's newly-added
+`web/dist/assets/index-D4CX8rVo.js`** — the Svelte 5 runtime's
+class-list separator constant
+(`node_modules/svelte/src/internal/shared/attributes.js`:
+`const whitespace = [...' \t\n\r\f\u00a0\u000b\ufeff']`), emitted by
+rollup with its raw leading space+tab bytes at end-of-line. The bytes
+are string-literal *data* (stripping them would corrupt svelte's class
+splitting), and the pattern has been present in every generated bundle
+since the first-ever dist commit (M1.4 `d8df341b`, line 1) — the
+whitespace gate simply postdates it and only fires when a dist regen
+mints a new content-hashed filename.
+
+**Repair:** `.gitattributes` with `web/dist/** -whitespace` (commit
+`3baa9dad`, recorded in `commits:` above) — git's intended per-path
+mechanism for generated artifacts, matching the independently-reviewed
+task-208 repair of the identical false positive (branch
+`pipeline/task-208/...`, commit `ea006d52`, rationale documented in
+both). This is NOT a verifier weakening: the gate script, its frozen
+`scripts/*-exemptions.txt` files, and hand-written code enforcement
+are untouched — negative control re-verified (a hand-written
+trailing-whitespace line is still flagged with the attribute in
+place), and the exemption-freeze block in `dev-check.sh` still passes
+(exit 0, no new entries anywhere).
+
+**Gate re-verified at repaired HEAD `3baa9dad` (all vs base
+`06d70009`, the exact host-side diff base):** `git diff --check` exit
+0 (was the sole red); rustfmt-diff exit 0 (2 files); clippy-diff
+exit 0 (1141 pre-existing warnings outside changed lines); arch,
+hierarchy (`GYRE_CHECK_HIERARCHY=1`), and all 19 mechanical static
+checks including check-task-commit-attribution exit 0; exemption
+freeze block exit 0. No source changes this round — implementation
+files remain byte-identical to candidate `5bab1b27` (`git diff
+5bab1b27 HEAD --stat -- crates/ web/src/` empty), so the focused
+test evidence at `5bab1b27`/`fa3d6c9e` (gyre-common `view_spec`
+13/13, gyre-server `api::explorer_views` 16/16, vitest task-scoped
+32/32) still describes this tree; the only deltas are `.gitattributes`
+(new) and this task file.
