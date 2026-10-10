@@ -2,7 +2,7 @@
 title: "Implement spec approval signal chain & orchestrators"
 spec_ref: "agent-runtime.md §1 Agent Lifecycle"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "agent-runtime.md §The Model"
   - "agent-runtime.md §1. Agent Lifecycle"

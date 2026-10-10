@@ -21,8 +21,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use gyre_common::Id;
 use gyre_common::message::{Destination, MessageKind};
+use gyre_common::Id;
 use gyre_domain::{
     Agent, AgentStatus, Notification, NotificationType, OrchestratorType, Repository, Task,
     TaskPriority, TaskStatus, TaskType, WorkspaceRole,
@@ -124,13 +124,11 @@ async fn find_live_repo_orchestrator(
     repo: &Repository,
 ) -> anyhow::Result<Option<Agent>> {
     let peers = state.agents.list_by_workspace(&repo.workspace_id).await?;
-    Ok(peers
-        .into_iter()
-        .find(|a| {
-            a.orchestrator_type == OrchestratorType::RepoOrchestrator
-                && a.repo_id.as_ref() == Some(&repo.id)
-                && is_live(a)
-        }))
+    Ok(peers.into_iter().find(|a| {
+        a.orchestrator_type == OrchestratorType::RepoOrchestrator
+            && a.repo_id.as_ref() == Some(&repo.id)
+            && is_live(a)
+    }))
 }
 
 // ── Phase 1→2: SpecApproved interception ─────────────────────────────────────
@@ -163,7 +161,10 @@ pub async fn on_spec_approved(state: &AppState, payload: &serde_json::Value) {
 
     // Serialize per workspace: concurrent approvals queue behind the first
     // (the registry mutex holds the "exactly-one-active" semantics).
-    let lock = state.orchestrator_registry.workspace_lock(&workspace_id).await;
+    let lock = state
+        .orchestrator_registry
+        .workspace_lock(&workspace_id)
+        .await;
     let _guard = lock.lock().await;
 
     // Ensure a live workspace orchestrator exists (spawn on demand — the
@@ -274,15 +275,10 @@ async fn run_workspace_orchestrator(
     //    here is non-fatal and logged by `read_git_file` itself.
     if let (Some(rid), true) = (&repo_id, !spec_sha.is_empty()) {
         if let Ok(Some(repo)) = state.repos.find_by_id(rid).await {
-            let git_bin =
-                std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
-            let _ = crate::spec_registry::read_git_file(
-                &git_bin,
-                &repo.path,
-                &spec_sha,
-                &spec_path,
-            )
-            .await;
+            let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+            let _ =
+                crate::spec_registry::read_git_file(&git_bin, &repo.path, &spec_sha, &spec_path)
+                    .await;
         }
     }
 
@@ -564,12 +560,8 @@ async fn run_repo_orchestrator(
     }
 
     match task.task_type {
-        Some(TaskType::Delegation) => {
-            decompose_delegation(state, repo, task).await?
-        }
-        Some(TaskType::Coordination) => {
-            assess_coordination(state, repo, task).await?
-        }
+        Some(TaskType::Delegation) => decompose_delegation(state, repo, task).await?,
+        Some(TaskType::Coordination) => assess_coordination(state, repo, task).await?,
         _ => unreachable!("scheduler_run_once filters to Delegation/Coordination"),
     }
     Ok(())
@@ -863,7 +855,9 @@ async fn decompose(
         });
     }
     if subs.is_empty() {
-        tracing::warn!("signal-chain: LLM decomposition produced no usable sub-tasks; falling back");
+        tracing::warn!(
+            "signal-chain: LLM decomposition produced no usable sub-tasks; falling back"
+        );
         return Ok(deterministic_decomposition(spec_path, &content));
     }
     Ok(subs)
@@ -916,7 +910,9 @@ async fn coordinate(
     let value = match port.predict_json(&persona, &user_prompt).await {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!("signal-chain: LLM coordination assessment failed ({e:#}); assuming action needed");
+            tracing::warn!(
+                "signal-chain: LLM coordination assessment failed ({e:#}); assuming action needed"
+            );
             return Ok(CoordinationAssessment {
                 create_subtask: true,
                 title: format!("Review dependency change: {}", task.spec_path.as_deref().unwrap_or("")),
@@ -973,10 +969,7 @@ pub fn spawn_task_scheduler(state: Arc<AppState>) {
     const CHECK_INTERVAL_SECS: u64 = 30;
 
     tokio::spawn(async move {
-        state
-            .job_registry
-            .mark_scheduled("task_scheduler")
-            .await;
+        state.job_registry.mark_scheduled("task_scheduler").await;
         let mut interval =
             tokio::time::interval(tokio::time::Duration::from_secs(CHECK_INTERVAL_SECS));
         loop {
@@ -1016,7 +1009,10 @@ mod tests {
         assert!(Arc::ptr_eq(&a, &b), "same workspace must share one lock");
         assert!(Arc::ptr_eq(&d, &e), "same repo must share one lock");
         assert!(!Arc::ptr_eq(&a, &c), "different workspaces must not share");
-        assert!(!Arc::ptr_eq(&a, &d), "workspace and repo locks are distinct");
+        assert!(
+            !Arc::ptr_eq(&a, &d),
+            "workspace and repo locks are distinct"
+        );
     }
 
     // Concurrent acquisitions of the same workspace lock serialize: the
@@ -1040,7 +1036,10 @@ mod tests {
             "second acquisition must block while the first holds the lock"
         );
         drop(g1);
-        assert!(task.await.unwrap(), "second acquisition completes after release");
+        assert!(
+            task.await.unwrap(),
+            "second acquisition completes after release"
+        );
     }
 
     // ── Full-chain integration tests ─────────────────────────────────────
@@ -1088,8 +1087,11 @@ mod tests {
             workspace_id: Some("ws-1".to_string()),
         };
         state.spec_ledger.save(&entry).await.unwrap();
-        state.spec_links_store.lock().await.push(
-            crate::spec_registry::SpecLinkEntry {
+        state
+            .spec_links_store
+            .lock()
+            .await
+            .push(crate::spec_registry::SpecLinkEntry {
                 id: "link-1".to_string(),
                 source_path: "specs/system/api.md".to_string(),
                 source_repo_id: Some("r-2".to_string()),
@@ -1102,8 +1104,7 @@ mod tests {
                 status: "active".to_string(),
                 created_at: 0,
                 stale_since: None,
-            },
-        );
+            });
         state
     }
 
@@ -1129,13 +1130,21 @@ mod tests {
         on_spec_approved(&state, &approved_payload()).await;
 
         // Exactly one live workspace orchestrator was spawned for ws-1.
-        let agents = state.agents.list_by_workspace(&Id::new("ws-1")).await.unwrap();
+        let agents = state
+            .agents
+            .list_by_workspace(&Id::new("ws-1"))
+            .await
+            .unwrap();
         let orch: Vec<_> = agents
             .iter()
             .filter(|a| a.orchestrator_type == OrchestratorType::WorkspaceOrchestrator)
             .collect();
         assert_eq!(orch.len(), 1, "exactly one workspace orchestrator spawned");
-        assert_eq!(orch[0].status, AgentStatus::Idle, "completes after processing inbox");
+        assert_eq!(
+            orch[0].status,
+            AgentStatus::Idle,
+            "completes after processing inbox"
+        );
 
         // The SpecApproved message was delivered to the orchestrator's inbox
         // (Directed tier, persisted).
@@ -1145,11 +1154,9 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            inbox
-                .iter()
-                .any(|m| m.kind == MessageKind::SpecApproved
-                    && m.payload.as_ref().and_then(|p| p.get("approval_id"))
-                        == Some(&serde_json::json!("approval-1"))),
+            inbox.iter().any(|m| m.kind == MessageKind::SpecApproved
+                && m.payload.as_ref().and_then(|p| p.get("approval_id"))
+                    == Some(&serde_json::json!("approval-1"))),
             "SpecApproved delivered to orchestrator inbox, got {inbox:?}"
         );
 
@@ -1188,7 +1195,11 @@ mod tests {
 
         on_spec_approved(&state, &payload).await;
 
-        let agents = state.agents.list_by_workspace(&Id::new("ws-1")).await.unwrap();
+        let agents = state
+            .agents
+            .list_by_workspace(&Id::new("ws-1"))
+            .await
+            .unwrap();
         assert!(
             agents
                 .iter()
@@ -1221,8 +1232,16 @@ mod tests {
             .iter()
             .filter(|t| t.task_type == Some(TaskType::Delegation))
             .collect();
-        assert_eq!(delegations.len(), 2, "each signal creates its delegation task");
-        let agents = state.agents.list_by_workspace(&Id::new("ws-1")).await.unwrap();
+        assert_eq!(
+            delegations.len(),
+            2,
+            "each signal creates its delegation task"
+        );
+        let agents = state
+            .agents
+            .list_by_workspace(&Id::new("ws-1"))
+            .await
+            .unwrap();
         let orch: Vec<_> = agents
             .iter()
             .filter(|a| a.orchestrator_type == OrchestratorType::WorkspaceOrchestrator)
@@ -1261,10 +1280,16 @@ mod tests {
         scheduler_run_once(&state).await.unwrap();
 
         // Repo orchestrator spawned for r-1 (Delegation task's repo).
-        let agents = state.agents.list_by_workspace(&Id::new("ws-1")).await.unwrap();
+        let agents = state
+            .agents
+            .list_by_workspace(&Id::new("ws-1"))
+            .await
+            .unwrap();
         assert!(
-            agents.iter().any(|a| a.orchestrator_type == OrchestratorType::RepoOrchestrator
-                && a.repo_id.as_ref() == Some(&Id::new("r-1"))),
+            agents.iter().any(
+                |a| a.orchestrator_type == OrchestratorType::RepoOrchestrator
+                    && a.repo_id.as_ref() == Some(&Id::new("r-1"))
+            ),
             "repo orchestrator spawned for r-1"
         );
 
@@ -1286,8 +1311,10 @@ mod tests {
         // a real ordered sub-task.
         let subs: Vec<_> = tasks
             .iter()
-            .filter(|t| t.parent_task_id.as_ref() == Some(&delegation.id)
-                && t.task_type == Some(TaskType::Implementation))
+            .filter(|t| {
+                t.parent_task_id.as_ref() == Some(&delegation.id)
+                    && t.task_type == Some(TaskType::Implementation)
+            })
             .collect();
         assert!(
             !subs.is_empty(),

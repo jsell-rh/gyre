@@ -959,27 +959,50 @@ pub async fn reject_spec(
     }
 
     // Agent-runtime §1: Create priority-2 "Spec rejected" notification for
-    // workspace Admin/Developer members.
-    if let Some(ref ws_id) = entry.workspace_id {
+    // workspace Admin/Developer members. Tenant scope is resolved from the
+    // workspace record — never fabricated via a "default" fallback (a
+    // lookup failure means the scope cannot be determined; skip and log).
+    if let Some(ws_id) = &entry.workspace_id {
         let ws_id = gyre_common::Id::new(ws_id.as_str());
-        if let Ok(members) = state.workspace_memberships.list_by_workspace(&ws_id).await {
-            for member in &members {
-                if matches!(
-                    member.role,
-                    gyre_domain::WorkspaceRole::Admin
-                        | gyre_domain::WorkspaceRole::Developer
-                        | gyre_domain::WorkspaceRole::Owner
-                ) {
-                    let tenant_id = entry.repo_id.as_deref().unwrap_or("default");
-                    crate::notifications::notify(
-                        state.as_ref(),
-                        ws_id.clone(),
-                        member.user_id.clone(),
-                        gyre_common::NotificationType::SpecRejected,
-                        format!("Spec '{}' rejected: {}", spec_path, req.reason),
-                        tenant_id,
-                    )
-                    .await;
+        // Resolve the tenant once outside the member fanout.
+        let tenant_id: Option<String> = match state.workspaces.find_by_id(&ws_id).await {
+            Ok(Some(ws)) => Some(ws.tenant_id.to_string()),
+            Ok(None) => {
+                tracing::warn!(
+                    workspace_id = %ws_id,
+                    spec_path = %spec_path,
+                    "spec rejection: workspace not found; skipping member notifications"
+                );
+                None
+            }
+            Err(e) => {
+                tracing::warn!(
+                    workspace_id = %ws_id,
+                    spec_path = %spec_path,
+                    "spec rejection: workspace lookup failed ({e}); skipping member notifications"
+                );
+                None
+            }
+        };
+        if let Some(tenant_id) = tenant_id {
+            if let Ok(members) = state.workspace_memberships.list_by_workspace(&ws_id).await {
+                for member in &members {
+                    if matches!(
+                        member.role,
+                        gyre_domain::WorkspaceRole::Admin
+                            | gyre_domain::WorkspaceRole::Developer
+                            | gyre_domain::WorkspaceRole::Owner
+                    ) {
+                        crate::notifications::notify(
+                            state.as_ref(),
+                            ws_id.clone(),
+                            member.user_id.clone(),
+                            gyre_common::NotificationType::SpecRejected,
+                            format!("Spec '{}' rejected: {}", spec_path, req.reason),
+                            tenant_id.clone(),
+                        )
+                        .await;
+                    }
                 }
             }
         }
@@ -2123,8 +2146,13 @@ mod tests {
         // chain has a repo to delegate to.
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let ws =
-                    gyre_domain::Workspace::new(gyre_common::Id::new("ws-9"), gyre_common::Id::new("t1"), "Ws", "ws", 0);
+                let ws = gyre_domain::Workspace::new(
+                    gyre_common::Id::new("ws-9"),
+                    gyre_common::Id::new("t1"),
+                    "Ws",
+                    "ws",
+                    0,
+                );
                 state.workspaces.create(&ws).await.unwrap();
                 let repo = gyre_domain::Repository::new(
                     gyre_common::Id::new("r-9"),
@@ -2179,7 +2207,14 @@ mod tests {
         // approved_by, approval_id).
         let msgs = state
             .messages
-            .list_by_workspace(&gyre_common::Id::new("ws-9"), None, None, None, None, Some(100))
+            .list_by_workspace(
+                &gyre_common::Id::new("ws-9"),
+                None,
+                None,
+                None,
+                None,
+                Some(100),
+            )
             .await
             .unwrap();
         let bus_msg = msgs
@@ -2187,7 +2222,13 @@ mod tests {
             .find(|m| m.kind == gyre_common::message::MessageKind::SpecApproved)
             .expect("SpecApproved emitted on the bus");
         let payload = bus_msg.payload.as_ref().expect("payload present");
-        for field in ["repo_id", "spec_path", "spec_sha", "approved_by", "approval_id"] {
+        for field in [
+            "repo_id",
+            "spec_path",
+            "spec_sha",
+            "approved_by",
+            "approval_id",
+        ] {
             assert!(
                 payload.get(field).is_some_and(|v| !v.is_null()),
                 "payload field {field} missing: {payload}"
@@ -2195,7 +2236,8 @@ mod tests {
         }
         assert_eq!(payload["spec_sha"], serde_json::json!(sha));
         assert_eq!(
-            payload["repo_id"], serde_json::json!("r-9"),
+            payload["repo_id"],
+            serde_json::json!("r-9"),
             "payload carries the ledger entry's repo"
         );
         assert!(
@@ -2212,8 +2254,9 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            agents.iter().any(|a| a.orchestrator_type
-                == gyre_domain::OrchestratorType::WorkspaceOrchestrator),
+            agents.iter().any(
+                |a| a.orchestrator_type == gyre_domain::OrchestratorType::WorkspaceOrchestrator
+            ),
             "workspace orchestrator spawned by the approve handler"
         );
         let tasks = state.tasks.list().await.unwrap();
