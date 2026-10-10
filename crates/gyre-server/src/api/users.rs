@@ -2109,4 +2109,60 @@ mod tests {
             "unknown user id must 404, not return an empty session list"
         );
     }
+
+    /// TEMP REVIEW PROBE (not part of candidate): after revoke-all, a
+    /// NEVER-SEEN device presenting the same credential must be rejected —
+    /// this is the branch only `credential_revoked` covers.
+    #[tokio::test]
+    async fn zz_probe_revoke_all_blocks_never_seen_device() {
+        let (state, raw_key) = provision_user_with_key().await;
+        // One device authenticates (creates a session).
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "gyre-cli/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Revoke all sessions for the user.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/users/me/sessions/revoke-all")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // A DIFFERENT device (never seen, no session row) presents the same key.
+        let app = crate::api::api_router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users/me/sessions")
+                    .header("Authorization", format!("Bearer {raw_key}"))
+                    .header("User-Agent", "brand-new-device/1.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "revoke-all must reject a never-seen device presenting the same credential"
+        );
+    }
 }
