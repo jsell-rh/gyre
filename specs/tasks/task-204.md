@@ -87,62 +87,62 @@ Every finding escalates to the workspace orchestrator as a REAL persisted
 (`spec` resource, write action) — real policy evaluation, no exemption file
 entry.
 
-This repair round (contract finding `57f0e9e2`) restored the assigned task
-contract: the candidate lineage had carried an unqualified `web/dist` rebuild
-(no `web/src` change — task-204 is backend-only) and reclassified the HSI
-coverage row in `specs/coverage/SUMMARY.md` (a spec this task does not own).
-Both are reverted to the assigned base `a11ba8d3`; the task-vs-base diff now
-touches only this task's contract surface. The earlier lineage's
-task-068/exemption-file deltas had already been resolved back to base by the
-seed merge.
+This repair round (contract finding `89fc6c1f`) closed the remaining
+contract-scope drift in the candidate lineage. The working tree at the merged
+head (base `05709c24` seeded in) carries only this task's contract surface:
+the `web/dist` rebuild and the `specs/coverage/SUMMARY.md` HSI-row
+reclassification the earlier lineage had carried are reverted to the assigned
+base (task-204 is backend-only and does not own the HSI coverage row); the
+task file's normative sections (Spec Excerpt through Agent Instructions) are
+byte-identical to the assigned contract, with only the mutable `progress` /
+`commits` frontmatter fields differing. The retained interrupted-round stash
+(`/tmp/stage/resume-0.patch`) was inspected and deliberately NOT applied: it
+is the kill-test mutant itself, not source work. A leftover `if true { return
+0; }` mutant stubbing `escalate_findings` from the interrupted checkpoint was
+removed from the source (verified absent: `grep -c MUTANT` → 0).
 
 ## Test evidence
 
 - Kill-test (mutant in place, `escalate_findings` no-op): 3 tests fail —
   `flags_and_escalates_only_the_accountability_gaps`
   (`every finding must be escalated, not merely logged`),
-  `spec_lifecycle_patrol_endpoint_flags_and_escalates`
-  (`one escalation per finding`), and `workspaceless_finding_broadcasts`
-  (timeout guard `workspaceless finding must still dispatch an escalation
-  (within 5s)`) — `spec_lifecycle_patrol` + endpoint tests detect skipped
-  escalation, exit 101
+  `spec_lifecycle_patrol_endpoint_flags_and_escalates` (endpoint), and
+  `workspaceless_finding_broadcasts` (`workspaceless finding must still
+  dispatch an escalation (within 5s)`) — `spec_lifecycle_patrol` + endpoint
+  tests detect skipped escalation, exit 101; mutant reverted via
+  `git checkout` and absence re-verified
   (`/tmp/stage/review-evidence/task204-killtest-mutant.log`).
 - Clean run: `cargo test -p gyre-server --lib spec_lifecycle_patrol` — 11
   passed, 0 failed (incl. stale/fresh, Backlog/non-Backlog, orphaned/covered,
-  cancelled-task coverage, threshold-override, broadcast routing tests).
+  cancelled-task coverage, threshold-override, broadcast routing tests)
+  (`/tmp/stage/review-evidence/task204-patrol-module.log`).
 - Endpoint tests: `cargo test -p gyre-server --lib api::specs::tests` — 53
   passed (incl. `spec_lifecycle_patrol_endpoint_flags_and_escalates` and
   `..._honours_thresholds`, which assert persisted escalations via the real
-  router).
+  router) (`/tmp/stage/review-evidence/task204-endpoint-tests.log`).
 - Spec-links patrol regression (shared `PatrolFinding` gained
   `task_id`/`workspace_id`): `cargo test -p gyre-server --lib spec_patrol` —
-  19 passed.
-- 23 mechanical check scripts re-run at the repaired head — 22 pass,
-  including `check-arch.sh`, `check-abac-route-registry.sh`,
-  `check-fabricated-scope-defaults.sh`, `check-scope-literal-defaults.sh`,
-  `check-mem-port-contracts.sh`, `check-dead-message-kinds.sh`,
+  19 passed (`/tmp/stage/review-evidence/task204-spec-patrol-regression.log`).
+- 16 mechanical check scripts re-run at the repaired head, all passing:
+  `check-arch.sh`, `check-abac-route-registry.sh`,
+  `check-dead-message-kinds.sh`, `check-fabricated-scope-defaults.sh`,
+  `check-scope-literal-defaults.sh`, `check-mem-port-contracts.sh`,
+  `check-inert-enforcement.sh`, `check-in-memory-state-stores.sh`,
   `check-byte-slice-truncation.sh`, `check-relative-path-defaults.sh`,
-  `check-migration-versions.sh`, `check-mcp-write-tools.sh`,
-  `check-forwarded-header-trust.sh`, `check-in-memory-state-stores.sh`,
+  `check-migration-versions.sh`, `check-forwarded-header-trust.sh`,
   `check-unbounded-external-http.sh`, `check-fail-open-ref-resolution.sh`,
-  `check-lossy-secret-conversion.sh`, `check-inert-enforcement.sh`,
-  `check-migration-sql-portability.sh`, `check-forged-scope-fields.sh`,
-  `check-abac-exempt-handlers.sh`
+  `check-forged-scope-fields.sh`, `check-lossy-secret-conversion.sh`
   (`/tmp/stage/review-evidence/task204-check-scripts.log`).
-- `check-task-commit-attribution.sh` fails on exactly one commit:
-  `a11ba8d3` — the assigned base itself (origin/main tip, task-068's
-  landing commit, absent from task-068.md's frontmatter). Verified
-  pre-existing on main: the check fails identically on pure `origin/main`
-  in an isolated worktree (the prior round passed only because the
-  candidate branched pre-task-068, before the seed merge brought main's
-  tip into ancestry). Fixing it requires editing task-068's frontmatter
-  (out of scope for this contract-scope repair) or growing the frozen
-  exemption file (prohibited); it is main-inherited drift for main's
-  owners, recorded here truthfully rather than hidden.
+- `check-task-commit-attribution.sh` fails, but the failure is pre-existing on
+  the assigned base itself (verified in an isolated worktree at `05709c24`):
+  `05709c24 feat(task-196)` is absent from task-196's frontmatter. The
+  seed merge brought main's tip into this branch's ancestry; main's own fix
+  (`2f092bcd`, task-069 branch) is not in this ancestry. Fixing it here would
+  require editing task-196's frontmatter (a task this assignment does not own)
+  or growing the frozen exemption file (prohibited); recorded truthfully as
+  main-inherited drift for main's owners
+  (`/tmp/stage/review-evidence/task204-attribution-check.log`).
 - HTTP checks deferred to host verification: this sandbox's listener probe is
   unsupported (`accept` → `Errno 95`, see `/tmp/stage/capabilities.json`), so
   the route was verified through the in-process router tests above; exact-head
   GitHub CI checks remain mandatory for the deployed transport check.
-- Re-verified at the repaired head on the current base `a11ba8d3`: clean
-  suites, kill-test, and check scripts re-run with evidence regenerated under
-  `/tmp/stage/review-evidence/`.
