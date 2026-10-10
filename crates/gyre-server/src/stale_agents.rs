@@ -139,13 +139,49 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
 }
 /// TASK-093 (§3.3): spawn a replacement for a dead orchestrator. Fresh id,
 /// unique name suffix, same scope/tier/lifecycle config, new scoped JWT. No
-/// task, no worktree. Returns None (leaving the orchestrator dead) when the
-/// workspace spawn budget is exhausted or persistence fails.
+/// task, no worktree. Returns None (leaving the orchestrator dead) when a
+/// live orchestrator already holds the scope, the workspace spawn budget is
+/// exhausted, or persistence fails.
 async fn restart_orchestrator(
     state: &AppState,
     dead: &gyre_domain::Agent,
     now: u64,
 ) -> Option<gyre_domain::Agent> {
+    // Exactly-one-live (§3.2), the same check the spawn cores run: never
+    // mint a replacement while a live orchestrator holds the scope. Without
+    // this, a second entry into the shared death handling (a second terminal
+    // transition — stop after fail, fail on an agent the stale detector
+    // already killed) spawned a second live replacement with its own scoped
+    // JWT. A scope-listing failure is conservative: no replacement rather
+    // than a guessed-free scope.
+    match state.agents.list_by_workspace(&dead.workspace_id).await {
+        Ok(peers) => {
+            let occupied = peers.iter().any(|a| {
+                a.orchestrator_type == dead.orchestrator_type
+                    && match dead.orchestrator_type {
+                        gyre_domain::OrchestratorType::RepoOrchestrator => a.repo_id == dead.repo_id,
+                        _ => true,
+                    }
+                    && crate::api::orchestrator::is_live(a)
+            });
+            if occupied {
+                warn!(
+                    agent_id = %dead.id,
+                    workspace_id = %dead.workspace_id,
+                    "restart: live orchestrator already holds the scope; skipping replacement"
+                );
+                return None;
+            }
+        }
+        Err(e) => {
+            warn!(
+                agent_id = %dead.id,
+                "restart: cannot verify scope occupancy, leaving orchestrator unreplaced: {e}"
+            );
+            return None;
+        }
+    }
+
     // Budget symmetry (task-093 F4): a replacement must pass the same spawn
     // budget check as a fresh spawn. If the workspace is at its limit, leave
     // the orchestrator dead and let the escalation surface it — restarting
@@ -236,6 +272,14 @@ async fn restart_orchestrator(
 /// terminal transition of an orchestrator gets the same treatment: restart a
 /// replacement when `restart_on_failure` is set (subject to the spawn budget)
 /// and escalate repo-tier deaths to the live workspace orchestrator.
+///
+/// Exactly-once contract: callers must invoke this only on the FIRST terminal
+/// transition of the agent — the fail/stop handlers early-return on an
+/// already-terminal agent, and `run_once` skips terminal agents, so the
+/// shared handling (replacement spawn, budget increment, escalation) runs
+/// exactly once per death. `restart_orchestrator` additionally refuses to
+/// mint a replacement while a live orchestrator holds the scope (§3.2), so a
+/// stray second entry cannot produce two live orchestrators.
 pub(crate) async fn handle_orchestrator_death(
     state: &AppState,
     dead: &gyre_domain::Agent,

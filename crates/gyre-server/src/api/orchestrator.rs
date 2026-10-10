@@ -44,7 +44,7 @@ pub struct SpawnOrchestratorRequest {
 /// Whether an agent slot counts as occupying its scope. Dead/Stopped/Failed
 /// orchestrators do NOT block a respawn - combined with auto-restart this
 /// keeps exactly one live orchestrator per scope (§3.2).
-fn is_live(a: &gyre_domain::Agent) -> bool {
+pub(crate) fn is_live(a: &gyre_domain::Agent) -> bool {
     !matches!(
         a.status,
         AgentStatus::Dead | AgentStatus::Stopped | AgentStatus::Failed
@@ -1186,5 +1186,123 @@ mod tests {
                 .await
                 .unwrap_err();
         assert!(matches!(err, ApiError::InvalidInput(_)), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn second_terminal_transition_does_not_spawn_second_replacement() {
+        // Reviewer probe (stop → fail): both handlers previously accepted a
+        // second terminal call on an already-terminal agent and re-ran the
+        // shared death handling — two live workspace orchestrators, both with
+        // valid scoped JWTs, budget double-decremented. Exactly one live
+        // orchestrator must survive any sequence of terminal calls.
+        let state = test_state();
+        seed(&state).await;
+
+        let (agent, _t) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1")
+                .await
+                .unwrap();
+
+        let id = agent.id.to_string();
+        let code = crate::api::spawn::stop_agent(State(state.clone()), Path(id.clone()))
+            .await
+            .unwrap();
+        assert_eq!(code, StatusCode::OK);
+        let code = crate::api::spawn::fail_agent(State(state.clone()), Path(id.clone()))
+            .await
+            .unwrap();
+        assert_eq!(code, StatusCode::OK);
+
+        // Exactly one live workspace orchestrator (§3.2) — the stop-path
+        // replacement — and the dead original's terminal status is stable.
+        let peers = state
+            .agents
+            .list_by_workspace(&Id::new("ws-1"))
+            .await
+            .unwrap();
+        let live: Vec<_> = peers
+            .iter()
+            .filter(|a| {
+                a.orchestrator_type == OrchestratorType::WorkspaceOrchestrator && is_live(a)
+            })
+            .collect();
+        assert_eq!(live.len(), 1, "exactly one live workspace orchestrator, got {} live: {:?}", live.len(),
+            live.iter().map(|a| a.name.clone()).collect::<Vec<_>>());
+        assert_eq!(live[0].name, "ws-orch-restart-1");
+
+        let original = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        assert_eq!(original.status, AgentStatus::Stopped);
+
+        // Budget symmetric: one decrement (stop), one increment
+        // (replacement) — net active count unchanged at one.
+        let usage = state
+            .budget_usages
+            .get_usage("workspace:ws-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            usage.active_agents, 1,
+            "double terminal must not double-decrement the budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn fail_after_stale_death_does_not_spawn_second_replacement() {
+        // The other re-entry route: the stale detector kills the
+        // orchestrator (Dead + replacement), then a caller POSTs /fail on
+        // the corpse. Previously the fail handler re-ran the death handling
+        // on the Dead agent and spawned a second live replacement.
+        let state = test_state();
+        seed(&state).await;
+
+        let (agent, _t) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(Some("ws-orch")), "user-1")
+                .await
+                .unwrap();
+
+        let mut aged = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        aged.spawned_at = aged.spawned_at.saturating_sub(10_000);
+        aged.last_heartbeat = None;
+        state.agents.update(&aged).await.unwrap();
+        crate::stale_agents::run_once(&state).await.unwrap();
+
+        let code = crate::api::spawn::fail_agent(
+            State(state.clone()),
+            Path(agent.id.to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, StatusCode::OK);
+
+        let peers = state
+            .agents
+            .list_by_workspace(&Id::new("ws-1"))
+            .await
+            .unwrap();
+        let live: Vec<_> = peers
+            .iter()
+            .filter(|a| {
+                a.orchestrator_type == OrchestratorType::WorkspaceOrchestrator && is_live(a)
+            })
+            .collect();
+        assert_eq!(
+            live.len(),
+            1,
+            "fail on a Dead corpse must not mint a second replacement; live: {:?}",
+            live.iter().map(|a| a.name.clone()).collect::<Vec<_>>()
+        );
+        assert_eq!(live[0].name, "ws-orch-restart-1");
+
+        let usage = state
+            .budget_usages
+            .get_usage("workspace:ws-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            usage.active_agents, 1,
+            "stale-abort decrement + replacement increment must stay net one"
+        );
     }
 }
