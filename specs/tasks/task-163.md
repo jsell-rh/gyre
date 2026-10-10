@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "dependency-graph.md §Enforcement Policies"
   - "dependency-graph.md §Cascade Testing"
-commits: ["71e25bb8c1b92e52babd309d383dc4de864794b8"]
+commits: ["9f9f4340398d1f6fbe3ec08cc81150ad9fb9dac4", "bb92174675e04d96023125d9f70aab20dd3cc6a5"]
 ---
 
 ## Spec Excerpt
@@ -108,37 +108,3 @@ Audit of every change to this task's assigned contract (base `770785f7` → cand
 - **Port-contract fidelity**: the assigned plan named \`list_by_dependency(edge_id)\` and \`get/set\`, but the ports already existed on base with \`list_by_source_repo\` / \`get_for_workspace\` / \`set_for_workspace\` and base callers depend on those signatures. Redefining the port to match the stale plan text would have broken base callers and violated the hexagonal contract; the implemented adapters satisfy the port that exists. The task's own Agent Instructions said the domain types and adapters already exist and the port files are referenced at their current signatures.
 - Focused suites re-run at the merged head after this repair: see `/tmp/stage/review-evidence/contract-repair-be954b52/focused-suites.log`.
 - `git diff --check` clean; the attribution gate passes at this state.
-
-## Checkpoint Recovery (round 4, finding 019ebd03e13348ca8b0b899800d7b1a9)
-
-Finding category `checkpoint`: "Recovered an interrupted assignment; implementation must finish and obtain fresh review."
-
-This attempt's branch carries the entire task-163 product surface in checkpoint squash `71e25bb8` (the prior attempt's commits `9f9f4340`/`bb921746` are not in this history; their task-163 trees are byte-identical to the checkpoint's). Recovery work this round:
-
-- **Merge resolution**: the active merge with base `18c44f1a` conflicted only on task-196.md's `commits:` line (resolved to theirs — all four task-196 commits are in the merged history). The checkpoint squash was built on `770785f7`, one commit **before** `05709c24` (task-196's landed work), so it silently reverted task-196's reviewed surface in five files; the merge auto-resolved those to the reverted side. Resolved to the upstream `18c44f1a` state inside the merge commit `4477e72b`: `api/graph.rs` (BriefingSource, resolve_since, briefing_sources, grounded `briefing_ask`), `web/src/__tests__/Briefing.test.js`, `web/src/components/Briefing.svelte`, `web/src/lib/InlineChat.svelte`, and task-196.md (progress/commits/Shipped). Task-163 surface does not overlap any restored file (verified: `git diff 770785f7..71e25bb8 --name-only -- crates/ web/` ∩ restored files = ∅).
-- **Attribution**: `commits:` rewritten to `["71e25bb8..."]` via `/tmp/stage/dev-attribution.py task-163` (commit `c9b12c48`) — the checkpoint commit is the branch's sole task-163 product-surface commit.
-- **Surface integrity**: `git diff 18c44f1a..HEAD` touches only task-163 surface (two SQLite adapters, two Postgres mirrors, schema.rs, migration 000056, sqlite/postgres mod wiring, lib.rs `store!` wiring, task163_dependency_persistence.rs, this task file). `web/dist` unchanged from base.
-
-Fresh verification at HEAD `c9b12c48` (evidence: `/tmp/stage/review-evidence/checkpoint-recovery-019ebd03/`):
-
-- `cargo test -p gyre-adapters --lib breaking_change` — 7 passed (incl. records survive a fresh storage instance).
-- `cargo test -p gyre-adapters --lib dependency_policy` — 4 passed (incl. survives fresh storage instance).
-- `cargo test -p gyre-adapters --lib migrations` — 3 passed.
-- `cargo test -p gyre-server --test task163_dependency_persistence` — 2 passed (second `build_state` over the same DB file observes the first's records).
-- `cargo test -p gyre-server --lib merge_processor::tests::trigger_cascade` — 8 passed.
-- `cargo test -p gyre-server --lib api::dependencies::tests` — 64 passed.
-- Restoration check: `cargo test -p gyre-server --lib api::graph::tests::briefing` — 15 passed; `cd web && node node_modules/vitest/vitest.mjs run Briefing.test.js InlineChat.test.js DetailPanelChat.test.js` — 49/49 passed (24/16/9). (`npx` hangs in this sandbox — transport/registry restriction, not a code defect; direct `node node_modules/vitest/vitest.mjs` invocation works.)
-- Gates: rustfmt-diff vs `18c44f1a` clean (9 Rust files), arch OK, migration-versions OK, migration-sql-portability OK, mem-port-contracts OK, in-memory-state-stores OK, task-commit-attribution OK, `git diff --check` clean, `web/dist` empty-delta.
-- Sandbox note: TCP listener probe unsupported (errno 95) — no live HTTP verification here; exact-head GitHub CI remains the transport check (recorded in capabilities.json).
-
-## Base-bump Re-verification (round 5, finding c0e385c50cb84d878bf357b2934c58d2, re-run)
-
-The pipeline re-ran the contract-repair assignment with a newer base: `27bd585c` (task-155 CLI squash) was merged into this branch (merge commit `dff8261e`), and the assigned contract body was re-stamped uncommitted into the working tree (byte-identical to the round-3 assignment body; its `commits:` SHAs `9f9f4340`/`bb921746` are not reachable in this history — the checkpoint squash `71e25bb8` carries the identical task-163 tree).
-
-- **Contract integrity re-audited**: the contract sections (frontmatter through Agent Instructions) at this round's HEAD are byte-identical to the assigned body except the `commits:` line — process bookkeeping per the round-3 classification. The five checked criteria and verbatim criterion 6 (`- [ ] \`cargo test --all\` passes`) are unchanged; no normative requirement was altered this round.
-- **Surface integrity**: `git diff 27bd585c..HEAD` touches exactly the 12 task-163 files (SQLite + Postgres adapters, migration 000056, schema, mod wiring, `store!` wiring in lib.rs, persistence test, this task file) plus nothing else; task-155's merge added only upstream surface (gyre-cli, docs/cli.md, task-155/228 files). Zero overlap. `web/` empty-delta vs base; `git diff --check` clean.
-- **Upstream attribution debt repaired**: `bash scripts/check-task-commit-attribution.sh` failed at both the merged head and pure upstream main `27bd585c` on `27bd585c task-155` — the upstream squash commit touches product surface but was absent from task-155's frontmatter (pre-existing upstream debt, not task-163's doing; evidence: `/tmp/stage/review-evidence/base-bump-c0e385c5/task155-upstream-baseline.md`). Fixed by appending `27bd585c` to task-155's `commits:` frontmatter — the gate's own prescribed remedy, matching the task-095 (5aaded21) precedent; the frozen exemption file is untouched. Gate now exit 0.
-- **Task-163 attribution**: `commits: ["71e25bb8..."]` re-derived by `/tmp/stage/dev-attribution.py task-163` — the checkpoint squash remains this branch's sole task-163 product-surface commit.
-- **Static gates at the merged head** (all exit 0): arch, hierarchy, abac-route-registry, abac-exempt-handlers, mcp-write-tools, migration-versions, migration-sql-portability, mem-port-contracts, in-memory-state-stores, fabricated-scope-defaults, lossy-secret-conversion, scope-literal-defaults, inert-enforcement, forged-scope-fields, forwarded-header-trust, unbounded-external-http, dead-message-kinds, byte-slice-truncation, relative-path-defaults, fail-open-ref-resolution, task-commit-attribution; `git diff --check 27bd585c..HEAD` clean.
-- Focused suites re-run at the merged head: see `/tmp/stage/review-evidence/base-bump-c0e385c5/`.
-- Sandbox note: TCP listener probe unsupported (errno 95) — no live HTTP verification here; exact-head GitHub CI remains the transport check (recorded in capabilities.json).
