@@ -171,3 +171,29 @@ Sandbox limitation (recorded, not a code defect): the e2e test
 The identical lifecycle is proven listener-free by
 `git_http::tests::push_modifying_spec_revokes_ledger_approvals`. Host
 checklist: e2e test, `cargo test --all`, GitHub CI on the exact head.
+
+## Shipped (run 2 — merge resolution and finding triage)
+
+This run resolved the interrupted checkpoint (exit 130) and triaged the
+verification finding; no production code needed changing — every focused
+suite passes on the merged tree at `103db0c3`.
+
+- Resolved active merge conflict in `specs/tasks/task-068.md` (identical
+  10-SHA `commits:` lists, different order; kept HEAD ordering), committed
+  as `103db0c3`. Attribution gate re-run green.
+- Completed the lifecycle verification the checkpoint was awaiting:
+  `push_modifying_spec_revokes_ledger_approvals` and
+  `require_current_spec_blocks_stale_spec_ref` pass, plus `api::gates` +
+  `api::specs` — 85 passed / 0 failed on the merged tree.
+- `gyre-adapters sqlite::spec_approval` 7/7, `gyre-domain spec_approval`
+  4/4; all 21 mechanical invariant scripts + attribution gate pass.
+- **Finding 9e33d19b (exit 1) triaged as environmental**: its tail shows a
+  successful vite build; reproduced `npm test` failures on current HEAD are
+  all 5s vitest timeouts (0 assertion failures) in ExplorerCanvas perf
+  tests; the finding's own base commit `e96d25ab` (on origin/main, green in
+  GitHub CI) fails identically but worse (11 vs 8) in this CPU-starved
+  sandbox; isolated run of the failing file passes 15/15. No branch
+  regression; host checklist: full `npm test` + GitHub CI on exact head.
+
+Evidence: `/tmp/stage/review-evidence/task-138-repair.md` (this run),
+`web-full-suite.log`, `web-base-e96d25ab.log`.
