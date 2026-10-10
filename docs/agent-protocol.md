@@ -138,7 +138,7 @@ When the merge queue executes an `AgentReview` or `AgentValidation` gate, it spa
 
 **`AgentValidation` protocol:** exit 0 = pass, non-zero = fail.
 
-**Security:** each execution gets a unique `gyre_gate_<uuid>` token (revoked on completion even on crash/timeout); command split on whitespace -- no `sh -c` shell wrapper; 5-minute default timeout prevents hung gate agents.
+**Security:** each execution gets a unique `gyre_gate_<uuid>` token (revoked on completion even on crash/timeout); command split on whitespace -- no `sh -c` shell wrapper; 5-minute default timeout prevents hung gate agents. Review tokens carry OIDC scope `review:submit` (read MR context, submit verdict, read-only -- push denied); validation tokens carry `validation:report` (read MR context only -- no review submission, push denied). Scope checks are exact-match on the capability string.
 
 **Merge processor dep failure handling (P5):** before processing each queued entry, the merge processor checks dependency health: if a dependency MR is `Closed`, the queue entry is marked `Failed` and a High-priority task `"Dependency MR-{id} was closed, reassess MR-{dependent}"` is auto-created; if a dependency has 3+ gate failures, an escalation warning is logged.
 

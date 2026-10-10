@@ -41,6 +41,22 @@ pub struct RemoteJwksEntry {
 /// TTL for cached remote JWKS (5 minutes).
 const REMOTE_JWKS_TTL_SECS: u64 = 300;
 
+
+// -- Gate-agent capability scopes (task-134, agent-gates.md) -------------------
+
+/// OIDC capability granted to an AgentReview gate's reviewer agent: it may
+/// read MR context and submit its verdict, nothing else (§Gate Agent
+/// Lifecycle: "read-only access", "identity-scoped").
+pub const REVIEW_SUBMIT_SCOPE: &str = "review:submit";
+
+/// OIDC capability granted to an AgentValidation gate's validator agent: it
+/// may read MR context to run its domain-specific check, nothing else. The
+/// validation contract is exit-code pass/fail, so this capability carries no
+/// review-submission rights — a validator must not be able to influence
+/// review-based approval surfaces.
+pub const VALIDATION_REPORT_SCOPE: &str = "validation:report";
+
+
 // -- Agent JWT signing (Gyre as OIDC provider) --------------------------------
 
 /// Claims embedded in agent JWTs minted by Gyre's built-in OIDC provider.
@@ -283,15 +299,17 @@ impl AgentSigningKey {
             .map_err(|e| format!("JWT mint error: {e}"))
     }
 
-    /// Mint a scoped agent JWT (task-134 review-agent protocol).
+    /// Mint a scoped agent JWT (task-134 gate-agent protocol).
     ///
-    /// Gate agents are ephemeral, single-purpose identities: an AgentReview
-    /// gate's reviewer may submit its verdict and read MR context, nothing
-    /// else. The `scope` claim carries an explicit capability string (e.g.
-    /// `review:submit`) that `git_http` (push denial), the ABAC middleware
-    /// (route allow-list), and `submit_review` (reviewer identity binding)
-    /// all enforce. `task_id` carries the gate id so the token is traceable
-    /// to the gate run that minted it.
+    /// Gate agents are ephemeral, single-purpose identities. An AgentReview
+    /// gate's reviewer carries [`REVIEW_SUBMIT_SCOPE`] (submit verdict, read
+    /// MR context); an AgentValidation gate's validator carries
+    /// [`VALIDATION_REPORT_SCOPE`] (read MR context, no submission — its
+    /// contract is the process exit code). The capability string is enforced
+    /// exactly (no substring matching) by `git_http` (push denial), the ABAC
+    /// middleware (route allow-list), and `submit_review` (reviewer identity
+    /// binding). `task_id` carries the gate id so the token is traceable to
+    /// the gate run that minted it.
     pub fn mint_scoped(
         &self,
         agent_id: &str,

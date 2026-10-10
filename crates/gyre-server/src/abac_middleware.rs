@@ -817,31 +817,50 @@ pub async fn abac_middleware(
 
     // Task-134 (agent-gates.md §Gate Agent Lifecycle): scoped tokens are
     // allow-listed to their capability's routes. A `review:submit` gate
-    // agent may read MR context and submit its verdict — anything else is
-    // denied before policy evaluation, so no repo/admin policy can widen a
-    // single-purpose reviewer into a general-purpose caller.
+    // agent may read MR context and submit its verdict; a
+    // `validation:report` agent may read MR context for its check and
+    // nothing else (its contract is the process exit code). Anything else
+    // is denied before policy evaluation, so no repo/admin policy can
+    // widen a single-purpose gate agent into a general-purpose caller.
+    // Capability comparison is exact-match: a substring check would let a
+    // hypothetical `review:submit:admin` scope inherit the allow-list
+    // (review F3).
     if let Some(scope) = auth
         .jwt_claims
         .as_ref()
         .and_then(|c| c.get("scope"))
         .and_then(|s| s.as_str())
     {
-        if scope.contains("review:submit") {
-            let allowed = matches!(
-                pattern.as_str(),
-                "/api/v1/merge-requests/:id"
-                    | "/api/v1/merge-requests/:id/reviews"
-                    | "/api/v1/merge-requests/:id/diff"
-                    | "/api/v1/merge-requests/:id/comments"
-                    | "/api/v1/merge-requests/:id/gates"
-                    | "/api/v1/version"
-            );
+        let is_reviewer = scope == crate::auth::REVIEW_SUBMIT_SCOPE;
+        let is_validator = scope == crate::auth::VALIDATION_REPORT_SCOPE;
+        if is_reviewer || is_validator {
+            let allowed = if is_reviewer {
+                matches!(
+                    pattern.as_str(),
+                    "/api/v1/merge-requests/:id"
+                        | "/api/v1/merge-requests/:id/reviews"
+                        | "/api/v1/merge-requests/:id/diff"
+                        | "/api/v1/merge-requests/:id/comments"
+                        | "/api/v1/merge-requests/:id/gates"
+                        | "/api/v1/version"
+                )
+            } else {
+                // Read-only MR context for the check itself; no review
+                // submission, no comment writes (validation contract is
+                // exit-code pass/fail).
+                matches!(
+                    pattern.as_str(),
+                    "/api/v1/merge-requests/:id"
+                        | "/api/v1/merge-requests/:id/diff"
+                        | "/api/v1/version"
+                )
+            };
             if !allowed {
                 tracing::warn!(
                     subject_id = %auth.agent_id,
                     pattern = %pattern,
                     scope = %scope,
-                    "ABAC denied request: review-scoped token outside allow-list"
+                    "ABAC denied request: scoped gate-agent token outside allow-list"
                 );
                 let decision = policy_engine::build_decision(
                     &policy_engine::EvalResult {
@@ -857,9 +876,14 @@ pub async fn abac_middleware(
                     &pattern,
                 );
                 let _ = state.policies.record_decision(&decision).await;
+                let error = if is_reviewer {
+                    "review-scoped token is limited to review routes"
+                } else {
+                    "validation-scoped token is limited to read-only MR routes"
+                };
                 return (
                     StatusCode::FORBIDDEN,
-                    Json(json!({"error": "review-scoped token is limited to review routes"})),
+                    Json(json!({"error": error})),
                 )
                     .into_response();
             }

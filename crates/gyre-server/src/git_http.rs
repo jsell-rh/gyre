@@ -245,27 +245,30 @@ pub async fn git_receive_pack(
     auth: AuthenticatedAgent,
     req: Request,
 ) -> Response {
-    // Task-134: scoped review tokens are read-only — a gate agent with
-    // `review:submit` may read MR context and submit its verdict, never
+    // Task-134: scoped gate-agent tokens are read-only — a `review:submit`
+    // reviewer or `validation:report` validator may read MR context, never
     // push code (agent-gates.md §Gate Agent Lifecycle: "read-only access").
-    // Caller-scoped capability: checked before workspace/repo resolution so
-    // the denial does not depend on (or leak the existence of) the target.
+    // Caller-scoped capability, exact-match (review F3): checked before
+    // workspace/repo resolution so the denial does not depend on (or leak
+    // the existence of) the target.
     if let Some(scope) = auth
         .jwt_claims
         .as_ref()
         .and_then(|c| c.get("scope"))
         .and_then(|s| s.as_str())
     {
-        if scope.contains("review:submit") {
+        if scope == crate::auth::REVIEW_SUBMIT_SCOPE
+            || scope == crate::auth::VALIDATION_REPORT_SCOPE
+        {
             warn!(
                 agent_id = %auth.agent_id,
                 workspace_slug = %workspace_slug,
                 repo_name = %repo_name,
-                "git-receive-pack 403: review-scoped token cannot push"
+                "git-receive-pack 403: scoped gate-agent token cannot push"
             );
             return (
                 StatusCode::FORBIDDEN,
-                "push rejected: review-scoped tokens are read-only".to_string(),
+                "push rejected: gate-agent scoped tokens are read-only".to_string(),
             )
                 .into_response();
         }

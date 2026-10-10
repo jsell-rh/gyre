@@ -713,10 +713,18 @@ pub async fn submit_review(
         .ok_or_else(|| ApiError::NotFound(format!("merge request {id} not found")))?;
 
     // Reviewer identity binding (task-134): a caller authenticated with a
-    // scoped JWT (`review:submit`) must submit under its own token subject.
-    // Without this, a gate agent could forge reviews under any reviewer id.
-    let reviewer_agent_id = if let Some(scope) = auth.jwt_claims.as_ref().and_then(|c| c.get("scope")).and_then(|s| s.as_str()) {
-        if scope.contains("review:submit") {
+    // scoped reviewer JWT (`review:submit`) must submit under its own token
+    // subject. Without this, a gate agent could forge reviews under any
+    // reviewer id. Exact-match capability (review F3); `validation:report`
+    // validators have no review-submission capability at all (F2) and are
+    // additionally blocked from this route by the ABAC allow-list.
+    let reviewer_agent_id = if let Some(scope) = auth
+        .jwt_claims
+        .as_ref()
+        .and_then(|c| c.get("scope"))
+        .and_then(|s| s.as_str())
+    {
+        if scope == crate::auth::REVIEW_SUBMIT_SCOPE {
             auth.agent_id.clone()
         } else {
             req.reviewer_agent_id

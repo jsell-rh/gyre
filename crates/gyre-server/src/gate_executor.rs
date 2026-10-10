@@ -575,7 +575,7 @@ async fn build_review_agent_context(
             "forge",
             &state.base_url,
             AGENT_GATE_TIMEOUT_SECS + 60,
-            "review:submit",
+            crate::auth::REVIEW_SUBMIT_SCOPE,
         )
         .map_err(|e| format!("failed to mint scoped review token: {e}"))?;
     // Register in agent_tokens so the auth extractor resolves the JWT and
@@ -834,12 +834,15 @@ async fn run_validation_agent_process(
     cmd: &str,
     persona: &str,
 ) -> (GateStatus, String) {
-    // Scoped validator identity: `review:submit` lets the validator read MR
-    // context and report its result, and nothing else. A mint failure fails
-    // the gate before anything is spawned — a fabricated fallback token is
-    // an identity the auth extractor can never validate, so the agent could
-    // not authenticate at all ("cannot determine state" is not "state is
-    // fine"). Mirrors build_review_agent_context's fail-closed mint path.
+    // Scoped validator identity: `validation:report` lets the validator read
+    // MR context and nothing else — its contract is the process exit code,
+    // so unlike a reviewer it carries no review-submission capability (a
+    // validator must not be able to influence review-based approval
+    // surfaces). A mint failure fails the gate before anything is spawned —
+    // a fabricated fallback token is an identity the auth extractor can
+    // never validate, so the agent could not authenticate at all ("cannot
+    // determine state" is not "state is fine"). Mirrors
+    // build_review_agent_context's fail-closed mint path.
     let gate_agent_id = format!("gate-validate-{}", Uuid::new_v4());
     let gate_token = match state.agent_signing_key.mint_scoped(
         &gate_agent_id,
@@ -847,7 +850,7 @@ async fn run_validation_agent_process(
         "forge",
         &state.base_url,
         AGENT_GATE_TIMEOUT_SECS + 60,
-        "review:submit",
+        crate::auth::VALIDATION_REPORT_SCOPE,
     ) {
         Ok(token) => token,
         Err(e) => {
@@ -2006,6 +2009,46 @@ mod tests {
         );
     }
 
+    /// Review F2: a validation agent's token must carry
+    /// `validation:report`, NOT `review:submit` — a validator whose
+    /// contract is exit-code pass/fail must not hold review-submission
+    /// capability. Proves the production mint site: the gate runs a real
+    /// `printenv GYRE_VALIDATION_TOKEN` process, its output surfaces the
+    /// minted token, and the JWT claims are validated against the state's
+    /// signing key (issuer = base_url).
+    #[tokio::test]
+    async fn agent_validation_token_carries_validation_scope_not_review() {
+        let state = test_state();
+        let gate = make_gate(
+            GateType::AgentValidation,
+            Some("printenv GYRE_VALIDATION_TOKEN".to_string()),
+        );
+        let mr_id = make_mr_id();
+
+        let (status, output) = run_agent_validation_gate(&state, &gate, &mr_id).await;
+
+        assert_eq!(status, GateStatus::Passed, "output: {output}");
+        let token = output
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("ey"))
+            .map(|rest| format!("ey{rest}"))
+            .unwrap_or_else(|| panic!("no JWT in gate output: {output}"));
+        let claims = state
+            .agent_signing_key
+            .validate(&token, &state.base_url)
+            .expect("gate-agent JWT must validate against the server signing key");
+        assert_eq!(
+            claims.scope,
+            crate::auth::VALIDATION_REPORT_SCOPE,
+            "validator token must carry validation:report, not review:submit"
+        );
+        assert_ne!(
+            claims.scope,
+            crate::auth::REVIEW_SUBMIT_SCOPE,
+            "validator must not hold review-submission capability"
+        );
+    }
+
     #[tokio::test]
     async fn gate_token_revoked_after_review_completes() {
         let state = test_state();
@@ -2081,6 +2124,11 @@ mod tests {
         let base_url = format!("http://127.0.0.1:{port}");
 
         let state = crate::build_state("gyre-test-token", &base_url, None);
+        // Seed builtin ABAC policies: build_state wires an empty policy
+        // store, and evaluation with zero policies is default-deny, so the
+        // driver's review POST would 403. main.rs seeds at startup; a test
+        // building its own state must do the same (review F1).
+        crate::abac_middleware::seed_builtin_policies(&state).await;
         let (mr_id, _repo_id, spec_sha) = seed_full_review_fixture(&state).await;
 
         let app = crate::build_router(state.clone());
@@ -2163,6 +2211,9 @@ mod tests {
         let base_url = format!("http://127.0.0.1:{port}");
 
         let state = crate::build_state("gyre-test-token", &base_url, None);
+        // Same as the approved-path test: seed builtin policies or the
+        // driver's review POST default-denies (review F1).
+        crate::abac_middleware::seed_builtin_policies(&state).await;
         let (mr_id, _repo_id, _spec_sha) = seed_full_review_fixture(&state).await;
 
         let app = crate::build_router(state.clone());
@@ -2187,6 +2238,77 @@ mod tests {
             output.contains("The diff violates the persona criteria"),
             "review body not surfaced in gate output: {output}"
         );
+    }
+
+    /// Review F1 regression guard, runnable without loopback: replicates the
+    /// e2e tests' exact setup (build_state + seeded fixture + router from
+    /// `crate::build_router`) via a oneshot request and proves the driver's
+    /// review submission is ABAC-allowed (201), not default-denied (403).
+    /// The e2e tests skip in no-loopback sandboxes; this one always runs,
+    /// so a future removal of `seed_builtin_policies` from their setup
+    /// fails here first.
+    #[tokio::test]
+    async fn e2e_review_submission_is_abac_allowed_with_seeded_policies() {
+        use tower::ServiceExt; // oneshot
+
+        let state = test_state();
+        crate::abac_middleware::seed_builtin_policies(&state).await;
+        let (mr_id, _repo_id, _spec_sha) = seed_full_review_fixture(&state).await;
+        let app = crate::build_router(state.clone());
+
+        // Mint and register a reviewer token exactly as the gate does.
+        let gate_agent_id = format!("gate-review-{}", Uuid::new_v4());
+        let token = state
+            .agent_signing_key
+            .mint_scoped(
+                &gate_agent_id,
+                "gate-probe",
+                "forge",
+                &state.base_url,
+                60,
+                crate::auth::REVIEW_SUBMIT_SCOPE,
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", &gate_agent_id, token.clone())
+            .await
+            .unwrap();
+
+        // The driver's exact request shape (forged reviewer id included).
+        let body = serde_json::json!({
+            "reviewer_agent_id": "forged-id-attempt",
+            "decision": "approved",
+            "body": "LGTM: satisfies the acceptance criteria."
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/merge-requests/{}/reviews", mr_id.as_str()))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&body).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert_eq!(
+            status,
+            axum::http::StatusCode::CREATED,
+            "e2e review submission must be allowed once builtin policies are seeded; \
+             403 means the e2e setup lost its seed_builtin_policies call (review F1): {text}"
+        );
+        // Identity binding holds through the same path.
+        let reviews = state.reviews.list_reviews(&mr_id).await.unwrap();
+        assert_eq!(reviews.len(), 1, "reviews: {reviews:?}");
+        assert_eq!(reviews[0].reviewer_agent_id, gate_agent_id);
     }
 
 

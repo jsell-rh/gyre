@@ -1,6 +1,8 @@
 //! Task-134 review probe: verify the scoped-token enforcement behaviors that
 //! the e2e tests cannot cover in a no-loopback sandbox, using oneshot router
-//! calls (no listener required).
+//! calls (no listener required). Scope capability strings are minted exactly
+//! as the gate executor mints them (`review:submit` for reviewers,
+//! `validation:report` for validators).
 
 use axum::{
     body::Body,
@@ -223,4 +225,201 @@ async fn revoked_scoped_token_is_rejected() {
         StatusCode::UNAUTHORIZED,
         "revoked scoped token must fail auth"
     );
+}
+
+/// Review F2: an AgentValidation gate agent (scope `validation:report`) must
+/// NOT be able to submit a review — its contract is exit-code pass/fail, so
+/// it must not influence review-based approval surfaces. The ABAC
+/// allow-list denies the review route for validation-scoped tokens.
+#[tokio::test]
+async fn validation_scoped_token_cannot_submit_review() {
+    let state = test_state().await;
+    gyre_server::abac_middleware::seed_builtin_policies(&state).await;
+    let app: Router = gyre_server::build_router(state.clone());
+
+    // Seed an MR.
+    let mr_id = gyre_common::Id::new("mr-probe-validation");
+    let mr = gyre_domain::MergeRequest::new(
+        mr_id.clone(),
+        gyre_common::Id::new("repo-probe"),
+        "t",
+        "feature",
+        "main",
+        1,
+    );
+    state.merge_requests.create(&mr).await.unwrap();
+
+    let gate_agent_id = "gate-validate-probe".to_string();
+    let token = state
+        .agent_signing_key
+        .mint_scoped(&gate_agent_id, "gate-1", "forge", "http://localhost:0", 60, "validation:report")
+        .unwrap();
+    state
+        .kv_store
+        .kv_set("agent_tokens", &gate_agent_id, token.clone())
+        .await
+        .unwrap();
+
+    let body = serde_json::json!({
+        "reviewer_agent_id": gate_agent_id,
+        "decision": "approved",
+        "body": "validator should not be able to do this"
+    });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/merge-requests/mr-probe-validation/reviews")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "validation-scoped token must not submit reviews: {text}"
+    );
+    // And no review was persisted.
+    let reviews = state.reviews.list_reviews(&mr_id).await.unwrap();
+    assert!(
+        reviews.is_empty(),
+        "validation agent must not create reviews: {reviews:?}"
+    );
+}
+
+/// Review F2: a validation agent may still read the MR context it needs for
+/// its domain-specific check (MR detail + diff, read-only).
+#[tokio::test]
+async fn validation_scoped_token_can_read_mr_context() {
+    let state = test_state().await;
+    gyre_server::abac_middleware::seed_builtin_policies(&state).await;
+    let app: Router = gyre_server::build_router(state.clone());
+
+    let mr_id = gyre_common::Id::new("mr-probe-validation-read");
+    let mr = gyre_domain::MergeRequest::new(
+        mr_id.clone(),
+        gyre_common::Id::new("repo-probe"),
+        "t",
+        "feature",
+        "main",
+        1,
+    );
+    state.merge_requests.create(&mr).await.unwrap();
+
+    let gate_agent_id = "gate-validate-probe-read".to_string();
+    let token = state
+        .agent_signing_key
+        .mint_scoped(&gate_agent_id, "gate-1", "forge", "http://localhost:0", 60, "validation:report")
+        .unwrap();
+    state
+        .kv_store
+        .kv_set("agent_tokens", &gate_agent_id, token.clone())
+        .await
+        .unwrap();
+
+    for uri in [
+        format!("/api/v1/merge-requests/{}", mr_id.as_str()),
+        format!("/api/v1/merge-requests/{}/diff", mr_id.as_str()),
+    ] {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "validation-scoped token must read MR context routes"
+        );
+    }
+}
+
+/// Review F3: capability comparison must be exact-match. A lookalike scope
+/// (`review:submit:admin`, `xreview:submit`) is not a known gate-agent
+/// capability, so it must not inherit the reviewer identity binding in
+/// `submit_review`. Discriminator: the lookalike token authenticates as a
+/// normal agent (the builtin agent-role policy allows the review POST), and
+/// the review is stored under the request body's reviewer id — proving the
+/// scope check compared exactly rather than substring-matched.
+#[tokio::test]
+async fn lookalike_scope_does_not_inherit_review_capability() {
+    let state = test_state().await;
+    gyre_server::abac_middleware::seed_builtin_policies(&state).await;
+    let app: Router = gyre_server::build_router(state.clone());
+
+    let mr_id = gyre_common::Id::new("mr-probe-lookalike");
+    let mr = gyre_domain::MergeRequest::new(
+        mr_id.clone(),
+        gyre_common::Id::new("repo-probe"),
+        "t",
+        "feature",
+        "main",
+        1,
+    );
+    state.merge_requests.create(&mr).await.unwrap();
+
+    for lookalike in ["review:submit:admin", "xreview:submit"] {
+        let agent_id = format!("gate-lookalike-{}", lookalike.replace(':', "-"));
+        let token = state
+            .agent_signing_key
+            .mint_scoped(&agent_id, "gate-1", "forge", "http://localhost:0", 60, lookalike)
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", &agent_id, token.clone())
+            .await
+            .unwrap();
+
+        // Route allow-list: lookalike scope is not a known gate-agent
+        // capability, so the allow-list does not apply — the request is
+        // evaluated under the agent-role builtin policy (read+write on
+        // merge_request), which permits the POST.
+        let body = serde_json::json!({
+            "reviewer_agent_id": "some-other-reviewer",
+            "decision": "approved",
+            "body": format!("lookalike probe {lookalike}")
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/merge-requests/mr-probe-lookalike/reviews")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+
+        // Reviewer identity binding must NOT have engaged: the review is
+        // stored under the body's reviewer id (proof the scope comparison
+        // is exact, not substring).
+        let reviews = state.reviews.list_reviews(&mr_id).await.unwrap();
+        let stored = reviews
+            .iter()
+            .find(|r| r.body == format!("lookalike probe {lookalike}"))
+            .unwrap_or_else(|| panic!("lookalike scope request failed: {status} {text}"));
+        assert_eq!(
+            stored.reviewer_agent_id, "some-other-reviewer",
+            "lookalike scope '{lookalike}' must not inherit reviewer identity binding"
+        );
+        assert_eq!(status, StatusCode::CREATED);
+    }
 }
