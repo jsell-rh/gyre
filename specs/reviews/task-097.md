@@ -110,3 +110,82 @@ The task meets the spec section as scoped (Principle, Architecture, Secret Scopi
 **progress: complete**
 
 — Reviewer, 2026-10-09
+
+## Round 4 (independent review, contract-repair candidate)
+
+Assignment: base `6bf777a6` → candidate `c527425c`. Tree clean at HEAD before
+and after all probes (every mutation restored, `git diff --quiet` verified after
+each). Evidence: `/tmp/stage/review-evidence/` (README.md indexes every log).
+
+### Contract repair verification
+
+- The assigned task body in the stage input is **byte-identical** to
+  `specs/tasks/task-097.md` at the candidate (frontmatter, all headers, `## Shipped`
+  body). The attempt-78c6b2ee drift is gone: no top-level `## Verification repair`
+  section; the record lives as `### Contract repair` nested under `## Shipped`.
+  All 13 original task-097 SHAs are unchanged and `5b50e3a6` is retained at the
+  list tail; all 14 are ancestors of the candidate (`frontmatter-ancestry.txt`).
+- Product surface is **byte-identical to the previously reviewed tree `653de113`**
+  on every task-owned file (`mem.rs`, `api/spawn.rs`, `constraint_check.rs`,
+  `sqlite/secret.rs`, the four exemption files touched, the coverage matrix, this
+  review file) — empty `git diff` per file. The `653de113..c527425c` delta is
+  exactly: the base merge (task-200 message-bus files), the task-file contract
+  re-normalization, and `web/dist` rebuild churn (zero `web/src` changes). The
+  `5b50e3a6` checkpoint's `mem.rs` (task-087 F2 payload repair) is also
+  byte-identical to the current tree.
+
+### Fresh evidence on the exact candidate (all logs under review-evidence)
+
+- `cargo test -p gyre-common --lib secret` → **5 passed**. `cargo test -p
+  gyre-adapters --lib sqlite::secret` → **17 passed** (encrypted-at-rest, tampered
+  ciphertext, wrong key, key derivation, reopen stability, tenant isolation,
+  cascade, expiry).
+- `SKIP_WEB_BUILD=1 cargo build -p gyre-server --tests` → clean, then
+  `cargo test -p gyre-server --lib mem::secret_contract_tests` → **4 passed**;
+  `mem::trace_payload_tests` → **6 passed** (absorbed task-087 F2 repair);
+  `constraint_check` → **31 passed**; `api::spawn::tests` → **34 passed** with
+  all five secret-delivery tests by name. Each of the five was also re-run in
+  isolation: 1 passed each.
+- Gates on the candidate: arch, migration-versions, mem-port-contracts,
+  fabricated-scope-defaults, lossy-secret-conversion, unwritten-store-fields,
+  scope-literal-defaults, inert-enforcement, forged-scope-fields,
+  in-memory-state-stores, migration-sql-portability — all exit 0;
+  `check-rustfmt-diff.py 6bf777a6` clean (4 Rust files).
+- `check-task-commit-attribution.sh` exits 1 with a single finding
+  (`6bf777a6 task-200`). Confirmed **pre-existing on the pristine base**: checked
+  out `6bf777a6`, re-ran the gate, got exit 1 with a byte-identical finding —
+  the base commit itself is task-200's landing commit and is absent from
+  task-200's frontmatter on origin/main. Upstream debt owned by repair task-220,
+  not introduced or worsened by this candidate (findings diff base vs candidate:
+  identical).
+
+### Mutation probes (re-run independently this round)
+
+- **F3** (reintroduced fabricated-tenant `"default"` resolution on the
+  unresolvable-workspace arm): `spawn_unresolvable_workspace_skips_secret_resolution`
+  **FAILED (exit 101)** with `GYRE_CRED_LEAK=leaked` delivered — the leak scenario
+  is genuinely pinned. (A first mutant attempt was behaviorally inert — the test
+  correctly passed — and a second did not compile; both discarded, logs retained.)
+- **F4** (`String::from_utf8_lossy` corruption reinstated):
+  `spawn_non_utf8_secret_skipped_others_delivered` **FAILED (exit 101)**.
+- **F1** (mem duplicate guard deleted): both `create_rejects_duplicate_*` contract
+  tests **FAILED (exit 101)**.
+- Tree restored and verified clean after each mutant; the full spawn suite re-ran
+  green afterward (34 passed).
+
+### Verdict
+
+The task contract is restored exactly (assigned body ≡ candidate file), the
+product code is unchanged from the round-3-reviewed tree, and the focused suites,
+gates, and mutation probes independently confirm the §7 substrate (Principle /
+Architecture / Secret Scoping / Secret Types / Storage Backend) behaves as
+specified: scoped cascade with nearest-scope-wins, no fabricated tenant identity,
+no lossy secret conversion, mem/SQLite contract parity, AES-256-GCM at rest with
+authenticated-decryption failure modes tested, and secrets delivered to a real
+spawned child process while `Secret` metadata never carries a value. The single
+attribution-gate failure is base-inherited upstream debt (task-220's), not a
+candidate defect.
+
+**approved: true**
+
+— Reviewer, 2026-10-10
