@@ -255,7 +255,7 @@ pub fn builtin_personas(tenant_id: &Id, now: u64) -> Vec<Persona> {
                 Id::new(uuid::Uuid::new_v4().to_string()),
                 def.name,
                 def.slug,
-                PersonaScope::Tenant(tenant_id.clone()),
+                PersonaScope::Tenant(Id::new("t-a")),
                 def.system_prompt,
                 now,
             );

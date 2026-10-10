@@ -2,7 +2,7 @@
 title: "Seed built-in personas at tenant bootstrap"
 spec_ref: "platform-model.md §2 Built-In Personas"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "platform-model.md §Built-In Personas"
 commits: ["e27cc0dab572a10d96ead8578f72bfa1dd71409d", "151cf7d2fef662f87f0306ba70b8f3197fb41802", "fcb712c51c1f27b597e4a0cb798e63d7f341f6e9", "f16e969ce52622e8f6133deb60550d77dd7ed47e"]
@@ -88,3 +88,11 @@ Implemented in `151cf7d2` (domain defs + adapters + server seeding), `fcb712c5` 
 - Read `crates/gyre-ports/src/persona.rs` for the `PersonaRepository` port trait
 - Read existing persona spec files in `specs/personas/` for prompt content
 - The hexagonal boundary invariant applies: domain logic in `gyre-domain`, infrastructure in `gyre-server`
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-domain/src/workspace.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
