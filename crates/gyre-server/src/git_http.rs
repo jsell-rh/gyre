@@ -4610,7 +4610,7 @@ mod tests {
             &repo.id,
             &repo.path,
             "feat/b",
-            "main",
+            &repo.default_branch,
         )
         .await;
         assert_eq!(lineage.len(), 1, "B must detect lineage on A");

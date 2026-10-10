@@ -1146,7 +1146,7 @@ async fn handle_create_mr(state: &AppState, args: &Value) -> Value {
     if let Ok(Some(repo)) = state.repos.find_by_id(&rid).await {
         mr.workspace_id = repo.workspace_id.clone();
         let lineage_deps = crate::api::merge_requests::detect_lineage_deps(
-            state, &rid, &repo.path, &source, &target,
+            state, &rid, &repo.path, &source, &repo.default_branch,
         )
         .await;
         if !lineage_deps.is_empty() {

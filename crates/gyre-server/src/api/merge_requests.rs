@@ -348,7 +348,7 @@ pub async fn create_mr(
             &repo_id,
             &repo.path,
             &req.source_branch,
-            &req.target_branch,
+            &repo.default_branch,
         )
         .await;
         if !lineage_deps.is_empty() {
@@ -401,19 +401,30 @@ pub async fn create_mr(
     Ok((StatusCode::CREATED, Json(MrResponse::from(mr))))
 }
 
-/// Auto-detect MR dependencies based on git branch lineage (P4).
+/// Auto-detect MR dependencies based on git branch lineage (P4,
+/// merge-dependencies.md §2).
 ///
-/// For each open MR in the same repo targeting the same target branch, checks
-/// whether `source_branch` is a descendant of that MR's source branch by
-/// comparing the merge-base to the candidate branch tip. If merge-base == tip,
-/// the new branch was created from the candidate branch and should depend on it.
+/// The forge infers a dependency when a MR's source branch was created from
+/// another MR's branch — not from the default branch. For every open MR in
+/// the same repo, resolves that MR's source-branch tip and the merge-base
+/// with the new source branch; when merge-base == candidate tip, the new
+/// branch descends from the candidate branch and a `BranchLineage`
+/// dependency edge is created.
+///
+/// Spec §2: "not the default branch" — a candidate whose tip is already
+/// contained in the repo's default branch is skipped. Its commits are
+/// already in the default branch, so forking from it is indistinguishable
+/// from forking from the default branch itself (e.g. a branch parked on
+/// the default tip, or commits merged out-of-band), and a lineage edge
+/// against it would block the child on a dependency that gates nothing.
 pub(crate) async fn detect_lineage_deps(
     state: &AppState,
     repo_id: &Id,
     repo_path: &str,
     source_branch: &str,
-    target_branch: &str,
+    default_branch: &str,
 ) -> Vec<MergeRequestDependency> {
+    let default_ref = format!("refs/heads/{default_branch}");
     let all_mrs = match state.merge_requests.list_by_repo(repo_id).await {
         Ok(mrs) => mrs,
         Err(_) => return vec![],
@@ -422,9 +433,7 @@ pub(crate) async fn detect_lineage_deps(
     let candidates: Vec<_> = all_mrs
         .into_iter()
         .filter(|m| {
-            m.target_branch == target_branch
-                && m.source_branch != source_branch
-                && m.status == MrStatus::Open
+            m.source_branch != source_branch && m.status == MrStatus::Open
         })
         .collect();
 
@@ -438,9 +447,13 @@ pub(crate) async fn detect_lineage_deps(
     // Validate a branch name is safe to pass to git (no flag injection).
     let is_safe_branch = |b: &str| !b.starts_with('-') && !b.contains("..");
 
-    if !is_safe_branch(source_branch) {
+    if !is_safe_branch(source_branch) || !is_safe_branch(default_branch) {
         return vec![];
     }
+
+    // Resolve the default branch tip once; candidates contained in it are
+    // excluded (fork-from-default is not lineage, see doc comment).
+    let default_tip = rev_resolve(&git_bin, repo_path, &default_ref).await;
 
     for candidate in candidates {
         let cand_branch = &candidate.source_branch;
@@ -464,6 +477,16 @@ pub(crate) async fn detect_lineage_deps(
         };
 
         if cand_tip.is_empty() || !cand_tip.chars().all(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+
+        // Spec §2 "not the default branch": skip candidates whose tip is
+        // already contained in the default branch. Forking from such a
+        // branch is indistinguishable from forking from the default branch
+        // itself (a parked zero-commit branch, or commits merged
+        // out-of-band), so the inferred edge would gate nothing and only
+        // stall the child on a zombie parent.
+        if is_contained_in(&git_bin, repo_path, &cand_tip, &default_tip).await {
             continue;
         }
 
@@ -501,6 +524,47 @@ pub(crate) async fn detect_lineage_deps(
     deps
 }
 
+/// Resolve `rev` in `repo_path` to a trimmed SHA, or an empty string when
+/// the ref does not exist (detection treats that as no candidate).
+async fn rev_resolve(git_bin: &str, repo_path: &str, rev: &str) -> String {
+    let out = tokio::process::Command::new(git_bin)
+        .arg("-C")
+        .arg(repo_path)
+        .arg("rev-parse")
+        .arg(rev)
+        .output()
+        .await;
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => String::new(),
+    }
+}
+
+/// True when `cand_tip` is an ancestor of (or equal to) `container_tip`.
+/// A missing/empty `container_tip` contains nothing.
+async fn is_contained_in(
+    git_bin: &str,
+    repo_path: &str,
+    cand_tip: &str,
+    container_tip: &str,
+) -> bool {
+    if container_tip.is_empty() || cand_tip.is_empty() {
+        return false;
+    }
+    matches!(
+        tokio::process::Command::new(git_bin)
+            .arg("-C")
+            .arg(repo_path)
+            .arg("merge-base")
+            .arg("--is-ancestor")
+            .arg(cand_tip)
+            .arg(container_tip)
+            .status()
+            .await,
+        Ok(st) if st.success()
+    )
+}
+
 /// Re-evaluate branch lineage dependencies for an existing MR after its
 /// source branch was pushed (rebased or updated).
 ///
@@ -534,7 +598,7 @@ pub(crate) async fn reevaluate_lineage_deps(state: &AppState, mr_id: &Id) {
         &mr.repository_id,
         &repo.path,
         &mr.source_branch,
-        &mr.target_branch,
+        &repo.default_branch,
     )
     .await;
     let detected_ids: std::collections::HashSet<String> = detected
@@ -552,10 +616,7 @@ pub(crate) async fn reevaluate_lineage_deps(state: &AppState, mr_id: &Id) {
         .collect();
     for dep in detected {
         // Skip lineage edges that duplicate an explicit/agent-declared dep.
-        if new_deps
-            .iter()
-            .any(|d| d.target_mr_id == dep.target_mr_id)
-        {
+        if new_deps.iter().any(|d| d.target_mr_id == dep.target_mr_id) {
             continue;
         }
         new_deps.push(dep);
@@ -2022,7 +2083,7 @@ mod tests {
                     .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
-                )
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -2088,6 +2149,84 @@ mod tests {
         assert!(
             deps.is_empty(),
             "parent rebased away from child: stale lineage edge must be dropped: {deps:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lineage_cross_target_branch_still_detected() {
+        // The lineage signal is branch ancestry, not target-branch
+        // equality: a child forked from a parent MR's branch must depend
+        // on the parent even when the child targets a different branch —
+        // merging the child first would carry the parent's unreviewed
+        // commits into the other target.
+        let repo = LineageRepo::new().await;
+
+        let base = repo.commit_on("main", None, "base");
+        let a = repo.commit_on("feat/a", Some(&base), "feat A");
+        let _ = repo.create_mr("feat/a").await;
+
+        // Child forked from feat/a but targeting a release branch.
+        repo.commit_on("release/1.0", Some(&base), "release branch");
+        let _b = repo.commit_on("feat/b", Some(&a), "B on top of A");
+
+        let app = crate::api::api_router()
+            .with_state(repo.state.clone())
+            .clone();
+        let body = serde_json::json!({
+            "repository_id": repo.repo_id.to_string(),
+            "title": "MR B targeting release",
+            "source_branch": "feat/b",
+            "target_branch": "release/1.0",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/merge-requests")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let mr_b = body_json(resp).await;
+        let mr_b_id = mr_b["id"].as_str().unwrap().to_string();
+
+        let deps = repo.deps_of(&mr_b_id).await;
+        assert_eq!(
+            deps.len(),
+            1,
+            "fork-from-MR-branch must be detected across target branches: {deps:?}"
+        );
+        assert_eq!(deps[0]["source"], "branch-lineage");
+    }
+
+    #[tokio::test]
+    async fn lineage_parent_contained_in_default_not_detected() {
+        // Spec §2: the fork must be from another MR's branch, "not the
+        // default branch". An open MR whose tip is already contained in
+        // the default branch (here: a zero-commit branch parked exactly on
+        // the default tip) must NOT produce a lineage edge for children
+        // forked from the default tip — forking from it is
+        // indistinguishable from forking from main, and the edge would
+        // block the child on a parent that gates nothing.
+        let repo = LineageRepo::new().await;
+
+        let base = repo.commit_on("main", None, "base");
+        // Parked branch: points at the exact default tip.
+        repo.git(&["update-ref", "refs/heads/feat/parked", &base]);
+        let _mr_parked = repo.create_mr("feat/parked").await;
+
+        // Child forked from the same default tip.
+        let _c = repo.commit_on("feat/c", Some(&base), "C from main");
+        let mr_c = repo.create_mr("feat/c").await;
+        let mr_c_id = mr_c["id"].as_str().unwrap().to_string();
+
+        let deps = repo.deps_of(&mr_c_id).await;
+        assert!(
+            deps.is_empty(),
+            "candidate contained in default branch must be skipped: {deps:?}"
         );
     }
 }
