@@ -1182,16 +1182,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
             if let Some(spec_ref) = mr.spec_ref.as_deref() {
                 // Parse "path@sha" — same format used by verify_spec_ref.
                 if let Some((path, sha)) = spec_ref.rsplit_once('@') {
-                    // Spec refs carry ledger paths ("system/foo.md"); the file lives
-                    // at "specs/system/foo.md" in the repo. Try the raw path first
-                    // (covers full-git-path refs), then the specs/-prefixed form.
-                    let current = match crate::git_refs::resolve_blob_sha(&repo.path, path).await {
-                        Some(sha) => Some(sha),
-                        None => {
-                            crate::git_refs::resolve_blob_sha(&repo.path, &format!("specs/{path}"))
-                                .await
-                        }
-                    };
+                    let current = crate::git_refs::resolve_spec_blob_sha(&repo.path, path).await;
                     let is_stale = match &current {
                         // If the file can't be resolved (new/empty repo), treat as non-stale.
                         Some(cur) => cur != sha,

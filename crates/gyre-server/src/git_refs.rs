@@ -88,6 +88,18 @@ pub async fn resolve_blob_sha(repo_path: &str, file_path: &str) -> Option<String
     None
 }
 
+/// Resolve the current blob SHA for a spec reference path.
+///
+/// Spec refs carry ledger paths ("system/foo.md") while the file lives at
+/// "specs/system/foo.md" in the repo. Try the raw path first (covers
+/// full-git-path refs), then the specs/-prefixed form.
+pub async fn resolve_spec_blob_sha(repo_path: &str, ledger_path: &str) -> Option<String> {
+    if let Some(sha) = resolve_blob_sha(repo_path, ledger_path).await {
+        return Some(sha);
+    }
+    resolve_blob_sha(repo_path, &format!("specs/{ledger_path}")).await
+}
+
 /// Count refs that exist under `prefix` (e.g. `refs/agents/{id}/snapshots/`).
 pub async fn count_refs_under(repo_path: &str, prefix: &str) -> usize {
     if !refname_safe(prefix) {
