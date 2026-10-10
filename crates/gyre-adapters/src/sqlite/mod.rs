@@ -265,6 +265,8 @@ mod tests {
             // migration 000056, task-198)
             "spec_links",
             // Raw-SQL tables (not in schema.rs but created by migrations)
+            "explorer_views",
+            "prompt_templates",
         ];
         for table in &tables {
             use diesel::RunQueryDsl;

@@ -1,4 +1,4 @@
-# Legacy in-memory store aliases (task-107 F9 baseline; frozen at 5).
+# Legacy in-memory store aliases (task-107 F9 baseline; frozen at 4).
 # Fix by routing through gyre-ports + an adapter; never add entries.
 crates/gyre-server/src/commit_signatures.rs:68
 crates/gyre-server/src/spec_registry.rs:195
