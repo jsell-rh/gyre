@@ -359,7 +359,7 @@ fn tool_definitions() -> Value {
                         },
                         "payload": {
                             "type": "object",
-                            "description": "Optional structured payload for the message"
+                            "description": "Optional structured payload for the message. Validated against the kind's schema (message-bus.md §Payload Schemas) — required fields must be present and non-null (e.g. task_assignment requires payload.task_id, status_update requires payload.status and payload.summary), and every schema-known field must match its declared wire type (task_id is a string, duration_ms an unsigned integer, usage_pct a number, conflicting_files an array of strings). A missing or wrongly-typed field fails the call."
                         },
                         "tier": {
                             "type": "string",
@@ -460,6 +460,19 @@ fn tool_definitions() -> Value {
                         "target_id": { "type": "string", "description": "Filter edges by target node ID" }
                     },
                     "required": ["repo_id"]
+                }
+            },
+            {
+                "name": "search",
+                "description": "Full-text search across a repo's knowledge graph. Searches node names, qualified names, doc comments, file paths, and spec paths. Results are ranked (exact name > prefix > substring).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo_id": { "type": "string", "description": "Repository ID" },
+                        "query": { "type": "string", "description": "Search query (case-insensitive substring)" },
+                        "limit": { "type": "number", "description": "Max results to return (default 30, max 50)" }
+                    },
+                    "required": ["repo_id", "query"]
                 }
             },
             {
@@ -1965,6 +1978,12 @@ async fn handle_message_send(state: &AppState, args: &Value, auth: &Authenticate
         }
     }
 
+    // Payload schema validation (message-bus.md §Payload Schemas) — the same
+    // required-field table the REST send path enforces, before signing/store.
+    if let Err(reason) = kind.validate_payload(args.get("payload")) {
+        return tool_error(reason);
+    }
+
     let from = MessageOrigin::Agent(agent_id);
     let created_at = now_ms();
     let msg_id = Id::new(uuid::Uuid::new_v4().to_string());
@@ -2159,7 +2178,14 @@ async fn handle_graph_query_dryrun(state: &AppState, args: &Value) -> Value {
     };
 
     let result = gyre_domain::view_query_resolver::dry_run(&query, &nodes, &edges, selected);
-    tool_result(serde_json::to_string_pretty(&result).unwrap_or_default())
+    // §9: the dry-run tool response echoes the query alongside the preview
+    // (`{"query": ..., "result": {...}}`); the `result` member carries the
+    // §23 DryRunResult shape.
+    let envelope = json!({
+        "query": serde_json::to_value(&query).unwrap_or(Value::Null),
+        "result": result,
+    });
+    tool_result(serde_json::to_string_pretty(&envelope).unwrap_or_default())
 }
 
 async fn handle_graph_nodes(state: &AppState, args: &Value) -> Value {
@@ -2256,6 +2282,20 @@ async fn handle_graph_edges(state: &AppState, args: &Value) -> Value {
     };
     let rid = Id::new(&repo_id);
 
+    // Node ID → name map so edge payloads carry human-readable endpoints
+    // (§9: the agent reasons about edges by node name, not raw UUIDs).
+    let node_names: std::collections::HashMap<String, String> =
+        match state.graph_store.list_nodes(&rid, None).await {
+            Ok(ns) => ns.into_iter().map(|n| (n.id.to_string(), n.name)).collect(),
+            Err(e) => return tool_error(format!("Failed: {e}")),
+        };
+    let name_of = |id: &Id| -> String {
+        node_names
+            .get(&id.to_string())
+            .cloned()
+            .unwrap_or_else(|| id.to_string())
+    };
+
     // If node_id is specified, get edges for that node
     if let Some(node_id) = get_str(args, "node_id") {
         let nid = Id::new(node_id);
@@ -2270,6 +2310,8 @@ async fn handle_graph_edges(state: &AppState, args: &Value) -> Value {
                             "id": e.id.to_string(),
                             "source_id": e.source_id.to_string(),
                             "target_id": e.target_id.to_string(),
+                            "source_name": name_of(&e.source_id),
+                            "target_name": name_of(&e.target_id),
                             "edge_type": format!("{:?}", e.edge_type).to_lowercase(),
                         })
                     })
@@ -2319,6 +2361,8 @@ async fn handle_graph_edges(state: &AppState, args: &Value) -> Value {
                 "id": e.id.to_string(),
                 "source_id": e.source_id.to_string(),
                 "target_id": e.target_id.to_string(),
+                "source_name": name_of(&e.source_id),
+                "target_name": name_of(&e.target_id),
                 "edge_type": format!("{:?}", e.edge_type).to_lowercase(),
             })
         })
@@ -2328,6 +2372,41 @@ async fn handle_graph_edges(state: &AppState, args: &Value) -> Value {
         "{} edges:\n{}",
         items.len(),
         serde_json::to_string_pretty(&items).unwrap_or_default()
+    ))
+}
+
+/// MCP tool handler for `search` — graph full-text search (explorer-implementation.md §9).
+/// Case-insensitive substring search over node name, qualified_name, file_path,
+/// doc_comment and spec_path, ranked by relevance. Soft-deleted nodes are excluded.
+async fn handle_graph_search(state: &AppState, args: &Value) -> Value {
+    let repo_id = match require_str(args, "repo_id") {
+        Ok(r) => r.to_string(),
+        Err(_) => return tool_error("missing required field: repo_id"),
+    };
+    let query = match require_str(args, "query") {
+        Ok(q) => q.to_string(),
+        Err(_) => return tool_error("missing required field: query"),
+    };
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(30)
+        .min(50) as usize; // Cap at 50 to limit conversation history bloat
+
+    let rid = Id::new(&repo_id);
+    let nodes = match state.graph_store.list_nodes(&rid, None).await {
+        Ok(n) => n,
+        Err(e) => return tool_error(format!("Failed to load graph nodes: {e}")),
+    };
+
+    let hits = gyre_domain::view_query_resolver::search_graph_nodes(&query, &nodes, limit);
+    if hits.is_empty() {
+        return tool_result(format!("No results for '{query}'"));
+    }
+    tool_result(format!(
+        "{} result(s):\n{}",
+        hits.len(),
+        serde_json::to_string_pretty(&hits).unwrap_or_default()
     ))
 }
 
@@ -3055,6 +3134,7 @@ pub async fn mcp_handler(
                 "graph_query_dryrun" => handle_graph_query_dryrun(&state, &args).await,
                 "graph_nodes" => handle_graph_nodes(&state, &args).await,
                 "graph_edges" => handle_graph_edges(&state, &args).await,
+                "search" => handle_graph_search(&state, &args).await,
                 "node_provenance" => handle_node_provenance(&state, &args).await,
                 "graph_concept" => handle_graph_concept(&state, &args).await,
                 "spec_assist" => handle_spec_assist(&state, &args, &auth).await,
@@ -3172,8 +3252,13 @@ mod tests {
         assert!(names.contains(&"gyre_list_mrs"));
         assert!(names.contains(&"gyre_record_activity"));
         assert!(names.contains(&"gyre_agent_heartbeat"));
-        assert!(names.contains(&"gyre_agent_complete"));
         assert!(names.contains(&"gyre_search"));
+        // §9 explorer agent tools — all five must be exposed over MCP.
+        assert!(names.contains(&"graph_summary"));
+        assert!(names.contains(&"graph_query_dryrun"));
+        assert!(names.contains(&"graph_nodes"));
+        assert!(names.contains(&"graph_edges"));
+        assert!(names.contains(&"search"));
         assert!(names.contains(&"node_provenance"));
     }
 
@@ -3933,6 +4018,105 @@ mod tests {
         );
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("Message sent"));
+    }
+
+    #[tokio::test]
+    async fn mcp_message_send_rejects_payload_missing_required_field() {
+        // message-bus.md §Payload Schemas: the MCP receipt path enforces the same
+        // required-field table as the REST path. `task_assignment` requires
+        // `task_id`; a payload carrying only `spec_ref` must be a tool error and
+        // must NOT reach the message store.
+        let state = test_state();
+        let mut sender = gyre_domain::Agent::new(Id::new("system"), "system", 0);
+        sender.workspace_id = Id::new("ws-schema");
+        state.agents.create(&sender).await.unwrap();
+        let mut target = gyre_domain::Agent::new(Id::new("agent-schema-target"), "t", 0);
+        target.workspace_id = Id::new("ws-schema");
+        state.agents.create(&target).await.unwrap();
+
+        let call = |payload: Value| {
+            let state = state.clone();
+            async move {
+                mcp_post(
+                    crate::build_router(state),
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": 73,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "gyre_message_send",
+                            "arguments": {
+                                "to": {"agent": "agent-schema-target"},
+                                "kind": "task_assignment",
+                                "payload": payload
+                            }
+                        }
+                    }),
+                )
+                .await
+            }
+        };
+
+        let (status, json) = call(json!({"spec_ref": "specs/x.md"})).await;
+        assert_eq!(status, StatusCode::OK, "JSON-RPC envelope is 200");
+        assert!(
+            json["result"]["isError"].as_bool().unwrap_or(false),
+            "invalid payload must be a tool error: {json}"
+        );
+        let text = json["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            text.contains("task_id"),
+            "error must name the missing field, got: {text}"
+        );
+        assert_eq!(
+            gyre_ports::MessageRepository::list_unacked(
+                &*state.messages,
+                &Id::new("agent-schema-target"),
+                10
+            )
+            .await
+            .unwrap()
+            .len(),
+            0,
+            "a rejected payload must not be persisted"
+        );
+
+        // A required field present but wrongly typed is the same rejection
+        // class: message-bus.md §Payload Schemas declares wire types per field.
+        let (status, json) = call(json!({"task_id": 42})).await;
+        assert_eq!(status, StatusCode::OK, "JSON-RPC envelope is 200");
+        assert!(
+            json["result"]["isError"].as_bool().unwrap_or(false),
+            "wrongly-typed payload must be a tool error: {json}"
+        );
+        let text = json["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            text.contains("task_id"),
+            "error must name the wrongly-typed field, got: {text}"
+        );
+        // Same kind with the required field present succeeds.
+        let (status, json) = call(json!({"task_id": "TASK-1"})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap_or(true),
+            "valid payload must succeed: {json}"
+        );
+        assert_eq!(
+            gyre_ports::MessageRepository::list_unacked(
+                &*state.messages,
+                &Id::new("agent-schema-target"),
+                10
+            )
+            .await
+            .unwrap()
+            .len(),
+            1,
+            "the accepted payload must be persisted"
+        );
     }
 
     #[tokio::test]
@@ -4885,6 +5069,422 @@ mod tests {
         assert!(result["nodes"].as_array().is_some());
         assert!(result["edges"].as_array().is_some());
         assert!(result["repo_id"].as_str().is_some());
+    }
+
+    // ── TASK-068: §9 graph tools callable over MCP protocol ─────────────────
+    use gyre_common::graph::{
+        EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence, Visibility,
+    };
+    //
+    // These exercise the real JSON-RPC tools/call dispatch path (router +
+    // AuthenticatedAgent + handler) against a real graph store, in-process.
+    // The TCP-level integration twins live in tests/graph_integration.rs
+    // (test_mcp_graph_summary/_dryrun/_nodes/_edges/_search); in this
+    // sandbox loopback accept() is seccomp-blocked, so the in-process tests
+    // are the runnable proof of §9's "callable via MCP protocol".
+
+    fn graph_node(repo_id: &str, name: &str, node_type: NodeType) -> GraphNode {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        GraphNode {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            repo_id: Id::new(repo_id),
+            node_type,
+            name: name.to_string(),
+            qualified_name: format!("pkg::{name}"),
+            file_path: format!("src/{name}.rs"),
+            line_start: 1,
+            line_end: 10,
+            visibility: Visibility::Public,
+            doc_comment: None,
+            spec_path: None,
+            spec_paths: vec![],
+            spec_confidence: SpecConfidence::None,
+            last_modified_sha: "abc123".to_string(),
+            last_modified_by: None,
+            last_modified_at: now,
+            created_sha: "abc123".to_string(),
+            created_at: now,
+            complexity: None,
+            churn_count_30d: 0,
+            test_coverage: None,
+            first_seen_at: now,
+            last_seen_at: now,
+            deleted_at: None,
+            test_node: false,
+            spec_approved_at: None,
+            milestone_completed_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_graph_summary_tool_call() {
+        let state = test_state();
+        let mut t = graph_node("repo-t68", "test_foo", NodeType::Function);
+        t.test_node = true;
+        let a = graph_node("repo-t68", "fn_a", NodeType::Function);
+        let b = graph_node("repo-t68", "fn_b", NodeType::Function);
+        state.graph_store.create_node(t.clone()).await.unwrap();
+        state.graph_store.create_node(a.clone()).await.unwrap();
+        state.graph_store.create_node(b.clone()).await.unwrap();
+        state
+            .graph_store
+            .create_edge(GraphEdge {
+                id: Id::new(uuid::Uuid::new_v4().to_string()),
+                repo_id: Id::new("repo-t68"),
+                source_id: t.id.clone(),
+                target_id: a.id.clone(),
+                edge_type: EdgeType::Calls,
+                metadata: None,
+                first_seen_at: 0,
+                last_seen_at: 0,
+                deleted_at: None,
+            })
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 150,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_summary",
+                    "arguments": { "repo_id": "repo-t68" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap_or(true),
+            "tool must succeed"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        let summary: Value = serde_json::from_str(text).unwrap();
+        // §22 fields all present.
+        for field in [
+            "node_counts",
+            "edge_counts",
+            "top_types_by_fields",
+            "top_functions_by_calls",
+            "modules",
+            "test_coverage",
+        ] {
+            assert!(
+                summary[field].is_object() || summary[field].is_array(),
+                "graph_summary must include {field}, got: {text}"
+            );
+        }
+        assert_eq!(summary["test_coverage"]["test_functions"], 1);
+        // BFS seeds include the test node itself: reachable = {test_foo, fn_a}.
+        assert_eq!(summary["test_coverage"]["reachable_from_tests"], 2);
+        assert_eq!(summary["test_coverage"]["unreachable"], 1);
+    }
+
+    #[tokio::test]
+    async fn mcp_graph_query_dryrun_tool_call() {
+        let state = test_state();
+        let n1 = graph_node("repo-t68", "AuthService", NodeType::Type);
+        state.graph_store.create_node(n1).await.unwrap();
+        let app = crate::build_router(state);
+
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 151,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_query_dryrun",
+                    "arguments": {
+                        "repo_id": "repo-t68",
+                        "query": {
+                            "scope": {
+                                "type": "filter",
+                                "node_types": ["type"],
+                                "name_pattern": "Auth"
+                            }
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap_or(true),
+            "tool must succeed"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        let envelope: Value = serde_json::from_str(text).unwrap();
+        // §9: response is {"query": {...}, "result": {DryRunResult}}.
+        assert!(
+            envelope["query"]["scope"]["type"] == "filter",
+            "dryrun must echo the query, got: {text}"
+        );
+        let result = &envelope["result"];
+        assert_eq!(result["matched_nodes"], 1);
+        assert!(
+            result["matched_node_names"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|n| n == "AuthService"),
+            "dryrun must report matched node names, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_graph_query_dryrun_empty_scope_warning_over_mcp() {
+        let state = test_state();
+        state
+            .graph_store
+            .create_node(graph_node("repo-t68", "Foo", NodeType::Type))
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 152,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_query_dryrun",
+                    "arguments": {
+                        "repo_id": "repo-t68",
+                        "query": {
+                            "scope": {
+                                "type": "filter",
+                                "node_types": [],
+                                "name_pattern": "does-not-exist"
+                            }
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        let envelope: Value = serde_json::from_str(text).unwrap();
+        let result = &envelope["result"];
+        assert!(
+            result["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w.as_str().unwrap().contains("Scope matched 0 nodes")),
+            "empty scope must warn over MCP, got: {text}"
+        );
+    }
+
+    /// TCP-twin shape assertion, proven in-process: a Focus-scope query must
+    /// round-trip through the §9 envelope so the integration twin's
+    /// `dryrun["query"]["scope"]["node"].is_string()` holds. Zoom is untagged,
+    /// so `"zoom": "fit"` deserializes to `Zoom::Named` and re-serializes as a
+    /// plain string.
+    #[tokio::test]
+    async fn mcp_graph_query_dryrun_focus_scope_envelope_round_trip() {
+        let state = test_state();
+        let n1 = graph_node("repo-t68", "Alpha", NodeType::Function);
+        let n2 = graph_node("repo-t68", "Beta", NodeType::Function);
+        state.graph_store.create_node(n1.clone()).await.unwrap();
+        state.graph_store.create_node(n2.clone()).await.unwrap();
+        state
+            .graph_store
+            .create_edge(GraphEdge {
+                id: Id::new(uuid::Uuid::new_v4().to_string()),
+                repo_id: Id::new("repo-t68"),
+                source_id: n1.id.clone(),
+                target_id: n2.id.clone(),
+                edge_type: EdgeType::Calls,
+                metadata: None,
+                first_seen_at: 0,
+                last_seen_at: 0,
+                deleted_at: None,
+            })
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 154,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_query_dryrun",
+                    "arguments": {
+                        "repo_id": "repo-t68",
+                        "query": {
+                            "scope": {
+                                "type": "focus",
+                                "node": "Alpha",
+                                "edges": ["calls"],
+                                "direction": "outgoing",
+                                "depth": 5
+                            },
+                            "emphasis": { "dim_unmatched": 0.12 },
+                            "zoom": "fit",
+                            "annotation": { "title": "Test" }
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!json["result"]["isError"].as_bool().unwrap_or(true));
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        let envelope: Value = serde_json::from_str(text).unwrap();
+        // Tagged-enum round-trip: Focus scope keeps its `node` string member.
+        assert!(
+            envelope["query"]["scope"]["type"] == "focus",
+            "focus scope tag must round-trip, got: {text}"
+        );
+        assert!(
+            envelope["query"]["scope"]["node"].is_string(),
+            "focus scope node must round-trip as a string, got: {text}"
+        );
+        // Untagged Zoom: "fit" round-trips as a plain JSON string.
+        assert!(
+            envelope["query"]["zoom"] == "fit",
+            "untagged zoom must round-trip as a string, got: {text}"
+        );
+        assert!(
+            envelope["result"]["matched_nodes"].as_u64().unwrap() >= 1,
+            "focus scope must match its neighbors, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_graph_nodes_tool_call() {
+        let state = test_state();
+        state
+            .graph_store
+            .create_node(graph_node("repo-t68", "TargetNode", NodeType::Type))
+            .await
+            .unwrap();
+        state
+            .graph_store
+            .create_node(graph_node("repo-t68", "OtherNode", NodeType::Type))
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 153,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_nodes",
+                    "arguments": { "repo_id": "repo-t68", "name_pattern": "Target" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("TargetNode") && !text.contains("OtherNode"),
+            "graph_nodes must filter by name pattern, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_graph_edges_tool_call() {
+        let state = test_state();
+        let src = graph_node("repo-t68", "caller_fn", NodeType::Function);
+        let dst = graph_node("repo-t68", "callee_fn", NodeType::Function);
+        let (sid, did) = (src.id.clone(), dst.id.clone());
+        state.graph_store.create_node(src).await.unwrap();
+        state.graph_store.create_node(dst).await.unwrap();
+        state
+            .graph_store
+            .create_edge(GraphEdge {
+                id: Id::new(uuid::Uuid::new_v4().to_string()),
+                repo_id: Id::new("repo-t68"),
+                source_id: sid,
+                target_id: did,
+                edge_type: EdgeType::Calls,
+                metadata: None,
+                first_seen_at: 0,
+                last_seen_at: 0,
+                deleted_at: None,
+            })
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 154,
+                "method": "tools/call",
+                "params": {
+                    "name": "graph_edges",
+                    "arguments": { "repo_id": "repo-t68", "edge_type": "calls" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("caller_fn") && text.contains("calls"),
+            "graph_edges must return the seeded call edge, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_graph_search_tool_call() {
+        let state = test_state();
+        state
+            .graph_store
+            .create_node(graph_node("repo-t68", "AuthService", NodeType::Type))
+            .await
+            .unwrap();
+        state
+            .graph_store
+            .create_node(graph_node("repo-t68", "UnrelatedNode", NodeType::Type))
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+
+        let (status, json) = mcp_post(
+            app,
+            json!({
+                "jsonrpc": "2.0",
+                "id": 155,
+                "method": "tools/call",
+                "params": {
+                    "name": "search",
+                    "arguments": { "repo_id": "repo-t68", "query": "auth" }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap_or(true),
+            "tool must succeed"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("AuthService") && !text.contains("UnrelatedNode"),
+            "search must return matching node only, got: {text}"
+        );
     }
 
     // ── TASK-010: spec_assist tool ───────────────────────────────────────────
