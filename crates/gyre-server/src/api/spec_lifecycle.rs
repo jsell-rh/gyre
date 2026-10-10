@@ -51,13 +51,7 @@ pub async fn set_spec_lifecycle(
     Path(repo_id): Path<String>,
     Json(req): Json<SpecLifecycleConfig>,
 ) -> Result<(StatusCode, Json<SpecLifecycleConfig>), ApiError> {
-    if !(auth.roles.contains(&gyre_domain::UserRole::Admin)
-        || auth.roles.contains(&gyre_domain::UserRole::Developer))
-    {
-        return Err(ApiError::Forbidden(
-            "only Admin or Developer role may update spec lifecycle config".to_string(),
-        ));
-    }
+    let _ = &auth.roles; // MUTATION C: role gate removed
 
     state
         .repos
