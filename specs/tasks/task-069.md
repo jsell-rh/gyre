@@ -131,7 +131,8 @@ else, leaving the status indicator stale.
   Its `byte-slice-truncation-exemptions.txt` entry is removed (exemptions
   shrink, never grow).
 
-Test evidence (2026-10-10, HEAD `30dc2826` on base `a11ba8d3`):
+Test evidence (2026-10-10, implementation HEAD `30dc2826`; re-verified at
+merged HEAD `b666a474` after base-merge repair, see below):
 
 - `cargo test -p gyre-server --lib explorer_ws` → 39 passed, 0 failed
   (includes 4 new: constants match spec exactly; Status message serializes
@@ -155,3 +156,16 @@ Test evidence (2026-10-10, HEAD `30dc2826` on base `a11ba8d3`):
 - `scripts/check-assertionless-tests.sh` exits 2 in this sandbox on clean
   HEAD as well — mawk lacks gawk's 3-arg `match()`; CI (gawk) passes it.
   Not task-related.
+
+Repair round (checkpoint continuation, 2026-10-10, merged HEAD `b666a474`
+on base `05709c24`): the base merge touched none of the task-069 files
+(only `api/graph.rs`, briefing web files, task-196/224 docs). All probes
+re-run green at merged HEAD: 39 lib tests, integration binary `--no-run`
+EXIT=0, arch/byte-slice/abac-route-registry/mem-port-contracts/
+inert-enforcement/fabricated-scope-defaults/attribution all pass. One
+concrete merge-introduced CI finding fixed: the merged base commit
+`05709c24` (task-196, product surface) was absent from
+`specs/tasks/task-196.md`'s `commits:` frontmatter, failing
+`check-task-commit-attribution.sh` at this HEAD — added per the gate's
+prescribed remedy (frontmatter, not the frozen exemption file). The
+task-069 implementation itself needed no changes.
