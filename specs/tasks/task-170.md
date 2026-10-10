@@ -270,3 +270,43 @@ test evidence at `5bab1b27`/`fa3d6c9e` (gyre-common `view_spec`
 13/13, gyre-server `api::explorer_views` 16/16, vitest task-scoped
 32/32) still describes this tree; the only deltas are `.gitattributes`
 (new) and this task file.
+
+**Round 14754d69 (checkpoint continuation of source `4a7f32a3`, merged
+head `22acde9d` on base `27bd585c`):** the prior assignment died on an
+LLM-stream timeout while waiting for the gyre-server test compile (agent
+exit 130, checkpoint `64b08e1b`). No work was lost: implementation files
+are byte-identical to checkpoint candidate `4a7f32a3` — `git diff
+4a7f32a3 HEAD -- web/src/lib/types/view-spec.ts web/src/lib/viewEvents.js
+web/src/lib/layoutRegistry.js web/src/lib/MoldableView.svelte
+web/src/__tests__ crates/gyre-common/src/view_spec.rs
+crates/gyre-server/src/api/explorer_views.rs` is empty; the base merge
+brought in task-155 only (gyre-cli search command, no intersection with
+view-spec validation). Probes re-run fresh at HEAD in this sandbox
+(evidence: `/tmp/stage/review-evidence/task-170-rust-22acde9d.txt`,
+`task-170-vitest-22acde9d.txt`): gyre-common `view_spec` 13/13; gyre-
+server `api::explorer_views` 16/16 (cold build 19m under concurrent
+compile); vitest task-scoped 32/32 across 4 files (view-spec 17,
+viewEvents 9, MoldableViewListView, MoldableViewNodeTypeFilter; locked
+deps via `npm ci`, `--maxWorkers=1` under sandbox CPU contention —
+default worker fan-out times out starting workers at load ~30+, an
+infrastructure limitation, not a code defect).
+
+`web/dist` note: the cold `cargo test -p gyre-server` (build.rs web
+rebuild, no SKIP_WEB_BUILD) regenerated dist with different esbuild
+minifier name-assignment hashes (`DauSjDxg`/`CZ1SLFkJ` vs committed
+`D4CX8rVo`/`OwdVv5y8`); content diff is esbuild identifier scramble
+only, no semantic change, and `web/src/` is unchanged — dist was
+restored to the committed state (`git checkout -- web/dist && git
+clean -fd web/dist`), tree clean.
+
+**Attribution repair (commit `b20d9c5b`):** the base merge exposed a
+pre-existing main drift — `27bd585c` (feat task-155, the base itself)
+landed on main via squash-merge without being recorded in
+specs/tasks/task-155.md `commits:`, so `scripts/check-task-commit-
+attribution.sh` failed at this HEAD (every branch merging current main
+inherits it). Repaired with the script's prescribed append-not-replace
+form, identical to the canonical repair `d1872f67` (applied on parallel
+task-214/235/236 branches) and the task-189 drift (task-095 R3-F4).
+No exemption entries added; check re-run at the repaired tree: exit 0.
+The repair commit is process-type, specs/-only — not product surface,
+so it requires no `commits:` recording of its own.
