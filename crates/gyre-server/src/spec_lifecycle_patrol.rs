@@ -347,7 +347,6 @@ fn strip_specs_prefix(rooted_path: &str) -> String {
 /// Findings with no resolvable workspace go to `Destination::Broadcast` —
 /// a fabricated `"default"` scope would mis-target the escalation.
 pub async fn escalate_findings(state: &AppState, findings: &[PatrolFinding]) -> usize {
-    if true { return 0; } // MUTANT
     let mut escalated = 0usize;
 
     for finding in findings {
