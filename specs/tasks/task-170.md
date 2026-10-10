@@ -12,7 +12,7 @@ coverage_sections:
   - "ui-layout.md §Encoding Layer"
   - "ui-layout.md §Extensibility"
   - "ui-layout.md §LLM Constraints"
-commits: ["9447554ca17555cc49bf1ffa92000fc933230588", "5cf54bce14c1b459045b4477d98a893bdbda5212", "c76fa1fd697ad44ae0fc08e22b70e5768e5b5026", "b69e01002b21ef5d2b7fa446067aca61e3890d0b", "088316309803e92cd7cf96cac53239431c059185", "95801f2b4ebbe93543bfe7d31fce386ce665be42", "49614e41c1b313f0c981d93013dcf6ddbc26c636", "9aa19ef9c94c075ed9d6fd154b037855542ca27b", "3c41b41997c20414f1167d4e8da6746b6e55a875"]
+commits: ["5cf54bce14c1b459045b4477d98a893bdbda5212", "c76fa1fd697ad44ae0fc08e22b70e5768e5b5026", "b69e01002b21ef5d2b7fa446067aca61e3890d0b", "088316309803e92cd7cf96cac53239431c059185", "95801f2b4ebbe93543bfe7d31fce386ce665be42", "49614e41c1b313f0c981d93013dcf6ddbc26c636", "9aa19ef9c94c075ed9d6fd154b037855542ca27b", "3c41b41997c20414f1167d4e8da6746b6e55a875"]
 ---
 
 ## Spec Excerpt
@@ -54,14 +54,14 @@ LLM Constraints: LLM can only produce view specs within this grammar, read-only 
 
 ## Acceptance Criteria
 
-- [x] `ViewSpec` TypeScript type defined with all four layers
-- [x] Server-side Rust struct with serde + validation
-- [x] Nesting depth limit enforced (side-by-side sub-views cannot contain side-by-side)
-- [x] `flow` layout requires `trace_source` in data layer (400 if missing)
-- [x] `spec_path` filter requires `repo_id` (400 if missing)
-- [x] `repo_id` validated against workspace membership
-- [x] Layout registry pattern implemented in frontend
-- [x] Tests pass for validation edge cases
+- [ ] `ViewSpec` TypeScript type defined with all four layers
+- [ ] Server-side Rust struct with serde + validation
+- [ ] Nesting depth limit enforced (side-by-side sub-views cannot contain side-by-side)
+- [ ] `flow` layout requires `trace_source` in data layer (400 if missing)
+- [ ] `spec_path` filter requires `repo_id` (400 if missing)
+- [ ] `repo_id` validated against workspace membership
+- [ ] Layout registry pattern implemented in frontend
+- [ ] Tests pass for validation edge cases
 
 ## Agent Instructions
 
@@ -69,69 +69,73 @@ Read `ui-layout.md` §4 thoroughly — it contains extensive detail on each laye
 
 ## Shipped
 
-**Assignment 97c0fbed (repair of finding 8dd76606 "changed the assigned
-requirements"):** the prior candidate was cut from an older base, so against
-assignment base `a1751da1` its tree rewound `specs/tasks/task-189.md` and
-deleted `specs/tasks/task-212.md`. Merge `b017c0ba` (candidate + assignment
-base) repaired the tree; this round verified `git diff a1751da1 HEAD --
-specs/` touches only task-170's own lifecycle fields and that task-189/
-task-212 are byte-identical to base. Implementation files are identical to
-the prior candidate; fresh probes below were run at merged HEAD `b017c0ba`.
+**Round be688572 (repair of contract finding 97c0fbed):** the prior
+candidate flipped the assigned acceptance-criteria checkboxes to `[x]`,
+which `scripts/dev-contract.py:requirement_parts` counts as a change to
+the assigned requirements (checkboxes are prose, not an operational
+section). That is the entire delta — frontmatter (`title`/`spec_ref`/
+`depends_on`/`coverage_sections`) was unchanged and the implementation
+tree was intact. This round restored the assigned contract: the task
+file keeps its original `[ ]` checkboxes and carries status via
+`progress:` plus this section (matching completed tasks task-189/
+task-212, which also keep `[ ]`). Implementation files are byte-identical
+to the published candidate `06e0665b` — verified `git diff 06e0665b HEAD
+-- crates/ web/src/` is empty; no re-implementation needed. No task-215/
+task-212/other specs regressions: the only specs/ delta vs assignment
+base `19d65446` is this file's own lifecycle fields.
 
-**Grammar types + validation, both sides (belt and suspenders):**
+**Implementation (ui-layout.md §4, all four grammar layers):**
 - `web/src/lib/types/view-spec.ts` — `ViewSpec`/`DataLayer`/`LayoutType`/
-  `EncodingLayer`/`HighlightLayer`/`SubViewSpec` typedefs matching the
-  ui-layout.md §4 JSON examples (kebab-case layout names, all eight layouts);
+  `EncodingLayer`/`HighlightLayer`/`SubViewSpec` typedefs matching the §4
+  JSON examples (kebab-case layout names, all eight layouts);
   `validateViewSpec` client-side mirror (name required, known layout,
   flow⇒trace_source, spec_path⇒repo_id, side-by-side requires left+right,
   max nesting depth 1, sub-view field whitelist, no field inheritance,
   orphan left/right rejected); `isViewSpec` guard; `registerLayoutName`
   extension point keeping client validation in sync with the registry.
-  `ViewEvent` per §10 ships in `web/src/lib/viewEvents.js`
-  (dispatch/subscribe/DOM bridge).
+  `ViewEvent` per §10 ships in `web/src/lib/viewEvents.js`.
 - `crates/gyre-common/src/view_spec.rs` — serde structs
-  (`#[serde(rename_all = "kebab-case")]` layout enum; `deny_unknown_fields`
-  on `SubViewSpec` enforcing data/layout/encoding-only at parse time) +
-  `validate_view_spec`/`validate_sub_view` with the same rules.
-- `crates/gyre-server/src/api/explorer_views.rs` — `parse_and_validate` on
-  POST/PUT `/workspaces/:id/explorer-views` (400 on every invalid case;
-  ViewQuery/ViewSpec hybrid payloads rejected so neither grammar can smuggle
-  unvalidated fields); LLM-output validation on `/generate` before the SSE
-  `complete` event (invalid or foreign-repo spec ⇒ `{view_spec: null,
-  explanation, fallback list view}`, never a 500 or unvalidated forward);
-  `validate_repo_ownership` checking `repo_id` at the top level AND inside
-  each side-by-side sub-view against workspace membership via the repos
-  port. Routes registered in `api/mod.rs` with ABAC `RouteResourceMapping`
-  entries (zero exemptions).
+  (`#[serde(rename_all = "kebab-case")]` layout enum;
+  `deny_unknown_fields` on `SubViewSpec` enforcing data/layout/encoding
+  only at parse time) + `validate_view_spec`/`validate_sub_view`.
+- `crates/gyre-server/src/api/explorer_views.rs` — `parse_and_validate`
+  400s on POST/PUT `/workspaces/:id/explorer-views` (ViewQuery/ViewSpec
+  hybrid payloads rejected so neither grammar smuggles unvalidated
+  fields); `/generate` validates LLM output before the SSE `complete`
+  event (invalid or foreign-repo spec ⇒ `view_spec: null` + fallback
+  list view, never a 500 or unvalidated forward); `validate_repo_ownership`
+  checks `repo_id` at the top level AND inside each side-by-side sub-view
+  against workspace membership via the repos port. ABAC
+  `RouteResourceMapping` entries for all three routes.
 - `web/src/lib/layoutRegistry.js` — `registerLayout`/`getLayout`/
-  `listLayouts`; duplicate registration is a no-op (closed for
-  modification) and `registerLayout` extends the grammar's accepted
-  layout-name set in lockstep; `MoldableView.svelte` drives its tabs and
-  renderer dispatch through the registry (§4 Extensibility).
+  `listLayouts`; duplicate registration no-ops (closed for modification)
+  and extends the grammar's accepted names in lockstep;
+  `MoldableView.svelte` drives tabs and renderer dispatch through it.
 
-**Test evidence (fresh runs this round at HEAD `b017c0ba`, recorded in
-`/tmp/stage/review-evidence/task-170-round-97c0fbed-verification.txt`):**
-- `cargo test -p gyre-common --lib view_spec` — 13 passed, 0 failed.
-- `cargo test -p gyre-server --lib api::explorer_views` — 16 passed, 0
-  failed (400s on flow-without-trace_source, nested side-by-side,
-  spec_path-without-repo_id, foreign repo_id incl. sub-view smuggle, hybrid
-  grammar payload; SSE generate: invalid LLM spec ⇒ null view_spec +
-  fallback, valid spec forwarded, hallucinated repo_id ⇒ fallback; 503
-  LLM-unavailable; rate limit).
-- vitest `--pool=threads` task-scoped — 27/27 passed (view-spec 17,
-  MoldableViewListView 1, viewEvents 9). Forks pool cannot start in this
-  sandbox (TCP listener probe unsupported, errno 95 per
-  `/tmp/stage/capabilities.json`) — infra limitation, not a code defect.
-- `check-abac-route-registry.sh` — exit 0.
-- `check-task-commit-attribution.sh` — exit 0 at HEAD (the task-189
-  attribution drift recorded last round was repaired upstream and is
-  included in the assignment base via `a1751da1`).
-- Post-probe working tree: only `specs/tasks/task-170.md` modified; the
-  build.rs web rebuild is byte-identical to committed `web/dist` (no drift).
+**Fresh verification this round at HEAD `120ca4db` (evidence in
+`/tmp/stage/review-evidence/task-170-be688572-*.txt`):**
+- `cargo test -p gyre-common --lib view_spec` — 13/13 (spec §4 example
+  parses; kebab-case roundtrip; unknown layout rejected;
+  flow-without-trace_source; spec_path-without-repo_id; nested
+  side-by-side; top-level-only fields in sub-views; no parent repo_id
+  inheritance; orphan left/right; flow sub-view; valid composition).
+- `cargo test -p gyre-server --lib api::explorer_views` — 16/16 (cold
+  build; in-process `oneshot` HTTP: 400 on flow-without-trace_source,
+  nested side-by-side, spec_path-without-repo_id, foreign repo_id incl.
+  sub-view smuggle, hybrid grammar payload; SSE generate: invalid LLM
+  spec ⇒ null view_spec + fallback, valid spec forwarded, hallucinated
+  repo_id ⇒ fallback; 503 LLM-unavailable; rate limit).
+- vitest `--pool=threads` task-scoped — 27/27 (view-spec 17, viewEvents 9,
+  MoldableViewListView 1; locked deps via `npm ci`).
+- `check-abac-route-registry.sh` — exit 0; `check-task-commit-
+  attribution.sh` — exit 0 (all 8 attributed commits reachable and
+  recorded); `check-in-memory-state-stores.sh`, `check-scope-literal-
+  defaults.sh`, `check-inert-enforcement.sh` — exit 0.
+- Working tree after probes: only this file modified; `web/dist`
+  byte-identical to HEAD.
 
-**Sandbox restriction recorded:** TCP-listener probes unsupported (`accept`
-errno 95). HTTP enforcement is covered by in-process
-`axum::Router::oneshot` tests exercising the full request/response path
-through middleware and handlers. Full suites, all-target Clippy, arch
-check, and GitHub CI are owned by verification/publication per assignment
-scope.
+**Sandbox restriction recorded:** TCP-listener probes unsupported
+(`accept` errno 95, `/tmp/stage/capabilities.json`) — no live-listener
+HTTP smoke possible here; enforcement is covered by the oneshot tests
+above. Full suites, all-target Clippy, arch check, and GitHub CI are
+owned by verification/publication per assignment scope.
