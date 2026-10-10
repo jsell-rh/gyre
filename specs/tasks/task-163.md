@@ -2,11 +2,11 @@
 title: "Dependency graph — persistent storage for breaking changes and policies"
 spec_ref: "dependency-graph.md §Enforcement Policies"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "dependency-graph.md §Enforcement Policies"
   - "dependency-graph.md §Cascade Testing"
-commits: []
+commits: ["77af619f88de72ac2c28b971f3c8dd9039291cda"]
 ---
 
 ## Spec Excerpt
@@ -50,13 +50,35 @@ When `require_cascade_tests` is true, a breaking change in repo A triggers test 
 
 ## Acceptance Criteria
 
-- [ ] `BreakingChangeRepository` port trait exists with SQLite adapter
-- [ ] `DependencyPolicyRepository` port trait exists with SQLite adapter
-- [ ] DB migration creates `breaking_changes` and `dependency_policies` tables
-- [ ] In-memory adapters replaced with persistent ones in AppState
-- [ ] Cascade test tasks auto-created when `require_cascade_tests` is true
-- [ ] `cargo test --all` passes
+- [x] `BreakingChangeRepository` port trait exists with SQLite adapter
+- [x] `DependencyPolicyRepository` port trait exists with SQLite adapter
+- [x] DB migration creates `breaking_changes` and `dependency_policies` tables
+- [x] In-memory adapters replaced with persistent ones in AppState
+- [x] Cascade test tasks auto-created when `require_cascade_tests` is true
+- [ ] `cargo test --all` passes — focused suites below all green; full workspace suite owned by verification
 
 ## Agent Instructions
 
 Read `specs/system/dependency-graph.md` §"Breaking Change Detection", §"Enforcement Policies", and §"Cascade Testing". The domain types (BreakingChange, DependencyPolicy, BreakingChangeBehavior) already exist in `gyre-domain/src/dependency.rs`. The in-memory adapters are in `gyre-server/src/mem.rs` — search for `MemBreakingChangeRepository` and `MemDependencyPolicyRepository`. Follow the existing adapter patterns in `crates/gyre-adapters/src/sqlite/` (e.g., `task.rs`, `agent.rs`).
+
+## Shipped
+
+Persistent storage for breaking changes and per-workspace dependency policies, wired into production `AppState`:
+
+- **Ports**: `BreakingChangeRepository` (gyre-ports/src/breaking_change.rs: create / find_by_id / list_unacknowledged / list_by_source_repo / acknowledge) and `DependencyPolicyRepository` (gyre-ports/src/dependency_policy.rs: get_for_workspace / set_for_workspace) — pre-existing on base, contract unchanged.
+- **SQLite adapters**: crates/gyre-adapters/src/sqlite/breaking_change.rs and dependency_policy.rs — full Diesel implementations; policy upsert on `(workspace_id)` PK; behavior string<->enum mapping rejects unknown values. Postgres mirrors in postgres/{breaking_change,dependency_policy}.rs; schema.rs registers both tables.
+- **Migration 000056** (`2026-10-08-000056_dep_breaking_policies`): `breaking_changes` (id PK, edge/source-repo indexes, acknowledged fields) and `dependency_policies` (workspace_id PK, all five policy columns). Next unused sequence number; portable SQL (no dialect-only constructs) — check-migration-sql-portability passes.
+- **AppState wiring**: `breaking_changes` and `dependency_policies` now go through the `store!` macro (lib.rs:910-917) — SqliteStorage/PgStorage in DB-backed mode, mem fallback only in pure in-memory mode, identical to every sibling store.
+- **Cascade tests**: `trigger_cascade_tests` (merge_processor.rs:2210) runs after every merge, reads the persistent policy, respects per-workspace opt-out of the dependent's workspace, creates a High-priority `cascade-test` labeled task in each dependent repo, emits `cascade_test_triggered` events, notifies members. Agent completion/failure of `cascade-test` tasks routes through `report_cascade_test_result` (spawn.rs:1363/1464).
+- **Branch hygiene**: reverted the checkpoint's accidental `web/dist` rebuild (fb319050, 7a26107a) — task-163 has no UI changes; the rebuild introduced a trailing-whitespace error in vendored svelte-i18n that fails `git diff --check` (task-210 Round 12 precedent). web/dist now byte-identical to base.
+
+Test evidence (all at HEAD of this branch):
+- `cargo test -p gyre-adapters --lib breaking_change` — 7 passed (roundtrip, missing→None, unacknowledged filter, acknowledge-missing→false, pre-acknowledged persistence, source-repo scoping, **records survive a fresh storage instance** — the hollow-store killer).
+- `cargo test -p gyre-adapters --lib dependency_policy` — 4 passed (default policy, full-field roundtrip, overwrite, **survives fresh storage instance**).
+- `cargo test -p gyre-adapters --lib migrations` — 3 passed, including `migrations_create_tables` (the test that timed out in the interrupted session).
+- `cargo test -p gyre-server --test task163_dependency_persistence` — 2 passed: records and policies written via one `build_state` are observed by a second `build_state` over the same DB file — fails against mem-only wiring.
+- `cargo test -p gyre-server --lib merge_processor::tests::trigger_cascade` — 8 passed (task per dependent, policy disabled skip, no-dependents noop, workspace resolution, member notification, default-policy enable, dependent opt-out).
+- `cargo test -p gyre-server --lib api::dependencies::tests` — 64 passed, including Block-policy merge rejection, Warn non-blocking, proceed-after-acknowledgment, breaking-change auto-task creation.
+- `scripts/check-{migration-versions,mem-port-contracts,migration-sql-portability,in-memory-state-stores,task-commit-attribution}.sh` — all OK.
+
+Sandbox note: TCP listener probe unsupported (errno 95) — no live HTTP verification possible here; exact-head GitHub CI remains the transport check. Recorded in /tmp/stage/review-evidence/sandbox-transport-restriction.json.

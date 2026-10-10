@@ -907,8 +907,14 @@ pub fn build_state(
             mem::MemNetworkPeerRepository::default()
         ),
         dependencies: Arc::new(mem::MemDependencyRepository::default()),
-        breaking_changes: Arc::new(mem::MemBreakingChangeRepository::default()),
-        dependency_policies: Arc::new(mem::MemDependencyPolicyRepository::default()),
+        breaking_changes: store!(
+            dyn BreakingChangeRepository,
+            mem::MemBreakingChangeRepository::default()
+        ),
+        dependency_policies: store!(
+            dyn DependencyPolicyRepository,
+            mem::MemDependencyPolicyRepository::default()
+        ),
         rate_limiter: rate_limit::RateLimiter::new(rate_per_sec),
         process_registry: Arc::new(Mutex::new(HashMap::new())),
         agent_logs: Arc::new(Mutex::new(HashMap::new())),
