@@ -1593,6 +1593,16 @@ impl MemWorkspaceRepository {
         }
     }
 
+    /// Set the workspace store (builder over `with_policy_store`): lets a
+    /// paired `MemComputeTargetRepository` share this repo's workspace map.
+    pub fn with_workspace_store(
+        mut self,
+        workspaces: Arc<Mutex<HashMap<String, Workspace>>>,
+    ) -> Self {
+        self.store = workspaces;
+        self
+    }
+
     /// Test hook: cause subsequent `apply_trust_transition` calls to fail.
     /// Only used by `#[cfg(test)]` wiring (`shared_workspace_policy_pair`),
     /// so gated to test builds to avoid dead-code warnings in the lib.
@@ -3189,8 +3199,8 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
 /// Build an AppState with all in-memory repositories for tests.
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
-    let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None)
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
+    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, ws_store, None)
 }
 
 /// Build a test AppState backed by a real `StoragePort` (e.g. a temp-file
@@ -3199,46 +3209,50 @@ pub fn test_state() -> Arc<crate::AppState> {
 pub fn test_state_with_storage(
     storage: Arc<dyn gyre_ports::storage::StoragePort>,
 ) -> Arc<crate::AppState> {
-    let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, Some(storage))
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
+    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, ws_store, Some(storage))
 }
 
 /// Build a test AppState whose workspace repo fails every `apply_trust_transition`,
 /// used to exercise the `update_workspace`/`create_workspace` 409 error path.
 #[cfg(test)]
 pub fn test_state_failing_trust() -> Arc<crate::AppState> {
-    let (workspaces, policies) = shared_workspace_policy_pair(true);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None)
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(true);
+    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, ws_store, None)
 }
 
 /// Construct a paired workspace + policy repo that share a single in-memory
 /// policy store so `apply_trust_transition` writes are visible through
 /// `state.policies`. When `fail_trust` is set, the workspace repo rejects every
-/// trust transition (simulating a DB rollback).
+/// trust transition (simulating a DB rollback). Also returns the shared
+/// workspace store so the compute-target repo can pair with it (real
+/// `has_workspace_references` in tests).
 #[cfg(test)]
 fn shared_workspace_policy_pair(
     fail_trust: bool,
 ) -> (
     Arc<dyn WorkspaceRepository>,
     Arc<dyn gyre_ports::PolicyRepository>,
+    Arc<Mutex<HashMap<String, Workspace>>>,
 ) {
     let pol_store = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     let policies = Arc::new(MemPolicyRepository::from_store(Arc::clone(&pol_store)));
-    let workspaces = MemWorkspaceRepository::with_policy_store(pol_store);
+    let ws_store = Arc::new(Mutex::new(HashMap::<String, Workspace>::new()));
+    let workspaces =
+        MemWorkspaceRepository::with_policy_store(pol_store).with_workspace_store(Arc::clone(&ws_store));
     if fail_trust {
         workspaces.fail_trust_transitions();
     }
-    (Arc::new(workspaces), policies)
+    (Arc::new(workspaces), policies, ws_store)
 }
 
 /// Build an AppState with a custom GitOpsPort for tests that need to control
 /// git operation behavior (e.g., configurable `can_merge` results).
 #[cfg(test)]
 pub fn test_state_with_git_ops(git_ops: Arc<dyn gyre_ports::GitOpsPort>) -> Arc<crate::AppState> {
-    let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(git_ops, workspaces, policies, None)
+    let (workspaces, policies, ws_store) = shared_workspace_policy_pair(false);
+    test_state_inner(git_ops, workspaces, policies, ws_store, None)
 }
-
 /// Shared builder for all in-memory test states. Callers supply the git ops
 /// adapter plus a paired workspace/policy repo (see `shared_workspace_policy_pair`).
 #[cfg(test)]
@@ -3246,6 +3260,7 @@ fn test_state_inner(
     git_ops: Arc<dyn gyre_ports::GitOpsPort>,
     workspaces: Arc<dyn WorkspaceRepository>,
     policies: Arc<dyn gyre_ports::PolicyRepository>,
+    ws_store: Arc<Mutex<HashMap<String, Workspace>>>,
     storage: Option<Arc<dyn gyre_ports::storage::StoragePort>>,
 ) -> Arc<crate::AppState> {
     use std::collections::HashMap;
@@ -3362,7 +3377,7 @@ fn test_state_inner(
         conversations: Arc::new(MemConversationRepository::default()),
         repos_root: format!("/tmp/gyre-unit-test-repos-{}", std::process::id()),
         prompt_templates: Arc::new(MemPromptRepository::default()),
-        compute_targets: Arc::new(MemComputeTargetRepository::default()),
+        compute_targets: Arc::new(MemComputeTargetRepository::with_workspace_store(ws_store)),
         llm: Some(Arc::new(gyre_adapters::MockLlmPortFactory::echo())),
         user_notification_prefs: Arc::new(MemUserNotificationPreferenceRepository::default()),
         user_tokens: Arc::new(MemUserTokenRepository::default()),
@@ -3699,9 +3714,37 @@ impl gyre_ports::PromptRepository for MemPromptRepository {
 
 // ── In-memory ComputeTargetRepository ────────────────────────────────────────
 
-#[derive(Default)]
 pub struct MemComputeTargetRepository {
     store: Arc<tokio::sync::RwLock<Vec<gyre_domain::ComputeTargetEntity>>>,
+    /// Workspace store shared with the paired `MemWorkspaceRepository` so
+    /// `has_workspace_references` performs a real scan instead of a
+    /// hardcoded false (agent-runtime.md §3: DELETE must fail with 409
+    /// when workspaces reference the target). Defaults to an independent
+    /// empty store, so standalone use (no pairing) behaves like before.
+    workspaces: Arc<Mutex<HashMap<String, Workspace>>>,
+}
+
+impl Default for MemComputeTargetRepository {
+    fn default() -> Self {
+        Self {
+            store: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            workspaces: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl MemComputeTargetRepository {
+    /// Construct a compute-target repo that shares the workspace store of a
+    /// paired `MemWorkspaceRepository`, giving `has_workspace_references`
+    /// real cross-repo visibility.
+    pub fn with_workspace_store(
+        workspaces: Arc<Mutex<HashMap<String, Workspace>>>,
+    ) -> Self {
+        Self {
+            store: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            workspaces,
+        }
+    }
 }
 
 #[async_trait]
@@ -3763,11 +3806,16 @@ impl gyre_ports::ComputeTargetRepository for MemComputeTargetRepository {
             .cloned())
     }
 
-    async fn has_workspace_references(&self, _id: &Id) -> Result<bool> {
-        // The in-memory adapter does not share state with MemWorkspaceRepository,
-        // so this always returns false in tests. The 409 Conflict path is covered
-        // by the SQLite adapter integration tests.
-        Ok(false)
+    async fn has_workspace_references(&self, id: &Id) -> Result<bool> {
+        // Real scan of the shared workspace store (same contract as the
+        // SQLite adapter's join). Unpaired standalone use sees an empty
+        // workspace set, which is the honest result for that mode.
+        Ok(self
+            .workspaces
+            .lock()
+            .await
+            .values()
+            .any(|ws| ws.compute_target_id.as_ref() == Some(id)))
     }
 }
 

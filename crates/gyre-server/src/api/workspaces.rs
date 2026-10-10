@@ -42,6 +42,10 @@ pub struct UpdateWorkspaceRequest {
     pub trust_level: Option<String>,
     pub llm_model: Option<String>,
     /// Set to a compute target ID to bind agent spawning, or null to clear.
+    /// Raw deserializer keeps an explicit JSON `null` distinct from an
+    /// absent field: serde collapses `null` to `None` inside
+    /// `Option<Value>`, which would make a clear a silent no-op.
+    #[serde(default, deserialize_with = "crate::api::deserialize_present")]
     pub compute_target_id: Option<serde_json::Value>,
 }
 
@@ -1036,8 +1040,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let updated = body_json(resp).await;
-        eprintln!("CLEAR_RESPONSE: {updated}");
-        assert!(updated["compute_target_id"].is_null(), "clear response was: {updated}");
+        assert!(updated["compute_target_id"].is_null());
     }
 
     /// A compute target from ANOTHER tenant must be rejected: the spawn-time

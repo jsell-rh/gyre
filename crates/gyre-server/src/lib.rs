@@ -861,7 +861,11 @@ pub fn build_state(
     // ABAC engine (which reads through `state.policies`). In DB-backed mode both
     // come from the same storage struct, so this store is unused.
     let mem_policy_store = Arc::new(Mutex::new(HashMap::new()));
-
+    // Shared workspace store for pure-mem mode: `MemComputeTargetRepository`
+    // pairs with `MemWorkspaceRepository` so `has_workspace_references`
+    // (agent-runtime.md §3 delete guard) sees real workspace assignments
+    // instead of a hardcoded empty set.
+    let mem_workspace_store = Arc::new(Mutex::new(HashMap::<String, gyre_domain::Workspace>::new()));
     Arc::new(AppState {
         auth_token: auth_token.to_string(),
         base_url: base_url.to_string(),
@@ -1011,6 +1015,7 @@ pub fn build_state(
         workspaces: store!(
             dyn WorkspaceRepository,
             mem::MemWorkspaceRepository::with_policy_store(Arc::clone(&mem_policy_store))
+                .with_workspace_store(Arc::clone(&mem_workspace_store))
         ),
         personas: store!(dyn PersonaRepository, mem::MemPersonaRepository::default()),
         policies: store!(
@@ -1092,7 +1097,7 @@ pub fn build_state(
         ),
         compute_targets: store!(
             dyn ComputeTargetRepository,
-            mem::MemComputeTargetRepository::default()
+            mem::MemComputeTargetRepository::with_workspace_store(Arc::clone(&mem_workspace_store))
         ),
         user_notification_prefs: store!(
             dyn gyre_ports::UserNotificationPreferenceRepository,
