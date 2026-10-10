@@ -8,6 +8,15 @@ pub struct GyreClient {
     base_url: String,
     token: String,
     client: Client,
+    /// Test-only transport seam: when installed, `send_request` hands the
+    /// fully-built `reqwest::Request` (real method, URL, headers, serialized
+    /// body) to this closure instead of the socket, so in-module tests can
+    /// drive the real method bodies (GET → merge → PUT compositions) and
+    /// inspect exactly what would go on the wire. Never present in
+    /// production builds (the field and its installer exist only under
+    /// `#[cfg(test)]`).
+    #[cfg(test)]
+    transport: Option<crate::tests::MockTransport>,
 }
 
 // ── Response types (mirrors server response shapes) ───────────────────────────
@@ -17,8 +26,14 @@ pub struct AgentResponse {
     pub id: String,
     pub name: String,
     pub status: String,
+    #[serde(default)]
     pub current_task_id: Option<String>,
+    #[serde(default)]
     pub last_heartbeat: Option<u64>,
+    /// When the agent was spawned (UNIX seconds) — the recency signal for
+    /// `gyre search --since` on agent results (agents have no updated_at).
+    #[serde(default)]
+    pub spawned_at: u64,
 }
 
 #[derive(Deserialize, Debug)]
@@ -36,20 +51,33 @@ pub struct TaskResponse {
     pub title: String,
     pub status: String,
     pub priority: String,
+    #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
     pub assigned_to: Option<String>,
+    #[serde(default)]
     pub labels: Vec<String>,
+    /// Last-modified timestamp (UNIX seconds) — maintained by the server on
+    /// task update and status transitions. Used by `gyre search --since`.
+    #[serde(default)]
+    pub updated_at: u64,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 #[allow(dead_code)]
 pub struct MrResponse {
     pub id: String,
     pub repository_id: String,
     pub title: String,
+    #[serde(default)]
     pub source_branch: String,
+    #[serde(default)]
     pub target_branch: String,
     pub status: String,
+    /// Last-modified timestamp (UNIX seconds) — maintained by the server on
+    /// MR status transitions. Used by `gyre search --since`.
+    #[serde(default)]
+    pub updated_at: u64,
 }
 
 // ── Bootstrap response types (platform-model.md §8) ──────────────────────────
@@ -172,7 +200,31 @@ pub struct TenantBudgetSummary {
     pub workspaces: Vec<BudgetResponse>,
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Search response types (mirrors GET /api/v1/search) ───────────────────────
+
+/// One search result row. `facets` mirrors the server's result facets
+/// (status, priority, repo_id, ...).
+#[derive(Deserialize, Debug, Clone)]
+#[allow(dead_code)]
+pub struct SearchResult {
+    pub entity_type: String,
+    pub entity_id: String,
+    pub title: String,
+    #[serde(default)]
+    pub snippet: String,
+    #[serde(default)]
+    pub score: f64,
+    #[serde(default)]
+    pub facets: std::collections::HashMap<String, String>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct SearchResponse {
+    pub query: String,
+    pub total: usize,
+    #[serde(default)]
+    pub results: Vec<SearchResult>,
+}
 
 /// Percent-encode a spec path for use as a single URL path segment.
 /// Encodes `/` as `%2F` so axum receives the full path in one `:path` param.
@@ -181,14 +233,46 @@ fn encode_spec_path(path: &str) -> String {
         .map(|c| match c {
             'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
             _ => format!("%{:02X}", c as u32),
-        })
-        .collect()
-}
-
-// ── Client implementation ─────────────────────────────────────────────────────
-
-impl GyreClient {
     pub fn new(base_url: String, token: String) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            token,
+            client: Client::new(),
+            #[cfg(test)]
+            transport: None,
+        }
+    }
+
+    /// Install a test-only transport seam (see the `transport` field). The
+    /// closure receives the request exactly as the production `.send()`
+    /// would transmit it; its return value becomes the method's response.
+    #[cfg(test)]
+    pub(crate) fn set_mock_transport(
+        &mut self,
+        mock: crate::tests::MockTransport,
+    ) {
+        self.transport = Some(mock);
+    }
+
+    /// Send a request through the transport seam when a test mock is
+    /// installed, else over the real socket. Passing the built `Request`
+    /// to the mock (not the `RequestBuilder`) pins the assertion surface to
+    /// the same object reqwest hands its connection layer.
+    #[cfg(test)]
+    async fn send_request(&self, rb: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+        if let Some(mock) = &self.transport {
+            let req = rb.build().map_err(|e| {
+                anyhow::anyhow!("building mock-inspected request: {e}")
+            })?;
+            return mock.call(req).await;
+        }
+        rb.send()
+            .await
+            .context("connecting to Gyre server")
+    }
+
+    #[allow(unused)]
+    fn auth_header(&self) -> String {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             token,
@@ -234,6 +318,43 @@ impl GyreClient {
             anyhow::bail!("get agent failed (HTTP {status}): {text}");
         }
         serde_json::from_str(&text).context("parsing agent response")
+    }
+
+    /// GET /api/v1/tasks/:id — live task detail. Search index facets are
+    /// frozen at create time, so `gyre search --status/--since` resolves
+    /// current task state through this endpoint.
+    pub async fn get_task(&self, task_id: &str) -> Result<TaskResponse> {
+        let resp = self
+            .client
+            .get(format!("{}/api/v1/tasks/{task_id}", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("get task failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing task response")
+    }
+
+    /// GET /api/v1/merge-requests/:id — live MR detail. See `get_task` for
+    /// why `gyre search --status/--since` needs the live record.
+    pub async fn get_mr(&self, mr_id: &str) -> Result<MrResponse> {
+        let resp = self
+            .client
+            .get(format!("{}/api/v1/merge-requests/{mr_id}", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("get MR failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing MR response")
     }
 
     /// List tasks with optional filters.
@@ -335,6 +456,45 @@ impl GyreClient {
             anyhow::bail!("create MR failed (HTTP {status}): {text}");
         }
         serde_json::from_str(&text).context("parsing MR response")
+    }
+
+    /// GET /api/v1/search — full-text search across all entities.
+    ///
+    /// `q` is passed to the server as-is (the server's current engine is
+    /// AND-of-terms substring matching; the facet query language of
+    /// search.md §Query Language is task-154). `entity_type` and
+    /// `workspace_id` are real server-side filters. The CLI's
+    /// `--status`/`--since` filters are applied client-side against live
+    /// entity state (see `gyre search` in main.rs) because search results
+    /// carry no timestamps and index facets freeze at create time.
+    pub async fn search(
+        &self,
+        q: &str,
+        entity_type: Option<&str>,
+        workspace_id: Option<&str>,
+        limit: usize,
+    ) -> Result<SearchResponse> {
+        let mut req = self
+            .client
+            .get(format!("{}/api/v1/search", self.base_url))
+            .header("Authorization", self.auth_header());
+        if !q.is_empty() {
+            req = req.query(&[("q", q)]);
+        }
+        if let Some(t) = entity_type {
+            req = req.query(&[("entity_type", t)]);
+        }
+        if let Some(w) = workspace_id {
+            req = req.query(&[("workspace_id", w)]);
+        }
+        req = req.query(&[("limit", limit.to_string())]);
+        let resp = req.send().await.context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("search failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing search response")
     }
 
     /// GET /api/v1/workspaces — list all accessible workspaces.

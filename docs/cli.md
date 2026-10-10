@@ -51,7 +51,9 @@ gyre bootstrap --dev
 
 # Also write a starter spec structure (specs/manifest.yaml, specs/index.md,
 # specs/system/design-principles.md, AGENTS.md, .prek.yaml) into --repo-path
-gyre bootstrap --dev --starter-kit --repo-path ./myrepo
+# (required: --starter-kit without --repo-path is an error — the kit must land
+# at an explicit path, never a cwd-relative default)
+gyre bootstrap --dev --starter-kit --repo-path /home/user/code/myrepo
 ```
 
 Steps performed in order: health check → create tenant → create admin user
@@ -162,6 +164,46 @@ Setting a limit above the tenant ceiling surfaces the server's cascade
 error verbatim (HTTP 400); a non-Admin token gets the server's 403. There is
 no tenant-level set endpoint — tenant:global limits are provisioned
 server-side.
+
+---
+
+## Search
+
+```bash
+# Simple full-text search across all entities
+gyre search "identity security"
+
+# Filter by entity type (spec, task, mr, commit, agent) — server-side
+gyre search "merge queue" --type spec
+
+# Filter by live status (task/mr/agent state) — client-side
+gyre search "ABAC" --type task --status in_progress
+
+# Workspace scope by slug — resolved server-side
+gyre search "budget" --workspace platform-team
+
+# Recency filter: relative (7d) or ISO date (2026-03-01)
+gyre search "auth.rs" --since 7d
+
+# Autocomplete for a title prefix
+gyre search --suggest "iden"
+
+# Cap result count (default 20, server max 100)
+gyre search "queue" --limit 5
+```
+
+Notes:
+
+- `--type` and `--workspace` are enforced by the server (`entity_type` /
+  `workspace_id` params on `GET /api/v1/search`).
+- `--status` and `--since` filter against the entity's live state
+  (fetched per-result from the task/MR/agent detail endpoints), because
+  the search index snapshots status at creation time. Results whose
+  live state cannot be resolved (spec/commit types, deleted entities)
+  are excluded and reported on stderr.
+- `--suggest` falls back to a title-prefix filter over regular search
+  results until the dedicated `/api/v1/search/suggest` endpoint lands
+  (task-153).
 
 ---
 
