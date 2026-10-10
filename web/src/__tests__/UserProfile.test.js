@@ -130,6 +130,15 @@ describe('UserProfile', () => {
     expect(await findByText('https://idp.example.com/realms/gyre')).toBeTruthy();
   });
 
+  it('shows read-only last login in Profile tab', async () => {
+    const { findByText } = r();
+    // 1759000000 * 1000 formatted by toLocaleString — assert the label and
+    // that some rendered value carries the year of the recorded login.
+    expect(await findByText('Last Login')).toBeTruthy();
+    const d = new Date(1759000000 * 1000);
+    expect(await findByText(d.toLocaleString())).toBeTruthy();
+  });
+
   it('shows Edit button that opens edit form', async () => {
     const { findByText, findByDisplayValue } = r();
     const editBtn = await findByText('Edit');

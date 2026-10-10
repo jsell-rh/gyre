@@ -293,6 +293,15 @@
     return `${Math.floor(secs/86400)}d ago`;
   }
 
+  // Auth provider info is read-only (HSI §12): rendered as the recorded
+  // wall-clock timestamp, not a relative age — "Last Login" is a fact about
+  // the account, not feed recency.
+  function fmtLogin(ts) {
+    if (!ts) return '—';
+    const d = new Date(typeof ts === 'number' ? ts * 1000 : ts);
+    return d.toLocaleString();
+  }
+
   function switchWorkspace(ws) {
     goToWorkspaceHome?.(ws);
   }
@@ -359,7 +368,7 @@
     {:else if activeTab === 'info'}
       {#if me}
         <div class="info-grid">
-          {#each [[$t('user_profile.fields.username'), me.username],[$t('user_profile.fields.email'), me.email],[$t('user_profile.fields.display_name'), me.display_name],[$t('user_profile.fields.timezone'), me.timezone],[$t('user_profile.fields.locale'), me.locale],[$t('user_profile.fields.role'), me.global_role],[$t('user_profile.fields.auth_provider'), me.oidc_issuer]] as [label, val]}
+          {#each [[$t('user_profile.fields.username'), me.username],[$t('user_profile.fields.email'), me.email],[$t('user_profile.fields.display_name'), me.display_name],[$t('user_profile.fields.timezone'), me.timezone],[$t('user_profile.fields.locale'), me.locale],[$t('user_profile.fields.role'), me.global_role],[$t('user_profile.fields.auth_provider'), me.oidc_issuer],[$t('user_profile.fields.last_login'), fmtLogin(me.last_login_at)]] as [label, val]}
             {#if val}
               <div class="info-row">
                 <span class="info-label">{label}</span>

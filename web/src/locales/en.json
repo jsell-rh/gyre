@@ -640,7 +640,8 @@
       "username": "Username",
       "email": "Email",
       "role": "Role",
-      "auth_provider": "Auth Provider"
+      "auth_provider": "Auth Provider",
+      "last_login": "Last Login"
     },
     "placeholders": {
       "display_name": "Your display name",
