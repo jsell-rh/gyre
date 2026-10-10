@@ -82,3 +82,19 @@ What this round checked and found:
 No material gap remains. Round 2's ten findings stay resolved; the integration-blocking formatting defect is repaired with no behavioral change.
 
 — Verifier, 2026-10-09
+
+# Independent review — task-093 (round 4, candidate `aa0725f0`)
+
+Assignment: base `f4acb4eb`, candidate `aa0725f0f3dab0ad0380d863e3752338c6d1a9b8`. This round carried two durable findings from the rejected `10c7ab64` checkpoint; both are verified fixed in production code. Evidence: `/tmp/stage/review-evidence/task-093-final-review-aa0725f0.txt`.
+
+Verdict: **approve**.
+
+- **Durable finding 1 (inert-enforcement exemption miscount) — resolved.** The 231/353 anchors landed inside `spawn_orchestrator` argument lists and failed `check-inert-enforcement.sh` on the committed tree. Now re-anchored to the true `validate_persona` call sites (`orchestrator.rs:222`, `:344`; grep-verified). Check passes on the candidate: exit 0. (At `10c7ab64` the same command failed with 2 inert sites.)
+- **Durable finding 2 (double terminal transition breaks §3.2 exactly-one-live) — resolved, two layers.** (a) `fail_agent`/`stop_agent` early-return on Failed|Stopped|Dead corpses (`spawn.rs:1441`, `:1517`); (b) defense in depth: `restart_orchestrator` (`stale_agents.rs:157-185`) refuses to mint a replacement while any live orchestrator holds the scope, and fails conservative (no replacement) on a store listing error. Ordering verified: all three call sites persist the terminal status *before* `handle_orchestrator_death`, so the occupancy check never sees the dying agent as live.
+- **Kill probes (temporary edits, tree restored and re-verified clean after each).** With the `fail_agent` terminal guard disabled, both double-terminal tests fail (`second_terminal_transition...`: 2 live orchestrators; `fail_after_stale_death...`: budget active_agents 0≠1). With the `restart_orchestrator` scope gate disabled, the `c9743839` backstop fails (second live orchestrator minted). Both production guards are load-bearing and their tests kill.
+- **Focused tests (candidate tree):** `api::orchestrator` 22/22, `api::spawn` 29/29, `mcp::tests::mcp_message_send` 9/9, MCP orchestrator-tier tools 6/6.
+- **Mechanical checks:** inert-enforcement, ABAC route registry (count 51, honest shrink), MCP write-tools (exemptions emptied), exempt-handlers (87), arch, warn-continue (re-anchor 728→734 verified), mem-port-contracts, fail-open-ref, in-memory-state-stores, unbounded-external-http, dead-message-kinds — all green. `check-rustfmt-diff.py f4acb4eb` → clean (the gate class that rejected round 3).
+- **Pre-existing, not a candidate defect:** `check-task-commit-attribution.sh` fails on `f4acb4eb`/task-189 — verified identical failure in a worktree at the base commit itself; no task-093 commit is flagged.
+- **Sandbox limitation:** TCP listener unsupported (capabilities.json), so no live server smoke test; exact-head GitHub CI remains the transport gate. All probes above are library tests against the mem adapter per repo convention.
+
+— Reviewer, 2026-10-10
