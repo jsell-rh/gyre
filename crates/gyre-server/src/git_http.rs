@@ -1476,7 +1476,7 @@ async fn process_spec_lifecycle(
                         let _ = state
                             .spec_approvals
                             .revoke_all_for_path(
-                                ledger_path(stale_path),
+                                stale_path,
                                 "system:spec-lifecycle",
                                 &reason,
                                 now,
