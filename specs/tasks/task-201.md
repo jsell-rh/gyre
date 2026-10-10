@@ -2,7 +2,7 @@
 title: "Implement persistent full-text search backend (SQLite FTS5 + Postgres tsvector)"
 spec_ref: "search.md §Search Index"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "search.md §Search Index"
   - "search.md §Technology"
@@ -160,3 +160,11 @@ lives in the `wip(task-201)`/checkpoint SHAs recorded in this file's
 `commits:` frontmatter; base `6bf777a6` merged via `207e9c6a`; the clippy
 gate repair, the task-200 attribution fix, and this evidence refresh are
 commit `3b3fb0c7`.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-adapters/src/sqlite/search.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.

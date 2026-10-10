@@ -116,7 +116,7 @@ const BODY_COL: i32 = 6;
 impl SearchPort for SqliteStorage {
     async fn index(&self, doc: SearchDocument) -> Result<()> {
         let pool = Arc::clone(&self.pool);
-        let metadata_json = serde_json::to_string(&doc.facets)?;
+        let metadata_json = serde_json::to_string(&std::collections::HashMap::<String, String>::new())?;
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
 
