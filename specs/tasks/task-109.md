@@ -70,14 +70,14 @@ Current state: Watched paths are hardcoded as `["specs/system/", "specs/developm
 
 ## Acceptance Criteria
 
-- [x] `SpecLifecycleConfig` struct in gyre-domain with all spec fields
-- [x] Database column stores per-repo config
-- [x] GET/PUT API for spec lifecycle settings
-- [x] git_http.rs uses per-repo config instead of hardcoded values
-- [x] Config defaults match current behavior
-- [x] Disabling `enabled` skips spec lifecycle processing
-- [x] Priority overrides work for task creation
-- [x] UI shows and edits spec lifecycle settings
+- [ ] `SpecLifecycleConfig` struct in gyre-domain with all spec fields
+- [ ] Database column stores per-repo config
+- [ ] GET/PUT API for spec lifecycle settings
+- [ ] git_http.rs uses per-repo config instead of hardcoded values
+- [ ] Config defaults match current behavior
+- [ ] Disabling `enabled` skips spec lifecycle processing
+- [ ] Priority overrides work for task creation
+- [ ] UI shows and edits spec lifecycle settings
 - [ ] `cargo test --all` passes
 
 ## Agent Instructions
@@ -86,74 +86,93 @@ Read `specs/system/spec-lifecycle.md` §Configuration for the full config spec. 
 
 ## Shipped
 
-Per-repo spec lifecycle configuration replaces the hardcoded watched/ignored
-path prefixes in the post-receive hook (spec-lifecycle.md §Configuration).
+Per-repo spec lifecycle configuration (spec-lifecycle.md §Configuration)
+replaces the previously hardcoded watched/ignored path prefixes and task
+priorities in the post-receive hook.
 
 **Domain** (`gyre-domain/src/spec_lifecycle_config.rs`): `SpecLifecycleConfig`
 with all eight spec fields — `enabled`, `watched_paths`, `ignored_paths`,
 `auto_invalidate_approvals`, `dedup_open_tasks`, and
-`default_priority_new/modified/deleted` as typed `TaskPriority` (not strings;
-invalid values rejected at deserialization). Defaults match the previous
-hardcoded behavior exactly: watched `["specs/system/", "specs/development/"]`,
-ignored `["specs/milestones/", "specs/prior-art/", "specs/personas/",
+`default_priority_new/modified/deleted` as typed `TaskPriority` (invalid
+values rejected at deserialization). Defaults match the prior hardcoded
+behavior exactly: watched `["specs/system/", "specs/development/"]`, ignored
+`["specs/milestones/", "specs/prior-art/", "specs/personas/",
 "specs/prompts/"]`, priorities Medium/High/High, all flags true. Serde
 field-level defaults keep a partial JSON payload from zeroing unspecified
-fields. `is_watched()` applies ignored-over-watched precedence.
+fields; `is_watched()` applies ignored-over-watched precedence.
 
-**Persistence** (migration `2026-10-08-000056_spec_lifecycle_configs`): separate
-`spec_lifecycle_configs` table (`repo_id` PK, `config` JSON TEXT) — portable
-SQL, runs on both SQLite and PostgreSQL via the shared embedded migrations
-dir. Diesel adapters implement the new `SpecLifecycleRepository` port for both
-backends (upsert on conflict); absent rows mean defaults. Wired through the
-`store!` macro in `AppState`; in-memory mode uses `MemSpecLifecycleRepository`
-(port-backed per the durable-state invariant).
+**Persistence** (migration `2026-10-08-000056_spec_lifecycle_configs`):
+separate `spec_lifecycle_configs` table (`repo_id` PK, `config` JSON TEXT),
+portable SQL for both SQLite and PostgreSQL through the shared embedded
+migrations dir. Diesel adapters (SQLite + Postgres) implement the
+`SpecLifecycleRepository` port with upsert-on-conflict; absent rows mean
+defaults. Wired through the `store!` macro in `AppState`; in-memory mode uses
+`MemSpecLifecycleRepository` (port-backed per the durable-state invariant).
 
 **API** (`GET/PUT /api/v1/repos/:id/settings/spec-lifecycle`, the assigned
-route contract restored by 483559c0 after the first review round): PUT
-restricted to Admin/Developer roles — the Agent role gets 403 (an agent must
-not be able to disable the drift detector it is subject to); GET returns
-defaults for unconfigured repos; unknown repo → 404. Route registered in
-`api/mod.rs` with an ABAC `RouteResourceMapping` entry; documented in
+route contract restored by 483559c0 after the first review round): PUT is
+Admin/Developer-only — the Agent role gets 403 (an agent must not be able to
+disable the drift detector it is subject to); GET returns defaults for
+unconfigured repos; unknown repo → 404. Route registered in `api/mod.rs`
+with an ABAC `RouteResourceMapping` entry; documented in
 `docs/api-reference.md`.
 
-**Hook wiring** (`git_http.rs process_spec_lifecycle`): loads per-repo config
-through the same port the API writes; `enabled=false` returns before any
-diff/task/approval work; filtering via `config.is_watched` (ignored wins);
-`classify_spec_change` takes priorities from config (A/R→new, M→modified,
-D→deleted); `auto_invalidate_approvals=false` skips approval revocation;
-`dedup_open_tasks=false` skips the open-task dedup gate. No hardcoded path
-literals remain in production code.
+**Hook wiring** (`git_http.rs process_spec_lifecycle`): loads per-repo
+config through the same port the API writes; `enabled=false` returns before
+any diff/task/approval work; filtering via `config.is_watched` (ignored
+wins); `classify_spec_change` takes priorities from config (A/R→new,
+M→modified, D→deleted); `auto_invalidate_approvals=false` skips approval
+revocation; `dedup_open_tasks=false` skips the open-task dedup gate. The
+workspace scope for created tasks comes from the repo resolved at push
+time — no "default" workspace fabrication on re-lookup failure. No
+hardcoded path literals remain in production code.
 
 **UI** (`RepoSettings.svelte`): "Spec Lifecycle" tab with enabled toggle,
 tag-style add/remove lists for watched/ignored paths, both flag toggles, and
 three priority selects; loads via `api.repoSpecLifecycle`, saves via
-`api.setRepoSpecLifecycle`; locale strings in `en.json`. Dist build artifacts
-committed.
+`api.setRepoSpecLifecycle`; locale strings in `en.json`.
 
-**Test evidence** (focused probes at HEAD after the 19d65446 base merge,
+**Contract-repair round (finding 569e4bd2):** the prior candidate
+`b1526c71` closed the acceptance-criteria checkboxes as `[x]`, which
+`scripts/dev-contract.py:requirement_parts` counts as a change to the
+assigned requirements (checkboxes are contract prose; only `Shipped` /
+`Review` are operational sections excluded from the contract hash). Same
+failure mode as task-170's documented repair. This round restored the
+assigned contract — the task file keeps its original `[ ]` checkboxes and
+carries status via `progress:` plus this section, matching completed tasks
+task-189/task-212 on main. Implementation tree is byte-identical to the
+published candidate apart from this file (`git diff b1526c71 HEAD --
+crates/ web/src/ docs/` empty); the assignment base merge 918f16bf is
+specs-only (task-216.md), so no code re-verification gap. Contract-hash
+equivalence proven with `dev-contract.py.requirement_parts`: base ==
+this file's final form (True), base == checkbox-flipped form (False).
+
+**Test evidence** (focused probes at HEAD `9f5e5e81` on this branch,
 recorded under `/tmp/stage/review-evidence/task-109/`):
-- `cargo test -p gyre-domain --lib spec_lifecycle` — 5/5
-- `cargo test -p gyre-adapters spec_lifecycle` — 4/4 (unconfigured defaults,
-  round-trip, upsert overwrite, per-repo isolation)
-- `cargo test -p gyre-server --lib 'git_http::tests::'` — 41 passed,
-  including all 17 spec-lifecycle tests (end-to-end against a real bare git
-  repo with real pushed commits: `enabled=false` creates no tasks; custom
-  `watched_paths` fully replace defaults; `default_priority_new: Critical`
-  lands on the created task). One pre-existing failure,
-  `git_clone_empty_repo_via_smart_http`, is a sandbox TCP-listener
-  restriction (errno 95, `capabilities.json`) — the test binds a real
-  127.0.0.1 listener and is untouched by this task's diff; requires host
-  verification.
-- `cargo test -p gyre-server --lib 'api::spec_lifecycle'` — 5/5 including
-  the Agent-role-forbidden test
-- `cd web && npm ci && npx vitest run src/__tests__/RepoSettings.test.js` —
-  56/56
-- Mechanical checks all exit 0: arch, ABAC route registry, migration
-  versions, in-memory state stores, migration SQL portability, forged scope
-  fields, relative path defaults, scope literal defaults, inert enforcement,
-  task-commit attribution (the main-branch `f4acb4eb`/task-189 attribution
-  failure that interrupted the previous assignment was repaired on main by
-  19d65446/task-215; the check passes at this branch with no new exemptions).
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-domain --lib spec_lifecycle` — 5/5
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib spec_lifecycle` — 4/4
+  (unconfigured defaults, round-trip, upsert overwrite, per-repo isolation)
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib spec_lifecycle` — 7/7
+  (API 5 incl. Agent-role 403 with a real JWT on the assigned
+  `/settings/spec-lifecycle` path; hook 2: `enabled=false` creates no tasks
+  and custom `watched_paths` fully replace defaults with
+  `default_priority_new: Critical` landing on the created task — end-to-end
+  against a real bare git repo with real pushed commits)
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib
+  'git_http::tests::parse_spec_changes'` — 9/9 and
+  `'git_http::tests::classify_spec_change'` — 6/6 (config-driven filtering,
+  custom paths, ignored-override, configured priorities)
+- `cd web && npm ci && npx vitest run
+  src/__tests__/RepoSettings.test.js` — 56/56
+- All 17 mechanical invariant checks exit 0 (arch, ABAC route registry,
+  migration versions, migration SQL portability, mem port contracts,
+  in-memory state stores, forged scope fields, relative path defaults,
+  scope literal defaults, inert enforcement, task-commit attribution, byte
+  slice truncation, fail-open ref resolution, fabricated scope defaults,
+  lossy secret conversion, unbounded external HTTP).
 
-`cargo test --all` and exact-head GitHub checks are owned by the verification
-stage per assignment instructions.
+`cargo test --all` and exact-head GitHub checks are owned by the
+verification stage per assignment instructions; this sandbox cannot run TCP
+listeners (capability probe errno 95, `capabilities.json`), so the
+`git_clone_empty_repo_via_smart_http` test and live-UI browser drive
+require host verification.
