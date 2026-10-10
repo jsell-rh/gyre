@@ -1,11 +1,11 @@
 ---
 title: "Implement gyre search CLI command"
 spec_ref: "search.md §CLI"
-depends_on: []
+depends_on: [task-218]
 progress: ready-for-review
 coverage_sections:
   - "search.md §CLI"
-commits: ["2b6f337257ce435c3b6064cd1a707e0ae7727ef9", "1292303aa70971d0b93b8ff04564d51b9365c36b", "951037f8ba299c77075fc224e6cf78593b977d05", "0196a149bb5cfd42e6dfadc1e024a0149a45ddf4", "4e5b20d211eb17c7d00be369227dbab2e82b0f34", "6bc9a54dfd5bff0a78d0410ff997196612e02802"]
+commits: ["2b6f337257ce435c3b6064cd1a707e0ae7727ef9", "1292303aa70971d0b93b8ff04564d51b9365c36b", "951037f8ba299c77075fc224e6cf78593b977d05", "0196a149bb5cfd42e6dfadc1e024a0149a45ddf4", "4e5b20d211eb17c7d00be369227dbab2e82b0f34", "6bc9a54dfd5bff0a78d0410ff997196612e02802", "4c0df440cda53f7d4b9b6b9df0ac7284ad994a02"]
 ---
 
 ## Spec Excerpt
@@ -141,3 +141,26 @@ Commit `2b6f3372` (branch `pipeline/task-155/a4ff485562464770a5a49734c603bfb8-1`
   workspace_id, limit}` match `SearchParams` exactly; response-type
   fields match the server's Serialize structs. E2E against a real
   server + GitHub CI remain for the verification/publication stage.
+
+## Shipped — baseline repair (commit 4c0df440)
+
+Repaired the two failures the baseline gate run raised against
+`f4acb4eb` (the attribution failure in that run was already fixed
+upstream by task-212's `a1751da1`):
+
+- **rustfmt (changed lines)**: canonical formatting applied to
+  `collect_suggestions` (tuple block) and the
+  `result_matches_filters_compose_with_and` assert. Gate now:
+  `rustfmt: changed lines clean (2 Rust files checked)`.
+- **check-relative-path-defaults (task-099 F6 class)**:
+  `bootstrap --starter-kit` without `--repo-path` fell back to
+  `PathBuf::from(repo_name)` — a cwd-relative default. Now a hard
+  error (`--starter-kit needs --repo-path: ...`); `docs/cli.md`
+  updated. Gate now: `check-relative-path-defaults: OK`.
+
+Evidence: `/tmp/stage/review-evidence/gates.txt` (rustfmt, path
+defaults, clippy diff — all exit 0), `smoke.txt` (binary: help output,
+conn-refused=1, `--since` validation exit codes incl. multibyte),
+`tcp-accept-errno95.txt` (sandbox cannot `accept()`; live E2E HTTP
+against a real server deferred to host verification + GitHub CI).
+`cargo test -p gyre-cli --bin gyre` → 110 passed, 0 failed.
