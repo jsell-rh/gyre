@@ -2414,7 +2414,15 @@ pub struct MemBudgetCallRepository {
 #[async_trait]
 impl gyre_ports::BudgetCallRepository for MemBudgetCallRepository {
     async fn save(&self, record: &gyre_domain::BudgetCallRecord) -> Result<()> {
-        self.store.lock().await.push(record.clone());
+        let mut store = self.store.lock().await;
+        // Port contract: "Insert-only; the record id is unique." The SQL
+        // adapters enforce this via the PRIMARY KEY; the mem adapter guards
+        // in code (check-mem-port-contracts.sh) so both backends reject a
+        // duplicate id identically.
+        if store.iter().any(|r| r.id == record.id) {
+            anyhow::bail!("budget call record {} already exists", record.id);
+        }
+        store.push(record.clone());
         Ok(())
     }
 
@@ -4312,5 +4320,44 @@ impl gyre_ports::TrustAnchorRepository for MemTrustAnchorRepository {
             .await
             .retain(|(tid, a)| !(tid == tenant_id && a.id == anchor_id));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod budget_call_tests {
+    use super::*;
+
+    fn record(id: &str) -> gyre_domain::BudgetCallRecord {
+        gyre_domain::BudgetCallRecord {
+            id: Id::new(id),
+            tenant_id: Id::new("tenant-1"),
+            workspace_id: Id::new("ws-1"),
+            repo_id: None,
+            agent_id: None,
+            task_id: None,
+            usage_type: "llm_query".to_string(),
+            input_tokens: 10,
+            output_tokens: 5,
+            cost_usd: 0.001,
+            model: "test-model".to_string(),
+            prompt_template_sha: None,
+            timestamp: 1000,
+        }
+    }
+
+    #[tokio::test]
+    async fn save_rejects_duplicate_id() {
+        // Port contract: "Insert-only; the record id is unique." The SQL
+        // adapters enforce this via the PRIMARY KEY; the mem adapter must
+        // reject a duplicate identically or SQLite-only suites would pass
+        // while the in-memory backend silently accepts rewrites.
+        let repo = MemBudgetCallRepository::default();
+        repo.save(&record("dup-1")).await.unwrap();
+        let err = repo.save(&record("dup-1")).await.unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+        // Distinct ids still append.
+        repo.save(&record("dup-2")).await.unwrap();
+        let listed = repo.list_by_workspace("ws-1", 0, 10).await.unwrap();
+        assert_eq!(listed.len(), 2);
     }
 }

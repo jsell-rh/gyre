@@ -633,8 +633,8 @@ mod tests {
 
     #[tokio::test]
     async fn record_llm_budget_call_increments_counters_and_persists_record() {
-        // Regression (task-190): the budget counters were frozen at zero
-        // because nothing ever called record_budget_usage. If the wiring from
+        // Regression (ui-layout.md §2 Budget charging): every LLM call must
+        // charge the workspace budget. If the wiring from
         // record_llm_budget_call is removed, this test fails on both the
         // counter and the audit-record assertions.
         let state = crate::mem::test_state();
@@ -697,9 +697,9 @@ mod tests {
 
     #[tokio::test]
     async fn recorded_usage_enforces_max_tokens_per_day() {
-        // Regression (task-190): check_spawn_budget could never fire on
-        // token limits because the counters were never incremented by real
-        // usage. Record usage past the limit and assert the error.
+        // Budget charging feeds real enforcement: record usage past a
+        // workspace token limit and assert check_spawn_budget fires. Guards
+        // against counters that never move (frozen-zero regression).
         let state = crate::mem::test_state();
         state
             .budget_configs

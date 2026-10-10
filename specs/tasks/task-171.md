@@ -2,7 +2,7 @@
 title: "LLM Endpoint Contract — SSE streaming, prompt templates, rate limiting"
 spec_ref: "ui-layout.md §2 LLM Endpoint Contract"
 depends_on: []
-progress: ready-for-review
+progress: not-started
 coverage_sections:
   - "ui-layout.md §LLM Endpoint Contract"
   - "ui-layout.md §Role"
@@ -63,28 +63,15 @@ Prompt template format uses `{{variable}}` substitution. Templates are committed
 
 ## Acceptance Criteria
 
-- [x] SSE streaming helper produces correct event format
-- [x] Prompt templates loaded from repo git tree with `{{...}}` substitution
-- [x] Rate limiter enforces 10 req/min per (user, workspace) with 429 + Retry-After
-- [x] Budget charging records `llm_query` cost entries
-- [x] Three LLM endpoints registered and return SSE streams
-- [x] ABAC resource mappings configured for all three endpoints
-- [x] `prompts/save` endpoint commits directly to default branch
-- [x] Tests pass
+- [ ] SSE streaming helper produces correct event format
+- [ ] Prompt templates loaded from repo git tree with `{{...}}` substitution
+- [ ] Rate limiter enforces 10 req/min per (user, workspace) with 429 + Retry-After
+- [ ] Budget charging records `llm_query` cost entries
+- [ ] Three LLM endpoints registered and return SSE streams
+- [ ] ABAC resource mappings configured for all three endpoints
+- [ ] `prompts/save` endpoint commits directly to default branch
+- [ ] Tests pass
 
 ## Agent Instructions
 
 Read `ui-layout.md` §2 "LLM Endpoint Contract" for the full contract. Check existing endpoint registration in `crates/gyre-server/src/api/mod.rs`. The `explorer-views/generate` endpoint already has a route registered — verify at `mod.rs`. Use the existing budget and ABAC infrastructure. For SSE, use axum's `Sse` response type. The rate limiter should be a simple `HashMap<(UserId, WorkspaceId), VecDeque<Instant>>` behind a `Mutex`, not a complex middleware.
-
-## Shipped
-
-All six shared behaviors of ui-layout.md §2 are real production code on this branch:
-
-- **SSE streaming**: `explorer-views/generate`, `briefing/ask`, and `specs/assist` all return axum `Sse` streams emitting `event: partial`, `event: complete`, and `event: error` (invalid LLM JSON / invalid diff ops). `briefing/ask` and `specs/assist` stream `stream_complete` chunks as incremental partials; explorer-generate validates the LLM output against the view-spec grammar and nulls `view_spec` with a list-layout fallback on invalid rather than an error event.
-- **Prompt storage**: `llm_helpers::resolve_prompt_template` resolves DB workspace override → `specs/prompts/<function>.md` in the repo git tree (branch-head SHA captured as provenance) → hardcoded fallback; `substitute_template` performs `{{var}}` substitution leaving unknown placeholders verbatim. Committed templates: `specs/prompts/{explorer-generate,briefing-ask,specs-assist}.md`. `POST /repos/:id/prompts/save` commits directly to the default branch and returns `{commit_sha}`.
-- **Model selection + token limits**: `resolve_llm_model` — LLM config override → workspace `llm_model` → `GYRE_LLM_MODEL` → default; per-endpoint `GYRE_LLM_MAX_TOKENS_{GENERATE,ASK,ASSIST}` (2000/4000/4000 defaults) threaded into every LLM call including MCP `specs/assist`.
-- **Rate limiting**: `llm_rate_limit.rs` — `HashMap<(principal, workspace), VecDeque<Instant>>` sliding window, 10 req/60 s, applied after auth in all three REST handlers plus MCP `specs/assist`; 429 with `Retry-After`; background eviction task.
-- **Budget charging**: every endpoint records an `llm_query` `CostEntry` and a `BudgetCallRecord` carrying the prompt-template git SHA (new port-backed `budget_call_records` store: SQLite/PG migration 000056 + mem adapter), incrementing workspace + tenant counters via `record_llm_budget_call`.
-- **ABAC**: `explorer_view`/`generate` for explorer-generate, `workspace`/`generate` for briefing/ask, `spec`/`generate` for specs/assist and prompts/save; explorer-generate additionally enforces per-handler workspace membership + tenant match and rejects foreign-repo `repo_id` with 403.
-
-Focused verification (evidence at `/tmp/stage/review-evidence/task-171-focused-tests.txt`, recorded at HEAD of this branch): `api::explorer_views` 12/12, `api::specs_assist` 21/21, `api::graph::tests::briefing_ask` 3/3, `llm`-filtered 36/36 (llm_helpers, llm_rate_limit, llm_config, llm_prompts), `api::budget` 9/9, gyre-adapters `budget` 2/2. Mechanical checks pass: arch lint, ABAC route registry, migration versions, MCP write tools, mem port contracts, in-memory store lint. Note for reviewers: this sandbox cannot bind TCP listeners, so live HTTP transport verification of SSE framing must run in host/CI environment; the SSE tests exercise the router via `oneshot` in-process.
