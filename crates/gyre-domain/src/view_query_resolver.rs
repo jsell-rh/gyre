@@ -2513,10 +2513,10 @@ pub fn search_graph_nodes(query: &str, nodes: &[GraphNode], limit: usize) -> Vec
             } else if n.file_path.to_lowercase().contains(&needle)
                 || n.spec_path
                     .as_ref()
-                    .map_or(false, |s| s.to_lowercase().contains(&needle))
+                    .is_some_and(|s| s.to_lowercase().contains(&needle))
                 || n.doc_comment
                     .as_ref()
-                    .map_or(false, |d| d.to_lowercase().contains(&needle))
+                    .is_some_and(|d| d.to_lowercase().contains(&needle))
             {
                 4
             } else {
@@ -2549,8 +2549,8 @@ pub fn search_graph_nodes(query: &str, nodes: &[GraphNode], limit: usize) -> Vec
 mod tests {
     use super::*;
     use gyre_common::graph::*;
-    use gyre_common::Id;
     use gyre_common::view_query::{NarrativeStep, ViewCallout, ViewGroup};
+    use gyre_common::Id;
 
     fn make_node(id: &str, name: &str, node_type: NodeType) -> GraphNode {
         GraphNode {
@@ -5613,7 +5613,13 @@ mod tests {
     #[test]
     fn test_search_graph_nodes_limit_and_empty_query() {
         let nodes: Vec<GraphNode> = (0..20)
-            .map(|i| make_node(&format!("t{i}"), &format!("auth_handler_{i}"), NodeType::Function))
+            .map(|i| {
+                make_node(
+                    &format!("t{i}"),
+                    &format!("auth_handler_{i}"),
+                    NodeType::Function,
+                )
+            })
             .collect();
         assert_eq!(search_graph_nodes("auth", &nodes, 5).len(), 5);
         assert!(search_graph_nodes("   ", &nodes, 10).is_empty());

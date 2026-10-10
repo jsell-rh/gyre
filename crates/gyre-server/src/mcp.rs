@@ -2258,10 +2258,7 @@ async fn handle_graph_edges(state: &AppState, args: &Value) -> Value {
     // (§9: the agent reasons about edges by node name, not raw UUIDs).
     let node_names: std::collections::HashMap<String, String> =
         match state.graph_store.list_nodes(&rid, None).await {
-            Ok(ns) => ns
-                .into_iter()
-                .map(|n| (n.id.to_string(), n.name))
-                .collect(),
+            Ok(ns) => ns.into_iter().map(|n| (n.id.to_string(), n.name)).collect(),
             Err(e) => return tool_error(format!("Failed: {e}")),
         };
     let name_of = |id: &Id| -> String {
@@ -5036,7 +5033,10 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert!(!json["result"]["isError"].as_bool().unwrap_or(true), "tool must succeed");
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap_or(true),
+            "tool must succeed"
+        );
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
         let summary: Value = serde_json::from_str(text).unwrap();
         // §22 fields all present.
@@ -5089,7 +5089,10 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert!(!json["result"]["isError"].as_bool().unwrap_or(true), "tool must succeed");
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap_or(true),
+            "tool must succeed"
+        );
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
         let envelope: Value = serde_json::from_str(text).unwrap();
         // §9: response is {"query": {...}, "result": {DryRunResult}}.
@@ -5308,7 +5311,7 @@ mod tests {
                 }
             }),
         )
- .await;
+        .await;
         assert_eq!(status, StatusCode::OK);
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
         assert!(
@@ -5346,7 +5349,10 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert!(!json["result"]["isError"].as_bool().unwrap_or(true), "tool must succeed");
+        assert!(
+            !json["result"]["isError"].as_bool().unwrap_or(true),
+            "tool must succeed"
+        );
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
         assert!(
             text.contains("AuthService") && !text.contains("UnrelatedNode"),
