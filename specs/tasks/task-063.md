@@ -131,3 +131,20 @@ required changes; this round verified the recovered tree end-to-end:
   and GitHub CI own transport checks.
 
 Evidence: `/tmp/stage/review-evidence/task-063-r9/`.
+
+### Round 10 (rebase repair `60487c84`)
+
+Resolved the auto-merge conflict from rebasing onto base `73a31e0b`. The conflict in
+`specs/tasks/task-200.md` was a single SHA in its `commits:` list: the HEAD side (from
+recovery checkpoint `322b2973`) carried a malformed 38-char SHA; the incoming base carried
+the valid 40-char `e44f11354629cf2dab7fd7846c8a0a0a1d2d9591` (resolves to `e44f1135`).
+Resolved to the valid SHA; merge committed as `22c614f8`. The merge brought in only
+`specs/tasks/` files (task-200, task-213, task-219) — the task-063 product surface is
+byte-identical to the R4-verified candidate `14088b68` (empty diff on `crates/` +
+`web/src/`). No task-063 production code changed this round; all 6 task-063 frontmatter
+SHAs and all task-200 SHAs resolve post-merge. Focused suites re-run on the merged tree:
+`cargo test -p gyre-domain --lib view_query_resolver` → 116 passed, 0 failed; `npm ci`
+(rc=0) then `npx vitest run src/__tests__/ExplorerCanvas.test.js` → 139 passed, 0 failed;
+attribution check rc=0; `git diff --check 6bf777a6..HEAD` rc=0; dist diff empty.
+
+Evidence: `/tmp/stage/review-evidence/task-063-r10/`.
