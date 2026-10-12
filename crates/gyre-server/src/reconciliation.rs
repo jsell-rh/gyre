@@ -1,0 +1,1906 @@
+//! Meta-spec reconciliation controller and conformance sweep
+//! (meta-spec-reconciliation.md §6, §10, §11).
+//!
+//! Two entry points:
+//!
+//! - `run_reconciliation` — the slow rollout (§6). Triggered when a
+//!   workspace's meta-spec set binding moves to a new version of a
+//!   meta-spec (via `PUT /api/v1/workspaces/{id}/meta-spec-set`) or when a
+//!   registry meta-spec is approved on new content. Computes the blast
+//!   radius (repos in the workspace bound to the changed meta-spec) and
+//!   creates a deduplicated reconciliation task per affected repo.
+//!
+//! - `run_conformance_sweep` — steady state (§10). A background job that
+//!   periodically sweeps every workspace, comparing the workspace's active
+//!   meta-spec set SHA against the meta-spec set SHA recorded in recent
+//!   agent provenance (authorization attestation `InputContent`). When code
+//!   was produced under a superseded meta-spec set, a drift-review task is
+//!   created (deduplicated) and workspace members are notified.
+//!
+//! The sweep is database queries only — no agent spawns (§10: "The sweep is
+//! cheap"). Agent spawning from reconciliation tasks happens through the
+//! normal signal chain (`task_type: delegation` → repo orchestrator).
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use gyre_common::{Id, Notification, NotificationType};
+use gyre_domain::{TaskPriority, TaskStatus, TaskType};
+use tracing::{info, warn};
+
+use crate::AppState;
+
+/// Label attached to every reconciliation task (§6 flow step 4).
+pub const RECONCILIATION_LABEL: &str = "meta-spec-reconciliation";
+
+/// Drift-review tasks created by the conformance sweep use this label.
+pub const DRIFT_REVIEW_LABEL: &str = "meta-spec-drift-review";
+
+/// Name under which the conformance sweep registers in the job registry.
+pub const CONFORMANCE_SWEEP_JOB: &str = "meta_spec_conformance_sweep";
+
+/// Default sweep interval: daily (§10 — "default: daily").
+pub const SWEEP_INTERVAL_SECS: u64 = 86_400;
+
+/// How far back the sweep inspects provenance records.
+const SWEEP_PROVENANCE_WINDOW_SECS: u64 = 30 * 86_400;
+
+// ---------------------------------------------------------------------------
+// §11 — Reconciliation wave completion (ReconciliationCompleted semantics)
+// ---------------------------------------------------------------------------
+
+/// Check whether a workspace's reconciliation wave is complete and emit
+/// `ReconciliationCompleted` if so (meta-spec-reconciliation.md §11:
+/// "All reconciliation tasks for a workspace are done").
+///
+/// Called after any task with the reconciliation label reaches a terminal
+/// status (Done or Cancelled). A wave is complete when the workspace has at
+/// least one terminal reconciliation task and zero open ones. Wave duration
+/// (trigger → last task terminal) is observed on the
+/// `gyre_reconciliation_duration_seconds{workspace}` histogram — measured
+/// from the most recent wave's task creation, which is task-creation time in
+/// the same `run_reconciliation` call as the trigger (zero-latency feedback
+/// per forge-advantages.md).
+///
+/// Multiple hooks can observe the same terminal transition (REST, MCP, and
+/// archive writers), and a re-check may run after the wave completes — the
+/// emission is deduplicated against persisted `reconciliation_completed`
+/// messages keyed on the wave's identity (latest wave start + total task
+/// count), so each wave completes and emits exactly once, including a
+/// workspace's second and later waves.
+pub async fn maybe_emit_reconciliation_completed(state: &Arc<AppState>, workspace_id: &Id) {
+    let tasks = match state.tasks.list_by_workspace(workspace_id).await {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(workspace_id = %workspace_id, error = %e, "reconciliation completion check: task query failed");
+            return;
+        }
+    };
+
+    let wave: Vec<&gyre_domain::Task> = tasks
+        .iter()
+        .filter(|t| t.labels.iter().any(|l| l == RECONCILIATION_LABEL))
+        .collect();
+
+    // A wave needs at least one terminal task to be "complete" — a workspace
+    // with no reconciliation tasks at all has no wave in flight and must not
+    // emit (e.g. a transition of an unrelated task must not fire the event).
+    let has_terminal = wave
+        .iter()
+        .any(|t| matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled));
+    if !has_terminal {
+        return;
+    }
+    let has_open = wave
+        .iter()
+        .any(|t| !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled));
+    if has_open {
+        info!(
+            workspace_id = %workspace_id,
+            open = wave.iter().filter(|t| !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled)).count(),
+            "reconciliation wave still in flight"
+        );
+        return;
+    }
+
+    // Wave identity: (start of the MOST RECENT wave, total reconciliation
+    // task count). Every task in one `run_reconciliation` call is stamped
+    // with the same `now`, so one wave's tasks share a creation time — but
+    // terminal tasks from PRIOR waves must not drag the identity back:
+    // after wave 1 completes and emits, wave 2 (new version → new title →
+    // new tasks, so creation-time dedup in `run_reconciliation` does not
+    // suppress it) also completes, and keying on the earliest task's
+    // creation would recompute wave 1's start, match the persisted
+    // `wave_started_at`, and silently suppress the wave-2 event, its
+    // MetaSpecDrift notifications, and its duration observation.
+    // `max(created_at)` is the latest wave's start; the total task count
+    // disambiguates successive waves created within the same wall-clock
+    // second (the count only grows — tasks are never removed), so a re-check
+    // of the same complete state matches exactly once.
+    let wave_started_at = wave.iter().map(|t| t.created_at).max().unwrap_or(0);
+    let task_count = wave.len() as u64;
+
+    // Dedup against already-emitted completions (persisted Event-tier
+    // messages): re-checks and multi-hook fan-in (REST + MCP + archive
+    // writers can each observe the same terminal transition) must emit once.
+    let already_emitted = state
+        .messages
+        .list_by_workspace(
+            workspace_id,
+            Some("reconciliation_completed"),
+            None,
+            None,
+            None,
+            Some(50),
+        )
+        .await
+        .map(|msgs| {
+            msgs.iter().any(|m| {
+                m.payload
+                    .as_ref()
+                    .and_then(|p| p.get("wave_started_at"))
+                    .and_then(|v| v.as_u64())
+                    == Some(wave_started_at)
+                    && m.payload
+                        .as_ref()
+                        .and_then(|p| p.get("task_count"))
+                        .and_then(|v| v.as_u64())
+                        == Some(task_count)
+            })
+        })
+        .unwrap_or(false);
+    if already_emitted {
+        return;
+    }
+
+    // Wave duration: trigger → last task terminal.
+    let now = crate::api::now_secs();
+    let duration_secs = now.saturating_sub(wave_started_at);
+    state
+        .metrics
+        .reconciliation_duration_seconds
+        .with_label_values(&[workspace_id.as_str()])
+        .observe(duration_secs as f64);
+    info!(
+        workspace_id = %workspace_id,
+        duration_secs,
+        "reconciliation: wave complete — all reconciliation tasks terminal"
+    );
+    crate::emit_reconciliation_completed(
+        state,
+        workspace_id.clone(),
+        Some(serde_json::json!({
+            "workspace_id": workspace_id.to_string(),
+            "wave_started_at": wave_started_at,
+            "task_count": task_count,
+            "duration_secs": duration_secs,
+        })),
+    )
+    .await;
+}
+
+/// Check whether a workspace's drift-review work is complete and emit the
+/// `meta_spec_drift_resolved` event if so (meta-spec-reconciliation.md §11:
+/// `MetaSpecDriftResolved` — drift remediation finished for a workspace).
+///
+/// Drift is resolved when every drift-review task created by the conformance
+/// sweep for this workspace has reached a terminal status.
+pub async fn maybe_emit_drift_resolved(state: &Arc<AppState>, workspace_id: &Id) {
+    let tasks = match state.tasks.list_by_workspace(workspace_id).await {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(workspace_id = %workspace_id, error = %e, "drift-resolution check: task query failed");
+            return;
+        }
+    };
+
+    let drift_tasks: Vec<&gyre_domain::Task> = tasks
+        .iter()
+        .filter(|t| t.labels.iter().any(|l| l == DRIFT_REVIEW_LABEL))
+        .collect();
+    if drift_tasks.is_empty() {
+        return;
+    }
+    let all_terminal = drift_tasks
+        .iter()
+        .all(|t| matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled));
+    if !all_terminal {
+        return;
+    }
+
+    info!(
+        workspace_id = %workspace_id,
+        tasks = drift_tasks.len(),
+        "meta-spec drift resolved — all drift-review tasks terminal"
+    );
+    state
+        .emit_event(
+            Some(workspace_id.clone()),
+            gyre_common::message::Destination::Workspace(workspace_id.clone()),
+            gyre_common::message::MessageKind::Custom("meta_spec_drift_resolved".to_string()),
+            Some(serde_json::json!({
+                "workspace_id": workspace_id.to_string(),
+                "tasks": drift_tasks.len(),
+            })),
+        )
+        .await;
+}
+
+/// Emit the `meta_spec_changed` domain event (§11) — meta-spec content
+/// updated in the registry. Fired by the registry update handler when the
+/// prompt (content) of a meta-spec changes.
+///
+/// Emitted once per workspace whose meta-spec set binds the changed spec
+/// (persisted Event-tier, Workspace destination — Broadcast messages are
+/// never persisted by the message bus, and the binding workspaces are the
+/// affected audience) plus once unscoped fallback when no workspace binds it.
+pub async fn emit_meta_spec_changed(
+    state: &Arc<AppState>,
+    workspace_id: Option<&Id>,
+    meta_spec: &gyre_domain::MetaSpec,
+) {
+    let payload = serde_json::json!({
+        "meta_spec_id": meta_spec.id.to_string(),
+        "name": meta_spec.name,
+        "kind": format!("{:?}", meta_spec.kind),
+        "version": meta_spec.version,
+        "content_hash": meta_spec.content_hash,
+    });
+    match workspace_id {
+        Some(ws_id) => {
+            state
+                .emit_event(
+                    Some(ws_id.clone()),
+                    gyre_common::message::Destination::Workspace(ws_id.clone()),
+                    gyre_common::message::MessageKind::Custom("meta_spec_changed".to_string()),
+                    Some(payload),
+                )
+                .await;
+        }
+        None => {
+            // Unscoped registry change: fan out to every workspace that binds
+            // this meta-spec (same audience resolution as the §6 trigger).
+            let workspaces = state.workspaces.list().await.unwrap_or_default();
+            let mut emitted = false;
+            for ws in &workspaces {
+                let binds = state
+                    .meta_spec_sets
+                    .get(&ws.id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|j| serde_json::from_str::<crate::api::meta_specs::MetaSpecSet>(&j).ok())
+                    .map(|s| {
+                        s.personas.values().any(|e| e.path == meta_spec.name)
+                            || s.principles.iter().any(|e| e.path == meta_spec.name)
+                            || s.standards.iter().any(|e| e.path == meta_spec.name)
+                            || s.process.iter().any(|e| e.path == meta_spec.name)
+                    })
+                    .unwrap_or(false);
+                if binds {
+                    emitted = true;
+                    state
+                        .emit_event(
+                            Some(ws.id.clone()),
+                            gyre_common::message::Destination::Workspace(ws.id.clone()),
+                            gyre_common::message::MessageKind::Custom(
+                                "meta_spec_changed".to_string(),
+                            ),
+                            Some(payload.clone()),
+                        )
+                        .await;
+                }
+            }
+            if !emitted {
+                // No workspace binds this spec — the change is still an
+                // observable registry event. Emit once unscoped (stored
+                // without a workspace destination by the message repository).
+                state
+                    .emit_event(
+                        None,
+                        gyre_common::message::Destination::Broadcast,
+                        gyre_common::message::MessageKind::Custom(
+                            "meta_spec_changed".to_string(),
+                        ),
+                        Some(payload),
+                    )
+                    .await;
+            }
+        }
+    }
+}
+
+/// Emit the `meta_spec_set_updated` domain event (§11) — a workspace
+/// meta-spec set binding changed. Fired by the set-update handler on every
+/// successful PUT that changes the binding.
+pub async fn emit_meta_spec_set_updated(
+    state: &Arc<AppState>,
+    workspace_id: &Id,
+    changed_paths: &[String],
+) {
+    state
+        .emit_event(
+            Some(workspace_id.clone()),
+            gyre_common::message::Destination::Workspace(workspace_id.clone()),
+            gyre_common::message::MessageKind::Custom("meta_spec_set_updated".to_string()),
+            Some(serde_json::json!({
+                "workspace_id": workspace_id.to_string(),
+                "changed": changed_paths,
+            })),
+        )
+        .await;
+}
+
+// ---------------------------------------------------------------------------
+// §6 — Reconciliation controller
+// ---------------------------------------------------------------------------
+
+/// Result summary of one reconciliation run (for logging/events/tests).
+#[derive(Debug, Default, Clone)]
+pub struct ReconciliationSummary {
+    /// Repos for which a reconciliation task was created this run.
+    pub tasks_created: usize,
+    /// Repos already covered by an existing open reconciliation task.
+    pub tasks_skipped: usize,
+}
+
+/// Run reconciliation for one workspace after its meta-spec set changed.
+///
+/// `changed_paths` are the meta-spec paths (set-entry `path` values, i.e.
+/// registry meta-spec names) whose pinned version changed in this update.
+/// For each, every repo in the workspace is a reconciliation candidate
+/// (the workspace binding governs all repos in the workspace — §2), and
+/// §6 step 2 requires a task per repo: "For each repo, creates a
+/// reconciliation task" titled `Align code with updated {kind} {name}
+/// v{version}`, scoped to that repo's orchestrator. A task is skipped only
+/// when an open task with the same (workspace, repo, title) already exists
+/// — a pending task elsewhere never suppresses this repo's reconciliation.
+///
+/// Emits `ReconciliationStarted` (custom Event-tier kind, §11) when work is
+/// created and `ReconciliationCompleted` (existing `MessageKind`) via the
+/// shared helper — which also creates priority-6 `MetaSpecDrift`
+/// notifications for workspace Admins/Developers/Owners.
+pub async fn run_reconciliation(
+    state: &Arc<AppState>,
+    workspace_id: &Id,
+    changed_paths: &[String],
+) -> ReconciliationSummary {
+    let mut summary = ReconciliationSummary::default();
+    if changed_paths.is_empty() {
+        return summary;
+    }
+
+    let now = crate::api::now_secs();
+    let ws_id = workspace_id.clone();
+
+    info!(
+        workspace_id = %ws_id,
+        changed = changed_paths.len(),
+        "reconciliation: controller started"
+    );
+
+    // Existing open tasks — the dedup set (same pattern as spec-lifecycle).
+    let existing_tasks = state.tasks.list().await.unwrap_or_default();
+
+    // All repos in the workspace bound to the meta-spec set (§6 step 1:
+    // repos in the affected workspace bound to the changed meta-spec —
+    // the set is the workspace-level binding, so every repo in the
+    // workspace is affected).
+    let repos = match state.repos.list_by_workspace(&ws_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(workspace_id = %ws_id, error = %e, "reconciliation: failed to list repos");
+            return summary;
+        }
+    };
+    if repos.is_empty() {
+        info!(workspace_id = %ws_id, "reconciliation: no repos in workspace");
+        return summary;
+    }
+
+    // Resolve each changed meta-spec path to its registry record (kind,
+    // name, new version). The set entry `path` is the registry meta-spec
+    // name (the registry is the spec-content source of truth; the set
+    // pins `name@sha`).
+    let mut changed_specs: Vec<gyre_domain::MetaSpec> = Vec::new();
+    for path in changed_paths {
+        match find_meta_spec_by_name(state, path).await {
+            Ok(Some(ms)) => changed_specs.push(ms),
+            Ok(None) => {
+                warn!(
+                    meta_spec = %path,
+                    "reconciliation: changed meta-spec not found in registry; skipping"
+                );
+            }
+            Err(e) => {
+                warn!(meta_spec = %path, error = %e, "reconciliation: registry lookup failed");
+            }
+        }
+    }
+
+    for ms in &changed_specs {
+        // §6 flow step 4 / task spec: title "Align code with updated {kind} {name} v{version}".
+        let title = format!(
+            "Align code with updated {} {} v{}",
+            ms.kind, ms.name, ms.version
+        );
+
+        for repo in &repos {
+            // Dedup: skip only a non-terminal task with the same title in
+            // THIS repo. A pending task in another repo or workspace never
+            // suppresses this repo's reconciliation (§6 step 2).
+            let exists = existing_tasks.iter().any(|t| {
+                t.title == title
+                    && t.workspace_id == ws_id
+                    && t.repo_id == repo.id
+                    && !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled)
+            });
+
+            if exists {
+                summary.tasks_skipped += 1;
+                info!(title, repo_id = %repo.id, "reconciliation: task already exists, skipping");
+                continue;
+            }
+
+            let task_id = Id::new(uuid::Uuid::new_v4().to_string());
+            let mut task = gyre_domain::Task::new(task_id.clone(), &title, now);
+            task.priority = TaskPriority::Medium;
+            task.labels = vec![
+                RECONCILIATION_LABEL.to_string(),
+                "auto-created".to_string(),
+            ];
+            task.description = Some(format!(
+                "Auto-created by the meta-spec reconciliation controller \
+                 (meta-spec-reconciliation.md §6).\nMeta-spec: {} ({}) v{}\n\
+                 Content hash: {}\nRe-run affected work under the updated rules; \
+                 no-op outcome (code already conforms) is valid.",
+                ms.name, ms.kind, ms.version, ms.content_hash
+            ));
+            task.workspace_id = ws_id.clone();
+            task.repo_id = repo.id.clone();
+            task.spec_path = Some(ms.name.clone());
+            // §6 flow step 5: the repo orchestrator spawns the reconciliation
+            // agent — delegation is the signal-chain discriminator for that.
+            task.task_type = Some(TaskType::Delegation);
+
+            match state.tasks.create(&task).await {
+                Err(e) => warn!(title, repo_id = %repo.id, error = %e, "reconciliation: failed to create task"),
+                Ok(()) => {
+                    summary.tasks_created += 1;
+                    info!(title, repo_id = %repo.id, "reconciliation: created reconciliation task");
+                    state
+                        .emit_event(
+                            Some(ws_id.clone()),
+                            gyre_common::message::Destination::Workspace(ws_id.clone()),
+                            gyre_common::message::MessageKind::TaskCreated,
+                            Some(serde_json::json!({
+                                "task_id": task_id.to_string(),
+                                "reason": "meta-spec-reconciliation",
+                            })),
+                        )
+                        .await;
+                }
+            }
+        }
+    }
+
+    if summary.tasks_created > 0 {
+        // §11 ReconciliationStarted: controller created tasks for a workspace.
+        state
+            .emit_event(
+                Some(ws_id.clone()),
+                gyre_common::message::Destination::Workspace(ws_id.clone()),
+                gyre_common::message::MessageKind::Custom(
+                    "reconciliation_started".to_string(),
+                ),
+                Some(serde_json::json!({
+                    "workspace_id": ws_id.to_string(),
+                    "tasks_created": summary.tasks_created,
+                    "tasks_skipped": summary.tasks_skipped,
+                })),
+            )
+            .await;
+        // ReconciliationCompleted is NOT emitted here: §11 defines it as
+        // "all reconciliation tasks for a workspace are done", which is a
+        // terminal-status event, not a creation-time event. The wave-start
+        // event above is ReconciliationStarted; wave completion is detected
+        // by `maybe_emit_reconciliation_completed` when the last open
+        // reconciliation task goes terminal.
+    }
+
+    // §11 metrics: gyre_reconciliation_tasks_total{workspace, status}.
+    record_reconciliation_metrics(
+        state,
+        ws_id.as_str(),
+        summary.tasks_created as u64,
+        summary.tasks_skipped as u64,
+    );
+    info!(
+        workspace_id = %ws_id,
+        created = summary.tasks_created,
+        skipped = summary.tasks_skipped,
+        "reconciliation: controller finished"
+    );
+
+    summary
+}
+
+/// Diff two meta-spec sets and return the paths whose pinned version changed.
+///
+/// A path is "changed" when its SHA differs between the old and new set, or
+/// when it appears only in the new set (newly bound). Removals are not
+/// reconciliation triggers (unbinding a spec does not invalidate code
+/// produced under it while it was active — no new version to align to).
+pub fn diff_meta_spec_set(
+    old: &crate::api::meta_specs::MetaSpecSet,
+    new: &crate::api::meta_specs::MetaSpecSet,
+) -> Vec<String> {
+    use crate::api::meta_specs::MetaSpecSet;
+
+    fn entries(set: &MetaSpecSet) -> BTreeMap<String, String> {
+        let mut m: BTreeMap<String, String> = set
+            .personas
+            .iter()
+            .map(|(_k, e)| (e.path.clone(), e.sha.clone()))
+            .collect();
+        // Two personas may pin the same spec path — keep the first pin.
+        for e in set.principles.iter().chain(&set.standards).chain(&set.process) {
+            m.entry(e.path.clone()).or_insert_with(|| e.sha.clone());
+        }
+        m
+    }
+
+    let old_entries = entries(old);
+    let new_entries = entries(new);
+
+    new_entries
+        .into_iter()
+        .filter(|(path, new_sha)| match old_entries.get(path) {
+            Some(old_sha) => old_sha != new_sha,
+            None => true,
+        })
+        .map(|(path, _)| path)
+        .collect()
+}
+
+/// Look up a registry meta-spec by name (set entries pin `name@sha`).
+async fn find_meta_spec_by_name(
+    state: &Arc<AppState>,
+    name: &str,
+) -> anyhow::Result<Option<gyre_domain::MetaSpec>> {
+    use gyre_ports::MetaSpecFilter;
+    let all = state.meta_specs.list(&MetaSpecFilter::default()).await?;
+    Ok(all.into_iter().find(|ms| ms.name == name))
+}
+
+// ---------------------------------------------------------------------------
+// §10 — Conformance sweep
+// ---------------------------------------------------------------------------
+
+/// Result summary of one conformance sweep (for logging/events/tests).
+#[derive(Debug, Default, Clone)]
+pub struct SweepSummary {
+    /// Workspaces scanned.
+    pub workspaces_scanned: usize,
+    /// Drifted (repo, set-sha) pairs found.
+    pub drift_detected: usize,
+    /// Drift-review tasks created this sweep.
+    pub tasks_created: usize,
+    /// Drift already covered by an existing open drift-review task.
+    pub tasks_skipped: usize,
+}
+
+/// Run one conformance sweep pass across all workspaces (§10).
+///
+/// For each workspace with a bound meta-spec set, compare the active set
+/// SHA (SHA-256 of the set JSON — same algorithm as
+/// `compute_meta_spec_set_sha`) against the `meta_spec_set_sha` recorded in
+/// recent authorization provenance (`chain_attestations` for the workspace's
+/// repos). Provenance recording a different SHA means the code was produced
+/// under a superseded meta-spec set: ensure a drift-review task exists and
+/// notify workspace members (`MetaSpecDrift`).
+///
+/// Database queries only — no agent spawns (§10).
+pub async fn run_conformance_sweep(state: &Arc<AppState>) -> anyhow::Result<SweepSummary> {
+    let mut summary = SweepSummary::default();
+    let now = crate::api::now_secs();
+
+    let workspaces = state.workspaces.list().await?;
+    summary.workspaces_scanned = workspaces.len();
+
+    let existing_tasks = state.tasks.list().await.unwrap_or_default();
+
+    for ws in &workspaces {
+        // Desired state: the workspace's current meta-spec set SHA.
+        let current_sha =
+            crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws.id).await;
+        if current_sha.is_empty() {
+            // No set bound — nothing to conform to (§10: only repos whose
+            // workspace binds a meta-spec set are in scope).
+            continue;
+        }
+
+        let repos = match state.repos.list_by_workspace(&ws.id).await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(workspace_id = %ws.id, error = %e, "sweep: failed to list repos");
+                continue;
+            }
+        };
+
+        // Drift review is per workspace+set-sha: one task covers all code
+        // produced under the superseded set in this workspace.
+        let mut drifted_repos: Vec<String> = Vec::new();
+        let since = now.saturating_sub(SWEEP_PROVENANCE_WINDOW_SECS);
+
+        for repo in &repos {
+            // Actual state: provenance-recorded meta-spec set SHA for code
+            // in this repo (§6 controller comparison: desired vs actual).
+            let attestations = match state
+                .chain_attestations
+                .find_by_repo(repo.id.as_str(), since, now)
+                .await
+            {
+                Ok(a) => a,
+                Err(e) => {
+                    warn!(repo_id = %repo.id, error = %e, "sweep: provenance query failed");
+                    continue;
+                }
+            };
+
+            let repo_drifted = attestations.iter().any(|att| {
+                let recorded = match &att.input {
+                    gyre_common::AttestationInput::Signed(si) => {
+                        si.content.meta_spec_set_sha.clone()
+                    }
+                    gyre_common::AttestationInput::Derived(_) => String::new(),
+                };
+                !recorded.is_empty() && recorded != current_sha
+            });
+
+            if repo_drifted {
+                drifted_repos.push(repo.id.to_string());
+            }
+        }
+
+        if drifted_repos.is_empty() {
+            continue;
+        }
+
+        summary.drift_detected += drifted_repos.len();
+
+        // §10: "ensure a reconciliation task exists (create if missing)".
+        // Dedup on (workspace, title) — the title embeds the active set
+        // SHA, so a new set version yields a new task, but the workspace
+        // id (not the slug, which need not be globally unique) scopes the
+        // dedup: two workspaces with the same slug and same active set
+        // SHA never suppress each other's drift review.
+        let title = format!(
+            "Review meta-spec drift in workspace {} (active set {})",
+            ws.slug, current_sha
+        );
+        let exists = existing_tasks.iter().any(|t| {
+            t.title == title
+                && t.workspace_id == ws.id
+                && !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled)
+        });
+
+        if exists {
+            summary.tasks_skipped += 1;
+            info!(workspace_id = %ws.id, "sweep: drift-review task already exists");
+        } else {
+            let task_id = Id::new(uuid::Uuid::new_v4().to_string());
+            let mut task = gyre_domain::Task::new(task_id, &title, now);
+            task.priority = TaskPriority::Medium;
+            task.labels = vec![
+                DRIFT_REVIEW_LABEL.to_string(),
+                "auto-created".to_string(),
+            ];
+            task.description = Some(format!(
+                "Auto-created by the meta-spec conformance sweep \
+                 (meta-spec-reconciliation.md §10).\nActive meta-spec set SHA: \
+                 {}\nRepos with provenance under a superseded set: {}\n\
+                 Verify code conforms to the active meta-spec set and reconcile drift.",
+                current_sha,
+                drifted_repos.join(", ")
+            ));
+            task.workspace_id = ws.id.clone();
+            task.repo_id = Id::new(drifted_repos[0].clone());
+
+            match state.tasks.create(&task).await {
+                Err(e) => warn!(title, error = %e, "sweep: failed to create drift-review task"),
+                Ok(()) => {
+                    summary.tasks_created += 1;
+                    info!(title, "sweep: created drift-review task");
+                }
+            }
+        }
+
+        // §11 MetaSpecDriftDetected: conformance sweep found code under a
+        // superseded meta-spec.
+        state
+            .emit_event(
+                Some(ws.id.clone()),
+                gyre_common::message::Destination::Workspace(ws.id.clone()),
+                gyre_common::message::MessageKind::Custom("meta_spec_drift_detected".to_string()),
+                Some(serde_json::json!({
+                    "workspace_id": ws.id.to_string(),
+                    "active_meta_spec_set_sha": current_sha,
+                    "drifted_repos": drifted_repos,
+                })),
+            )
+            .await;
+
+        // §11 metrics: gyre_meta_spec_drift_total{workspace, repo}.
+        record_drift_metrics(state, ws.id.as_str(), &drifted_repos);
+
+        // MetaSpecDrift notifications to workspace members (priority 6).
+        notify_drift_members(state, ws, &current_sha, &drifted_repos, now).await;
+    }
+
+    if summary.drift_detected > 0 {
+        info!(
+            workspaces = summary.workspaces_scanned,
+            drift = summary.drift_detected,
+            created = summary.tasks_created,
+            skipped = summary.tasks_skipped,
+            "sweep: conformance sweep found drift"
+        );
+    } else {
+        info!(
+            workspaces = summary.workspaces_scanned,
+            "sweep: no meta-spec drift detected"
+        );
+    }
+
+    Ok(summary)
+}
+
+/// Create priority-6 MetaSpecDrift notifications for Admin/Developer/Owner
+/// members of a drifted workspace.
+async fn notify_drift_members(
+    state: &Arc<AppState>,
+    ws: &gyre_domain::Workspace,
+    active_sha: &str,
+    drifted_repos: &[String],
+    now: u64,
+) {
+    let members = match state.workspace_memberships.list_by_workspace(&ws.id).await {
+        Ok(m) => m,
+        Err(e) => {
+            warn!(workspace_id = %ws.id, error = %e, "sweep: failed to list members");
+            return;
+        }
+    };
+
+    for member in &members {
+        if !matches!(
+            member.role,
+            gyre_domain::WorkspaceRole::Admin
+                | gyre_domain::WorkspaceRole::Developer
+                | gyre_domain::WorkspaceRole::Owner
+        ) {
+            continue;
+        }
+        let mut notif = Notification::new(
+            Id::new(uuid::Uuid::new_v4().to_string()),
+            ws.id.clone(),
+            member.user_id.clone(),
+            NotificationType::MetaSpecDrift,
+            format!(
+                "Meta-spec drift detected in workspace '{}' — code was produced under a superseded meta-spec set",
+                ws.slug
+            ),
+            ws.tenant_id.to_string(),
+            now as i64,
+        );
+        notif.body = Some(
+            serde_json::json!({
+                "active_meta_spec_set_sha": active_sha,
+                "drifted_repos": drifted_repos,
+            })
+            .to_string(),
+        );
+        notif.entity_ref = Some(ws.id.to_string());
+        if let Err(e) = state.notifications.create(&notif).await {
+            warn!(
+                user = %member.user_id,
+                error = %e,
+                "sweep: failed to create MetaSpecDrift notification"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// §11 — Prometheus metrics
+// ---------------------------------------------------------------------------
+
+/// Record reconciliation metrics (§11 Observability):
+/// `gyre_reconciliation_tasks_total{workspace, status}` — incremented at
+/// task creation/skip time in `run_reconciliation`.
+fn record_reconciliation_metrics(state: &AppState, workspace_id: &str, created: u64, skipped: u64) {
+    if created > 0 {
+        state
+            .metrics
+            .reconciliation_tasks_total
+            .with_label_values(&[workspace_id, "created"])
+            .inc_by(created as f64);
+    }
+    if skipped > 0 {
+        state
+            .metrics
+            .reconciliation_tasks_total
+            .with_label_values(&[workspace_id, "skipped"])
+            .inc_by(skipped as f64);
+    }
+}
+
+/// Record drift metrics (§11 Observability):
+/// `gyre_meta_spec_drift_total{workspace, repo}` — incremented per drifted
+/// repo at sweep time.
+fn record_drift_metrics(state: &AppState, workspace_id: &str, drifted_repos: &[String]) {
+    for repo in drifted_repos {
+        state
+            .metrics
+            .meta_spec_drift_total
+            .with_label_values(&[workspace_id, repo])
+            .inc();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::meta_specs::MetaSpecPinnedEntry;
+    use crate::mem::test_state;
+    use gyre_common::message::MessageKind;
+    use gyre_domain::meta_spec::{MetaSpec, MetaSpecApprovalStatus, MetaSpecKind, MetaSpecScope};
+    use gyre_domain::{Repository, Workspace, WorkspaceMembership, WorkspaceRole};
+    use std::future::Future;
+
+    fn now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    fn sha256_hex(s: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(s.as_bytes());
+        hex::encode(h.finalize())
+    }
+
+    async fn make_workspace(state: &Arc<AppState>, id: &str) -> gyre_domain::Workspace {
+        let ws = Workspace {
+            id: Id::new(id),
+            tenant_id: Id::new("default"),
+            name: format!("ws-{id}"),
+            slug: id.to_string(),
+            description: None,
+            budget: None,
+            max_repos: None,
+            max_agents_per_repo: None,
+            trust_level: gyre_domain::TrustLevel::Autonomous,
+            llm_model: None,
+            created_at: 1_000_000,
+            compute_target_id: None,
+        };
+        state.workspaces.create(&ws).await.unwrap();
+        ws
+    }
+
+    async fn make_repo(state: &Arc<AppState>, id: &str, ws_id: &str) -> Repository {
+        let repo = Repository::new(
+            Id::new(id),
+            Id::new(ws_id),
+            format!("repo-{id}"),
+            format!("/tmp/does-not-matter/{id}"),
+            now(),
+        );
+        state.repos.create(&repo).await.unwrap();
+        repo
+    }
+
+    async fn make_meta_spec(state: &Arc<AppState>, name: &str, version: u32) -> MetaSpec {
+        let prompt = format!("prompt for {name} v{version}");
+        let ms = MetaSpec {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            kind: MetaSpecKind::Persona,
+            name: name.to_string(),
+            scope: MetaSpecScope::Global,
+            scope_id: None,
+            prompt,
+            version,
+            content_hash: sha256_hex(&format!("prompt for {name} v{version}")),
+            required: false,
+            approval_status: MetaSpecApprovalStatus::Approved,
+            approved_by: Some("admin".to_string()),
+            approved_at: Some(now()),
+            approved_content_hash: Some(sha256_hex(&format!("prompt for {name} v{version}"))),
+            created_by: "admin".to_string(),
+            created_at: now(),
+            updated_at: now(),
+        };
+        state.meta_specs.create(&ms).await.unwrap();
+        ms
+    }
+
+    fn pin(path: &str, sha: &str) -> MetaSpecPinnedEntry {
+        MetaSpecPinnedEntry {
+            path: path.to_string(),
+            sha: sha.to_string(),
+        }
+    }
+
+    fn make_set(ws_id: &str, entries: Vec<MetaSpecPinnedEntry>) -> crate::api::meta_specs::MetaSpecSet {
+        // Distinct persona keys per entry: a single reused key would make the
+        // map collapse to the last entry, silently dropping the others (the
+        // set-diff test would then pass by disappearance, not comparison).
+        let mut personas = std::collections::BTreeMap::new();
+        for (i, e) in entries.into_iter().enumerate() {
+            personas.insert(format!("role-{i}"), e);
+        }
+        crate::api::meta_specs::MetaSpecSet {
+            workspace_id: ws_id.to_string(),
+            personas,
+            principles: vec![],
+            standards: vec![],
+            process: vec![],
+        }
+    }
+
+    async fn put_set(state: &Arc<AppState>, ws_id: &str, set: &crate::api::meta_specs::MetaSpecSet) {
+        let json = serde_json::to_string(set).unwrap();
+        state.meta_spec_sets.upsert(&Id::new(ws_id), &json).await.unwrap();
+    }
+
+    fn open_tasks_with_label<'a>(
+        state: &'a Arc<AppState>,
+        label: &'a str,
+    ) -> impl Future<Output = Vec<gyre_domain::Task>> + 'a {
+        async move {
+            state
+                .tasks
+                .list()
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|t| t.labels.iter().any(|l| l == label))
+                .collect()
+        }
+    }
+
+    // -- §6: reconciliation creates tasks for affected repos ----------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reconciliation_creates_task_for_bound_repo() {
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-recon-1").await;
+        let _repo = make_repo(&state, "repo-1", "ws-recon-1").await;
+        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+
+        let summary = run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
+
+        assert_eq!(summary.tasks_created, 1);
+        let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
+        assert_eq!(tasks.len(), 1);
+        let t = &tasks[0];
+        assert_eq!(
+            t.title,
+            "Align code with updated meta:persona backend-developer v4"
+        );
+        assert_eq!(t.priority, TaskPriority::Medium);
+        assert!(t.labels.iter().any(|l| l == "auto-created"));
+        assert_eq!(t.workspace_id.as_str(), "ws-recon-1");
+        assert_eq!(t.task_type, Some(TaskType::Delegation));
+        assert_eq!(t.spec_path.as_deref(), Some("backend-developer"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reconciliation_no_repos_creates_nothing() {
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-recon-empty").await;
+        let ms = make_meta_spec(&state, "backend-developer", 2).await;
+
+        let summary = run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
+        assert_eq!(summary.tasks_created, 0);
+        assert_eq!(open_tasks_with_label(&state, RECONCILIATION_LABEL).await.len(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reconciliation_unknown_spec_creates_nothing() {
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-recon-unknown").await;
+        let _repo = make_repo(&state, "repo-u", "ws-recon-unknown").await;
+
+        let summary = run_reconciliation(&state, &ws.id, &["no-such-spec".to_string()]).await;
+        assert_eq!(summary.tasks_created, 0);
+    }
+
+    // -- §6: deduplication ---------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reconciliation_deduplicates_open_tasks() {
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-recon-dup").await;
+        let _repo = make_repo(&state, "repo-d", "ws-recon-dup").await;
+        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+
+        let first = run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
+        assert_eq!(first.tasks_created, 1);
+
+        // Re-run with the same version → no new task.
+        let second = run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
+        assert_eq!(second.tasks_created, 0);
+        assert_eq!(second.tasks_skipped, 1);
+        assert_eq!(open_tasks_with_label(&state, RECONCILIATION_LABEL).await.len(), 1);
+
+        // New version → new task (different title).
+        state.meta_specs.update(&MetaSpec {
+            version: 5,
+            ..ms.clone()
+        }).await.unwrap();
+        let third = run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
+        assert_eq!(third.tasks_created, 1);
+        assert_eq!(open_tasks_with_label(&state, RECONCILIATION_LABEL).await.len(), 2);
+    }
+
+    // -- §6: set diffing (trigger condition) ---------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_diff_detects_version_changes() {
+        let old = make_set("ws", vec![pin("backend-developer", "a1")]);
+        let new = make_set("ws", vec![pin("backend-developer", "a1")]);
+        assert!(diff_meta_spec_set(&old, &new).is_empty(), "same set → no changes");
+
+        let new = make_set("ws", vec![pin("backend-developer", "b2")]);
+        assert_eq!(diff_meta_spec_set(&old, &new), vec!["backend-developer".to_string()]);
+
+        // Newly bound entry counts as changed; the identical
+        // backend-developer pin (a1 → a1) does not.
+        let new = make_set("ws", vec![pin("backend-developer", "a1"), pin("security", "c3")]);
+        assert_eq!(diff_meta_spec_set(&old, &new), vec!["security".to_string()]);
+
+        // Removal is not a trigger.
+        let new = make_set("ws", vec![]);
+        assert!(diff_meta_spec_set(&old, &new).is_empty());
+    }
+
+    // -- §10: conformance sweep detects drift --------------------------------
+
+    fn sample_attestation(repo_id: &str, ws_id: &str, meta_sha: &str, created_at: u64) -> gyre_common::Attestation {
+        use gyre_common::attestation::*;
+        let content = InputContent {
+            spec_path: "specs/system/x.md".to_string(),
+            spec_sha: "a".repeat(40),
+            workspace_id: ws_id.to_string(),
+            repo_id: repo_id.to_string(),
+            persona_constraints: vec![],
+            meta_spec_set_sha: meta_sha.to_string(),
+            scope: ScopeConstraint::default(),
+        };
+        let si = SignedInput {
+            content,
+            output_constraints: vec![],
+            valid_until: created_at + 3600,
+            expected_generation: None,
+            signature: vec![1, 2, 3],
+            key_binding: gyre_common::KeyBinding {
+                public_key: vec![1],
+                user_identity: "user:admin".to_string(),
+                issuer: "https://gyre.local".to_string(),
+                trust_anchor_id: "ta".to_string(),
+                issued_at: created_at,
+                expires_at: created_at + 3600,
+                user_signature: vec![1],
+                platform_countersign: vec![1],
+            },
+        };
+        gyre_common::Attestation {
+            id: sha256_hex(&format!("{repo_id}-{meta_sha}-{created_at}")),
+            input: AttestationInput::Signed(si),
+            output: AttestationOutput {
+                content_hash: vec![1],
+                commit_sha: format!("{:040x}", created_at),
+                agent_signature: None,
+                gate_results: vec![],
+            },
+            metadata: gyre_common::attestation::AttestationMetadata {
+                created_at,
+                workspace_id: ws_id.to_string(),
+                repo_id: repo_id.to_string(),
+                task_id: "task-1".to_string(),
+                agent_id: "agent-1".to_string(),
+                chain_depth: 0,
+            },
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sweep_detects_drift_and_creates_deduped_task() {
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-sweep-1").await;
+        let repo = make_repo(&state, "repo-s1", "ws-sweep-1").await;
+
+        // Bind a meta-spec set — this is the desired state.
+        let set = make_set("ws-sweep-1", vec![pin("backend-developer", "a1")]);
+        put_set(&state, "ws-sweep-1", &set).await;
+        let active_sha = crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws.id).await;
+        assert!(!active_sha.is_empty());
+
+        // Provenance under an OLD set SHA → drift.
+        let old_att = sample_attestation(repo.id.as_str(), "ws-sweep-1", "deadbeef", now());
+        state.chain_attestations.save(&old_att).await.unwrap();
+
+        // Member to notify.
+        let membership = WorkspaceMembership {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            user_id: Id::new("user-sweep"),
+            workspace_id: ws.id.clone(),
+            role: WorkspaceRole::Admin,
+            invited_by: Id::new("admin"),
+            accepted: true,
+            accepted_at: Some(now()),
+            created_at: now(),
+        };
+        state.workspace_memberships.create(&membership).await.unwrap();
+
+        let summary = run_conformance_sweep(&state).await.unwrap();
+        assert_eq!(summary.drift_detected, 1);
+        assert_eq!(summary.tasks_created, 1);
+
+        let tasks = open_tasks_with_label(&state, DRIFT_REVIEW_LABEL).await;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].workspace_id.as_str(), "ws-sweep-1");
+
+        // MetaSpecDrift notification created for the admin member.
+        let notifs = state
+            .notifications
+            .list_for_user(&Id::new("user-sweep"), Some(&ws.id), Some(6), Some(6), None, 10, 0)
+            .await
+            .unwrap();
+        assert!(
+            notifs
+                .iter()
+                .any(|n| n.notification_type == NotificationType::MetaSpecDrift),
+            "expected MetaSpecDrift notification"
+        );
+
+        // meta_spec_drift_detected event persisted (Event tier is stored).
+        let msgs = state
+            .messages
+            .list_by_workspace(&ws.id, Some("meta_spec_drift_detected"), None, None, None, Some(50))
+            .await
+            .unwrap();
+        assert!(
+            msgs.iter().any(|m| m.kind == MessageKind::Custom(
+                "meta_spec_drift_detected".to_string()
+            )),
+            "expected meta_spec_drift_detected event message"
+        );
+
+        // Second sweep: same drift → task deduplicated, but drift still
+        // counted and notification refreshed.
+        let second = run_conformance_sweep(&state).await.unwrap();
+        assert_eq!(second.drift_detected, 1);
+        assert_eq!(second.tasks_created, 0);
+        assert_eq!(second.tasks_skipped, 1);
+        assert_eq!(open_tasks_with_label(&state, DRIFT_REVIEW_LABEL).await.len(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sweep_clean_when_provenance_matches_current_set() {
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-sweep-2").await;
+        let repo = make_repo(&state, "repo-s2", "ws-sweep-2").await;
+
+        let set = make_set("ws-sweep-2", vec![pin("backend-developer", "a1")]);
+        put_set(&state, "ws-sweep-2", &set).await;
+        let active_sha = crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws.id).await;
+
+        // Provenance under the CURRENT set SHA → no drift.
+        let att = sample_attestation(repo.id.as_str(), "ws-sweep-2", &active_sha, now());
+        state.chain_attestations.save(&att).await.unwrap();
+
+        let summary = run_conformance_sweep(&state).await.unwrap();
+        assert_eq!(summary.drift_detected, 0);
+        assert_eq!(summary.tasks_created, 0);
+        assert_eq!(open_tasks_with_label(&state, DRIFT_REVIEW_LABEL).await.len(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sweep_skips_workspaces_without_set() {
+        let state = test_state();
+        let _ws = make_workspace(&state, "ws-sweep-3").await;
+        let repo = make_repo(&state, "repo-s3", "ws-sweep-3").await;
+
+        // No set bound; provenance with a non-empty SHA exists but there is
+        // no desired state to compare against.
+        let att = sample_attestation(repo.id.as_str(), "ws-sweep-3", "deadbeef", now());
+        state.chain_attestations.save(&att).await.unwrap();
+
+        let summary = run_conformance_sweep(&state).await.unwrap();
+        assert_eq!(summary.drift_detected, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sweep_ignores_empty_provenance_sha() {
+        let state = test_state();
+        let _ws = make_workspace(&state, "ws-sweep-4").await;
+        let repo = make_repo(&state, "repo-s4", "ws-sweep-4").await;
+
+        let set = make_set("ws-sweep-4", vec![pin("backend-developer", "a1")]);
+        put_set(&state, "ws-sweep-4", &set).await;
+
+        // Provenance recorded before any set was bound (empty SHA) — cannot
+        // assert drift against an unknown baseline.
+        let att = sample_attestation(repo.id.as_str(), "ws-sweep-4", "", now());
+        state.chain_attestations.save(&att).await.unwrap();
+
+        let summary = run_conformance_sweep(&state).await.unwrap();
+        assert_eq!(summary.drift_detected, 0);
+    }
+
+    // -- End-to-end: set update triggers reconciliation ----------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_update_via_api_triggers_reconciliation() {
+        use axum::{body::Body, Router};
+        use http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let state = test_state();
+        // Create the workspace via the API (member role wiring for
+        // notifications comes from the membership below).
+        let app: Router = crate::api::api_router().with_state(state.clone());
+
+        let ws_body = serde_json::json!({"name": "ws-e2e", "slug": "ws-e2e"});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(ws_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let ws_json: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+
+        make_repo(&state, "repo-e2e", &ws_id).await;
+        make_meta_spec(&state, "backend-developer", 4).await;
+
+        // PUT the set with a first binding.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/meta-spec-set"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "personas": { "backend": { "path": "backend-developer", "sha": "a1" } },
+                            "principles": [], "standards": [], "process": []
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // First binding → reconciliation task created.
+        let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
+        assert_eq!(tasks.len(), 1, "set binding should trigger reconciliation");
+        assert_eq!(tasks[0].workspace_id.as_str(), ws_id);
+
+        // Re-PUT the identical set → no new task (no version change).
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/meta-spec-set"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "personas": { "backend": { "path": "backend-developer", "sha": "a1" } },
+                            "principles": [], "standards": [], "process": []
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            open_tasks_with_label(&state, RECONCILIATION_LABEL).await.len(),
+            1,
+            "identical re-PUT must not create a second task"
+        );
+    }
+
+    // -- §10/§9: identical set re-PUT must not flip the set SHA -----------
+
+    /// `compute_meta_spec_set_sha` hashes the stored JSON bytes. The sweep
+    /// (§10) compares that hash against provenance records, and the §9 merge
+    /// gate compares `agent.meta_spec_set_sha == input.meta_spec_set_sha`.
+    /// If serializing the same set twice produced different bytes (e.g. a
+    /// HashMap's per-instance key order), an identical re-PUT would rewrite
+    /// the stored JSON under a new SHA and false-drift every provenance
+    /// record. This test pins the canonical-serialization invariant.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn identical_reput_keeps_set_sha_stable() {
+        use axum::{body::Body, Router};
+        use http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let state = test_state();
+        let app: Router = crate::api::api_router().with_state(state.clone());
+
+        // Create a workspace via the API.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"name": "ws-sha", "slug": "ws-sha"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let ws_json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+        let ws_id = Id::new(&ws_id);
+
+        // Multiple personas: HashMap ordering is per-instance random, so a
+        // multi-entry set is what exposes nondeterministic serialization.
+        let put_body = serde_json::json!({
+            "personas": {
+                "backend":  {"path": "backend-developer", "sha": "a1"},
+                "frontend": {"path": "frontend-developer", "sha": "b2"},
+                "sre":      {"path": "sre-operator", "sha": "c3"}
+            },
+            "principles": [], "standards": [], "process": []
+        });
+        let put = |app: Router, ws: Id| {
+            let body = put_body.to_string();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(format!("/api/v1/workspaces/{}/meta-spec-set", ws.as_str()))
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        let r1 = put(app.clone(), ws_id.clone()).await;
+        assert_eq!(r1.status(), StatusCode::OK);
+        let sha1 = crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws_id).await;
+        assert!(!sha1.is_empty());
+
+        // Identical re-PUT: same entries (deliberately supplied in the same
+        // JSON object order; key order in the REQUEST must not matter
+        // either, since deserialization into BTreeMap canonicalizes).
+        let r2 = put(app.clone(), ws_id.clone()).await;
+        assert_eq!(r2.status(), StatusCode::OK);
+        let sha2 = crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws_id).await;
+        assert_eq!(sha1, sha2, "identical re-PUT must not change the set SHA");
+
+        // Re-PUT with the SAME entries in a DIFFERENT request key order:
+        // still identical after deserialization → same SHA.
+        let reordered = serde_json::json!({
+            "personas": {
+                "sre":      {"path": "sre-operator", "sha": "c3"},
+                "backend":  {"path": "backend-developer", "sha": "a1"},
+                "frontend": {"path": "frontend-developer", "sha": "b2"}
+            },
+            "principles": [], "standards": [], "process": []
+        });
+        let r3 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{}/meta-spec-set", ws_id.as_str()))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(reordered.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r3.status(), StatusCode::OK);
+        let sha3 = crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws_id).await;
+        assert_eq!(
+            sha1, sha3,
+            "request key order must not leak into the stored set SHA"
+        );
+
+        // A genuinely different set (one pinned SHA changed) must change
+        // the SHA — the invariant must not be trivially "SHA never moves".
+        let changed = serde_json::json!({
+            "personas": {
+                "backend":  {"path": "backend-developer", "sha": "a9"},
+                "frontend": {"path": "frontend-developer", "sha": "b2"},
+                "sre":      {"path": "sre-operator", "sha": "c3"}
+            },
+            "principles": [], "standards": [], "process": []
+        });
+        let r4 = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{}/meta-spec-set", ws_id.as_str()))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(changed.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r4.status(), StatusCode::OK);
+        let sha4 = crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws_id).await;
+        assert_ne!(sha1, sha4, "a changed pin must change the set SHA");
+    }
+
+    // -- §6 step 2: task per repo, scoped per workspace ----------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reconciliation_creates_task_per_repo() {
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-recon-multi").await;
+        let _r1 = make_repo(&state, "repo-m1", "ws-recon-multi").await;
+        let _r2 = make_repo(&state, "repo-m2", "ws-recon-multi").await;
+        let _r3 = make_repo(&state, "repo-m3", "ws-recon-multi").await;
+        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+
+        let s = run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
+        let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
+        assert_eq!(s.tasks_created, 3, "§6 step 2: task per affected repo");
+        assert_eq!(tasks.len(), 3);
+        let mut repo_ids: Vec<String> = tasks.iter().map(|t| t.repo_id.as_str().to_string()).collect();
+        repo_ids.sort();
+        assert_eq!(
+            repo_ids,
+            vec!["repo-m1".to_string(), "repo-m2".to_string(), "repo-m3".to_string()],
+            "each repo gets its own task"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reconciliation_two_workspaces_same_spec_not_suppressed() {
+        let state = test_state();
+        let ws1 = make_workspace(&state, "ws-recon-w1").await;
+        let _repo1 = make_repo(&state, "repo-pa", "ws-recon-w1").await;
+        let ws2 = make_workspace(&state, "ws-recon-w2").await;
+        let _repo2 = make_repo(&state, "repo-pb", "ws-recon-w2").await;
+        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+
+        let s1 = run_reconciliation(&state, &ws1.id, &[ms.name.clone()]).await;
+        assert_eq!(s1.tasks_created, 1);
+        let s2 = run_reconciliation(&state, &ws2.id, &[ms.name.clone()]).await;
+        assert_eq!(s2.tasks_created, 1, "second workspace must get its own reconciliation task");
+        assert_eq!(s2.tasks_skipped, 0);
+
+        let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(
+            tasks.iter().filter(|t| t.workspace_id.as_str() == "ws-recon-w1").count(),
+            1
+        );
+        assert_eq!(
+            tasks.iter().filter(|t| t.workspace_id.as_str() == "ws-recon-w2").count(),
+            1
+        );
+    }
+
+    // -- §11: ReconciliationCompleted fires on wave completion, not creation -
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reconciliation_completed_fires_when_all_tasks_terminal() {
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-wave").await;
+        make_repo(&state, "repo-w1", "ws-wave").await;
+        make_repo(&state, "repo-w2", "ws-wave").await;
+        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+
+        // Member so the completion notification path is exercised end-to-end.
+        let membership = WorkspaceMembership {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            user_id: Id::new("user-wave"),
+            workspace_id: ws.id.clone(),
+            role: WorkspaceRole::Admin,
+            invited_by: Id::new("admin"),
+            accepted: true,
+            accepted_at: Some(now()),
+            created_at: now(),
+        };
+        state.workspace_memberships.create(&membership).await.unwrap();
+
+        // Two reconciliation tasks created (one per repo).
+        run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
+
+        let count_completed = |ws: gyre_domain::Workspace| {
+            let state = state.clone();
+            async move {
+                state
+                    .messages
+                    .list_by_workspace(&ws.id, Some("reconciliation_completed"), None, None, None, Some(50))
+                    .await
+                    .unwrap()
+                    .len()
+            }
+        };
+
+        // NOT fired at creation time (§11: completion = all tasks done).
+        assert_eq!(
+            count_completed(ws.clone()).await, 0,
+            "no completion event while tasks are open"
+        );
+
+        // Terminal-transition the first task (Backlog → Cancelled) — one task
+        // still open, still no completion.
+        let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
+        assert_eq!(tasks.len(), 2);
+        let mut t1 = state.tasks.find_by_id(&tasks[0].id).await.unwrap().unwrap();
+        t1.transition_status(TaskStatus::Cancelled).unwrap();
+        state.tasks.update(&t1).await.unwrap();
+        maybe_emit_reconciliation_completed(&state, &ws.id).await;
+        assert_eq!(
+            count_completed(ws.clone()).await, 0,
+            "one task still open — wave not complete"
+        );
+
+        // Terminal-transition the second task — wave complete, event fires.
+        let mut t2 = state.tasks.find_by_id(&tasks[1].id).await.unwrap().unwrap();
+        t2.transition_status(TaskStatus::InProgress).unwrap();
+        t2.transition_status(TaskStatus::Review).unwrap();
+        t2.transition_status(TaskStatus::Done).unwrap();
+        state.tasks.update(&t2).await.unwrap();
+        maybe_emit_reconciliation_completed(&state, &ws.id).await;
+        assert_eq!(
+            count_completed(ws.clone()).await, 1,
+            "all tasks terminal — ReconciliationCompleted must fire exactly once"
+        );
+
+        // MetaSpecDrift notification for the admin member (via the shared
+        // emit_reconciliation_completed helper).
+        let notifs = state
+            .notifications
+            .list_for_user(&Id::new("user-wave"), Some(&ws.id), Some(6), Some(6), None, 10, 0)
+            .await
+            .unwrap();
+        assert!(
+            notifs
+                .iter()
+                .any(|n| n.notification_type == NotificationType::MetaSpecDrift),
+            "expected MetaSpecDrift notification on wave completion"
+        );
+
+        // Idempotency: a re-check of the complete wave must not re-emit.
+        maybe_emit_reconciliation_completed(&state, &ws.id).await;
+        assert_eq!(
+            count_completed(ws.clone()).await, 1,
+            "idempotent: re-checking a complete wave must not re-emit"
+        );
+    }
+
+    /// A SECOND reconciliation wave must emit its own ReconciliationCompleted.
+    /// Regression for the wave-identity bug: identity was
+    /// min(created_at) over ALL reconciliation tasks — including terminal
+    /// tasks from prior waves — so after wave 1 completed and emitted, wave
+    /// 2's completion recomputed wave 1's start, matched the persisted
+    /// wave_started_at, and suppressed the wave-2 event. §11 requires the
+    /// event for every wave ("all reconciliation tasks for a workspace are
+    /// done" — true again when the second wave's tasks all go terminal).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn second_wave_emits_its_own_completion() {
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-wave2").await;
+        make_repo(&state, "repo-w2", "ws-wave2").await;
+        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+
+        let count_completed = || {
+            let state = state.clone();
+            let ws_id = ws.id.clone();
+            async move {
+                state
+                    .messages
+                    .list_by_workspace(&ws_id, Some("reconciliation_completed"), None, None, None, Some(50))
+                    .await
+                    .unwrap()
+                    .len()
+            }
+        };
+        let complete_all_open = || {
+            let state = state.clone();
+            let ws_id = ws.id.clone();
+            async move {
+                let tasks = state
+                    .tasks
+                    .list_by_workspace(&ws_id)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .filter(|t| {
+                        t.labels.iter().any(|l| l == RECONCILIATION_LABEL)
+                            && !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled)
+                    })
+                    .collect::<Vec<_>>();
+                for mut t in tasks {
+                    t.transition_status(TaskStatus::InProgress).unwrap();
+                    t.transition_status(TaskStatus::Review).unwrap();
+                    t.transition_status(TaskStatus::Done).unwrap();
+                    state.tasks.update(&t).await.unwrap();
+                }
+            }
+        };
+
+        // Wave 1: v4 → one task → complete → emit.
+        run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
+        complete_all_open().await;
+        maybe_emit_reconciliation_completed(&state, &ws.id).await;
+        assert_eq!(count_completed().await, 1, "wave 1 must emit exactly once");
+
+        // Wave 2: same spec bumped to v5 (new title → new task). Created
+        // within the same wall-clock second as wave 1 in the worst case —
+        // the identity must still distinguish the waves.
+        state
+            .meta_specs
+            .update(&MetaSpec {
+                version: 5,
+                ..ms.clone()
+            })
+            .await
+            .unwrap();
+        run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
+        let open = open_tasks_with_label(&state, RECONCILIATION_LABEL)
+            .await
+            .into_iter()
+            .filter(|t| !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled))
+            .count();
+        assert_eq!(open, 1, "wave 2 must create a new open task");
+
+        maybe_emit_reconciliation_completed(&state, &ws.id).await;
+        assert_eq!(
+            count_completed().await, 1,
+            "wave 2 open — no completion while in flight"
+        );
+
+        complete_all_open().await;
+        maybe_emit_reconciliation_completed(&state, &ws.id).await;
+        assert_eq!(
+            count_completed().await, 2,
+            "wave 2 completion must emit its own ReconciliationCompleted"
+        );
+
+        // Idempotency preserved: re-checking the complete state must not
+        // emit a third event for the same wave.
+        maybe_emit_reconciliation_completed(&state, &ws.id).await;
+        assert_eq!(
+            count_completed().await, 2,
+            "re-check must not re-emit wave 2"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn no_completion_event_for_workspace_without_reconciliation_tasks() {
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-nowave").await;
+
+        // An unrelated terminal task must not fire the completion event.
+        let mut task = gyre_domain::Task::new(Id::new("unrelated-1"), "Unrelated", now());
+        task.workspace_id = ws.id.clone();
+        task.transition_status(TaskStatus::InProgress).unwrap();
+        task.transition_status(TaskStatus::Review).unwrap();
+        task.transition_status(TaskStatus::Done).unwrap();
+        state.tasks.create(&task).await.unwrap();
+
+        maybe_emit_reconciliation_completed(&state, &ws.id).await;
+        let msgs = state
+            .messages
+            .list_by_workspace(&ws.id, Some("reconciliation_completed"), None, None, None, Some(50))
+            .await
+            .unwrap();
+        assert!(msgs.is_empty(), "no reconciliation tasks — no completion event");
+    }
+
+    // -- §11: MetaSpecDriftResolved on drift-review task completion ---------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drift_resolved_fires_when_all_drift_review_tasks_terminal() {
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-resolve").await;
+
+        // One terminal drift-review task: drift resolved.
+        let mut task = gyre_domain::Task::new(
+            Id::new("drift-task-1"),
+            "Review meta-spec drift in workspace ws-resolve (active set abc)",
+            now(),
+        );
+        task.labels = vec![DRIFT_REVIEW_LABEL.to_string()];
+        task.workspace_id = ws.id.clone();
+        task.transition_status(TaskStatus::InProgress).unwrap();
+        task.transition_status(TaskStatus::Review).unwrap();
+        task.transition_status(TaskStatus::Done).unwrap();
+        state.tasks.create(&task).await.unwrap();
+
+        // Open drift-review task in another workspace must not resolve this one.
+        let ws2 = make_workspace(&state, "ws-resolve-2").await;
+        let mut open_task = gyre_domain::Task::new(
+            Id::new("drift-task-2"),
+            "Review meta-spec drift in workspace ws-resolve-2 (active set abc)",
+            now(),
+        );
+        open_task.labels = vec![DRIFT_REVIEW_LABEL.to_string()];
+        open_task.workspace_id = ws2.id.clone();
+        state.tasks.create(&open_task).await.unwrap();
+
+        maybe_emit_drift_resolved(&state, &ws.id).await;
+        let msgs = state
+            .messages
+            .list_by_workspace(&ws.id, Some("meta_spec_drift_resolved"), None, None, None, Some(50))
+            .await
+            .unwrap();
+        assert_eq!(
+            msgs.len(), 1,
+            "all drift-review tasks terminal → drift resolved event"
+        );
+
+        // ws2 still has an open drift-review task — no event.
+        let msgs2 = state
+            .messages
+            .list_by_workspace(&ws2.id, Some("meta_spec_drift_resolved"), None, None, None, Some(50))
+            .await
+            .unwrap();
+        assert!(msgs2.is_empty(), "open drift-review task — drift not resolved");
+    }
+
+    // -- §11: MetaSpecSetUpdated / MetaSpecChanged events --------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_update_emits_meta_spec_set_updated_event() {
+        use axum::{body::Body, Router};
+        use http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let state = test_state();
+        let app: Router = crate::api::api_router().with_state(state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"name": "ws-setevent", "slug": "ws-setevent"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let ws_json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap(),
+        )
+        .unwrap();
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+
+        // Bind a set — changed_paths is non-empty (new binding) → event fires.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/meta-spec-set"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "personas": { "backend": { "path": "backend-developer", "sha": "a1" } },
+                            "principles": [], "standards": [], "process": []
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let msgs = state
+            .messages
+            .list_by_workspace(
+                &Id::new(&ws_id),
+                Some("meta_spec_set_updated"),
+                None,
+                None,
+                None,
+                Some(50),
+            )
+            .await
+            .unwrap();
+        assert_eq!(msgs.len(), 1, "set binding change must emit meta_spec_set_updated");
+        let payload = msgs[0].payload.as_ref().unwrap();
+        assert_eq!(
+            payload["changed"]
+                .as_array()
+                .map(|a| a.len())
+                .unwrap_or(0),
+            1,
+            "event payload must name the changed spec"
+        );
+
+        // Identical re-PUT: no version change → no additional event.
+        let app2: Router = crate::api::api_router().with_state(state.clone());
+        let resp = app2
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/meta-spec-set"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "personas": { "backend": { "path": "backend-developer", "sha": "a1" } },
+                            "principles": [], "standards": [], "process": []
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let msgs = state
+            .messages
+            .list_by_workspace(
+                &Id::new(&ws_id),
+                Some("meta_spec_set_updated"),
+                None,
+                None,
+                None,
+                Some(50),
+            )
+            .await
+            .unwrap();
+        assert_eq!(msgs.len(), 1, "identical re-PUT must not emit another event");
+    }
+}

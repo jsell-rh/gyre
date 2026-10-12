@@ -201,7 +201,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/meta-specs/{path}/blast-radius` | Affected workspaces and repos if this meta-spec changes — `{spec_path, affected_workspaces: [{id}], affected_repos: [{id, workspace_id, reason}]}`; path is URL-encoded (M32) |
 | `POST` | `/api/v1/workspaces/{id}/meta-specs/preview` | Trigger async preview of a meta-spec change — returns `{preview_id}`; runs reconciliation in background (M32, HSI §1) |
 | `GET` | `/api/v1/workspaces/{id}/meta-specs/preview/{preview_id}` | Poll preview status — `{status: pending\|running\|complete\|failed, result?: {affected_agents, drift_count, sample_diffs}}` (M32, HSI §1) |
-| `POST/GET` | `/api/v1/meta-specs-registry` | Create / list DB-backed meta-spec registry entries — `{id, name, kind, path, content, version, status: draft\|approved\|deprecated}`; separate from `specs/manifest.yaml`-backed spec ledger (agent-runtime spec) |
+| `POST/GET` | `/api/v1/meta-specs-registry` | Create (**Admin only**) / list DB-backed meta-spec registry entries — `{id, name, kind, path, content, version, status: draft\|approved\|deprecated}`; `GET` with `?scope=Workspace&scope_id=` requires membership of that workspace; separate from `specs/manifest.yaml`-backed spec ledger (agent-runtime spec) |
 | `GET/PUT/DELETE` | `/api/v1/meta-specs-registry/{id}` | Read / update / delete a meta-spec registry entry (**Admin only** for PUT/DELETE) |
 | `GET` | `/api/v1/meta-specs-registry/{id}/versions` | List all versions of a meta-spec registry entry |
 | `GET` | `/api/v1/meta-specs-registry/{id}/versions/{version}` | Get a specific version snapshot |

@@ -505,6 +505,32 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register meta-spec conformance sweep job (runs daily,
+    // meta-spec-reconciliation.md §10). Interval is configurable via
+    // GYRE_META_SPEC_SWEEP_INTERVAL_SECS.
+    registry
+        .register(
+            JobDefinition {
+                name: "meta_spec_conformance_sweep".to_string(),
+                description:
+                    "Sweeps all workspaces for meta-spec drift between the active \
+                     meta-spec set and provenance-recorded set SHAs (§10)"
+                        .to_string(),
+                interval_secs: std::env::var("GYRE_META_SPEC_SWEEP_INTERVAL_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(crate::reconciliation::SWEEP_INTERVAL_SECS),
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move {
+                crate::reconciliation::run_conformance_sweep(&state)
+                    .await
+                    .map(|_| ())
+            },
+        )
+        .await;
+
     // Schedulers are NOT spawned here — existing background tasks in main.rs handle
     // periodic execution. Handlers registered above enable on-demand triggering and
     // status tracking via POST /admin/jobs/{name}/run and GET /admin/jobs.

@@ -34,6 +34,7 @@ pub(crate) mod oidc;
 pub mod pre_accept;
 pub mod rate_limit;
 pub(crate) mod rbac;
+pub mod reconciliation;
 pub mod retention;
 pub mod siem;
 pub(crate) mod signing;
@@ -1463,6 +1464,7 @@ pub async fn seed_builtin_meta_specs(state: &Arc<AppState>) {
             approval_status: MetaSpecApprovalStatus::Approved,
             approved_by: Some("system".to_string()),
             approved_at: Some(now),
+            approved_content_hash: Some(sha256_hex(prompt)),
             created_by: "system".to_string(),
             created_at: now,
             updated_at: now,
