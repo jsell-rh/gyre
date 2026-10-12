@@ -1267,7 +1267,7 @@ async fn undo_ref_updates(repo_path: &str, ref_updates: &[RefUpdate]) {
 // ---------------------------------------------------------------------------
 
 /// Spec path prefixes that trigger lifecycle task creation (per spec-lifecycle.md).
-const SPEC_WATCHED_PATHS: &[&str] = &["specs/system/", "specs/development/"];
+pub(crate) const SPEC_WATCHED_PATHS: &[&str] = &["specs/system/", "specs/development/"];
 
 /// Classify a spec file change and return (title, labels, priority).
 fn classify_spec_change(

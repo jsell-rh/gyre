@@ -39,6 +39,7 @@ pub mod siem;
 pub(crate) mod signing;
 pub(crate) mod snapshot;
 pub(crate) mod spa;
+pub mod spec_lifecycle_patrol;
 pub mod spec_link_staleness;
 pub mod spec_patrol;
 pub mod spec_registry;
