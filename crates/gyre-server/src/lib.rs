@@ -48,6 +48,7 @@ pub(crate) mod explorer_ws;
 pub mod notifications;
 pub mod otlp_receiver;
 pub mod policy_engine;
+pub mod signal_chain;
 pub mod stale_agents;
 pub mod stale_peers;
 pub mod telemetry;
@@ -402,6 +403,12 @@ pub struct AppState {
     pub secrets: Arc<dyn gyre_ports::SecretRepository>,
     /// Aggregated judgment ledger for user activity history (HSI §12).
     pub judgment_ledger: Arc<dyn gyre_ports::JudgmentLedgerRepository>,
+    /// Orchestrator registry (agent-runtime.md §1 Phases 2–3): per-workspace
+    /// and per-repo processing locks implementing exactly-one-active
+    /// semantics for the spec-approval signal chain. Process-local
+    /// serialization only — agent liveness lives in the port-backed agents
+    /// store.
+    pub orchestrator_registry: signal_chain::OrchestratorRegistry,
     /// WebSocket ticket store: short-lived, single-use tokens for WS auth.
     /// Replaces the insecure ?token= query parameter pattern.
     pub ws_tickets: auth::WsTicketStore,
@@ -1098,6 +1105,7 @@ pub fn build_state(
             dyn gyre_ports::JudgmentLedgerRepository,
             mem::MemJudgmentLedgerRepository
         ),
+        orchestrator_registry: signal_chain::OrchestratorRegistry::new(),
         ws_tickets: auth::WsTicketStore::new(),
         llm: match std::env::var("GYRE_VERTEX_PROJECT") {
             Ok(_) => match gyre_adapters::RigVertexAiFactory::from_env() {
