@@ -1,8 +1,7 @@
-# Legacy unbounded reqwest clients (task-107 F10 baseline; frozen at 6).
-# Fix by building with .timeout(...) or wrapping awaits in
-# tokio::time::timeout; never add entries.
-crates/gyre-adapters/src/llm/rig_vertexai.rs:103
-crates/gyre-adapters/src/llm/rig_vertexai.rs:613
-crates/gyre-adapters/src/llm/rig_vertexai.rs:692
-crates/gyre-adapters/src/llm/rig_vertexai.rs:761
-crates/gyre-adapters/src/llm/rig_vertexai.rs:836
+# Legacy unbounded reqwest clients (task-107 F10 baseline; originally 5).
+# All former sites in crates/gyre-adapters/src/llm/rig_vertexai.rs were
+# fixed by task-171 (clients built with .timeout(...) — Vertex AI adapter
+# 120s, Google OAuth token exchanges 10s, GCE metadata 5s); the remaining
+# Client::new() in that file is inside #[cfg(test)] and not scanned.
+# Fix any future site by building with .timeout(...) or wrapping awaits
+# in tokio::time::timeout; never add entries.

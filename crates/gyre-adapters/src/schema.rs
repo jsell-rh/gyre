@@ -630,6 +630,7 @@ diesel::table! {
         output_tokens -> BigInt,
         cost_usd -> Double,
         model -> Text,
+        prompt_template_sha -> Nullable<Text>,
         timestamp -> BigInt,
     }
 }

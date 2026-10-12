@@ -630,6 +630,55 @@ pub fn m34_builtin_policies() -> Vec<Policy> {
             created_at: now,
             updated_at: now,
         },
+        // Priority 800: Developer workspace role → allow LLM generation
+        // (`generate` action) on explorer_view / spec / workspace resources.
+        //
+        // HSI §1444-1445 (spec-amendment table): `generate` is distinct from
+        // `write` so policies can permit LLM generation while restricting
+        // CRUD. The four LLM endpoints (`explorer-views/generate`,
+        // `briefing/ask`, `specs/assist`, `prompts/save`) use
+        // `action_override: "generate"`, which no other builtin Allow
+        // covers — without this policy, `default-deny` 403s every LLM call
+        // for non-Admin users.
+        //
+        // Keyed on `subject.workspace_role` (from JWT claims), not the
+        // global role: LLM generation is a workspace-scoped capability
+        // (HSI §1325 "Requires workspace membership"), so a user with a
+        // global Developer role but Viewer workspace role must be denied.
+        // `briefing/ask` maps to resource_type `workspace` (HSI §1325),
+        // so `workspace` must be covered alongside the spec's
+        // `explorer_view` and `spec` (hierarchy-enforcement.md built-ins
+        // table).
+        Policy {
+            id: Id::new("builtin-developer-generate-access"),
+            name: "developer-generate-access".to_string(),
+            description: "Developer and Admin workspace roles can perform the generate action on LLM endpoints".to_string(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 800,
+            effect: PolicyEffect::Allow,
+            conditions: vec![Condition {
+                attribute: "subject.workspace_role".to_string(),
+                operator: ConditionOp::In,
+                value: ConditionValue::StringList(vec![
+                    "Owner".to_string(),
+                    "Admin".to_string(),
+                    "Developer".to_string(),
+                ]),
+            }],
+            actions: vec!["generate".to_string()],
+            resource_types: vec![
+                "explorer_view".to_string(),
+                "spec".to_string(),
+                "workspace".to_string(),
+            ],
+            enabled: true,
+            built_in: true,
+            immutable: false,
+            created_by: by.clone(),
+            created_at: now,
+            updated_at: now,
+        },
         // Priority 600: ReadOnly role → allow only read.
         Policy {
             id: Id::new("builtin-readonly-get-only"),
@@ -1209,5 +1258,107 @@ pub mod tests {
             .filter(|p| p.name == "builtin:require-human-spec-approval")
             .count();
         assert_eq!(count, 1);
+    }
+
+    /// Regression (task-171, HSI spec-amendment table): without the
+    /// `developer-generate-access` Allow policy, `default-deny` blocks all
+    /// LLM generation and prompt editing. The three LLM endpoints
+    /// (`briefing/ask`, `explorer-views/generate`, `specs/assist`,
+    /// `prompts/save`) use `action_override: "generate"`, which no other
+    /// builtin Allow covers — a Developer-role JWT would be 403'd on every
+    /// LLM call.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn developer_jwt_can_generate_on_llm_endpoints() {
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use axum::routing::post;
+
+        let state_base = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state_base))
+        });
+        init_resolver();
+
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        // The LLM endpoints with `generate` action overrides.
+        let app = Router::new()
+            .route("/api/v1/workspaces/:id/briefing/ask", post(ok_handler))
+            .route(
+                "/api/v1/workspaces/:id/explorer-views/generate",
+                post(ok_handler),
+            )
+            .route("/api/v1/repos/:id/specs/assist", post(ok_handler))
+            .route("/api/v1/repos/:id/prompts/save", post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state_base.clone(),
+                abac_middleware,
+            ))
+            .with_state(state_base);
+
+        let token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "dev-llm-sub",
+                "preferred_username": "developer",
+                "realm_access": { "roles": ["developer"] },
+                "workspace_role": "Developer"
+            }),
+            3600,
+        );
+
+        for path in [
+            "/api/v1/workspaces/some-ws/briefing/ask",
+            "/api/v1/workspaces/some-ws/explorer-views/generate",
+            "/api/v1/repos/some-repo/specs/assist",
+            "/api/v1/repos/some-repo/prompts/save",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("Authorization", format!("Bearer {token}"))
+                        .header("content-type", "application/json")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "Developer must be allowed generate on {path}"
+            );
+        }
+
+        // Viewer workspace role must still be denied — the Allow is
+        // scoped to Developer/Admin workspace roles, not everyone.
+        let viewer_token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "viewer-llm-sub",
+                "preferred_username": "viewer",
+                "realm_access": { "roles": ["developer"] },
+                "workspace_role": "Viewer"
+            }),
+            3600,
+        );
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/some-ws/briefing/ask")
+                    .header("Authorization", format!("Bearer {viewer_token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "Viewer workspace role must be denied generate"
+        );
     }
 }

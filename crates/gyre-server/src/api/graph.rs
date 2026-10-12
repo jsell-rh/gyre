@@ -22,7 +22,7 @@ use axum::{
     response::sse::{Event, Sse},
     Json,
 };
-use futures_util::{stream, StreamExt as _};
+use futures_util::stream;
 use gyre_common::GateStatus;
 use gyre_common::{
     graph::{ArchitecturalDelta, EdgeType, GraphEdge, GraphNode, NodeType, SpecConfidence},
@@ -1221,12 +1221,13 @@ pub async fn briefing_ask(
         ));
     }
 
-    // Per-user/workspace sliding-window rate limit (HSI §6): 10 req/60 s.
+    // Per-user/workspace sliding-window rate limit (ui-layout.md §2 /
+    // HSI §6): 10 req/60 s, keyed on the auth-context user_id.
     {
         let mut limiter = state.llm_rate_limiter.lock().await;
         if let Err(retry_after) = check_rate_limit(
             &mut limiter,
-            &caller.agent_id,
+            &crate::llm_rate_limit::rate_limit_principal(&caller),
             &id,
             LLM_RATE_LIMIT,
             LLM_WINDOW_SECS,
@@ -1234,7 +1235,6 @@ pub async fn briefing_ask(
             return Err(ApiError::RateLimited(retry_after));
         }
     }
-
     // Require LLM to be configured.
     let factory = state.llm.as_ref().ok_or(ApiError::LlmUnavailable)?;
 
@@ -1251,18 +1251,10 @@ pub async fn briefing_ask(
 
     let workspace_id_obj = Id::new(&id);
 
-    // Load effective prompt; fall back to hardcoded default.
-    let template_content = state
-        .prompt_templates
-        .get_effective(&workspace_id_obj, "briefing-ask")
-        .await
-        .map_err(ApiError::Internal)?
-        .map(|t| t.content)
-        .unwrap_or_else(|| crate::llm_defaults::PROMPT_BRIEFING_ASK.to_string());
-
-    // Grounding context: JSON-serialized briefing + conversation history.
-    // The server is stateless (HSI §1325); the client owns the conversation
-    // state, so we replay exactly what was sent as prompt context.
+    // Grounding context: JSON-serialized briefing + conversation history
+    // (HSI §1327). The server is stateless (HSI §1325); the client owns
+    // the conversation state, so we replay exactly what was sent as prompt
+    // context.
     let briefing_json =
         serde_json::to_string(&briefing).map_err(|e| ApiError::Internal(anyhow::anyhow!(e)))?;
     let mut context = format!("Briefing data:\n{briefing_json}");
@@ -1277,24 +1269,126 @@ pub async fn briefing_ask(
         }
     }
 
-    let system_prompt = template_content
-        .replace("{{workspace_id}}", &id)
-        .replace("{{context}}", &context)
-        .replace("{{question}}", &req.question);
+    let template = crate::llm_helpers::resolve_prompt_template(
+        &state,
+        &workspace_id_obj,
+        None,
+        "briefing-ask",
+        crate::llm_defaults::PROMPT_BRIEFING_ASK,
+    )
+    .await;
+
+    // Prompt template (ui-layout.md §2): DB override → git tree
+    // (specs/prompts/briefing-ask.md) → hardcoded fallback. `sha` carries
+    // git provenance for the cost entry. Variables match the committed
+    // template (`{{briefing_json}}`, `{{graph_summary}}`, `{{history}}`);
+    // the hardcoded default uses `{{context}}` (briefing JSON + history
+    // transcript) — each variable gets its own faithful value.
+    // The user's question travels as the user prompt only (injection
+    // containment), so the template's `{{question}}` placeholder is
+    // explicitly blanked — the same rule the other two LLM endpoints
+    // apply — rather than leaking literal placeholder text.
+    let graph_summary =
+        crate::llm_helpers::workspace_graph_summary(&state, &workspace_id_obj, None).await;
+    let history_transcript: String = req
+        .history
+        .as_deref()
+        .map(|h| {
+            h.iter()
+                .map(|e| format!("{}: {}", e.role, e.content))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    let system_prompt = crate::llm_helpers::substitute_template(
+        &template.content,
+        &[
+            ("workspace_id", id.as_str()),
+            ("context", context.as_str()),
+            ("briefing_json", briefing_json.as_str()),
+            ("graph_summary", graph_summary.as_str()),
+            ("history", history_transcript.as_str()),
+            ("question", ""),
+        ],
+    );
     let user_prompt = req.question.clone();
 
-    // Resolve model and call streaming LLM.
-    let (model, _) =
-        crate::llm_helpers::resolve_llm_model(&state, &Id::new(&id), "briefing-ask").await;
-    let stream = factory
+    // Model + per-endpoint max output tokens (ui-layout.md §2).
+    let (model, max_tokens) =
+        crate::llm_helpers::resolve_llm_model(&state, &workspace_id_obj, "briefing-ask").await;
+    // LLM connection failure is an `event: error` SSE event, not an HTTP
+    // 500 (ui-layout.md §2). Mid-stream chunk failures must surface as
+    // `event: error` too — a truncated response must not masquerade as a
+    // `complete` event (the old `filter_map(|r| r.ok())` silently dropped
+    // them).
+    let stream = match factory
         .for_model(&model)
-        .stream_complete(&system_prompt, &user_prompt, None)
+        .stream_complete(&system_prompt, &user_prompt, max_tokens)
         .await
-        .map_err(ApiError::Internal)?;
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(model = %model, workspace_id = %id, error = ?e, "LLM stream_complete failed in briefing_ask");
+            return Ok(sse_error_stream(format!("LLM request failed: {e}")));
+        }
+    };
 
-    let chunks: Vec<String> = stream.filter_map(|r| async { r.ok() }).collect().await;
+    let mut chunks: Vec<String> = Vec::new();
+    let mut stream_error: Option<String> = None;
+    {
+        use futures_util::StreamExt as _;
+        let mut stream = std::pin::pin!(stream);
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(chunk) => chunks.push(chunk),
+                Err(e) => {
+                    stream_error = Some(format!("LLM stream failed mid-generation: {e}"));
+                    break;
+                }
+            }
+        }
+    }
     let full_text = chunks.join("");
-
+    if let Some(err) = stream_error {
+        return Ok(sse_error_stream(err));
+    }
+    // Budget Tracking (platform-model.md §5): charge the workspace for the
+    // briefing Q&A as an `llm_query` budget call — persist the audit record
+    // (with prompt-template git SHA, ui-layout.md §2) and increment the
+    // workspace + tenant counters. The LlmPort does not report actual usage
+    // for stream_complete; estimate from prompt/response size the same way
+    // the other LLM endpoints do (~4 chars per token). Skip and log if the
+    // workspace cannot be resolved rather than fabricating a tenant scope.
+    let estimated_input = (user_prompt.len() + system_prompt.len()) / 4;
+    let estimated_output = full_text.len() / 4;
+    if let Some(ws) = state
+        .workspaces
+        .find_by_id(&workspace_id_obj)
+        .await
+        .ok()
+        .flatten()
+    {
+        super::budget::record_llm_budget_call(
+            &state,
+            ws.tenant_id.as_str(),
+            &id,
+            None,
+            None,
+            None,
+            "llm_query",
+            estimated_input as u64,
+            estimated_output as u64,
+            0.0,
+            &model,
+            template.sha.as_deref(),
+        )
+        .await;
+    } else {
+        tracing::warn!(
+            workspace_id = %id,
+            "briefing/ask: workspace unresolvable; budget counters not incremented"
+        );
+    }
     let mut events: Vec<Result<Event, std::convert::Infallible>> = Vec::new();
     for chunk in &chunks {
         let data = serde_json::to_string(&serde_json::json!({"type": "partial", "text": chunk}))
@@ -1308,7 +1402,8 @@ pub async fn briefing_ask(
     .unwrap_or_default();
     events.push(Ok(Event::default().event("complete").data(complete_data)));
 
-    Ok(Sse::new(stream::iter(events)).keep_alive(
+    let s = stream::iter(events);
+    Ok(Sse::new(s).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("ping"),
@@ -1366,6 +1461,22 @@ pub async fn link_node_to_spec(
     ))
 }
 
+/// Build a single-event SSE stream carrying `event: error` (ui-layout.md §2:
+/// "If the LLM connection fails entirely, `event: error` fires instead").
+fn sse_error_stream(
+    message: String,
+) -> Sse<futures_util::stream::Iter<std::vec::IntoIter<Result<Event, std::convert::Infallible>>>> {
+    let error_data =
+        serde_json::to_string(&serde_json::json!({"error": message})).unwrap_or_default();
+    let events: Vec<Result<Event, std::convert::Infallible>> =
+        vec![Ok(Event::default().event("error").data(error_data))];
+    Sse::new(stream::iter(events)).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ping"),
+    )
+}
+
 /// GET /workspaces/{id}/graph/concept/{name}
 /// Workspace-scoped concept search — filters nodes across all repos in the workspace
 /// by case-insensitive substring match on `name` or `qualified_name`.
@@ -1419,12 +1530,13 @@ pub async fn predict_graph(
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
 
-    // Per-user/repo sliding-window rate limit: 10 req/60 s.
+    // Per-user/repo sliding-window rate limit: 10 req/60 s, keyed on the
+    // auth-context user_id (same principal rule as the LLM endpoints).
     {
         let mut limiter = state.llm_rate_limiter.lock().await;
         if let Err(retry_after) = check_rate_limit(
             &mut limiter,
-            &caller.agent_id,
+            &crate::llm_rate_limit::rate_limit_principal(&caller),
             &id,
             LLM_RATE_LIMIT,
             LLM_WINDOW_SECS,
@@ -1516,7 +1628,7 @@ pub async fn predict_graph(
         crate::llm_helpers::resolve_llm_model(&state, &workspace_id, "graph-predict").await;
     let result = factory
         .for_model(&model)
-        .predict_json(&system_prompt, &user_prompt)
+        .predict_json(&system_prompt, &user_prompt, None)
         .await
         .map_err(ApiError::Internal)?;
 
@@ -2144,6 +2256,7 @@ mod tests {
             &self,
             _system_prompt: &str,
             _user_prompt: &str,
+            _max_tokens: Option<u32>,
         ) -> anyhow::Result<serde_json::Value> {
             Ok(serde_json::json!([]))
         }

@@ -11,7 +11,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use futures_util::{stream, StreamExt as _};
+use futures_util::stream;
 use gyre_common::{Id, Notification, NotificationType};
 use gyre_domain::{CostEntry, MergeRequest, MrStatus};
 use serde::{Deserialize, Serialize};
@@ -86,6 +86,23 @@ fn spec_path_slug(spec_path: &str) -> String {
         .bytes()
         .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
     format!("{}-{:04x}", slug, hash & 0xffff)
+}
+
+/// Build a single-event SSE stream carrying `event: error` (ui-layout.md §2:
+/// "If the LLM connection fails entirely, `event: error` fires instead").
+/// Mirrors the private helper in `graph.rs`.
+fn sse_error_stream(
+    message: String,
+) -> Sse<futures_util::stream::Iter<std::vec::IntoIter<Result<Event, std::convert::Infallible>>>> {
+    let error_data =
+        serde_json::to_string(&serde_json::json!({"error": message})).unwrap_or_default();
+    let events: Vec<Result<Event, std::convert::Infallible>> =
+        vec![Ok(Event::default().event("error").data(error_data))];
+    Sse::new(stream::iter(events)).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("ping"),
+    )
 }
 
 /// A single line in an LCS-based text diff between two spec versions.
@@ -307,13 +324,14 @@ pub async fn assist_spec(
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("repo {} not found", repo_id)))?;
 
-    // Per-user/workspace sliding-window rate limit (HSI §6): 10 req/60 s.
+    // Per-user/workspace sliding-window rate limit (ui-layout.md §2):
+    // 10 req/60 s, keyed on the auth-context user_id.
     {
         let workspace_id = repo.workspace_id.to_string();
         let mut limiter = state.llm_rate_limiter.lock().await;
         if let Err(retry_after) = check_rate_limit(
             &mut limiter,
-            &caller.agent_id,
+            &crate::llm_rate_limit::rate_limit_principal(&caller),
             &workspace_id,
             LLM_RATE_LIMIT,
             LLM_WINDOW_SECS,
@@ -393,38 +411,78 @@ pub async fn assist_spec(
         }
     };
 
-    // Load effective prompt; fall back to hardcoded default.
-    let template_content = state
-        .prompt_templates
-        .get_effective(&repo.workspace_id, "specs-assist")
-        .await
-        .map_err(ApiError::Internal)?
-        .map(|t| t.content)
-        .unwrap_or_else(|| crate::llm_defaults::PROMPT_SPECS_ASSIST.to_string());
-
-    let system_prompt = template_content
-        .replace("{{spec_path}}", &req.spec_path)
-        .replace("{{spec_content}}", &spec_content)
-        .replace("{{graph_context}}", &graph_context)
-        .replace("{{instruction}}", &req.instruction)
-        // Backward compat: old templates may use {{draft_content}}
-        .replace(
-            "{{draft_content}}",
-            req.draft_content.as_deref().unwrap_or(&spec_content),
-        );
+    // Prompt template (ui-layout.md §2): DB override → this repo's git tree
+    // (specs/prompts/specs-assist.md on the default branch) → hardcoded
+    // fallback. `sha` carries git provenance for the cost entry.
+    let template = crate::llm_helpers::resolve_prompt_template(
+        &state,
+        &repo.workspace_id,
+        Some(&repo.id),
+        "specs-assist",
+        crate::llm_defaults::PROMPT_SPECS_ASSIST,
+    )
+    .await;
+    // Meta-spec-set binding (ui-layout.md §2: templates are "Bound to the
+    // workspace's meta-spec-set"): the workspace's pinned personas,
+    // principles, standards, and process specs are injected as
+    // `{{meta_spec_context}}`.
+    let meta_spec_context =
+        crate::llm_helpers::workspace_meta_spec_context(&state, &repo.workspace_id, Some(&repo.id))
+            .await;
+    // Spec content and graph context travel in the system template as
+    // grounding variables; the instruction is the user prompt only
+    // (injection containment — blank its template placeholder).
+    let system_prompt = crate::llm_helpers::substitute_template(
+        &template.content,
+        &[
+            ("spec_path", req.spec_path.as_str()),
+            ("spec_content", spec_content.as_str()),
+            ("graph_context", graph_context.as_str()),
+            ("meta_spec_context", meta_spec_context.as_str()),
+            ("instruction", ""),
+        ],
+    );
     let user_prompt = format!("Instruction: {}", req.instruction);
 
     // Resolve model and call streaming LLM.
     let (model, max_tokens) =
         crate::llm_helpers::resolve_llm_model(&state, &repo.workspace_id, "specs-assist").await;
-    let llm_stream = factory
+    // LLM connection failure is an `event: error` SSE event, not an HTTP
+    // 500 (ui-layout.md §2). Mid-stream chunk failures must surface as
+    // `event: error` too — a truncated response must not masquerade as a
+    // `complete` event (the old `filter_map(|r| r.ok())` silently dropped
+    // them).
+    let llm_stream = match factory
         .for_model(&model)
         .stream_complete(&system_prompt, &user_prompt, max_tokens)
         .await
-        .map_err(ApiError::Internal)?;
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(repo_id = %repo_id, model = %model, error = ?e, "LLM stream_complete failed in assist_spec");
+            return Ok(sse_error_stream(format!("LLM request failed: {e}")));
+        }
+    };
 
-    let chunks: Vec<String> = llm_stream.filter_map(|r| async { r.ok() }).collect().await;
+    let mut chunks: Vec<String> = Vec::new();
+    let mut stream_error: Option<String> = None;
+    {
+        use futures_util::StreamExt as _;
+        let mut stream = std::pin::pin!(llm_stream);
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(chunk) => chunks.push(chunk),
+                Err(e) => {
+                    stream_error = Some(format!("LLM stream failed mid-generation: {e}"));
+                    break;
+                }
+            }
+        }
+    }
     let full_text = chunks.join("");
+    if let Some(err) = stream_error {
+        return Ok(sse_error_stream(err));
+    }
 
     // Budget tracking: charge workspace for LLM usage (ui-layout.md §3 line 158).
     let estimated_input = (user_prompt.len() + system_prompt.len()) / 4;
@@ -441,6 +499,43 @@ pub async fn assist_spec(
     );
     if let Err(e) = state.costs.record(&cost_entry).await {
         tracing::warn!("Failed to record specs/assist cost entry: {e}");
+    }
+
+    // Budget Tracking (platform-model.md §5): persist an `llm_query`
+    // BudgetCallRecord and increment the workspace + tenant counters. The
+    // LlmPort does not report actual usage for stream_complete, so the
+    // existing estimate is split into input/output tokens. Tenant scope comes
+    // from the repo's workspace; skip and log if unresolvable.
+    let tenant_id = state
+        .workspaces
+        .find_by_id(&repo.workspace_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|ws| ws.tenant_id.to_string());
+    match tenant_id {
+        Some(tenant_id) => {
+            super::budget::record_llm_budget_call(
+                &state,
+                &tenant_id,
+                repo.workspace_id.as_str(),
+                Some(repo.id.as_str()),
+                None,
+                None,
+                "llm_query",
+                estimated_input as u64,
+                (estimated_tokens - estimated_input as f64) as u64,
+                0.0,
+                &model,
+                template.sha.as_deref(),
+            )
+            .await;
+        }
+        None => tracing::warn!(
+            repo_id = %repo_id,
+            workspace_id = %repo.workspace_id,
+            "specs/assist: workspace unresolvable; budget counters not incremented"
+        ),
     }
 
     // Build SSE events: partial events stream the explanation progressively,
