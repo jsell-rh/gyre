@@ -51,20 +51,32 @@ fn is_live(a: &gyre_domain::Agent) -> bool {
     )
 }
 
-/// Soft persona validation (§3.1): warn and continue when the seeded persona
-/// meta-spec is missing or unapproved - never block the spawn path on it.
-async fn validate_persona(state: &AppState, name: &str) {
+/// Soft persona validation (§3.1): reports whether the seeded persona
+/// meta-spec is present AND approved. Callers log a warning and continue
+/// when it is not — the spawn path is never blocked on persona seeding —
+/// but the decision is made from the returned value, not discarded
+/// (check-inert-enforcement: a `validate_*` result in statement position
+/// gates nothing).
+async fn validate_persona(state: &AppState, name: &str) -> bool {
     let filter = MetaSpecFilter {
         kind: Some(MetaSpecKind::Persona),
         ..Default::default()
     };
-    if let Ok(personas) = state.meta_specs.list(&filter).await {
-        match personas.iter().find(|p| p.name == name) {
-            None => tracing::warn!(persona = name, "persona meta-spec not found"),
-            Some(p) if !matches!(p.approval_status, MetaSpecApprovalStatus::Approved) => {
-                tracing::warn!(persona = name, "persona meta-spec not approved")
+    match state.meta_specs.list(&filter).await {
+        Ok(personas) => match personas.iter().find(|p| p.name == name) {
+            None => {
+                tracing::warn!(persona = name, "persona meta-spec not found");
+                false
             }
-            _ => {}
+            Some(p) if !matches!(p.approval_status, MetaSpecApprovalStatus::Approved) => {
+                tracing::warn!(persona = name, "persona meta-spec not approved");
+                false
+            }
+            _ => true,
+        },
+        Err(e) => {
+            tracing::warn!(persona = name, "persona meta-spec lookup failed: {e}");
+            false
         }
     }
 }
@@ -111,6 +123,36 @@ async fn spawn_orchestrator(
     // workspace_id + repo_id. task_id carries the orchestrator's own id
     // (orchestrators are not task-bound but the claim is required on all
     // agent JWTs for gyre_agent_complete compatibility).
+    //
+    // §1 Token Scoping: resolve tenant (workspace → tenant) and repo name
+    // so the scope list is minted from real hierarchy context — workspace
+    // tier `workspace:{id}:read|spawn`, repo tier `repo:{name}:write|spawn`.
+    // An unresolvable workspace means the tenant scope cannot be determined —
+    // fail the spawn rather than minting a fabricated tenant identity
+    // (task-097 F3 class): the orchestrator's scope IS its identity.
+    let tenant_id = state
+        .workspaces
+        .find_by_id(workspace_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|ws| ws.tenant_id.to_string())
+        .ok_or_else(|| {
+            ApiError::Internal(anyhow::anyhow!(
+                "orchestrator spawn: workspace {workspace_id} unresolvable, \
+                 tenant scope cannot be determined"
+            ))
+        })?;
+    let repo_name = match repo_id {
+        Some(rid) => state
+            .repos
+            .find_by_id(rid)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.name),
+        None => None,
+    };
     let token = state
         .agent_signing_key
         .mint_orchestrator(
@@ -118,8 +160,10 @@ async fn spawn_orchestrator(
             auth_agent_id,
             &state.base_url,
             state.agent_jwt_ttl_secs,
+            &tenant_id,
             &workspace_id.to_string(),
             repo_id.map(|r| r.to_string()).as_deref(),
+            repo_name.as_deref(),
             &orchestrator_type.to_string(),
         )
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("orchestrator token mint: {e}")))?;
@@ -184,7 +228,15 @@ pub(crate) async fn spawn_workspace_orchestrator_core(
         .await
         .map_err(ApiError::TooManyRequests)?;
 
-    validate_persona(state, "workspace-orchestrator").await;
+    // §3.1 soft validation: log-and-continue, but the decision comes from
+    // the returned finding (never a discarded validate_* result).
+    let persona_ok = validate_persona(state, "workspace-orchestrator").await;
+    if !persona_ok {
+        tracing::warn!(
+            workspace_id = %workspace.id,
+            "continuing workspace-orchestrator spawn without an approved persona meta-spec"
+        );
+    }
 
     let name = req
         .name
@@ -280,7 +332,15 @@ pub(crate) async fn spawn_repo_orchestrator_core(
         .await
         .map_err(ApiError::TooManyRequests)?;
 
-    validate_persona(state, "repo-orchestrator").await;
+    // §3.1 soft validation: log-and-continue, but the decision comes from
+    // the returned finding (never a discarded validate_* result).
+    let persona_ok = validate_persona(state, "repo-orchestrator").await;
+    if !persona_ok {
+        tracing::warn!(
+            repo_id = %repo.id,
+            "continuing repo-orchestrator spawn without an approved persona meta-spec"
+        );
+    }
 
     let name = req
         .name
@@ -394,7 +454,16 @@ mod tests {
             claims.orchestrator_type.as_deref(),
             Some("workspace_orchestrator")
         );
-        assert_eq!(claims.scope, "agent");
+        // §1 Token Scoping: workspace orchestrator is scoped to its workspace.
+        assert_eq!(
+            claims.scope,
+            vec![
+                "workspace:ws-1:read".to_string(),
+                "workspace:ws-1:spawn".to_string()
+            ]
+        );
+        assert_eq!(claims.tenant_id, "t1");
+        assert_eq!(claims.persona.as_deref(), Some("workspace_orchestrator"));
 
         // Token registered so the auth middleware accepts it.
         let stored = state

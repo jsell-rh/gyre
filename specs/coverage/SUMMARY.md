@@ -1,6 +1,6 @@
 # Spec Coverage Summary
 
-**Last updated:** 2026-10-08
+**Last updated:** 2026-10-10
 
 | Spec | Total | n/a | Not Started | Assigned | Implemented | Verified | Coverage |
 |------|-------|-----|-------------|----------|-------------|----------|----------|
@@ -25,7 +25,7 @@
 | message-bus.md | 17 | 3 | 0 | 2 | 1 | 11 | 85% |
 | meta-spec-reconciliation.md | 18 | 7 | 0 | 7 | 4 | 0 | 36% |
 | observability.md | 9 | 0 | 0 | 3 | 3 | 3 | 66% |
-| platform-model.md | 56 | 5 | 0 | 24 | 19 | 8 | 52% |
+| platform-model.md | 56 | 5 | 0 | 23 | 20 | 8 | 54% |
 | ralph-loop.md | 27 | 27 | 0 | 0 | 0 | 0 | 0% |
 | realized-model.md | 12 | 4 | 0 | 2 | 3 | 3 | 75% |
 | repo-lifecycle.md | 20 | 2 | 0 | 3 | 11 | 4 | 83% |
@@ -44,4 +44,4 @@
 | user-management.md | 36 | 10 | 0 | 26 | 0 | 0 | 0% |
 | view-query-grammar.md | 16 | 0 | 0 | 16 | 0 | 0 | 0% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **218** | **0** | **312** | **109** | **163** | **46%** |
+| **TOTAL** | **802** | **218** | **0** | **311** | **110** | **163** | **46%** |

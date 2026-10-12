@@ -484,10 +484,21 @@ mod tests {
                 .unwrap();
         }
 
-        // Mint an agent JWT (scope=agent ≠ repo:special → ABAC will deny).
+        // Mint an agent JWT (repo scope ≠ the policy's repo:special claim →
+        // ABAC will deny).
         let jwt = state
             .agent_signing_key
-            .mint("agent-blocked", "task-1", "system", &state.base_url, 3600)
+            .mint(
+                "agent-blocked",
+                "task-1",
+                "system",
+                &state.base_url,
+                3600,
+                "t1",
+                "ws-1",
+                "repo-jj-abac",
+                "jj-abac",
+            )
             .expect("mint JWT");
 
         // Register the JWT so the auth middleware accepts it.
