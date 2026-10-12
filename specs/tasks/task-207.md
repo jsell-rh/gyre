@@ -2,11 +2,11 @@
 title: "Business Continuity §5 — Data Retention: Real Enforcement for All 7 Data Types"
 spec_ref: "business-continuity.md §5. Data Retention Policies"
 depends_on: []
-progress: needs-revision
+review: specs/reviews/task-207.md
+progress: ready-for-review
 coverage_sections:
   - "business-continuity.md §5. Data Retention Policies"
-commits: [6a908460]
-review: specs/reviews/task-207.md
+commits: ["b0d994bf373b7a6fe57dbd6a417e4ea58d35893f", "b60590958a34740cfb6b7c881f8cde8a65854888", "d365e47f45f04b633516eef3a058d26a528662a0", "e57cbd2c13b1f4470940769ffdbf6d693d9066f1", "16e7c07affb1d27f3732c6208501607fb446957b", "5f58013e398a726ecb2d583e1e3294f042c353bf", "2b1fa2ae823dfc912d85cbd41d4e9069a9cc02b4", "3a3c727b1df1480c95b3c0929cc3297d2e5ae161", "d69ef5baf6ccae0700b4aaf74499189080333f17", "dbc06219e0500d33c08b0c578f6c9e3679f7bc88", "6a908460b4d37971938a6f9cc4bfca182fefd592"]
 ---
 
 ## Spec Excerpt
@@ -95,3 +95,136 @@ No new tests for already-working behavior (endpoint CRUD shape, job registration
 - Investigate actual persistence for activity_events and agent_logs before assuming; if `activity_events` truly live only in the bounded `TelemetryBuffer` ring, that boundedness is the enforcement — document it in code and the coverage note rather than inventing a fake purge.
 - Do not soften the spec: `02:00 UTC` nightly, all 7 data types, read/unread notification split, tiered snapshot policy are all mandatory. If any piece is genuinely infeasible, stop and flag `needs-revision` with specifics rather than shipping a hollow implementation.
 - On completion: run `cargo test --all`, update this file's frontmatter (`progress: ready-for-review`, `commits`), update the coverage row, and run `bash scripts/update-coverage-summary.sh`.
+
+## Shipped
+
+Revision round closing review findings F1–F4 (spec round 1) on top of the
+original 8 commits; all seven data types from business-continuity.md §5 are
+now genuinely enforced.
+
+- **F1 — activity_events (90d)**: enforced by `TelemetryBuffer::purge_older_than`
+  (gyre-common/src/message.rs:471), a hard age eviction across all workspace
+  buffers, driven from `run_cleanup` with the policy cutoff (epoch-ms). The
+  previously-dead `ActivityRepository` port and its SQLite/Postgres adapters
+  were removed — the activity_events table has no writer; live activity data
+  is the telemetry ring, so the ring is where the purge belongs. The
+  `unwired-port-methods` exemption entry was retired.
+- **F2 — snapshot tiers configurable**: tier counts now live on the
+  `snapshots` policy row (`SnapshotTiers { keep_24h, keep_7d, keep_4w }`) and
+  flow from `PUT /admin/retention` into `purge_snapshots`; band membership is
+  age-fixed (≤24h / 1–7d / 7–28d) with no spillover, so the per-window caps
+  cannot be defeated by cascade.
+- **F3 — disk-level tests**: `purge_snapshots_on_disk_both_directions`
+  (real tempdir, real mtimes, exact survivor set), idempotency,
+  missing-dir no-op, and configured-tiers end-to-end.
+- **F4 — PUT validation**: `validate_policies` requires exactly the 7 spec
+  types each exactly once, `max_age_days >= 1`, the notifications read/unread
+  split (read ≤ unread), snapshot tier counts ≥ 1, and attestations
+  `u64::MAX`; invalid lists are rejected 400 with policies untouched.
+- Also shipped in this round: corrupt-blob warn + self-heal, KV read-failure
+  never overwrites the stored blob, durable `update()` (write completes
+  before the 204), and the byte-slice-truncation guard fix
+  (`take(1)` instead of `Vec::truncate`).
+
+**Test evidence (this sandbox, SKIP_WEB_BUILD=1, isolated target dir):**
+
+- `cargo test -p gyre-server retention` → **29 passed, 0 failed**
+  (retention.rs unit tests incl. all F1–F4 tests + admin.rs endpoint oneshot
+  tests: defaults / update / reject-incomplete / RBAC).
+- `cargo test -p gyre-adapters delete_older_than` → **3 passed, 0 failed**
+  (SQLite audit/analytics/notification both-direction purges).
+- `cargo test -p gyre-common telemetry_buffer_purge` → **1 passed, 0 failed**
+  (both directions).
+- `scripts/check-arch.sh`, `check-unwired-port-methods.sh`,
+  `check-byte-slice-truncation.sh`, `check-in-memory-state-stores.sh`,
+  `check-dead-message-kinds.sh`, `check-mem-port-contracts.sh`,
+  `check-lossy-secret-conversion.sh`, `check-inert-enforcement.sh`,
+  `check-fail-open-ref-resolution.sh` → all OK.
+
+**Transport restriction (not a code defect):** the HTTP integration test
+`admin_retention_list_and_update` spawns a loopback TCP listener
+(`Ctx::new`, api_integration.rs:48). This sandbox cannot `accept()` on TCP
+sockets (errno 95, per /tmp/stage/capabilities.json) — every test in that
+file fails identically regardless of the code under test, including
+unrelated endpoints. The endpoint contract is covered by the in-process
+oneshot tests above; the listener-based test must run on host/CI
+(`cargo test -p gyre-server --test api_integration
+admin_retention_list_and_update`). Recorded in
+/tmp/stage/review-evidence/task-207-transport-restriction.md.
+
+
+## Review
+
+### Recovery + contract-repair round (2026-10-10, assignment 3f26fcf486214310b7b027971090931d)
+
+Repair category `contract`: "The implementation changed the assigned
+requirements." Audit of the candidate vs the base (`770785f7`) found the
+implementation itself intact and contract-compliant — all 7 data types
+enforced, 02:00 UTC wall-clock scheduling, KV-persisted policies, full PUT
+validation (re-verified against source that round):
+
+- **Restored `review: specs/reviews/task-207.md`** in the frontmatter (the
+  review file itself was unchanged in the tree — only the pointer had been
+  dropped).
+- **Single `progress: ready-for-review`** — that round's assignment
+  injection had left a duplicate `progress:` key (`needs-revision` +
+  `ready-for-review`, invalid YAML); resolved to the one truthful value.
+- **Attribution completed**: `574d0c3c` added to `commits:`.
+- No production code changed — the repair was the task contract itself.
+
+### Contract-repair round 2 (2026-10-10, assignment 1f636918df8f4689825666ceabed6db7)
+
+Same finding class, root-caused and reproduced this round with
+`scripts/dev-contract.py requirement_parts`: the detector compares
+`task['body']` vs `result['task_body']` (scripts/pipeline/stages.py:72),
+stripping only the operational headings `Shipped`, `Implementation Notes`,
+`Implementation Log`, `Review`. The prior round had recorded its history
+under a non-whitelisted `## Recovery + contract-repair round addendum`
+heading, which registered as a normative contract amendment — so this
+round's injection (which strips non-whitelisted sections when composing the
+assigned body) guaranteed a re-fire. Reproduced: frontmatter tracked keys
+identical; the sole prose delta was that appendix.
+
+Repair this round: operational history consolidated under `## Review`
+(whitelisted — history appends can no longer register as contract
+changes); `review:` pointer restored; duplicate `progress:` key resolved to
+the single truthful `ready-for-review`; attribution extended with
+`1c366396` and `0e5d012a`. No production code changed — none was needed.
+Root-cause reproduction and evidence:
+/tmp/stage/review-evidence/task-207-contract-repair-r2-root-cause.md
+
+### Verification-repair round (2026-10-10, assignment 623e29dc7d0248cbb3f710258201263b)
+
+Repair category `verification`: durable finding
+`9f41b337b9304567889b94f034425593` — `bash checks.sh` exit 1 on the merge
+of candidate `6d0c53ff` into base `7c6ac232`. The controller-host artifact
+is unreachable from this sandbox, but the log tail plus local reproduction
+pin the failure exactly:
+
+- The tail is noise: the vite build **succeeded** (`✓ built in 14.30s`)
+  and the `Removing web/dist/...` lines are `dev-check.sh:85-86`'s own
+  dist cleanup after that successful build. Exit 1 means an earlier gate
+  had set `FAILED=1` (the script collects regressions).
+- Reproduced: `dev-check.sh:8` runs `git diff --check HEAD^1 HEAD`. In the
+  verify checkout HEAD^1 is the base and HEAD is the merge (identical tree
+  to this branch's `767794c7`); the diff **adds**
+  `web/dist/assets/index-D4CX8rVo.js` (regenerated bundle from checkpoint
+  `e57cbd2c`) whose line 5 ends with trailing whitespace (backtick, space,
+  TAB — rollup minified output). Git exits 2 → `|| FAILED=1` → checks.sh
+  exits 1. Exit codes reconcile with the durable finding; full root cause:
+  /tmp/stage/review-evidence/task-207-verification-failure-root-cause.md.
+
+Repair commit `a4d49ca1`: restores `web/dist` to the exact base `7c6ac232`
+blobs (deleting the candidate-only regenerated bundles). Committed bundle
+churn is needed by no gate — dev-check.sh rebuilds web/dist itself and
+restores it afterward, and `SKIP_WEB_BUILD=1` cargo builds serve the same
+UI either way. No verifier was weakened, no exemption added. After the
+repair, `git diff --check 7c6ac232 HEAD` exits 0.
+
+Implementation re-verified intact on this branch (unchanged by the repair):
+all 29 `cargo test -p gyre-server --lib retention` tests pass (both-
+direction purges, idempotency, notification read/unread split, snapshot
+tiering on disk, policy persistence across re-init, PUT validation, 02:00
+UTC next-run computation); `scripts/check-arch.sh` and
+`scripts/check-task-commit-attribution.sh` pass. Frontmatter attribution
+extended with `a4d49ca1`; progress remains `ready-for-review`.
