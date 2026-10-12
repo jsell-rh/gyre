@@ -29,4 +29,5 @@ reqwest = { workspace = true }
 tokio-test = "0.4"
 serde_json = { workspace = true }
 tempfile = "3"
+http = "1"
 serde_yaml = "0.9"
