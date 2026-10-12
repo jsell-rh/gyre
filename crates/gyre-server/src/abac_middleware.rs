@@ -465,9 +465,6 @@ impl ResourceResolver {
                 // POST /users (create) is admin-only, enforced in-handler.
                 RouteResourceMapping::api("/api/v1/users", "user", None),
                 RouteResourceMapping::api("/api/v1/users/me", "user", None),
-                RouteResourceMapping::api("/api/v1/users/me/agents", "agent", None),
-                RouteResourceMapping::api("/api/v1/users/me/tasks", "task", None),
-                RouteResourceMapping::api("/api/v1/users/me/mrs", "merge_request", None),
                 // Notification endpoints use per-handler auth (HSI §2) — ABAC-exempt.
                 RouteResourceMapping::exempt("/api/v1/users/me/notifications"),
                 RouteResourceMapping::exempt("/api/v1/notifications/:id/dismiss"),

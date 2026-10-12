@@ -7,9 +7,6 @@ vi.mock('../lib/api.js', () => ({
     me: vi.fn(),
     myNotifications: vi.fn(),
     myJudgments: vi.fn(),
-    myAgents: vi.fn(),
-    myTasks: vi.fn(),
-    myMrs: vi.fn(),
     workspaces: vi.fn(),
     updateMe: vi.fn(),
     markNotificationRead: vi.fn(),
@@ -60,9 +57,6 @@ beforeEach(() => {
   api.me.mockResolvedValue({ ...ME });
   api.myNotifications.mockResolvedValue([...NOTIFICATIONS]);
   api.myJudgments.mockResolvedValue([...JUDGMENTS]);
-  api.myAgents.mockResolvedValue([]);
-  api.myTasks.mockResolvedValue([]);
-  api.myMrs.mockResolvedValue([]);
   api.workspaces.mockResolvedValue([...WORKSPACES]);
   api.updateMe.mockResolvedValue({ ...ME, display_name: 'Updated Name' });
   api.markNotificationRead.mockResolvedValue({});
@@ -96,17 +90,16 @@ describe('UserProfile', () => {
     expect(adminEls.length).toBeGreaterThan(0);
   });
 
-  it('shows all eight tabs', async () => {
-    const { findByText, findAllByText } = r();
+  it('exposes exactly the six permitted tabs — HSI §12 forbids My Agents/Tasks/MRs', async () => {
+    const { container, findAllByText } = r();
     await findAllByText('James Sell');
-    expect(await findByText('Profile')).toBeTruthy();
-    expect(await findByText('Agents')).toBeTruthy();
-    expect(await findByText('Tasks')).toBeTruthy();
-    expect(await findByText('MRs')).toBeTruthy();
-    expect(await findByText('Workspaces')).toBeTruthy();
-    expect(await findByText('Judgment Ledger')).toBeTruthy();
-    expect(await findByText('Notification Preferences')).toBeTruthy();
-    expect(await findByText('Notifications')).toBeTruthy();
+    const ids = [...container.querySelectorAll('[role="tab"]')].map((el) => el.dataset.id);
+    expect(ids).toEqual(['info', 'tokens', 'memberships', 'ledger', 'notif-prefs', 'notifications']);
+    // HSI §12 "What the Profile Is NOT": tasks are agent work units, MRs are
+    // judged not authored, agents are machinery — none is a per-user surface.
+    for (const forbidden of ['my-agents', 'my-tasks', 'my-mrs']) {
+      expect(ids).not.toContain(forbidden);
+    }
   });
 
   it('shows profile info fields in Profile tab', async () => {

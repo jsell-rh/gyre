@@ -172,9 +172,6 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `DELETE` | `/api/v1/auth/key-binding/:id` | Revoke a specific key binding; `:id` is the hex-encoded Ed25519 public key (64 hex chars); only the binding owner or a tenant admin can revoke; returns 204 on success, 404 if not found, 403 if not authorized; emits `key_binding.revoked` audit event (TASK-047, authorization-provenance §2.3, §7.7) |
 | `DELETE` | `/api/v1/auth/key-bindings` | Revoke all active key bindings for the authenticated user; useful for logout flow; returns 204; emits `key_binding.revoked` for each revoked binding (TASK-047, authorization-provenance §2.3, §7.7) |
 | `GET/PUT` | `/api/v1/users/me` | Current user profile (username, display_name, avatar_url, timezone, locale, global_role, `UserPreferences`); PUT updates fields (M22.8) |
-| `GET` | `/api/v1/users/me/agents` | Agents spawned by the current user (M22.8) |
-| `GET` | `/api/v1/users/me/tasks` | Tasks assigned to the current user (M22.8) |
-| `GET` | `/api/v1/users/me/mrs` | MRs authored by the current user (M22.8) |
 | `GET/PUT` | `/api/v1/users/me/notification-preferences` | Get / update notification delivery preferences — per-type channels (email, in-app, webhook), quiet hours, digest frequency (HSI §12) |
 | `POST/GET` | `/api/v1/users/me/tokens` | Create / list personal API tokens — `{name, scopes[], expires_at?}`; response includes `token` value only on creation (store it — not retrievable later) (HSI §12) |
 | `DELETE` | `/api/v1/users/me/tokens/{id}` | Revoke an API token (HSI §12) |
