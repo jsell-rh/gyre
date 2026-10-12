@@ -637,6 +637,38 @@ impl GitOpsPort for Git2OpsAdapter {
         .await?
     }
 
+    async fn read_file_at_commit(
+        &self,
+        repo_path: &str,
+        sha: &str,
+        file_path: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        let repo_path = repo_path.to_string();
+        let sha = sha.to_string();
+        let file_path = file_path.to_string();
+        tokio::task::spawn_blocking(move || {
+            let repo = Repository::open(&repo_path).context("failed to open repository")?;
+
+            // A missing/invalid SHA is an error, not Ok(None): the caller
+            // pinned a spec at a SHA that does not resolve — that must not
+            // silently look like "file absent" (fail-open ref resolution).
+            let oid = git2::Oid::from_str(&sha).context("invalid SHA")?;
+            let commit = repo
+                .find_commit(oid)
+                .with_context(|| format!("commit '{sha}' not found"))?;
+            let tree = commit.tree()?;
+
+            match tree.get_path(std::path::Path::new(&file_path)) {
+                Ok(entry) => {
+                    let blob = repo.find_blob(entry.id())?;
+                    Ok(Some(blob.content().to_vec()))
+                }
+                Err(_) => Ok(None),
+            }
+        })
+        .await?
+    }
+
     async fn revert_commit(
         &self,
         repo_path: &str,
@@ -1580,5 +1612,87 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content, None);
+    }
+
+    #[tokio::test]
+    async fn test_read_file_at_commit_returns_pinned_content() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bare.git");
+        let adapter = Git2OpsAdapter::new();
+        adapter.init_bare(path.to_str().unwrap()).await.unwrap();
+        adapter
+            .create_initial_commit(path.to_str().unwrap(), "main")
+            .await
+            .unwrap();
+
+        let sha1 = adapter
+            .write_file(
+                path.to_str().unwrap(),
+                "main",
+                "specs/system/vision.md",
+                b"# Vision v1",
+                "Add vision spec v1",
+            )
+            .await
+            .unwrap();
+        // Advance the branch so the tip no longer matches the pinned SHA.
+        adapter
+            .write_file(
+                path.to_str().unwrap(),
+                "main",
+                "specs/system/vision.md",
+                b"# Vision v2",
+                "Add vision spec v2",
+            )
+            .await
+            .unwrap();
+
+        // Reading at the pinned SHA must return v1, not the branch-tip v2.
+        let content = adapter
+            .read_file_at_commit(path.to_str().unwrap(), &sha1, "specs/system/vision.md")
+            .await
+            .unwrap();
+        assert_eq!(content, Some(b"# Vision v1".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn test_read_file_at_commit_returns_none_for_missing_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bare.git");
+        let adapter = Git2OpsAdapter::new();
+        adapter.init_bare(path.to_str().unwrap()).await.unwrap();
+        let sha = adapter
+            .create_initial_commit(path.to_str().unwrap(), "main")
+            .await
+            .unwrap();
+
+        let content = adapter
+            .read_file_at_commit(path.to_str().unwrap(), &sha, "specs/no-such-file.md")
+            .await
+            .unwrap();
+        assert_eq!(content, None);
+    }
+
+    #[tokio::test]
+    async fn test_read_file_at_commit_errors_on_unknown_sha() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bare.git");
+        let adapter = Git2OpsAdapter::new();
+        adapter.init_bare(path.to_str().unwrap()).await.unwrap();
+        adapter
+            .create_initial_commit(path.to_str().unwrap(), "main")
+            .await
+            .unwrap();
+
+        // An unresolvable pinned SHA is an error, not Ok(None): "cannot
+        // determine state" must not silently look like "state is fine".
+        let result = adapter
+            .read_file_at_commit(
+                path.to_str().unwrap(),
+                "0000000000000000000000000000000000000001",
+                "specs/system/vision.md",
+            )
+            .await;
+        assert!(result.is_err());
     }
 }

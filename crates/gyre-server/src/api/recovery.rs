@@ -371,6 +371,7 @@ pub async fn set_post_merge_gates(
             command: Some(dto.command.clone()),
             required_approvals: None,
             persona: None,
+            validation_type: None,
             required: dto.required,
             gate_phase: GatePhase::PostMerge,
             timeout_secs: dto.timeout_secs,
