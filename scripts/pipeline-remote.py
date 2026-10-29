@@ -77,105 +77,28 @@ def capabilities():
 
 
 def main():
+    if sys.argv[1:] == ['capabilities']:
+        run('cc', '-fuse-ld=lld', '-Wl,--version', '-x', 'c', '/dev/null', '-o', '/tmp/gyre-linker-probe')
+        value = capabilities()
+        (STAGE / 'capabilities.json').write_text(json.dumps(value))
+        print(json.dumps(value))
+        return 0
+    if len(sys.argv) != 3 or sys.argv[1] != 'finalize':
+        raise ValueError('usage: pipeline-remote.py finalize 0|1')
+    success = sys.argv[2] == '1'
     job = json.loads((STAGE / 'job.json').read_text())
     role, task, branch = job['stage'], job['task'], job['branch']
-    os.environ.update(HOME='/tmp', CARGO_BUILD_JOBS='2',
-                      CARGO_TARGET_DIR='/tmp/gyre-target', CARGO_HOME='/tmp/cargo',
-                      RUSTUP_HOME='/usr/local/rustup',
-                      PLAYWRIGHT_BROWSERS_PATH='/usr/local/share/gyre-playwright',
-                      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER='cc',
-                      RUSTFLAGS='-C link-arg=-fuse-ld=lld')
-    # Fail before inference when the image cannot link Rust build scripts.
-    run('cc', '-fuse-ld=lld', '-Wl,--version', '-x', 'c', '/dev/null', '-o', '/tmp/gyre-linker-probe')
-    binaries = STAGE / 'bin'
-    binaries.mkdir(exist_ok=True)
-    for name in ('cargo', 'npm', 'npx'):
-        actual = shutil.which(name)
-        if not actual:
-            raise RuntimeError(f'worker image has no {name}')
-        os.environ['GYRE_DEV_REAL_' + name.upper()] = actual
-        shim = binaries / name
-        if not shim.exists():
-            shim.symlink_to('../dev-build-command.sh')
-    os.environ['PATH'] = str(binaries) + ':' + os.environ['PATH']
-    config = Path('/tmp/.omp/agent')
-    config.mkdir(parents=True, exist_ok=True)
-    for name in ('models.yml', 'config.yml'):
-        (config / name).write_bytes((STAGE / name).read_bytes())
-    run('git', 'config', '--global', 'user.name', 'gyre-pipeline')
-    run('git', 'config', '--global', 'user.email', 'jsell-rh@users.noreply.github.com')
-    run('git', 'config', '--global', '--add', 'safe.directory', '*')
-    run('git', 'config', '--global', 'http.version', 'HTTP/1.1')
-    run('git', 'config', '--global', 'credential.helper',
-        '!f(){ echo username=x-access-token; echo password=$GITHUB_TOKEN; }; f')
-    checkout = Path('/tmp/gyre')
-    if not (checkout / '.git').exists():
-        for attempt in range(5):
-            try:
-                result = run('git', 'clone', '--quiet', '--filter=blob:none',
-                             job['repo_url'], str(checkout), check=False, timeout=180)
-                succeeded = result.returncode == 0
-            except subprocess.TimeoutExpired:
-                succeeded = False
-            if succeeded:
-                break
-            # Clone failures do not allocate another sandbox.
-            shutil.rmtree(checkout, ignore_errors=True)
-            if attempt == 4:
-                raise RuntimeError('clone failed after retries in the same sandbox')
-            time.sleep(min(60, 5 * 2 ** attempt))
+    checkout = Path(job['checkout'])
     os.chdir(checkout)
-    seed = job['input'].get('candidate') or job['input']['base']
-    checkout_seed(branch, seed)
-    observed = git('ls-remote', '--heads', 'origin', branch).split()
-    if observed:
-        raise RuntimeError('claim branch already exists before execution')
-    (STAGE / 'push-expected').write_text('')
-    if role == 'implement':
-        # Reconcile the clean seed before installing desired task metadata.
-        # Merge the final checkpoint tree. Replaying its historical partial
-        # commits can resurrect old failures and conflict with later repairs.
-        if run('git', 'merge-base', '--is-ancestor', job['input']['base'], 'HEAD', check=False).returncode:
-            run('git', 'merge', '--no-edit', job['input']['base'], check=False)
+    # Identity and credential helpers come from trusted executor configuration.
+    run('git', 'config', 'user.name', 'gyre-pipeline')
+    run('git', 'config', 'user.email', 'jsell-rh@users.noreply.github.com')
+    run('git', 'config', 'core.hooksPath', '/dev/null')
+    run('git', 'config', 'credential.helper', '!f(){ echo username=x-access-token; echo password=${GITHUB_TOKEN:-$GH_TOKEN}; }; f')
+    run('git', 'remote', 'set-url', 'origin', job['repo_url'])
     path = checkout / 'specs/tasks' / (task + '.md')
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(job['body'])
-    # A checkpoint may contain a newer task contract than main. Keep it when
-    # resuming implementation or reviewing it; discovery supplies its body.
     before = STAGE / 'review-before.json'
-    if role in ('review', 'triage'):
-        run('python3', str(STAGE / 'dev-review-guard.py'), 'snapshot', str(before), '--task', task)
-    prompt = (STAGE / 'prompt.md').read_text()
-    measured = capabilities()
-    (STAGE / 'capabilities.json').write_text(json.dumps(measured))
-    prompt += ('\n\nMeasured sandbox capabilities: ' + json.dumps(measured) +
-               '\nRead /tmp/stage/capabilities.json before expensive server or browser probes. '
-               'An unsupported listener probe is an infrastructure limitation; record the exact HTTP checks for host verification and required GitHub CI. Do not perform a cold server build when this runtime cannot execute its transport probe.\n')
-    for kind, fields in (
-            ('tool_start', {'text': 'Measure sandbox capabilities'}),
-            ('tool_output', {'text': json.dumps(measured)}),
-            ('tool_end', {'error': False})):
-        print('GYRE_AGENT_EVENT ' + json.dumps({'at': int(time.time() * 1000), 'role': role,
-              'type': kind, 'id': 'runtime-capabilities', 'name': 'runtime capabilities', **fields}), flush=True)
-    agent = subprocess.Popen(['omp', '-p', '--model', job['model'], '--no-session',
-                              '--mode=json', '--approval-mode', 'yolo'],
-                             stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-    stream = subprocess.Popen(['node', str(STAGE / 'dev-stream.mjs'), role,
-                               str(STAGE / 'response.txt')], stdin=agent.stdout)
-    agent.stdout.close()
-    try:
-        agent.stdin.write(prompt.encode())
-        agent.stdin.close()
-        agent.wait(timeout=job.get('timeout', 1800))
-    except subprocess.TimeoutExpired:
-        agent.send_signal(2)
-        try:
-            agent.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            agent.kill()
-            agent.wait()
-    stream.wait(timeout=30)
-    valid = agent.returncode == 0 and stream.returncode == 0
+    valid = success
     # Returning to the same immutable candidate via detached HEAD is harmless.
     # Reattach without changing the tree or approving edits.
     reattach_candidate(branch, checkout)
@@ -190,7 +113,7 @@ def main():
         run('python3', str(STAGE / 'dev-attribution.py'), task, '--commit')
     head = git('rev-parse', 'HEAD')
     outcome = {'stage': role, 'head': head, 'base': job['input']['base'], 'tree': git('rev-parse', 'HEAD^{tree}'),
-               'agent_exit': agent.returncode, 'stream_exit': stream.returncode,
+               'agent_exit': 0 if success else 1, 'stream_exit': 0 if success else 1,
                'valid': valid, 'task_body': path.read_text()}
     if role == 'review':
         verdict = STAGE / 'verdict.json'
@@ -214,7 +137,7 @@ def main():
         if attempt == 4:
             raise RuntimeError('checkpoint publication unavailable; capture recovery before cleanup')
         time.sleep(min(60, 5 * 2 ** attempt))
-    record_outcome(outcome | {'published': True})
+    record_outcome(outcome | {'published': True, 'branch': branch})
     (STAGE / 'push-expected').write_text(head)
     return 0
 

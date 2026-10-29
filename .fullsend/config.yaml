@@ -1,0 +1,20 @@
+version: "1"
+runtime: pi
+agents:
+  - name: triage
+    source: harness/triage.yaml
+  - name: implement
+    source: harness/implement.yaml
+  - name: review
+    source: harness/review.yaml
+inference:
+  gateway:
+    url: https://api.enmaas.devshift.net
+    auth: api-key
+    models:
+      rits/zai-org/glm-5-3:
+        api: openai-completions
+        contextWindow: 262144
+        maxTokens: 65536
+        compat:
+          supportsDeveloperRole: false
