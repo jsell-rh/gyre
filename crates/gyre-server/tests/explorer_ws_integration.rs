@@ -444,9 +444,7 @@ async fn explorer_ws_session_limit_is_per_server_instance() {
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     sink1
-        .send(Message::Text(
-            json!({"type": "list_views"}).to_string().into(),
-        ))
+        .send(Message::Text(json!({"type": "list_views"}).to_string()))
         .await
         .unwrap();
     let msg = WsCtx::read_msg_skip_warnings(&mut stream1).await;
