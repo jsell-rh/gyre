@@ -122,7 +122,7 @@ def prepare(execution, task, prompt):
         if path.is_relative_to(execution.store.directory) and path.is_file():
             (bundle / 'findings.log').write_bytes(path.read_bytes()[-65536:])
     total = 0
-    sources = [(Path(p), Path('ci-artifacts') / str(i)) for i, p in enumerate(repair.get('artifact_directories', []))]
+    sources = [(Path(p), Path('ci-artifacts') / str(i)) for i, p in enumerate(repair.get('artifact_directories') or [])]
     for source, relative in sources:
         source = source.resolve()
         if not source.is_relative_to(execution.store.directory) or not source.is_dir():
@@ -138,7 +138,7 @@ def prepare(execution, task, prompt):
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(path, target)
             total += path.stat().st_size
-    retained = list(dict.fromkeys(task['data'].get('retained_artifacts', []) + repair.get('stash_artifacts', [])))
+    retained = list(dict.fromkeys((task['data'].get('retained_artifacts') or []) + (repair.get('stash_artifacts') or [])))
     for i, value in enumerate(retained):
         path = Path(value).resolve()
         if not path.is_relative_to(execution.store.directory) or path.stat().st_size > 16 * 1024 * 1024:

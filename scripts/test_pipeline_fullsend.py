@@ -70,6 +70,14 @@ class FullsendContracts(FullsendFixture):
         self.assertEqual(harness['sandbox_timeout_seconds'], 600)
         self.assertTrue((shim / 'openshell').is_file())
 
+    def test_saved_task_with_null_optional_artifacts_can_resume(self):
+        task = self.store.task('task-9999')
+        task['data'] = {'retained_artifacts': None,
+                        'repair': {'stash_artifacts': None, 'artifact_directories': None}}
+        cfg, repo, _ = prepare(self.execution, task, 'Resume the saved assignment.')
+        self.assertTrue((repo / '.git').is_dir())
+        self.assertTrue((cfg / 'harness/implement.yaml').is_file())
+
     def test_actual_checkpoint_publishes_fixture_source_to_bare_remote(self):
         _, repo, _ = self.prepare()
         (repo / 'code.py').write_text('def add(a, b):\n    return a + b\n')
