@@ -5,7 +5,9 @@ relevant development docs. The task contract and durable findings are the input;
 do not reproduce old diagnostic ledgers in the task or prompt.
 
 Resolve an active merge or rebase first. Repair concrete review, verification, or CI
-findings. Preserve useful source checkpoints. Run focused tests that distinguish
+findings. Read `/tmp/stage/findings.log` when present for retained verification
+and CI evidence; host artifact paths in findings are not sandbox paths.
+Preserve useful source checkpoints. Run focused tests that distinguish
 correct behavior from a real defect. Save expensive probe commands, source SHAs,
 exit codes, and output under /tmp/stage/review-evidence so they can be retained.
 Do not weaken verifiers, add exemptions, inflate tests, or claim fake completion.
