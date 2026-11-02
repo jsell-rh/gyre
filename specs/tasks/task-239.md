@@ -3,7 +3,7 @@ title: "Repair verified failure on main b1cdb0ddd80e"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
 progress: ready-for-review
-commits: ["483bf8ad72a38505d47f5a8cb47bae619a4648da"]
+commits: ["3e62cdbb5aa0881246ceb3170461e02eda7bea6b", "483bf8ad72a38505d47f5a8cb47bae619a4648da"]
 ---
 
 ## Required behavior
@@ -62,104 +62,59 @@ GYRE_BASELINE_FAILURE_JSON {"base": "b1cdb0ddd80ecd37f9de7c29559562f8a86dccf3", 
 
 ## Shipped
 
-**Reproduction at assignment HEAD** (tree = base `b1cdb0ddd` plus this
-untracked task file; `git diff b1cdb0dd -- crates/ web/ scripts/` empty):
-`bash scripts/check-task-commit-attribution.sh` exited 1 listing
-`b1cdb0dd task-170 feat(task-170): View Specification Grammar — TypeScript
-types and server-side validation` — a product-surface commit (touches
-`crates/gyre-common/src/view_spec.rs`,
-`crates/gyre-server/src/api/explorer_views.rs`, `web/src/lib/**`,
-`web/src/__tests__/**`) missing from `specs/tasks/task-170.md`'s
-`commits:` frontmatter. Root cause is the squash-drift class recorded by
-tasks 213/219/222/224/229: the squashed landing commit cannot contain its
-own SHA, so the task's recorded list stayed one entry short and the
-landing surface was invisible to review scoping (task-095 R3-F4 flaw
-class). Evidence: `task-239-reproduction-before-repair.txt`.
+### Verification failure repaired (round 4)
 
-**Repair**: appended the full SHA
-`b1cdb0ddd80ecd37f9de7c29559562f8a86dccf3` to `specs/tasks/task-170.md`'s
-`commits:` frontmatter, joining the 11 SHAs already recorded from the
-task's branch (kept, not collapsed — same repair shape as task-229's
-`task-196` fix and task-224's `task-068` fix that landed on main). This is
-the check's own documented remedy. No exemptions added;
-`scripts/task-commit-attribution-exemptions.txt` untouched at its frozen
-baseline (24 lines / 3 entries);
-no check, skip, or gate weakened; no Rust/JS source changed.
+The verified upstream failure (checks.sh exit 1 at candidate
+3a878cf3) reproduces as `scripts/check-byte-slice-truncation.sh`
+exit 1: the F4-class `&raw_preview[..500]` slice in
+`crates/gyre-server/src/explorer_ws.rs` (invalid view-query preview
+truncation) was exempted at line 2882, but this branch's product
+commit 483bf8ad added lines above the site and shifted it to line
+2921, so the line-pinned exemption no longer matched. Re-pinning the
+line number would create a new exemption entry, which the
+exemption-growth gate forbids; per the exemption file's own policy
+("when you fix one, DELETE its exemption line") the hazard was fixed
+for real instead, in commit 3e62cdbb:
 
-**Probe after repair**: exit 0 — `OK: every task-labeled product-surface
-commit is recorded in its task's commits: frontmatter (or exempted legacy
-drift).` Evidence: `task-239-attribution-after.txt`.
+- `explorer_ws.rs` truncates the preview through
+  `crate::gate_executor::truncate_bytes` - UTF-8 char-boundary safe.
+  The site previously panicked whenever byte 500 of the
+  pretty-printed query JSON fell inside a multibyte character.
+- `truncate_bytes` is now `pub(crate)`: the same helper, already
+  unit-tested for exactly that panic case, is reused rather than
+  duplicated.
+- The `explorer_ws.rs:2882` exemption entry is deleted. The list
+  shrinks; no new entries; no check, skip, or gate weakened.
 
-**Mutation check (test-the-repair)**: with the appended SHA removed via
-sed, the gate re-fails with the identical violation (exit 1); restoring
-it re-passes (exit 0). Evidence: `task-239-mutation-check.txt`. The pass
-is attributable to the recorded SHA, not gate drift.
+Evidence (`/tmp/stage/review-evidence/`): gate exit 1 at assignment
+HEAD before the fix (flags `explorer_ws.rs:2921`, identical violation
+to the verified failure); exit 0 after; mutation check re-fails with
+the fix reverted and re-passes restored; explorer WS integration
+suite 8/8 (including `explorer_ws_save_and_load_view` and
+`explorer_ws_session_limit_is_per_server_instance`); `truncate_bytes`
+unit tests 3/3; rustfmt and clippy clean on the changed lines (the
+sandbox clippy 1.99 `never_loop` error in `gyre-domain` is a plain
+invocation artifact - under the gate's exact `-W clippy::all`
+invocation it is a pre-existing warning on lines unchanged vs base,
+which the changed-lines gate ignores).
 
-**Attribution for this task (round 1)**: at the round-1 head the
-branch vs `origin/main` carried no product-surface commits (only
-`specs/tasks/task-170.md` and this task file), so `commits: []` was
-correct then. The branch has since gained one task-labeled
-product-surface commit (see round 3 below); it is recorded in this
-task's `commits:` frontmatter so review scoping covers it.
+### Prior rounds (carried in the branch)
 
-**Note on the baseline log's `task-214.md:114: new blank line at EOF`
-warning**: that lint fired in the pipeline's baseline checkout state
-(`tools/checks.sh` is pipeline-external; the file flagged there does not
-exist at this HEAD), it is a warning not a FAIL, and the only gate FAIL in
-the baseline log was the attribution check repaired above. Files touched
-this round end with a single trailing newline.
+- Baseline attribution failure repaired: full SHA
+  `b1cdb0ddd80ecd37f9de7c29559562f8a86dccf3` appended to
+  `specs/tasks/task-170.md`'s `commits:` frontmatter (squash-drift
+  class; the check's own documented remedy). Mutation-checked in
+  round 1.
+- Product fix 483bf8ad (durable finding 68f83ea6): the explorer
+  WebSocket per-user concurrent session limit moved from a
+  process-global static to an `ExplorerSessionRegistry` owned by
+  `AppState`, stopping parallel test servers (and embedders) from
+  evicting each other's sessions. Recorded in this task's `commits:`
+  frontmatter, as is 3e62cdbb.
+- Round 3 restored this task file's contract (frontmatter, Required
+  behavior, Baseline failure) to the round-1 pipeline checkpoint
+  after round 2 appended normative sections; those contract sections
+  remain byte-identical.
 
-Independent review, full deterministic gates, and GitHub checks on the
-exact PR head remain required before merge. All evidence is under
-`/tmp/stage/review-evidence/` (paths relative to that directory).
-
-### Round 3: contract restoration (repair finding 5bf0aeca)
-
-**Finding repaired**: the round-2 assignment changed this task's
-assigned requirements — it appended a "## Round 2 baseline failure
-(verified)" section and a second Shipped narrative to this task file
-(commit `8d446378`), redefining what task-239 requires. Normative
-changes to a task contract require separate spec review; they are not
-an implementer's call.
-
-**Restoration**: this task file's contract — frontmatter (title,
-spec_ref, depends_on), `## Required behavior`, and `## Baseline
-failure` — is byte-identical to the round-1 pipeline checkpoint
-(`7cd9dce6`, the last contract-valid state). The round-2 normative
-additions are removed. No requirement, baseline, or scope text was
-rewritten by this round.
-
-**Product commit kept and recorded, not hidden**: the branch history
-still carries `483bf8ad` ("feat(task-239): scope explorer WS session
-limit to the server instance"), the round-2 production fix for the
-verified `cargo test --all` failure (durable finding `68f83ea6`:
-`explorer_ws_save_and_load_view` panicked at
-`crates/gyre-server/tests/explorer_ws_integration.rs:233`). Rewriting
-branch history to drop it would destroy source checkpoints and make
-the labeled surface invisible — exactly the task-095 R3-F4 flaw class
-this gate exists to prevent. It is therefore recorded in this task's
-`commits:` frontmatter (the check's own documented remedy, applied via
-`python3 /tmp/stage/dev-attribution.py task-239`), so the verifier's
-review scope includes it. In short: the fix moves the explorer
-WebSocket per-user concurrent session limit from a process-global
-static to an `ExplorerSessionRegistry` owned by `AppState` — the limit
-is a property of a server instance, not of the OS process — which
-stops parallel test servers (and embedders) from evicting each other's
-sessions; single-instance production behavior is unchanged.
-
-**Evidence this round** (`/tmp/stage/review-evidence/`):
-- `task-239-contract-repro-pre.txt` — attribution gate at the restored
-  contract with `commits: []`: exit 1, flagging `483bf8ad` — proof the
-  SHA must be recorded rather than the restoration silently dropping
-  it from scope.
-- `task-239-explorer-ws-focused.txt` — focused probe at this round's
-  tree: `SKIP_WEB_BUILD=1 cargo test -p gyre-server --test
-  explorer_ws_integration` — 8/8 passed (including the originally
-  failing `explorer_ws_save_and_load_view` and the regression test
-  `explorer_ws_session_limit_is_per_server_instance`), exit 0.
-- `task-239-attribution-post.txt` — attribution gate after recording
-  the SHA: exit 0.
-
-No check, skip, exemption, or gate was weakened; no Rust/JS source
-was changed this round (the product fix under review is the
-already-checkpointed `483bf8ad`, re-verified above at the merged head).
+Independent review, full deterministic gates, and GitHub checks on
+the exact PR head remain required before merge.
