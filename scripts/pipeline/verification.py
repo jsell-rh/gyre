@@ -2,6 +2,7 @@
 import base64
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -10,6 +11,14 @@ from .execution import ROOT, Retry, Wait, gateway
 
 COMMANDS = [['bash', '/tmp/stage/checks.sh'], ['cargo', 'test', '--all', '--quiet'],
             ['npm', 'test', '--', '--no-file-parallelism']]
+
+
+def decode_poll(output):
+    frames = [line.removeprefix('GYRE_VERIFY_POLL ') for line in output.splitlines()
+              if line.startswith('GYRE_VERIFY_POLL ')]
+    if len(frames) != 1:
+        raise ValueError('expected one framed verification response')
+    return json.loads(frames[0])
 
 
 def validate_receipt(receipt, identity):
@@ -33,6 +42,13 @@ def retire(execution, name):
     observed = next((item for item in gateway.inventory() if item['name'] == name), None)
     if observed and observed['labels'].get('gyre.dev/pipeline') != execution.store.setting('owner'):
         raise RuntimeError('refusing to delete a foreign verification sandbox')
+    if observed and observed['phase'].lower() == 'ready' and not (execution.directory / 'remote-verification.json').exists():
+        try:
+            raw = execution.remote(name, 'tail', '-c', '131072', '/tmp/stage/step.log', timeout=10, check=False)
+            if raw.returncode == 0:
+                (execution.directory / 'failure-tail.log').write_text(raw.stdout)
+        except Exception as exc:
+            execution.store.event('verification_tail_unavailable', {'resource': name, 'error': type(exc).__name__}, execution.claim['task'])
     execution.store.resource_state(name, 'deleting')
     result = execution.os('sandbox', 'delete', name, timeout=60, check=False)
     if result.returncode:
@@ -43,6 +59,7 @@ def retire(execution, name):
 
 def run(execution, path, identity):
     store = execution.store
+    os.environ.setdefault('RUST_LOG', 'error')
     execution.login()
     name = 'gyre-v-' + hashlib.sha256((execution.claim['id'] + ':' + str(execution.claim['token'])).encode()).hexdigest()[:12]
     if not store.reserve(name, execution.claim['id'], execution.claim['token'], 'sandbox', store.setting('slots', 8),
@@ -90,7 +107,7 @@ def run(execution, path, identity):
             execution.current()
             try:
                 result = execution.remote(name, 'python3', '/tmp/stage/pipeline-verify.py', 'poll', '--offset', str(offset), timeout=30)
-                value = json.loads(result.stdout)
+                value = decode_poll(result.stdout)
                 data = base64.b64decode(value['log'], validate=True)
                 if value['offset'] != offset + len(data):
                     raise ValueError('verification log offset mismatch')
@@ -114,7 +131,9 @@ def run(execution, path, identity):
                 if failures >= 6:
                     raise Retry('remote verification transport unavailable') from exc
             except (ValueError, KeyError, TypeError) as exc:
-                raise Retry('invalid remote verification protocol response') from exc
+                failures += 1
+                if failures >= 6:
+                    raise Retry('invalid remote verification protocol response') from exc
             execution.cancelled.wait(min(30, 2 ** failures) if failures else 2)
         raise Retry('remote verification exceeded its bounded deadline')
     finally:

@@ -79,7 +79,7 @@ def main():
         stat = Path(f"/proc/{identity['pid']}/stat")
         fields = stat.read_text().rsplit(')', 1)[1].split() if stat.exists() else []
         alive = bool(fields and fields[0] != 'Z' and fields[19] == identity['start'])
-        print(json.dumps({'offset': offset, 'log': base64.b64encode(data).decode(), 'receipt': value, 'alive': alive}))
+        print('GYRE_VERIFY_POLL ' + json.dumps({'offset': offset, 'log': base64.b64encode(data).decode(), 'receipt': value, 'alive': alive}))
         return
     job = json.loads((STAGE / 'verify-job.json').read_text())
     identity = {key: job[key] for key in ('candidate', 'base', 'head', 'tree')}

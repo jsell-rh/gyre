@@ -12,7 +12,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parent))
 from pipeline.execution import Execution, Retry, Wait
 from pipeline.store import Store
-from pipeline.verification import COMMANDS, run, retire, validate_receipt
+from pipeline.verification import COMMANDS, decode_poll, run, retire, validate_receipt
 
 spec = importlib.util.spec_from_file_location('remote_verify', Path(__file__).with_name('pipeline-verify.py'))
 remote = importlib.util.module_from_spec(spec)
@@ -20,6 +20,14 @@ spec.loader.exec_module(remote)
 
 
 class VerificationTests(unittest.TestCase):
+    def test_cli_diagnostics_do_not_corrupt_framed_poll(self):
+        value = {'offset': 0, 'log': '', 'receipt': None, 'alive': True}
+        frame = 'GYRE_VERIFY_POLL ' + json.dumps(value)
+        self.assertEqual(decode_poll('2026-11-02 WARN tls verification disabled\n' + frame + '\n'), value)
+        for invalid in ('diagnostics only', frame + '\n' + frame):
+            with self.assertRaises(ValueError):
+                decode_poll(invalid)
+
     def test_receipt_cannot_skip_checks_or_change_source(self):
         identity = dict(candidate='a', base='b', head='c', tree='d')
         valid = identity | {'passed': True, 'checks': [{'command': c, 'exit_code': 0} for c in COMMANDS]}
