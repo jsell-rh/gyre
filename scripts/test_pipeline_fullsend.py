@@ -114,6 +114,26 @@ class FullsendContracts(FullsendFixture):
             self.assertEqual(archive.getnames(), ['review-evidence/probe.txt'])
             self.assertEqual(archive.extractfile('review-evidence/probe.txt').read(), b'actual probe output')
 
+    def test_contract_repair_keeps_source_and_reports_the_protected_text_difference(self):
+        from pipeline.stages import implement
+        _, repo, _ = self.prepare()
+        (repo / 'code.py').write_text('def add(a, b):\n    return a + b\n')
+        self.call('git', 'add', '.', cwd=repo)
+        self.call('git', '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'fixture source repair', cwd=repo)
+        head = self.call('git', 'rev-parse', 'HEAD', cwd=repo).strip()
+        self.execution.log.write_text('transport noise must not replace contract evidence')
+        changed = self.body.replace('progress: not-started', 'progress: ready-for-review') + '\n## Round 2 diagnostics\n\nObserved transport output.\n'
+        receipt = {'head': head, 'base': self.base, 'branch': self.execution.branch,
+                   'valid': True, 'agent_exit': 0, 'task_body': changed}
+        with patch.object(self.execution, 'cloud_step', return_value=receipt), patch('pipeline.stages.checkout', return_value=repo):
+            result, updates, _ = implement(self.execution, self.store.task('task-9999'))
+        self.assertEqual(result['head'], head)
+        self.assertEqual(result['task_body'], self.body)
+        self.assertEqual(updates['repair']['category'], 'contract')
+        self.assertIn('+## Round 2 diagnostics', updates['repair']['log_tail'])
+        self.assertNotIn('transport noise', updates['repair']['log_tail'])
+        self.assertIn('exactly ## Shipped', updates['repair']['detail'])
+
     def test_modified_runner_is_rejected_before_execution(self):
         path = self.root / 'modified-fullsend';path.write_text('untrusted executable')
         with patch.dict(os.environ, {'GYRE_FULLSEND': str(path)}):
