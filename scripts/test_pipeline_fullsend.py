@@ -114,6 +114,20 @@ class FullsendContracts(FullsendFixture):
             self.assertEqual(archive.getnames(), ['review-evidence/probe.txt'])
             self.assertEqual(archive.extractfile('review-evidence/probe.txt').read(), b'actual probe output')
 
+    def test_restoring_a_contract_does_not_require_an_unrelated_production_edit(self):
+        from pipeline.stages import implement
+        task = self.store.task('task-9999')
+        task['data'] = {'candidate': self.base, 'candidate_base': self.base,
+                        'repair': {'category': 'contract', 'source': self.base}}
+        receipt = {'head': self.base, 'base': self.base, 'branch': 'fixture',
+                   'valid': True, 'agent_exit': 0,
+                   'task_body': self.body.replace('not-started', 'ready-for-review')}
+        with patch.object(self.execution, 'cloud_step', return_value=receipt), patch('pipeline.stages.checkout', side_effect=AssertionError('contract restoration must not demand source churn')):
+            _, updates, _ = implement(self.execution, task)
+        self.assertIsNone(updates['repair'])
+        self.assertEqual(updates['candidate'], self.base)
+        self.assertEqual(updates['review_context']['category'], 'contract')
+
     def test_contract_repair_keeps_source_and_reports_the_protected_text_difference(self):
         from pipeline.stages import implement
         _, repo, _ = self.prepare()

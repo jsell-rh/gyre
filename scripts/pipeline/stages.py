@@ -87,7 +87,9 @@ def implement(execution, task):
         # Retain its source for repair while keeping the assigned contract.
         result['task_body'] = task['body']
     repair = task['data'].get('repair') or {}
-    requires_fix = (repair.get('category') in ('review', 'verification', 'ci', 'contract') and
+    # Contract equality is enforced above. A document-only restoration must
+    # not require unrelated production edits merely to clear its finding.
+    requires_fix = (repair.get('category') in ('review', 'verification', 'ci') and
                     execution.claim['input']['base'] == task['data'].get('candidate_base'))
     if not contract_changed and (not complete or requires_fix):
         path = checkout(execution, result['head'])
