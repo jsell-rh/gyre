@@ -2917,8 +2917,14 @@ async fn run_explorer_agent(
                     // Stream a warning with the raw JSON so the user can see what was attempted.
                     let raw_preview = serde_json::to_string_pretty(&query_json)
                         .unwrap_or_else(|_| query_json.to_string());
+                    // Truncate on a UTF-8 char boundary - a fixed byte index
+                    // would panic when byte 500 falls inside a multibyte
+                    // character (task-095 F4 flaw class).
                     let truncated = if raw_preview.len() > 500 {
-                        format!("{}...", &raw_preview[..500])
+                        format!(
+                            "{}...",
+                            crate::gate_executor::truncate_bytes(&raw_preview, 500)
+                        )
                     } else {
                         raw_preview
                     };
