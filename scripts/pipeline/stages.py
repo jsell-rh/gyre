@@ -5,8 +5,6 @@ import hashlib
 import os
 from pathlib import Path
 import re
-import shlex
-import subprocess
 import time
 
 from .catalog import contract, helper, metadata, safe_metadata
@@ -175,105 +173,63 @@ def checkout(execution, source):
 
 
 def verify(execution, task):
+    from .verification import run as remote_verify
     inp = execution.claim['input']
-    host_resource = 'host-' + execution.claim['id'] + '-' + str(execution.claim['token'])
-    if not execution.store.reserve(host_resource, execution.claim['id'], execution.claim['token'], 'host', 1):
-        raise Retry('host verification capacity is occupied')
-    try:
-        execution.phase('Verifying')
-        path = checkout(execution, inp['base'])
-        execution.command('git', 'fetch', '--quiet', 'origin', inp['candidate'], cwd=path, timeout=180)
-        execution.command('git', 'config', 'user.name', 'gyre-pipeline', cwd=path)
-        execution.command('git', 'config', 'user.email', 'jsell-rh@users.noreply.github.com', cwd=path)
-        execution.command('git', 'checkout', '--detach', inp['candidate'], cwd=path)
-        task_file = path / 'specs/tasks' / (task['name'] + '.md')
-        body, count = re.subn(r'(?m)^progress:[^\n]*$', 'progress: complete', task_file.read_text(), count=1)
-        if count != 1:
-            raise ValueError('candidate task has no unique progress field')
-        task_file.write_text(body)
-        execution.command('git', 'add', '--', str(task_file), cwd=path)
-        changed = execution.command('git', 'diff', '--cached', '--quiet', cwd=path, check=False)
-        if changed.returncode:
-            execution.command('git', '-c', 'core.hooksPath=/dev/null', 'commit', '-m',
-                              f"process({task['name']}): record independent approval", cwd=path)
-        approved_candidate = execution.command('git', 'rev-parse', 'HEAD', cwd=path).stdout.strip()
-        execution.command('git', 'checkout', '--detach', inp['base'], cwd=path)
-        merge = execution.command('git', '-c', 'core.hooksPath=/dev/null', 'merge', '--no-ff',
-                                  '-m', f"verify({task['name']}): reconcile candidate with main",
-                                  approved_candidate, cwd=path, check=False)
-        if merge.returncode:
-            finding = {'id': execution.claim['id'], 'category': 'rebase', 'source': inp['candidate'],
-                       'base': inp['base'], 'details': merge.stdout + merge.stderr}
-            return {'passed': False}, {'repair': finding}, [finding]
-        head = execution.command('git', 'rev-parse', 'HEAD', cwd=path).stdout.strip()
-        tree = execution.command('git', 'rev-parse', 'HEAD^{tree}', cwd=path).stdout.strip()
-        tools = execution.directory / 'tools'
-        tools.mkdir(exist_ok=True)
-        for name in ('dev-static-gate.py', 'check-rustfmt-diff.py', 'check-clippy-diff.py'):
-            (tools / name).write_bytes((ROOT / 'scripts' / name).read_bytes())
-        # Reuse the mechanically maintained checks, with explicit absolute
-        # locations. Both upstream and candidate verifiers are executed.
-        gate = (ROOT / 'scripts/dev-check.sh').read_text().replace('/tmp/gyre', shlex.quote(str(path))).replace('/tmp/stage', shlex.quote(str(tools)))
-        gate_path = tools / 'checks.sh'
-        gate_path.write_text(gate)
-        env = {**os.environ, 'SKIP_WEB_BUILD': '1', 'CARGO_BUILD_JOBS': '2',
-               'CARGO_TARGET_DIR': str(execution.store.directory / 'host-target')}
-        commands = [(['python3', str(ROOT / 'scripts/dev-cargo-clean.py')], path, 180),
-                    (['bash', str(gate_path)], path, 3600),
-                    (['cargo', 'test', '--all', '--quiet'], path, 3600),
-                    (['npm', 'test', '--', '--no-file-parallelism'], path / 'web', 1800)]
-        records = []
-        with execution.log.open('ab', buffering=0) as log:
-            for index, (command, cwd, timeout) in enumerate(commands):
-                execution.current()
-                log.write(('\n$ ' + ' '.join(command) + '\n').encode())
-                result_path = execution.directory / f'host-step-{index}.exit'
-                execution.store.resource_state(host_resource, 'present', {'identity': str(result_path) + '.process.json'})
-                child = subprocess.Popen(['bash', str(ROOT / 'scripts/dev-process.sh'), str(result_path), *command],
-                                         cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT,
-                                         start_new_session=True)
-                try:
-                    code = child.wait(timeout=timeout)
-                except subprocess.TimeoutExpired as exc:
-                    import signal
-                    os.killpg(child.pid, signal.SIGKILL)
-                    child.wait()
-                    raise Retry('verification timed out; inspect infrastructure') from exc
-                finally:
-                    if child.poll() is None:
-                        import signal
-                        os.killpg(child.pid, signal.SIGKILL)
-                        child.wait(timeout=30)
-                records.append({'command': command, 'exit_code': code})
-                if code:
-                    if code in (75, 77, 79, 124, 137):
-                        raise Retry('verification infrastructure unavailable')
-                    if code == 81:
-                        observation = static_baseline_observation(execution.log, inp['base'])
-                        prerequisite = baseline_repair(execution, observation)
-                        finding = observation | {'id': execution.claim['id'], 'category': 'baseline',
-                                                 'source': inp['candidate'], 'prerequisite': prerequisite,
-                                                 'log_tail': execution.log.read_text(errors='replace')[-16000:]}
-                        return {'passed': False, 'checks': records}, {
-                            'repair': finding, 'dependencies': sorted(set(task['data']['dependencies']) | {prerequisite})}, [finding]
-                    finding = {'id': execution.claim['id'], 'category': 'verification',
-                               'source': inp['candidate'], 'base': inp['base'],
-                               'command': command, 'exit_code': code,
-                               'artifact': str(execution.log),
-                               'log_tail': execution.log.read_text(errors='replace')[-16000:]}
-                    return {'passed': False, 'checks': records}, {'repair': finding}, [finding]
-        dirty = execution.command('git', 'status', '--porcelain', cwd=path).stdout.splitlines()
-        if any('web/dist/' not in line for line in dirty):
-            raise RuntimeError('verification changed the source tree')
-        branch = f"pipeline/verified/{execution.claim['id']}-{execution.claim['token']}"
-        execution.command('git', 'push', 'origin', head + ':refs/heads/' + branch, cwd=path, timeout=180)
-        receipt = {'candidate': inp['candidate'], 'base': inp['base'], 'head': head,
-                   'tree': tree, 'branch': branch, 'checks': records, 'passed': True}
-        (execution.directory / 'verified.json').write_text(json.dumps(receipt))
-        return receipt, {'verified': receipt}, []
-    finally:
-        execution.store.resource_state(host_resource, 'absent')
-
+    execution.phase('Verifying')
+    path = checkout(execution, inp['base'])
+    execution.command('git', 'fetch', '--quiet', 'origin', inp['candidate'], cwd=path, timeout=180)
+    execution.command('git', 'config', 'user.name', 'gyre-pipeline', cwd=path)
+    execution.command('git', 'config', 'user.email', 'jsell-rh@users.noreply.github.com', cwd=path)
+    execution.command('git', 'checkout', '--detach', inp['candidate'], cwd=path)
+    task_file = path / 'specs/tasks' / (task['name'] + '.md')
+    body, count = re.subn(r'(?m)^progress:[^\n]*$', 'progress: complete', task_file.read_text(), count=1)
+    if count != 1:
+        raise ValueError('candidate task has no unique progress field')
+    task_file.write_text(body)
+    execution.command('git', 'add', '--', str(task_file), cwd=path)
+    changed = execution.command('git', 'diff', '--cached', '--quiet', cwd=path, check=False)
+    if changed.returncode:
+        execution.command('git', '-c', 'core.hooksPath=/dev/null', 'commit', '-m',
+                          f"process({task['name']}): record independent approval", cwd=path)
+    approved_candidate = execution.command('git', 'rev-parse', 'HEAD', cwd=path).stdout.strip()
+    execution.command('git', 'checkout', '--detach', inp['base'], cwd=path)
+    merge = execution.command('git', '-c', 'core.hooksPath=/dev/null', 'merge', '--no-ff',
+                              '-m', f"verify({task['name']}): reconcile candidate with main",
+                              approved_candidate, cwd=path, check=False)
+    if merge.returncode:
+        finding = {'id': execution.claim['id'], 'category': 'rebase', 'source': inp['candidate'],
+                   'base': inp['base'], 'details': merge.stdout + merge.stderr}
+        return {'passed': False}, {'repair': finding}, [finding]
+    head = execution.command('git', 'rev-parse', 'HEAD', cwd=path).stdout.strip()
+    tree = execution.command('git', 'rev-parse', 'HEAD^{tree}', cwd=path).stdout.strip()
+    remote = remote_verify(execution, path, {'candidate': inp['candidate'], 'base': inp['base'], 'head': head, 'tree': tree})
+    records = remote['checks']
+    if not remote['passed']:
+        failed = next(record for record in records if record['exit_code'])
+        code = failed['exit_code']
+        if code in (75, 77, 79, 124, 137) or code < 0:
+            raise Retry('verification infrastructure unavailable')
+        if code == 81:
+            observation = static_baseline_observation(execution.log, inp['base'])
+            prerequisite = baseline_repair(execution, observation)
+            finding = observation | {'id': execution.claim['id'], 'category': 'baseline',
+                                     'source': inp['candidate'], 'prerequisite': prerequisite,
+                                     'log_tail': execution.log.read_text(errors='replace')[-16000:]}
+            return {'passed': False, 'checks': records}, {
+                'repair': finding, 'dependencies': sorted(set(task['data']['dependencies']) | {prerequisite})}, [finding]
+        finding = {'id': execution.claim['id'], 'category': 'verification',
+                   'source': inp['candidate'], 'base': inp['base'],
+                   'command': failed['command'], 'exit_code': code,
+                   'artifact': str(execution.log),
+                   'log_tail': execution.log.read_text(errors='replace')[-16000:]}
+        return {'passed': False, 'checks': records}, {'repair': finding}, [finding]
+    branch = f"pipeline/verified/{execution.claim['id']}-{execution.claim['token']}"
+    execution.command('git', 'push', 'origin', head + ':refs/heads/' + branch, cwd=path, timeout=180)
+    receipt = {'candidate': inp['candidate'], 'base': inp['base'], 'head': head,
+               'tree': tree, 'branch': branch, 'checks': records, 'passed': True,
+               'engine': 'gateway', 'sandbox': remote['sandbox']}
+    (execution.directory / 'verified.json').write_text(json.dumps(receipt))
+    return receipt, {'verified': receipt}, []
 
 def publish(execution, task):
     verified = execution.claim['input']['verified']

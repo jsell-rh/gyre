@@ -6,7 +6,7 @@ do not reproduce old diagnostic ledgers in the task or prompt.
 
 Resolve an active merge or rebase first. Repair concrete review, verification, or CI
 findings. Read `/tmp/stage/findings.log` when present for retained verification
-and CI evidence; host artifact paths in findings are not sandbox paths.
+and CI evidence; controller artifact paths in findings are not sandbox paths.
 Preserve useful source checkpoints. Run focused tests that distinguish
 correct behavior from a real defect. Save expensive probe commands, source SHAs,
 exit codes, and output under /tmp/stage/review-evidence so they can be retained.
@@ -26,7 +26,7 @@ Install frontend dependencies with `npm ci` before running repository test tools
 use the locked versions rather than letting `npx` download an unrelated release.
 Do not repeat full gates inside this assignment. If a focused probe needs a
 listener, first check whether this sandbox permits it. Record any actual transport
-restriction for host verification; do not infer a code defect from that restriction.
+restriction for remote verification; do not infer a code defect from that restriction.
 
 When implementation is ready, set the task's progress to `ready-for-review` and
 write a concise `## Shipped` explanation of actual behavior and test evidence.

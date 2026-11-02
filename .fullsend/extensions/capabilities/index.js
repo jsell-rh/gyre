@@ -10,7 +10,7 @@ export default function (pi) {
     }).trim();
     return { systemPrompt: event.systemPrompt + '\nMeasured Gyre runtime capabilities: ' + measured +
       '\nRead /tmp/stage/capabilities.json before expensive server/browser probes. ' +
-      'An unsupported listener is infrastructure evidence for host verification, not a code defect. ' +
+      'An unsupported listener is infrastructure evidence for remote verification, not a code defect. ' +
       'For build commands use /tmp/stage/bin/cargo, /tmp/stage/bin/npm, and /tmp/stage/bin/npx; these serialize builds within this sandbox.' };
   });
 }
