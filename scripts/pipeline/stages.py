@@ -236,9 +236,7 @@ def verify(execution, task):
                     if code in (75, 77, 79, 124, 137):
                         raise Retry('verification infrastructure unavailable')
                     if code == 81:
-                        observation = {'status': 'baseline_failed', 'base': inp['base'],
-                                       'environment': 'host-' + hashlib.sha256(json.dumps(command).encode()).hexdigest(),
-                                       'baseline_log': str(execution.log)}
+                        observation = static_baseline_observation(execution.log, inp['base'])
                         prerequisite = baseline_repair(execution, observation)
                         finding = observation | {'id': execution.claim['id'], 'category': 'baseline',
                                                  'source': inp['candidate'], 'prerequisite': prerequisite,
@@ -382,6 +380,28 @@ def merge_method(execution, repository):
         if policy[field]:
             return method
     raise Wait('repository policy currently disables every merge method')
+
+
+def static_baseline_observation(log, base):
+    """Use the gate's reproduced failure identity, never an attempt's path."""
+    marker = 'GYRE_BASELINE_FAILURE_JSON '
+    records = [line[len(marker):] for line in Path(log).read_text().splitlines()
+               if line.startswith(marker)]
+    if not records:
+        raise Retry('baseline gate exited 81 without reproduced failure evidence')
+    try:
+        value = json.loads(records[-1])
+    except ValueError as exc:
+        raise Retry('baseline gate returned malformed failure evidence') from exc
+    if (not isinstance(value, dict) or value.get('base') != base or
+            not isinstance(value.get('environment'), str) or
+            not re.fullmatch(r'[0-9a-f]{64}', value['environment']) or
+            not isinstance(value.get('probe'), list) or not value['probe'] or
+            not all(isinstance(arg, str) and arg for arg in value['probe'])):
+        raise Retry('baseline gate evidence does not identify the verified base and probe')
+    return {'status': 'baseline_failed', 'base': base,
+            'environment': 'host-' + value['environment'],
+            'probe': value['probe'], 'baseline_log': str(log)}
 
 
 def baseline_repair(execution, observation):
