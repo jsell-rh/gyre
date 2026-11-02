@@ -61,6 +61,20 @@ class VerificationTests(unittest.TestCase):
                               receipt, {}, os.environ.copy())
             self.assertEqual(json.loads(receipt.read_text())['checks'][0]['exit_code'], 124)
 
+    def test_transient_infrastructure_retries_in_same_workspace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / 'transient.py'
+            script.write_text('from pathlib import Path\nimport sys\np=Path("attempt")\n'
+                              'n=int(p.read_text()) if p.exists() else 0\np.write_text(str(n+1))\n'
+                              'sys.exit(77 if n==0 else 0)\n')
+            receipt = root / 'result.json'
+            remote.run_checks([([sys.executable, str(script)], directory, 10)], receipt, {}, os.environ.copy(), retry_delays=(0,))
+            value = json.loads(receipt.read_text())
+            self.assertTrue(value['passed'])
+            self.assertEqual(value['checks'][0]['attempts'], 2)
+            self.assertEqual((root / 'attempt').read_text(), '2')
+
     def test_verification_competes_for_same_slots_as_agents(self):
         with tempfile.TemporaryDirectory() as directory:
             s = Store(directory)

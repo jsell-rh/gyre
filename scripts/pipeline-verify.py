@@ -19,20 +19,25 @@ def atomic(path, value):
     temporary.replace(path)
 
 
-def run_checks(commands, receipt, identity, env):
+def run_checks(commands, receipt, identity, env, retry_delays=(5, 10, 20, 40)):
     records = []
     try:
         for command, cwd, timeout in commands:
-            print('\n$ ' + ' '.join(command), flush=True)
-            child = subprocess.Popen(command, cwd=cwd, env=env, start_new_session=True)
-            try:
-                code = child.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                os.killpg(child.pid, signal.SIGKILL)
-                child.wait()
-                code = 124
-            code = 137 if code == -signal.SIGKILL else code
-            records.append({'command': command, 'exit_code': code})
+            for attempt in range(len(retry_delays) + 1):
+                print('\n$ ' + ' '.join(command), flush=True)
+                child = subprocess.Popen(command, cwd=cwd, env=env, start_new_session=True)
+                try:
+                    code = child.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    os.killpg(child.pid, signal.SIGKILL)
+                    child.wait()
+                    code = 124
+                code = 137 if code == -signal.SIGKILL else code
+                if code not in (75, 77) or attempt == len(retry_delays):
+                    break
+                print(f'Infrastructure retry in {retry_delays[attempt]}s; retaining sandbox and build cache.', flush=True)
+                time.sleep(retry_delays[attempt])
+            records.append({'command': command, 'exit_code': code, 'attempts': attempt + 1})
             if code:
                 break
         atomic(receipt, identity | {'checks': records, 'passed': bool(records) and all(r['exit_code'] == 0 for r in records)})
