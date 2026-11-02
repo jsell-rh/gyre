@@ -28,6 +28,8 @@ restriction for host verification; do not infer a code defect from that restrict
 
 When implementation is ready, set the task's progress to `ready-for-review` and
 write a concise `## Shipped` explanation of actual behavior and test evidence.
+Keep that heading exact and use `###` for any subheadings. Replace older shipped
+notes rather than appending diagnostic ledgers or new top-level sections.
 An independent reviewer and deterministic gates decide approval. If unfinished,
 leave truthful progress and specific remaining work. The executor checkpoints
 and publishes the source when this single assignment ends.

@@ -1,5 +1,6 @@
 """Independent stage handlers. Outcomes become the next stage's discoveries."""
 import json
+import difflib
 import hashlib
 import os
 from pathlib import Path
@@ -68,17 +69,27 @@ def implement(execution, task):
     # sent to review as though the agent completed its assignment.
     progress = safe_metadata(result['task_body'])['progress']
     complete = result['valid'] and progress in ('ready-for-review', 'complete')
+    contract_delta = ''
     try:
-        contract_changed = contract.requirement_parts(task['body']) != contract.requirement_parts(result['task_body'])
+        assigned = contract.requirement_parts(task['body'])
+        observed = contract.requirement_parts(result['task_body'])
+        contract_changed = assigned != observed
+        if contract_changed:
+            contract_delta = ''.join(difflib.unified_diff(
+                ('\n'.join(assigned)).splitlines(True), ('\n'.join(observed)).splitlines(True),
+                fromfile='assigned contract', tofile='checkpoint contract'))[:6000]
     except ValueError:
         contract_changed = True
+        contract_delta = 'The checkpoint task document could not be parsed.'
     if contract_changed:
         complete = False
         # An implementer cannot approve its own weaker desired requirements.
         # Retain its source for repair while keeping the assigned contract.
         result['task_body'] = task['body']
     repair = task['data'].get('repair') or {}
-    requires_fix = (repair.get('category') in ('review', 'verification', 'ci', 'contract') and
+    # Contract equality is enforced above. A document-only restoration must
+    # not require unrelated production edits merely to clear its finding.
+    requires_fix = (repair.get('category') in ('review', 'verification', 'ci') and
                     execution.claim['input']['base'] == task['data'].get('candidate_base'))
     if not contract_changed and (not complete or requires_fix):
         path = checkout(execution, result['head'])
@@ -100,7 +111,9 @@ def implement(execution, task):
                                                 'detail': 'Continue from this saved source checkpoint. The previous assignment did not complete; do not repeat broad repository exploration or full integration gates.',
                                                 'log_tail': execution.log.read_text(errors='replace')[-12000:]}}
     if contract_changed:
-        updates['repair'].update(category='contract', detail='The implementation changed the assigned requirements. Restore the original task contract and implement it; normative changes require separate spec review.')
+        updates['repair'].update(category='contract',
+            detail='The protected task text changed. The executor restores the assigned task document in the next checkout; preserve the existing production fix. Keep all progress notes under exactly ## Shipped, using ### for round subheadings. Do not rename that heading or add diagnostic top-level sections. Normative changes require separate spec review.',
+            log_tail=contract_delta)
     return result, updates, []
 
 
