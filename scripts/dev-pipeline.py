@@ -70,8 +70,8 @@ def discover_stage(store, stage, base):
 
 
 def run_one(store, stage, task=None):
-    limit = store.setting('limits', {}).get(stage, 1 if stage == 'verify' else max(1, store.setting('slots', 8)))
-    if stage in ('implement', 'review', 'triage') and (store.setting('slots', 8) == 0 or store.setting('admission_paused', False)):
+    limit = store.setting('limits', {}).get(stage, max(1, store.setting('slots', 8)))
+    if stage in ('implement', 'review', 'triage', 'verify') and (store.setting('slots', 8) == 0 or store.setting('admission_paused', False)):
         return False
     claim = store.claim(stage, f'{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}',
                         concurrency=limit, task=task, eligible=lambda work: eligible(store, work))
@@ -204,11 +204,11 @@ def serve(store, interval, only_task=None):
                 ready = store.db.execute(query, (time.time(),)).fetchall()
                 for row in ready:
                     stage = row['stage']
-                    if stage in ('triage', 'implement', 'review') and store.setting('admission_paused', False):
+                    if stage in ('triage', 'implement', 'review', 'verify') and store.setting('admission_paused', False):
                         continue
                     if allowed is not None and row['task'] not in allowed:
                         continue
-                    limit = store.setting('limits', {}).get(stage, 1 if stage == 'verify' else max(1, store.setting('slots', 8)))
+                    limit = store.setting('limits', {}).get(stage, max(1, store.setting('slots', 8)))
                     live = sum(getattr(child, 'stage', None) == stage for child in children)
                     for _ in range(max(0, min(row['n'], limit - live))):
                         command = [sys.executable, str(Path(__file__).resolve()), '--state', str(store.directory), 'run', stage]

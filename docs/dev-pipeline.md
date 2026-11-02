@@ -56,7 +56,7 @@ stops an orphaned host runner using its boot ID, PID, and process start time.
 
 The controller prepares a self-contained checkout on the exact assignment branch.
 A host validator checkpoints and publishes actual source before deletion;
-source guards, exact-candidate independent review, host verification, CI repair,
+source guards, exact-candidate independent review, remote verification, CI repair,
 and protected merge observation remain controller responsibilities. Raw fullsend
 logs/transcripts are retained and Pi events feed the existing cockpit stream.
 The large trusted input checkout is removed after execution, keeping receipts
@@ -99,8 +99,8 @@ python3 scripts/dev-pipeline.py retry task-123
 `discover STAGE` queues eligible work; `run STAGE` claims one queued item;
 `tick STAGE` does both. Concurrent callers share the same database and atomic
 claims. `serve --task task-123` restricts dispatch to that task and its transitive
-prerequisites. The global slot budget covers all model stages together; the host
-verification and upstream merge budgets each default to one. Stage limits can
+prerequisites. The global slot budget covers all model stages together; verification uses the same shared sandbox budget; the upstream merge budget
+defaults to one. Stage limits can
 be set in the private state's `limits` setting.
 
 Private state defaults to `.gyre-pipeline/`; override with `--state /absolute/path`
@@ -215,3 +215,46 @@ docker push ghcr.io/jsell-rh/gyre-worker:fullsend-0.50.0
 Pin the resulting digest in `toolchain.json` and verify anonymous manifest and
 layer access. A new GHCR package defaults to private: a successful authenticated
 push does not establish that the gateway can pull it.
+
+## Remote verification and Fullsend hooks
+
+Implementation and review use Fullsend/Pi. Verification is a model-free gateway
+job using the same pinned worker image and shared sandbox reservations. The local
+controller reconciles Git metadata and uploads a prerequisite Git bundle; Cargo,
+source guards, npm builds, and tests execute only in the disposable verifier.
+Every verifier gets an isolated build target, so cross-checkout host cache
+invalidation is unnecessary. There is no host build fallback. Per-stage `limits`
+can bound verification concurrency independently without changing desired slots.
+
+The verifier checks the exact assigned head and tree, runs unchanged upstream
+and candidate guards, all-target Clippy, the web build, all Rust tests, and frontend
+tests. GitHub's required checks (including browser E2E) still gate merging. A
+complete source-bound receipt is mandatory; transport loss, missing receipts,
+and timeouts retry as infrastructure. Concrete check failures become durable
+implementation findings. Git retries reuse the allocation. Logs stream to the
+cockpit and remain locally; compute is immediately requested for deletion, with
+unconfirmed deletion charged until authoritative absence. Slots zero drains
+verification too. SQLite, gateway authentication, Git publication, and GitHub
+observation remain in the lightweight local control plane.
+
+In pinned Fullsend 0.50.0 (`internal/cli/run.go`), `pre_script` runs on the runner
+before sandbox creation and supports a structured skip decision. `post_script`
+runs on the runner **after sandbox cleanup**, and can be skipped on failed
+validation or failed agent execution. These are useful for discovery/admission
+checks and reporting downloaded results, respectively. They cannot replace
+pre-deletion source capture or unconditional cleanup/reconciliation. Gyre already
+uses Fullsend's `validation_loop.script` for successful source checkpoint
+collection; its gateway boundary also captures incomplete checkpoints on failed
+runs. Keeping those responsibilities separate preserves failed work and fenced
+claims. Hook-based publication would also mix PR/merge responsibilities back
+into model execution, so publication remains its independent stage.
+
+Run a model-free full-gate proof against a committed candidate:
+
+```bash
+python3 scripts/prove-remote-verification.py --candidate HEAD
+```
+
+This creates isolated proof state, uses one gateway sandbox, runs real gates,
+and cleans its temporary verified branch. It does not mark a product task
+delivered, publish a PR, or alter production slots.
