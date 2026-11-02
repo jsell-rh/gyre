@@ -443,7 +443,7 @@ def merge_observation(execution, url):
 def cleanup(execution, task):
     resource = execution.claim['input']['resource']
     record = execution.store.db.execute('SELECT * FROM resources WHERE name=?', (resource,)).fetchone()
-    if record['kind'] == 'host':
+    if record['kind'] in ('host', 'runner'):
         identity = json.loads(record['data']).get('identity')
         if identity and Path(identity).exists():
             value = json.loads(Path(identity).read_text())
@@ -470,6 +470,16 @@ def cleanup(execution, task):
         execution.store.resource_state(resource, 'absent')
         return {'merge_observed': observation}, {}, []
     execution.login()
+    if record['kind'] == 'provider':
+        # A paginated list cannot establish this provider's absence.
+        observed = execution.os('provider', 'get', resource, timeout=30, check=False)
+        if observed.returncode == 0:
+            execution.os('provider', 'delete', resource, timeout=60)
+            observed = execution.os('provider', 'get', resource, timeout=30, check=False)
+        if observed.returncode == 0 or 'provider not found' not in (observed.stderr + observed.stdout).lower():
+            raise Retry('run-scoped provider deletion not yet confirmed')
+        execution.store.resource_state(resource, 'absent')
+        return {'deleted_provider': resource}, {}, []
     inventory = gateway.inventory()
     item = next((item for item in inventory if item['name'] == resource), None)
     if item and item['labels'].get('gyre.dev/pipeline') != execution.store.setting('owner'):
@@ -500,7 +510,7 @@ if p.exists():
             raw = execution.remote(resource, 'tail', '-c', '1048576', '/tmp/stage/step.log', timeout=30, check=False)
             (old_directory / 'orphan.log').write_text(raw.stdout)
             try:
-                execution.command('python3', str(ROOT / 'scripts/dev-recover.py'), resource,
+                execution.command('env', 'GYRE_DEV_RECOVERY_REPO=' + json.loads(owned['data']).get('repo', '/tmp/gyre'), 'python3', str(ROOT / 'scripts/dev-recover.py'), resource,
                                   str(old_directory / 'recovery.patch'), timeout=180, check=False)
             except Exception as exc:
                 execution.store.event('orphan_capture_unavailable', {'resource': resource, 'error': str(exc)}, task['name'])

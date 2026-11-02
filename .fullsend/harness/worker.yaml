@@ -1,0 +1,9 @@
+# Per-assignment identity, input files and timeout are supplied by the controller.
+role: coder
+policy: policies/worker.yaml
+model: gateway/rits/zai-org/glm-5-3
+providers: [github]
+plugins: [extensions/capabilities]
+validation_loop:
+  script: scripts/validate-assignment.py
+  max_iterations: 1

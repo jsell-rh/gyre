@@ -1,0 +1,10 @@
+{
+  "version": "0.50.0",
+  "commit": "5163a55332d09571fa9c33d78a66155eb70fc6ea",
+  "linux_amd64_archive_sha256": "57f6f01bc7375195f97b775057ed818e7adbec9304663126198a963dc21c93b3",
+  "linux_arm64_archive_sha256": "f53ddb7fb9e03755636e73a4573f7df104b79c8921f63bc5fed1868e21d2657e",
+  "base_image": "ghcr.io/fullsend-ai/fullsend-sandbox@sha256:16c312057410c980ca4f9741364d2336bf43ac9e2c97de58dd24e78348f77dd5",
+  "linux_amd64_binary_sha256": "6d3c05a7bfc5494afcfa455d77a143b2f2fc15e329530433331f4846ffa78d5c",
+  "linux_arm64_binary_sha256": "cf1d4f02250dba815c504216c5e9624ac7abecdd9af2f13a81c5f4312d17dc34",
+  "worker_image": "ghcr.io/jsell-rh/gyre-worker@sha256:8c91b080f66dca3ac5fd65e63c43d02986affe64ab431618402940882e0daa66"
+}
