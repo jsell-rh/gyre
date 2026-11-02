@@ -60,7 +60,7 @@ GYRE_BASELINE_FAILURE_JSON {"base": "b1cdb0ddd80ecd37f9de7c29559562f8a86dccf3", 
 
 ```
 
-## Shipped
+## Shipped (round 1: commit-attribution gate repair)
 
 **Reproduction at assignment HEAD** (tree = base `b1cdb0ddd` plus this
 untracked task file; `git diff b1cdb0dd -- crates/ web/ scripts/` empty):
@@ -110,3 +110,84 @@ this round end with a single trailing newline.
 Independent review, full deterministic gates, and GitHub checks on the
 exact PR head remain required before merge. All evidence is under
 `/tmp/stage/review-evidence/` (paths relative to that directory).
+
+## Round 2 baseline failure (verified)
+
+```text
+
+$ cargo test --all --quiet            # on candidate 7cd9dce69b9765420fcd2ea7826d4b7fed091cc1
+...
+running 7 tests
+... 3/7
+explorer_ws_save_and_load_view --- FAILED
+
+---- explorer_ws_save_and_load_view stdout ----
+
+thread 'explorer_ws_save_and_load_view' (2954388) panicked at crates/gyre-server/tests/explorer_ws_integration.rs:233:5:
+Should receive view_query on load
+
+failures:
+    explorer_ws_save_and_load_view
+
+test result: FAILED. 6 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+error: test failed, to rerun pass `-p gyre-server --test explorer_ws_integration`
+```
+
+Attempt artifact: `68f83ea6262f4a07b7ae9a1901827150` (exit 101).
+
+## Shipped (round 2: explorer WS session-limit scoping)
+
+**Root cause (real production defect, not a flaky test to paper over):**
+the explorer WebSocket per-user concurrent session limit (default 3,
+oldest-first eviction) was tracked in a PROCESS-GLOBAL static
+(`ACTIVE_SESSIONS` + `SESSION_ID_COUNTER` in `explorer_ws.rs`) keyed by
+`tenant_id:agent_id`. The limit is a property of a server instance, not
+of the OS process: every connection routed through a different
+`AppState` in the same process competed for one shared cap. All seven
+tests in `explorer_ws_integration.rs` authenticate with the same global
+dev token (principal `"default"`:`"system"`) and each runs its own
+`build_state()` server in one test process, so once a 4th test held a
+live session the oldest mid-flight session was evicted ("Session
+replaced by a newer connection.") and its socket closed; the victim
+exhausted its read loop and failed. This matches the pipeline log: the
+binary failed in 0.19s, far below the 5s per-read timeout, i.e. a closed
+stream, not a timeout. Scheduling-dependent, hence flaky under the full
+parallel suite.
+
+**Repair (production code, commit `483bf8ad`):** replaced the statics
+with `ExplorerSessionRegistry` (register/unregister, oldest-first
+eviction, same `std::sync::Mutex` + `Notify` mechanics) owned by
+`AppState` and wired in `build_state`, `mem.rs` test constructor, and
+the `middleware.rs` test constructor. Matches the sibling ephemeral-
+state precedent (`compose_sessions`, `process_registry`): the state is
+connection-lifetime-only (WebSocket sessions cannot outlive their
+server instance), intentionally not port-backed; `check-in-memory-state-stores.sh`
+passes. Single-instance production behavior is unchanged.
+
+**Regression test:**
+`explorer_ws_session_limit_is_per_server_instance` opens 3 sessions on
+server A, one same-user session on server B in the same process, and
+asserts A's oldest session still answers (`list_views` → `views`); then
+asserts the cap is still enforced WITHIN one server (4th connection
+evicts the oldest with a "replaced" error).
+
+**Evidence** (`/tmp/stage/review-evidence/`):
+- `task-239-reproduce-prefail.txt` — regression test on UNFIXED code:
+  FAILED, exit 101, "Session replaced by a newer connection." — the
+  failure mechanism reproduced deterministically.
+- `task-239-final-test-binary.txt` — full `explorer_ws_integration`
+  binary at fix commit: 8/8 passed, exit 0 (also 5 consecutive green
+  runs during development).
+- `task-239-gyre-server-suite.txt` — `cargo test -p gyre-server` (lib +
+  all integration binaries, incl. 1213 lib tests): all green, exit 0.
+- `task-239-clippy-diff.txt` — all-target Clippy attempt was
+  INTERRUPTED at the pipeline stage boundary (per operator); NOT passed,
+  NOT evidence. The independent host verifier owns this mandatory gate
+  on the exact candidate.
+- Changed-lines rustfmt gate (`check-rustfmt-diff.py` vs pre-change
+  HEAD `3c772043`): clean, exit 0.
+
+No checks weakened, no skips or exemptions added, no test assertions
+removed. The previously-failing `explorer_ws_save_and_load_view` passes
+at the fix commit.
