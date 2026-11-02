@@ -1,0 +1,28 @@
+# Review — task-239 (Repair verified failure on main b1cdb0ddd80e)
+
+Task: reproduce and repair the verified upstream failure — `scripts/check-task-commit-attribution.sh` exit 1 at base `b1cdb0dd` (task-170 commit missing from its `commits:` frontmatter) — plus the durable verification finding from candidate `c0cef9de` (clippy changed-lines gate, `useless_conversion`).
+
+Candidate under review: `31e0437e776ef9b60d10f328ac46ed1059b80e58` (branch head, merge base `121fba26`).
+Product commits scoped by the task's `commits:` frontmatter: `483bf8ad` (explorer WS session registry → `AppState`), `3e62cdbb` (char-boundary truncation in `explorer_ws.rs`), `7a820241` (drop useless `String`→`String` conversion in the new test).
+Verdict: **approved** — baseline failure and durable finding both repaired with real fixes; no check, skip, or exemption weakened; the new test is mutation-verified meaningful.
+
+## Probes run (this checkout, candidate checked out; evidence in `/tmp/stage/review-evidence/`)
+
+- `bash scripts/check-task-commit-attribution.sh` → **OK, exit 0** (the exact baseline probe). Baseline failed on `b1cdb0dd` missing from task-170's frontmatter; the candidate appends the full SHA `b1cdb0ddd80ecd37f9de7c29559562f8a86dccf3` — the check's own documented remedy (squash-drift class). Commit verified present, task-170-labeled, and an ancestor of HEAD.
+- Focused clippy changed-lines reproduction (same algorithm as `scripts/check-clippy-diff.py`, scoped to `-p gyre-server --all-targets --all-features` — all six changed `.rs` files are in gyre-server; changed lines from `git diff 121fba26..31e0437e`) → **0 changed-line failures, 707 existing warnings outside changes, exit 0** (`clippy-probe.stdout`). At `c0cef9de` the flagged line was `explorer_ws_integration.rs:448` `.to_string().into()` inside the newly added test — confirmed via `git show c0cef9de`.
+- **Mutation A** (clippy repair): re-introduced `.into()` on the fixed line → probe fails with exactly the upstream finding, `crates/gyre-server/tests/explorer_ws_integration.rs:447: clippy::useless_conversion: useless conversion to the same type: std::string::String` (`clippy-mutation.stdout`); file restored, `git status` clean. The ten identical `.into()` patterns elsewhere in the file are pre-existing unchanged lines — outside the gate and outside this task's scope.
+- `python3 scripts/check-rustfmt-diff.py 121fba26...` → **changed lines clean (6 Rust files)**.
+- `cargo test -p gyre-server --test explorer_ws_integration` → **8 passed, 0 failed** (`explorer-ws-test.stdout`), including the new `explorer_ws_session_limit_is_per_server_instance`.
+- **Mutation B** (test meaningfulness): temporarily made `ExplorerSessionRegistry` a process-global `LazyLock` shared by `build_state` (the pre-fix bug class) → the new test **FAILS** at the intended assertion: "Session on server A must survive a same-user connection on server B; got `Session replaced by a newer connection.`" (`session-limit-mutation.stdout`); both files restored, `git status` clean, HEAD unchanged at `31e0437e`. The test kills the exact defect `483bf8ad` fixed, and its second half still proves the per-user cap is enforced within one server (4th connection evicts the oldest with a "replaced" error).
+- `bash scripts/check-byte-slice-truncation.sh` → **OK**. The `&raw_preview[..500]` site now routes through `gate_executor::truncate_bytes` (char-boundary-safe, unit-tested at gate_executor.rs:1153+); the line-pinned exemption entry for `explorer_ws.rs:2882` was **deleted**, not re-pinned — the exemption list shrank, per policy.
+- `bash scripts/check-in-memory-state-stores.sh` → **OK**. The new `AppState.explorer_sessions: Arc<ExplorerSessionRegistry>` is not a bare `Arc<Mutex<HashMap>>` alias and is ephemeral by nature (WS connections cannot outlive the server instance) — correctly not port-backed; wiring in `lib.rs`, `mem.rs`, and the `middleware.rs` test-state clone is consistent.
+- `bash scripts/check-arch.sh` → **OK**; `bash scripts/check-conditional-test-guards.sh` → **OK**.
+- Note: `bash scripts/check-assertionless-tests.sh` exits 2 in this sandbox — **pre-existing/environmental, identical at base `121fba26`** (the script uses gawk-only 3-arg `match()`; this sandbox has mawk). Not a candidate defect; the candidate adds no assertionless test.
+
+## Verified working (no findings)
+
+- **Baseline repair is real**: attribution gate green at the candidate, remedy is the one the failure message documents, and the referenced commit exists and is labeled task-170.
+- **Clippy repair is real and minimal**: the changed line no longer triggers `useless_conversion`; nothing else in the diff touches gates or verifiers (`git diff --stat` over `scripts/`, `web/`, `docs/` shows only the single exemption-line deletion — a strengthening).
+- **Registry scoping fix is a production fix, not test-only**: eviction/registration logic moved into `ExplorerSessionRegistry` owned by `AppState`; `SessionGuard` holds an `Arc` to the owning registry so cleanup follows the right instance; per-server session IDs remain monotonic for oldest-first eviction; env override `GYRE_EXPLORER_MAX_SESSIONS` still honored via `max_sessions_per_user()`.
+- **Test is hard, not self-confirming**: asserts survival across same-process server instances (mutation-verified) and in-server eviction semantics; real WS transport against two independently built `AppState` servers; no conditional guards, no skipped assertions.
+- **Attribution hygiene**: all three product commits plus `7a820241` recorded in task-239's `commits:` frontmatter; repo-wide attribution check passes.
