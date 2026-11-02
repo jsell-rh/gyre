@@ -117,10 +117,17 @@ def prepare(execution, task, prompt):
                           str(bundle / 'review-before.json'), '--task', task['name'], cwd=repo)
     repair = task['data'].get('repair') or task['data'].get('review_context') or {}
     evidence = repair.get('baseline_log') if repair.get('category') == 'baseline' else repair.get('candidate_log')
+    if not evidence and repair.get('category') == 'verification':
+        evidence = repair.get('artifact')
     if evidence:
         path = Path(evidence).resolve()
         if path.is_relative_to(execution.store.directory) and path.is_file():
-            (bundle / 'findings.log').write_bytes(path.read_bytes()[-65536:])
+            data = path.read_bytes()
+            if len(data) > 65536:
+                marker = b'\n[... middle of retained log omitted ...]\n'
+                first = (65536 - len(marker)) // 2
+                data = data[:first] + marker + data[-(65536 - len(marker) - first):]
+            (bundle / 'findings.log').write_bytes(data)
     total = 0
     sources = [(Path(p), Path('ci-artifacts') / str(i)) for i, p in enumerate(repair.get('artifact_directories') or [])]
     for source, relative in sources:

@@ -78,6 +78,20 @@ class FullsendContracts(FullsendFixture):
         self.assertTrue((repo / '.git').is_dir())
         self.assertTrue((cfg / 'harness/implement.yaml').is_file())
 
+    def test_verification_evidence_preserves_early_error_despite_noisy_log_tail(self):
+        log = self.store.directory / 'verification.log'
+        log.write_bytes(b'ERROR: unsafe UTF-8 byte slice in production code\n' + b'build warning\n' * 10000 + b'frontend build finished\n')
+        task = self.store.task('task-9999')
+        task['data'] = {'repair': {'category': 'verification', 'artifact': str(log)}}
+        cfg, _, _ = prepare(self.execution, task, 'Repair the verifier finding.')
+        staged = self.execution.directory / 'bundle/findings.log'
+        data = staged.read_bytes()
+        self.assertLessEqual(len(data), 65536)
+        self.assertTrue(data.startswith(b'ERROR: unsafe UTF-8'))
+        self.assertTrue(data.endswith(b'frontend build finished\n'))
+        harness = json.loads((cfg / 'harness/implement.yaml').read_text())
+        self.assertIn('/tmp/stage/findings.log', [item['dest'] for item in harness['host_files']])
+
     def test_actual_checkpoint_publishes_fixture_source_to_bare_remote(self):
         _, repo, _ = self.prepare()
         (repo / 'code.py').write_text('def add(a, b):\n    return a + b\n')
