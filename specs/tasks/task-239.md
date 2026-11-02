@@ -3,7 +3,7 @@ title: "Repair verified failure on main b1cdb0ddd80e"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
 progress: ready-for-review
-commits: ["3e62cdbb5aa0881246ceb3170461e02eda7bea6b", "483bf8ad72a38505d47f5a8cb47bae619a4648da"]
+commits: ["3e62cdbb5aa0881246ceb3170461e02eda7bea6b", "483bf8ad72a38505d47f5a8cb47bae619a4648da", "7a820241adafdaee2218339f38eb4a29d4f6851f"]
 ---
 
 ## Required behavior
@@ -62,59 +62,52 @@ GYRE_BASELINE_FAILURE_JSON {"base": "b1cdb0ddd80ecd37f9de7c29559562f8a86dccf3", 
 
 ## Shipped
 
-### Verification failure repaired (round 4)
+### Verification failure repaired (round 5)
 
-The verified upstream failure (checks.sh exit 1 at candidate
-3a878cf3) reproduces as `scripts/check-byte-slice-truncation.sh`
-exit 1: the F4-class `&raw_preview[..500]` slice in
-`crates/gyre-server/src/explorer_ws.rs` (invalid view-query preview
-truncation) was exempted at line 2882, but this branch's product
-commit 483bf8ad added lines above the site and shifted it to line
-2921, so the line-pinned exemption no longer matched. Re-pinning the
-line number would create a new exemption entry, which the
-exemption-growth gate forbids; per the exemption file's own policy
-("when you fix one, DELETE its exemption line") the hazard was fixed
-for real instead, in commit 3e62cdbb:
+The verified upstream failure (checks.sh exit 1 on merge base
+121fba26, candidate c0cef9de, category `verification`) reproduces
+as the clippy changed-lines gate failing on
+`crates/gyre-server/tests/explorer_ws_integration.rs:448:
+clippy::useless_conversion: useless conversion to the same type:
+std::string::String`. The trailing vite output in the failure log
+("Removing web/dist/assets/...") is dev-check.sh's normal
+`git clean` cleanup after a successful web build - the failing step
+is clippy, not the build. The violation was in the new test added by
+product commit 483bf8ad:
+`Message::Text(json!({"type": "list_views"}).to_string().into())` -
+`json!(...).to_string()` already yields `String`, and
+tokio-tungstenite 0.24's `Message::Text` takes `String`, so `.into()`
+was a no-op conversion on a changed line. Fixed in commit 7a820241 by
+dropping the useless `.into()`; no check, skip, exemption, or gate was
+weakened, and no assertion changed.
 
-- `explorer_ws.rs` truncates the preview through
-  `crate::gate_executor::truncate_bytes` - UTF-8 char-boundary safe.
-  The site previously panicked whenever byte 500 of the
-  pretty-printed query JSON fell inside a multibyte character.
-- `truncate_bytes` is now `pub(crate)`: the same helper, already
-  unit-tested for exactly that panic case, is reused rather than
-  duplicated.
-- The `explorer_ws.rs:2882` exemption entry is deleted. The list
-  shrinks; no new entries; no check, skip, or gate weakened.
-
-Evidence (`/tmp/stage/review-evidence/`): gate exit 1 at assignment
-HEAD before the fix (flags `explorer_ws.rs:2921`, identical violation
-to the verified failure); exit 0 after; mutation check re-fails with
-the fix reverted and re-passes restored; explorer WS integration
-suite 8/8 (including `explorer_ws_save_and_load_view` and
-`explorer_ws_session_limit_is_per_server_instance`); `truncate_bytes`
-unit tests 3/3; rustfmt and clippy clean on the changed lines (the
-sandbox clippy 1.99 `never_loop` error in `gyre-domain` is a plain
-invocation artifact - under the gate's exact `-W clippy::all`
-invocation it is a pre-existing warning on lines unchanged vs base,
-which the changed-lines gate ignores).
+Evidence (`/tmp/stage/review-evidence/`): clippy gate reproduction
+with the exact dev-check.sh invocation (`cargo clippy --all-targets
+--all-features --message-format=json -- -W clippy::all`, changed lines
+derived from `git diff 121fba26..HEAD`) fails with exactly the
+upstream finding before the fix and reports zero changed-line
+failures after (1141 pre-existing warnings outside changes, same
+class as the 343 the baseline reported); rustfmt changed-lines gate
+clean (6 files); explorer WS integration suite passes in full;
+mutation check re-introduces the failure with `.into()` restored and
+it disappears again with the fix re-applied.
 
 ### Prior rounds (carried in the branch)
 
 - Baseline attribution failure repaired: full SHA
   `b1cdb0ddd80ecd37f9de7c29559562f8a86dccf3` appended to
   `specs/tasks/task-170.md`'s `commits:` frontmatter (squash-drift
-  class; the check's own documented remedy). Mutation-checked in
-  round 1.
+  class; the check's own documented remedy).
 - Product fix 483bf8ad (durable finding 68f83ea6): the explorer
   WebSocket per-user concurrent session limit moved from a
   process-global static to an `ExplorerSessionRegistry` owned by
   `AppState`, stopping parallel test servers (and embedders) from
-  evicting each other's sessions. Recorded in this task's `commits:`
-  frontmatter, as is 3e62cdbb.
-- Round 3 restored this task file's contract (frontmatter, Required
-  behavior, Baseline failure) to the round-1 pipeline checkpoint
-  after round 2 appended normative sections; those contract sections
-  remain byte-identical.
+  evicting each other's sessions.
+- 3e62cdbb: the F4-class `&raw_preview[..500]` byte-slice in
+  `explorer_ws.rs` now truncates through the char-boundary-safe
+  `gate_executor::truncate_bytes`, and its line-pinned exemption
+  entry was deleted rather than re-pinned.
 
-Independent review, full deterministic gates, and GitHub checks on
-the exact PR head remain required before merge.
+All three commits are recorded in this task's `commits:` frontmatter,
+as is 7a820241. Independent review, full deterministic gates, and
+GitHub checks on the exact PR head remain required before merge.
