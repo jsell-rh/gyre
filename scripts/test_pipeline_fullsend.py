@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import tarfile
 import unittest
 from unittest.mock import patch
@@ -68,6 +69,14 @@ class FullsendContracts(FullsendFixture):
         self.assertNotIn('FULLSEND_INFERENCE_GATEWAY_API_KEY', json.dumps(harness))
         self.assertEqual(harness['sandbox_timeout_seconds'], 600)
         self.assertTrue((shim / 'openshell').is_file())
+
+    def test_saved_task_with_null_optional_artifacts_can_resume(self):
+        task = self.store.task('task-9999')
+        task['data'] = {'retained_artifacts': None,
+                        'repair': {'stash_artifacts': None, 'artifact_directories': None}}
+        cfg, repo, _ = prepare(self.execution, task, 'Resume the saved assignment.')
+        self.assertTrue((repo / '.git').is_dir())
+        self.assertTrue((cfg / 'harness/implement.yaml').is_file())
 
     def test_actual_checkpoint_publishes_fixture_source_to_bare_remote(self):
         _, repo, _ = self.prepare()
@@ -138,6 +147,10 @@ if a[:2]==['sandbox','create']:
 elif a[:2]==['sandbox','delete'] and not os.environ.get('HOLD_DELETE'):
  v['pods']=[x for x in v['pods'] if x['name']!=a[2]]
 p.write_text(json.dumps(v))
+if a[:2]==['sandbox','exec']:
+ import time
+ p.with_suffix('.pid').write_text(str(os.getpid()))
+ time.sleep(60)
 if os.environ.get('WARN_ONCE') and not any(x[:2]==['gateway','login'] for x in v['calls']):
  print('Warning: OIDC token refresh failed; continuing with cached token',file=sys.stderr)
 if a[:2]==['provider','list'] and os.environ.get('EXPIRE_ONCE') and not any(x[:2]==['gateway','login'] for x in v['calls']):
@@ -167,6 +180,27 @@ else: print('fixture control operation')
         refused=self.invoke('sandbox','create','--name','fs-imp-'+'b'*12,'--','sleep','infinity')
         self.assertEqual(refused.returncode,75)
         self.assertEqual(len(json.loads((self.root/'backend.json').read_text())['pods']),1)
+
+    def test_streaming_deadline_targets_the_real_cli_without_an_orphan_parent(self):
+        process = subprocess.Popen([str(self.shim / 'openshell'), 'sandbox', 'exec',
+                                    '--name', self.name, '--', 'sleep', '60'],
+                                   env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        try:
+            marker = self.root / 'backend.pid'
+            deadline = time.monotonic() + 5
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertTrue(marker.exists(), 'real streaming command did not start')
+            actual_pid = int(marker.read_text())
+            self.assertEqual(actual_pid, process.pid, 'deadline would leave an orphan holding the pipe')
+            process.terminate()
+            process.wait(timeout=5)
+            self.assertFalse(Path('/proc/' + str(actual_pid)).exists())
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            process.stderr.close()
 
     def test_checkpoint_hook_consumes_matching_scope_and_refuses_other_gateway(self):
         result = self.invoke('--gateway', 'gyre-gyre', 'provider', 'list')

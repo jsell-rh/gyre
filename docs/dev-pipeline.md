@@ -114,7 +114,8 @@ browser auth for an unattended supervisor. Fullsend configures its providers;
 `dev-gateway.py --inference` is the older standalone setup helper, not a required
 step of the fullsend harness.
 
-The pinned worker image includes Chromium and its system dependencies matching
+The pinned worker image includes the project-configured `clang` and `mold`
+linkers, plus Chromium and its system dependencies matching
 Playwright 1.58.2 in the web lockfile. Rebuild the image when that version changes.
 Browser dependencies do not require runtime downloads or system writes. Individual
 probes still need to check the sandbox's actual process and network capabilities.
