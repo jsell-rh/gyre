@@ -4,7 +4,7 @@ FROM ghcr.io/jsell-rh/gyre-worker@sha256:a3856204f3b23b3694564ab34fa76d588f2d09e
 FROM ghcr.io/fullsend-ai/fullsend-sandbox@sha256:16c312057410c980ca4f9741364d2336bf43ac9e2c97de58dd24e78348f77dd5
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential pkg-config libssl-dev libpq-dev sqlite3 lld python3 \
+      build-essential pkg-config libssl-dev libpq-dev sqlite3 clang mold lld python3 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=gyre-tools /usr/local/rustup /usr/local/rustup
 COPY --from=gyre-tools /usr/local/cargo /usr/local/cargo
@@ -15,6 +15,6 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/gyre-playwright
 RUN npx --yes --package=playwright@1.58.2 playwright install-deps chromium \
     && rm -rf /var/lib/apt/lists/* \
-    && cargo --version && pi --version
+    && cargo --version && pi --version && clang --version && mold --version
 WORKDIR /sandbox/workspace
 USER sandbox
