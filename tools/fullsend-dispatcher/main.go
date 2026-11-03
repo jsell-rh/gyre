@@ -27,7 +27,7 @@ func runMain() int {
 		path = os.Getenv("FUNNEL_ADAPTER")
 	}
 	if path == "" {
-		fmt.Fprintln(os.Stderr, "Run .hypershell/execute-sdlc/funnel-dispatch.sh so the integration adapter can be located.")
+		fmt.Fprintln(os.Stderr, "Use your project's dispatcher launcher or set FULLSEND_DISPATCH_ADAPTER to its adapter.")
 		return 2
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

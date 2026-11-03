@@ -30,10 +30,12 @@ def binary(state):
 
 def serve(store, interval, task=None, plain=False):
     target = binary(store.directory)
+    temporary = store.directory / 'dispatcher/tmp'
+    temporary.mkdir(parents=True, exist_ok=True, mode=0o700)
     env = {**os.environ,
            'FULLSEND_DISPATCH_ADAPTER': str(ROOT / 'scripts/dispatch-adapter.py'),
            'FULLSEND_DISPATCH_PYTHON': sys.executable,
-           'GYRE_PIPELINE_STATE': str(store.directory)}
+           'GYRE_PIPELINE_STATE': str(store.directory), 'TMPDIR': str(temporary)}
     # Inherited HyperShell launcher variables must never select its adapter.
     env.pop('FUNNEL_ADAPTER', None)
     args = [str(target), '--state', str(store.directory), '--interval', str(interval)]

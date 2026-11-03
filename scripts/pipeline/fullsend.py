@@ -311,6 +311,9 @@ def execute(execution, cfg, repo, shim, env, runtime='pi'):
                     model='fixture' if runtime == 'dummy' else 'gateway/rits/zai-org/glm-5-3')
     command = [str(executable), 'run', execution.claim['stage'], '--runtime', runtime, '--forge', 'github',
                '--fullsend-dir', str(cfg), '--target-repo', str(repo), '--output-dir', str(execution.directory / 'runs')]
+    if runtime == 'pi':
+        # Never let another project's exported FULLSEND_MODEL override Gyre's pinned route.
+        command += ['--model', 'gateway/rits/zai-org/glm-5-3']
     process = None
     finished = threading.Event()
     stream = None

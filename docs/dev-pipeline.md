@@ -147,7 +147,9 @@ The dispatcher uses Gyre's `supervisor.lock`, `dispatcher/logs`, existing attemp
 directories, and a scope derived from this ledger's owner UUID. It never uses
 HyperShell's XDG state, `.hypershell` directory, labels, Jira configuration, or
 Vertex credentials. Adapter selection is explicit per process; an inherited
-`FUNNEL_ADAPTER` cannot redirect Gyre. The configured gateway is explicit, and an
+`FUNNEL_ADAPTER` cannot redirect Gyre. Host temporary files/profile caches use
+`dispatcher/tmp`, and Pi's EnMaaS model is pinned on the fullsend command line
+so another project's exported model cannot override it. The configured gateway is explicit, and an
 inherited endpoint override is cleared without changing another process's
 environment or the machine's default gateway selection. A private local OIDC
 registration (`gyre-d-<instance hash>`) snapshots the connection metadata and
