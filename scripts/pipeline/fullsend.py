@@ -48,7 +48,7 @@ def context(path):
         store.close()
         raise RuntimeError('fullsend assignment has been fenced')
     claim['input'] = json.loads(claim['input'])
-    execution = Execution(store, claim)
+    execution = Execution(store, claim, honor_cancel=False)
     execution.current()
     execution.branch = value['branch']
     return execution
@@ -153,8 +153,11 @@ def prepare(execution, task, prompt):
         shutil.copyfile(path, bundle / f'resume-{i}.patch')
     cfg = execution.directory / 'fullsend'
     shutil.copytree(ROOT / '.fullsend', cfg, dirs_exist_ok=True)
+    from .isolation import provider_files
+    forge_provider, _ = provider_files(execution.store, cfg)
     stage = claim['stage']
     harness = {'base': 'worker.yaml', 'agent': 'agents/' + stage + '.md',
+               'providers': [forge_provider],
                'role': {'implement': 'coder', 'review': 'review', 'triage': 'triage'}[stage],
                'image': execution.store.setting('fullsend_image', json.loads((ROOT / '.fullsend/toolchain.json').read_text())['worker_image']),
                'sandbox_timeout_seconds': 600,
@@ -287,7 +290,7 @@ def cloud_step(execution, task, prompt):
     execution.login()
     from .inference import check, credential
     check(execution.store)
-    outstanding = execution.store.db.execute("SELECT name FROM resources WHERE work=? AND state<>'absent'", (execution.claim['id'],)).fetchall()
+    outstanding = execution.store.db.execute("SELECT name FROM resources WHERE work=? AND state<>'absent' AND kind<>'admission'", (execution.claim['id'],)).fetchall()
     if outstanding:
         raise Wait('Previous attempt still owns resources; cleanup must finish first')
     cfg, repo, shim = prepare(execution, task, prompt)
