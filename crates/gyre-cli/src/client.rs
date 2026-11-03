@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub struct GyreClient {
     base_url: String,
@@ -69,6 +69,60 @@ pub struct MrResponse {
     /// MR status transitions. Used by `gyre search --since`.
     #[serde(default)]
     pub updated_at: u64,
+}
+
+// ── Budget response types (mirror server api/budget.rs shapes) ────────────────
+
+/// Budget limits for an entity (workspace or tenant). Mirrors
+/// `gyre_domain::BudgetConfig` as serialized by GET/PUT
+/// /api/v1/workspaces/:id/budget.
+#[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq)]
+pub struct BudgetConfig {
+    pub max_tokens_per_day: Option<u64>,
+    pub max_cost_per_day: Option<f64>,
+    pub max_concurrent_agents: Option<u32>,
+    pub max_agent_lifetime_secs: Option<u64>,
+}
+
+/// Real-time budget usage snapshot. Mirrors `gyre_domain::BudgetUsage`.
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+pub struct BudgetUsage {
+    pub entity_type: String,
+    pub entity_id: String,
+    pub tokens_used_today: u64,
+    pub cost_today: f64,
+    pub active_agents: u32,
+    pub period_start: u64,
+}
+
+/// Response of GET/PUT /api/v1/workspaces/:id/budget — config + live usage.
+#[derive(Deserialize, Debug, Clone)]
+pub struct BudgetResponse {
+    pub entity_type: String,
+    pub entity_id: String,
+    pub config: BudgetConfig,
+    pub usage: BudgetUsage,
+}
+
+/// Request body of PUT /api/v1/workspaces/:id/budget. The server replaces
+/// the whole config with this body (omitted fields become unset), so the CLI
+/// fetch-merges before sending (see `gyre budget set` in main.rs).
+#[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq)]
+pub struct SetBudgetRequest {
+    pub max_tokens_per_day: Option<u64>,
+    pub max_cost_per_day: Option<f64>,
+    pub max_concurrent_agents: Option<u32>,
+    pub max_agent_lifetime_secs: Option<u64>,
+}
+
+/// Response of GET /api/v1/budget/summary (Admin only) — tenant config,
+/// tenant usage, and per-workspace breakdown.
+#[derive(Deserialize, Debug, Clone)]
+pub struct TenantBudgetSummary {
+    pub tenant_config: BudgetConfig,
+    pub tenant_usage: BudgetUsage,
+    pub workspaces: Vec<BudgetResponse>,
 }
 
 // ── Bootstrap response types (platform-model.md §8) ──────────────────────────
@@ -652,6 +706,71 @@ impl GyreClient {
             .and_then(|r| r["id"].as_str())
             .map(|s| s.to_string())
             .ok_or_else(|| anyhow::anyhow!("no repo found with name '{repo_name}' in workspace"))
+    }
+
+    /// GET /api/v1/workspaces/:id/budget — workspace budget limits + live usage.
+    pub async fn get_workspace_budget(&self, workspace_id: &str) -> Result<BudgetResponse> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/api/v1/workspaces/{workspace_id}/budget",
+                self.base_url
+            ))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("get budget failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing budget response")
+    }
+
+    /// PUT /api/v1/workspaces/:id/budget — set workspace budget limits
+    /// (Admin only). The server replaces the whole config with this body and
+    /// enforces the tenant cascade (HTTP 400 when a limit exceeds the tenant
+    /// ceiling — the message is surfaced verbatim by the caller).
+    pub async fn set_workspace_budget(
+        &self,
+        workspace_id: &str,
+        req: &SetBudgetRequest,
+    ) -> Result<BudgetResponse> {
+        let resp = self
+            .client
+            .put(format!(
+                "{}/api/v1/workspaces/{workspace_id}/budget",
+                self.base_url
+            ))
+            .header("Authorization", self.auth_header())
+            .json(req)
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("set budget failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing budget response")
+    }
+
+    /// GET /api/v1/budget/summary — tenant-wide budget picture (Admin only).
+    pub async fn budget_summary(&self) -> Result<TenantBudgetSummary> {
+        let resp = self
+            .client
+            .get(format!("{}/api/v1/budget/summary", self.base_url))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .context("connecting to Gyre server")?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            anyhow::bail!("budget summary failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str(&text).context("parsing budget summary response")
     }
 
     /// GET /api/v1/merge-requests/:id/trace
@@ -1436,8 +1555,121 @@ pub enum SpawnRepoOrchestratorOutcome {
     AlreadyLive,
 }
 
+/// Test-only helpers for spinning up real loopback HTTP servers that
+/// capture the exact request line, headers, and body the client emits.
+/// Shared by the client tests here and the command-flow tests in main.rs.
+#[cfg(test)]
+pub(crate) mod test_http {
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Clone)]
+    pub(crate) struct CapturedRequest {
+        pub(crate) request_line: String,
+        pub(crate) headers: String,
+        pub(crate) body: String,
+    }
+
+    fn find_double_crlf(buf: &[u8]) -> Option<usize> {
+        buf.windows(4).position(|w| w == b"\r\n\r\n")
+    }
+
+    /// Read one full HTTP request (headers + Content-Length body) from the
+    /// stream.
+    fn read_request(stream: &mut std::net::TcpStream) -> CapturedRequest {
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        loop {
+            let n = stream.read(&mut tmp).unwrap();
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if let Some(header_end) = find_double_crlf(&buf) {
+                let headers = String::from_utf8_lossy(&buf[..header_end]).to_string();
+                let content_length = headers
+                    .lines()
+                    .find_map(|l| {
+                        let lower = l.to_ascii_lowercase();
+                        lower
+                            .strip_prefix("content-length:")
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                if buf.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+        }
+        let header_end = find_double_crlf(&buf).unwrap_or(buf.len());
+        let headers = String::from_utf8_lossy(&buf[..header_end]).to_string();
+        let request_line = headers.lines().next().unwrap_or("").to_string();
+        let body = String::from_utf8_lossy(&buf[header_end + 4..]).to_string();
+        CapturedRequest {
+            request_line,
+            headers,
+            body,
+        }
+    }
+
+    fn write_response(stream: &mut std::net::TcpStream, status: &str, reply_body: &str) {
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply_body}",
+            reply_body.len()
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        stream.flush().unwrap();
+    }
+
+    /// Spawn a one-shot HTTP server on 127.0.0.1:0. Serves exactly one
+    /// request, captures it, and replies with `status_line` + `response_body`.
+    pub(crate) fn spawn_mock_http_server(
+        status_line: &str,
+        response_body: &str,
+    ) -> (String, std::sync::mpsc::Receiver<CapturedRequest>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let status = status_line.to_string();
+        let reply_body = response_body.to_string();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let req = read_request(&mut stream);
+            let _ = tx.send(req);
+            write_response(&mut stream, &status, &reply_body);
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    /// Spawn a sequential HTTP server on 127.0.0.1:0. Serves one request
+    /// per entry of `responses` (in order), capturing every request into a
+    /// shared vec readable while the server runs. Fewer requests than
+    /// scripted responses is fine (the server simply keeps waiting), so a
+    /// test can assert that rejected input produced no requests at all.
+    pub(crate) fn spawn_mock_http_server_sequence(
+        responses: Vec<(String, String)>,
+    ) -> (String, Arc<Mutex<Vec<CapturedRequest>>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let captured: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = captured.clone();
+        std::thread::spawn(move || {
+            for (status, reply_body) in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let req = read_request(&mut stream);
+                sink.lock().unwrap().push(req);
+                write_response(&mut stream, &status, &reply_body);
+            }
+        });
+        (format!("http://{addr}"), captured)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_http::spawn_mock_http_server;
     use super::*;
 
     #[test]
@@ -1504,5 +1736,169 @@ mod tests {
     #[test]
     fn encode_spec_path_preserves_unreserved() {
         assert_eq!(encode_spec_path("a-b_c.d~e"), "a-b_c.d~e");
+    }
+
+    // ── Budget wiring tests ────────────────────────────────────────────────
+    //
+    // A one-shot mock HTTP server (see `test_http` above) captures the exact
+    // request line, headers, and body the client methods emit, so these tests
+    // fail if the method, URL, or serialized body drifts from the real
+    // endpoints registered in gyre-server api/mod.rs
+    // (GET/PUT /api/v1/workspaces/:id/budget,
+    // GET /api/v1/budget/summary).
+
+    const BUDGET_RESPONSE_JSON: &str = r#"{
+        "entity_type": "workspace",
+        "entity_id": "ws-123",
+        "config": {
+            "max_tokens_per_day": 500000,
+            "max_cost_per_day": 100.0,
+            "max_concurrent_agents": 10,
+            "max_agent_lifetime_secs": 3600
+        },
+        "usage": {
+            "entity_type": "workspace",
+            "entity_id": "ws-123",
+            "tokens_used_today": 123456,
+            "cost_today": 12.5,
+            "active_agents": 3,
+            "period_start": 1790000000
+        }
+    }"#;
+
+    #[tokio::test]
+    async fn get_workspace_budget_hits_real_endpoint() {
+        let (base, rx) = spawn_mock_http_server("200 OK", BUDGET_RESPONSE_JSON);
+        let api = GyreClient::new(base, "tok".to_string());
+        let budget = api.get_workspace_budget("ws-123").await.unwrap();
+        let req = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            req.request_line,
+            "GET /api/v1/workspaces/ws-123/budget HTTP/1.1"
+        );
+        assert!(req
+            .headers
+            .to_ascii_lowercase()
+            .contains("authorization: bearer tok"));
+        // Response must parse into the server's BudgetResponse shape.
+        assert_eq!(budget.config.max_tokens_per_day, Some(500000));
+        assert_eq!(budget.config.max_cost_per_day, Some(100.0));
+        assert_eq!(budget.usage.tokens_used_today, 123456);
+        assert_eq!(budget.usage.cost_today, 12.5);
+        assert_eq!(budget.usage.active_agents, 3);
+    }
+
+    #[tokio::test]
+    async fn set_workspace_budget_puts_exact_url_and_body() {
+        let (base, rx) = spawn_mock_http_server("200 OK", BUDGET_RESPONSE_JSON);
+        let api = GyreClient::new(base, "tok".to_string());
+        let req_body = SetBudgetRequest {
+            max_tokens_per_day: Some(500000),
+            max_cost_per_day: Some(100.0),
+            max_concurrent_agents: Some(10),
+            max_agent_lifetime_secs: Some(3600),
+        };
+        let budget = api.set_workspace_budget("ws-123", &req_body).await.unwrap();
+        let req = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            req.request_line,
+            "PUT /api/v1/workspaces/ws-123/budget HTTP/1.1"
+        );
+        assert!(req
+            .headers
+            .to_ascii_lowercase()
+            .contains("authorization: bearer tok"));
+        // Exact serialized body of SetBudgetRequest (server api/budget.rs shape).
+        assert_eq!(
+            req.body,
+            "{\"max_tokens_per_day\":500000,\"max_cost_per_day\":100.0,\"max_concurrent_agents\":10,\"max_agent_lifetime_secs\":3600}"
+        );
+        assert_eq!(budget.entity_id, "ws-123");
+    }
+
+    #[tokio::test]
+    async fn set_workspace_budget_surfaces_server_error_verbatim() {
+        // Tenant-cascade violation: the server returns 400 with the reason in
+        // the body; the CLI must surface it verbatim.
+        let (base, rx) = spawn_mock_http_server(
+            "400 Bad Request",
+            "{\"error\":\"workspace max_tokens_per_day (999) exceeds tenant limit (500)\"}",
+        );
+        let api = GyreClient::new(base, "tok".to_string());
+        let req_body = SetBudgetRequest {
+            max_tokens_per_day: Some(999),
+            ..Default::default()
+        };
+        let err = api
+            .set_workspace_budget("ws-123", &req_body)
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("HTTP 400"),
+            "error should carry the status: {msg}"
+        );
+        assert!(
+            msg.contains("workspace max_tokens_per_day (999) exceeds tenant limit (500)"),
+            "error should surface the server message verbatim: {msg}"
+        );
+        let _ = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn budget_summary_hits_real_endpoint() {
+        let summary_json = r#"{
+            "tenant_config": {
+                "max_tokens_per_day": 1000000,
+                "max_cost_per_day": 500.0,
+                "max_concurrent_agents": 50,
+                "max_agent_lifetime_secs": null
+            },
+            "tenant_usage": {
+                "entity_type": "tenant",
+                "entity_id": "global",
+                "tokens_used_today": 200000,
+                "cost_today": 42.0,
+                "active_agents": 7,
+                "period_start": 1790000000
+            },
+            "workspaces": [
+                {
+                    "entity_type": "workspace",
+                    "entity_id": "ws-1",
+                    "config": {
+                        "max_tokens_per_day": 500000,
+                        "max_cost_per_day": 100.0,
+                        "max_concurrent_agents": 10,
+                        "max_agent_lifetime_secs": 3600
+                    },
+                    "usage": {
+                        "entity_type": "workspace",
+                        "entity_id": "ws-1",
+                        "tokens_used_today": 123456,
+                        "cost_today": 12.5,
+                        "active_agents": 3,
+                        "period_start": 1790000000
+                    }
+                }
+            ]
+        }"#;
+        let (base, rx) = spawn_mock_http_server("200 OK", summary_json);
+        let api = GyreClient::new(base, "tok".to_string());
+        let summary = api.budget_summary().await.unwrap();
+        let req = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert_eq!(req.request_line, "GET /api/v1/budget/summary HTTP/1.1");
+        assert!(req
+            .headers
+            .to_ascii_lowercase()
+            .contains("authorization: bearer tok"));
+        assert_eq!(summary.tenant_config.max_tokens_per_day, Some(1000000));
+        assert_eq!(summary.tenant_usage.active_agents, 7);
+        assert_eq!(summary.workspaces.len(), 1);
+        assert_eq!(summary.workspaces[0].entity_id, "ws-1");
+        assert_eq!(
+            summary.workspaces[0].config.max_agent_lifetime_secs,
+            Some(3600)
+        );
     }
 }

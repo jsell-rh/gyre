@@ -841,7 +841,7 @@ async fn resolve_source_commit_sha(state: &Arc<AppState>, mr_id: &Id) -> String 
 /// Truncate a string to at most `limit` bytes on a UTF-8 char boundary.
 /// External process output may be multibyte — a fixed byte index would
 /// panic ("byte index N is not a char boundary").
-fn truncate_bytes(s: &str, limit: usize) -> &str {
+pub(crate) fn truncate_bytes(s: &str, limit: usize) -> &str {
     if s.len() <= limit {
         return s;
     }
