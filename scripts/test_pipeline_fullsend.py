@@ -292,6 +292,16 @@ else: print('fixture control operation')
         self.assertEqual(refused.returncode,75)
         self.assertEqual(json.loads((self.root/'backend.json').read_text())['pods'],[])
 
+    def test_old_worker_auth_refresh_does_not_touch_shared_registration(self):
+        alias='gyre-d-fixture'
+        self.store.set_setting('dispatcher_gateway_registration',{'source':'gyre-gyre','alias':alias})
+        self.store.set_setting('gateway',alias)
+        result=self.invoke('provider','list',extra={'EXPIRE_ONCE':'1','GYRE_OPEN_GATEWAY':'gyre-gyre'})
+        self.assertEqual(result.returncode,0,result.stderr)
+        state=json.loads((self.root/'backend.json').read_text())
+        self.assertTrue(any(c[:2]==['gateway','login'] for c in state['calls']))
+        self.assertEqual(set(state['gateways']),{alias})
+
     def test_expired_gateway_auth_is_refreshed_and_operation_retried(self):
         result=self.invoke('provider','list','--names',extra={'EXPIRE_ONCE':'1'})
         self.assertEqual(result.returncode,0,result.stderr)

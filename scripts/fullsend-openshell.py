@@ -39,6 +39,9 @@ def main():
             raise ValueError('OpenShell scope differs from the assigned gateway')
         args = args[2:]
     env = {**os.environ, 'OPENSHELL': config['real_openshell'], 'OPENSHELL_GATEWAY': bound_gateway, 'RUST_LOG': 'error'}
+    # Refresh the private alias even for a worker started before the cutover.
+    # Changing a shim process's environment cannot retarget its parent or HyperShell.
+    os.environ['GYRE_OPEN_GATEWAY'] = bound_gateway
     def invoke(arguments, **kwargs):
         return subprocess.run([config['real_openshell'], '-g', bound_gateway, *arguments], env=env, **kwargs)
     provider_create = args[:2] == ['provider', 'create']
