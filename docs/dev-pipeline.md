@@ -131,6 +131,14 @@ The npm registry policy permits encoded slashes for scoped package metadata
 (`@scope%2fpackage`); registry requests remain read-only and restricted to the
 listed binaries. Blocking those paths prevents ordinary dependency installs.
 
+`seed /absolute/path/task-123.md --fresh` deliberately starts an unshipped task
+from current main with new triage/implementation work identities. Drain its active
+work first. Previous task state is archived under the private `task-resets/`
+directory; source branches, stage receipts, and logs remain intact. The task
+contract generation does not change. Baseline findings from older upstream bases
+are excluded from current prompts. Normal reseeding preserves a valid metadata
+triage receipt instead of leaving discovery stranded on a completed work item.
+
 `seed /absolute/path/task-123.md --candidate SHA --base SHA` retains an existing
 unfinished checkpoint. `--pr URL` associates an existing open PR at that exact
 candidate. Imported progress labels do not grant approval: the replacement
