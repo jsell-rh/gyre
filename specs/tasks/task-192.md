@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §CLI"
-commits: ["f1dd5659f671593ddc3a75bca69beac91091563a"]
+commits: ["f1dd5659f671593ddc3a75bca69beac91091563a", "0a2d6e7e08d2787195748bee73863ab987fb3a61"]
 ---
 
 ## Spec Excerpt
@@ -67,17 +67,18 @@ The `SetBudgetRequest` shape (`crates/gyre-server/src/api/budget.rs:63-69`) acce
 
 ## Shipped
 
-Implemented `gyre budget show` / `gyre budget set` in `crates/gyre-cli` (commit f1dd5659), calling exactly the endpoints registered in `gyre-server/src/api/mod.rs` — `GET/PUT /api/v1/workspaces/:id/budget` and `GET /api/v1/budget/summary`. No new routes, no repo-level budget store.
+`gyre budget show` / `gyre budget set` in `crates/gyre-cli` (commits f1dd5659, 0a2d6e7e), calling exactly the endpoints registered in `gyre-server/src/api/mod.rs` — `GET/PUT /api/v1/workspaces/:id/budget` and `GET /api/v1/budget/summary`. No new routes, no repo-level budget store.
 
 ### Behavior
 
-- `gyre budget show` (no flags) resolves the current repo's owning workspace from the git remote via the same `infer_repo_from_git_remote` + `resolve_workspace_slug` chain `gyre explore`/`gyre deps` use, then prints that workspace's limits and live usage (tokens/cost/active agents vs limits, % utilization). `--workspace [--workspace-name <slug>]` targets a named workspace; `--repo` validates repo membership like `explore` does; `--tenant` prints the Admin-only tenant summary with a per-workspace table plus tenant totals.
-- `gyre budget set --llm-tokens/--llm-cost/--max-agents/--max-agent-lifetime-secs` PUTs the merged config (fetch-merge-put, since the server replaces the whole config) so omitted limits keep their values, and prints the resulting budget. Server errors surface verbatim with their HTTP status (400 cascade violation, 403 non-Admin). `set --tenant` and flag-less `set` bail with truthful messages (no tenant-level set endpoint exists in the API).
-- Help text on the command, both subcommands, and `docs/cli.md` states that repo scope maps to the owning workspace.
+- `gyre budget show` (no flags) resolves the current repo's owning workspace from the git remote via the same `infer_repo_from_git_remote` + `resolve_workspace_slug` chain `gyre explore`/`gyre deps` use, then prints that workspace's limits and live usage (tokens/cost/active agents vs limits, % utilization). `--workspace [--workspace-name <slug>]` targets a named workspace; `--repo` validates repo membership like `explore` does; `--tenant` prints the Admin-only tenant summary with a per-workspace table plus tenant totals. Zero caps render as an explicit `(zero cap)`/`(over cap)` display, never `NaN%`.
+- `gyre budget set --llm-tokens/--llm-cost/--max-agents/--max-agent-lifetime-secs` validates `--llm-cost` (finite and positive) **before any network I/O**, then PUTs the merged config (fetch-merge-put, since the server replaces the whole config) so omitted limits keep their values, and prints the resulting budget. NaN/Infinity (which serde_json serializes as `null`, silently clearing a cost cap) and zero/negative amounts are rejected with exit 1 and no request sent. Server errors surface verbatim with their HTTP status (400 cascade violation, 403 non-Admin). `set --tenant` bails with a truthful message (no tenant-level set endpoint exists in the API).
+- Help text on the command, both subcommands, and `docs/cli.md` states that repo scope maps to the owning workspace (and documents the cost-input validation).
 
 ### Test evidence
 
 - Client-level tests in `client.rs` run a one-shot mock HTTP server over a real loopback socket and assert the exact request line (`GET/PUT /api/v1/workspaces/ws-123/budget`, `GET /api/v1/budget/summary`), Bearer auth header, exact serialized `SetBudgetRequest` body, and verbatim surfacing of a 400 cascade error — they fail if the URL, method, or body drifts.
-- CLI parse tests cover all spec'd invocations (`set --llm-tokens 500000`, `set --workspace --llm-cost 100.00`, show scopes), the `--workspace`/`--tenant` conflict, and the merge helper's preserve-semantics.
-- `cargo test -p gyre-cli`: 123 + 1 passed, 0 failed. `cargo build --all`: ok. `bash scripts/check-arch.sh`: ok.
-- End-to-end against a real `gyre-server` (loopback): show/set/tenant-summary/repo-scope inference all verified, including fetch-merge-put preservation across separate `set` invocations. Transcripts in `/tmp/stage/review-evidence/` (task-192-evidence.md, e2e-transcript.txt).
+- Command-path flow tests in `main.rs` drive `run_budget_set` (the exact flow the handler calls) against a sequential mock HTTP server: NaN/±Infinity/zero/negative `--llm-cost` all return an error naming the flag **with zero HTTP requests captured** (no budget-mutating PUT can occur), and a valid cost PUTs the exact merged body preserving unmentioned limits. Mutation check: removing the validation call makes both rejection tests fail.
+- Zero-cap display tests assert `(zero cap)`/`(over cap)` output and the unchanged non-zero paths.
+- `cargo test -p gyre-cli`: 128 + 1 passed, 0 failed. `cargo build -p gyre-cli` and `cargo build --all`: ok. `bash scripts/check-arch.sh`: ok.
+- End-to-end against a real `gyre-server` (loopback) for the original scope, plus the staged operator reproducers (cost-input-regression.py, zero-limit-regression.py) and a full input matrix (NaN/inf/zero/negative/`--llm-cost=-5`/valid-75) run against the built binary — all pass; transcripts in `/tmp/stage/review-evidence/` (task-192-evidence.md, task-192-repair-evidence.md, and the `*-result.txt` files).
