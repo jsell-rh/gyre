@@ -67,7 +67,7 @@ The `SetBudgetRequest` shape (`crates/gyre-server/src/api/budget.rs:63-69`) acce
 
 ## Shipped
 
-`gyre budget show` / `gyre budget set` in `crates/gyre-cli` (commits f1dd5659, 0a2d6e7e, 06309226), calling exactly the endpoints registered in `gyre-server/src/api/mod.rs` — `GET/PUT /api/v1/workspaces/:id/budget` and `GET /api/v1/budget/summary`. No new routes, no repo-level budget store.
+`gyre budget show` / `gyre budget set` in `crates/gyre-cli` (commits f1dd5659, 0a2d6e7e, 06309226, plus format repair 2b846915), calling exactly the endpoints registered in `gyre-server/src/api/mod.rs` — `GET/PUT /api/v1/workspaces/:id/budget` and `GET /api/v1/budget/summary`. No new routes, no repo-level budget store.
 
 ### Behavior
 
@@ -82,3 +82,9 @@ The `SetBudgetRequest` shape (`crates/gyre-server/src/api/budget.rs:63-69`) acce
 - Zero-cap display tests assert `(zero cap)`/`(over cap)` output and the unchanged non-zero paths.
 - `cargo test -p gyre-cli`: 129 + 1 passed, 0 failed. `cargo build -p gyre-cli`: ok. `bash scripts/check-arch.sh`: ok.
 - Real-binary probes against real loopback HTTP (transcripts in `/tmp/stage/review-evidence/`): the staged operator reproducers all pass — `zero-set-probe.py` (`--llm-cost 0` exits 0, exactly one PUT carrying `max_cost_per_day: 0.0` with `max_tokens_per_day: 500000` / `max_concurrent_agents: 4` / `max_agent_lifetime_secs: 3600` preserved, bounded `(over cap)` display), `operator-nan-cost-probe.py` (NaN rejected, no mutation), `operator-zero-limit-probe.py` (bounded zero-cap display) — plus `negative-cost-probe.py` (`--llm-cost=-5` rejected before any request, error naming the flag and negativity).
+
+### Verification repair (round 2)
+
+- The prior verification run failed only `scripts/check-rustfmt-diff.py` against base 321936d: changed lines in `crates/gyre-cli/src/client.rs` and `main.rs` needed formatting. Commit 2b846915 reformats exactly those lines to rustfmt's own output (line-wrapping only; no behavior change).
+- Equivalence proof (this sandbox cannot compile — crates.io unreachable and no local registry cache, an infrastructure restriction recorded for remote verification, not a code defect): `python3 scripts/check-rustfmt-diff.py 321936d` now exits 0; `git diff -w` between the previously verified tree and the repair shows only whitespace-level line wrapping plus two semantically inert changes (removal of a match-arm trailing comma and a swap of two `use` statements whose resolution order is irrelevant); rustfmt parsed both files successfully (the checker invokes it with `check=True`). The behavior verified in round 1 (`cargo test -p gyre-cli`: 129 + 1 passed, 0 failed; `cargo build -p gyre-cli`: ok) is therefore unchanged.
+- `bash scripts/check-arch.sh`: ok. Evidence saved under `/tmp/stage/review-evidence/` (rustfmt-check.txt, whitespace-equivalence.txt, check-arch.txt, transport-restriction.txt).
