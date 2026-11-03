@@ -69,5 +69,5 @@ def snapshot(store):
             'confirmed_merges': sum(bool(task['merge_sha']) for task in tasks),
             'resources': {'used': sum(row[1] for row in resources), 'deletion_pending': dict(resources).get('deleting', 0),
                           'inventory_ready': bool(inventory and time.time() - inventory['at'] < 180)},
-            'health': {'condition': store.setting('admission_condition', 'Reconciling'), 'effective_slots': store.setting('slots', 8)},
+            'health': {'condition': 'Paused' if store.setting('admission_paused', False) else store.setting('admission_condition', 'Reconciling'), 'effective_slots': 0 if store.setting('admission_paused', False) else store.setting('slots', 8)},
             'dispatch': {'only_task': store.setting('only_task')}}
