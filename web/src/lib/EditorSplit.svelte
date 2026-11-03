@@ -684,6 +684,7 @@
   }
 
   function handleKeydown(e) {
+    console.log('DEBUG EditorSplit.handleKeydown', e.key);
     if (e.key !== 'Escape') return;
     // While the 409 conflict dialog is open it owns Esc (HSI §7): the dialog
     // closes, the editor stays. The dialog's own window listener handles it.
