@@ -1,7 +1,7 @@
 ---
 title: "Repair verified failure on main f4acb4ebcaf9"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
-depends_on: []
+depends_on: [task-239]
 progress: ready-for-review
 commits: ["52a7d4afb5c5ecccaf548409c9478817c410fd02", "8e5852493dd00fae67c93cc1f74679eea9b7c43a", "96d2a28c0e5068d00924db884877712e1cbd4dee"]
 ---
@@ -111,4 +111,3 @@ Transport restriction (unchanged, not a code defect): this sandbox cannot run th
 
 - Product-surface commit `96d2a28c` recorded in `commits:` frontmatter (full SHA, corrected by checkpoint commit `2bbc4f8e` after a truncated SHA was recorded in the interrupted run). Docs-only commits (`1f7876ab`, `2bbc4f8e`) touch `specs/` only, outside the check's scope.
 - Independent review, full deterministic gates, and GitHub checks remain required before merge (per assignment); no full-suite rerun performed here per the smallest-relevant-probe constraint.
-

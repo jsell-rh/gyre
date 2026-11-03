@@ -1,11 +1,10 @@
 <script>
-  import ExplorerCanvas from './ExplorerCanvas.svelte';
-  import FlowRenderer from './FlowRenderer.svelte';
   import Badge from './Badge.svelte';
   import EmptyState from './EmptyState.svelte';
   import { api } from './api.js';
   import { toast as showToast } from './toast.svelte.js';
   import { entityName, shortId } from './entityNames.svelte.js';
+  import { listLayouts } from './layoutRegistry.js';
   import { t } from 'svelte-i18n';
 
   let {
@@ -27,7 +26,15 @@
     specs: new Set(['Spec']),
   };
 
-  let activeView = $state('graph'); // 'graph' | 'list' | 'timeline' | 'flow'
+  // View-switcher tabs and renderer dispatch come from the layout registry
+  // (ui-layout.md §4 Extensibility) — new layouts register themselves there
+  // instead of being hardcoded here.
+  const layouts = listLayouts();
+  const layoutNames = layouts.map((l) => l.name);
+
+  let activeView = $state('graph'); // active layout name from the registry
+
+  let activeLayout = $derived(layouts.find((l) => l.name === activeView));
 
   // List view sort
   let sortBy = $state('type'); // 'type' | 'name' | 'file'
@@ -250,89 +257,69 @@
     return `${((ts - min) / (max - min)) * 100}%`;
   }
 </script>
-
 <div class="moldable-view">
   <!-- View switcher tabs -->
-  <!-- svelte-ignore a11y_interactive_supports_focus -->
   <div class="view-tabs" role="tablist" aria-label={$t('moldable_view.view_mode')}
     onkeydown={(e) => {
-      const views = ['graph', 'list', 'timeline', 'flow'];
+      const views = layoutNames;
       const idx = views.indexOf(activeView);
       if (e.key === 'ArrowRight') { e.preventDefault(); const ni = (idx + 1) % views.length; activeView = views[ni]; document.getElementById('tab-' + views[ni])?.focus(); }
       if (e.key === 'ArrowLeft')  { e.preventDefault(); const ni = (idx - 1 + views.length) % views.length; activeView = views[ni]; document.getElementById('tab-' + views[ni])?.focus(); }
       if (e.key === 'Home') { e.preventDefault(); activeView = views[0]; document.getElementById('tab-' + views[0])?.focus(); }
-      if (e.key === 'End')  { e.preventDefault(); activeView = views[views.length - 1]; document.getElementById('tab-' + views[views.length - 1])?.focus(); }
+      if (e.key === 'End') { e.preventDefault(); activeView = views[views.length - 1]; document.getElementById('tab-' + views[views.length - 1])?.focus(); }
     }}
   >
-    <button
-      class="view-tab"
-      id="tab-graph"
-      class:active={activeView === 'graph'}
-      role="tab"
-      aria-selected={activeView === 'graph'}
-      aria-controls="tabpanel-graph"
-      tabindex={activeView === 'graph' ? 0 : -1}
-      onclick={() => (activeView = 'graph')}
-    >
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
-        <circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/>
-        <path d="M7 12h10M17 7l-10 4M17 17L7 13"/>
-      </svg>
-      {$t('moldable_view.tab_graph')}
-    </button>
-    <button
-      class="view-tab"
-      id="tab-list"
-      class:active={activeView === 'list'}
-      role="tab"
-      aria-selected={activeView === 'list'}
-      aria-controls="tabpanel-list"
-      tabindex={activeView === 'list' ? 0 : -1}
-      onclick={() => (activeView = 'list')}
-    >
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
-        <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>
-        <line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>
-      </svg>
-      {$t('moldable_view.tab_list')}
-    </button>
-    <button
-      class="view-tab"
-      id="tab-timeline"
-      class:active={activeView === 'timeline'}
-      role="tab"
-      aria-selected={activeView === 'timeline'}
-      aria-controls="tabpanel-timeline"
-      tabindex={activeView === 'timeline' ? 0 : -1}
-      onclick={() => (activeView = 'timeline')}
-    >
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
-        <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/>
-      </svg>
-      {$t('moldable_view.tab_timeline')}
-    </button>
-    <button
-      class="view-tab"
-      id="tab-flow"
-      class:active={activeView === 'flow'}
-      role="tab"
-      aria-selected={activeView === 'flow'}
-      aria-controls="tabpanel-flow"
-      tabindex={activeView === 'flow' ? 0 : -1}
-      onclick={() => (activeView = 'flow')}
-    >
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
-        <circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/>
-        <path d="M7 11.5l9-5M7 12.5l9 5"/>
-      </svg>
-      {$t('moldable_view.tab_flow')}
-    </button>
+    {#each layouts as layout (layout.name)}
+      <button
+        class="view-tab"
+        id="tab-{layout.name}"
+        class:active={activeView === layout.name}
+        role="tab"
+        aria-selected={activeView === layout.name}
+        aria-controls="tabpanel-{layout.name}"
+        tabindex={activeView === layout.name ? 0 : -1}
+        onclick={() => (activeView = layout.name)}
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true">
+          {@html layout.icon}
+        </svg>
+        {$t(layout.labelKey)}
+      </button>
+    {/each}
   </div>
 
   <!-- View content -->
   <div class="view-content" role="tabpanel" id="tabpanel-{activeView}" aria-labelledby="tab-{activeView}">
-    {#if activeView === 'graph'}
-      <ExplorerCanvas nodes={displayNodes} edges={displayEdges} {repoId} {onSelectNode} />
+    {#if activeLayout?.component}
+      <!-- Registry-driven renderer dispatch (ui-layout.md §4 Extensibility):
+           layouts with a registered component render through it. -->
+      {@const Renderer = activeLayout.component}
+      {#if activeView === 'flow'}
+        <div class="flow-container">
+          {#if flowLoading}
+            <div class="flow-status-bar" role="status" aria-label={$t('moldable_view.loading_traces')}>
+              <div class="flow-spinner-inline" aria-hidden="true"></div>
+              <span>{$t('moldable_view.loading_traces')}</span>
+            </div>
+          {:else if flowError}
+            <div class="flow-status-bar flow-status-error" role="alert">
+              <span>{$t('moldable_view.flow_error', { values: { error: flowError } })}</span>
+            </div>
+          {:else if repoId && flowSpans.length === 0}
+            <div class="flow-status-bar">
+              <span>{$t('moldable_view.no_traces')}</span>
+            </div>
+          {/if}
+          <Renderer
+            nodes={displayNodes}
+            edges={displayEdges}
+            {repoId}
+            spans={flowSpans}
+          />
+        </div>
+      {:else}
+        <Renderer nodes={displayNodes} edges={displayEdges} {repoId} {onSelectNode} />
+      {/if}
 
     {:else if activeView === 'list'}
       <div class="list-view">
@@ -413,30 +400,6 @@
             </table>
           {/if}
         </div>
-      </div>
-
-    {:else if activeView === 'flow'}
-      <div class="flow-container">
-        {#if flowLoading}
-          <div class="flow-status-bar" role="status" aria-label={$t('moldable_view.loading_traces')}>
-            <div class="flow-spinner-inline" aria-hidden="true"></div>
-            <span>{$t('moldable_view.loading_traces')}</span>
-          </div>
-        {:else if flowError}
-          <div class="flow-status-bar flow-status-error" role="alert">
-            <span>{$t('moldable_view.flow_error', { values: { error: flowError } })}</span>
-          </div>
-        {:else if repoId && flowSpans.length === 0}
-          <div class="flow-status-bar">
-            <span>{$t('moldable_view.no_traces')}</span>
-          </div>
-        {/if}
-        <FlowRenderer
-          nodes={displayNodes}
-          edges={displayEdges}
-          {repoId}
-          spans={flowSpans}
-        />
       </div>
 
     {:else if activeView === 'timeline'}

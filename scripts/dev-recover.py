@@ -41,8 +41,8 @@ def main() -> int:
     for attempt in range(3):
         try:
             result = subprocess.run(
-                [os.environ.get("OPENSHELL", "openshell"), "-g", "gyre-gyre", "sandbox",
-                 "exec", "-n", sandbox, "--no-login-shell", "--workdir", "/tmp/gyre",
+                [os.environ.get("OPENSHELL", "openshell"), "-g", os.environ.get("GYRE_OPEN_GATEWAY", "gyre-gyre"), "sandbox",
+                 "exec", "-n", sandbox, "--no-login-shell", "--workdir", os.environ.get("GYRE_DEV_RECOVERY_REPO", "/tmp/gyre"),
                  "--", "bash", "-c", command],
                 capture_output=True, timeout=120,
             )
