@@ -1,0 +1,3 @@
+base: worker.yaml
+agent: agents/implement.md
+role: coder
