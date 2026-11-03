@@ -202,7 +202,7 @@ class CrashTest(unittest.TestCase):
         (prior / 'outcome.json').write_text(json.dumps({'published': True, 'head': 'source', 'valid': False}))
         claim = {**self.claim, 'stage': 'review'}
         execution = Execution(self.store, claim)
-        with patch.object(execution, 'login', side_effect=RuntimeError('new model assignment required')):
+        with patch('pipeline.fullsend.binary', return_value=Path('/runner')), patch.object(execution, 'login', side_effect=RuntimeError('new model assignment required')):
             with self.assertRaisesRegex(RuntimeError, 'new model assignment required'):
                 execution.cloud_step(self.store.task('task-001'), '')
 
