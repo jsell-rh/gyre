@@ -110,3 +110,58 @@ The task meets the spec section as scoped (Principle, Architecture, Secret Scopi
 **progress: complete**
 
 — Reviewer, 2026-10-09
+
+## Round 4 (independent review, candidate a8f242fa vs base 653a696f)
+
+Diff scope: 13 files — spawn.rs (F2 end-to-end tests + F3/F4 fixes), mem.rs (F1
+guard + contract tests, task-087 F2 trace-payload parity, `test_state_with_secrets`
+hook), constraint_check.rs (F3 sibling fix), sqlite/secret.rs (F5 warns only),
+exemption drain-downs, specs/coverage rows 39-44, task file re-normalization.
+
+### Independent evidence (fresh target dir, SKIP_WEB_BUILD=1, pristine tree)
+
+- `cargo test -p gyre-common --lib secret` → 5 passed.
+- `cargo test -p gyre-adapters --lib sqlite::secret` → 17 passed (encryption at
+  rest, tampered ciphertext / wrong key failure, tenant isolation, scope cascade,
+  expiry, reopen stability).
+- `cargo test -p gyre-server --lib` filtered on `api::spawn::tests`,
+  `mem::secret_contract_tests`, `mem::trace_payload_tests` → 44 passed, including
+  all five secret-delivery tests by name, through a real spawned child process
+  (env-dump compute target; loopback listeners work in this sandbox).
+- Mutation probes (source restored byte-identical after each): F3 mutant
+  (reintroduced "default" tenant fabrication) killed by
+  `spawn_unresolvable_workspace_skips_secret_resolution` — the dump shows
+  `GYRE_CRED_LEAK=leaked` delivered, the exact leak scenario; F4 mutant
+  (`from_utf8_lossy`) killed by `spawn_non_utf8_secret_skipped_others_delivered`;
+  F1 mutant (mem duplicate guard deleted) killed by both `create_rejects_*`
+  contract tests. Logs under /tmp/stage/review-evidence.
+- Gates: arch, migration-versions, mem-port-contracts, fabricated-scope-defaults,
+  lossy-secret-conversion, unwritten-store-fields, scope-literal-defaults,
+  inert-enforcement, forged-scope-fields, in-memory-state-stores,
+  migration-sql-portability all OK; `check-task-commit-attribution.sh` exits 0 on
+  the candidate (the task-200 debt was repaired by base 653a696f itself). All 14
+  frontmatter SHAs are ancestors of HEAD. `git diff --check` base→candidate clean;
+  web/ untouched by the candidate.
+- Domain/port/adapter/migration re-read: Secret carries no value field
+  (test-enforced), AES-256-GCM per-value random nonce, expired excluded,
+  nearest-scope-wins, tenant-isolated; mem resolve_for_agent mirrors SQLite
+  semantics; no `from_utf8_lossy` on secret bytes anywhere in the touched files.
+
+### Finding (revision required — one item)
+
+**F6 (minor, gate integrity): `check-fabricated-scope-defaults.sh` frozen count
+left slack by one.** The diff removes two exemption entries (the task-097 F3 line
+at spawn.rs:643 and its constraint_check.rs:1357 sibling) but lowers
+`FROZEN_EXEMPTION_COUNT` only 7→6, leaving 5 entries against a count of 6. The
+gate fails only when entries exceed the count, so a single future exemption
+re-add (6 ≤ 6) passes silently — base was tight at 7/7, where any growth failed.
+Demonstrated by appending one line to a copy of the exemption file: gate exits 0.
+This breaks the "fails on any growth" freeze discipline (AGENTS.md) for exactly
+the scope-fabrication gate this task's F3 fix created, and the file header now
+claims "frozen at 6 entries" with 5 lines present. Fix: lower
+`FROZEN_EXEMPTION_COUNT` to 5 and correct the header comment.
+
+Everything else in the task contract is supported by independent evidence. With
+F6 repaired (a two-line mechanical fix), this review would approve.
+
+— Reviewer, round 4
