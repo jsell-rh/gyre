@@ -1687,9 +1687,12 @@ async fn main() -> Result<()> {
                         // Repo scope maps to the owning workspace: resolve the
                         // workspace from --workspace-name or the git remote
                         // (same helpers `gyre explore`/`gyre deps` use).
-                        let ws_id =
-                            resolve_budget_workspace(&api, workspace_name.as_deref(), repo.as_deref())
-                                .await?;
+                        let ws_id = resolve_budget_workspace(
+                            &api,
+                            workspace_name.as_deref(),
+                            repo.as_deref(),
+                        )
+                        .await?;
                         let budget = api.get_workspace_budget(&ws_id).await?;
                         print_workspace_budget(&budget);
                     }
@@ -1726,7 +1729,7 @@ async fn main() -> Result<()> {
                     print_workspace_budget(&updated);
                 }
             }
-        },
+        }
     }
 
     Ok(())
@@ -2113,12 +2116,8 @@ fn merge_budget_updates(
     updates: &client::SetBudgetRequest,
 ) -> client::SetBudgetRequest {
     client::SetBudgetRequest {
-        max_tokens_per_day: updates
-            .max_tokens_per_day
-            .or(current.max_tokens_per_day),
-        max_cost_per_day: updates
-            .max_cost_per_day
-            .or(current.max_cost_per_day),
+        max_tokens_per_day: updates.max_tokens_per_day.or(current.max_tokens_per_day),
+        max_cost_per_day: updates.max_cost_per_day.or(current.max_cost_per_day),
         max_concurrent_agents: updates
             .max_concurrent_agents
             .or(current.max_concurrent_agents),
@@ -2265,7 +2264,10 @@ fn print_workspace_budget(budget: &client::BudgetResponse) {
     println!("Usage today (since {}):", budget.usage.period_start);
     println!(
         "  tokens used:   {}",
-        budget_usage_line(budget.usage.tokens_used_today, budget.config.max_tokens_per_day)
+        budget_usage_line(
+            budget.usage.tokens_used_today,
+            budget.config.max_tokens_per_day
+        )
     );
     println!(
         "  cost today:    {}",
@@ -2326,7 +2328,10 @@ fn print_tenant_budget_summary(summary: &client::TenantBudgetSummary) {
         "  active agents: {}",
         budget_usage_line(
             summary.tenant_usage.active_agents as u64,
-            summary.tenant_config.max_concurrent_agents.map(|a| a as u64),
+            summary
+                .tenant_config
+                .max_concurrent_agents
+                .map(|a| a as u64),
         )
     );
     println!();
@@ -4328,7 +4333,12 @@ mod tests {
     #[test]
     fn cli_budget_show_workspace_parses() {
         let args = Cli::try_parse_from([
-            "gyre", "budget", "show", "--workspace", "--workspace-name", "platform",
+            "gyre",
+            "budget",
+            "show",
+            "--workspace",
+            "--workspace-name",
+            "platform",
         ]);
         assert!(args.is_ok());
         if let Commands::Budget {
@@ -4439,7 +4449,12 @@ mod tests {
     fn cli_budget_set_workspace_cost_parses() {
         // Spec: `gyre budget set --workspace --llm-cost 100.00`
         let args = Cli::try_parse_from([
-            "gyre", "budget", "set", "--workspace", "--llm-cost", "100.00",
+            "gyre",
+            "budget",
+            "set",
+            "--workspace",
+            "--llm-cost",
+            "100.00",
         ]);
         assert!(args.is_ok());
         if let Commands::Budget {
@@ -4553,8 +4568,7 @@ mod tests {
     /// Mock server scripting the full `budget set --workspace-name platform`
     /// request sequence: slug resolution, budget GET (fetch-merge-put),
     /// budget PUT. Captures every request that actually arrives.
-    fn spawn_budget_set_server()
-    -> (
+    fn spawn_budget_set_server() -> (
         String,
         std::sync::Arc<std::sync::Mutex<Vec<client::test_http::CapturedRequest>>>,
     ) {
@@ -4621,7 +4635,11 @@ mod tests {
         assert_eq!(updated.entity_id, "ws-123");
 
         let reqs = captured.lock().unwrap();
-        assert_eq!(reqs.len(), 3, "expected slug-resolve GET, budget GET, budget PUT");
+        assert_eq!(
+            reqs.len(),
+            3,
+            "expected slug-resolve GET, budget GET, budget PUT"
+        );
         assert_eq!(
             reqs[0].request_line,
             "GET /api/v1/workspaces?slug=platform HTTP/1.1"
@@ -4657,7 +4675,11 @@ mod tests {
         assert_eq!(updated.entity_id, "ws-123");
 
         let reqs = captured.lock().unwrap();
-        assert_eq!(reqs.len(), 3, "expected slug-resolve GET, budget GET, budget PUT");
+        assert_eq!(
+            reqs.len(),
+            3,
+            "expected slug-resolve GET, budget GET, budget PUT"
+        );
         assert_eq!(
             reqs[2].request_line,
             "PUT /api/v1/workspaces/ws-123/budget HTTP/1.1"
@@ -4680,12 +4702,21 @@ mod tests {
     fn budget_usage_line_zero_limit_is_bounded_not_nan() {
         let line = budget_usage_line(0, Some(0));
         assert!(!line.contains("NaN"), "zero cap rendered NaN: {line}");
-        assert!(line.contains("zero cap"), "expected explicit zero-cap display: {line}");
+        assert!(
+            line.contains("zero cap"),
+            "expected explicit zero-cap display: {line}"
+        );
         let over = budget_usage_line(5, Some(0));
         assert!(!over.contains("NaN"), "zero cap rendered NaN: {over}");
-        assert!(over.contains("over cap"), "usage above zero cap must say over cap: {over}");
+        assert!(
+            over.contains("over cap"),
+            "usage above zero cap must say over cap: {over}"
+        );
         // Non-zero paths are unchanged.
-        assert_eq!(budget_usage_line(123456, Some(500000)), "123456 / 500000 (24.7%)");
+        assert_eq!(
+            budget_usage_line(123456, Some(500000)),
+            "123456 / 500000 (24.7%)"
+        );
         assert_eq!(budget_usage_line(7, None), "7 / none");
     }
 
@@ -4693,12 +4724,21 @@ mod tests {
     fn budget_cost_line_zero_limit_is_bounded_not_nan() {
         let line = budget_cost_line(0.0, Some(0.0));
         assert!(!line.contains("NaN"), "zero cap rendered NaN: {line}");
-        assert!(line.contains("zero cap"), "expected explicit zero-cap display: {line}");
+        assert!(
+            line.contains("zero cap"),
+            "expected explicit zero-cap display: {line}"
+        );
         let over = budget_cost_line(1.5, Some(0.0));
         assert!(!over.contains("NaN"), "zero cap rendered NaN: {over}");
-        assert!(over.contains("over cap"), "usage above zero cap must say over cap: {over}");
+        assert!(
+            over.contains("over cap"),
+            "usage above zero cap must say over cap: {over}"
+        );
         // Non-zero paths are unchanged.
-        assert_eq!(budget_cost_line(12.5, Some(100.0)), "$12.50 / $100.00 (12.5%)");
+        assert_eq!(
+            budget_cost_line(12.5, Some(100.0)),
+            "$12.50 / $100.00 (12.5%)"
+        );
         assert_eq!(budget_cost_line(3.0, None), "$3.00 / none");
     }
 

@@ -1626,10 +1626,7 @@ pub(crate) mod test_http {
     pub(crate) fn spawn_mock_http_server(
         status_line: &str,
         response_body: &str,
-    ) -> (
-        String,
-        std::sync::mpsc::Receiver<CapturedRequest>,
-    ) {
+    ) -> (String, std::sync::mpsc::Receiver<CapturedRequest>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1672,8 +1669,8 @@ pub(crate) mod test_http {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::test_http::spawn_mock_http_server;
+    use super::*;
 
     #[test]
     fn client_trims_trailing_slash() {
@@ -1779,7 +1776,10 @@ mod tests {
             req.request_line,
             "GET /api/v1/workspaces/ws-123/budget HTTP/1.1"
         );
-        assert!(req.headers.to_ascii_lowercase().contains("authorization: bearer tok"));
+        assert!(req
+            .headers
+            .to_ascii_lowercase()
+            .contains("authorization: bearer tok"));
         // Response must parse into the server's BudgetResponse shape.
         assert_eq!(budget.config.max_tokens_per_day, Some(500000));
         assert_eq!(budget.config.max_cost_per_day, Some(100.0));
@@ -1804,7 +1804,10 @@ mod tests {
             req.request_line,
             "PUT /api/v1/workspaces/ws-123/budget HTTP/1.1"
         );
-        assert!(req.headers.to_ascii_lowercase().contains("authorization: bearer tok"));
+        assert!(req
+            .headers
+            .to_ascii_lowercase()
+            .contains("authorization: bearer tok"));
         // Exact serialized body of SetBudgetRequest (server api/budget.rs shape).
         assert_eq!(
             req.body,
@@ -1831,7 +1834,10 @@ mod tests {
             .await
             .unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("HTTP 400"), "error should carry the status: {msg}");
+        assert!(
+            msg.contains("HTTP 400"),
+            "error should carry the status: {msg}"
+        );
         assert!(
             msg.contains("workspace max_tokens_per_day (999) exceeds tenant limit (500)"),
             "error should surface the server message verbatim: {msg}"
@@ -1882,7 +1888,10 @@ mod tests {
         let summary = api.budget_summary().await.unwrap();
         let req = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         assert_eq!(req.request_line, "GET /api/v1/budget/summary HTTP/1.1");
-        assert!(req.headers.to_ascii_lowercase().contains("authorization: bearer tok"));
+        assert!(req
+            .headers
+            .to_ascii_lowercase()
+            .contains("authorization: bearer tok"));
         assert_eq!(summary.tenant_config.max_tokens_per_day, Some(1000000));
         assert_eq!(summary.tenant_usage.active_agents, 7);
         assert_eq!(summary.workspaces.len(), 1);
