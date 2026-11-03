@@ -39,6 +39,7 @@ def source(store):
 def discover_cleanup(store):
     from pipeline.execution import gateway
     os.environ.update(OPENSHELL_NO_BROWSER='1', OPENSHELL_GATEWAY_INSECURE='true', OPENSHELL_WORKSPACE='default')
+    os.environ['GYRE_OPEN_GATEWAY'] = store.setting('gateway', 'gyre-gyre')
     gateway.login(store.directory)
     inventory = gateway.inventory()
     observed = {item['name'] for item in inventory}
@@ -69,8 +70,8 @@ def discover_stage(store, stage, base):
 
 
 def run_one(store, stage, task=None):
-    limit = store.setting('limits', {}).get(stage, 1 if stage == 'verify' else max(1, store.setting('slots', 8)))
-    if stage in ('implement', 'review', 'triage') and store.setting('slots', 8) == 0:
+    limit = store.setting('limits', {}).get(stage, max(1, store.setting('slots', 8)))
+    if stage in ('implement', 'review', 'triage', 'verify') and (store.setting('slots', 8) == 0 or store.setting('admission_paused', False)):
         return False
     claim = store.claim(stage, f'{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}',
                         concurrency=limit, task=task, eligible=lambda work: eligible(store, work))
@@ -203,9 +204,11 @@ def serve(store, interval, only_task=None):
                 ready = store.db.execute(query, (time.time(),)).fetchall()
                 for row in ready:
                     stage = row['stage']
+                    if stage in ('triage', 'implement', 'review', 'verify') and store.setting('admission_paused', False):
+                        continue
                     if allowed is not None and row['task'] not in allowed:
                         continue
-                    limit = store.setting('limits', {}).get(stage, 1 if stage == 'verify' else max(1, store.setting('slots', 8)))
+                    limit = store.setting('limits', {}).get(stage, max(1, store.setting('slots', 8)))
                     live = sum(getattr(child, 'stage', None) == stage for child in children)
                     for _ in range(max(0, min(row['n'], limit - live))):
                         command = [sys.executable, str(Path(__file__).resolve()), '--state', str(store.directory), 'run', stage]
@@ -234,29 +237,19 @@ def main():
     commands.add_parser('status').add_argument('--json', action='store_true')
     commands.add_parser('retry').add_argument('task')
     commands.add_parser('retry-all')
+    commands.add_parser('pause')
+    commands.add_parser('resume')
     commands.add_parser('slots').add_argument('count', type=int)
     command = commands.add_parser('seed')
     command.add_argument('task_file', type=Path)
     command.add_argument('--candidate')
     command.add_argument('--base')
     command.add_argument('--pr')
+    command.add_argument('--fresh', action='store_true', help='start from main with a new work identity; retain prior checkpoints and receipts')
     args = parser.parse_args()
     store = Store(args.state)
-    credentials = store.directory / 'gateway.env'
-    if credentials.exists():
-        if credentials.stat().st_mode & 0o077:
-            raise RuntimeError('gateway.env must have mode 0600')
-        import shlex
-        for line in credentials.read_text().splitlines():
-            if not line.strip() or line.lstrip().startswith('#'):
-                continue
-            key, value = line.removeprefix('export ').split('=', 1)
-            if key not in ('OPENSHELL_OIDC_CLIENT_SECRET', 'GITHUB_TOKEN', 'GH_TOKEN', 'ENMAAS_API_KEY'):
-                raise ValueError('unsupported credential field')
-            words = shlex.split(value)
-            if len(words) != 1:
-                raise ValueError('invalid credential value')
-            os.environ.setdefault(key, words[0])
+    from pipeline.credentials import load
+    load(store)
     try:
         if args.command == 'status':
             from pipeline.cockpit import snapshot
@@ -271,6 +264,9 @@ def main():
                 count = store.db.execute(query, params).rowcount
                 store.event('operator_retry', {'count': count}, getattr(args, 'task', None))
             print(f'retried {count} work items')
+        elif args.command in ('pause', 'resume'):
+            store.set_setting('admission_paused', args.command == 'pause')
+            store.event('operator_admission', {'paused': args.command == 'pause'})
         elif args.command == 'slots':
             if not 0 <= args.count <= 1000:
                 parser.error('slots must be 0–1000')
@@ -281,6 +277,8 @@ def main():
             serve(store, args.interval, args.task)
         elif args.command == 'seed':
             import re
+            if args.fresh and any((args.candidate, args.base, args.pr)):
+                parser.error('--fresh cannot be combined with --candidate, --base, or --pr')
             for value in (args.candidate, args.base):
                 if value is not None and not re.fullmatch(r'[a-f0-9]{40}', value):
                     parser.error('candidate and base must be full Git commit SHAs')
@@ -296,6 +294,21 @@ def main():
             existing = next((task for task in store.tasks() if task['name'] == name), None)
             if existing:
                 data['catalog_generation'] = existing['data'].get('catalog_generation', existing['generation'])
+                if args.fresh:
+                    if store.db.execute("SELECT 1 FROM work WHERE task=? AND state='claimed'", (name,)).fetchone():
+                        parser.error('drain active work for this task before starting fresh')
+                    if existing['data'].get('delivered'):
+                        parser.error('a delivered task cannot be restarted as fresh work')
+                    archive = store.directory / 'task-resets' / (name + '-' + uuid.uuid4().hex + '.json')
+                    archive.parent.mkdir(exist_ok=True)
+                    archive.write_text(json.dumps(existing, indent=2) + '\n')
+                    archive.chmod(0o600)
+                    store.event('operator_fresh_start', {'archive': str(archive)}, name)
+                elif existing['generation'] == generation and existing['data'].get('triaged') == generation:
+                    data['triaged'] = generation
+            if args.fresh:
+                data['repair'] = {'category': 'fresh_start', 'id': uuid.uuid4().hex,
+                                  'detail': 'Implement this task afresh from the assigned current main. Prior checkpoints are archived; do not resume their source or treat historical baseline diagnostics as current failures.'}
             if args.candidate:
                 if not args.base:
                     parser.error('--candidate requires --base')
