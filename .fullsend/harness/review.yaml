@@ -1,0 +1,3 @@
+base: worker.yaml
+agent: agents/review.md
+role: review
