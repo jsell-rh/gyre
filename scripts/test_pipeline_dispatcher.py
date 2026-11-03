@@ -82,6 +82,25 @@ print(json.dumps(c and c['id']))
         self.another()
         self.assertIsNone(self.store.claim('review','second',capacity=0))
 
+    def test_cleanup_cannot_race_source_recovery_with_a_live_stage_on_same_task(self):
+        claim=self.store.claim('implement','first',capacity=1)
+        self.store.reserve('pod',self.work,claim['token'],'sandbox',1)
+        self.store.resource_state('pod','deleting')
+        cleaner=self.store.enqueue('cleanup','task-001','g',{'resource':'pod'})
+        self.assertIsNone(self.store.claim('cleanup','cleaner',ident=cleaner))
+        self.store.finish(self.work,claim['token'],{})
+        self.assertIsNotNone(self.store.claim('cleanup','cleaner',ident=cleaner))
+
+    def test_new_round_waits_for_prior_task_cleanup_even_if_other_slots_are_free(self):
+        claim=self.store.claim('implement','first',capacity=2)
+        self.store.reserve('pod',self.work,claim['token'],'sandbox',2)
+        self.store.finish(self.work,claim['token'],{})
+        self.store.resource_state('pod','deleting')
+        repair=self.store.enqueue('implement','task-001','g',{'base':'main','repair':'new finding'})
+        self.assertIsNone(self.store.claim('implement','new round',ident=repair,capacity=2))
+        self.store.resource_state('pod','absent')
+        self.assertIsNotNone(self.store.claim('implement','new round',ident=repair,capacity=2))
+
     def test_foreign_dispatcher_cannot_launch_retry_cancel_or_read_history(self):
         foreign=Store(Path(self.temp.name)/'hypershell');self.addCleanup(foreign.close)
         request=adapter.job(self.store,dict(self.store.db.execute('SELECT * FROM work WHERE id=?',(self.work,)).fetchone()))

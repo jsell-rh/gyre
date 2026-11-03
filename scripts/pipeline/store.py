@@ -146,12 +146,11 @@ class Store:
                 WHERE w.stage=? AND w.state IN ('ready','retry') AND w.retry_at<=?
                 AND (? IS NULL OR w.task=?)
                 AND (? IS NULL OR w.id=?)
-                AND (w.stage='cleanup' OR NOT EXISTS(SELECT 1 FROM work x
-                    WHERE x.task=w.task AND x.state='claimed' AND x.stage<>'cleanup'))
+                AND NOT EXISTS(SELECT 1 FROM work x WHERE x.task=w.task AND x.state='claimed')
                 ORDER BY w.priority DESC,w.created,w.id''', (stage, now, task, task, ident, ident)).fetchall()
             row = next((row for row in rows
                         if (not compute or not self.db.execute(
-                            "SELECT 1 FROM resources WHERE work=? AND state<>'absent'", (row['id'],)).fetchone())
+                            "SELECT 1 FROM resources r JOIN work w ON w.id=r.work WHERE w.task=? AND r.state<>'absent'", (row['task'],)).fetchone())
                         and (eligible is None or eligible(dict(row)))), None)
             if not row:
                 return None
