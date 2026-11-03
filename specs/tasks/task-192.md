@@ -5,8 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §CLI"
-commits:
-  - f1dd5659
+commits: ["f1dd5659f671593ddc3a75bca69beac91091563a"]
 ---
 
 ## Spec Excerpt
