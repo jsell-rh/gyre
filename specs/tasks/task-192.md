@@ -2,10 +2,11 @@
 title: "Add gyre budget CLI: show and set at repo/workspace/tenant scope"
 spec_ref: "platform-model.md §CLI"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "platform-model.md §CLI"
-commits: []
+commits:
+  - f1dd5659
 ---
 
 ## Spec Excerpt
@@ -64,3 +65,20 @@ The `SetBudgetRequest` shape (`crates/gyre-server/src/api/budget.rs:63-69`) acce
 - Match the existing CLI output/formatting and error-handling style (see the `Deps`/`Trace` handlers).
 - Confirm `SetBudgetRequest`/`BudgetResponse`/`TenantBudgetSummary` field names in `crates/gyre-server/src/api/budget.rs` before serializing.
 - Run only the touched crates' tests plus `scripts/check-arch.sh`; do not run the full workspace suite or formatters.
+
+## Shipped
+
+Implemented `gyre budget show` / `gyre budget set` in `crates/gyre-cli` (commit f1dd5659), calling exactly the endpoints registered in `gyre-server/src/api/mod.rs` — `GET/PUT /api/v1/workspaces/:id/budget` and `GET /api/v1/budget/summary`. No new routes, no repo-level budget store.
+
+### Behavior
+
+- `gyre budget show` (no flags) resolves the current repo's owning workspace from the git remote via the same `infer_repo_from_git_remote` + `resolve_workspace_slug` chain `gyre explore`/`gyre deps` use, then prints that workspace's limits and live usage (tokens/cost/active agents vs limits, % utilization). `--workspace [--workspace-name <slug>]` targets a named workspace; `--repo` validates repo membership like `explore` does; `--tenant` prints the Admin-only tenant summary with a per-workspace table plus tenant totals.
+- `gyre budget set --llm-tokens/--llm-cost/--max-agents/--max-agent-lifetime-secs` PUTs the merged config (fetch-merge-put, since the server replaces the whole config) so omitted limits keep their values, and prints the resulting budget. Server errors surface verbatim with their HTTP status (400 cascade violation, 403 non-Admin). `set --tenant` and flag-less `set` bail with truthful messages (no tenant-level set endpoint exists in the API).
+- Help text on the command, both subcommands, and `docs/cli.md` states that repo scope maps to the owning workspace.
+
+### Test evidence
+
+- Client-level tests in `client.rs` run a one-shot mock HTTP server over a real loopback socket and assert the exact request line (`GET/PUT /api/v1/workspaces/ws-123/budget`, `GET /api/v1/budget/summary`), Bearer auth header, exact serialized `SetBudgetRequest` body, and verbatim surfacing of a 400 cascade error — they fail if the URL, method, or body drifts.
+- CLI parse tests cover all spec'd invocations (`set --llm-tokens 500000`, `set --workspace --llm-cost 100.00`, show scopes), the `--workspace`/`--tenant` conflict, and the merge helper's preserve-semantics.
+- `cargo test -p gyre-cli`: 123 + 1 passed, 0 failed. `cargo build --all`: ok. `bash scripts/check-arch.sh`: ok.
+- End-to-end against a real `gyre-server` (loopback): show/set/tenant-summary/repo-scope inference all verified, including fetch-merge-put preservation across separate `set` invocations. Transcripts in `/tmp/stage/review-evidence/` (task-192-evidence.md, e2e-transcript.txt).
