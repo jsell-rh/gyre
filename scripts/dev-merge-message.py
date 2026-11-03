@@ -11,10 +11,12 @@ def frontmatter(body, name):
 
 
 def section_bullets(body, heading):
-    match = re.search(rf'^##+ {re.escape(heading)}\s*$', body, re.M)
+    match = re.search(rf'^(#{{2,6}}) {re.escape(heading)}[ \t]*$', body, re.M)
     if not match:
         return []
-    section = re.split(r'^##+ ', body[match.end():], maxsplit=1, flags=re.M)[0]
+    # Subheadings belong to this section; stop only at a sibling or parent.
+    level = len(match.group(1))
+    section = re.split(rf'^#{{1,{level}}}[ \t]+', body[match.end():], maxsplit=1, flags=re.M)[0]
     bullets = []
     for line in section.splitlines():
         if re.match(r'^[-*] ', line):

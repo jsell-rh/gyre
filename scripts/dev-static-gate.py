@@ -12,19 +12,33 @@ import sys
 import tempfile
 
 
+def unavailable(code, output):
+    return code in (124, 137, -9) or bool(re.search(
+        r'failed to download|failed to get .* dependency|Could not resolve (?:host|proxy)|'
+        r'Temporary failure in name resolution|Could not connect to server|ECONNRESET|ETIMEDOUT', output))
+
+
 def main():
     base = subprocess.check_output(['git', 'rev-parse', sys.argv[1]], text=True).strip()
     command = sys.argv[2:]
     timeout = int(os.environ.get('GYRE_DEV_GATE_TIMEOUT', '1800')) + 60
     try:
-        result = subprocess.run(command, timeout=timeout)
+        with tempfile.TemporaryFile(mode='w+') as out, tempfile.TemporaryFile(mode='w+') as err:
+            result = subprocess.run(command, timeout=timeout, stdout=out, stderr=err)
+            out.seek(0)
+            err.seek(0)
+            stdout, stderr = out.read(), err.read()
+        sys.stdout.write(stdout)
+        sys.stderr.write(stderr)
+        sys.stdout.flush()
+        sys.stderr.flush()
     except (OSError, subprocess.TimeoutExpired) as exc:
         print(f'gate execution unavailable: {exc}', file=sys.stderr)
         return 77
     if result.returncode == 0:
         return 0
-    if result.returncode in (124, 137, -9):
-        print('gate execution timed out or was killed; awaiting infrastructure recovery', file=sys.stderr)
+    if unavailable(result.returncode, (stdout + stderr)[-65536:]):
+        print('candidate gate infrastructure unavailable; retry without changing source', file=sys.stderr)
         return 77
     directory = Path(tempfile.mkdtemp(prefix='gyre-gate-baseline-'))
     try:
@@ -40,7 +54,7 @@ def main():
         if baseline.returncode == 0:
             return 1  # Regression or newly strengthened gate: repair candidate.
         output = (baseline.stdout + baseline.stderr)[-65536:]
-        if baseline.returncode in (124, 137, -9) or re.search(r'failed to download|failed to get .* dependency|Could not resolve (?:host|proxy)|Temporary failure in name resolution', output):
+        if unavailable(baseline.returncode, output):
             print('baseline gate infrastructure unavailable: ' + output, file=sys.stderr)
             return 77
         if 'command not found' in output or 'ModuleNotFoundError' in output:
