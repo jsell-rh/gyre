@@ -212,6 +212,15 @@ enum Commands {
         #[command(subcommand)]
         command: RepoCommands,
     },
+    /// Budget governance: show usage and set limits
+    ///
+    /// The budget governance boundary is the workspace — repo scope (the
+    /// default) resolves the current repo's owning workspace and operates on
+    /// that workspace's budget (platform-model.md §5 CLI).
+    Budget {
+        #[command(subcommand)]
+        command: BudgetCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -444,6 +453,72 @@ enum DepsCommands {
     Acknowledge {
         /// Breaking change ID
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum BudgetCommands {
+    /// Show budget limits and real-time usage.
+    ///
+    /// With no flags, resolves the current repo's owning workspace from the
+    /// git remote and shows that workspace's budget — there is no separate
+    /// repo-level budget store; repo scope maps to the owning workspace.
+    /// `--workspace` scopes to a workspace (named via --workspace-name, else
+    /// inferred from the git remote). `--tenant` shows the tenant-wide
+    /// summary (Admin only).
+    Show {
+        /// Show workspace-level usage (the named/current workspace)
+        #[arg(long, conflicts_with = "tenant")]
+        workspace: bool,
+        /// Show tenant-level usage summary (Admin only)
+        #[arg(long, conflicts_with = "workspace")]
+        tenant: bool,
+        /// Workspace slug to target (with --workspace; without it, the
+        /// workspace is inferred from the git remote)
+        #[arg(long)]
+        workspace_name: Option<String>,
+        /// Repository name whose owning workspace to target (validated
+        /// against the resolved workspace; requires --workspace-name or a
+        /// gyre git remote)
+        #[arg(long)]
+        repo: Option<String>,
+    },
+    /// Set budget limits (Admin only).
+    ///
+    /// With no flags, sets limits on the current repo's owning workspace
+    /// (resolved from the git remote — repo scope maps to the owning
+    /// workspace; there is no repo-level budget store). `--workspace`
+    /// targets a workspace named via --workspace-name (or inferred from the
+    /// git remote). Omitted limits keep their current values. Setting
+    /// tenant-level limits is not supported by the server API.
+    Set {
+        /// Set limits on a workspace (the named/current one)
+        #[arg(long, conflicts_with = "tenant")]
+        workspace: bool,
+        /// Tenant scope (not supported for set — no tenant-level set endpoint)
+        #[arg(long, conflicts_with = "workspace")]
+        tenant: bool,
+        /// Max LLM tokens per day
+        #[arg(long)]
+        llm_tokens: Option<u64>,
+        /// Max LLM cost per day (USD)
+        #[arg(long)]
+        llm_cost: Option<f64>,
+        /// Max concurrent agents
+        #[arg(long)]
+        max_agents: Option<u32>,
+        /// Max agent lifetime in seconds
+        #[arg(long)]
+        max_agent_lifetime_secs: Option<u64>,
+        /// Workspace slug to target (with --workspace; without it, the
+        /// workspace is inferred from the git remote)
+        #[arg(long)]
+        workspace_name: Option<String>,
+        /// Repository name whose owning workspace to target (validated
+        /// against the resolved workspace; requires --workspace-name or a
+        /// gyre git remote)
+        #[arg(long)]
+        repo: Option<String>,
     },
 }
 
@@ -1592,6 +1667,75 @@ async fn main() -> Result<()> {
                 }
             },
         },
+
+        Commands::Budget { command } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+
+            match command {
+                BudgetCommands::Show {
+                    workspace: _,
+                    tenant,
+                    workspace_name,
+                    repo,
+                } => {
+                    if tenant {
+                        let summary = api.budget_summary().await?;
+                        print_tenant_budget_summary(&summary);
+                    } else {
+                        // Repo scope maps to the owning workspace: resolve the
+                        // workspace from --workspace-name or the git remote
+                        // (same helpers `gyre explore`/`gyre deps` use).
+                        let ws_id =
+                            resolve_budget_workspace(&api, workspace_name.as_deref(), repo.as_deref())
+                                .await?;
+                        let budget = api.get_workspace_budget(&ws_id).await?;
+                        print_workspace_budget(&budget);
+                    }
+                }
+
+                BudgetCommands::Set {
+                    workspace: _,
+                    tenant,
+                    llm_tokens,
+                    llm_cost,
+                    max_agents,
+                    max_agent_lifetime_secs,
+                    workspace_name,
+                    repo,
+                } => {
+                    if tenant {
+                        anyhow::bail!(
+                            "tenant-level budget limits cannot be set: the server API only \
+                             supports setting workspace budgets (PUT /api/v1/workspaces/:id/budget)"
+                        );
+                    }
+                    let updates = client::SetBudgetRequest {
+                        max_tokens_per_day: llm_tokens,
+                        max_cost_per_day: llm_cost,
+                        max_concurrent_agents: max_agents,
+                        max_agent_lifetime_secs,
+                    };
+                    if updates == client::SetBudgetRequest::default() {
+                        anyhow::bail!(
+                            "no limits given: use --llm-tokens, --llm-cost, --max-agents \
+                             or --max-agent-lifetime-secs"
+                        );
+                    }
+                    let ws_id =
+                        resolve_budget_workspace(&api, workspace_name.as_deref(), repo.as_deref())
+                            .await?;
+                    // The server PUT replaces the whole config (omitted fields
+                    // become unset), so fetch-merge-put to leave unmentioned
+                    // limits unchanged.
+                    let current = api.get_workspace_budget(&ws_id).await?;
+                    let merged = merge_budget_updates(&current.config, &updates);
+                    let updated = api.set_workspace_budget(&ws_id, &merged).await?;
+                    print_workspace_budget(&updated);
+                }
+            }
+        },
     }
 
     Ok(())
@@ -1921,6 +2065,223 @@ fn infer_repo_from_git_remote() -> Option<(String, String)> {
         }
     }
     None
+}
+
+/// Resolve the workspace whose budget a `gyre budget` command operates on.
+///
+/// Repo scope maps to the owning workspace (the budget governance boundary
+/// is the workspace; there is no repo-keyed budget store). Resolution reuses
+/// the exact helpers `gyre explore`/`gyre deps` use:
+/// - `--workspace-name <slug>` → `resolve_workspace_slug`
+/// - `--repo <name>` (with a slug or a gyre git remote) → the repo is resolved
+///   inside the workspace to validate it owns the budget target
+/// - no flags → workspace slug inferred from the git remote
+async fn resolve_budget_workspace(
+    api: &client::GyreClient,
+    workspace_name: Option<&str>,
+    repo: Option<&str>,
+) -> Result<String> {
+    match (workspace_name, repo) {
+        (Some(slug), repo_name) => {
+            let wid = api.resolve_workspace_slug(slug).await?;
+            if let Some(name) = repo_name {
+                // Validate the repo belongs to the named workspace.
+                api.resolve_repo_name(&wid, name).await?;
+            }
+            Ok(wid)
+        }
+        (None, Some(name)) => {
+            // Same as `gyre explore --repo`: infer the workspace from the git
+            // remote, then resolve the repo name within it.
+            let (ws_slug, _) = infer_repo_from_git_remote().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "could not infer workspace from git remote. \
+                     Use --workspace-name <slug> --repo <name> to specify."
+                )
+            })?;
+            let wid = api.resolve_workspace_slug(&ws_slug).await?;
+            api.resolve_repo_name(&wid, name).await?;
+            Ok(wid)
+        }
+        (None, None) => {
+            let (ws_slug, _) = infer_repo_from_git_remote().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "could not infer workspace from git remote. \
+                     Run from a gyre-cloned repository, or pass --workspace-name <slug>."
+                )
+            })?;
+            api.resolve_workspace_slug(&ws_slug).await
+        }
+    }
+}
+
+/// Merge `gyre budget set` updates into the current config so unmentioned
+/// limits keep their values (the server PUT replaces the whole config).
+fn merge_budget_updates(
+    current: &client::BudgetConfig,
+    updates: &client::SetBudgetRequest,
+) -> client::SetBudgetRequest {
+    client::SetBudgetRequest {
+        max_tokens_per_day: updates
+            .max_tokens_per_day
+            .or(current.max_tokens_per_day),
+        max_cost_per_day: updates
+            .max_cost_per_day
+            .or(current.max_cost_per_day),
+        max_concurrent_agents: updates
+            .max_concurrent_agents
+            .or(current.max_concurrent_agents),
+        max_agent_lifetime_secs: updates
+            .max_agent_lifetime_secs
+            .or(current.max_agent_lifetime_secs),
+    }
+}
+
+/// "123456 / 500000 (24.7%)" vs "123456 / none" — usage vs limit with
+/// utilization when a limit is set.
+fn budget_usage_line(used: u64, limit: Option<u64>) -> String {
+    match limit {
+        Some(max) => format!("{used} / {max} ({:.1}%)", used as f64 / max as f64 * 100.0),
+        None => format!("{used} / none"),
+    }
+}
+
+fn budget_cost_line(used: f64, limit: Option<f64>) -> String {
+    match limit {
+        Some(max) => format!("${used:.2} / ${max:.2} ({:.1}%)", used / max * 100.0),
+        None => format!("${used:.2} / none"),
+    }
+}
+
+fn budget_limit_line<T: std::fmt::Display>(limit: Option<T>) -> String {
+    match limit {
+        Some(v) => v.to_string(),
+        None => "none".to_string(),
+    }
+}
+
+fn budget_cost_limit_line(limit: Option<f64>) -> String {
+    match limit {
+        Some(v) => format!("${v:.2}"),
+        None => "none".to_string(),
+    }
+}
+
+/// Print a workspace budget: limits + real-time usage
+/// (`gyre budget show`, `gyre budget set` result).
+fn print_workspace_budget(budget: &client::BudgetResponse) {
+    println!("Budget for {} {}", budget.entity_type, budget.entity_id);
+    println!();
+    println!("Limits:");
+    println!(
+        "  max tokens per day:     {}",
+        budget_limit_line(budget.config.max_tokens_per_day)
+    );
+    println!(
+        "  max cost per day:       {}",
+        budget_cost_limit_line(budget.config.max_cost_per_day)
+    );
+    println!(
+        "  max concurrent agents:  {}",
+        budget_limit_line(budget.config.max_concurrent_agents)
+    );
+    println!(
+        "  max agent lifetime:     {}",
+        budget_limit_line(
+            budget
+                .config
+                .max_agent_lifetime_secs
+                .map(|s| format!("{s}s"))
+        )
+    );
+    println!("Usage today (since {}):", budget.usage.period_start);
+    println!(
+        "  tokens used:   {}",
+        budget_usage_line(budget.usage.tokens_used_today, budget.config.max_tokens_per_day)
+    );
+    println!(
+        "  cost today:    {}",
+        budget_cost_line(budget.usage.cost_today, budget.config.max_cost_per_day)
+    );
+    println!(
+        "  active agents: {}",
+        budget_usage_line(
+            budget.usage.active_agents as u64,
+            budget.config.max_concurrent_agents.map(|a| a as u64),
+        )
+    );
+}
+
+/// Print the tenant-wide budget summary: tenant totals plus a per-workspace
+/// table (`gyre budget show --tenant`).
+fn print_tenant_budget_summary(summary: &client::TenantBudgetSummary) {
+    println!("Tenant budget");
+    println!();
+    println!("Limits:");
+    println!(
+        "  max tokens per day:     {}",
+        budget_limit_line(summary.tenant_config.max_tokens_per_day)
+    );
+    println!(
+        "  max cost per day:       {}",
+        budget_cost_limit_line(summary.tenant_config.max_cost_per_day)
+    );
+    println!(
+        "  max concurrent agents:  {}",
+        budget_limit_line(summary.tenant_config.max_concurrent_agents)
+    );
+    println!(
+        "  max agent lifetime:     {}",
+        budget_limit_line(
+            summary
+                .tenant_config
+                .max_agent_lifetime_secs
+                .map(|s| format!("{s}s"))
+        )
+    );
+    println!("Usage today (since {}):", summary.tenant_usage.period_start);
+    println!(
+        "  tokens used:   {}",
+        budget_usage_line(
+            summary.tenant_usage.tokens_used_today,
+            summary.tenant_config.max_tokens_per_day
+        )
+    );
+    println!(
+        "  cost today:    {}",
+        budget_cost_line(
+            summary.tenant_usage.cost_today,
+            summary.tenant_config.max_cost_per_day
+        )
+    );
+    println!(
+        "  active agents: {}",
+        budget_usage_line(
+            summary.tenant_usage.active_agents as u64,
+            summary.tenant_config.max_concurrent_agents.map(|a| a as u64),
+        )
+    );
+    println!();
+    if summary.workspaces.is_empty() {
+        println!("No workspace budgets configured.");
+        return;
+    }
+    println!("Workspaces:");
+    println!(
+        "{:<38} {:>12} {:>18} {:>14} {:>10}",
+        "ID", "TOKENS", "TOKENS LIMIT", "COST TODAY", "AGENTS"
+    );
+    println!("{}", "-".repeat(96));
+    for ws in &summary.workspaces {
+        println!(
+            "{:<38} {:>12} {:>18} {:>14} {:>10}",
+            ws.entity_id,
+            ws.usage.tokens_used_today,
+            budget_limit_line(ws.config.max_tokens_per_day),
+            format!("${:.2}", ws.usage.cost_today),
+            ws.usage.active_agents
+        );
+    }
 }
 
 /// List notifications, resolving workspace slug and parsing priority range.
@@ -3867,6 +4228,227 @@ mod tests {
         } else {
             panic!("Expected Deps Acknowledge");
         }
+    }
+
+    // ── Budget command tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn cli_budget_show_bare_parses() {
+        // `gyre budget show` — default (repo) scope, resolved to the owning
+        // workspace at runtime.
+        let args = Cli::try_parse_from(["gyre", "budget", "show"]);
+        assert!(args.is_ok());
+        if let Commands::Budget {
+            command:
+                BudgetCommands::Show {
+                    workspace,
+                    tenant,
+                    workspace_name,
+                    repo,
+                },
+        } = args.unwrap().command
+        {
+            assert!(!workspace);
+            assert!(!tenant);
+            assert_eq!(workspace_name, None);
+            assert_eq!(repo, None);
+        } else {
+            panic!("Expected Budget Show");
+        }
+    }
+
+    #[test]
+    fn cli_budget_show_workspace_parses() {
+        let args = Cli::try_parse_from([
+            "gyre", "budget", "show", "--workspace", "--workspace-name", "platform",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Budget {
+            command:
+                BudgetCommands::Show {
+                    workspace,
+                    tenant,
+                    workspace_name,
+                    repo: _,
+                },
+        } = args.unwrap().command
+        {
+            assert!(workspace);
+            assert!(!tenant);
+            assert_eq!(workspace_name.as_deref(), Some("platform"));
+        } else {
+            panic!("Expected Budget Show with --workspace");
+        }
+    }
+
+    #[test]
+    fn cli_budget_show_tenant_parses() {
+        let args = Cli::try_parse_from(["gyre", "budget", "show", "--tenant"]);
+        assert!(args.is_ok());
+        if let Commands::Budget {
+            command:
+                BudgetCommands::Show {
+                    workspace,
+                    tenant,
+                    workspace_name: _,
+                    repo: _,
+                },
+        } = args.unwrap().command
+        {
+            assert!(!workspace);
+            assert!(tenant);
+        } else {
+            panic!("Expected Budget Show with --tenant");
+        }
+    }
+
+    #[test]
+    fn cli_budget_show_workspace_and_tenant_conflict() {
+        // --workspace and --tenant are mutually exclusive scope selectors.
+        let args = Cli::try_parse_from(["gyre", "budget", "show", "--workspace", "--tenant"]);
+        assert!(args.is_err());
+    }
+
+    #[test]
+    fn cli_budget_show_repo_parses() {
+        let args = Cli::try_parse_from([
+            "gyre",
+            "budget",
+            "show",
+            "--workspace-name",
+            "platform",
+            "--repo",
+            "gyre",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Budget {
+            command:
+                BudgetCommands::Show {
+                    workspace: _,
+                    tenant: _,
+                    workspace_name,
+                    repo,
+                },
+        } = args.unwrap().command
+        {
+            assert_eq!(workspace_name.as_deref(), Some("platform"));
+            assert_eq!(repo.as_deref(), Some("gyre"));
+        } else {
+            panic!("Expected Budget Show with --workspace-name --repo");
+        }
+    }
+
+    #[test]
+    fn cli_budget_set_tokens_parses() {
+        // Spec: `gyre budget set --llm-tokens 500000`
+        let args = Cli::try_parse_from(["gyre", "budget", "set", "--llm-tokens", "500000"]);
+        assert!(args.is_ok());
+        if let Commands::Budget {
+            command:
+                BudgetCommands::Set {
+                    tenant,
+                    llm_tokens,
+                    llm_cost,
+                    max_agents,
+                    max_agent_lifetime_secs,
+                    workspace_name: _,
+                    repo: _,
+                    workspace: _,
+                },
+        } = args.unwrap().command
+        {
+            assert!(!tenant);
+            assert_eq!(llm_tokens, Some(500000));
+            assert_eq!(llm_cost, None);
+            assert_eq!(max_agents, None);
+            assert_eq!(max_agent_lifetime_secs, None);
+        } else {
+            panic!("Expected Budget Set with --llm-tokens");
+        }
+    }
+
+    #[test]
+    fn cli_budget_set_workspace_cost_parses() {
+        // Spec: `gyre budget set --workspace --llm-cost 100.00`
+        let args = Cli::try_parse_from([
+            "gyre", "budget", "set", "--workspace", "--llm-cost", "100.00",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Budget {
+            command:
+                BudgetCommands::Set {
+                    workspace,
+                    tenant,
+                    llm_cost,
+                    ..
+                },
+        } = args.unwrap().command
+        {
+            assert!(workspace);
+            assert!(!tenant);
+            assert_eq!(llm_cost, Some(100.0));
+        } else {
+            panic!("Expected Budget Set with --workspace --llm-cost");
+        }
+    }
+
+    #[test]
+    fn cli_budget_set_all_limits_parses() {
+        let args = Cli::try_parse_from([
+            "gyre",
+            "budget",
+            "set",
+            "--llm-tokens",
+            "500000",
+            "--llm-cost",
+            "100.00",
+            "--max-agents",
+            "10",
+            "--max-agent-lifetime-secs",
+            "3600",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Budget {
+            command:
+                BudgetCommands::Set {
+                    llm_tokens,
+                    llm_cost,
+                    max_agents,
+                    max_agent_lifetime_secs,
+                    ..
+                },
+        } = args.unwrap().command
+        {
+            assert_eq!(llm_tokens, Some(500000));
+            assert_eq!(llm_cost, Some(100.0));
+            assert_eq!(max_agents, Some(10));
+            assert_eq!(max_agent_lifetime_secs, Some(3600));
+        } else {
+            panic!("Expected Budget Set with all limits");
+        }
+    }
+
+    #[test]
+    fn merge_budget_updates_preserves_unmentioned_limits() {
+        // The server PUT replaces the whole config, so `gyre budget set`
+        // fetch-merges: provided limits override, others keep current values.
+        let current = client::BudgetConfig {
+            max_tokens_per_day: Some(100000),
+            max_cost_per_day: Some(50.0),
+            max_concurrent_agents: Some(5),
+            max_agent_lifetime_secs: Some(1800),
+        };
+        let updates = client::SetBudgetRequest {
+            max_tokens_per_day: Some(500000),
+            max_cost_per_day: None,
+            max_concurrent_agents: None,
+            max_agent_lifetime_secs: None,
+        };
+        let merged = merge_budget_updates(&current, &updates);
+        assert_eq!(merged.max_tokens_per_day, Some(500000)); // overridden
+        assert_eq!(merged.max_cost_per_day, Some(50.0)); // preserved
+        assert_eq!(merged.max_concurrent_agents, Some(5)); // preserved
+        assert_eq!(merged.max_agent_lifetime_secs, Some(1800)); // preserved
     }
 
     #[test]

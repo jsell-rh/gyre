@@ -133,6 +133,39 @@ gyre spec conflicts
 
 ---
 
+## Budget (platform-model.md §5)
+
+```bash
+# Current repo budget usage — resolves the repo's owning workspace
+# from the git remote (the budget governance boundary is the workspace;
+# there is no repo-level budget store)
+gyre budget show
+
+# Workspace-level usage (named workspace, or inferred from git remote)
+gyre budget show --workspace --workspace-name platform
+
+# Tenant-level usage summary (Admin only)
+gyre budget show --tenant
+
+# Set repo budget (the owning workspace's limits; Admin only)
+gyre budget set --llm-tokens 500000
+
+# Set workspace cost limit
+gyre budget set --workspace --llm-cost 100.00
+
+# Other limits: --max-agents, --max-agent-lifetime-secs
+# Omitted limits keep their current values (fetch-merge-put).
+```
+
+Notes:
+
+- Calls the real budget endpoints (`GET/PUT /api/v1/workspaces/:id/budget`,
+  `GET /api/v1/budget/summary`); setting limits requires the Admin role.
+- A limit exceeding the tenant ceiling surfaces the server's cascade error;
+  tenant-level limits cannot be set (no tenant-level set endpoint exists).
+
+---
+
 ## Search
 
 ```bash
