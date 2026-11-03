@@ -2132,9 +2132,11 @@ fn merge_budget_updates(
 /// is sent. Non-finite values (NaN/Infinity) must be rejected because
 /// serde_json serializes them as `null`, which the server would store as
 /// "no limit" — silently clearing a financial governance cap instead of
-/// setting one. Non-positive amounts are rejected as nonsensical limits
-/// (a cap of $0 blocks all spend and is far more likely a typo than intent;
-/// a negative cap can never be exceeded by non-negative usage).
+/// setting one. Negative amounts are rejected because a cap below zero
+/// can never be exceeded by non-negative usage. A finite ZERO cap is
+/// VALID: it explicitly disables all spending for the day — the server
+/// stores it, the over-budget check blocks any usage above it, and the
+/// CLI display renders it as an explicit `(zero cap)` rather than `none`.
 fn validate_llm_cost(cost: f64) -> anyhow::Result<()> {
     if !cost.is_finite() {
         anyhow::bail!(
@@ -2142,9 +2144,10 @@ fn validate_llm_cost(cost: f64) -> anyhow::Result<()> {
              (NaN or Infinity would be serialized as null and silently clear the limit)"
         );
     }
-    if cost <= 0.0 {
+    if cost < 0.0 {
         anyhow::bail!(
-            "invalid --llm-cost {cost}: the cost limit must be a positive amount in USD"
+            "invalid --llm-cost {cost}: the cost limit must be a non-negative amount in USD \
+             (zero is valid and disables spending)"
         );
     }
     Ok(())
@@ -4585,21 +4588,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn budget_set_rejects_nonpositive_llm_cost_before_any_request() {
-        for bad in [-5.0, 0.0] {
+    async fn budget_set_rejects_negative_llm_cost_before_any_request() {
+        // A negative cost cap can never be exceeded by non-negative usage
+        // and is rejected before any network I/O. Zero is NOT rejected here:
+        // a finite zero cap is a valid way to disable spending (see
+        // budget_set_zero_cost_disables_spending_and_preserves_limits).
+        for bad in [-5.0] {
             let (base, captured) = spawn_budget_set_server();
             let api = client::GyreClient::new(base, "tok".to_string());
             let err = run_budget_set(&api, Some("platform"), None, None, Some(bad), None, None)
                 .await
-                .expect_err("non-positive --llm-cost must be rejected");
+                .expect_err("negative --llm-cost must be rejected");
             let msg = format!("{err:#}");
             assert!(
-                msg.contains("--llm-cost") && msg.contains("positive"),
-                "error should name the flag and positivity: {msg}"
+                msg.contains("--llm-cost") && msg.contains("negative"),
+                "error should name the flag and negativity: {msg}"
             );
             assert!(
                 captured.lock().unwrap().is_empty(),
-                "non-positive --llm-cost produced HTTP requests"
+                "negative --llm-cost produced HTTP requests"
             );
         }
     }
@@ -4610,7 +4617,7 @@ mod tests {
         let api = client::GyreClient::new(base, "tok".to_string());
         let updated = run_budget_set(&api, Some("platform"), None, None, Some(75.0), None, None)
             .await
-            .expect("finite positive --llm-cost must be accepted");
+            .expect("finite --llm-cost must be accepted");
         assert_eq!(updated.entity_id, "ws-123");
 
         let reqs = captured.lock().unwrap();
@@ -4632,6 +4639,35 @@ mod tests {
         assert_eq!(
             reqs[2].body,
             "{\"max_tokens_per_day\":500000,\"max_cost_per_day\":75.0,\"max_concurrent_agents\":10,\"max_agent_lifetime_secs\":3600}"
+        );
+    }
+
+    #[tokio::test]
+    async fn budget_set_zero_cost_disables_spending_and_preserves_limits() {
+        // A finite ZERO cost cap is valid (review repair 02b87ba4): it
+        // explicitly disables all spending for the day. The command must
+        // PUT max_cost_per_day=0 — not reject the input, and not let
+        // Option/or-merge turn Some(0.0) into the previous value or None —
+        // while every unmentioned limit keeps its GET value.
+        let (base, captured) = spawn_budget_set_server();
+        let api = client::GyreClient::new(base, "tok".to_string());
+        let updated = run_budget_set(&api, Some("platform"), None, None, Some(0.0), None, None)
+            .await
+            .expect("finite zero --llm-cost must be accepted");
+        assert_eq!(updated.entity_id, "ws-123");
+
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 3, "expected slug-resolve GET, budget GET, budget PUT");
+        assert_eq!(
+            reqs[2].request_line,
+            "PUT /api/v1/workspaces/ws-123/budget HTTP/1.1"
+        );
+        // The zero cap must be serialized as 0.0 (a null here would
+        // silently clear the limit instead of disabling spending), and the
+        // other limits must be preserved from the fetch-merge-put GET.
+        assert_eq!(
+            reqs[2].body,
+            "{\"max_tokens_per_day\":500000,\"max_cost_per_day\":0.0,\"max_concurrent_agents\":10,\"max_agent_lifetime_secs\":3600}"
         );
     }
 
