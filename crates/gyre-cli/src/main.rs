@@ -1711,27 +1711,18 @@ async fn main() -> Result<()> {
                              supports setting workspace budgets (PUT /api/v1/workspaces/:id/budget)"
                         );
                     }
-                    let updates = client::SetBudgetRequest {
-                        max_tokens_per_day: llm_tokens,
-                        max_cost_per_day: llm_cost,
-                        max_concurrent_agents: max_agents,
+                    // run_budget_set validates --llm-cost before any network
+                    // I/O, then resolves the workspace and fetch-merge-puts.
+                    let updated = run_budget_set(
+                        &api,
+                        workspace_name.as_deref(),
+                        repo.as_deref(),
+                        llm_tokens,
+                        llm_cost,
+                        max_agents,
                         max_agent_lifetime_secs,
-                    };
-                    if updates == client::SetBudgetRequest::default() {
-                        anyhow::bail!(
-                            "no limits given: use --llm-tokens, --llm-cost, --max-agents \
-                             or --max-agent-lifetime-secs"
-                        );
-                    }
-                    let ws_id =
-                        resolve_budget_workspace(&api, workspace_name.as_deref(), repo.as_deref())
-                            .await?;
-                    // The server PUT replaces the whole config (omitted fields
-                    // become unset), so fetch-merge-put to leave unmentioned
-                    // limits unchanged.
-                    let current = api.get_workspace_budget(&ws_id).await?;
-                    let merged = merge_budget_updates(&current.config, &updates);
-                    let updated = api.set_workspace_budget(&ws_id, &merged).await?;
+                    )
+                    .await?;
                     print_workspace_budget(&updated);
                 }
             }
@@ -2137,10 +2128,77 @@ fn merge_budget_updates(
     }
 }
 
+/// Validate the `--llm-cost` input of `gyre budget set` before any request
+/// is sent. Non-finite values (NaN/Infinity) must be rejected because
+/// serde_json serializes them as `null`, which the server would store as
+/// "no limit" — silently clearing a financial governance cap instead of
+/// setting one. Non-positive amounts are rejected as nonsensical limits
+/// (a cap of $0 blocks all spend and is far more likely a typo than intent;
+/// a negative cap can never be exceeded by non-negative usage).
+fn validate_llm_cost(cost: f64) -> anyhow::Result<()> {
+    if !cost.is_finite() {
+        anyhow::bail!(
+            "invalid --llm-cost {cost}: the cost limit must be a finite amount in USD \
+             (NaN or Infinity would be serialized as null and silently clear the limit)"
+        );
+    }
+    if cost <= 0.0 {
+        anyhow::bail!(
+            "invalid --llm-cost {cost}: the cost limit must be a positive amount in USD"
+        );
+    }
+    Ok(())
+}
+
+/// Execute `gyre budget set`: validate the requested updates, resolve the
+/// target workspace, then fetch-merge-put (the server PUT replaces the
+/// whole config, so unmentioned limits keep their current values).
+/// Validation runs before any network I/O, so rejected --llm-cost input
+/// can never reach the server — in particular it can never produce the
+/// PUT that mutates the budget.
+async fn run_budget_set(
+    api: &client::GyreClient,
+    workspace_name: Option<&str>,
+    repo: Option<&str>,
+    llm_tokens: Option<u64>,
+    llm_cost: Option<f64>,
+    max_agents: Option<u32>,
+    max_agent_lifetime_secs: Option<u64>,
+) -> anyhow::Result<client::BudgetResponse> {
+    if let Some(cost) = llm_cost {
+        validate_llm_cost(cost)?;
+    }
+    let updates = client::SetBudgetRequest {
+        max_tokens_per_day: llm_tokens,
+        max_cost_per_day: llm_cost,
+        max_concurrent_agents: max_agents,
+        max_agent_lifetime_secs,
+    };
+    if updates == client::SetBudgetRequest::default() {
+        anyhow::bail!(
+            "no limits given: use --llm-tokens, --llm-cost, --max-agents \
+             or --max-agent-lifetime-secs"
+        );
+    }
+    let ws_id = resolve_budget_workspace(api, workspace_name, repo).await?;
+    let current = api.get_workspace_budget(&ws_id).await?;
+    let merged = merge_budget_updates(&current.config, &updates);
+    api.set_workspace_budget(&ws_id, &merged).await
+}
+
 /// "123456 / 500000 (24.7%)" vs "123456 / none" — usage vs limit with
-/// utilization when a limit is set.
+/// utilization when a limit is set. A zero cap has no utilization ratio to
+/// report (0/0), so it is displayed explicitly instead of as NaN: a zero
+/// cap blocks all usage, so any usage above it is over cap.
 fn budget_usage_line(used: u64, limit: Option<u64>) -> String {
     match limit {
+        Some(0) => {
+            if used > 0 {
+                format!("{used} / 0 (over cap)")
+            } else {
+                format!("{used} / 0 (zero cap)")
+            }
+        }
         Some(max) => format!("{used} / {max} ({:.1}%)", used as f64 / max as f64 * 100.0),
         None => format!("{used} / none"),
     }
@@ -2148,6 +2206,13 @@ fn budget_usage_line(used: u64, limit: Option<u64>) -> String {
 
 fn budget_cost_line(used: f64, limit: Option<f64>) -> String {
     match limit {
+        Some(0.0) => {
+            if used > 0.0 {
+                format!("${used:.2} / $0.00 (over cap)")
+            } else {
+                format!("${used:.2} / $0.00 (zero cap)")
+            }
+        }
         Some(max) => format!("${used:.2} / ${max:.2} ({:.1}%)", used / max * 100.0),
         None => format!("${used:.2} / none"),
     }
@@ -4449,6 +4514,156 @@ mod tests {
         assert_eq!(merged.max_cost_per_day, Some(50.0)); // preserved
         assert_eq!(merged.max_concurrent_agents, Some(5)); // preserved
         assert_eq!(merged.max_agent_lifetime_secs, Some(1800)); // preserved
+    }
+
+    // ── `gyre budget set` input-validation regressions (review repair) ─────
+    //
+    // Non-finite --llm-cost must be rejected before any network I/O:
+    // serde_json serializes NaN/Infinity as null, so a PUT carrying it
+    // would silently CLEAR the cost limit instead of setting one. The
+    // command-path tests below drive run_budget_set (the exact flow the
+    // `budget set` handler calls) against a real loopback HTTP server and
+    // assert that rejected input produces no requests at all — in
+    // particular no budget-mutating PUT.
+
+    const BUDGET_SET_WORKSPACES_JSON: &str =
+        r#"[{"id":"ws-123","name":"platform","slug":"platform"}]"#;
+    const BUDGET_SET_RESPONSE_JSON: &str = r#"{
+        "entity_type": "workspace",
+        "entity_id": "ws-123",
+        "config": {
+            "max_tokens_per_day": 500000,
+            "max_cost_per_day": 100.0,
+            "max_concurrent_agents": 10,
+            "max_agent_lifetime_secs": 3600
+        },
+        "usage": {
+            "entity_type": "workspace",
+            "entity_id": "ws-123",
+            "tokens_used_today": 123456,
+            "cost_today": 12.5,
+            "active_agents": 3,
+            "period_start": 1790000000
+        }
+    }"#;
+
+    /// Mock server scripting the full `budget set --workspace-name platform`
+    /// request sequence: slug resolution, budget GET (fetch-merge-put),
+    /// budget PUT. Captures every request that actually arrives.
+    fn spawn_budget_set_server()
+    -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<client::test_http::CapturedRequest>>>,
+    ) {
+        client::test_http::spawn_mock_http_server_sequence(vec![
+            ("200 OK".to_string(), BUDGET_SET_WORKSPACES_JSON.to_string()),
+            ("200 OK".to_string(), BUDGET_SET_RESPONSE_JSON.to_string()),
+            ("200 OK".to_string(), BUDGET_SET_RESPONSE_JSON.to_string()),
+        ])
+    }
+
+    #[tokio::test]
+    async fn budget_set_rejects_nonfinite_llm_cost_before_any_request() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let (base, captured) = spawn_budget_set_server();
+            let api = client::GyreClient::new(base, "tok".to_string());
+            let err = run_budget_set(&api, Some("platform"), None, None, Some(bad), None, None)
+                .await
+                .expect_err("non-finite --llm-cost must be rejected");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("--llm-cost") && msg.contains("finite"),
+                "error should name the flag and finiteness: {msg}"
+            );
+            // No request may reach the server — rejected input must never
+            // produce a PUT (or even the workspace-resolution GET).
+            assert!(
+                captured.lock().unwrap().is_empty(),
+                "non-finite --llm-cost produced HTTP requests"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn budget_set_rejects_nonpositive_llm_cost_before_any_request() {
+        for bad in [-5.0, 0.0] {
+            let (base, captured) = spawn_budget_set_server();
+            let api = client::GyreClient::new(base, "tok".to_string());
+            let err = run_budget_set(&api, Some("platform"), None, None, Some(bad), None, None)
+                .await
+                .expect_err("non-positive --llm-cost must be rejected");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("--llm-cost") && msg.contains("positive"),
+                "error should name the flag and positivity: {msg}"
+            );
+            assert!(
+                captured.lock().unwrap().is_empty(),
+                "non-positive --llm-cost produced HTTP requests"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn budget_set_valid_cost_puts_merged_body_and_preserves_limits() {
+        let (base, captured) = spawn_budget_set_server();
+        let api = client::GyreClient::new(base, "tok".to_string());
+        let updated = run_budget_set(&api, Some("platform"), None, None, Some(75.0), None, None)
+            .await
+            .expect("finite positive --llm-cost must be accepted");
+        assert_eq!(updated.entity_id, "ws-123");
+
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 3, "expected slug-resolve GET, budget GET, budget PUT");
+        assert_eq!(
+            reqs[0].request_line,
+            "GET /api/v1/workspaces?slug=platform HTTP/1.1"
+        );
+        assert_eq!(
+            reqs[1].request_line,
+            "GET /api/v1/workspaces/ws-123/budget HTTP/1.1"
+        );
+        assert_eq!(
+            reqs[2].request_line,
+            "PUT /api/v1/workspaces/ws-123/budget HTTP/1.1"
+        );
+        // Fetch-merge-put: the new cost is sent, every unmentioned limit
+        // keeps the value from the GET (server replaces the whole config).
+        assert_eq!(
+            reqs[2].body,
+            "{\"max_tokens_per_day\":500000,\"max_cost_per_day\":75.0,\"max_concurrent_agents\":10,\"max_agent_lifetime_secs\":3600}"
+        );
+    }
+
+    // ── zero-cap display regressions (review repair) ─────────────────────
+    //
+    // A zero cap has no utilization ratio (0/0); it must not render as
+    // NaN%. A zero cap blocks all usage, so usage above it is over cap.
+
+    #[test]
+    fn budget_usage_line_zero_limit_is_bounded_not_nan() {
+        let line = budget_usage_line(0, Some(0));
+        assert!(!line.contains("NaN"), "zero cap rendered NaN: {line}");
+        assert!(line.contains("zero cap"), "expected explicit zero-cap display: {line}");
+        let over = budget_usage_line(5, Some(0));
+        assert!(!over.contains("NaN"), "zero cap rendered NaN: {over}");
+        assert!(over.contains("over cap"), "usage above zero cap must say over cap: {over}");
+        // Non-zero paths are unchanged.
+        assert_eq!(budget_usage_line(123456, Some(500000)), "123456 / 500000 (24.7%)");
+        assert_eq!(budget_usage_line(7, None), "7 / none");
+    }
+
+    #[test]
+    fn budget_cost_line_zero_limit_is_bounded_not_nan() {
+        let line = budget_cost_line(0.0, Some(0.0));
+        assert!(!line.contains("NaN"), "zero cap rendered NaN: {line}");
+        assert!(line.contains("zero cap"), "expected explicit zero-cap display: {line}");
+        let over = budget_cost_line(1.5, Some(0.0));
+        assert!(!over.contains("NaN"), "zero cap rendered NaN: {over}");
+        assert!(over.contains("over cap"), "usage above zero cap must say over cap: {over}");
+        // Non-zero paths are unchanged.
+        assert_eq!(budget_cost_line(12.5, Some(100.0)), "$12.50 / $100.00 (12.5%)");
+        assert_eq!(budget_cost_line(3.0, None), "$3.00 / none");
     }
 
     #[test]

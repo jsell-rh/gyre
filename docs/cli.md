@@ -163,6 +163,9 @@ Notes:
   `GET /api/v1/budget/summary`); setting limits requires the Admin role.
 - A limit exceeding the tenant ceiling surfaces the server's cascade error;
   tenant-level limits cannot be set (no tenant-level set endpoint exists).
+- `--llm-cost` must be a finite positive amount (USD): NaN, Infinity, zero,
+  and negative values are rejected before any request is sent (a non-finite
+  value would serialize as `null` and silently clear the limit).
 
 ---
 

@@ -1555,9 +1555,125 @@ pub enum SpawnRepoOrchestratorOutcome {
     AlreadyLive,
 }
 
+/// Test-only helpers for spinning up real loopback HTTP servers that
+/// capture the exact request line, headers, and body the client emits.
+/// Shared by the client tests here and the command-flow tests in main.rs.
+#[cfg(test)]
+pub(crate) mod test_http {
+    use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Clone)]
+    pub(crate) struct CapturedRequest {
+        pub(crate) request_line: String,
+        pub(crate) headers: String,
+        pub(crate) body: String,
+    }
+
+    fn find_double_crlf(buf: &[u8]) -> Option<usize> {
+        buf.windows(4).position(|w| w == b"\r\n\r\n")
+    }
+
+    /// Read one full HTTP request (headers + Content-Length body) from the
+    /// stream.
+    fn read_request(stream: &mut std::net::TcpStream) -> CapturedRequest {
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        loop {
+            let n = stream.read(&mut tmp).unwrap();
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if let Some(header_end) = find_double_crlf(&buf) {
+                let headers = String::from_utf8_lossy(&buf[..header_end]).to_string();
+                let content_length = headers
+                    .lines()
+                    .find_map(|l| {
+                        let lower = l.to_ascii_lowercase();
+                        lower
+                            .strip_prefix("content-length:")
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                if buf.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+        }
+        let header_end = find_double_crlf(&buf).unwrap_or(buf.len());
+        let headers = String::from_utf8_lossy(&buf[..header_end]).to_string();
+        let request_line = headers.lines().next().unwrap_or("").to_string();
+        let body = String::from_utf8_lossy(&buf[header_end + 4..]).to_string();
+        CapturedRequest {
+            request_line,
+            headers,
+            body,
+        }
+    }
+
+    fn write_response(stream: &mut std::net::TcpStream, status: &str, reply_body: &str) {
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply_body}",
+            reply_body.len()
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        stream.flush().unwrap();
+    }
+
+    /// Spawn a one-shot HTTP server on 127.0.0.1:0. Serves exactly one
+    /// request, captures it, and replies with `status_line` + `response_body`.
+    pub(crate) fn spawn_mock_http_server(
+        status_line: &str,
+        response_body: &str,
+    ) -> (
+        String,
+        std::sync::mpsc::Receiver<CapturedRequest>,
+    ) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let status = status_line.to_string();
+        let reply_body = response_body.to_string();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let req = read_request(&mut stream);
+            let _ = tx.send(req);
+            write_response(&mut stream, &status, &reply_body);
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    /// Spawn a sequential HTTP server on 127.0.0.1:0. Serves one request
+    /// per entry of `responses` (in order), capturing every request into a
+    /// shared vec readable while the server runs. Fewer requests than
+    /// scripted responses is fine (the server simply keeps waiting), so a
+    /// test can assert that rejected input produced no requests at all.
+    pub(crate) fn spawn_mock_http_server_sequence(
+        responses: Vec<(String, String)>,
+    ) -> (String, Arc<Mutex<Vec<CapturedRequest>>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let captured: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = captured.clone();
+        std::thread::spawn(move || {
+            for (status, reply_body) in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let req = read_request(&mut stream);
+                sink.lock().unwrap().push(req);
+                write_response(&mut stream, &status, &reply_body);
+            }
+        });
+        (format!("http://{addr}"), captured)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::test_http::spawn_mock_http_server;
 
     #[test]
     fn client_trims_trailing_slash() {
@@ -1627,83 +1743,12 @@ mod tests {
 
     // ── Budget wiring tests ────────────────────────────────────────────────
     //
-    // A one-shot mock HTTP server captures the exact request line, headers,
-    // and body the client methods emit, so these tests fail if the method,
-    // URL, or serialized body drifts from the real endpoints registered in
-    // gyre-server api/mod.rs (GET/PUT /api/v1/workspaces/:id/budget,
+    // A one-shot mock HTTP server (see `test_http` above) captures the exact
+    // request line, headers, and body the client methods emit, so these tests
+    // fail if the method, URL, or serialized body drifts from the real
+    // endpoints registered in gyre-server api/mod.rs
+    // (GET/PUT /api/v1/workspaces/:id/budget,
     // GET /api/v1/budget/summary).
-
-    struct CapturedRequest {
-        request_line: String,
-        headers: String,
-        body: String,
-    }
-
-    fn find_double_crlf(buf: &[u8]) -> Option<usize> {
-        buf.windows(4).position(|w| w == b"\r\n\r\n")
-    }
-
-    /// Spawn a one-shot HTTP server on 127.0.0.1:0. Serves exactly one
-    /// request, captures it, and replies with `status_line` + `response_body`.
-    fn spawn_mock_http_server(
-        status_line: &str,
-        response_body: &str,
-    ) -> (
-        String,
-        std::sync::mpsc::Receiver<CapturedRequest>,
-    ) {
-        use std::io::{Read, Write};
-
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let status = status_line.to_string();
-        let reply_body = response_body.to_string();
-        std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = Vec::new();
-            let mut tmp = [0u8; 4096];
-            // Read until headers + Content-Length body are fully received.
-            loop {
-                let n = stream.read(&mut tmp).unwrap();
-                if n == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&tmp[..n]);
-                if let Some(header_end) = find_double_crlf(&buf) {
-                    let headers = String::from_utf8_lossy(&buf[..header_end]).to_string();
-                    let content_length = headers
-                        .lines()
-                        .find_map(|l| {
-                            let lower = l.to_ascii_lowercase();
-                            lower
-                                .strip_prefix("content-length:")
-                                .and_then(|v| v.trim().parse::<usize>().ok())
-                        })
-                        .unwrap_or(0);
-                    if buf.len() >= header_end + 4 + content_length {
-                        break;
-                    }
-                }
-            }
-            let header_end = find_double_crlf(&buf).unwrap_or(buf.len());
-            let headers = String::from_utf8_lossy(&buf[..header_end]).to_string();
-            let request_line = headers.lines().next().unwrap_or("").to_string();
-            let body = String::from_utf8_lossy(&buf[header_end + 4..]).to_string();
-            let _ = tx.send(CapturedRequest {
-                request_line,
-                headers,
-                body,
-            });
-            let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply_body}",
-                reply_body.len()
-            );
-            let _ = stream.write_all(response.as_bytes());
-            let _ = stream.flush();
-        });
-        (format!("http://{addr}"), rx)
-    }
 
     const BUDGET_RESPONSE_JSON: &str = r#"{
         "entity_type": "workspace",
