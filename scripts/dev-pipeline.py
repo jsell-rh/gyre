@@ -245,6 +245,7 @@ def main():
     command.add_argument('--candidate')
     command.add_argument('--base')
     command.add_argument('--pr')
+    command.add_argument('--fresh', action='store_true', help='start from main with a new work identity; retain prior checkpoints and receipts')
     args = parser.parse_args()
     store = Store(args.state)
     from pipeline.credentials import load
@@ -276,6 +277,8 @@ def main():
             serve(store, args.interval, args.task)
         elif args.command == 'seed':
             import re
+            if args.fresh and any((args.candidate, args.base, args.pr)):
+                parser.error('--fresh cannot be combined with --candidate, --base, or --pr')
             for value in (args.candidate, args.base):
                 if value is not None and not re.fullmatch(r'[a-f0-9]{40}', value):
                     parser.error('candidate and base must be full Git commit SHAs')
@@ -291,6 +294,21 @@ def main():
             existing = next((task for task in store.tasks() if task['name'] == name), None)
             if existing:
                 data['catalog_generation'] = existing['data'].get('catalog_generation', existing['generation'])
+                if args.fresh:
+                    if store.db.execute("SELECT 1 FROM work WHERE task=? AND state='claimed'", (name,)).fetchone():
+                        parser.error('drain active work for this task before starting fresh')
+                    if existing['data'].get('delivered'):
+                        parser.error('a delivered task cannot be restarted as fresh work')
+                    archive = store.directory / 'task-resets' / (name + '-' + uuid.uuid4().hex + '.json')
+                    archive.parent.mkdir(exist_ok=True)
+                    archive.write_text(json.dumps(existing, indent=2) + '\n')
+                    archive.chmod(0o600)
+                    store.event('operator_fresh_start', {'archive': str(archive)}, name)
+                elif existing['generation'] == generation and existing['data'].get('triaged') == generation:
+                    data['triaged'] = generation
+            if args.fresh:
+                data['repair'] = {'category': 'fresh_start', 'id': uuid.uuid4().hex,
+                                  'detail': 'Implement this task afresh from the assigned current main. Prior checkpoints are archived; do not resume their source or treat historical baseline diagnostics as current failures.'}
             if args.candidate:
                 if not args.base:
                     parser.error('--candidate requires --base')

@@ -18,7 +18,8 @@ def prompt(execution, task):
     bounded = (task['body'][:16000] if role == 'triage' and safe_metadata(task['body']).get('metadata_error') else
                execution.command('python3', str(ROOT / 'scripts/dev-context.py'), 'task', str(task_path)).stdout)
     findings = [finding['detail'] for finding in execution.store.findings(task['name'])
-                if not finding['resolved_by'] and finding['generation'] == task['generation']]
+                if not finding['resolved_by'] and finding['generation'] == task['generation']
+                and (finding['category'] != 'baseline' or finding['detail'].get('base') == execution.claim['input'].get('base'))]
     context = task['data'].get('repair') or (task['data'].get('review_context') if role == 'review' else None)
     if context and context not in findings:
         findings.append(context)

@@ -58,6 +58,17 @@ class FullsendFixture(unittest.TestCase):
 
 
 class FullsendContracts(FullsendFixture):
+    def test_prompt_excludes_baseline_failures_from_a_different_base(self):
+        from pipeline.stages import prompt
+        self.store.finish(self.work, self.claim['token'], {}, findings=[
+            {'category': 'baseline', 'base': 'old-main', 'detail': 'OBSOLETE_BASELINE_SENTINEL'},
+            {'category': 'baseline', 'base': self.base, 'detail': 'CURRENT_BASELINE_SENTINEL'},
+        ])
+        with patch.object(self.execution, 'command', return_value=subprocess.CompletedProcess([], 0, stdout='task')):
+            text = prompt(self.execution, self.store.task('task-9999'))
+        self.assertNotIn('OBSOLETE_BASELINE_SENTINEL', text)
+        self.assertIn('CURRENT_BASELINE_SENTINEL', text)
+
     def test_prepared_checkout_is_self_contained_and_harness_has_no_key(self):
         cfg, repo, shim = self.prepare()
         self.assertFalse((repo / '.git/objects/info/alternates').exists())
