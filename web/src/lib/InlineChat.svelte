@@ -5,12 +5,11 @@
    * Spec ref: ui-layout.md §3 (Contextual Chat)
    *           HSI §1 (Scoped communication)
    *
-   * Props:
-   *   recipient     — string, e.g. "worker-12", "workspace orchestrator"
-   *   recipientType — 'agent' | 'llm-qa' | 'spec-edit'
-   *   placeholder   — override input placeholder text
    *   onmessage     — async (text: string) => void | Response
    *                   If it returns a Response, InlineChat handles SSE streaming.
+   *   onassistant   — (answer: string) => void, called with each committed
+   *                   assistant answer so the caller can track conversation
+   *                   history (HSI §1325: client owns the conversation state).
    *   streaming     — bool, true when SSE is in flight
    */
   let {
@@ -18,6 +17,7 @@
     recipientType = 'agent',
     placeholder = undefined,
     onmessage = undefined,
+    onassistant = undefined,
     streaming = $bindable(false),
   } = $props();
 
@@ -71,6 +71,15 @@
     }
   }
 
+  /**
+   * Commit a final assistant answer and notify the caller so it can track
+   * conversation history (HSI §1325: client owns the conversation state).
+   */
+  function commitAssistant(content) {
+    messages = [...messages, { role: 'assistant', content }];
+    onassistant?.(content);
+  }
+
   async function send() {
     const msg = text.trim();
     if (!msg || streaming) return;
@@ -91,7 +100,7 @@
         // SSE streaming response
         await handleSse(result);
       } else if (typeof result === 'string') {
-        messages = [...messages, { role: 'assistant', content: result }];
+        commitAssistant(result);
       }
     } catch (e) {
       error = e?.message ?? 'Send failed';
@@ -129,8 +138,11 @@
               if (parsed.type === 'partial') {
                 streamBuffer += parsed.text ?? '';
               } else if (parsed.type === 'complete') {
-                const final = parsed.text ?? streamBuffer;
-                messages = [...messages, { role: 'assistant', content: final }];
+                // HSI §1325: briefing Q&A complete events carry {answer, sources};
+                // other producers may still send {text}. Fall back to the partial
+                // buffer when neither is present.
+                const final = parsed.answer ?? parsed.text ?? streamBuffer;
+                commitAssistant(final);
                 streamBuffer = '';
                 done = true;
                 break;
@@ -152,7 +164,7 @@
 
     // If we got partial content but no complete event, commit what we have.
     if (!destroyed && streamBuffer) {
-      messages = [...messages, { role: 'assistant', content: streamBuffer }];
+      commitAssistant(streamBuffer);
       streamBuffer = '';
     }
   }
