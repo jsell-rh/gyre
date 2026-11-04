@@ -1,9 +1,8 @@
 ---
 title: "View Query Grammar — Scope Resolution, Emphasis & Rendering Primitives"
 spec_ref: "view-query-grammar.md §4–9"
-depends_on:
-  - task-062
-progress: complete
+depends_on: [task-062, task-223]
+progress: ready-for-review
 coverage_sections:
   - "view-query-grammar.md §4 2. Scope — What Subgraph to Show"
   - "view-query-grammar.md §5 3. Emphasis — How to Color It"
@@ -11,7 +10,7 @@ coverage_sections:
   - "view-query-grammar.md §7 5. Zoom"
   - "view-query-grammar.md §8 6. Annotation"
   - "view-query-grammar.md §9 7. Interactive Bindings"
-commits: ["322b2973909bc9a556453a7d90b120f885bf58ff", "08f616e0e4d84fd91280fd3437cdeb253a4c5d4a", "ff416a1ff75435442b6192b81731b599b026e784", "ac5f41f6f609089f36492a37fbc2f1634d58bbf0", "7f5f8278c035e1006fcb0dc74d5ed83af6614a36", "3c8b331eba71ff231f076767885948db731bab49"]
+commits: ["322b2973909bc9a556453a7d90b120f885bf58ff", "08f616e0e4d84fd91280fd3437cdeb253a4c5d4a", "ff416a1ff75435442b6192b81731b599b026e784", "ac5f41f6f609089f36492a37fbc2f1634d58bbf0", "7f5f8278c035e1006fcb0dc74d5ed83af6614a36", "3c8b331eba71ff231f076767885948db731bab49", "322910807e9164c84c8b71022a6e85e51e078b6b"]
 ---
 
 ## Spec Excerpt
@@ -148,3 +147,53 @@ SHAs and all task-200 SHAs resolve post-merge. Focused suites re-run on the merg
 attribution check rc=0; `git diff --check 6bf777a6..HEAD` rc=0; dist diff empty.
 
 Evidence: `/tmp/stage/review-evidence/task-063-r10/`.
+
+### Round 11 (CI repair `32291080` — stale e2e visual baseline)
+
+Repaired the single failing check of PR #674 run `41888697099` (E2E Tests,
+head `3b2179a2`): `view_query_container_with_annotation_bar` failed
+`toHaveScreenshot('view-query-container.png')` with 6097 px (ratio 0.03 >
+maxDiffPixelRatio 0.02); 63/64 e2e tests passed.
+
+**Root cause — stale baseline, not a rendering regression.** The committed
+`view-query-container-linux.png` dates to #627 (`d7940e85`). On main,
+`a781ede2` (task-210) regenerated the other 13 explorer-visual baselines
+after upstream rendering drift but missed this one. Independently, the
+task-063 client-side scope resolution (R4-approved) changes the canvas region
+for `scope: all` — emphasis `highlight.matched` color + label now applies to
+the client-resolved matched set and `zoom: "fit"` engages (0.50x) — which
+the old baseline also does not contain. No production code was changed this
+round.
+
+**Attribution evidence** (controlled same-environment local reproduction via
+static shim + the spec's own route interception; chromium headless shell):
+- Base `8d0625df` local render vs committed baseline fails with the same
+  toolbar/annotation bands as the branch render — that drift is upstream +
+  CI text rendering (Red Hat fonts, subpixel fringing), not branch code.
+- Base `8d0625df` vs branch HEAD local renders differ only in canvas rows
+  (257–447) — the branch delta is the intended client-side emphasis
+  rendering; toolbar bands are byte-identical between base and branch.
+- CI candidate `3b2179a2` vs current HEAD `65096e82` local renders: 0 px
+  beyond threshold — the task-172 merge does not affect this screenshot.
+- CI vs local error-contexts differ only in the chat sidebar (WebSocket
+  status), outside `.treemap-container`; live DOM probe confirms annotation
+  bar, lens toggle, 5-item legend, Timeline/Risk, anomaly badge, zoom 0.50x,
+  34-node canvas all present.
+
+**Fix**: replaced the stale baseline with the actual PNG produced by run
+`41888697099` at PR head `3b2179a2` (GitHub infra, real fonts) — the exact
+rendering CI deterministically produces for this tree (the 13 `a781ede2`
+baselines passing in that same run prove run-to-run determinism). Assertion
+strength unchanged: same test, locator, and 0.02 threshold; no test logic,
+exemptions, or production code touched.
+
+**Local verification caveat**: this sandbox cannot reach fonts.googleapis.com
+(EACCES), so local text renders in fallback fonts (container 466px vs CI's
+468px); the single test still fails locally against ANY baseline including a
+locally-generated one (which would also fail on CI by >2%). Pixel-level YIQ
+analysis of the local render vs the new baseline: 1.55%, confined to text
+rows and canvas label text — structurally identical. The CI artifact is the
+only environment-faithful baseline; exact-head GitHub checks remain the
+authoritative gate.
+
+Evidence: `/tmp/stage/review-evidence/task-063-r11/`.
