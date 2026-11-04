@@ -1,0 +1,29 @@
+# Review — task-130 (Token Scoping: hierarchy claims in AgentJwtClaims + MCP scope validation)
+
+Spec: `specs/system/platform-model.md` §1 Token Scoping.
+Candidate: `240553e8e789a621d541a10b42654f1314cf452a` (branch `pipeline/task-130/6403a8e64ecd4f2f96c8124c0a09456d-3`, base `63aa1486`).
+Verdict: **needs-revision** (one deterministically failing test; enforcement itself is real).
+
+## Round 3 (this review)
+
+Prior round-1 findings re-verified as fixed, plus new checks:
+
+- `mcp_scope` suite: **7/7 passed** (`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib mcp_scope`).
+- Independent probe tests (temporary insert into `mcp.rs` tests mod, restored after run; source and output under `/tmp/stage/review-evidence/probe-source.rs`, `probe-output.txt`): **4/4 passed** —
+  - **F1 fixed**: worker scoped `repo:r-x:write` (ws-2) calling `gyre_update_task {"id":"probe-task-1"}` on a task in r-1/ws-1 → JSON-RPC `PERMISSION_DENIED`; store read-back confirms title unchanged. Own-repo update passes and persists. The target is now resolved from `state.tasks` by id and checked via `check_task_target`, not by inspecting `repo_id`/`workspace_id` args the tool never reads.
+  - **F2 fixed**: worker in ws-1 calling `gyre_search {"q":..,"workspace_id":"ws-2"}` → `PERMISSION_DENIED`; absent target is clamped to the caller's workspace claim in `handle_search` (code-read confirmed, mcp.rs ~2370).
+  - `gyre_list_tasks` is tier-filtered for scoped callers (`task_visible_to_caller`): own-repo task listed, other-repo and other-workspace tasks filtered.
+- Static gates: `check-arch.sh`, `check-mcp-write-tools.sh`, `check-inert-enforcement.sh`, `check-scope-literal-defaults.sh`, `check-fabricated-scope-defaults.sh`, `check-task-commit-attribution.sh` all exit 0. Exemption files: fabricated-scope-defaults dropped one entry (spawn.rs site genuinely fixed — count lowered, allowed); others line-number drift only.
+- Code-read verification of the round-1 remediation shape: `validate_tool_scope` resolves `gyre_update_task`/`gyre_decompose_spec` targets from `state.tasks`, fails closed on lookup error and on unresolvable repo membership; `gyre_create_task` explicit targets validated per tier with absent targets clamped to signed claims in the handler; graph/spec-assist read tools validate explicit `repo_id` targets (`check_repo_read_target` resolves the repo's real workspace for workspace-tier tokens).
+
+Verified working (no findings):
+
+- **Claims**: `AgentJwtClaims` carries `tenant_id: String`, `workspace_id: Option<String>`, `repo_id: Option<String>`, `persona: Option<String>`, `attestation_level: Option<u32>`, `scope: Vec<String>` (serde-defaulted, so old tokens still deserialize).
+- **Minting**: `mint_with_workload` accepts persona/attestation and hierarchy params; worker scope `["repo:{name}:write"]`. `mint_orchestrator` mints workspace tier `["workspace:{id}:read","workspace:{id}:spawn"]` and repo tier `["repo:{name}:write","repo:{name}:spawn"]` (repo_name required, else mint errors). `spawn_agent_core` resolves repo→workspace→tenant and fails closed (UUID fallback + log) when the workspace is unresolvable rather than fabricating "default"; `spawn_orchestrator` errors the spawn when tenant cannot be determined; `stale_agents::restart_orchestrator` re-resolves the same context. The task-097 F3 `"default"` tenant fallback in spawn.rs secret resolution is also genuinely removed (exemption entry deleted).
+- **`AuthenticatedAgent`** exposes `workspace_id`/`repo_id`/`scope` derived from signature-verified claims via `with_hierarchy_from_claims`, called on all four JWT-resolved auth paths (agent-token, ws-ticket, Keycloak, federated).
+- **Every tool call**: `validate_tool_scope` runs in `tools/call` before dispatch (mcp.rs ~3600), after RBAC, before the TASK-216 create_mr check. `is_agent_jwt` requires a non-empty scope array; a scope array whose derived `auth.scope` is empty fails closed in `validate_tool_scope`. Non-scope-list callers (global token, API key, Keycloak JWT, legacy UUID) keep the ABAC/RBAC path, matching the coverage row's documented boundary. `check_repo_scope`'s `require_spawn_right` predicate is now live (spawn actions need the `spawn` right; write actions accept `write` or `spawn`).
+
+Findings:
+
+- [ ] **F1 (major, test): `cargo test -p gyre-server --lib` fails deterministically at the candidate — `mcp::tests::mcp_decompose_spec_creates_subtasks_in_repo_scope` panics at mcp.rs:6383.** The test's first assertion expects the foreign-parent `gyre_decompose_spec` denial to arrive as a tool-level result (`json["result"]["isError"]`), but the new pre-dispatch `validate_tool_scope` gate correctly returns a JSON-RPC error (`{"error":{"code":-32603,"message":"PERMISSION_DENIED: token scope [\"repo:r-1:write\",\"repo:r-1:spawn\"] does not permit gyre_decompose_spec on task parent-p (repo r-x)"}}` — probe output in `/tmp/stage/review-evidence/probe-output.txt`), so `json["result"]` is `Null`, `.as_bool()` is `None`, and `.unwrap()` panics. The enforcement is correct; the test's assertion shape is stale (the seven new `mcp_scope_*` tests assert the new shape, this pre-existing test was not updated). This breaks the acceptance criterion "`cargo test --all` passes" (1219 passed / 1 failed on a pristine checkout, twice). It also falsifies the shipped note "Full `cargo test -p gyre-server --lib` run recorded under `/tmp/stage/review-evidence/`" — that directory did not exist before this review created it. Remedy: change the first assertion to the JSON-RPC error shape (`assert!(json["error"]["message"].as_str().unwrap().contains("PERMISSION_DENIED"))`), matching `mcp_scope_workspace_orchestrator_other_workspace_rejected`.
+- [ ] **F2 (minor, code): `check_repo_read_scope` (mcp.rs:875) is dead code** — never called (repo-read targets go through `check_repo_read_target`); produces the suite's only compiler warning (`function is never used`). Delete it.
