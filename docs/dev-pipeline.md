@@ -21,9 +21,55 @@ charged. Lowering slots drains new admission while already admitted work finishe
 Cleanup and publication remain schedulable when every compute slot is occupied.
 
 The stages are triage, implementation, independent review, verification,
-publication/merge, and cleanup. Review and verification bind to an exact candidate
+publication/merge, CI observation, and cleanup. Review and verification bind to an exact candidate
 and upstream base. Failures produce durable findings consumed by implementation.
 Infrastructure failures retry with backoff without changing the task contract.
+
+CI observation is a separate, sandbox-free stage bound to the recorded published
+head and its verified base. It can run alongside a verifier, but never races a
+branch publisher. A completed failing check is actionable even while sibling
+checks remain pending or main advances. Head and check state are rechecked after
+evidence collection. A confirmed candidate failure retains the failed head and
+logs, requests implementation, and fences any now-obsolete verifier. Pending CI
+waits; upstream failures and transient CI infrastructure retain their distinct
+recovery paths. PR readiness is visible separately from a successful review run.
+
+A durable **integration lane** admits one candidate at a time to final
+verification, CI, and merge. Implementation and independent review remain
+parallel up to the normal shared sandbox budget. The lane survives worker
+restarts, infrastructure retries, and gaps while GitHub checks run; repair,
+delivery, cancellation, or a changed contract/candidate releases it. Queued
+candidates pick up current main when admitted. This prevents the controller's
+own merges from repeatedly invalidating one another's full integration checks.
+If an external merge advances main, the current lane owner first observes its
+published CI and then refreshes integration once needed. Independent review is
+retained for the unchanged candidate. Checks on a different merge tree are
+never reused as proof of the final tree; protected exact-head GitHub checks
+and authoritative upstream-tree comparison still gate delivery.
+
+Model assignments default to four hours (`model_timeout: 14400` seconds in the
+private ledger). Existing assignments retain the harness deadline they started
+with. A failed run records `diagnostic.json`: the runner's actual timeout budget,
+agent and runner exit codes when available, inference error category, and names
+of unfinished tools. Credentials, tool arguments, and model reasoning are not
+copied into these diagnostics. The cockpit's retry reason uses this diagnosis.
+
+Interrupted independent reviews resume saved notes and bounded probe evidence
+only when the candidate and assignment still match and protected source was not
+changed. The original candidate remains the checkout; previous verdicts are
+never restored. Workspace-wide Cargo commands are rejected in review and remain
+the deterministic verifier's responsibility. Focused package/test probes remain
+available with the longer assignment budget.
+
+Historical generated static-repair tasks first enter model-free triage. A
+strictly recognized `bash scripts/check-*.sh` probe runs on exact current main
+in a disposable gateway sandbox. Its receipt is shared across matching repairs
+for that main revision and worker image. A passing probe records **resolved**,
+distinct from a shipped merge; failures stay repair work, and infrastructure
+errors resolve nothing. Resolved prerequisites unblock their dependents without
+creating a documentation-only PR. New repair identities use the reproduced
+probe/failure rather than incidental environment paths; identical unresolved
+failures share a prerequisite even as main advances.
 
 SQLite is the local authority for work, leases, findings, resource reservations,
 and observations. Claim tokens fence late results. GitHub is authoritative for
@@ -112,6 +158,7 @@ python3 scripts/dev-pipeline.py tick implement
 python3 scripts/dev-pipeline.py tick review
 python3 scripts/dev-pipeline.py tick verify
 python3 scripts/dev-pipeline.py tick publish
+python3 scripts/dev-pipeline.py tick observe
 python3 scripts/dev-pipeline.py tick cleanup
 python3 scripts/dev-pipeline.py status --json
 python3 scripts/dev-pipeline.py retry task-123
