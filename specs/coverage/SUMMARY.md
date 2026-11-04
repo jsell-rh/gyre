@@ -39,7 +39,7 @@
 | system-explorer.md | 19 | 10 | 0 | 9 | 0 | 0 | 0% |
 | trusted-foundry-integration.md | 26 | 26 | 0 | 0 | 0 | 0 | 0% |
 | ui-journeys.md | 13 | 13 | 0 | 0 | 0 | 0 | 0% |
-| ui-layout.md | 42 | 4 | 0 | 38 | 0 | 0 | 0% |
+| ui-layout.md | 42 | 4 | 0 | 37 | 1 | 0 | 2% |
 | ui-navigation.md | 33 | 7 | 0 | 1 | 13 | 12 | 96% |
 | user-management.md | 36 | 10 | 0 | 26 | 0 | 0 | 0% |
 | view-query-grammar.md | 16 | 0 | 0 | 16 | 0 | 0 | 0% |
