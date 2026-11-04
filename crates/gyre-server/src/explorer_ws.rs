@@ -789,7 +789,11 @@ async fn handle_explorer_session(
                     _ = async {
                         // Listen for Cancel messages while the agent is running.
                         // View CRUD messages (SaveView, DeleteView, LoadView, ListViews)
-                        // are queued and processed after the agent completes.
+                        // and user Messages are queued and processed after the agent
+                        // completes — a Message received mid-run must not be silently
+                        // dropped: it is replayed through the main loop where the
+                        // minimum-interval rate limiter (and length/session limits)
+                        // evaluate it deterministically.
                         loop {
                             match receiver.next().await {
                                 Some(Ok(Message::Text(raw))) => {
@@ -799,17 +803,19 @@ async fn handle_explorer_session(
                                             let _ = cancel_tx.send(true);
                                             break;
                                         }
-                                        // Queue view CRUD messages for processing after agent completes.
+                                        // Queue messages for processing after agent completes.
                                         match &client_msg {
                                             ExplorerClientMessage::SaveView { .. }
                                             | ExplorerClientMessage::DeleteView { .. }
                                             | ExplorerClientMessage::LoadView { .. }
-                                            | ExplorerClientMessage::ListViews => {
+                                            | ExplorerClientMessage::ListViews
+                                            | ExplorerClientMessage::Message { .. } => {
                                                 debug!(user = %auth.agent_id, "Queuing message during agent run");
                                                 queued_messages.push(client_msg);
                                             }
                                             _ => {
-                                                // Message type (e.g. another Message) ignored during agent run
+                                                // Cancel is handled above; no other
+                                                // variants exist in this arm.
                                             }
                                         }
                                     }
