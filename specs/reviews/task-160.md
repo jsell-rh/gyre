@@ -57,3 +57,50 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+## Round 7 — independent review at candidate 3cc3cdf9 (verdict: complete)
+
+Base `2427ccc1` → candidate `3cc3cdf9` (merge `dba355b8` folded the base;
+assigned commits `2698b9b6` + `ba78ab2a` both ancestors; attribution gate OK).
+Evidence: `/tmp/stage/review-evidence/task-160-r7/` (COMMANDS.txt has every
+probe command, source, exit code).
+
+**Clean gates at the candidate:** `check-hierarchy.sh` exit 0;
+`check-tenant-filter.sh` exit 0 (111 read methods on tenant-column tables /
+0 violations, tenant-less tables as visible backlog); `check-api-auth.sh`
+exit 0 (middleware chain + 4 non-ABAC handlers with `AuthenticatedAgent`
+extractors + delegated frozen-baseline registry); `check-arch.sh` OK;
+`check-scope-literal-defaults.sh crates` OK (exemptions 24→10 across the task,
+never raised); `git diff --check HEAD^1 HEAD` clean. All three scripts
+executable, usage-commented, blocking in CI (no `|| true`) and pre-commit
+(.pre-commit-config.yaml:46/62/70).
+
+**Fresh mutation kills this round** (isolated worktree, restored, removed):
+`Task.workspace_id → Option<Id>` → hierarchy exit 1 naming task.rs:60;
+deleting the field entirely → hierarchy exit 1 "missing from the struct"
+(deleted-edge bypass killed); tenant predicate stripped from
+`sqlite/secret.rs::get_value` → tenant-filter exit 1 (1/111, naming
+secret.rs:229); `/api/v1/activity` RouteResourceMapping deleted → api-auth
+exit 1 via the delegated registry.
+
+**The integration test is real, not self-confirming:** disabling the
+production tenant predicate in `sqlite/repository.rs::find_by_id` makes BOTH
+`tenant_isolation.rs` tests FAIL with exact cross-tenant leak diagnostics
+(2 failed / 0 passed); restored, 2 passed / 0 failed.
+
+**Cascade compiles and emits correctly:** checkpoint commit 2698b9b6 changed
+`emit_event`/`emit_telemetry` signatures (Option→Id, sync→async, fabricated
+"default" tenant → `tenant_for_workspace` resolution with drop-and-warn),
+touching many server files. `cargo check -p gyre-server --all-targets` clean;
+`cargo test -p gyre-server --lib emit` 5 passed including
+`ws_activity_event_emits_to_telemetry`, which exercises the new tenant
+resolution end-to-end (unresolvable scope would drop the message and fail
+the test). This code change is what legitimately removed the last two
+lib.rs exemption entries (12→10) — no exemption was added anywhere.
+
+**Verifier item:** full `cargo test --all` belongs to the verification stage;
+focused coverage here = tenant_isolation (pass), gyre-server all-targets
+check (clean), emit-path lib tests (pass), plus round-4's gyre-adapters
+--lib 344 passed.
+
+No new material findings. Approved.
