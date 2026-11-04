@@ -4,6 +4,7 @@ import time
 
 
 def eligible(store, work):
+    from .repairs import probe, satisfied
     task = store.task(work['task'])
     data = task['data']
     stage = work['stage']
@@ -17,14 +18,26 @@ def eligible(store, work):
         return row is not None
     if store.setting('task_paused:' + task['name'], False):
         return False
-    if data.get('delivered'):
+    if satisfied(data):
         return False
     if stage == 'triage':
+        if inputs.get('baseline_probe'):
+            if (probe(task) != inputs['baseline_probe'] or
+                    (data.get('baseline_checked') or {}).get('base') == inputs['base']):
+                return False
+            for row in store.db.execute("SELECT id,input FROM work WHERE stage='triage' AND state='claimed'"):
+                other = json.loads(row['input'])
+                if (row['id'] != work['id'] and other.get('base') == inputs['base'] and
+                        other.get('baseline_probe') == inputs['baseline_probe']):
+                    return False
+            return True
         return data.get('triaged') != task['generation']
+    if probe(task) and (data.get('baseline_checked') or {}).get('base') != store.setting('observed_main', inputs.get('base')):
+        return False
     if data.get('triaged') != task['generation']:
         return False
     tasks = {task['name']: task for task in store.tasks()}
-    if any(dep not in tasks or not tasks[dep]['data'].get('delivered') for dep in data.get('dependencies') or []):
+    if any(dep not in tasks or not satisfied(tasks[dep]['data']) for dep in data.get('dependencies') or []):
         return False
     candidate = data.get('candidate')
     if stage == 'implement':
