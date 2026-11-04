@@ -111,7 +111,7 @@ def main():
             previous = os.environ.get('OPENSHELL')
             os.environ['OPENSHELL'] = config['real_openshell']
             try:
-                gateway.login(store.directory)
+                gateway.login(store.directory,force=True)
             finally:
                 if previous is None: os.environ.pop('OPENSHELL', None)
                 else: os.environ['OPENSHELL'] = previous
@@ -129,7 +129,7 @@ def main():
         # Python parent whose orphan keeps its stdout pipe open forever.
         store.close()
         os.execvpe(config['real_openshell'],
-                   [config['real_openshell'], '-g', config['gateway'], *args], env)
+                   [config['real_openshell'], '-g', bound_gateway, *args], env)
     if provider_create and owned_provider and result.returncode == 0:
         store.resource_state(provider_name, 'present')
     if provider_delete and owned_provider and result.returncode == 0:

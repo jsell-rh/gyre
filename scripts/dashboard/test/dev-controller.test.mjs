@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { associatePullRequests, controllerPaths, collectController, attemptLog, setSlots, coverageHistory, coverageMetrics, taskTitles } from "../server/dev-controller.mjs";
+import { associatePullRequests, controllerPaths, collectController, attemptLog, setSlots, setPriority, coverageHistory, coverageMetrics, taskTitles } from "../server/dev-controller.mjs";
 import { createDashboardServer } from "../server/dev-http.mjs";
 
 const execFileP = promisify(execFile);
@@ -60,11 +60,17 @@ test("cockpit reads pipeline stages and updates the durable sandbox budget", asy
   assert.equal(state.present, true);
   assert.equal(state.online, false);
   assert.deepEqual(state.tasks, []);
-  assert.deepEqual(Object.keys(state.stages), ["triage", "implement", "review", "verify", "publish", "cleanup"]);
+  assert.deepEqual(Object.keys(state.stages), ["triage", "implement", "review", "verify", "publish", "observe", "cleanup"]);
 
   await setSlots(paths, 7);
   assert.equal((await collectController(paths)).slots, 7);
   await assert.rejects(setSlots(paths, 1001), /slots/);
+  await execFileP("python3", ["-c", "import sys;sys.path.insert(0,sys.argv[1]);from pipeline.store import Store;s=Store(sys.argv[2]);s.put_task('task-001','g','body',{})", join(root,"scripts"),paths.state]);
+  assert.equal((await setPriority(paths,"task-001","urgent")).class,"urgent");
+  assert.equal((await collectController(paths)).tasks.find((t) => t.name === "task-001").priority.source,"operator");
+  assert.equal((await setPriority(paths,"task-001",null)).class,"normal");
+  await assert.rejects(setPriority(paths,"task-001","unknown"),/Unknown priority class/);
+  await assert.rejects(setPriority(paths,"task-001","urgent; false"),/invalid/);
 
   const id = "abcdef0123456789abcdef0123456789-1";
   const log = join(paths.attempts, id.slice(0, 32), "1", "output.log");
