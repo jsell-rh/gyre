@@ -81,11 +81,11 @@ class Execution:
         with self.store.transaction():
             self.store.event('phase', {'phase': name, **detail}, self.claim['task'], self.claim['id'])
 
-    def login(self):
+    def login(self, force=False):
         os.environ.update(OPENSHELL_NO_BROWSER='1', OPENSHELL_GATEWAY_INSECURE='true',
                           OPENSHELL_WORKSPACE='default',
                           GYRE_OPEN_GATEWAY=self.store.setting('gateway', 'gyre-gyre'))
-        gateway.login(self.store.directory)
+        gateway.login(self.store.directory,force=force)
 
     def os(self, *args, **kwargs):
         check = kwargs.pop('check', True)
@@ -94,7 +94,7 @@ class Execution:
         diagnostic = (result.stderr or '') + (result.stdout or '')
         if result.returncode and ('cached OIDC token has expired' in diagnostic or
                                   'OIDC token refresh failed' in diagnostic):
-            self.login()
+            self.login(force=True)
             result = self.command(*command, check=False, **kwargs)
         if check and result.returncode:
             raise RuntimeError((result.stderr or result.stdout or '')[-4000:])
