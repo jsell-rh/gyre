@@ -1,8 +1,24 @@
 # Development reconcilers
 
 Each stage independently discovers work, atomically claims it, runs one operation,
-and records its outcome. A supervisor only wakes stages and limits admission;
-it does not contain task transitions. Periodic discovery repairs missed events.
+and records its outcome. The Go dispatcher extracted from HyperShell supplies
+scheduling, worker monitoring, and its terminal cockpit. Its adapter calls Gyre's
+existing stage handlers; periodic discovery repairs missed events. The previous
+Python scheduling loop has been removed.
+
+The extracted source, license, and pinned provenance live in
+`tools/fullsend-dispatcher/`. It supports an adapter backend so Gyre retains
+`pipeline.sqlite3` as its single workflow authority; it does not create a second
+jobs database or import HyperShell's state. The original SQLite backend remains
+available to the source integration.
+
+Admission reserves one shared compute slot atomically with a stage claim, before
+starting a worker, cloning source, creating providers, or invoking fullsend.
+Implementation, review, triage, and verification share this budget. A full pool
+leaves work queued without incrementing its attempt or failure count. The
+reservation transfers atomically to the actual sandbox; pending deletion remains
+charged. Lowering slots drains new admission while already admitted work finishes.
+Cleanup and publication remain schedulable when every compute slot is occupied.
 
 The stages are triage, implementation, independent review, verification,
 publication/merge, and cleanup. Review and verification bind to an exact candidate
@@ -72,10 +88,15 @@ python3 scripts/dev-pipeline.py resume
 python3 scripts/dev-pipeline.py serve --task task-123 # first live canary
 # Once the canary is independently reviewed, verified, and merged:
 python3 scripts/dev-pipeline.py serve
+# Equivalent terminal cockpit:
+make fullsend
 node scripts/loop-dashboard.mjs
 ```
 
-The cockpit listens on `http://127.0.0.1:7690`. Stop the supervisor with Ctrl-C;
+The browser cockpit listens on `http://127.0.0.1:7690` and remains connected to
+the same ledger. The terminal cockpit offers filtering, live logs, attempt
+history, retry, and cancellation. Press `?` for keys; `q`/Ctrl-C detaches while
+workers continue. `serve --plain` selects text output. Stop the supervisor with Ctrl-C;
 already claimed stages finish independently. Restarting `serve` adopts their
 leases and discovers pending work. `pause` stops new model-stage dispatch while
 preserving the desired slot count; `resume` enables it again. Slots zero also
@@ -113,6 +134,37 @@ allows unattended authentication refresh. Do not replace it with interactive
 browser auth for an unattended supervisor. Fullsend configures its providers;
 `dev-gateway.py --inference` is the older standalone setup helper, not a required
 step of the fullsend harness.
+
+## Isolation from another local dispatcher
+
+Gyre builds its host orchestration binary into
+`.gyre-pipeline/tools/gyre-dispatcher-<source hash>` under a build lock. This does
+not overwrite `fullsend`, OpenShell, or HyperShell's cached dispatcher. Only the
+host orchestration tool is compiled locally; product builds and verification
+continue on the OpenShell gateway.
+
+The dispatcher uses Gyre's `supervisor.lock`, `dispatcher/logs`, existing attempt
+directories, and a scope derived from this ledger's owner UUID. It never uses
+HyperShell's XDG state, `.hypershell` directory, labels, Jira configuration, or
+Vertex credentials. Adapter selection is explicit per process; an inherited
+`FUNNEL_ADAPTER` cannot redirect Gyre. Host temporary files/profile caches use
+`dispatcher/tmp`, and Pi's EnMaaS model is pinned on the fullsend command line
+so another project's exported model cannot override it. The configured gateway is explicit, and an
+inherited endpoint override is cleared without changing another process's
+environment or the machine's default gateway selection. A private local OIDC
+registration (`gyre-d-<instance hash>`) snapshots the connection metadata and
+mints its own token; it does not copy a refresh token or modify the source
+registration. This also isolates authentication when HyperShell uses the same
+physical gateway. Gyre's persistent GitHub provider and profile use
+`gyre-gh-<instance hash>` instead of the shared `github` name. Per-run inference
+providers remain separate and are purged normally. Sandbox/provider cleanup
+retains the existing owner and claim checks.
+
+Existing stage workers are adopted from their valid leases, not relaunched.
+Cancellation is bound to a work ID and claim token; it pauses further work on
+that task until explicit retry. Workers predating cancellation support are
+monitored until they finish normally. Retry and history requests must match the
+ledger's scope, so a different local dispatcher cannot control these attempts.
 
 The pinned worker image includes the project-configured `clang` and `mold`
 linkers, plus Chromium and its system dependencies matching
