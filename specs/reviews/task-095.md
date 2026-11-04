@@ -126,3 +126,106 @@ The R2 scope note ("Circuit Breaker, CLI, UI are not implemented on main, assign
 ### Verdict
 
 **Needs-revision.** R3-F1 is a functional correctness defect in the headline §6 CLI feature (manual revert of a specific MR) with zero test coverage; R3-F2 means the circuit breaker — the other headline feature of `5aaded21` — cannot fire in the workflow the recovery protocol itself prescribes; R3-F3 is a fail-open health signal on the human decision path; R3-F4 must be corrected so the review record matches what actually landed. The R1/R2 findings themselves remain fixed on integrated main.
+
+## Round 5 — review of candidate `b3207fb9` (R3/R4 revision rounds, base `6a9739e5`)
+
+Review target: the exact assigned candidate `b3207fb9`, diffed against base
+`6a9739e5`. All task-095-labeled commits are recorded in the frontmatter
+(`check-task-commit-attribution.sh` green). Evidence under
+`/tmp/stage/review-evidence/` (README.md indexes every probe, command, and
+exit code).
+
+### Prior-round fixes re-verified — all hold
+
+- **R3-F1** — `merge_commit_sha` persisted at merge time on both processor
+  paths (migration `2026-09-30-000056`, sqlite+postgres); `POST
+  /repos/:id/revert/:mr_id` reverts the MR's own recorded commit (verified
+  through the `ConfigurableGitOps.revert_calls` double), 409 without a
+  recorded sha, 403 on foreign-repo MR, manual reverts count toward the
+  breaker. `api::recovery` suite → 6 passed.
+- **R3-F2** — breaker keyed on resubmission-stable identity
+  (`revert_breaker_key`), enqueue + processor selection reject non-Open/
+  Approved MRs (Reverted MR cannot be silently re-merged). `api::merge_queue`
+  → 8 passed; `revert_breaker_accumulates_across_resubmitted_mrs`,
+  `process_next_fails_entry_for_reverted_mr` pass.
+- **R3-F3** — `repo_status` fails closed on unresolvable HEAD
+  (`repo_status_main_green_fails_closed_when_head_unresolvable`, plain
+  directory + always-pass gate proving the gate never ran); exemption file
+  frozen at 0.
+- **R3-F4** — duplicate resolver entries removed (single first-match block;
+  `check-abac-route-registry.sh` green with lowered baseline); task-096
+  rescoped; attribution green.
+- **R4-F1** — `Git2OpsAdapter::revert_commit` implements true `git revert -m 1`
+  three-way merge (ancestor=tree(M), ours=tree(tip), theirs=tree(M^1)).
+  Real-git regression tests pass: `test_revert_commit_non_tip_preserves_later_merges`
+  (reverting A leaves B's file intact — kills the snapshot bug),
+  `test_revert_commit_conflict_leaves_branch_untouched`. Conflict arm
+  escalates without side effects on all three callers. Adapters git2_ops
+  suite → 31 passed. §6 protocol tests (pause, revert, notify, remediation
+  task, gate invalidation, resume, atomic group, circuit breaker) all pass.
+
+### New findings — all introduced by checkpoint commit `ee2bcf8e`
+
+- **R5-F1 (major): `builtin:attested-authorization` is seeded `enabled: false`,
+  making the §7.2 policy interplay fix inert and failing two of its own
+  tests.** `abac_middleware.rs:710` (new policy from `ee2bcf8e`) ships the
+  companion Allow disabled. `policy_engine::evaluate` retains only `p.enabled`
+  policies (`policy_engine.rs:205`), so the Allow never evaluates;
+  `builtin-default-deny` (priority 1, no conditions, `*`/`*`) then denies
+  every push/merge that carries a valid attestation chain. The same commit
+  added the unless-clause to `builtin:require-signed-authorization` and the
+  drift-refresh seeding — the fix design is right, but with the Allow
+  disabled the net effect is unchanged from base: attested merges are still
+  denied. Two tests introduced by the same commit fail deterministically at
+  head (reproduced twice, suite and isolated):
+  `merge_processor::tests::merge_time_abac_valid_chain_merges_under_builtin_policies`
+  (`cargo test -p gyre-server --lib merge_processor` → exit 101; the MR stays
+  Open — the merge-time ABAC gate blocks it) and
+  `policy_engine::tests::builtin_signed_authorization_satisfied_by_chain_presence`
+  (`cargo test -p gyre-server --lib policy_engine` → exit 101; asserts
+  `matched_policy == builtin-attested-authorization`, impossible while
+  disabled). Spec `authorization-provenance.md` §7.2: the deny fires "unless
+  a valid attestation chain exists" — attested work must pass. The unit tests
+  in `abac_middleware` pass because none asserts `enabled` on the attested
+  policy, which is exactly how the disabled flag survived the checkpoint.
+  Violates the task acceptance criterion "`cargo test --all` passes". Fix:
+  `enabled: true` (the policy's own description and both failing tests
+  document the intent), then re-run both suites.
+
+- **R5-F2 (CI gate): changed-line rustfmt violation at `abac_middleware.rs:1345`.**
+  `python3 scripts/check-rustfmt-diff.py 6a9739e5` → exit 1 ("changed lines
+  need formatting: 1345"): `assert_eq!(before.updated_at, after.updated_at,
+  "no-op seed must not bump updated_at");` exceeds max_width; plain
+  `rustfmt --check` on the file also fails. The line is absent at base —
+  introduced by `ee2bcf8e`'s test hunk. This is the same failure class as
+  the durable finding (checks.sh exit 1 on ancestor `9508cd02` flagged
+  git2_ops/git_types/recovery/mem/merge_processor); those five files were
+  repaired in the round-5/6 rebase repairs, but this line was missed.
+
+- **R5-F3 (CI gate): `check-fabricated-scope-defaults.sh` red at head, green at
+  base — exemption drift caused by this diff.** The candidate's 4-line
+  insertion in `git_http.rs` (~line 610, the push-time
+  `subject.attestation_chain_present` attribute) shifted the exempted legacy
+  site `let ws_id = ...unwrap_or_else(|| Id::new("default"))` from line 1495
+  to 1499, so the frozen line-keyed exemption
+  `crates/gyre-server/src/git_http.rs:1495` no longer matches and the check
+  reports a violation at 1499 (exit 1 at head; exit 0 verified at base
+  `6a9739e5` in a temp worktree). Fix: move the exemption line to 1499
+  (same legacy site, shifted) — never by raising the frozen baseline. The
+  underlying legacy site itself is pre-existing, not a new fabrication.
+
+### Verdict
+
+**Needs-revision.** The §6 recovery protocol implementation itself is real,
+well-tested, and all prior-round findings hold — but the candidate head fails
+`cargo test` (two deterministic failures from the disabled attested Allow,
+R5-F1) and two mechanical CI gates (R5-F2 rustfmt, R5-F3 exemption drift),
+so the task's acceptance criteria are not met at `b3207fb9`. All three
+defects trace to checkpoint commit `ee2bcf8e`; the fixes are small and
+localized (flip `enabled: true`, format one line, move one exemption entry).
+Verifier follow-up recorded: `check-clippy-diff.py` against the assigned base
+(the durable finding flagged clippy on the ancestor; the flagged spots were
+refactored/allowed but a changed-line clippy pass was not re-run in this
+review — all-target Clippy belongs to verification). TCP listener probe
+unsupported in this runtime; REST behavior verified via in-process axum
+`oneshot` tests.
