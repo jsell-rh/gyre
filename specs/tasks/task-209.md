@@ -5,7 +5,8 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["50fd6945abd0439c6953ac61edbb58e77aab8913", "b528de9349516d0cca67186b89c876fc17751cba", "1ffcd86b78f399149490bd6179119170441e4654", "9438142d12e9dff6e300121a51684fb71a33a702", "56ece2dc54a582547549988c9bf83e4d84bb611a", "176ae13258c8ffbab81217e2a746ee5a18bbca8a", "403923b7d198aedfd47cd3c5a7200c76e34b08eb", "dbaf9dd6f984386b0337ee2bcd99210bcc6d161c", "e67011aa5a0d2aeb77391e849dcdf23dcfa9e423", "9a61c3ec54fa6caba9df7e166719252104e3dcbc", "52fc6cd99b02e9b591ec393585580c1d8125de11", "809658763eb59ffac04a7efbdf994c58c6158089", "11115554f03748e01eb7a2adbc44445815d26d98", "f66cb1970a9cdd85b228a1f970c4c4999c92c6aa"]
+commits: ["50fd6945abd0439c6953ac61edbb58e77aab8913", "b528de9349516d0cca67186b89c876fc17751cba", "1ffcd86b78f399149490bd6179119170441e4654", "9438142d12e9dff6e300121a51684fb71a33a702", "56ece2dc54a582547549988c9bf83e4d84bb611a", "176ae13258c8ffbab81217e2a746ee5a18bbca8a", "403923b7d198aedfd47cd3c5a7200c76e34b08eb", "dbaf9dd6f984386b0337ee2bcd99210bcc6d161c", "e67011aa5a0d2aeb77391e849dcdf23dcfa9e423", "9a61c3ec54fa6caba9df7e166719252104e3dcbc", "52fc6cd99b02e9b591ec393585580c1d8125de11", "809658763eb59ffac04a7efbdf994c58c6158089", "11115554f03748e01eb7a2adbc44445815d26d98", "f66cb1970a9cdd85b228a1f970c4c4999c92c6aa", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
+---
 
 ## Spec Excerpt
 
@@ -120,69 +121,68 @@ Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different file
 
 ## Shipped
 
-All three HSI §12 gaps are implemented in production code on branch
-`pipeline/task-209/e893e0dd9dae4fd2b714406bc06f904e-1` (resume of interrupted
-checkpoint 624e69d4; base 653a696f; verification at c41e2cc3):
+All three HSI §12 gaps are implemented in production code. This round
+recovered the interrupted assignment: the implementation checkpoint
+(f7f3b081) was already on the branch; this round resolved the interrupted
+merge of the assigned base e608ac78 into it (mem.rs conflict combined the
+judgment-ledger source wiring with the base's injectable-secrets test
+builder; web/dist was rebuilt from the merged sources, resolving the stale
+hashed-asset conflicts), re-verified every acceptance criterion against the
+merged tree, and recorded the landing in the coverage matrix (row 53 →
+implemented).
 
-**Part 1 — spec amendment** (`specs/system/human-system-interface.md` §12):
-- Judgment Ledger now carries a concrete Sources table (category → table → human
-  attribution column → workspace attribution column), records when each event is
-  written (gate override per failed gate on human MR approval, trust transition on
-  successful PUT, meta-spec publish on registry create+update), and fixes the
-  `?type=` values to `approval|rejection|gate|trust|meta-spec`.
-- Notification Preferences semantics pinned: no-row = enabled, explicit
-  `enabled = 0` disables; filter applies to list AND badge count AND MCP inbox
-  tool, in-query (before pagination); background de-dup jobs explicitly exempt;
-  PUT rejects unknown `notification_type` (400).
-- Auth provider info pinned: `oidc_issuer`/`last_login_at` on GET /users/me,
-  server-recorded during OIDC/JWT auth, debounced, never client-editable.
+### Behavior shipped
 
-**Part 3 — write paths**:
-- `AuditEventType` gains `TrustChange`/`GateOverride`/`MetaSpecPublish` (round-trip tested).
-- Trust transition via `PUT /api/v1/workspaces/:id` writes a `trust_change`
-  audit event attributed to the acting user (workspaces.rs).
-- Human approval on an MR with failed gate results writes one `gate_override`
-  audit event per failed gate with mr_id/gate_id/gate_type/from/to
-  (merge_requests.rs submit_review; agent-token approvals do not qualify).
-- Meta-spec registry create and update write `meta_spec_publish` audit events
-  with kind/name/version/content_hash and workspace attribution from scope
-  (meta_specs.rs); registry DELETE gained per-handler authorization
-  (Admin for Global scope, workspace Owner/Admin or tenant Admin for Workspace
-  scope) and its ABAC exemption entry was removed.
-- JWT validation records `oidc_issuer` + `last_login_at` via new
-  `UserRepository::record_login` (single-statement debounced write; new
-  migration 000056 adds the two users columns; SQLite and Postgres in parity).
+- **Spec amendment (Part 1)** — `specs/system/human-system-interface.md`
+  §12 Judgment Ledger now carries a concrete Sources table (category →
+  table → human-attribution column → workspace-attribution column), states
+  when each event is written, and pins `?type=` values to
+  `approval|rejection|gate|trust|meta-spec` (exactly the `JudgmentType`
+  wire strings).
+- **Write paths (Part 3)** — `AuditEventType` gains `TrustChange` /
+  `GateOverride` / `MetaSpecPublish`. Trust transition via
+  `PUT /api/v1/workspaces/:id` writes a `trust_change` audit event
+  attributed to the acting user. A human approval review on an MR with
+  failed gate results writes one `gate_override` event per failed gate
+  (mr_id/gate_id/gate_type/from/to); agent-token approvals do not
+  qualify. Meta-spec registry create/update write `meta_spec_publish`
+  events with kind/name/version/content_hash and workspace attribution
+  from scope; registry DELETE enforces per-handler authorization. JWT
+  validation records `oidc_issuer` + `last_login_at` via
+  `UserRepository::record_login` (debounced; migration 000056 adds the
+  users columns; SQLite/Postgres/mem parity).
+- **Aggregation + filtering (Part 2)** — `JudgmentType::GateOverride`
+  (`"gate"`). `list_for_user` (SQLite/Postgres/mem parity) aggregates
+  `spec_approvals` (LEFT JOIN spec_ledger_entries; `?workspace_id=`
+  filters, previously stamped) and `audit_events`
+  (gate_override/trust_change/meta_spec_publish, `user_id` attribution),
+  merges, sorts reverse-chronologically (deterministic tie-break), and
+  applies limit/offset to the merged stream only. Inbox:
+  `NotificationRepository::list_for_user`/`count_unresolved` take
+  `exclude_types` applied in-query before pagination; users.rs inbox +
+  badge endpoints and the MCP `notifications://` tool load disabled types
+  from `user_notification_preferences` (no row = enabled; PUT rejects
+  unknown notification_type with 400); background de-dup callers pass
+  none. `GET /users/me` returns read-only `oidc_issuer`/`last_login_at`.
 
-**Part 2 — aggregation**:
-- `JudgmentType` gains `GateOverride` (`"gate"`), all five wire strings stable.
-- `list_for_user` (SQLite + Postgres + mem, all in parity) now aggregates
-  `spec_approvals` (LEFT JOIN spec_ledger_entries for workspace attribution —
-  `?workspace_id=` filters, previously it stamped) and `audit_events`
-  (`event_type IN ('gate_override','trust_change','meta_spec_publish')`,
-  `user_id = caller`), merges, sorts reverse-chronologically (deterministic
-  entity_ref tie-break), and applies limit/offset to the merged stream only.
-- Inbox filtering: `NotificationRepository::list_for_user`/`count_unresolved`
-  take `exclude_types` (applied in-query, before limit/offset); users.rs inbox
-  + badge endpoints and the MCP inbox tool load disabled types from
-  `user_notification_preferences`; background de-dup callers pass `&[]`.
-- Web: UserProfile.svelte uses canonical `NotificationType` names (22 toggles),
-  server wire format for prefs, server-side badge count; Profile tab shows
-  read-only OIDC issuer + last login.
+### Test evidence (post-remerge, on this branch)
 
-**Test evidence** (logs under /tmp/stage/review-evidence/task-209/):
-- `cargo test -p gyre-adapters --lib user_profile`: 10 passed (judgment ledger
+- `cargo build --all` green (semantic-conflict check for the merge).
+- `cargo test -p gyre-adapters --lib user_profile`: 10 passed (ledger
   merge/filter/pagination, notification exclusion, record_login debounce).
-- `cargo test -p gyre-server --lib` focused write-paths: 5 passed
-  (disabled-preference inbox/count, get_me auth-provider info via real JWT,
-  trust_change event, gate_override event + `?type=gate` ledger shape,
-  meta_spec_publish events + `?type=meta-spec` ledger shape).
-- `cargo test -p gyre-domain --lib`: 363 passed.
-- `cd web && npx vitest run src/__tests__/UserProfile.test.js`: 26 passed.
-- `scripts/check-arch.sh`: passed. `scripts/check-task-commit-attribution.sh`:
-  OK. `scripts/check-tenant-filter.sh` exits 2 with an awk dialect error that is
-  identical at base 653a696f (pre-existing sandbox incompatibility, not a
-  violation).
-
-Not run here (owned by verification/publication per assignment scope): full
-`cargo test --all`, full `cd web && npm test`, all-target Clippy, GitHub CI.
-Full workspace suites and exact-head GitHub checks remain required before merge.
+- `cargo test -p gyre-server --lib` focused: users (11), workspaces +
+  meta_specs + merge_requests (52), auth (36) — all passed, including
+  `human_approval_on_failed_gate_writes_gate_override_event` (+ the
+  `?type=gate` ledger shape it asserts),
+  `trust_transition_writes_trust_change_audit_event`,
+  `publish_writes_meta_spec_publish_audit_event` (+ `?type=meta-spec`
+  shape), `disabled_preference_excludes_type_from_inbox_and_count`,
+  `get_me_returns_recorded_auth_provider_info`.
+- `cd web && npm ci && npm test`: 65 files, 1589 passed / 41 skipped.
+- `scripts/check-abac-exempt-handlers.sh` OK (89 handlers);
+  `scripts/check-fabricated-scope-defaults.sh` OK. Migration 000056 is
+  the unique next sequence number. Note: `check-tenant-filter.sh`
+  cannot execute under this sandbox's mawk (gawk-only 3-arg `match()`);
+  its logic was replicated manually — the findings are identical to the
+  assigned base e608ac78 (user-scoped tables), i.e. no new violations
+  from this task; CI runs the script under gawk with `|| true`.
