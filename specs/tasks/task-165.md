@@ -61,26 +61,37 @@ Read `specs/system/supply-chain.md` §"gyre-stack.lock", §"Attestation Levels",
 
 ## Shipped
 
-Contract repair (round `228887c2`): the prior candidate `c0b104d9` had
-checked all seven acceptance boxes and appended evidence text to each,
-rewriting the assignment's normative prose (the pipeline's
-`requirement_parts` comparison treats `## Acceptance Criteria` as contract;
-only this `## Shipped` section is stripped). Restored the assignment
-contract byte-for-byte — frontmatter and prose compare equal to the assigned
-body, acceptance boxes left unchecked per repo convention (evidence lives
-here, not in the boxes). No product code changed this round: all
-task-165 implementation files are byte-identical to checkpoint `19a3d5af`
-(`git diff 19a3d5af HEAD --stat` over `gyre-domain/src/stack.rs`,
-`gyre-server/src/git_http.rs`, `api/stack_attest.rs`, `api/agents.rs`,
-`gyre-domain/src/agent.rs`, `gyre-adapters/`, migrations is empty; the only
-server delta since is `api/graph.rs` from the absorbed upstream task-231/232
-merge, and the gyre-cli deltas are task-155's search work). The `commits:`
-list keeps the assignment's two checkpoint SHAs
-(`96dfd8b8`, `19a3d5af`), which carry the full implementation; `735a5e1a`
-(merge resolution + docs) and `1ed12f95` (attribution repair) sit on top as
-process commits outside the list, as recorded previously.
+Rebase repair (round `bc4e6b8a`, merge commit `6b2a84a7`): resolved the
+assigned merge of upstream `ed57c723` (task-201 persistent full-text
+search backend) into this branch. Three conflict classes, all resolved
+without changing task-165 behavior:
 
-**Actual behavior (from the two checkpoints, re-verified at this HEAD):**
+- `crates/gyre-cli/src/main.rs`: HEAD's `Stack` command and upstream's
+  `Budget` command were both added at the same enum/match sites — resolved
+  by union (both commands kept; zero stack-related lines changed,
+  `git diff 0f9cd02c 6b2a84a7 -- crates/gyre-cli/src/main.rs` contains no
+  `[Ss]tack` hunk).
+- `web/dist` build artifacts: rename/rename on `elk.bundled-*.js` (both
+  variants byte-identical, md5 `1be96051…`) plus `index.html` script-hash
+  conflict — took upstream's build (`index-D4CX8rVo.js` referencing
+  `elk.bundled-OwdVv5y8.js`) because this branch has zero `web/src`
+  changes since merge base `db37fd02`, so the merged `web/src` is
+  byte-identical to upstream's and their dist is the matching build.
+- `specs/coverage/SUMMARY.md`: TOTAL-line conflict resolved mechanically by
+  re-running `scripts/update-coverage-summary.sh` (802 total / 219 n/a /
+  0 not-started / 307 assigned / 113 implemented / 163 verified / 47%).
+
+All task-165 implementation files are byte-identical to checkpoint
+`19a3d5af`: `git diff 19a3d5af HEAD --stat` over `gyre-domain/src/stack.rs`,
+`gyre-server/src/git_http.rs`, `api/stack_attest.rs`, `api/agents.rs`,
+`gyre-domain/src/agent.rs`, and the task-165 migration is empty; the only
+deltas under `gyre-adapters/` and `gyre-cli/src/main.rs` are upstream
+task-201's search/budget work absorbed by the merge. The `commits:` list
+keeps the assignment's two checkpoint SHAs (`96dfd8b8`, `19a3d5af`), which
+carry the full implementation; the merge and earlier process commits sit
+on top outside the list.
+
+### Actual behavior
 
 1. **Lockfile schema** — `StackLockfile` (`crates/gyre-domain/src/stack.rs`):
    TOML schema with fingerprint + agents_md_hash, hooks, mcp_servers, model,
@@ -90,23 +101,22 @@ process commits outside the list, as recorded previously.
    components. Lives in gyre-domain so CLI and server compute the same
    fingerprint over the same schema.
 2. **Lockfile generation** — `gyre stack lock [--output PATH]`
-   (`crates/gyre-cli/src/main.rs:1631-1655`): fetches the agent's registered
-   stack via `GET /api/v1/agents/:id/stack` and writes the TOML lockfile.
+   (`crates/gyre-cli/src/main.rs`): fetches the agent's registered stack
+   via `GET /api/v1/agents/:id/stack` and writes the TOML lockfile.
 3. **Attestation level resolution** — `resolve_push_attestation_level`
-   (`git_http.rs:1265-1307`): L3 = server-recorded workload attestation with
+   (`git_http.rs`): L3 = server-recorded workload attestation with
    container identity (written by spawn.rs for M19.4 container targets) or
    verified agent JWT carrying `wl_container_id`+`wl_image_hash`; L2 =
    registered stack in KV `agent_stacks`; L1 = no attestation. Stored on the
    agent record (migration `2026-10-10-000056_agent_attestation_level`,
    sqlite/postgres round-trip, mem via whole-struct clone), exposed on
    `GET /api/v1/agents/:id` as `attestation_level`, and mapped to commit
-   provenance labels (server-verified / self-reported / unattested,
-   git_http.rs:516-525).
-4. **Per-level policy** — `RepoStackPolicy` (`api/stack_attest.rs:47-61`)
+   provenance labels (server-verified / self-reported / unattested).
+4. **Per-level policy** — `RepoStackPolicy` (`api/stack_attest.rs`)
    with `min_attestation_level: u8` (1..=3, validated) and `enforcement:
    block|warn`; Admin-only PUT/GET `/repos/:id/stack-policy`; legacy KV
    entries derive `min_attestation_level` from `required_level`.
-5. **Push enforcement** — `enforce_stack_policy` (git_http.rs:1337-1449)
+5. **Push enforcement** — `enforce_stack_policy` (`git_http.rs`)
    runs synchronously on every push to a policy-bearing repo: below-minimum
    level → Block: 403 + `undo_ref_updates` + PushRejected event; Warn:
    accept + ConstraintViolation event. `gyre-stack.lock` in the pushed tree
@@ -114,8 +124,10 @@ process commits outside the list, as recorded previously.
    drift-checked against the pushing agent's attested stack under the same
    enforcement modes.
 
-**Test evidence** (logs under `/tmp/stage/review-evidence/`,
-`task165-*.log`, all run this round at HEAD `0bef33dc`):
+### Test evidence
+
+All suites re-run this round at merge HEAD `6b2a84a7` (logs under
+`/tmp/stage/review-evidence/`, `task165-merge-*.log`):
 
 - gyre-domain `stack`: 9 passed (round-trip, integrity, drift, malformed
   TOML, zero-timestamp, missing-persona, fingerprint discrimination).
@@ -123,31 +135,36 @@ process commits outside the list, as recorded previously.
   set/get/clear, level-3 policy, min-level + warn mode, bad-level/mode 400s,
   legacy parse fallbacks, agent-role 403 NEW-39).
 - gyre-server git_http task-165 push tests: 7 passed —
-  `push_below_min_attestation_level_blocked` (403 + ref undone + level not
-  stored), `push_below_min_level_warn_mode_flagged_and_accepted` (event +
-  stored level 1), `push_meeting_min_level_accepted_and_level_stored`
-  (stored 2), `level3_detected_from_workload_attestation` (stored 3 under
-  min-3 policy), `lockfile_drift_blocked_in_block_mode`,
-  `lockfile_match_accepted`, `tampered_lockfile_rejected_by_integrity_check`.
-- gyre-server `constraint_check`: 31 passed (merge-constraint side:
-  `derive_attestation_level` / `get_repo_required_attestation_level` wired
-  through `parse_stack_policy`). Adjacent consumers green: `aibom` 4,
-  `provenance` 5.
-- gyre-cli bin unit tests: 110 passed.
-- Invariant gates at HEAD: migration versions, arch, ABAC route registry,
-  mem port contracts, task attribution, relative-path defaults,
-  byte-slice truncation, in-memory state stores — all OK.
-- `cargo test --all` itself is owned by the verification/publication stage
-  and not repeated here; the focused suites above cover every task-165
+  `push_below_min_attestation_level_blocked`,
+  `push_below_min_level_warn_mode_flagged_and_accepted`,
+  `push_meeting_min_level_accepted_and_level_stored`,
+  `level3_detected_from_workload_attestation`,
+  `lockfile_drift_blocked_in_block_mode`, `lockfile_match_accepted`,
+  `tampered_lockfile_rejected_by_integrity_check`.
+- gyre-server `constraint_check`: 31 passed — re-run because the merge
+  touched `constraint_check.rs` (upstream); `derive_attestation_level` /
+  `get_repo_required_attestation_level` still green through
+  `parse_stack_policy`.
+- gyre-cli bin unit tests: 129 passed (110 prior + 19 upstream budget
+  tests absorbed by the merge; `Stack` command paths unchanged).
+- gyre-cli + gyre-domain compile clean (`cargo build -p gyre-cli -p
+  gyre-domain`), which also compiles the merged server test tree the suites
+  above ran against.
+- Invariant gates at HEAD: arch, migration versions, ABAC route registry,
+  mem port contracts, task attribution — all OK.
+- `cargo test --all` is owned by the verification/publication stage and
+  not repeated here; the focused suites above cover every task-165
   behavior. `ws_integration::test_auth_and_ping_roundtrip` fails in this
   sandbox on `TcpListener::bind` errno 95 (`capabilities.json`:
   `tcp_listener_probe.supported=false`) — pre-existing test predating the
   task base, an infrastructure restriction, not a code defect; requires
   exact-head GitHub CI verification.
 
-**Known partials** (also recorded in coverage rows 7/8/9): lockfile is not
-approver-signed (integrity is self-verifying via the recomputed fingerprint,
-but no signature over the file); L3 trust basis is server-observed container
+### Known partials
+
+(also recorded in coverage rows 7/8/9): lockfile is not approver-signed
+(integrity is self-verifying via the recomputed fingerprint, but no
+signature over the file); L3 trust basis is server-observed container
 identity + server-minted JWT claims, not SPIFFE/eBPF cryptographic
 environment proof; stack attestation is not sigstore-signed (pre-existing,
 rows 4/5/10). Consistent with the task's implementation plan, which scoped
