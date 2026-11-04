@@ -714,6 +714,8 @@ async fn decompose_delegation(
         );
         sub.description = Some(st.description.clone());
         sub.task_type = Some(TaskType::Implementation);
+        sub.repo_id = repo.id.clone();
+        sub.workspace_id = repo.workspace_id.clone();
         sub.spec_path = Some(spec_path.clone());
         sub.spec_ref = Some(spec_ref.clone());
         sub.parent_task_id = Some(task.id.clone());
