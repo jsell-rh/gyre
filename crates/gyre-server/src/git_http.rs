@@ -3374,6 +3374,15 @@ pub(crate) fn verify_context_binding(
     let mut children = Vec::new();
     let mut all_valid = true;
 
+    // MUTATION (review probe): check disabled to prove tests kill removal.
+    let _ = (&mut all_valid, &children, target_repo_id, target_workspace_id, task_spec_sha, task_generation);
+    return gyre_common::VerificationResult {
+        label: "context_binding".to_string(),
+        valid: true,
+        message: "mutated: binding check disabled".to_string(),
+        children: vec![],
+    };
+
     // Binding 1: repo_id — the input cannot be replayed to a different repo.
     let repo_ok = root.content.repo_id == target_repo_id;
     children.push(gyre_common::VerificationResult {

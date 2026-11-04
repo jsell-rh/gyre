@@ -2,7 +2,7 @@
 title: "Enforce SignedInput context binding (replay prevention) at verification"
 spec_ref: "authorization-provenance.md §2.4"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "authorization-provenance.md §2.4 Context Binding (Replay Prevention)"
 commits: ["0fc3651223fecb43f926752d6196753864e3c593", "57e04abc81ec1d5d380de6c013a633cee4a03b24", "13cbb9c646da7fecec39b1070cf501de622b017e", "dce5c6a5eef16c506409ed9bde3f12f8373800a6", "add4ba14aa2190356f82ed2de95d2bdcd21ed974"]
@@ -152,3 +152,11 @@ is not exposed in the `ApproveSpecRequest` API. Enforcement (comparison
 against the persisted `Task.generation`) is fully implemented and
 mutation-tested; exposing a signer-side pin would extend the request
 contract and was not part of this task's enumerated scope.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/git_http.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
