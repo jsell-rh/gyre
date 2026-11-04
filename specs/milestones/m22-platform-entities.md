@@ -98,6 +98,6 @@
 | `BudgetDashboard` | Operations → Budget | Tenant summary cards, per-workspace progress bars |
 | `DependencyGraph` | Source Control → Dependencies | SVG circular layout, edge-type coloring, blast-radius panel |
 | `SpecGraph` | Source Control → Spec Graph | SVG DAG, link-type colored edges + legend, node detail panel |
-| `UserProfile` | Overview → My Profile | Profile edit form, My Agents/Tasks/MRs/Notifications tabs |
+| `UserProfile` | Overview → My Profile | Profile edit form, My Agents/Tasks/MRs/Notifications tabs (My Agents/Tasks/MRs tabs removed 2026-10-07 per `human-system-interface.md` §12, task-208; only the Notifications tab remains from that set) |
 
 20+ new API methods added to `api.js` covering workspaces, budget, personas, dependencies, spec graph, and user/me endpoints.
