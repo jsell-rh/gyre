@@ -3,11 +3,10 @@
 # reason and an owner. Never add entries; fix by wiring the trait into
 # production (store! pattern in build_state) or removing it.
 
-# task-207 F1: ActivityRepository is implemented in all three adapters
-# (delete_older_than) but not wired into AppState — the activity_events
-# retention arm is hollow. Product fix owned by task-207's revision
-# round; remove this entry when the wiring lands.
-ActivityRepository
+# (task-207 R1 F1 resolved: the dead ActivityRepository port and its
+# SQLite/Postgres adapters were removed in the revision round —
+# activity_events retention is enforced by TelemetryBuffer age eviction
+# driven from run_cleanup; the activity_events DB table has no writer.)
 
 # Pre-existing (predates this check): LlmPort is consumed only through
 # LlmPortFactory::for_model() -> Arc<dyn LlmPort> (state.llm in lib.rs);

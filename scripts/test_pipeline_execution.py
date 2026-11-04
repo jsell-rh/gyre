@@ -44,6 +44,20 @@ class CrashTest(unittest.TestCase):
         self.assertEqual(json.loads((execution.directory / 'outcome.json').read_text())['head'], 'source')
         self.assertEqual(self.store.db.execute('SELECT count(*) FROM resources').fetchone()[0], 0)
 
+    def test_truncated_checkpoint_task_restores_contract_without_discarding_candidate(self):
+        body='---\ntitle: Real task\nspec_ref: fixture\ndepends_on: []\nprogress: not-started\n---\n\nRequired behavior.\n'
+        self.store.put_task('task-001','g',body,{'candidate':'saved-source',
+                            'task_override':'---\ntitle: Real task\n'})
+        observed=[]
+        def handler(execution,task):
+            observed.append(task)
+            return {},{},[]
+        with patch.dict(cli.HANDLERS,{'implement':handler}), patch.object(cli,'eligible',return_value=True):
+            cli.run_claim(self.store,self.claim)
+        self.assertEqual(observed[0]['body'],body)
+        self.assertEqual(observed[0]['data']['candidate'],'saved-source')
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM events WHERE kind='checkpoint_contract_restored'").fetchone()[0],1)
+
     def test_terminal_readiness_does_not_hold_dead_compute(self):
         from pipeline.execution import Retry
         execution = Execution(self.store, self.claim)
