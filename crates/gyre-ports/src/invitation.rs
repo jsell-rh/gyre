@@ -24,16 +24,26 @@ pub trait TenantInvitationRepository: Send + Sync {
     /// All invitations across tenants with the given status (used by the
     /// expiry job).
     async fn list_by_status(&self, status: InvitationStatus) -> Result<Vec<TenantInvitation>>;
-    /// Transition an invitation to a terminal status, recording the
-    /// acceptance timestamp when accepting.
-    async fn update_status(
+    /// Atomically transition the invitation from `from` to `to`.
+    ///
+    /// Returns `Ok(false)` — not an error — when the invitation is missing
+    /// or no longer in `from` (it was accepted, declined, revoked, expired,
+    /// or claimed concurrently). This is the single-use guard for
+    /// acceptance: callers perform the transition FIRST and only proceed
+    /// with user/membership creation when it returns `true`, so two
+    /// concurrent accepts of the same token cannot both win. Adapters must
+    /// enforce the `from` precondition in the write itself (a conditional
+    /// UPDATE / a check-and-set under the store lock), never as a separate
+    /// read-then-write.
+    async fn transition_status(
         &self,
         id: &Id,
-        status: InvitationStatus,
+        from: InvitationStatus,
+        to: InvitationStatus,
         accepted_at: Option<u64>,
-    ) -> Result<()>;
+    ) -> Result<bool>;
     /// Delete an invitation. Only used for administrative cleanup; normal
-    /// lifecycle transitions go through `update_status`.
+    /// lifecycle transitions go through [`Self::transition_status`].
     async fn delete(&self, id: &Id) -> Result<()>;
 }
 
@@ -55,15 +65,20 @@ pub trait WorkspaceInvitationRepository: Send + Sync {
     /// All invitations across workspaces with the given status (used by the
     /// expiry job).
     async fn list_by_status(&self, status: InvitationStatus) -> Result<Vec<WorkspaceInvitation>>;
-    /// Transition an invitation to a terminal status, recording the
-    /// acceptance timestamp when accepting.
-    async fn update_status(
+    /// Atomically transition the invitation from `from` to `to`.
+    ///
+    /// Same contract as
+    /// [`TenantInvitationRepository::transition_status`]: `Ok(false)` when
+    /// the invitation is not (or no longer) in `from`; the conditional
+    /// write is the single-use acceptance guard.
+    async fn transition_status(
         &self,
         id: &Id,
-        status: InvitationStatus,
+        from: InvitationStatus,
+        to: InvitationStatus,
         accepted_at: Option<u64>,
-    ) -> Result<()>;
+    ) -> Result<bool>;
     /// Delete an invitation. Only used for administrative cleanup; normal
-    /// lifecycle transitions go through `update_status`.
+    /// lifecycle transitions go through [`Self::transition_status`].
     async fn delete(&self, id: &Id) -> Result<()>;
 }

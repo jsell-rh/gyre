@@ -15,6 +15,14 @@
 //! - GET    /api/v1/workspaces/:id/invitations     — list invitations
 //! - DELETE /api/v1/workspaces/:id/invitations/:id — revoke
 //!
+//! Invitee-facing workspace invitation surface (spec §API > Workspace
+//! Membership + §Workspace Invitation Flow steps 3-4 — the invitee has
+//! no membership yet, so the workspace-scoped routes above are
+//! unreachable for them):
+//! - GET    /api/v1/users/me/invitations            — my invitations
+//! - POST   /api/v1/workspaces/:id/invite/accept    — accept (authenticated)
+//! - POST   /api/v1/workspaces/:id/invite/decline   — decline (authenticated)
+//!
 //! Magic-link acceptance (no Bearer auth — the invitation token IS the
 //! auth factor; registered outside the auth middleware chain in lib.rs):
 //! - POST   /api/v1/invite/:token/accept     — accept tenant invitation
@@ -457,10 +465,18 @@ pub async fn revoke_tenant_invitation(
         )));
     }
 
-    state
+    // Conditional transition: a concurrent accept/decline/expiry that
+    // landed between the read above and this write must not be overwritten
+    // by Revoked — the Pending precondition is enforced in the write.
+    let revoked = state
         .tenant_invitations
-        .update_status(&invitation.id, InvitationStatus::Revoked, None)
+        .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Revoked, None)
         .await?;
+    if !revoked {
+        return Err(ApiError::Conflict(format!(
+            "invitation is no longer pending — only pending invitations can be revoked"
+        )));
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -614,11 +630,56 @@ pub async fn accept_tenant_invitation(
         // catch it, but the caller deserves the terminal state immediately).
         state
             .tenant_invitations
-            .update_status(&invitation.id, InvitationStatus::Expired, None)
+            .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Expired, None)
             .await?;
         return Err(ApiError::Conflict("invitation has expired".to_string()));
     }
 
+    // Single-use claim, BEFORE any side effects: the conditional
+    // Pending→Accepted transition is atomic at the store, so two
+    // concurrent accepts of the same token cannot both proceed — only
+    // the claim winner creates the user and memberships. On failure
+    // after the claim, the status is rolled back so the invitation
+    // stays usable.
+    let claimed = state
+        .tenant_invitations
+        .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Accepted, Some(now))
+        .await?;
+    if !claimed {
+        return Err(ApiError::Conflict(format!(
+            "invitation is {}",
+            invitation.status.as_str()
+        )));
+    }
+
+    let outcome = accept_tenant_invitation_claimed(&state, &invitation, &req, now).await;
+    match outcome {
+        Ok(response) => Ok((StatusCode::OK, Json(response))),
+        Err(e) => {
+            // Best-effort rollback: the side effects failed, so the
+            // invitation must not stay Accepted with nothing delivered.
+            let _ = state
+                .tenant_invitations
+                .transition_status(
+                    &invitation.id,
+                    InvitationStatus::Accepted,
+                    InvitationStatus::Pending,
+                    None,
+                )
+                .await;
+            Err(e)
+        }
+    }
+}
+
+/// Side effects of a successfully claimed tenant invitation: find or
+/// create the user, activate pre-assigned workspace memberships.
+async fn accept_tenant_invitation_claimed(
+    state: &AppState,
+    invitation: &TenantInvitation,
+    req: &AcceptInviteRequest,
+    now: u64,
+) -> Result<AcceptInviteResponse, ApiError> {
     // Find or create the user in this tenant.
     let email = invitation.email.clone();
     let tenant_ns = format!("tenant:{}:email:{}", invitation.tenant_id, email);
@@ -691,21 +752,13 @@ pub async fn accept_tenant_invitation(
         activated.push(ws_id.to_string());
     }
 
-    state
-        .tenant_invitations
-        .update_status(&invitation.id, InvitationStatus::Accepted, Some(now))
-        .await?;
-
-    Ok((
-        StatusCode::OK,
-        Json(AcceptInviteResponse {
-            user_id: user.id.to_string(),
-            username: user.username.clone(),
-            mode: mode.to_string(),
-            tenant_id: invitation.tenant_id.to_string(),
-            workspaces: activated,
-        }),
-    ))
+    Ok(AcceptInviteResponse {
+        user_id: user.id.to_string(),
+        username: user.username.clone(),
+        mode: mode.to_string(),
+        tenant_id: invitation.tenant_id.to_string(),
+        workspaces: activated,
+    })
 }
 
 /// POST /api/v1/invite/:token/decline
@@ -735,14 +788,22 @@ pub async fn decline_tenant_invitation(
     if invitation.is_expired(now_secs()) {
         state
             .tenant_invitations
-            .update_status(&invitation.id, InvitationStatus::Expired, None)
+            .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Expired, None)
             .await?;
         return Err(ApiError::Conflict("invitation has expired".to_string()));
     }
-    state
+    // Conditional transition — a concurrent accept that landed between
+    // the read and this write must win, not be overwritten by Declined.
+    let declined = state
         .tenant_invitations
-        .update_status(&invitation.id, InvitationStatus::Declined, None)
+        .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Declined, None)
         .await?;
+    if !declined {
+        return Err(ApiError::Conflict(format!(
+            "invitation is {}",
+            invitation.status.as_str()
+        )));
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -750,12 +811,83 @@ pub async fn decline_tenant_invitation(
 
 #[derive(Deserialize)]
 pub struct WorkspaceInviteRequest {
-    /// User id of an existing tenant user.
-    pub user_id: String,
+    /// User id of an existing tenant user. One of `user_id`/`username`/
+    /// `email` must be provided (spec §Workspace Invitation Flow step 1:
+    /// invitations are issued "by username (tenant-internal) or email";
+    /// user_id is accepted for API callers that already resolved the
+    /// user).
+    #[serde(default)]
+    pub user_id: Option<String>,
+    /// Username of an existing tenant user (tenant-internal lookup).
+    #[serde(default)]
+    pub username: Option<String>,
+    /// Email of an existing tenant user (lowercase match).
+    #[serde(default)]
+    pub email: Option<String>,
     #[serde(default = "default_ws_role")]
     pub role: String,
     #[serde(default)]
     pub expires_in_days: Option<u32>,
+}
+
+/// Resolve the invitee for a workspace invitation. Accepts user_id,
+/// username, or email (spec §Workspace Invitation Flow step 1); when
+/// several selectors are given they must all resolve to the same tenant
+/// user, otherwise the request is ambiguous and rejected.
+async fn resolve_workspace_invitee(
+    state: &AppState,
+    tenant_id: &Id,
+    req: &WorkspaceInviteRequest,
+) -> Result<User, ApiError> {
+    let selectors = [
+        req.user_id.as_deref(),
+        req.username.as_deref(),
+        req.email.as_deref(),
+    ]
+    .iter()
+    .flatten()
+    .map(|s| s.trim())
+    .filter(|s| !s.is_empty())
+    .collect::<Vec<_>>();
+    if selectors.is_empty() {
+        return Err(ApiError::InvalidInput(
+            "one of user_id, username, or email is required".to_string(),
+        ));
+    }
+
+    // Resolve each selector to a user within the inviting workspace's
+    // tenant — usernames and emails are only meaningful tenant-internally,
+    // and cross-tenant invites are rejected anyway.
+    let users = state.users.list().await?;
+    let mut resolved: Option<&User> = None;
+    for selector in selectors {
+        let lower = selector.to_lowercase();
+        let found = users.iter().find(|u| {
+            u.tenant_id.as_ref() == Some(tenant_id)
+                && (u.id.as_str() == selector
+                    || u.username.to_lowercase() == lower
+                    || u.email
+                        .as_ref()
+                        .is_some_and(|e| e.to_lowercase() == lower))
+        });
+        let found = found.ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "no user matching '{selector}' in this tenant"
+            ))
+        })?;
+        match resolved {
+            None => resolved = Some(found),
+            Some(prev) if prev.id == found.id => {}
+            Some(_) => {
+                return Err(ApiError::InvalidInput(
+                    "selectors resolve to different users".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(resolved
+        .expect("selectors is non-empty, so resolved is Some")
+        .clone())
 }
 
 fn default_ws_role() -> String {
@@ -837,25 +969,12 @@ pub async fn invite_to_workspace(
 
     let role = WorkspaceRole::parse_role(&req.role)
         .ok_or_else(|| ApiError::InvalidInput(format!("unknown role: {}", req.role)))?;
-    let user_id = Id::new(req.user_id.clone());
 
     // The invitee must exist and belong to the same tenant. A user with no
     // tenant has no verifiable scope — reject rather than fabricate one.
-    let invitee = state
-        .users
-        .find_by_id(&user_id)
-        .await?
-        .ok_or_else(|| ApiError::NotFound(format!("user {user_id} not found")))?;
-    let invitee_tenant = invitee
-        .tenant_id
-        .as_ref()
-        .map(|t| t.as_str())
-        .ok_or_else(|| {
-            ApiError::Forbidden(format!(
-                "user {user_id} has no tenant scope; cannot verify tenant containment"
-            ))
-        })?;
-    if invitee_tenant != workspace.tenant_id.as_str() {
+    let invitee = resolve_workspace_invitee(&state, &workspace.tenant_id, &req).await?;
+    let user_id = invitee.id.clone();
+    if invitee.tenant_id.as_ref() != Some(&workspace.tenant_id) {
         return Err(ApiError::Forbidden(
             "cross-tenant workspace invitations are not supported".to_string(),
         ));
@@ -929,19 +1048,44 @@ pub async fn invite_to_workspace(
     state.workspace_invitations.create(&invitation).await?;
 
     // In-app notification to the invitee (spec step 3: "in-app always").
-    let notif = gyre_common::Notification::new(
+    // The body carries the accept route so the invitee can act on the
+    // invitation end-to-end: the invitee has no membership yet (so the
+    // workspace-scoped listing is unreachable) and must not need the
+    // inviter's token — the authenticated accept path
+    // (POST /api/v1/workspaces/{id}/invite/accept) and the invitee's own
+    // pending-invitations view (GET /api/v1/users/me/invitations) are the
+    // invitee-facing surfaces.
+    let mut notif = gyre_common::Notification::new(
         new_id(),
         ws_id.clone(),
         user_id.clone(),
         gyre_common::NotificationType::TrustSuggestion,
         format!(
             "You have been invited to workspace {} with role {}",
-            workspace_id,
+            workspace.name,
             invitation.role.as_str()
         ),
         workspace.tenant_id.as_str().to_string(),
         now as i64,
     );
+    notif.body = Some(
+        serde_json::json!({
+            "kind": "workspace_invitation",
+            "workspace_id": ws_id.to_string(),
+            "role": invitation.role.as_str(),
+            "accept_url": format!(
+                "{}/api/v1/workspaces/{}/invite/accept",
+                state.base_url, workspace_id
+            ),
+            "decline_url": format!(
+                "{}/api/v1/workspaces/{}/invite/decline",
+                state.base_url, workspace_id
+            ),
+            "invitations_url": format!("{}/api/v1/users/me/invitations", state.base_url),
+        })
+        .to_string(),
+    );
+    notif.entity_ref = Some(ws_id.to_string());
     let _ = state.notifications.create(&notif).await;
 
     let mut response = WorkspaceInvitationResponse::from(invitation);
@@ -1043,10 +1187,18 @@ pub async fn revoke_workspace_invitation(
             invitation.status.as_str()
         )));
     }
-    state
+    // Conditional transition — a concurrent accept must not be overwritten
+    // by Revoked (same guard as the tenant revoke).
+    let revoked = state
         .workspace_invitations
-        .update_status(&invitation.id, InvitationStatus::Revoked, None)
+        .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Revoked, None)
         .await?;
+    if !revoked {
+        return Err(ApiError::Conflict(
+            "invitation is no longer pending — only pending invitations can be revoked"
+                .to_string(),
+        ));
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1087,12 +1239,48 @@ pub async fn accept_workspace_invitation(
     if invitation.is_expired(now) {
         state
             .workspace_invitations
-            .update_status(&invitation.id, InvitationStatus::Expired, None)
+            .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Expired, None)
             .await?;
         return Err(ApiError::Conflict("invitation has expired".to_string()));
     }
 
-    // Idempotent membership activation.
+    // Single-use claim BEFORE the membership side effects — see
+    // accept_tenant_invitation for the rationale.
+    let claimed = state
+        .workspace_invitations
+        .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Accepted, Some(now))
+        .await?;
+    if !claimed {
+        return Err(ApiError::Conflict(format!(
+            "invitation is {}",
+            invitation.status.as_str()
+        )));
+    }
+    match activate_membership(&state, &invitation, now).await {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(e) => {
+            let _ = state
+                .workspace_invitations
+                .transition_status(
+                    &invitation.id,
+                    InvitationStatus::Accepted,
+                    InvitationStatus::Pending,
+                    None,
+                )
+                .await;
+            Err(e)
+        }
+    }
+}
+
+/// Activate (or re-accept) the membership a claimed workspace invitation
+/// grants. Idempotent: an existing membership is only flipped to accepted,
+/// never duplicated.
+async fn activate_membership(
+    state: &AppState,
+    invitation: &WorkspaceInvitation,
+    now: u64,
+) -> Result<(), ApiError> {
     let existing = state
         .workspace_memberships
         .find_by_user_and_workspace(&invitation.user_id, &invitation.workspace_id)
@@ -1106,7 +1294,7 @@ pub async fn accept_workspace_invitation(
             m
         }
         None => {
-            let m = WorkspaceMembership::new(
+            let mut m = WorkspaceMembership::new(
                 new_id(),
                 invitation.user_id.clone(),
                 invitation.workspace_id.clone(),
@@ -1115,17 +1303,11 @@ pub async fn accept_workspace_invitation(
                 now,
             );
             // activate immediately — acceptance IS the activation.
-            let mut m = m;
             m.accept(now);
             state.workspace_memberships.create(&m).await?;
             m
         }
     };
-
-    state
-        .workspace_invitations
-        .update_status(&invitation.id, InvitationStatus::Accepted, Some(now))
-        .await?;
 
     tracing::info!(
         workspace_id = %invitation.workspace_id,
@@ -1133,7 +1315,7 @@ pub async fn accept_workspace_invitation(
         membership_id = %membership.id,
         "workspace invitation accepted"
     );
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
 }
 
 /// POST /api/v1/workspaces/invitations/:token/decline
@@ -1165,15 +1347,166 @@ pub async fn decline_workspace_invitation(
     if invitation.is_expired(now_secs()) {
         state
             .workspace_invitations
-            .update_status(&invitation.id, InvitationStatus::Expired, None)
+            .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Expired, None)
             .await?;
         return Err(ApiError::Conflict("invitation has expired".to_string()));
     }
-    state
+    // Conditional transition — a concurrent accept must not be overwritten.
+    let declined = state
         .workspace_invitations
-        .update_status(&invitation.id, InvitationStatus::Declined, None)
+        .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Declined, None)
         .await?;
+    if !declined {
+        return Err(ApiError::Conflict(format!(
+            "invitation is {}",
+            invitation.status.as_str()
+        )));
+    }
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ─── Invitee-facing workspace invitation surface ─────────────────────────────
+//
+// Spec §API > Workspace Membership defines the invitee's accept route as
+// POST /api/v1/workspaces/{id}/invite/accept (authenticated invitee
+// accepts THEIR pending invitation — no token), and §Workspace
+// Invitation Flow step 4 requires the invitee to accept or decline. The
+// invitee has no workspace membership yet, so the workspace-scoped
+// listing is unreachable for them; these routes plus
+// GET /api/v1/users/me/invitations are the invitee-facing surface.
+
+/// GET /api/v1/users/me/invitations
+///
+/// The caller's workspace invitations across workspaces (the invitee's
+/// "pending invitations" view — spec §Workspace Invitation Flow). Scoped
+/// to the authenticated user; no token material is exposed.
+pub async fn list_my_invitations(
+    auth: AuthenticatedAgent,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let caller_id = caller_user_id(&auth);
+    let items: Vec<WorkspaceInvitationResponse> = state
+        .workspace_invitations
+        .list_by_user(&caller_id)
+        .await?
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    Ok(Json(serde_json::json!({ "invitations": items })))
+}
+
+/// POST /api/v1/workspaces/:id/invite/accept
+///
+/// Authenticated invitee accepts their pending invitation for the
+/// workspace (spec §API > Workspace Membership). The invitation is
+/// located by (workspace, caller) — no token needed, because the
+/// caller's authenticated identity IS the invitee proof.
+pub async fn accept_my_workspace_invitation(
+    auth: AuthenticatedAgent,
+    Path(workspace_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, ApiError> {
+    let invitation = find_my_pending_invitation(&state, &auth, &workspace_id).await?;
+    let now = now_secs();
+    if invitation.is_expired(now) {
+        state
+            .workspace_invitations
+            .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Expired, None)
+            .await?;
+        return Err(ApiError::Conflict("invitation has expired".to_string()));
+    }
+    let claimed = state
+        .workspace_invitations
+        .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Accepted, Some(now))
+        .await?;
+    if !claimed {
+        return Err(ApiError::Conflict(format!(
+            "invitation is {}",
+            invitation.status.as_str()
+        )));
+    }
+    match activate_membership(&state, &invitation, now).await {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(e) => {
+            let _ = state
+                .workspace_invitations
+                .transition_status(
+                    &invitation.id,
+                    InvitationStatus::Accepted,
+                    InvitationStatus::Pending,
+                    None,
+                )
+                .await;
+            Err(e)
+        }
+    }
+}
+
+/// POST /api/v1/workspaces/:id/invite/decline
+///
+/// Authenticated invitee declines their pending invitation for the
+/// workspace (spec §Workspace Invitation Flow step 4).
+pub async fn decline_my_workspace_invitation(
+    auth: AuthenticatedAgent,
+    Path(workspace_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, ApiError> {
+    let invitation = find_my_pending_invitation(&state, &auth, &workspace_id).await?;
+    let now = now_secs();
+    if invitation.is_expired(now) {
+        state
+            .workspace_invitations
+            .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Expired, None)
+            .await?;
+        return Err(ApiError::Conflict("invitation has expired".to_string()));
+    }
+    let declined = state
+        .workspace_invitations
+        .transition_status(&invitation.id, InvitationStatus::Pending, InvitationStatus::Declined, None)
+        .await?;
+    if !declined {
+        return Err(ApiError::Conflict(format!(
+            "invitation is {}",
+            invitation.status.as_str()
+        )));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Shared lookup for the invitee-facing accept/decline routes: resolve the
+/// workspace, enforce tenant containment, and find the caller's pending
+/// invitation in it. 404 when the caller has no pending invitation there
+/// (an invitee must not learn whether OTHER users have pending
+/// invitations), 403 when the workspace belongs to another tenant.
+async fn find_my_pending_invitation(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    workspace_id: &str,
+) -> Result<WorkspaceInvitation, ApiError> {
+    let ws_id = Id::new(workspace_id.to_string());
+    let workspace = state
+        .workspaces
+        .find_by_id(&ws_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {workspace_id} not found")))?;
+    if workspace.tenant_id.as_str() != auth.tenant_id {
+        return Err(ApiError::Forbidden(
+            "workspace belongs to a different tenant".to_string(),
+        ));
+    }
+    let caller_id = caller_user_id(auth);
+    let invitation = state
+        .workspace_invitations
+        .list_by_workspace(&ws_id)
+        .await?
+        .into_iter()
+        .find(|i| i.user_id == caller_id && i.status == InvitationStatus::Pending)
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "no pending invitation for you in workspace {workspace_id}"
+            ))
+        })?;
+    Ok(invitation)
 }
 
 // ─── Expiry job ──────────────────────────────────────────────────────────────
@@ -1184,16 +1517,20 @@ pub async fn run_expiry_once(state: &AppState) -> anyhow::Result<u64> {
     let now = now_secs();
     let mut expired_count = 0u64;
 
+    // Conditional Pending→Expired transitions: an invitation that was
+    // accepted/declined/revoked between the list read and the write must
+    // keep its terminal status — only successful transitions count.
     for inv in state
         .tenant_invitations
         .list_by_status(InvitationStatus::Pending)
         .await?
     {
-        if inv.is_expired(now) {
-            state
+        if inv.is_expired(now)
+            && state
                 .tenant_invitations
-                .update_status(&inv.id, InvitationStatus::Expired, None)
-                .await?;
+                .transition_status(&inv.id, InvitationStatus::Pending, InvitationStatus::Expired, None)
+                .await?
+        {
             expired_count += 1;
         }
     }
@@ -1203,11 +1540,12 @@ pub async fn run_expiry_once(state: &AppState) -> anyhow::Result<u64> {
         .list_by_status(InvitationStatus::Pending)
         .await?
     {
-        if inv.is_expired(now) {
-            state
+        if inv.is_expired(now)
+            && state
                 .workspace_invitations
-                .update_status(&inv.id, InvitationStatus::Expired, None)
-                .await?;
+                .transition_status(&inv.id, InvitationStatus::Pending, InvitationStatus::Expired, None)
+                .await?
+        {
             expired_count += 1;
         }
     }
@@ -1289,6 +1627,14 @@ mod tests {
                 post(invite_to_workspace),
             )
             .route(
+                "/api/v1/workspaces/:id/invite/accept",
+                post(accept_my_workspace_invitation),
+            )
+            .route(
+                "/api/v1/workspaces/:id/invite/decline",
+                post(decline_my_workspace_invitation),
+            )
+            .route(
                 "/api/v1/workspaces/:id/invitations",
                 get(list_workspace_invitations),
             )
@@ -1304,6 +1650,7 @@ mod tests {
                 "/api/v1/workspaces/invitations/:token/decline",
                 post(decline_workspace_invitation),
             )
+            .route("/api/v1/users/me/invitations", get(list_my_invitations))
             .with_state(state)
     }
 
@@ -1614,23 +1961,55 @@ mod tests {
         assert_eq!(json["error_count"], 2);
     }
 
+    /// HTTP-layer negative authorization (review F4): a non-admin
+    /// authenticated caller must get 403 from POST /api/v1/tenant/invite
+    /// through the real extractor + handler chain — a routing or extractor
+    /// regression that bypasses the guard must fail here, not pass silently.
     #[tokio::test]
-    async fn non_admin_cannot_invite() {
-        // A Developer-role user's API key... simplest: craft an
-        // AuthenticatedAgent-equivalent by using a non-admin token. The
-        // test_state dev token is Admin; use an agent token (Agent role).
-        // Agent tokens live in kv_store("agent_tokens") — but seeding one
-        // there requires the token to resolve through the extractor. The
-        // direct unit-level check is simpler: call the guard.
-        let auth = AuthenticatedAgent {
-            agent_id: "agent-1".to_string(),
-            user_id: None,
-            roles: vec![UserRole::Agent],
-            tenant_id: "default".to_string(),
-            jwt_claims: None,
-            deprecated_token_auth: false,
-        };
-        assert!(require_tenant_admin(&auth).is_err());
+    async fn non_admin_cannot_invite_via_http() {
+        let state = test_state();
+        // A plain Member user (ReadOnly roles) with a real API key.
+        let mut pleb = User::new(
+            Id::new("pleb-1"),
+            "tenant:default:email:pleb@x.com",
+            "pleb",
+            now_secs(),
+        );
+        pleb.email = Some("pleb@x.com".to_string());
+        pleb.tenant_id = Some(Id::new("default"));
+        state.users.create(&pleb).await.unwrap();
+        let raw_key = format!("gyre_{}", uuid::Uuid::new_v4().simple());
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(&raw_key), &pleb.id, "test")
+            .await
+            .unwrap();
+
+        let app = Router::new()
+            .route("/api/v1/tenant/invite", post(invite_to_tenant))
+            .with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tenant/invite")
+                    .header("authorization", format!("Bearer {raw_key}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"email": "someone@x.com"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        // And nothing was created.
+        let pending = state
+            .tenant_invitations
+            .list_by_tenant(&Id::new("default"))
+            .await
+            .unwrap();
+        assert!(pending.is_empty(), "403 must not create an invitation");
     }
 
     /// Task-110 identity guard: a Bearer-authenticated caller whose email
@@ -2174,6 +2553,454 @@ mod tests {
             age >= 29 * day && age <= 31 * day,
             "expiry driven by configured policy, got {age}s (~{} days)",
             age / day
+        );
+    }
+
+    /// Shared fixture for the invitee-facing tests: a workspace with an
+    /// Owner (inviter) and a second tenant user (invitee), both with real
+    /// API keys so the extractor resolves their identities.
+    struct InviteeFixture {
+        state: Arc<AppState>,
+        owner_key: String,
+        invitee_key: String,
+        invitee_id: Id,
+    }
+
+    async fn invitee_fixture() -> InviteeFixture {
+        let state = test_state();
+        let ws = gyre_domain::Workspace::new(
+            Id::new("ws-inv"),
+            Id::new("default"),
+            "Invite WS",
+            "invite-ws",
+            now_secs(),
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let mut owner = User::new(
+            Id::new("owner-inv"),
+            "tenant:default:email:owner-inv@x.com",
+            "owner-inv",
+            now_secs(),
+        );
+        owner.email = Some("owner-inv@x.com".to_string());
+        owner.tenant_id = Some(Id::new("default"));
+        state.users.create(&owner).await.unwrap();
+        let mut invitee = User::new(
+            Id::new("invitee-inv"),
+            "tenant:default:email:invitee@x.com",
+            "invitee",
+            now_secs(),
+        );
+        invitee.email = Some("invitee@x.com".to_string());
+        invitee.tenant_id = Some(Id::new("default"));
+        state.users.create(&invitee).await.unwrap();
+        let owner_membership = WorkspaceMembership::new(
+            Id::new("m-owner-inv"),
+            owner.id.clone(),
+            ws.id.clone(),
+            WorkspaceRole::Owner,
+            owner.id.clone(),
+            now_secs(),
+        );
+        state.workspace_memberships.create(&owner_membership).await.unwrap();
+
+        let owner_key = format!("gyre_{}", uuid::Uuid::new_v4().simple());
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(&owner_key), &owner.id, "test")
+            .await
+            .unwrap();
+        let invitee_key = format!("gyre_{}", uuid::Uuid::new_v4().simple());
+        state
+            .api_keys
+            .create(&crate::auth::hash_api_key(&invitee_key), &invitee.id, "test")
+            .await
+            .unwrap();
+        InviteeFixture {
+            state,
+            owner_key,
+            invitee_key,
+            invitee_id: invitee.id,
+        }
+    }
+
+    fn invitee_router(state: Arc<AppState>) -> Router {
+        Router::new()
+            .route("/api/v1/workspaces/:id/invite", post(invite_to_workspace))
+            .route(
+                "/api/v1/workspaces/:id/invite/accept",
+                post(accept_my_workspace_invitation),
+            )
+            .route(
+                "/api/v1/workspaces/:id/invite/decline",
+                post(decline_my_workspace_invitation),
+            )
+            .route("/api/v1/users/me/invitations", get(list_my_invitations))
+            .with_state(state)
+    }
+
+    /// HTTP-layer negative authorization (review F4): a tenant user who is
+    /// NOT a member of the workspace must get 403 from
+    /// POST /api/v1/workspaces/{id}/invite through the real chain.
+    #[tokio::test]
+    async fn non_member_cannot_invite_to_workspace() {
+        let f = invitee_fixture().await;
+        let app = invitee_router(f.state.clone());
+        // The invitee (a plain tenant user, not a member) tries to invite.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-inv/invite")
+                    .header("authorization", format!("Bearer {}", f.invitee_key))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"username": "owner-inv"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let all = f
+            .state
+            .workspace_invitations
+            .list_by_workspace(&Id::new("ws-inv"))
+            .await
+            .unwrap();
+        assert!(all.is_empty(), "403 must not create an invitation");
+    }
+
+    /// Review F1/F2: the invitee-facing surface must close the loop
+    /// end-to-end — invite by username (spec step 1), the invitee lists
+    /// THEIR pending invitations via GET /api/v1/users/me/invitations,
+    /// accepts via the specced authenticated route
+    /// POST /api/v1/workspaces/{id}/invite/accept (no token needed), and
+    /// the membership activates.
+    #[tokio::test]
+    async fn invitee_lists_and_accepts_their_invitation() {
+        let f = invitee_fixture().await;
+        let app = invitee_router(f.state.clone());
+
+        // Owner invites by username (spec §Workspace Invitation Flow
+        // step 1: "by username (tenant-internal) or email").
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-inv/invite")
+                    .header("authorization", format!("Bearer {}", f.owner_key))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"username": "invitee", "role": "Developer"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["user_id"], f.invitee_id.to_string());
+
+        // The invitee sees their pending invitation — this is the surface
+        // that was previously unreachable (list_by_user had no route).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/users/me/invitations")
+                    .header("authorization", format!("Bearer {}", f.invitee_key))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let invitations = json["invitations"].as_array().unwrap();
+        assert_eq!(invitations.len(), 1, "exactly the invitee's invitation");
+        assert_eq!(invitations[0]["workspace_id"], "ws-inv");
+        assert_eq!(invitations[0]["status"], "Pending");
+        assert_eq!(invitations[0]["role"], "Developer");
+        assert!(
+            invitations[0].get("invite_url").is_none(),
+            "invitee view must not leak the token"
+        );
+
+        // The invitee accepts via the authenticated route — no token.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-inv/invite/accept")
+                    .header("authorization", format!("Bearer {}", f.invitee_key))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // Membership is active.
+        let m = f
+            .state
+            .workspace_memberships
+            .find_by_user_and_workspace(&f.invitee_id, &Id::new("ws-inv"))
+            .await
+            .unwrap()
+            .expect("membership exists after acceptance");
+        assert!(m.accepted);
+        assert_eq!(m.role, WorkspaceRole::Developer);
+
+        // Single-use: a second accept finds no pending invitation → 404.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-inv/invite/accept")
+                    .header("authorization", format!("Bearer {}", f.invitee_key))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // The listing now shows the accepted (terminal) state.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/users/me/invitations")
+                    .header("authorization", format!("Bearer {}", f.invitee_key))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["invitations"][0]["status"], "Accepted");
+    }
+
+    /// A different authenticated user must not accept someone else's
+    /// invitation through the invitee-facing route: there is no pending
+    /// invitation for THEM, so 404 (and the real invitee can still accept).
+    #[tokio::test]
+    async fn other_user_cannot_accept_my_invitation() {
+        let f = invitee_fixture().await;
+        let app = invitee_router(f.state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-inv/invite")
+                    .header("authorization", format!("Bearer {}", f.owner_key))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"username": "invitee"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // The OWNER (a member, but not the invitee) has no pending
+        // invitation for themselves → 404, not a membership grant.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-inv/invite/accept")
+                    .header("authorization", format!("Bearer {}", f.owner_key))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // The invitation is untouched — the invitee can still accept.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-inv/invite/accept")
+                    .header("authorization", format!("Bearer {}", f.invitee_key))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    /// Spec §Workspace Invitation Flow step 4: the invitee can decline via
+    /// the authenticated route; no membership is created.
+    #[tokio::test]
+    async fn invitee_declines_via_authenticated_route() {
+        let f = invitee_fixture().await;
+        let app = invitee_router(f.state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-inv/invite")
+                    .header("authorization", format!("Bearer {}", f.owner_key))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"email": "invitee@x.com"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED, "invite by email works");
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-inv/invite/decline")
+                    .header("authorization", format!("Bearer {}", f.invitee_key))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let stored = f
+            .state
+            .workspace_invitations
+            .list_by_user(&f.invitee_id)
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].status, InvitationStatus::Declined);
+        assert!(
+            f.state
+                .workspace_memberships
+                .find_by_user_and_workspace(&f.invitee_id, &Id::new("ws-inv"))
+                .await
+                .unwrap()
+                .is_none(),
+            "declining must not create a membership"
+        );
+    }
+
+    /// Review F3 (single-use race): two concurrent claims of the same
+    /// pending invitation must produce exactly one winner — the mem
+    /// adapter's check-and-set is inside one critical section, so this is
+    /// deterministic even under tokio::join!.
+    #[tokio::test]
+    async fn concurrent_claims_produce_exactly_one_winner() {
+        let state = test_state();
+        let invitation = WorkspaceInvitation {
+            id: Id::new("wi-race"),
+            tenant_id: Id::new("default"),
+            workspace_id: Id::new("ws-race"),
+            user_id: Id::new("u-race"),
+            invited_by: Id::new("owner-race"),
+            role: WorkspaceRole::Developer,
+            status: InvitationStatus::Pending,
+            token_hash: hash_token("race-token"),
+            expires_at: now_secs() + 86_400,
+            created_at: now_secs(),
+            accepted_at: None,
+        };
+        state.workspace_invitations.create(&invitation).await.unwrap();
+
+        let repo = state.workspace_invitations.clone();
+        let a = repo.transition_status(
+            &invitation.id,
+            InvitationStatus::Pending,
+            InvitationStatus::Accepted,
+            Some(1),
+        );
+        let b = repo.transition_status(
+            &invitation.id,
+            InvitationStatus::Pending,
+            InvitationStatus::Accepted,
+            Some(2),
+        );
+        let (a, b) = tokio::join!(a, b);
+        let winners = a.unwrap() as u8 + b.unwrap() as u8;
+        assert_eq!(winners, 1, "exactly one concurrent claim wins");
+        let stored = state
+            .workspace_invitations
+            .find_by_id(&invitation.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, InvitationStatus::Accepted);
+        assert!(
+            stored.accepted_at.is_some(),
+            "winner's timestamp is recorded"
+        );
+    }
+
+    /// Review F1: the in-app notification must carry the accept path so
+    /// the invitee can act on the invitation without the inviter's token.
+    #[tokio::test]
+    async fn invite_notification_carries_accept_path() {
+        let f = invitee_fixture().await;
+        let app = invitee_router(f.state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces/ws-inv/invite")
+                    .header("authorization", format!("Bearer {}", f.owner_key))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"username": "invitee"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let notifs = f
+            .state
+            .notifications
+            .list_for_user(&f.invitee_id, None, None, None, None, 50, 0)
+            .await
+            .unwrap();
+        let notif = notifs
+            .iter()
+            .find(|n| n.entity_ref.as_deref() == Some("ws-inv"))
+            .expect("invitation notification created for the invitee");
+        let body: serde_json::Value =
+            serde_json::from_str(notif.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["kind"], "workspace_invitation");
+        let accept = body["accept_url"].as_str().unwrap();
+        assert!(
+            accept.contains("/api/v1/workspaces/ws-inv/invite/accept"),
+            "accept_url names the authenticated accept route: {accept}"
         );
     }
 }

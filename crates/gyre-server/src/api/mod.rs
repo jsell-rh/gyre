@@ -75,7 +75,8 @@ use compute::{
     list_compute_targets, list_tunnels, open_tunnel,
 };
 use invitations::{
-    bulk_invite_to_tenant, get_invitation_policy, invite_to_tenant, invite_to_workspace,
+    accept_my_workspace_invitation, bulk_invite_to_tenant, decline_my_workspace_invitation,
+    get_invitation_policy, invite_to_tenant, invite_to_workspace, list_my_invitations,
     list_tenant_invitations, list_workspace_invitations, revoke_tenant_invitation,
     revoke_workspace_invitation, update_invitation_policy,
 };
@@ -804,6 +805,9 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/users/me/agents", get(get_my_agents))
         .route("/api/v1/users/me/tasks", get(get_my_tasks))
         .route("/api/v1/users/me/mrs", get(get_my_mrs))
+        // My workspace invitations (task-110 repair: the invitee's pending-
+        // invitations view, spec §Workspace Invitation Flow steps 3-4)
+        .route("/api/v1/users/me/invitations", get(list_my_invitations))
         // API Tokens (HSI §12) — per-handler auth, ABAC-exempt
         .route(
             "/api/v1/users/me/tokens",
@@ -859,6 +863,17 @@ pub fn api_router() -> Router<Arc<AppState>> {
         // Workspace invitations (task-110, user-management.md §API >
         // Workspace Membership). Owner/Admin enforced per-handler.
         .route("/api/v1/workspaces/:id/invite", post(invite_to_workspace))
+        // Invitee-facing accept/decline (task-110 repair, spec §API >
+        // Workspace Membership: authenticated invitee accepts THEIR
+        // pending invitation — no token).
+        .route(
+            "/api/v1/workspaces/:id/invite/accept",
+            post(accept_my_workspace_invitation),
+        )
+        .route(
+            "/api/v1/workspaces/:id/invite/decline",
+            post(decline_my_workspace_invitation),
+        )
         .route(
             "/api/v1/workspaces/:id/invitations",
             get(list_workspace_invitations),

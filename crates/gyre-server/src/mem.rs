@@ -4395,17 +4395,27 @@ impl TenantInvitationRepository for MemTenantInvitationRepository {
             .collect())
     }
 
-    async fn update_status(
+    async fn transition_status(
         &self,
         id: &Id,
-        status: InvitationStatus,
+        from: InvitationStatus,
+        to: InvitationStatus,
         accepted_at: Option<u64>,
-    ) -> Result<()> {
-        if let Some(inv) = self.store.lock().await.get_mut(id.as_str()) {
-            inv.status = status;
-            inv.accepted_at = accepted_at;
+    ) -> Result<bool> {
+        // Check-and-set under the store lock: the mem adapter has no
+        // schema, so the `from` precondition is guarded in code — the
+        // guard and the write happen inside one critical section, which
+        // is the single-use acceptance contract (same as the adapters'
+        // conditional UPDATE).
+        let mut store = self.store.lock().await;
+        match store.get_mut(id.as_str()) {
+            Some(inv) if inv.status == from => {
+                inv.status = to;
+                inv.accepted_at = accepted_at;
+                Ok(true)
+            }
+            _ => Ok(false),
         }
-        Ok(())
     }
 
     async fn delete(&self, id: &Id) -> Result<()> {
@@ -4491,17 +4501,27 @@ impl WorkspaceInvitationRepository for MemWorkspaceInvitationRepository {
             .collect())
     }
 
-    async fn update_status(
+    async fn transition_status(
         &self,
         id: &Id,
-        status: InvitationStatus,
+        from: InvitationStatus,
+        to: InvitationStatus,
         accepted_at: Option<u64>,
-    ) -> Result<()> {
-        if let Some(inv) = self.store.lock().await.get_mut(id.as_str()) {
-            inv.status = status;
-            inv.accepted_at = accepted_at;
+    ) -> Result<bool> {
+        // Check-and-set under the store lock: the mem adapter has no
+        // schema, so the `from` precondition is guarded in code — the
+        // guard and the write happen inside one critical section, which
+        // is the single-use acceptance contract (same as the adapters'
+        // conditional UPDATE).
+        let mut store = self.store.lock().await;
+        match store.get_mut(id.as_str()) {
+            Some(inv) if inv.status == from => {
+                inv.status = to;
+                inv.accepted_at = accepted_at;
+                Ok(true)
+            }
+            _ => Ok(false),
         }
-        Ok(())
     }
 
     async fn delete(&self, id: &Id) -> Result<()> {

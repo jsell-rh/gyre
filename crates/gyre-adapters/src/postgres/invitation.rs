@@ -221,25 +221,34 @@ impl TenantInvitationRepository for PgStorage {
         .await?
     }
 
-    async fn update_status(
+    async fn transition_status(
         &self,
         id: &Id,
-        status: InvitationStatus,
+        from: InvitationStatus,
+        to: InvitationStatus,
         accepted_at: Option<u64>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
-        let status_str = status.as_str().to_string();
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        let from_str = from.as_str().to_string();
+        let to_str = to.as_str().to_string();
+        tokio::task::spawn_blocking(move || -> Result<bool> {
             let mut conn = pool.get().context("get db connection")?;
-            diesel::update(tenant_invitations::table.find(id.as_str()))
-                .set((
-                    tenant_invitations::status.eq(status_str.as_str()),
-                    tenant_invitations::accepted_at.eq(accepted_at.map(|v| v as i64)),
-                ))
-                .execute(&mut *conn)
-                .context("update tenant invitation status")?;
-            Ok(())
+            // The `from` precondition lives in the UPDATE's WHERE clause —
+            // the database rejects the transition when another writer got
+            // there first, so concurrent accepts cannot both win.
+            let rows = diesel::update(
+                tenant_invitations::table
+                    .find(id.as_str())
+                    .filter(tenant_invitations::status.eq(from_str.as_str())),
+            )
+            .set((
+                tenant_invitations::status.eq(to_str.as_str()),
+                tenant_invitations::accepted_at.eq(accepted_at.map(|v| v as i64)),
+            ))
+            .execute(&mut *conn)
+            .context("transition tenant invitation status")?;
+            Ok(rows > 0)
         })
         .await?
     }
@@ -442,25 +451,32 @@ impl WorkspaceInvitationRepository for PgStorage {
         .await?
     }
 
-    async fn update_status(
+    async fn transition_status(
         &self,
         id: &Id,
-        status: InvitationStatus,
+        from: InvitationStatus,
+        to: InvitationStatus,
         accepted_at: Option<u64>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
-        let status_str = status.as_str().to_string();
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        let from_str = from.as_str().to_string();
+        let to_str = to.as_str().to_string();
+        tokio::task::spawn_blocking(move || -> Result<bool> {
             let mut conn = pool.get().context("get db connection")?;
-            diesel::update(workspace_invitations::table.find(id.as_str()))
-                .set((
-                    workspace_invitations::status.eq(status_str.as_str()),
-                    workspace_invitations::accepted_at.eq(accepted_at.map(|v| v as i64)),
-                ))
-                .execute(&mut *conn)
-                .context("update workspace invitation status")?;
-            Ok(())
+            // Conditional UPDATE — see the tenant variant for the rationale.
+            let rows = diesel::update(
+                workspace_invitations::table
+                    .find(id.as_str())
+                    .filter(workspace_invitations::status.eq(from_str.as_str())),
+            )
+            .set((
+                workspace_invitations::status.eq(to_str.as_str()),
+                workspace_invitations::accepted_at.eq(accepted_at.map(|v| v as i64)),
+            ))
+            .execute(&mut *conn)
+            .context("transition workspace invitation status")?;
+            Ok(rows > 0)
         })
         .await?
     }

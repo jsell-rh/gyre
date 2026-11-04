@@ -221,25 +221,34 @@ impl TenantInvitationRepository for SqliteStorage {
         .await?
     }
 
-    async fn update_status(
+    async fn transition_status(
         &self,
         id: &Id,
-        status: InvitationStatus,
+        from: InvitationStatus,
+        to: InvitationStatus,
         accepted_at: Option<u64>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
-        let status_str = status.as_str().to_string();
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        let from_str = from.as_str().to_string();
+        let to_str = to.as_str().to_string();
+        tokio::task::spawn_blocking(move || -> Result<bool> {
             let mut conn = pool.get().context("get db connection")?;
-            diesel::update(tenant_invitations::table.find(id.as_str()))
-                .set((
-                    tenant_invitations::status.eq(status_str.as_str()),
-                    tenant_invitations::accepted_at.eq(accepted_at.map(|v| v as i64)),
-                ))
-                .execute(&mut *conn)
-                .context("update tenant invitation status")?;
-            Ok(())
+            // The `from` precondition lives in the UPDATE's WHERE clause —
+            // the database rejects the transition when another writer got
+            // there first, so concurrent accepts cannot both win.
+            let rows = diesel::update(
+                tenant_invitations::table
+                    .find(id.as_str())
+                    .filter(tenant_invitations::status.eq(from_str.as_str())),
+            )
+            .set((
+                tenant_invitations::status.eq(to_str.as_str()),
+                tenant_invitations::accepted_at.eq(accepted_at.map(|v| v as i64)),
+            ))
+            .execute(&mut *conn)
+            .context("transition tenant invitation status")?;
+            Ok(rows > 0)
         })
         .await?
     }
@@ -442,25 +451,32 @@ impl WorkspaceInvitationRepository for SqliteStorage {
         .await?
     }
 
-    async fn update_status(
+    async fn transition_status(
         &self,
         id: &Id,
-        status: InvitationStatus,
+        from: InvitationStatus,
+        to: InvitationStatus,
         accepted_at: Option<u64>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let pool = Arc::clone(&self.pool);
         let id = id.clone();
-        let status_str = status.as_str().to_string();
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        let from_str = from.as_str().to_string();
+        let to_str = to.as_str().to_string();
+        tokio::task::spawn_blocking(move || -> Result<bool> {
             let mut conn = pool.get().context("get db connection")?;
-            diesel::update(workspace_invitations::table.find(id.as_str()))
-                .set((
-                    workspace_invitations::status.eq(status_str.as_str()),
-                    workspace_invitations::accepted_at.eq(accepted_at.map(|v| v as i64)),
-                ))
-                .execute(&mut *conn)
-                .context("update workspace invitation status")?;
-            Ok(())
+            // Conditional UPDATE — see the tenant variant for the rationale.
+            let rows = diesel::update(
+                workspace_invitations::table
+                    .find(id.as_str())
+                    .filter(workspace_invitations::status.eq(from_str.as_str())),
+            )
+            .set((
+                workspace_invitations::status.eq(to_str.as_str()),
+                workspace_invitations::accepted_at.eq(accepted_at.map(|v| v as i64)),
+            ))
+            .execute(&mut *conn)
+            .context("transition workspace invitation status")?;
+            Ok(rows > 0)
         })
         .await?
     }
@@ -483,7 +499,7 @@ impl WorkspaceInvitationRepository for SqliteStorage {
 mod tests {
     use super::*;
     // Both repository traits define create/find_by_id/find_by_token_hash/
-    // update_status/delete; `use super::*` brings both into scope, so the
+    // transition_status/delete; `use super::*` brings both into scope, so the
     // shared method names are ambiguous at call syntax. Disambiguate with
     // trait-qualified calls.
     use gyre_ports::TenantInvitationRepository as TiRepo;
@@ -531,12 +547,35 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        TiRepo::update_status(&db, &Id::new("ti1"), InvitationStatus::Accepted, Some(1500))
-            .await
-            .unwrap();
+        let claimed = TiRepo::transition_status(
+            &db,
+            &Id::new("ti1"),
+            InvitationStatus::Pending,
+            InvitationStatus::Accepted,
+            Some(1500),
+        )
+        .await
+        .unwrap();
+        assert!(claimed, "pending → accepted must claim");
         let accepted = TiRepo::find_by_id(&db, &Id::new("ti1")).await.unwrap().unwrap();
         assert_eq!(accepted.status, InvitationStatus::Accepted);
         assert_eq!(accepted.accepted_at, Some(1500));
+
+        // Single-use guard: the same transition cannot happen twice — the
+        // second claim loses because the row is no longer Pending.
+        let reclaimed = TiRepo::transition_status(
+            &db,
+            &Id::new("ti1"),
+            InvitationStatus::Pending,
+            InvitationStatus::Accepted,
+            Some(1600),
+        )
+        .await
+        .unwrap();
+        assert!(!reclaimed, "a claimed invitation cannot be re-claimed");
+        let still = TiRepo::find_by_id(&db, &Id::new("ti1")).await.unwrap().unwrap();
+        assert_eq!(still.status, InvitationStatus::Accepted);
+        assert_eq!(still.accepted_at, Some(1500), "loser does not overwrite");
 
         // After a terminal status, a new invitation for the same email is allowed.
         let reinvite = TenantInvitation {
@@ -588,9 +627,27 @@ mod tests {
         let by_ws = WiRepo::list_by_workspace(&db, &Id::new("ws1")).await.unwrap();
         assert_eq!(by_ws.len(), 1);
 
-        WiRepo::update_status(&db, &Id::new("wi1"), InvitationStatus::Declined, None)
-            .await
-            .unwrap();
+        let claimed = WiRepo::transition_status(
+            &db,
+            &Id::new("wi1"),
+            InvitationStatus::Pending,
+            InvitationStatus::Declined,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(claimed);
+        // Non-pending rows cannot be transitioned (single-use guard).
+        let reclaimed = WiRepo::transition_status(
+            &db,
+            &Id::new("wi1"),
+            InvitationStatus::Pending,
+            InvitationStatus::Declined,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!reclaimed);
         assert_eq!(
             WiRepo::find_by_id(&db, &Id::new("wi1"))
                 .await
@@ -598,6 +655,74 @@ mod tests {
                 .unwrap()
                 .status,
             InvitationStatus::Declined
+        );
+    }
+
+    /// The transition precondition is enforced by the UPDATE's WHERE
+    /// clause, not by a read-then-write: a row that is Revoked cannot be
+    /// flipped to Expired by an expiry-job-style transition, and a missing
+    /// id reports `false` rather than an error.
+    #[tokio::test]
+    async fn transition_status_rejects_wrong_source_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = SqliteStorage::new(dir.path().join("test.db").to_str().unwrap()).unwrap();
+        let inv = WorkspaceInvitation {
+            id: Id::new("wi-r"),
+            tenant_id: Id::new("t1"),
+            workspace_id: Id::new("ws1"),
+            user_id: Id::new("u2"),
+            invited_by: Id::new("u1"),
+            role: WorkspaceRole::Viewer,
+            status: InvitationStatus::Pending,
+            token_hash: "tok-r".to_string(),
+            expires_at: 2000,
+            created_at: 1000,
+            accepted_at: None,
+        };
+        WiRepo::create(&db, &inv).await.unwrap();
+        assert!(
+            WiRepo::transition_status(
+                &db,
+                &Id::new("wi-r"),
+                InvitationStatus::Pending,
+                InvitationStatus::Revoked,
+                None
+            )
+            .await
+            .unwrap()
+        );
+        // Expiry job fires late: the row is already Revoked — the
+        // Pending→Expired transition must not overwrite it.
+        assert!(!
+            WiRepo::transition_status(
+                &db,
+                &Id::new("wi-r"),
+                InvitationStatus::Pending,
+                InvitationStatus::Expired,
+                None
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            WiRepo::find_by_id(&db, &Id::new("wi-r"))
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            InvitationStatus::Revoked
+        );
+        // Unknown id → false, not an error.
+        assert!(!
+            WiRepo::transition_status(
+                &db,
+                &Id::new("nope"),
+                InvitationStatus::Pending,
+                InvitationStatus::Expired,
+                None
+            )
+            .await
+            .unwrap()
         );
     }
 }
