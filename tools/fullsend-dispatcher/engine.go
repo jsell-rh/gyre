@@ -404,7 +404,12 @@ func (e *Engine) run(ctx context.Context) (exit int) {
 		for _, row := range rows {
 			started[row.Key] = row.Started
 		}
-		sort.SliceStable(candidates, func(i, j int) bool { return started[candidates[i].Key] < started[candidates[j].Key] })
+		// Domain adapters own stage/resource priority. Re-sorting their queue
+		// by historical attempt age can starve new cleanup or baseline checks
+		// behind years-old implementation records.
+		if !e.c.AdapterBackend {
+			sort.SliceStable(candidates, func(i, j int) bool { return started[candidates[i].Key] < started[candidates[j].Key] })
+		}
 		ready := 0
 		pending := false
 		for _, job := range candidates {
