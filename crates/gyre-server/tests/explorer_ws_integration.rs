@@ -342,6 +342,19 @@ async fn explorer_ws_message_too_long() {
 
 #[tokio::test]
 async fn explorer_ws_rate_limiting() {
+    // Widen the rate-limit window for this test (default: 1000ms). The test
+    // verifies that a second message sent in quick succession is rejected;
+    // under parallel `cargo test` load the second message's *processing* can
+    // be delayed well past 1s even though it was sent immediately, which must
+    // not turn a rate-limited send into an accepted one. 5s stays below the
+    // session's initial 10s last-message offset so the FIRST message is never
+    // rate-limited. GYRE_EXPLORER_MSG_INTERVAL_MS is the documented tuning
+    // knob for this interval; no other test in this binary reaches the
+    // message rate check (explorer_ws_message_too_long is rejected by the
+    // length check, which runs before the rate check), so parallel tests in
+    // this process are not affected.
+    std::env::set_var("GYRE_EXPLORER_MSG_INTERVAL_MS", "5000");
+
     let ctx = WsCtx::new().await;
     let repo_id = ctx.repo_id().await;
     let (mut sink, mut stream) = ctx.connect(&repo_id).await;
@@ -356,37 +369,44 @@ async fn explorer_ws_rate_limiting() {
         .await
         .unwrap();
 
-    // Send second message IMMEDIATELY (within MIN_MESSAGE_INTERVAL_MS=1000ms).
-    // Don't wait for the first response — just fire both in quick succession.
-    // Note: if the first message causes the server to close (e.g., no LLM configured),
-    // the send may fail with BrokenPipe — that's acceptable in test environments.
-    if sink
-        .send(Message::Text(msg.to_string().into()))
+    // Send second message IMMEDIATELY (within the rate-limit window).
+    // The server must not close on the first message (the no-LLM fallback
+    // path answers locally), so a failed send is a real defect, not an
+    // acceptable environment condition.
+    sink.send(Message::Text(msg.to_string().into()))
         .await
-        .is_err()
-    {
-        // Server closed before second message — rate limiting can't be tested
-        // without a configured LLM. This is acceptable.
-        return;
-    }
+        .unwrap();
 
-    // Read all responses: the second message should get a rate-limit error.
-    // We may see status/text from the first message and an error from the second.
+    // Read all responses. The first message must be accepted — a "status"
+    // message is only emitted after the rate check passes, so observing one
+    // proves the first message was not rate-limited (the test cannot pass
+    // vacuously via both messages being rejected). The second message must
+    // get the rate-limit error.
     let mut got_rate_limit = false;
+    let mut first_accepted = false;
     for _ in 0..20 {
         if let Some(resp) = WsCtx::read_msg(&mut stream).await {
-            if resp["type"] == "error" {
-                if let Some(m) = resp["message"].as_str() {
-                    if m.contains("wait") {
-                        got_rate_limit = true;
-                        break;
+            match resp["type"].as_str() {
+                Some("status") => first_accepted = true,
+                Some("error") => {
+                    if let Some(m) = resp["message"].as_str() {
+                        if m.contains("wait") {
+                            got_rate_limit = true;
+                            break;
+                        }
                     }
                 }
+                _ => {}
             }
         } else {
             break;
         }
     }
+    assert!(
+        first_accepted,
+        "First message should be accepted (a status message is only sent \
+         after the rate check passes)"
+    );
     assert!(
         got_rate_limit,
         "Second rapid message should be rate limited"

@@ -486,13 +486,20 @@ async fn handle_explorer_session(
         .checked_sub(std::time::Duration::from_secs(60))
         .unwrap_or_else(std::time::Instant::now);
 
-    // Buffer for messages received during agent execution that should be
-    // processed after the agent completes (SaveView, DeleteView, LoadView, ListViews).
-    let mut queued_messages: Vec<ExplorerClientMessage> = Vec::new();
+    // Buffer for messages received while an agent run is in flight, to be
+    // processed after the agent completes. View CRUD ops (SaveView, DeleteView,
+    // LoadView, ListViews) are queued for later processing; user Messages are
+    // queued WITH their arrival time so the rate limiter evaluates them against
+    // when they were actually received, not when the (possibly long) agent run
+    // finishes replaying them. Nothing received during an agent run is silently
+    // dropped: a rapid follow-up gets the rate-limit error and a genuinely later
+    // follow-up is processed, matching the sequential processing model the
+    // explorer spec describes.
+    let mut queued_messages: Vec<(ExplorerClientMessage, std::time::Instant)> = Vec::new();
     // Replay buffer: queued messages are moved here after agent completes,
     // then drained at the top of the main loop before reading from the WebSocket.
-    let mut replay_buffer: std::collections::VecDeque<ExplorerClientMessage> =
-        std::collections::VecDeque::new();
+    let mut replay_buffer: std::collections::VecDeque<(ExplorerClientMessage, std::time::Instant)>
+        = std::collections::VecDeque::new();
 
     // Ping/pong keepalive: keeps connections alive through proxies/load balancers.
     // Track last pong to detect dead connections (2 missed pongs = dead).
@@ -504,9 +511,12 @@ async fn handle_explorer_session(
 
     loop {
         // First, drain any messages queued during agent execution.
-        let client_msg: ExplorerClientMessage = if let Some(replayed) = replay_buffer.pop_front() {
-            replayed
-        } else {
+        // `received_at` is the arrival time for replayed messages (None for
+        // messages read directly from the WebSocket, where read time ≈ arrival).
+        let (client_msg, received_at): (ExplorerClientMessage, Option<std::time::Instant>) =
+            if let Some((replayed, arrived)) = replay_buffer.pop_front() {
+                (replayed, Some(arrived))
+            } else {
             // No queued messages — read from WebSocket.
             let msg = tokio::select! {
                 incoming = receiver.next() => {
@@ -573,21 +583,24 @@ async fn handle_explorer_session(
                 continue;
             }
 
-            match serde_json::from_str(&msg) {
-                Ok(m) => m,
-                Err(e) => {
-                    warn!(error = ?e, "Invalid explorer WebSocket message");
-                    let err = ExplorerServerMessage::Error {
-                        message: "Invalid message format".to_string(),
-                    };
-                    let _ = sender
-                        .send(Message::Text(
-                            serialize_msg(&err).unwrap_or_default().into(),
-                        ))
-                        .await;
-                    continue;
-                }
-            }
+            (
+                match serde_json::from_str(&msg) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        warn!(error = ?e, "Invalid explorer WebSocket message");
+                        let err = ExplorerServerMessage::Error {
+                            message: "Invalid message format".to_string(),
+                        };
+                        let _ = sender
+                            .send(Message::Text(
+                                serialize_msg(&err).unwrap_or_default().into(),
+                            ))
+                            .await;
+                        continue;
+                    }
+                },
+                None,
+            )
         };
 
         match client_msg {
@@ -610,8 +623,17 @@ async fn handle_explorer_session(
                 }
 
                 // Rate limiting: enforce minimum interval between messages.
+                // For messages that arrived while an agent run was in flight
+                // (queued and replayed), evaluate the interval against the
+                // message's ARRIVAL time, not the replay time: replay happens
+                // only after the agent run completes, and under load that delay
+                // can exceed the interval even though the user sent the message
+                // in quick succession. A rapid follow-up must be rate-limited
+                // deterministically; a genuinely later follow-up must be
+                // processed rather than silently dropped.
                 let now = std::time::Instant::now();
-                let elapsed = now.duration_since(last_message_time).as_millis() as u64;
+                let sent_at = received_at.unwrap_or(now);
+                let elapsed = sent_at.duration_since(last_message_time).as_millis() as u64;
                 if elapsed < min_message_interval_ms() {
                     let err = ExplorerServerMessage::Error {
                         message: "Please wait before sending another message.".to_string(),
@@ -623,7 +645,7 @@ async fn handle_explorer_session(
                         .await;
                     continue;
                 }
-                last_message_time = now;
+                last_message_time = sent_at;
 
                 // Session message limit: prevent unbounded history growth.
                 message_count += 1;
@@ -781,8 +803,13 @@ async fn handle_explorer_session(
                     }
                     _ = async {
                         // Listen for Cancel messages while the agent is running.
-                        // View CRUD messages (SaveView, DeleteView, LoadView, ListViews)
-                        // are queued and processed after the agent completes.
+                        // All other messages (view CRUD ops AND user Messages)
+                        // are queued with their arrival time and processed after
+                        // the agent completes — nothing is silently dropped.
+                        // User Messages are rate-limited against their arrival
+                        // time when replayed, so a rapid follow-up is rejected
+                        // deterministically instead of racing on when the agent
+                        // run happens to finish.
                         loop {
                             match receiver.next().await {
                                 Some(Ok(Message::Text(raw))) => {
@@ -792,19 +819,8 @@ async fn handle_explorer_session(
                                             let _ = cancel_tx.send(true);
                                             break;
                                         }
-                                        // Queue view CRUD messages for processing after agent completes.
-                                        match &client_msg {
-                                            ExplorerClientMessage::SaveView { .. }
-                                            | ExplorerClientMessage::DeleteView { .. }
-                                            | ExplorerClientMessage::LoadView { .. }
-                                            | ExplorerClientMessage::ListViews => {
-                                                debug!(user = %auth.agent_id, "Queuing message during agent run");
-                                                queued_messages.push(client_msg);
-                                            }
-                                            _ => {
-                                                // Message type (e.g. another Message) ignored during agent run
-                                            }
-                                        }
+                                        debug!(user = %auth.agent_id, "Queuing message during agent run");
+                                        queued_messages.push((client_msg, std::time::Instant::now()));
                                     }
                                 }
                                 Some(Ok(Message::Close(_))) | None => break,
