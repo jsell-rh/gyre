@@ -87,3 +87,82 @@ The rejected integration's only preserved item was `specs/coverage/SUMMARY.md`. 
 All three findings repaired with real implementations and regression tests that fail on the original failure classes. No new exemptions, no gate weakening, no deleted tests, no unrelated changes — the round-2 diff beyond the F1/F2/F3 product repairs is spec/coverage bookkeeping and this task file. **progress: complete.**
 
 — Reviewer, 2026-10-09
+
+## Round 3 (2026-11-04) — post-PASS delta review of candidate `4bd6c4c1`
+
+Assignment base `75ada1c4`, candidate `4bd6c4c1` (HEAD). Round 2 (PASS) reviewed
+the product surface at `7b922a3`; this round verifies everything that changed
+since, plus fresh runs of the round-2 evidence on the merged tree.
+
+### Post-round-2 delta (all verified)
+
+- **Base merge `2ff4dc5b`** (base `75ada1c4`): brought in other tasks' work
+  (web/, search.rs, retention, spawn, explorer). Only merge conflict was the
+  `SUMMARY.md` TOTAL row — resolved by recomputing from table rows. Semantic
+  auto-merge interactions with task-120's files (`mem.rs`, `sqlite/mod.rs`)
+  disproven by the suites below. Diff vs base is exactly the task-120 surface
+  (17 files).
+- **`93913405` — migration `last_login_at` INTEGER→BIGINT** (PG portability):
+  SQLite-compatible (type affinity), migration regression test green on SQLite,
+  portability gate OK.
+- **`cf32398a` — `find_or_create_user` collision walk**: first-login handle now
+  goes through `resolve_unique_username` (bounded 2..=10_000 suffix walk, 64-char
+  cap with separator-safe truncation, `u-<uuid>` generated-handle fallback when
+  nothing derivable). Real tests: squatter pre-occupying the `-2` slot forces
+  `-3`; `unsanitizable_preferred_username_falls_back_to_url_safe_handle`
+  asserts `validate_username` on the persisted fallback (`u-` + lowercase uuid
+  v4 is provably in-contract).
+- **SCIM externalId sanitization** (checkpoint `7c52ffffd`): the round-2
+  fallback persisted the *raw* externalId (Auth0 ids contain `|`) as the
+  username — the new code sanitizes the externalId too and 400s when neither
+  yields a URL-safe handle. **Mutation probe** (evidence
+  `mutation-scim-extid-raw.txt`): reverting to the raw-fallback behavior makes
+  `scim_create_sanitizes_falls_back_to_external_id` FAIL (8/1) — the test
+  genuinely pins the behavior. File restored byte-exact (sha256 match vs
+  candidate).
+- **`7d53b6d2` rustfmt / `7752dd2e` clippy scoping**: behavior-neutral
+  (whitespace-only auth.rs diff; test-only row carriers moved into a fn-local
+  `mod rows` with `#![allow(clippy::redundant_field_names)]`, same pattern as
+  `sqlite/search.rs`; no production lint suppressed). The ports-trait
+  `#[allow(clippy::double_must_use)]` is a documented async_trait codegen
+  style-lint allow.
+- **`c23c4e2f` / `4bd6c4c1`**: task-file docs/frontmatter only.
+
+### Fresh verification on candidate `4bd6c4c1` (evidence: /tmp/stage/review-evidence/task-120-round3/)
+
+- `python3 scripts/check-rustfmt-diff.py 75ada1c4` → changed lines clean (11
+  Rust files).
+- `check-clippy-diff.py` replicated per-package with `--lib --tests`
+  (`clippy-focused.py`; the wrapper rejects the script's workspace-wide
+  invocation and `--all-targets`; equivalent here — no `[features]` in any of
+  the 4 changed packages, no changed file under benches/examples) → changed
+  lines clean (11 Rust files, 1909 existing warnings outside changes).
+- `cargo test -p gyre-domain --lib user` → 11/0. `cargo test -p gyre-adapters
+  --lib` → **350 passed, 0 failed** (12 ignored). `cargo test -p gyre-server
+  --lib api::users` → 14/0; `api::scim` → 9/0; `auth::` → 43/0 (incl. the
+  collision and fallback tests).
+- Mechanical gates: migration-versions, migration-sql-portability,
+  mem-port-contracts, arch, task-commit-attribution, abac-route-registry,
+  fabricated-scope-defaults, scope-literal-defaults — all OK.
+- Coverage bookkeeping: `grep -c -F '| not-started |'
+  specs/coverage/system/user-management.md` → 0; rows 2/3/11 `implemented`;
+  `update-coverage-summary.sh` regenerates SUMMARY byte-identically (only the
+  date stamp differs; restored).
+
+### Deferred to workspace verification
+
+- `cargo test --all` (acceptance criterion) — workspace-wide invocations are
+  rejected by the executor's wrapper; focused per-package equivalents for every
+  changed package are green above, and the clippy `--tests` run compiles all
+  targets including `gyre-server/tests/*`.
+- `python3 scripts/check-clippy-diff.py 75ada1c4` verbatim — same reason;
+  the focused replication above applies the identical changed-line filter.
+
+### Verdict
+
+Round-2 PASS findings hold on the merged tree; every post-PASS change is
+either a real improvement with behavior-pinning tests (proven by mutation
+probe) or behavior-neutral formatting/lint scoping; no new exemptions, no gate
+weakening, no test deletions, no unrelated production changes. **Approved.**
+
+— Reviewer, 2026-11-04
