@@ -342,11 +342,32 @@ async fn explorer_ws_message_too_long() {
 
 #[tokio::test]
 async fn explorer_ws_rate_limiting() {
+    // Deterministic rate-limit verification.
+    //
+    // The default 1000ms window cannot be asserted against a live agent
+    // run: the handler processes the second Message only after the first
+    // message's agent cycle completes, and a Message arriving *during* a
+    // cycle is intentionally dropped (not queued, not answered). Under
+    // parallel test load the cycle outlives the window, so the second
+    // message is either dropped or legitimately accepted — firing both
+    // messages immediately asserts a race (durable finding b5ed01bf:
+    // intermittent "Second rapid message should be rate limited").
+    //
+    // Instead: widen the window far beyond any agent-cycle duration via
+    // the documented GYRE_EXPLORER_MSG_INTERVAL_MS override, wait for the
+    // first message's cycle to finish (the handler always ends a Message
+    // cycle with a trailing "ready" status), then send the second message
+    // and require the rate-limit rejection. The only other Message-type
+    // sender in this binary (explorer_ws_message_too_long) is unaffected:
+    // its length check rejects the frame before the rate limiter runs.
+    std::env::set_var("GYRE_EXPLORER_MSG_INTERVAL_MS", "3600000");
+
     let ctx = WsCtx::new().await;
     let repo_id = ctx.repo_id().await;
     let (mut sink, mut stream) = ctx.connect(&repo_id).await;
 
-    // Send two messages in quick succession — second should be rate-limited
+    // First message: accepted (the session's first Message is never
+    // rate-limited) and runs a full agent cycle.
     let msg = json!({
         "type": "message",
         "text": "hello",
@@ -356,35 +377,50 @@ async fn explorer_ws_rate_limiting() {
         .await
         .unwrap();
 
-    // Send second message IMMEDIATELY (within MIN_MESSAGE_INTERVAL_MS=1000ms).
-    // Don't wait for the first response — just fire both in quick succession.
-    // Note: if the first message causes the server to close (e.g., no LLM configured),
-    // the send may fail with BrokenPipe — that's acceptable in test environments.
-    if sink
-        .send(Message::Text(msg.to_string().into()))
-        .await
-        .is_err()
-    {
-        // Server closed before second message — rate limiting can't be tested
-        // without a configured LLM. This is acceptable.
-        return;
+    // Wait for the cycle to complete: the trailing "ready" status is sent
+    // exactly once per Message cycle, after the agent run (success or
+    // error) and after replaying any queued view CRUD messages.
+    let mut saw_ready = false;
+    for _ in 0..30 {
+        match WsCtx::read_msg(&mut stream).await {
+            Some(m) if m["type"] == "status" && m["status"] == "ready" => {
+                saw_ready = true;
+                break;
+            }
+            Some(_) => continue,
+            None => break,
+        }
     }
+    assert!(saw_ready, "First message should complete its agent cycle");
 
-    // Read all responses: the second message should get a rate-limit error.
-    // We may see status/text from the first message and an error from the second.
+    // Second message, sent after the cycle: it must be rejected by the
+    // rate limiter (elapsed since the first message is far below the
+    // widened interval), not accepted into a new agent cycle.
+    sink.send(Message::Text(msg.to_string().into()))
+        .await
+        .unwrap();
+
     let mut got_rate_limit = false;
-    for _ in 0..20 {
-        if let Some(resp) = WsCtx::read_msg(&mut stream).await {
-            if resp["type"] == "error" {
-                if let Some(m) = resp["message"].as_str() {
-                    if m.contains("wait") {
-                        got_rate_limit = true;
-                        break;
+    for _ in 0..10 {
+        match WsCtx::read_msg(&mut stream).await {
+            Some(resp) => {
+                // If the second message were wrongly accepted, the server
+                // would emit a "thinking" status for a new agent cycle —
+                // fail fast on that instead of timing out.
+                assert!(
+                    !(resp["type"] == "status" && resp["status"] == "thinking"),
+                    "Second message was accepted into a new agent cycle instead of being rate-limited"
+                );
+                if resp["type"] == "error" {
+                    if let Some(m) = resp["message"].as_str() {
+                        if m.contains("wait") {
+                            got_rate_limit = true;
+                            break;
+                        }
                     }
                 }
             }
-        } else {
-            break;
+            None => break,
         }
     }
     assert!(

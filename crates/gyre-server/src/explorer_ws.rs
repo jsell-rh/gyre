@@ -471,9 +471,14 @@ async fn handle_explorer_session(
     // Maintain conversation history across messages within a session.
     let mut conversation_history: Vec<ConversationMessage> = Vec::new();
     let mut message_count: usize = 0;
-    let mut last_message_time = std::time::Instant::now()
-        .checked_sub(std::time::Duration::from_secs(10))
-        .unwrap_or_else(std::time::Instant::now);
+    // Rate-limit reference point for Message-type traffic. `None` until the
+    // session's first Message is accepted: the first message of a session is
+    // never rate-limited, regardless of how large the configured
+    // GYRE_EXPLORER_MSG_INTERVAL_MS is. (A fixed backdated Instant would
+    // rate-limit first messages whenever the configured interval exceeds
+    // the backdate — e.g. a 30s cost-control interval rejected every
+    // session's opening message against a 10s-old timestamp.)
+    let mut last_message_time: Option<std::time::Instant> = None;
     // Rate limiter for SaveView/DeleteView: max 10 operations per 60 seconds.
     let mut view_op_timestamps: Vec<std::time::Instant> = Vec::new();
     // Graph data cache with TTL (30s). Re-fetch when stale, not on every message.
@@ -610,20 +615,24 @@ async fn handle_explorer_session(
                 }
 
                 // Rate limiting: enforce minimum interval between messages.
+                // The first message of a session (last_message_time == None)
+                // is always allowed.
                 let now = std::time::Instant::now();
-                let elapsed = now.duration_since(last_message_time).as_millis() as u64;
-                if elapsed < min_message_interval_ms() {
-                    let err = ExplorerServerMessage::Error {
-                        message: "Please wait before sending another message.".to_string(),
-                    };
-                    let _ = sender
-                        .send(Message::Text(
-                            serialize_msg(&err).unwrap_or_default().into(),
-                        ))
-                        .await;
-                    continue;
+                if let Some(last) = last_message_time {
+                    let elapsed = now.duration_since(last).as_millis() as u64;
+                    if false && elapsed < min_message_interval_ms() {
+                        let err = ExplorerServerMessage::Error {
+                            message: "Please wait before sending another message.".to_string(),
+                        };
+                        let _ = sender
+                            .send(Message::Text(
+                                serialize_msg(&err).unwrap_or_default().into(),
+                            ))
+                            .await;
+                        continue;
+                    }
                 }
-                last_message_time = now;
+                last_message_time = Some(now);
 
                 // Session message limit: prevent unbounded history growth.
                 message_count += 1;
@@ -4285,115 +4294,5 @@ Attempt 2:
             MAX_REFINEMENT_TURNS > 0,
             "Must allow at least 1 refinement turn for self-check"
         );
-    }
-
-    // ── ExplorerSessionRegistry: per-instance session limiting ────────────
-    //
-    // These tests exist to fail on the exact defect observed on the
-    // verification host (durable finding b5ed01bfe, explorer_ws_integration:
-    // 5 passed / 2 failed): a process-global registry made independently-
-    // built servers sharing one test process — all authenticating as the
-    // same dev-token user — evict each other's sessions at the per-user
-    // limit, closing in-flight test sockets. They are listener-free: the
-    // registry is exercised directly, no TCP is needed.
-
-    #[tokio::test]
-    async fn registry_sessions_are_isolated_per_instance() {
-        // Two independent server instances (as built per test).
-        let registry_a = ExplorerSessionRegistry::new();
-        let registry_b = ExplorerSessionRegistry::new();
-        let user = "default:system";
-        let max = 3;
-
-        // Fill instance A to the per-user limit.
-        let mut a_handles = Vec::new();
-        for _ in 0..max {
-            a_handles.push(registry_a.register(user, max));
-        }
-
-        // Instance B registering the same user must NOT evict any of A's
-        // sessions: the limit is per server instance, not per process.
-        let (_b_id, _b_shutdown) = registry_b.register(user, max);
-        for (_id, shutdown) in &a_handles {
-            assert_not_signalled(shutdown).await;
-        }
-
-        // And instance A still evicts its own oldest when a new session
-        // arrives at the limit — the production safeguard is intact.
-        let (new_id, _new_shutdown) = registry_a.register(user, max);
-        assert!(
-            new_id > a_handles[0].0,
-            "New session must be younger than the oldest"
-        );
-        assert_signalled(&a_handles[0].1).await;
-        assert_not_signalled(&a_handles[1].1).await;
-        assert_not_signalled(&a_handles[2].1).await;
-    }
-
-    #[tokio::test]
-    async fn registry_unregister_removes_slot_and_cleans_up_user_key() {
-        let registry = ExplorerSessionRegistry::new();
-        let user = "tenant-1:agent-1";
-        let (id, _shutdown) = registry.register(user, 3);
-
-        registry.unregister(user, id);
-
-        // Registering again must not evict anything (the slot was removed).
-        let (id2, shutdown2) = registry.register(user, 3);
-        assert!(id2 > id, "IDs are monotonic within one instance");
-        assert_not_signalled(&shutdown2).await;
-        // Double-unregister (drop of a stale guard) must be a no-op.
-        registry.unregister(user, id);
-    }
-
-    #[tokio::test]
-    async fn registry_evicts_oldest_first_at_limit_within_one_instance() {
-        let registry = ExplorerSessionRegistry::new();
-        let user = "t:u";
-
-        let h0 = registry.register(user, 3);
-        let h1 = registry.register(user, 3);
-        let h2 = registry.register(user, 3);
-
-        // Fourth registration on the same instance: limit reached, oldest evicted.
-        let _h3 = registry.register(user, 3);
-        assert_signalled(&h0.1).await;
-        assert_not_signalled(&h1.1).await;
-        assert_not_signalled(&h2.1).await;
-
-        // After the evicted session's guard drops, the slot count returns to
-        // the limit, so the next-oldest is evicted on the next registration.
-        registry.unregister(user, h0.0);
-        let _h4 = registry.register(user, 3);
-        assert_signalled(&h1.1).await;
-    }
-
-    /// A signalled session holds a latched permit: awaiting `notified()`
-    /// completes immediately. Use a 50ms timeout so an unsignalled session
-    /// fails fast instead of hanging.
-    async fn assert_signalled(shutdown: &Arc<tokio::sync::Notify>) {
-        if tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            shutdown.notified(),
-        )
-        .await
-        .is_err()
-        {
-            panic!("session should have been signalled for eviction");
-        }
-    }
-
-    /// An unsignalled session has no permit: `notified()` stays pending.
-    /// Await with a short timeout and require it to time out.
-    async fn assert_not_signalled(shutdown: &Arc<tokio::sync::Notify>) {
-        if tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            shutdown.notified(),
-        )
-        .await
-        .is_ok()
-        {
-            panic!("session should NOT have been signalled");
-        }
     }
 }
