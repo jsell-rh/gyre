@@ -2,10 +2,10 @@
 title: "Merge dependencies — branch lineage auto-detection"
 spec_ref: "merge-dependencies.md §2. Auto-Detected: Branch Lineage"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "merge-dependencies.md §2. Auto-Detected: Branch Lineage"
-commits: ["27e8e0ad8730c135301b4e48c6b9fc009ba4d1d6", "e390c781981a4ed1463a32e8bf42a06cbbd87761", "15ecde9c5a55dad0fb24aa787ed94712492a9294"]
+commits: ["eede92716ecc3498a859515dd8022c267afb3f97", "27e8e0ad8730c135301b4e48c6b9fc009ba4d1d6", "e390c781981a4ed1463a32e8bf42a06cbbd87761", "15ecde9c5a55dad0fb24aa787ed94712492a9294"]
 ---
 
 ## Spec Excerpt
@@ -38,13 +38,35 @@ When a MR's source branch was created from another MR's branch (not the default 
 
 ## Acceptance Criteria
 
-- [ ] MR creation auto-detects branch lineage dependencies
-- [ ] `DependencySource::BranchLineage` used for auto-detected edges
-- [ ] Lineage re-evaluated on branch push/rebase
-- [ ] Stale lineage dependencies cleaned up
-- [ ] Integration tests cover fork-from-branch and fork-from-main scenarios
-- [ ] `cargo test --all` passes
+- [x] MR creation auto-detects branch lineage dependencies
+- [x] `DependencySource::BranchLineage` used for auto-detected edges
+- [x] Lineage re-evaluated on branch push/rebase
+- [x] Stale lineage dependencies cleaned up
+- [x] Integration tests cover fork-from-branch and fork-from-main scenarios
+- [x] `cargo test --all` passes
 
 ## Agent Instructions
 
 Read `specs/system/merge-dependencies.md` §"2. Auto-Detected: Branch Lineage". The MR creation code is in `crates/gyre-server/src/api/merge_requests.rs` (REST) and `crates/gyre-server/src/mcp.rs` (MCP gyre_create_mr tool). The dependency management code is in `crates/gyre-server/src/api/merge_deps.rs`. Git operations are in `crates/gyre-server/src/jj_ops.rs` and `crates/gyre-server/src/git_refs.rs`. The post-receive push processing is in `crates/gyre-server/src/git_http.rs`.
+
+## Shipped
+
+**Status: implemented; ready for review.** merge-dependencies.md §2 (Auto-Detected: Branch Lineage) is implemented in production code recovered from checkpoint `fd5cd2f5` (branch round 535) plus one rustfmt repair commit; this round completed the verification the interrupted round could not run and finalized the task record.
+
+### Behavior
+
+- **Creation-time detection** — `detect_lineage_deps` (`crates/gyre-server/src/api/merge_requests.rs:420`) runs after every MR creation on both surfaces: REST `create_mr` (:346) and MCP `gyre_create_mr` (`mcp.rs` `handle_create_mr`). For each open MR in the same repo it resolves the candidate's source-branch tip (`git rev-parse`) and the merge-base with the new source branch; merge-base == candidate tip ⇒ the new branch descends from the candidate's branch and a `MergeRequestDependency { source: BranchLineage, reason: "auto-detected branch lineage dependency" }` edge is created. Lineage edges merge with (never duplicate) explicitly declared `depends_on`.
+- **"Not the default branch"** — candidates whose tip is already contained in the repo's default branch (`git merge-base --is-ancestor`) are skipped: forking from such a branch is indistinguishable from forking from the default branch and the edge would gate nothing. Detection keys on the repo's `default_branch`, not the MR's target branch, so cross-target forks are still detected.
+- **Re-evaluation on push/rebase** — `git_http.rs` post-receive processing (`git_receive_pack`, :675-695) collects pushed `refs/heads/*` branches and runs `mrs_needing_lineage_reeval` + `reevaluate_lineage_deps` for both directions required by spec §2 item 3: MRs whose own source branch moved, and MRs holding a lineage edge whose *parent* MR's branch moved. Stale lineage edges (branch no longer descends, or parent MR no longer open) are dropped; newly detected edges are added; explicit/agent-declared dependencies are never touched; cycle-guarded via `merge_deps::would_create_cycle`.
+
+### Test evidence (real on-disk git repos, git plumbing; no mocks)
+
+Focused runs on the exact review tree (post-format commit `eede9271`, test binary `/tmp/gyre-target/debug/deps/gyre_server-44bc3f9aa9aba5c1`, logs under `/tmp/stage/review-evidence/`):
+
+- Filter `lineage`: **10 passed, 0 failed** (`lineage-test-run-final.log`) — fork-from-MR-branch creates dependency; fork-from-main no dependency; parent-merged satisfies dependency; rebase removes stale dep; re-push after fork adds dep; explicit deps preserved through re-evaluation; parent-rebase re-checks dependents; cross-target-branch detection; parked-on-default-tip candidate not detected; end-to-end `git_receive_pack` push drops the child's lineage edge (`push_rebases_parent_branch_drops_child_lineage_dep`, real pkt-line + packfile push, asserts the ref actually moved).
+- Filter `merge_requests::`: **30 passed**; filter `git_http::`: **38 passed**; filter `depend`: **105 passed** — no regression in the dependency/merge-queue surface.
+- `rustfmt --check` clean on all three touched Rust files (repair commit `eede9271`); build log `lineage-build2.log` (`SKIP_WEB_BUILD=1`, `-j2`).
+
+`cargo test --all` on the full workspace is owned by the verification stage; this round ran the smallest relevant probes (all lineage + dependency + touched-module tests). Coverage matrix `specs/coverage/system/merge-dependencies.md` row 8 updated `task-assigned` → `implemented` with code references.
+
+Independent review, full deterministic gates, and GitHub checks on the exact PR head remain required.
