@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use gyre_ports::{ComputeTarget, ProcessHandle, SpawnConfig};
+use std::collections::HashMap;
 use tokio::process::Command;
 
 /// Spawns processes on remote hosts via SSH.
@@ -31,6 +32,33 @@ impl SshTarget {
     pub fn with_port(mut self, port: u16) -> Self {
         self.port = Some(port);
         self
+    }
+
+    /// Reconstruct a target from a recorded handle so out-of-band
+    /// operations (kill, liveness) reach the RIGHT host. `handle.id` is
+    /// `user@host:pid` (see `spawn_process`); the identity file and port
+    /// recorded in `handle.options` at spawn time are restored so a
+    /// non-default SSH config still authenticates.
+    pub fn from_handle(handle: &ProcessHandle) -> Option<Self> {
+        // `user@host:pid` — split off the trailing pid, then user from host.
+        // Never slice at fixed byte indexes: user/host are arbitrary UTF-8.
+        let (destination, _pid) = handle.id.rsplit_once(':')?;
+        let (user, host) = destination.split_once('@')?;
+        if user.is_empty() || host.is_empty() {
+            return None;
+        }
+        let mut target = Self::new(user, host);
+        if let Some(identity_file) = handle.options.get("identity_file") {
+            target = target.with_identity(identity_file.clone());
+        }
+        if let Some(port) = handle
+            .options
+            .get("port")
+            .and_then(|p| p.parse::<u16>().ok())
+        {
+            target = target.with_port(port);
+        }
+        Some(target)
     }
 
     fn destination(&self) -> String {
@@ -223,6 +251,20 @@ impl ComputeTarget for SshTarget {
             id: format!("{}:{}", self.destination(), pid),
             target_type: "ssh".to_string(),
             pid: Some(pid),
+            // Connection details for later out-of-band kills: the registry
+            // stores only the handle, and reconstructing the target from
+            // `user@host:pid` alone would drop a configured identity file
+            // or non-default port.
+            options: {
+                let mut options = HashMap::new();
+                if let Some(ref id) = self.identity_file {
+                    options.insert("identity_file".to_string(), id.clone());
+                }
+                if let Some(port) = self.port {
+                    options.insert("port".to_string(), port.to_string());
+                }
+                options
+            },
         })
     }
 
@@ -314,6 +356,69 @@ mod tests {
         let target = SshTarget::new("user", "host");
         let args = target.base_ssh_args();
         assert!(args.contains(&"BatchMode=yes".to_string()));
+    }
+
+    /// `from_handle` must round-trip the destination recorded in
+    /// `user@host:pid` — an out-of-band kill depends on reaching the RIGHT
+    /// host, and a mis-parse must fail loudly (None), never guess.
+    #[test]
+    fn from_handle_parses_destination_and_pid() {
+        let handle = ProcessHandle {
+            id: "ubuntu@192.168.1.10:4242".to_string(),
+            target_type: "ssh".to_string(),
+            pid: Some(4242),
+            options: HashMap::new(),
+        };
+        let target = SshTarget::from_handle(&handle).expect("valid handle must parse");
+        assert_eq!(target.user, "ubuntu");
+        assert_eq!(target.host, "192.168.1.10");
+        assert_eq!(target.identity_file, None);
+        assert_eq!(target.port, None);
+    }
+
+    /// Connection options recorded at spawn time (identity file, non-default
+    /// port) must survive the round trip — dropping them would make
+    /// reconstructed kills fail authentication against configured targets.
+    #[test]
+    fn from_handle_restores_connection_options() {
+        let mut options = HashMap::new();
+        options.insert("identity_file".to_string(), "/etc/gyre/ssh_key".to_string());
+        options.insert("port".to_string(), "2222".to_string());
+        let handle = ProcessHandle {
+            id: "root@builder.internal:99".to_string(),
+            target_type: "ssh".to_string(),
+            pid: Some(99),
+            options,
+        };
+        let target = SshTarget::from_handle(&handle).expect("valid handle must parse");
+        assert_eq!(target.user, "root");
+        assert_eq!(target.host, "builder.internal");
+        assert_eq!(target.identity_file.as_deref(), Some("/etc/gyre/ssh_key"));
+        assert_eq!(target.port, Some(2222));
+    }
+
+    /// Malformed handle ids must yield `None` — a reconstruction that
+    /// "falls back" to some destination would kill the wrong host's process.
+    #[test]
+    fn from_handle_rejects_malformed_ids() {
+        for bad in [
+            "4242",                // bare pid: no destination
+            "localhost:4242",      // no user@ separator
+            "ubuntu@:4242",        // empty host
+            "@localhost:4242",     // empty user
+            "ubuntu@192.168.1.10", // no pid suffix
+        ] {
+            let handle = ProcessHandle {
+                id: bad.to_string(),
+                target_type: "ssh".to_string(),
+                pid: None,
+                options: HashMap::new(),
+            };
+            assert!(
+                SshTarget::from_handle(&handle).is_none(),
+                "malformed id {bad:?} must not reconstruct a target"
+            );
+        }
     }
 
     #[test]

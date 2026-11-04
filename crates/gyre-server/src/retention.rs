@@ -115,7 +115,9 @@ impl RetentionStore {
     pub fn new() -> Self {
         Self {
             policies: Arc::new(RwLock::new(default_policies())),
-            kv: Arc::new(RwLock::new(Arc::new(crate::mem::MemKvStore::default()) as Arc<dyn KvJsonStore>)),
+            kv: Arc::new(RwLock::new(
+                Arc::new(crate::mem::MemKvStore::default()) as Arc<dyn KvJsonStore>
+            )),
         }
     }
 
@@ -367,11 +369,13 @@ fn snapshot_tier_deletions(now_secs: u64, files: &[(String, u64)]) -> Vec<String
 
 #[cfg(test)]
 mod tests {
-    use crate::jobs::next_daily_run_secs;
     use super::*;
+    use crate::jobs::next_daily_run_secs;
     use crate::mem::test_state;
     use gyre_common::{Id, Notification, NotificationType};
-    use gyre_domain::{AnalyticsEvent, AttestationBundle, AuditEvent, AuditEventType, MergeAttestation};
+    use gyre_domain::{
+        AnalyticsEvent, AttestationBundle, AuditEvent, AuditEventType, MergeAttestation,
+    };
     use std::sync::Arc;
 
     const DAY: u64 = 86_400;
@@ -399,12 +403,19 @@ mod tests {
         // No cost_entries policy — spec lists exactly these 7 types.
         assert!(!types.contains(&"cost_entries"));
         // Notifications: 365d unread / 90d read split (§5).
-        let notif = policies.iter().find(|p| p.data_type == "notifications").unwrap();
+        let notif = policies
+            .iter()
+            .find(|p| p.data_type == "notifications")
+            .unwrap();
         assert_eq!(notif.max_age_days, 365);
         assert_eq!(notif.max_age_days_read, Some(90));
         // Attestations and snapshots are never age-purged.
         assert_eq!(
-            policies.iter().find(|p| p.data_type == "attestations").unwrap().max_age_days,
+            policies
+                .iter()
+                .find(|p| p.data_type == "attestations")
+                .unwrap()
+                .max_age_days,
             u64::MAX
         );
     }
@@ -422,7 +433,11 @@ mod tests {
     fn set_existing_policy() {
         let store = RetentionStore::new();
         store.set_policy("audit_events", 30);
-        let p = store.list().into_iter().find(|p| p.data_type == "audit_events").unwrap();
+        let p = store
+            .list()
+            .into_iter()
+            .find(|p| p.data_type == "audit_events")
+            .unwrap();
         assert_eq!(p.max_age_days, 30);
     }
 
@@ -430,7 +445,11 @@ mod tests {
     fn set_new_policy() {
         let store = RetentionStore::new();
         store.set_policy("custom_type", 7);
-        let p = store.list().into_iter().find(|p| p.data_type == "custom_type").unwrap();
+        let p = store
+            .list()
+            .into_iter()
+            .find(|p| p.data_type == "custom_type")
+            .unwrap();
         assert_eq!(p.max_age_days, 7);
     }
 
@@ -577,7 +596,11 @@ mod tests {
             signing_key_id: "kid".to_string(),
             deprecation_notice: None,
         };
-        state.attestation_store.save("mr-ancient", &bundle).await.unwrap();
+        state
+            .attestation_store
+            .save("mr-ancient", &bundle)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -588,20 +611,28 @@ mod tests {
         state.retention_store.run_cleanup(&state).await.unwrap();
 
         // audit: old gone, new kept.
-        let audit = gyre_ports::AuditRepository::query(&*state.audit, &gyre_ports::AuditQueryFilter { limit: 100, ..Default::default() })
-            .await
-            .unwrap();
+        let audit = gyre_ports::AuditRepository::query(
+            &*state.audit,
+            &gyre_ports::AuditQueryFilter {
+                limit: 100,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         let ids: Vec<&str> = audit.iter().map(|e| e.id.as_str()).collect();
         assert!(!ids.contains(&"a-old"), "old audit event must be purged");
         assert!(ids.contains(&"a-new"), "new audit event must be kept");
 
         // analytics: old gone, new kept.
-        let analytics =
-            gyre_ports::AnalyticsRepository::query(&*state.analytics, None, None, 100)
-                .await
-                .unwrap();
+        let analytics = gyre_ports::AnalyticsRepository::query(&*state.analytics, None, None, 100)
+            .await
+            .unwrap();
         let ids: Vec<&str> = analytics.iter().map(|e| e.id.as_str()).collect();
-        assert!(!ids.contains(&"an-old"), "old analytics event must be purged");
+        assert!(
+            !ids.contains(&"an-old"),
+            "old analytics event must be purged"
+        );
         assert!(ids.contains(&"an-new"), "new analytics event must be kept");
 
         // notifications: old-read and old-unread purged; both new kept.
@@ -609,22 +640,43 @@ mod tests {
             .await
             .unwrap();
         let ids: Vec<&str> = notifs.iter().map(|n| n.id.as_str()).collect();
-        assert!(!ids.contains(&"n-old-read"), "old read notification must be purged");
-        assert!(!ids.contains(&"n-old-unread"), "old unread notification must be purged");
-        assert!(ids.contains(&"n-new-read"), "recent read notification must be kept");
-        assert!(ids.contains(&"n-new-unread"), "recent unread notification must be kept");
+        assert!(
+            !ids.contains(&"n-old-read"),
+            "old read notification must be purged"
+        );
+        assert!(
+            !ids.contains(&"n-old-unread"),
+            "old unread notification must be purged"
+        );
+        assert!(
+            ids.contains(&"n-new-read"),
+            "recent read notification must be kept"
+        );
+        assert!(
+            ids.contains(&"n-new-unread"),
+            "recent unread notification must be kept"
+        );
 
         // agent_logs: old line drained; new line and unprefixed line kept.
         let logs = state.agent_logs.lock().await;
         let lines = logs.get("agent-1").unwrap();
-        assert_eq!(lines.len(), 2, "old log line must be purged, others kept: {lines:?}");
+        assert_eq!(
+            lines.len(),
+            2,
+            "old log line must be purged, others kept: {lines:?}"
+        );
         assert!(lines.iter().any(|l| l.contains("new line")));
         assert!(lines.iter().any(|l| l.contains("no prefix line")));
         drop(logs);
 
         // attestation: ancient bundle survives (never purged).
         assert!(
-            state.attestation_store.find_by_mr_id("mr-ancient").await.unwrap().is_some(),
+            state
+                .attestation_store
+                .find_by_mr_id("mr-ancient")
+                .await
+                .unwrap()
+                .is_some(),
             "attestations must never be purged"
         );
     }
@@ -635,25 +687,39 @@ mod tests {
         seed_state(&state).await;
 
         state.retention_store.run_cleanup(&state).await.unwrap();
-        let after_first = gyre_ports::NotificationRepository::list_recent(&*state.notifications, 100)
-            .await
-            .unwrap()
-            .len();
-        let audit_first = gyre_ports::AuditRepository::query(&*state.audit, &gyre_ports::AuditQueryFilter { limit: 100, ..Default::default() })
-            .await
-            .unwrap()
-            .len();
+        let after_first =
+            gyre_ports::NotificationRepository::list_recent(&*state.notifications, 100)
+                .await
+                .unwrap()
+                .len();
+        let audit_first = gyre_ports::AuditRepository::query(
+            &*state.audit,
+            &gyre_ports::AuditQueryFilter {
+                limit: 100,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .len();
 
         // Second consecutive run must not delete anything new.
         state.retention_store.run_cleanup(&state).await.unwrap();
-        let after_second = gyre_ports::NotificationRepository::list_recent(&*state.notifications, 100)
-            .await
-            .unwrap()
-            .len();
-        let audit_second = gyre_ports::AuditRepository::query(&*state.audit, &gyre_ports::AuditQueryFilter { limit: 100, ..Default::default() })
-            .await
-            .unwrap()
-            .len();
+        let after_second =
+            gyre_ports::NotificationRepository::list_recent(&*state.notifications, 100)
+                .await
+                .unwrap()
+                .len();
+        let audit_second = gyre_ports::AuditRepository::query(
+            &*state.audit,
+            &gyre_ports::AuditQueryFilter {
+                limit: 100,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .len();
         assert_eq!(after_first, after_second);
         assert_eq!(audit_first, audit_second);
     }
@@ -662,10 +728,19 @@ mod tests {
     fn agent_log_line_is_old_boundaries() {
         let cutoff = 1000;
         assert!(agent_log_line_is_old("[999] x", cutoff));
-        assert!(!agent_log_line_is_old("[1000] x", cutoff), "cutoff is exclusive");
+        assert!(
+            !agent_log_line_is_old("[1000] x", cutoff),
+            "cutoff is exclusive"
+        );
         assert!(!agent_log_line_is_old("[1001] x", cutoff));
-        assert!(!agent_log_line_is_old("no prefix", cutoff), "unparseable prefix kept");
-        assert!(!agent_log_line_is_old("[abc] x", cutoff), "non-numeric ts kept");
+        assert!(
+            !agent_log_line_is_old("no prefix", cutoff),
+            "unparseable prefix kept"
+        );
+        assert!(
+            !agent_log_line_is_old("[abc] x", cutoff),
+            "non-numeric ts kept"
+        );
         assert!(!agent_log_line_is_old("", cutoff));
     }
 
@@ -699,16 +774,25 @@ mod tests {
         let deletions = snapshot_tier_deletions(now, &files);
         assert_eq!(deletions.len(), 8, "deleted: {deletions:?}");
         for name in ["month-1", "month-2", "month-3", "month-4", "month-5"] {
-            assert!(deletions.contains(&name.to_string()), "{name} should be deleted");
+            assert!(
+                deletions.contains(&name.to_string()),
+                "{name} should be deleted"
+            );
         }
         for i in 0..3 {
             assert!(deletions.contains(&format!("ancient-{i}")));
         }
         for i in 0..24 {
-            assert!(!deletions.contains(&format!("recent-{i}")), "recent-{i} must survive");
+            assert!(
+                !deletions.contains(&format!("recent-{i}")),
+                "recent-{i} must survive"
+            );
         }
         for name in ["week-3", "week-4", "week-5", "week-6", "month-0"] {
-            assert!(!deletions.contains(&name.to_string()), "{name} must survive");
+            assert!(
+                !deletions.contains(&name.to_string()),
+                "{name} must survive"
+            );
         }
     }
 

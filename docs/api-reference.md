@@ -368,6 +368,8 @@ Errors: `400` empty `targets` / unknown draft `kind` shape · `403` caller lacks
 
 Preview agents are killed on completion (no idle state), and their `preview/{preview_id}/*` branches are auto-deleted after the TTL (`GYRE_META_SPEC_PREVIEW_TTL_HOURS`).
 
+**Skip-ceremony is enforced, not just skipped.** A preview agent cannot mint ceremony through the REST surface with its own live JWT: `POST /api/v1/agents/{id}/complete` and `POST /api/v1/merge-requests` both return `403` for preview-agent callers (the MCP dispatch refuses the equivalent tools the same way). The preview branch push is the entire deliverable. Tearing a run down (manual `DELETE` or TTL GC) also closes any open MR pointing at a `preview/{preview_id}/*` branch so no open MR dangles off a deleted branch.
+
 ---
 
 ## Authentication

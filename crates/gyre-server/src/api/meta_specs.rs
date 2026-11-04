@@ -702,6 +702,23 @@ pub(crate) async fn is_preview_agent(state: &AppState, agent_id: &str) -> bool {
     )
 }
 
+/// True when the caller authenticated via a Gyre-minted agent JWT
+/// (`scope == "agent"`) whose agent id belongs to a preview run. Global
+/// tokens, API keys and Keycloak JWTs never satisfy this: they are not the
+/// preview agent itself.
+pub(crate) async fn caller_is_preview_agent(
+    state: &AppState,
+    auth: &crate::auth::AuthenticatedAgent,
+) -> bool {
+    let agent_jwt = auth
+        .jwt_claims
+        .as_ref()
+        .and_then(|c| c.get("scope"))
+        .and_then(|s| s.as_str())
+        == Some("agent");
+    agent_jwt && is_preview_agent(state, &auth.agent_id).await
+}
+
 // ---------------------------------------------------------------------------
 // Background GC sweep
 // ---------------------------------------------------------------------------
@@ -1377,6 +1394,7 @@ async fn teardown_preview_agent(state: &AppState, agent_ref: &PreviewAgentRef) {
     // Stopped first: a monitor's late exit callback must not park it in Idle.
     stop_preview_agent_row(state, &agent_ref.agent_id).await;
     remove_preview_worktree(state, agent_ref).await;
+    close_preview_branch_mrs(state, agent_ref).await;
     delete_preview_branch(state, agent_ref).await;
     revoke_preview_token(state, &agent_ref.agent_id).await;
     release_preview_slot(state, agent_ref).await;
@@ -1460,6 +1478,49 @@ async fn remove_preview_worktree(state: &AppState, agent_ref: &PreviewAgentRef) 
     {
         for wt in wts {
             let _ = state.worktrees.delete(&wt.id).await;
+        }
+    }
+}
+
+/// Close any open MR pointing at a preview branch. Preview runs create no
+/// MRs and the REST/MCP surfaces refuse to create them for preview agents,
+/// but a run torn down must not leave an open MR dangling off a branch that
+/// no longer exists (belt-and-braces for any path that slipped past the
+/// gates). `Closed` is terminal — already-closed MRs are left untouched.
+async fn close_preview_branch_mrs(state: &AppState, agent_ref: &PreviewAgentRef) {
+    let mrs = match state
+        .merge_requests
+        .list_by_repo(&Id::new(&agent_ref.repo_id))
+        .await
+    {
+        Ok(mrs) => mrs,
+        Err(e) => {
+            tracing::warn!(
+                preview_id = %agent_ref.preview_id,
+                "MR listing failed during preview teardown: {e:#}"
+            );
+            return;
+        }
+    };
+    for mut mr in mrs {
+        if mr.source_branch != agent_ref.branch || mr.status == gyre_domain::MrStatus::Closed {
+            continue;
+        }
+        if let Err(e) = mr.transition_status(gyre_domain::MrStatus::Closed) {
+            tracing::warn!(
+                preview_id = %agent_ref.preview_id,
+                mr_id = %mr.id,
+                "closing MR on preview branch failed: {e}"
+            );
+            continue;
+        }
+        mr.updated_at = now_secs();
+        if let Err(e) = state.merge_requests.update(&mr).await {
+            tracing::warn!(
+                preview_id = %agent_ref.preview_id,
+                mr_id = %mr.id,
+                "MR close persist failed during preview teardown: {e:#}"
+            );
         }
     }
 }
@@ -2430,6 +2491,223 @@ mod tests {
                     .unwrap()
                     .is_none(),
                 "orphaned preview agent record must be reclaimed"
+            );
+        })
+        .await;
+    }
+
+    /// A preview agent must not be able to mint ceremony through the REST
+    /// surface with its own live JWT (review finding: the §5 skip-ceremony
+    /// invariant was enforced only in the MCP dispatch). POST
+    /// /agents/{id}/complete and POST /merge-requests must both refuse the
+    /// preview agent — no MR, no Idle, no provenance, no snapshot refs.
+    /// Exercises the production route chain (ABAC middleware + seeded
+    /// builtin policies) exactly as a live server would evaluate it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_agent_rest_ceremony_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, state, repo_id) = preview_app(dir.path(), 86_400, None).await;
+
+        let env_out = dir.path().join("agent-env.txt");
+        let script = env_dump_script(dir.path(), &env_out);
+
+        with_agent_command(script.to_str().unwrap(), || async {
+            let resp =
+                post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let json = body_json(resp).await;
+            let preview_id = json["preview_id"].as_str().unwrap().to_string();
+            let agent_id = json["agents"][0]["agent_id"].as_str().unwrap().to_string();
+            let branch = json["agents"][0]["branch"].as_str().unwrap().to_string();
+
+            // The preview agent's own live JWT, driven through the production
+            // router (auth + ABAC middleware), mirroring the review probe.
+            crate::abac_middleware::seed_builtin_policies(&state).await;
+            let prod = crate::build_router(state.clone());
+            let jwt = state
+                .kv_store
+                .kv_get("agent_tokens", &agent_id)
+                .await
+                .unwrap()
+                .expect("preview agent token must be live");
+
+            // POST /api/v1/agents/{id}/complete → 403, not 201-with-MR.
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/agents/{agent_id}/complete"))
+                        .header("authorization", format!("Bearer {jwt}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "branch": branch,
+                                "title": "ceremony escape",
+                                "target_branch": "main",
+                                "conversation_sha": "0".repeat(64),
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "preview agent must not complete via REST"
+            );
+
+            // POST /api/v1/merge-requests → 403, not 201-with-MR.
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/merge-requests")
+                        .header("authorization", format!("Bearer {jwt}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "repository_id": repo_id,
+                                "title": "ceremony escape",
+                                "source_branch": branch,
+                                "target_branch": "main",
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "preview agent must not create MRs via REST"
+            );
+
+            // No ceremony side effects leaked through either refusal.
+            assert!(
+                state.merge_requests.list().await.unwrap().is_empty(),
+                "no MR may exist after the refused calls"
+            );
+            let agent = state
+                .agents
+                .find_by_id(&gyre_common::Id::new(&agent_id))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_ne!(agent.status, gyre_domain::AgentStatus::Idle);
+            assert_eq!(
+                agent.status,
+                gyre_domain::AgentStatus::Active,
+                "the refused complete call must not change the preview agent's state"
+            );
+            assert!(
+                state
+                    .kv_store
+                    .kv_list("agent_provenance")
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "no provenance may be recorded for a preview agent"
+            );
+            let repo = state
+                .repos
+                .find_by_id(&gyre_common::Id::new(&repo_id))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                crate::git_refs::count_refs_under(&repo.path, "refs/agents/").await,
+                0,
+                "no snapshot refs may be written for a preview agent"
+            );
+
+            // Positive control: the same MR request from an Admin caller is
+            // accepted — the gate scopes to preview agents, not the route.
+            let resp = prod
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/merge-requests")
+                        .header("authorization", "Bearer test-token")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "repository_id": repo_id,
+                                "title": "admin-created on preview branch",
+                                "source_branch": branch,
+                                "target_branch": "main",
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::CREATED,
+                "admin MR creation on a preview branch must still work"
+            );
+
+            let del = delete_preview(&app, &preview_id).await;
+            assert_eq!(del.status(), StatusCode::NO_CONTENT);
+        })
+        .await;
+    }
+
+    /// Tearing a preview run down must close MRs pointing at its branches —
+    /// an open MR dangling off a deleted branch is ceremony debris preview
+    /// mode promises not to leave behind.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_delete_closes_mrs_on_preview_branches() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, state, repo_id) = preview_app(dir.path(), 86_400, None).await;
+
+        let env_out = dir.path().join("agent-env.txt");
+        let script = env_dump_script(dir.path(), &env_out);
+
+        with_agent_command(script.to_str().unwrap(), || async {
+            let resp =
+                post_preview(&app, preview_body(&repo_id, &["specs/system/search.md"])).await;
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+            let json = body_json(resp).await;
+            let preview_id = json["preview_id"].as_str().unwrap().to_string();
+            let branch = json["agents"][0]["branch"].as_str().unwrap().to_string();
+
+            // An open MR on the preview branch (e.g. created before a gate
+            // existed, or by an admin).
+            let mut mr = gyre_domain::MergeRequest::new(
+                gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+                gyre_common::Id::new(&repo_id),
+                "mr on preview branch".to_string(),
+                branch.clone(),
+                "main".to_string(),
+                chrono_now_secs(),
+            );
+            mr.author_agent_id = Some(gyre_common::Id::new(
+                json["agents"][0]["agent_id"].as_str().unwrap(),
+            ));
+            state.merge_requests.create(&mr).await.unwrap();
+            assert_eq!(mr.status, gyre_domain::MrStatus::Open);
+
+            let del = delete_preview(&app, &preview_id).await;
+            assert_eq!(del.status(), StatusCode::NO_CONTENT);
+
+            let closed = state
+                .merge_requests
+                .find_by_id(&mr.id)
+                .await
+                .unwrap()
+                .expect("MR row must survive teardown (only the branch is deleted)");
+            assert_eq!(
+                closed.status,
+                gyre_domain::MrStatus::Closed,
+                "MR on a torn-down preview branch must be closed, not left open"
             );
         })
         .await;

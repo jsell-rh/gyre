@@ -749,13 +749,27 @@ pub(crate) async fn on_agent_process_exit(state: &AppState, agent_id: &str) {
 ///
 /// Container handles are killed by container id (`docker rm --force`), so they
 /// must not be dispatched to the local target — a container handle's pid (if
-/// any) belongs to the docker daemon's child, not to the agent.
+/// any) belongs to the docker daemon's child, not to the agent. SSH handles
+/// carry the REMOTE pid echoed by the remote shell: dispatching them to the
+/// local target would terminate an unrelated local process that happens to
+/// hold that pid while the remote agent survives. Both are reconstructed
+/// from the handle itself — the spawning target object is long gone by the
+/// time a registry lookup kills a process.
 pub(crate) async fn kill_process_handle(handle: &gyre_ports::ProcessHandle) -> anyhow::Result<()> {
     use gyre_ports::ComputeTarget;
     if handle.target_type == "container" {
         // The image is irrelevant to `docker rm --force`; the handle id is the
         // container id recorded at spawn time.
         let target = gyre_adapters::compute::ContainerTarget::new(String::new());
+        ComputeTarget::kill_process(&target, handle).await
+    } else if handle.target_type == "ssh" {
+        let target = gyre_adapters::compute::SshTarget::from_handle(handle).ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot reconstruct ssh target from handle id '{}' — refusing to \
+                 kill a local pid that belongs to a remote process",
+                handle.id
+            )
+        })?;
         ComputeTarget::kill_process(&target, handle).await
     } else {
         ComputeTarget::kill_process(&gyre_adapters::compute::LocalTarget, handle).await
@@ -1258,6 +1272,20 @@ pub async fn complete_agent(
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("agent {id} not found")))?;
+
+    // Preview agents (meta-spec reconciliation §5) run ceremony-free: no MR,
+    // no provenance, no idle state — the branch push is the entire deliverable
+    // and the run ends when the process exits (routed through
+    // `finish_preview_agent`). The MCP dispatch already refuses
+    // `gyre_agent_complete` for preview agents, but allowedTools is advisory:
+    // the REST surface must enforce the same invariant or a preview agent can
+    // mint a real MR and park itself in Idle through this route.
+    if crate::api::meta_specs::is_preview_agent(&state, &id).await {
+        return Err(ApiError::Forbidden(format!(
+            "agent {id} belongs to a meta-spec preview run — preview agents skip \
+             MR creation and completion ceremony; the run ends when the process exits"
+        )));
+    }
 
     // Get repository_id from agent's worktree
     let worktrees = state.worktrees.find_by_agent(&agent.id).await?;
@@ -2356,6 +2384,30 @@ mod tests {
             .unwrap();
         let agent_json = body_json(agent_resp).await;
         assert_eq!(agent_json["status"], "idle");
+    }
+
+    /// An SSH handle's pid is the REMOTE pid echoed by the remote shell.
+    /// `kill_process_handle` must reconstruct an SshTarget (or refuse) — never
+    /// fall through to a local kill, which would terminate an unrelated local
+    /// process holding that pid while the remote agent survives. The handle
+    /// here carries THIS test process's pid and a malformed destination: a
+    /// regression to local dispatch kills the test runner itself, so the
+    /// guard is proven by survival, not just the error message.
+    #[tokio::test]
+    async fn kill_process_handle_refuses_malformed_ssh_handle() {
+        let handle = gyre_ports::ProcessHandle {
+            id: "no-destination-here".to_string(),
+            target_type: "ssh".to_string(),
+            pid: Some(std::process::id()),
+            options: std::collections::HashMap::new(),
+        };
+        let err = super::kill_process_handle(&handle)
+            .await
+            .expect_err("malformed ssh handle must be refused, not killed locally");
+        assert!(
+            err.to_string().contains("cannot reconstruct ssh target"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[tokio::test]

@@ -18,6 +18,11 @@ pub struct ProcessHandle {
     pub id: String,
     pub target_type: String,
     pub pid: Option<u32>,
+    /// Target-specific connection details needed to reconstruct the compute
+    /// target for out-of-band operations after the spawning target object is
+    /// gone (e.g. killing the process from a registry lookup). SSH targets
+    /// record `identity_file` and `port` here; other targets leave it empty.
+    pub options: HashMap<String, String>,
 }
 
 /// Port for spawning and managing processes on compute targets.
