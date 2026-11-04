@@ -115,6 +115,13 @@ def main():
         commands = [(['bash', str(STAGE / 'checks.sh')], str(CHECKOUT), 3600),
                     (['cargo', 'test', '--all', '--quiet'], str(CHECKOUT), 3600),
                     (['npm', 'test', '--', '--no-file-parallelism'], str(CHECKOUT / 'web'), 1800)]
+        if 'probe' in job:
+            import re
+            probe = job['probe']
+            if (not isinstance(probe, list) or len(probe) != 2 or probe[0] != 'bash' or
+                    not isinstance(probe[1], str) or not re.fullmatch(r'scripts/check-[a-z0-9-]+\.sh', probe[1])):
+                raise ValueError('unsupported baseline probe')
+            commands = [(probe, str(CHECKOUT), 1800)]
         checks_receipt = STAGE / 'verification-checks.json'
         run_checks(commands, checks_receipt, identity, env)
         value = json.loads(checks_receipt.read_text())
