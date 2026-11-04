@@ -104,6 +104,19 @@ class CheckIntegrityTest(unittest.TestCase):
         self.assertIn('GYRE_BASELINE_FAILURE_JSON', result.stdout)
         self.assertEqual(self.git('status', '--porcelain'), '')
 
+    def test_candidate_download_failure_is_infrastructure_without_baseline_probe(self):
+        probe = self.root / 'network-probe.py'
+        probe.write_text('import sys\nfrom pathlib import Path\n'
+                         f'p=Path({str(self.root / "invocations")!r})\n'
+                         'p.write_text(p.read_text()+"called\\n" if p.exists() else "called\\n")\n'
+                         'print("error: Could not connect to server", file=sys.stderr)\nraise SystemExit(1)\n')
+        import sys
+        result = subprocess.run([sys.executable, str(self.stage / 'dev-static-gate.py'), self.git('rev-parse', 'HEAD'),
+                                 sys.executable, str(probe)], cwd=self.work, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 77, result.stdout + result.stderr)
+        self.assertEqual((self.root / 'invocations').read_text(), 'called\n')
+        self.assertNotIn('GYRE_BASELINE_FAILURE_JSON', result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
