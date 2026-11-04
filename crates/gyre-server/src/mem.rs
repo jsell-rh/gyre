@@ -3347,7 +3347,7 @@ pub fn test_state() -> Arc<crate::AppState> {
 #[cfg(test)]
 pub fn test_state_with_jj_ops(jj_ops: Arc<dyn gyre_ports::JjOpsPort>) -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    let mut state = test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None);
+    let mut state = test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None);
     let s = Arc::get_mut(&mut state).expect("test state is uniquely owned");
     s.jj_ops = jj_ops;
     state
