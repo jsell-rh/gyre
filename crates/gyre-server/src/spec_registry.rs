@@ -257,16 +257,23 @@ pub fn resolve_approval_status(
     }
 
     let approval = entry.approval.as_ref();
-    let has_valid_human = events.iter().any(|e| is_valid_human_approval(e, approval, current_sha));
-    let has_valid_agent = events.iter().any(|e| is_valid_agent_approval(e, approval, current_sha));
+    let has_valid_human = events
+        .iter()
+        .any(|e| is_valid_human_approval(e, approval, current_sha));
+    let has_valid_agent = events
+        .iter()
+        .any(|e| is_valid_agent_approval(e, approval, current_sha));
 
-    match entry.effective_approval_mode() {
+    let approved = match entry.effective_approval_mode() {
         ApprovalMode::HumanOnly => has_valid_human,
         ApprovalMode::AgentOnly => has_valid_agent,
         ApprovalMode::HumanAndAgent => has_valid_human && has_valid_agent,
+    };
+    if approved {
+        ApprovalStatus::Approved
+    } else {
+        ApprovalStatus::Pending
     }
-    .then_some(ApprovalStatus::Approved)
-    .unwrap_or(ApprovalStatus::Pending)
 }
 
 /// A human approval is valid when it is active, matches `current_sha`, and the
@@ -1477,7 +1484,7 @@ specs:
         // Human alone → Pending.
         let human = approval_event("e1", SHA, "human", "user:jsell");
         assert_eq!(
-            resolve_approval_status(entry, &m.defaults, SHA, &[human.clone()]),
+            resolve_approval_status(entry, &m.defaults, SHA, std::slice::from_ref(&human)),
             ApprovalStatus::Pending
         );
 
@@ -1486,7 +1493,7 @@ specs:
         let mut agent = agent_event("e2", SHA, "accountability");
         agent.attestation_level = Some(3);
         assert_eq!(
-            resolve_approval_status(entry, &m.defaults, SHA, &[agent.clone()]),
+            resolve_approval_status(entry, &m.defaults, SHA, std::slice::from_ref(&agent)),
             ApprovalStatus::Pending
         );
 
@@ -1501,7 +1508,12 @@ specs:
     fn test_resolve_stale_sha_is_not_valid() {
         let m = approval_manifest();
         let entry = manifest_entry(&m, "system/human-only.md");
-        let ev = approval_event("e1", "9999999999999999999999999999999999999999", "human", "user:jsell");
+        let ev = approval_event(
+            "e1",
+            "9999999999999999999999999999999999999999",
+            "human",
+            "user:jsell",
+        );
         assert_eq!(
             resolve_approval_status(entry, &m.defaults, SHA, &[ev]),
             ApprovalStatus::Pending

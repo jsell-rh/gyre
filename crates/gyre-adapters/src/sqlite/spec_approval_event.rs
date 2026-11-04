@@ -190,13 +190,12 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, "e1");
         assert_eq!(listed[0].approver_type, "human");
-        assert_eq!(listed[0].spec_sha, "0123456789abcdef0123456789abcdef01234567");
+        assert_eq!(
+            listed[0].spec_sha,
+            "0123456789abcdef0123456789abcdef01234567"
+        );
         // Other paths see nothing.
-        assert!(s
-            .list_by_path("system/other.md")
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(s.list_by_path("system/other.md").await.unwrap().is_empty());
     }
 
     #[tokio::test]

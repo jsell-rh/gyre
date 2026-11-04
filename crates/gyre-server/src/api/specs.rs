@@ -521,8 +521,7 @@ pub async fn approve_spec(
                     serde_json::from_str::<crate::workload_attestation::WorkloadAttestation>(&json)
                         .ok()
                 });
-            let level =
-                crate::constraint_check::derive_attestation_level(workload.as_ref()) as u32;
+            let level = crate::constraint_check::derive_attestation_level(workload.as_ref()) as u32;
             (
                 "agent".to_string(),
                 format!("agent:{}", auth.agent_id),
@@ -903,7 +902,6 @@ async fn resolve_new_approval_status(
     )
 }
 
-
 // ---------------------------------------------------------------------------
 // POST /api/v1/specs/:path/revoke — revoke an approval
 // ---------------------------------------------------------------------------
@@ -1094,25 +1092,41 @@ pub async fn reject_spec(
     // workspace Admin/Developer members.
     if let Some(ref ws_id) = entry.workspace_id {
         let ws_id = gyre_common::Id::new(ws_id.as_str());
-        if let Ok(members) = state.workspace_memberships.list_by_workspace(&ws_id).await {
-            for member in &members {
-                if matches!(
-                    member.role,
-                    gyre_domain::WorkspaceRole::Admin
-                        | gyre_domain::WorkspaceRole::Developer
-                        | gyre_domain::WorkspaceRole::Owner
-                ) {
-                    let tenant_id = entry.repo_id.as_deref().unwrap_or("default");
-                    crate::notifications::notify(
-                        state.as_ref(),
-                        ws_id.clone(),
-                        member.user_id.clone(),
-                        gyre_common::NotificationType::SpecRejected,
-                        format!("Spec '{}' rejected: {}", spec_path, req.reason),
-                        tenant_id,
-                    )
-                    .await;
+        // Resolve the tenant from the workspace record — never fabricate a
+        // "default" scope identity when it cannot be determined (task-097 F3).
+        match state.workspaces.find_by_id(&ws_id).await {
+            Ok(Some(ws)) => {
+                let tenant_id = ws.tenant_id.to_string();
+                if let Ok(members) = state.workspace_memberships.list_by_workspace(&ws_id).await {
+                    for member in &members {
+                        if matches!(
+                            member.role,
+                            gyre_domain::WorkspaceRole::Admin
+                                | gyre_domain::WorkspaceRole::Developer
+                                | gyre_domain::WorkspaceRole::Owner
+                        ) {
+                            crate::notifications::notify(
+                                state.as_ref(),
+                                ws_id.clone(),
+                                member.user_id.clone(),
+                                gyre_common::NotificationType::SpecRejected,
+                                format!("Spec '{}' rejected: {}", spec_path, req.reason),
+                                tenant_id.clone(),
+                            )
+                            .await;
+                        }
+                    }
                 }
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    "reject_spec: workspace {ws_id} not found; skipping spec-rejected notifications"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "reject_spec: failed to resolve workspace tenant for {ws_id}: {e}; skipping spec-rejected notifications"
+                );
             }
         }
     }
@@ -2333,10 +2347,8 @@ specs:
 
     /// Build a real git repo containing the E2E approval manifest and spec
     /// files. Returns (tempdir, map of spec path → blob SHA at HEAD).
-    async fn make_manifest_repo() -> (
-        tempfile::TempDir,
-        std::collections::HashMap<String, String>,
-    ) {
+    async fn make_manifest_repo() -> (tempfile::TempDir, std::collections::HashMap<String, String>)
+    {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path();
         let run = |args: &[&str]| {
@@ -2358,19 +2370,23 @@ specs:
 
         std::fs::create_dir_all(path.join("specs/system")).unwrap();
         std::fs::write(path.join("specs/manifest.yaml"), E2E_APPROVAL_MANIFEST).unwrap();
-        for spec in ["system/both.md", "system/agent-min.md", "system/agent-pinned.md"] {
-            std::fs::write(
-                path.join("specs").join(spec),
-                format!("# {}\n", spec),
-            )
-            .unwrap();
+        for spec in [
+            "system/both.md",
+            "system/agent-min.md",
+            "system/agent-pinned.md",
+        ] {
+            std::fs::write(path.join("specs").join(spec), format!("# {}\n", spec)).unwrap();
         }
         run(&["add", "."]);
         run(&["commit", "-m", "manifest + specs"]);
 
         // Blob SHA for each spec file at HEAD — the ledger's current_sha.
         let mut shas = std::collections::HashMap::new();
-        for spec in ["system/both.md", "system/agent-min.md", "system/agent-pinned.md"] {
+        for spec in [
+            "system/both.md",
+            "system/agent-min.md",
+            "system/agent-pinned.md",
+        ] {
             let out = std::process::Command::new("git")
                 .args(["rev-parse", &format!("HEAD:specs/{spec}")])
                 .current_dir(path)
@@ -2457,9 +2473,9 @@ specs:
                 "system",
                 &state.base_url,
                 3600,
-                None,                // wl_pid
-                None,                // wl_hostname
-                Some("local".to_string()), // wl_compute_target
+                None,                         // wl_pid
+                None,                         // wl_hostname
+                Some("local".to_string()),    // wl_compute_target
                 Some(stack_hash.to_string()), // wl_stack_hash
                 if level >= 3 {
                     Some("container-1".to_string())
@@ -2536,10 +2552,7 @@ specs:
             .unwrap()
     }
 
-    async fn ledger_status(
-        state: &crate::AppState,
-        spec_path: &str,
-    ) -> ApprovalStatus {
+    async fn ledger_status(state: &crate::AppState, spec_path: &str) -> ApprovalStatus {
         state
             .spec_ledger
             .find_by_path(spec_path)
@@ -2614,13 +2627,15 @@ specs:
 
         // Level 2 agent (stack, no container) — manifest requires 3.
         let weak_jwt = register_e2e_agent(&state, "agent-e2e-2", "sha256:free", 2).await;
-        let resp = approve_via_api(&app, &weak_jwt, spec, &shas[spec], Some("accountability")).await;
+        let resp =
+            approve_via_api(&app, &weak_jwt, spec, &shas[spec], Some("accountability")).await;
         assert_eq!(resp.status(), StatusCode::CREATED);
         assert_eq!(ledger_status(&state, spec).await, ApprovalStatus::Pending);
 
         // Level 3 agent on the same spec → Approved.
         let strong_jwt = register_e2e_agent(&state, "agent-e2e-3", "sha256:free", 3).await;
-        let resp = approve_via_api(&app, &strong_jwt, spec, &shas[spec], Some("accountability")).await;
+        let resp =
+            approve_via_api(&app, &strong_jwt, spec, &shas[spec], Some("accountability")).await;
         assert_eq!(resp.status(), StatusCode::CREATED);
         assert_eq!(ledger_status(&state, spec).await, ApprovalStatus::Approved);
     }
@@ -2636,13 +2651,15 @@ specs:
 
         // Agent running a different stack → Pending.
         let other_jwt = register_e2e_agent(&state, "agent-e2e-4", "sha256:other", 3).await;
-        let resp = approve_via_api(&app, &other_jwt, spec, &shas[spec], Some("accountability")).await;
+        let resp =
+            approve_via_api(&app, &other_jwt, spec, &shas[spec], Some("accountability")).await;
         assert_eq!(resp.status(), StatusCode::CREATED);
         assert_eq!(ledger_status(&state, spec).await, ApprovalStatus::Pending);
 
         // Agent running the pinned stack → Approved.
         let pinned_jwt = register_e2e_agent(&state, "agent-e2e-5", "sha256:pinned", 3).await;
-        let resp = approve_via_api(&app, &pinned_jwt, spec, &shas[spec], Some("accountability")).await;
+        let resp =
+            approve_via_api(&app, &pinned_jwt, spec, &shas[spec], Some("accountability")).await;
         assert_eq!(resp.status(), StatusCode::CREATED);
         assert_eq!(ledger_status(&state, spec).await, ApprovalStatus::Approved);
     }
@@ -2657,7 +2674,8 @@ specs:
         let app = crate::api::api_router().with_state(state.clone());
 
         let spec = "system/agent-pinned.md";
-        let resp = approve_via_api(&app, &agent_jwt, spec, &shas[spec], Some("accountability")).await;
+        let resp =
+            approve_via_api(&app, &agent_jwt, spec, &shas[spec], Some("accountability")).await;
         assert_eq!(resp.status(), StatusCode::CREATED);
 
         // The recorded event carries the JWT-derived attestation fields.
