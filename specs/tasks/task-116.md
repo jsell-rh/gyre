@@ -14,7 +14,7 @@ coverage_sections:
   - "agent-runtime.md §Stale Pin Detection"
   - "agent-runtime.md §Bootstrap"
   - "agent-runtime.md §API"
-commits: ["e0457b7ce5b7b6dca2c694e769af8a20201abf61", "7c79870cca8f13e2c249d6766d6aeb135ba51964", "bf462e6c1f187f2bd3ca880942e6ee18f2ffb607", "5d428e7c4b856d48e1796e2fbbf01b3ce7e52b1a"]
+commits: ["e0457b7ce5b7b6dca2c694e769af8a20201abf61", "7c79870cca8f13e2c249d6766d6aeb135ba51964", "bf462e6c1f187f2bd3ca880942e6ee18f2ffb607", "5d428e7c4b856d48e1796e2fbbf01b3ce7e52b1a", "15b451be81e57cbea9929196a6d1c7faad32ffba"]
 ---
 
 ## Spec Excerpt
@@ -161,18 +161,20 @@ the reviewer's (removed) probes.
   `lib.rs`). Test:
   `mem::meta_spec_binding_contract_tests::delete_fails_when_binding_references_meta_spec`.
 
-**Test evidence this session** (at HEAD after the two test additions,
-`SKIP_WEB_BUILD=1`; full log:
-`/tmp/stage/review-evidence/task116-round6-repairs.md`): meta_spec suites
-26/26 (api 18 + mem contract 2 + assembly/stale/related 6), prompt_assembly
-10/10, mem:: 2/2, spawn 36/36; check-arch, check-abac-route-registry,
-check-mem-port-contracts all OK. Cold test build took ~21 min (empty target
-cache explains the prior session's build timeouts — not a code defect).
-`cargo test --all` is owned by the verification stage per assignment
-constraints; focused suites above are the smallest relevant probes.
-Infrastructure restrictions (npm registry unreachable, TCP listener probe
-errno 95) recorded in the evidence file — exact-head GitHub CI remains the
-authority for transport-level checks.
+**Rebase repair round** (merge commit `15b451be`): merged upstream
+`75ada1c4` into this branch; the only conflicts were committed `web/dist`
+build artifacts where each side's bundle predated the other's `web/src`
+changes. Resolved by rebuilding dist from the merged `web/src` with the
+locked toolchain (`npm ci` — registry reachable this session — then
+`vite build`); no source changes. Post-merge probes at `15b451be`
+(`SKIP_WEB_BUILD=1`): gyre-server lib tests filtered to meta_spec /
+prompt_assembly / spawn / mem:: — 84 passed, 0 failed (includes
+`stale_pin_detection_creates_notification`, the approval-gating and
+binding-membership regression tests, and the mem binding-contract test);
+check-arch, check-abac-route-registry, check-mem-port-contracts all OK.
+Evidence: `/tmp/stage/review-evidence/task116-rebase-75ada1c4.md`.
+`cargo test --all` and exact-head GitHub CI are owned by the verification
+stage per assignment constraints.
 
 ## Agent Instructions
 
