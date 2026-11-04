@@ -315,17 +315,20 @@ The cockpit displays stage counts, pending retries, sandbox reservations,
 coverage history, PR links, and live agent events. Streams retain collapse
 controls, relative times, automatic following, and a return-to-bottom control.
 
-Gateway setup remains `python3 scripts/dev-gateway.py --inference`. Authenticate
-with `OPENSHELL_OIDC_CLIENT_SECRET`; the ignored gateway credential file can be
-sourced into the shell running the supervisor. Inference setup reads
-`secret-tool lookup service pricetag key api-token`. The attached providers are
-`gyre-enmaas` and `gyre-github-rw`; the model is explicitly pinned to
-`enmaas-glm-5-3/rits/zai-org/glm-5-3`. `python3 scripts/dev-inference.py --smoke-only`
-checks inference without changing the configured providers.
+Worker execution uses pinned fullsend with Pi on the configured OpenShell gateway.
+Install and inspect it with `python3 scripts/dev-fullsend.py install` and
+`python3 scripts/dev-fullsend.py check`; see [dev-pipeline.md](dev-pipeline.md)
+for gateway selection, the model-free transport proof, and live canary procedure.
+The private state's mode-0600 `gateway.env` loads unattended gateway credentials.
+Fullsend manages its providers; EnMaaS credentials come from
+`secret-tool lookup service pricetag key api-token` or `ENMAAS_API_KEY`. The model
+is pinned to `gateway/rits/zai-org/glm-5-3`. `check --live` probes the exact endpoint
+without allocating a sandbox. Migration leaves model admission paused; `resume`
+enables it without changing the saved slot target.
 
-Implementation and review each execute one bounded OMP assignment in an isolated
-sandbox. Their prompts are `specs/prompts/pipeline-*.md`; repeatable deterministic
-checks stay in scripts. Independent review cannot edit production code or
+Implementation and review each execute one bounded fullsend assignment in an
+isolated sandbox. Harnesses are in `.fullsend/`; task prompts are
+`specs/prompts/pipeline-*.md`; repeatable deterministic checks stay in scripts. Independent review cannot edit production code or
 verifiers. Verification integrates the candidate with an exact main revision and
 runs the maintained guards, full Rust tests, and frontend tests on the host.
 Publication opens or updates a task PR, observes required checks, and requests an
