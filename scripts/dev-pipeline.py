@@ -74,9 +74,15 @@ def run_one(store, stage, task=None):
     if stage in ('implement', 'review', 'triage', 'verify') and (store.setting('slots', 8) == 0 or store.setting('admission_paused', False)):
         return False
     claim = store.claim(stage, f'{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}',
-                        concurrency=limit, task=task, eligible=lambda work: eligible(store, work))
+                        concurrency=limit, task=task, eligible=lambda work: eligible(store, work),
+                        capacity=store.setting('slots', 8))
     if not claim:
         return False
+    return run_claim(store, claim)
+
+
+def run_claim(store, claim):
+    stage = claim['stage']
     execution = Execution(store, claim)
     try:
         with execution.heartbeat():
@@ -150,6 +156,8 @@ def run_one(store, stage, task=None):
             except StaleClaim:
                 pass
         print(f'{stage}/{claim["task"]}: retry scheduled: {exc}', file=sys.stderr)
+    finally:
+        store.resource_state(store.admission_name(claim['id'], claim['token']), 'absent')
     return True
 
 
@@ -166,61 +174,9 @@ def status(store):
                                for state in ('ready', 'claimed', 'retry', 'succeeded', 'obsolete')} for stage in STAGES}}
 
 
-def serve(store, interval, only_task=None):
-    children = []
-    stopping = False
-    def stop(*_):
-        nonlocal stopping
-        stopping = True
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
-    with (store.directory / 'supervisor.lock').open('a+') as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise RuntimeError('another pipeline supervisor is running')
-        lock.seek(0)
-        lock.truncate()
-        lock.write(str(os.getpid()))
-        lock.flush()
-        store.set_setting('only_task', only_task)
-        while not stopping:
-            try:
-                base = source(store)
-                for stage in STAGES:
-                    discover_stage(store, stage, base)
-                children = [child for child in children if child.poll() is None]
-                allowed = None
-                if only_task:
-                    catalog = {task['name']: task['data'] for task in store.tasks()}
-                    allowed = {only_task}
-                    pending = [only_task]
-                    while pending:
-                        for dependency in catalog.get(pending.pop(), {}).get('dependencies') or []:
-                            if dependency not in allowed:
-                                allowed.add(dependency)
-                                pending.append(dependency)
-                query = "SELECT stage,task,count(*) AS n FROM work WHERE state IN ('ready','retry') AND retry_at<=? GROUP BY stage,task"
-                ready = store.db.execute(query, (time.time(),)).fetchall()
-                for row in ready:
-                    stage = row['stage']
-                    if stage in ('triage', 'implement', 'review', 'verify') and store.setting('admission_paused', False):
-                        continue
-                    if allowed is not None and row['task'] not in allowed:
-                        continue
-                    limit = store.setting('limits', {}).get(stage, max(1, store.setting('slots', 8)))
-                    live = sum(getattr(child, 'stage', None) == stage for child in children)
-                    for _ in range(max(0, min(row['n'], limit - live))):
-                        command = [sys.executable, str(Path(__file__).resolve()), '--state', str(store.directory), 'run', stage]
-                        command += ['--task', row['task']]
-                        child = subprocess.Popen(command, start_new_session=True)
-                        child.stage = stage
-                        children.append(child)
-            except Exception as exc:
-                print(f'discovery retry: {exc}', file=sys.stderr)
-            time.sleep(interval)
-        # Independent workers keep their leases and finish on supervisor stop.
-        # A new supervisor discovers and adopts their durable claims.
+def serve(store, interval, only_task=None, plain=False):
+    from pipeline.dispatcher import serve as dispatch
+    dispatch(store, interval, only_task, plain)
 
 
 def main():
@@ -234,6 +190,10 @@ def main():
     command = commands.add_parser('serve')
     command.add_argument('--interval', type=float, default=15)
     command.add_argument('--task')
+    command.add_argument('--plain', action='store_true', help='run without the terminal UI')
+    command = commands.add_parser('execute', help=argparse.SUPPRESS)
+    command.add_argument('work')
+    command.add_argument('token', type=int)
     commands.add_parser('status').add_argument('--json', action='store_true')
     commands.add_parser('retry').add_argument('task')
     commands.add_parser('retry-all')
@@ -274,7 +234,11 @@ def main():
         elif args.command == 'serve':
             if not 0 < args.interval <= 60:
                 parser.error('interval must be 0–60 seconds')
-            serve(store, args.interval, args.task)
+            serve(store, args.interval, args.task, args.plain)
+        elif args.command == 'execute':
+            claim = dict(store._current(args.work, args.token))
+            claim['input'] = json.loads(claim['input'])
+            run_claim(store, claim)
         elif args.command == 'seed':
             import re
             if args.fresh and any((args.candidate, args.base, args.pr)):

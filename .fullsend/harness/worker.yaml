@@ -2,7 +2,8 @@
 role: coder
 policy: policies/worker.yaml
 model: gateway/rits/zai-org/glm-5-3
-providers: [github]
+# The controller supplies the instance-scoped GitHub provider.
+providers: []
 plugins: [extensions/capabilities]
 validation_loop:
   script: scripts/validate-assignment.py

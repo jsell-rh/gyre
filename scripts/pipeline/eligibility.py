@@ -15,6 +15,8 @@ def eligible(store, work):
         # A retry may still need to restore a captured checkpoint after the
         # sandbox was deleted. Deletion and recovery have separate receipts.
         return row is not None
+    if store.setting('task_paused:' + task['name'], False):
+        return False
     if data.get('delivered'):
         return False
     if stage == 'triage':
