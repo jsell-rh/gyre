@@ -376,14 +376,41 @@ mod tests {
         // version and on a dedup collision aborting at CREATE UNIQUE INDEX.
         conn.run_migrations(&target).unwrap();
 
-        #[derive(diesel::QueryableByName)]
-        #[allow(clippy::redundant_field_names)] // field name mirrors the column being selected
-        struct Row {
-            #[diesel(sql_type = diesel::sql_types::Text)]
-            id: String,
-            #[diesel(sql_type = diesel::sql_types::Text)]
-            username: String,
+        // `QueryableByName`'s derive (diesel_derives 2.3.7) expands to
+        // `Self { field: field, … }` with spans mapped onto the field
+        // declarations, so clippy::redundant_field_names fires on
+        // derive-generated code. The generated construction sits in a dummy
+        // module that inherits neither struct- nor field-level `#[allow]`
+        // (verified in this repo on the same diesel version — see
+        // sqlite/search.rs), so the lint is scoped off for this row-carrier
+        // module instead. Nothing in here writes `field: field`
+        // initializations by hand.
+        mod rows {
+            #![allow(clippy::redundant_field_names)]
+
+            #[derive(diesel::QueryableByName)]
+            pub(super) struct Row {
+                #[diesel(sql_type = diesel::sql_types::Text)]
+                pub(super) id: String,
+                #[diesel(sql_type = diesel::sql_types::Text)]
+                pub(super) username: String,
+            }
+
+            // Defaults backfilled for rows predating the new columns.
+            #[derive(diesel::QueryableByName)]
+            pub(super) struct Defaults {
+                #[diesel(sql_type = diesel::sql_types::Text)]
+                pub(super) timezone: String,
+                #[diesel(sql_type = diesel::sql_types::Text)]
+                pub(super) locale: String,
+                #[diesel(sql_type = diesel::sql_types::Text)]
+                pub(super) global_role: String,
+                #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+                pub(super) preferences: Option<String>,
+            }
         }
+        use rows::{Defaults, Row};
+
         let rows: Vec<Row> = diesel::sql_query("SELECT id, username FROM users")
             .load(&mut conn)
             .unwrap();
@@ -434,19 +461,6 @@ mod tests {
             "backfilled usernames are not unique: {handles:?}"
         );
 
-        // Defaults backfilled for rows predating the new columns.
-        #[derive(diesel::QueryableByName)]
-        #[allow(clippy::redundant_field_names)] // field names mirror the columns being selected
-        struct Defaults {
-            #[diesel(sql_type = diesel::sql_types::Text)]
-            timezone: String,
-            #[diesel(sql_type = diesel::sql_types::Text)]
-            locale: String,
-            #[diesel(sql_type = diesel::sql_types::Text)]
-            global_role: String,
-            #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
-            preferences: Option<String>,
-        }
         let d: Defaults = diesel::sql_query(
             "SELECT timezone, locale, global_role, preferences FROM users WHERE id = 'u-alice-1'",
         )
