@@ -3339,7 +3339,7 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None)
+    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None)
 }
 
 /// Build an AppState with a custom JjOpsPort for tests that need to
@@ -3360,7 +3360,30 @@ pub fn test_state_with_storage(
     storage: Arc<dyn gyre_ports::storage::StoragePort>,
 ) -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, Some(storage))
+    test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        Some(storage),
+        None,
+    )
+}
+
+/// Build a test AppState with a custom `SecretRepository` — used to exercise
+/// the spawn path's resolve-failure branch (task-097 F2) with a port that
+/// always errors, everything else in-memory and real.
+#[cfg(test)]
+pub fn test_state_with_secrets(
+    secrets: Arc<dyn gyre_ports::SecretRepository>,
+) -> Arc<crate::AppState> {
+    let (workspaces, policies) = shared_workspace_policy_pair(false);
+    test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        None,
+        Some(secrets),
+    )
 }
 
 /// Build a test AppState whose workspace repo fails every `apply_trust_transition`,
@@ -3368,7 +3391,7 @@ pub fn test_state_with_storage(
 #[cfg(test)]
 pub fn test_state_failing_trust() -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(true);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None)
+    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None)
 }
 
 /// Construct a paired workspace + policy repo that share a single in-memory
@@ -3396,17 +3419,19 @@ fn shared_workspace_policy_pair(
 #[cfg(test)]
 pub fn test_state_with_git_ops(git_ops: Arc<dyn gyre_ports::GitOpsPort>) -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(git_ops, workspaces, policies, None)
+    test_state_inner(git_ops, workspaces, policies, None, None)
 }
 
 /// Shared builder for all in-memory test states. Callers supply the git ops
-/// adapter plus a paired workspace/policy repo (see `shared_workspace_policy_pair`).
+/// adapter plus a paired workspace/policy repo (see `shared_workspace_policy_pair`);
+/// `secrets` overrides the default in-memory SecretRepository when given.
 #[cfg(test)]
 fn test_state_inner(
     git_ops: Arc<dyn gyre_ports::GitOpsPort>,
     workspaces: Arc<dyn WorkspaceRepository>,
     policies: Arc<dyn gyre_ports::PolicyRepository>,
     storage: Option<Arc<dyn gyre_ports::storage::StoragePort>>,
+    secrets: Option<Arc<dyn gyre_ports::SecretRepository>>,
 ) -> Arc<crate::AppState> {
     use std::collections::HashMap;
     use tokio::sync::{broadcast, Mutex};
@@ -3438,6 +3463,7 @@ fn test_state_inner(
             .unwrap_or_default()
             .as_secs(),
         compose_sessions: Arc::new(Mutex::new(HashMap::new())),
+        explorer_sessions: Arc::new(crate::explorer_ws::ExplorerSessionRegistry::new()),
         retention_store: crate::retention::RetentionStore::new(),
         job_registry: Arc::new(crate::jobs::JobRegistry::new()),
         analytics: Arc::new(MemAnalyticsRepository::default()),
@@ -3526,7 +3552,7 @@ fn test_state_inner(
         user_notification_prefs: Arc::new(MemUserNotificationPreferenceRepository::default()),
         user_tokens: Arc::new(MemUserTokenRepository::default()),
         judgment_ledger: Arc::new(MemJudgmentLedgerRepository),
-        secrets: Arc::new(MemSecretRepository::default()),
+        secrets: secrets.unwrap_or_else(|| Arc::new(MemSecretRepository::default())),
         ws_tickets: crate::auth::WsTicketStore::new(),
     })
 }
@@ -3552,14 +3578,21 @@ fn mem_now_secs() -> u64 {
 impl gyre_ports::SecretRepository for MemSecretRepository {
     async fn create(&self, secret: &gyre_common::Secret, value: &[u8]) -> Result<()> {
         let mut store = self.store.lock().await;
-        if store.iter().any(|(tenant_id, existing, _)| {
-            tenant_id == &secret.tenant_id
-                && (existing.id == secret.id
-                    || (existing.scope == secret.scope
-                        && existing.scope_id == secret.scope_id
-                        && existing.name == secret.name))
+        // Mirror the SQLite UNIQUE(id) + UNIQUE(tenant, scope, scope_id, name)
+        // failure mode: reject duplicates instead of silently shadowing them
+        // (get_value/rotate only ever find the first entry).
+        if store.iter().any(|(tid, s, _)| {
+            tid == &secret.tenant_id
+                && (s.id == secret.id
+                    || (s.scope == secret.scope
+                        && s.scope_id == secret.scope_id
+                        && s.name == secret.name))
         }) {
-            anyhow::bail!("secret id or scope/name already exists in tenant");
+            anyhow::bail!(
+                "secret {} already exists in tenant {} (duplicate id or scope/name)",
+                secret.id,
+                secret.tenant_id
+            );
         }
         store.push((secret.tenant_id.clone(), secret.clone(), value.to_vec()));
         Ok(())
@@ -3651,40 +3684,6 @@ impl gyre_ports::SecretRepository for MemSecretRepository {
     }
 }
 
-#[cfg(test)]
-mod secret_contract_tests {
-    use super::*;
-    use gyre_ports::SecretRepository;
-
-    #[tokio::test]
-    async fn create_rejects_duplicate_id_and_scope_name() {
-        let repo = MemSecretRepository::default();
-        let original = gyre_common::Secret {
-            id: Id::new("secret-1"),
-            name: "API_KEY".into(),
-            scope: gyre_common::SecretScope::Repo,
-            scope_id: "repo-1".into(),
-            secret_type: gyre_common::SecretType::Static,
-            created_by: "user-1".into(),
-            created_at: 1,
-            expires_at: None,
-            last_rotated_at: None,
-            tenant_id: "tenant-1".into(),
-        };
-        repo.create(&original, b"first").await.unwrap();
-        let mut duplicate_id = original.clone();
-        duplicate_id.name = "OTHER_KEY".into();
-        assert!(repo.create(&duplicate_id, b"second").await.is_err());
-        let mut duplicate_name = original.clone();
-        duplicate_name.id = Id::new("secret-2");
-        assert!(repo.create(&duplicate_name, b"third").await.is_err());
-        assert_eq!(
-            repo.get_value(&original.id, "tenant-1").await.unwrap(),
-            Some(b"first".to_vec())
-        );
-    }
-}
-
 // ── In-memory TraceRepository ────────────────────────────────────────────────
 
 #[derive(Default)]
@@ -3700,11 +3699,41 @@ pub struct MemTraceRepository {
 impl gyre_ports::TraceRepository for MemTraceRepository {
     async fn store(&self, trace: &gyre_common::GateTrace) -> Result<()> {
         let mut guard = self.store.lock().await;
+        // Capture the previous trace's run id before replacement: the SQLite
+        // delete of the replaced trace cascades to its trace_spans rows, so
+        // the mem replacement must drop the previous run's payloads with it.
+        let old_run_ids: Vec<String> = guard
+            .values()
+            .filter(|v| v.mr_id == trace.mr_id)
+            .map(|v| v.gate_run_id.as_str().to_string())
+            .collect();
         // Replace any existing trace for same MR (capped at most recent).
         // A fresh capture is non-permanent (SQLite inserts permanent=0).
         self.permanent.lock().await.remove(trace.mr_id.as_str());
         guard.retain(|_, v| v.mr_id != trace.mr_id);
         guard.insert(trace.mr_id.as_str().to_string(), trace.clone());
+
+        // Mirror the SQLite adapter: every span's payload blob is written at
+        // store() time (sqlite/trace.rs builds it from input/output before
+        // insert), keyed by gate_run_id + span_id.
+        let mut payloads = self.payloads.lock().await;
+        for run_id in &old_run_ids {
+            payloads.retain(|(rid, _), _| rid != run_id);
+        }
+        for span in &trace.spans {
+            // build_payload_blob semantics: a span with BOTH summaries absent
+            // has no payload row (NULL blob) -- skip it entirely.
+            if span.input_summary.is_none() && span.output_summary.is_none() {
+                continue;
+            }
+            payloads.insert(
+                (trace.gate_run_id.as_str().to_string(), span.span_id.clone()),
+                gyre_ports::trace::SpanPayload {
+                    input: span.input_summary.as_ref().map(|s| s.clone().into_bytes()),
+                    output: span.output_summary.as_ref().map(|s| s.clone().into_bytes()),
+                },
+            );
+        }
         Ok(())
     }
 
@@ -3719,9 +3748,17 @@ impl gyre_ports::TraceRepository for MemTraceRepository {
     ) -> Result<Option<gyre_ports::trace::SpanPayload>> {
         let guard = self.payloads.lock().await;
         let key = (gate_run_id.as_str().to_string(), span_id.to_string());
+        // decode_payload_blob parity (sqlite/trace.rs): empty input/output
+        // byte sections come back as None, not Some(vec![]).
+        let empty_to_none = |v: &Option<Vec<u8>>| -> Option<Vec<u8>> {
+            match v {
+                Some(b) if b.is_empty() => None,
+                other => other.clone(),
+            }
+        };
         Ok(guard.get(&key).map(|p| gyre_ports::trace::SpanPayload {
-            input: p.input.clone(),
-            output: p.output.clone(),
+            input: empty_to_none(&p.input),
+            output: empty_to_none(&p.output),
         }))
     }
 
@@ -3738,7 +3775,16 @@ impl gyre_ports::TraceRepository for MemTraceRepository {
         if self.permanent.lock().await.contains(mr_id.as_str()) {
             return Ok(());
         }
-        self.store.lock().await.remove(mr_id.as_str());
+        // SQLite's ON DELETE CASCADE removes the trace's span rows with the
+        // gate_traces row; drop this MR's span payloads with it.
+        let removed = self.store.lock().await.remove(mr_id.as_str());
+        if let Some(trace) = removed {
+            let run_id = trace.gate_run_id.as_str().to_string();
+            self.payloads
+                .lock()
+                .await
+                .retain(|(rid, _), _| rid != &run_id);
+        }
         Ok(())
     }
 }
@@ -4432,5 +4478,296 @@ impl gyre_ports::TrustAnchorRepository for MemTrustAnchorRepository {
             .await
             .retain(|(tid, a)| !(tid == tenant_id && a.id == anchor_id));
         Ok(())
+    }
+}
+#[cfg(test)]
+mod secret_contract_tests {
+    //! F1 (task-097): the mem adapter must enforce the SecretRepository port's
+    //! duplicate-rejection contract in code — SQLite enforces it via UNIQUE
+    //! constraints, so a mem-only guard is the only thing tests can catch.
+    use super::*;
+    use gyre_common::{Secret, SecretScope, SecretType};
+    use gyre_ports::SecretRepository as _;
+
+    fn sample_secret(
+        id: &str,
+        name: &str,
+        scope: SecretScope,
+        scope_id: &str,
+        tenant: &str,
+    ) -> Secret {
+        Secret {
+            id: Id::new(id),
+            name: name.to_string(),
+            scope,
+            scope_id: scope_id.to_string(),
+            secret_type: SecretType::Static,
+            created_by: "test".to_string(),
+            created_at: mem_now_secs(),
+            expires_at: None,
+            last_rotated_at: None,
+            tenant_id: tenant.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_rejects_duplicate_id_same_tenant() {
+        let repo = MemSecretRepository::default();
+        let s = sample_secret(
+            "sec-1",
+            "ALPHA",
+            SecretScope::Tenant,
+            "tenant-a",
+            "tenant-a",
+        );
+        repo.create(&s, b"v1").await.unwrap();
+
+        // Same id, different name/scope — still a duplicate (SQLite PK).
+        let dup = sample_secret("sec-1", "BETA", SecretScope::Repo, "repo-9", "tenant-a");
+        let err = repo.create(&dup, b"v2").await;
+        assert!(err.is_err(), "duplicate id in same tenant must be rejected");
+    }
+
+    #[tokio::test]
+    async fn create_rejects_duplicate_scope_and_name_same_tenant() {
+        let repo = MemSecretRepository::default();
+        let s = sample_secret("sec-1", "ALPHA", SecretScope::Repo, "repo-1", "tenant-a");
+        repo.create(&s, b"v1").await.unwrap();
+
+        // Same (scope, scope_id, name) via a fresh id — the UNIQUE the port doc names.
+        let dup = sample_secret("sec-2", "ALPHA", SecretScope::Repo, "repo-1", "tenant-a");
+        let err = repo.create(&dup, b"v2").await;
+        assert!(
+            err.is_err(),
+            "duplicate (scope, scope_id, name) in same tenant must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_allows_same_name_different_tenant() {
+        let repo = MemSecretRepository::default();
+        let a = sample_secret(
+            "sec-1",
+            "ALPHA",
+            SecretScope::Tenant,
+            "tenant-a",
+            "tenant-a",
+        );
+        let b = sample_secret(
+            "sec-2",
+            "ALPHA",
+            SecretScope::Tenant,
+            "tenant-b",
+            "tenant-b",
+        );
+        repo.create(&a, b"v1").await.unwrap();
+        repo.create(&b, b"v2").await.unwrap();
+
+        // Both tenants must independently resolve their own value.
+        let va = repo.get_value(&a.id, "tenant-a").await.unwrap();
+        let vb = repo.get_value(&b.id, "tenant-b").await.unwrap();
+        assert_eq!(va.as_deref(), Some(b"v1".as_slice()));
+        assert_eq!(vb.as_deref(), Some(b"v2".as_slice()));
+    }
+
+    #[tokio::test]
+    async fn create_allows_different_name_same_scope() {
+        let repo = MemSecretRepository::default();
+        let a = sample_secret("sec-1", "ALPHA", SecretScope::Workspace, "ws-1", "tenant-a");
+        let b = sample_secret("sec-2", "BETA", SecretScope::Workspace, "ws-1", "tenant-a");
+        repo.create(&a, b"v1").await.unwrap();
+        repo.create(&b, b"v2").await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod trace_payload_tests {
+    //! Task-087 F2 / task-097 repair: MemTraceRepository.payloads must be
+    //! populated by store() exactly like the SQLite adapter builds its
+    //! payload blobs -- in-memory mode previously 404'd every span payload.
+    //! These mirror sqlite/trace.rs's round-trip tests plus the
+    //! replacement/cascade semantics the ON DELETE CASCADE gives SQLite.
+    use super::*;
+    use gyre_ports::TraceRepository as _;
+
+    fn span(span_id: &str, input: Option<&str>, output: Option<&str>) -> gyre_common::TraceSpan {
+        gyre_common::TraceSpan {
+            span_id: span_id.to_string(),
+            parent_span_id: None,
+            operation_name: "GET /api/health".to_string(),
+            service_name: "gyre-server".to_string(),
+            kind: gyre_common::SpanKind::Server,
+            start_time: 1_000_000,
+            duration_us: 2_000,
+            attributes: std::collections::HashMap::new(),
+            input_summary: input.map(str::to_string),
+            output_summary: output.map(str::to_string),
+            status: gyre_common::SpanStatus::Ok,
+            graph_node_id: None,
+        }
+    }
+
+    fn trace(
+        mr_id: &str,
+        gate_run_id: &str,
+        spans: Vec<gyre_common::TraceSpan>,
+    ) -> gyre_common::GateTrace {
+        gyre_common::GateTrace {
+            id: Id::new(uuid::Uuid::new_v4().to_string()),
+            mr_id: Id::new(mr_id),
+            gate_run_id: Id::new(gate_run_id),
+            commit_sha: "abc123".to_string(),
+            spans,
+            captured_at: 1_700_000_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn get_span_payload_roundtrip() {
+        let repo = MemTraceRepository::default();
+        repo.store(&trace(
+            "mr-1",
+            "gate-run-1",
+            vec![span("span-1", Some("{}"), Some(r#"{"ok":true}"#))],
+        ))
+        .await
+        .unwrap();
+
+        let payload = repo
+            .get_span_payload(&Id::new("gate-run-1"), "span-1")
+            .await
+            .unwrap()
+            .expect("stored span with summaries must have a payload");
+        let input = payload.input.map(|b| String::from_utf8(b).unwrap());
+        let output = payload.output.map(|b| String::from_utf8(b).unwrap());
+        assert_eq!(input.as_deref(), Some("{}"));
+        assert_eq!(output.as_deref(), Some(r#"{"ok":true}"#));
+    }
+
+    #[tokio::test]
+    async fn span_with_no_payload_returns_none() {
+        let repo = MemTraceRepository::default();
+        repo.store(&trace(
+            "mr-1",
+            "gate-run-1",
+            vec![span("span-1", None, None)],
+        ))
+        .await
+        .unwrap();
+
+        let payload = repo
+            .get_span_payload(&Id::new("gate-run-1"), "span-1")
+            .await
+            .unwrap();
+        assert!(
+            payload.is_none(),
+            "both-summaries-absent span has no payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_span_or_run_returns_none() {
+        let repo = MemTraceRepository::default();
+        repo.store(&trace(
+            "mr-1",
+            "gate-run-1",
+            vec![span("span-1", Some("i"), Some("o"))],
+        ))
+        .await
+        .unwrap();
+
+        // Span id is only unique within a trace: a different run's id must
+        // not resolve this run's payload.
+        assert!(repo
+            .get_span_payload(&Id::new("gate-run-2"), "span-1")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(repo
+            .get_span_payload(&Id::new("gate-run-1"), "span-2")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn store_replaces_previous_run_payloads() {
+        let repo = MemTraceRepository::default();
+        repo.store(&trace(
+            "mr-1",
+            "gate-run-1",
+            vec![span("span-1", Some("old-input"), Some("old-output"))],
+        ))
+        .await
+        .unwrap();
+        repo.store(&trace(
+            "mr-1",
+            "gate-run-2",
+            vec![span("span-1", Some("new-input"), None)],
+        ))
+        .await
+        .unwrap();
+
+        // Old run's payload went away with the replaced trace (SQLite:
+        // delete + cascade to trace_spans, then re-insert).
+        assert!(repo
+            .get_span_payload(&Id::new("gate-run-1"), "span-1")
+            .await
+            .unwrap()
+            .is_none());
+        let payload = repo
+            .get_span_payload(&Id::new("gate-run-2"), "span-1")
+            .await
+            .unwrap()
+            .expect("new run's span payload must resolve");
+        let input = payload.input.map(|b| String::from_utf8(b).unwrap());
+        let output = payload.output.map(|b| String::from_utf8(b).unwrap());
+        assert_eq!(input.as_deref(), Some("new-input"));
+        assert_eq!(output.as_deref(), None, "None summary stays absent");
+    }
+
+    #[tokio::test]
+    async fn delete_by_mr_removes_payloads() {
+        let repo = MemTraceRepository::default();
+        repo.store(&trace(
+            "mr-1",
+            "gate-run-1",
+            vec![span("span-1", Some("i"), Some("o"))],
+        ))
+        .await
+        .unwrap();
+
+        repo.delete_by_mr(&Id::new("mr-1")).await.unwrap();
+
+        assert!(repo
+            .get_span_payload(&Id::new("gate-run-1"), "span-1")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn promote_to_attestation_preserves_payloads() {
+        let repo = MemTraceRepository::default();
+        repo.store(&trace(
+            "mr-1",
+            "gate-run-1",
+            vec![span("span-1", Some("i"), Some("o"))],
+        ))
+        .await
+        .unwrap();
+        repo.promote_to_attestation(&Id::new("mr-1")).await.unwrap();
+
+        // Promoted trace survives delete_by_mr (permanent=1 rows survive) --
+        // its payloads must survive with it, mirroring SQLite.
+        repo.delete_by_mr(&Id::new("mr-1")).await.unwrap();
+
+        let payload = repo
+            .get_span_payload(&Id::new("gate-run-1"), "span-1")
+            .await
+            .unwrap()
+            .expect("promoted trace's payloads must survive delete_by_mr");
+        let input = payload.input.map(|b| String::from_utf8(b).unwrap());
+        assert_eq!(input.as_deref(), Some("i"));
     }
 }
