@@ -672,8 +672,18 @@ fn has_workspace_scopes(auth: &AuthenticatedAgent) -> bool {
 /// agent token) is not token-scoped here — those callers are authorized by
 /// the ABAC/RBAC layers instead, matching the pre-existing behaviour.
 ///
+/// Targets are resolved from real state where the tool addresses entities
+/// indirectly: `gyre_update_task`/`gyre_decompose_spec` address tasks by id
+/// (never by the repo_id/workspace_id args), so the target task's actual
+/// repo/workspace is loaded from `state.tasks`; repo-addressable read
+/// tools resolve the target repo's workspace for workspace-tier callers.
+/// Repo identity is checked against the signed `repo_id` claim (scope
+/// entries name repos by *name* while tools address repos by *id* — the
+/// claim and the scope entries are written by the same mint).
+///
 /// Returns `Err(message)` describing the mismatch on rejection.
-fn validate_tool_scope(
+async fn validate_tool_scope(
+    state: &AppState,
     tool_name: &str,
     args: &Value,
     auth: &AuthenticatedAgent,
@@ -702,14 +712,20 @@ fn validate_tool_scope(
                 .get("repository_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            check_repo_write_scope(auth, Some(repo), tool_name)
+            if repo.is_empty() {
+                return Ok(()); // handler rejects the missing field — no write happens
+            }
+            check_repo_target_by_id(auth, repo, false, tool_name)
         }
         "gyre_list_mrs" => {
             let repo = args
                 .get("repository_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            check_repo_read_scope(auth, Some(repo), tool_name)
+            if repo.is_empty() {
+                return Ok(()); // handler rejects the missing field
+            }
+            check_repo_read_target(state, auth, repo, tool_name).await
         }
         // Repo-tier spawning (repo orchestrator persona). A token carrying
         // repo scopes must hold `repo:{target}:spawn` — a worker's
@@ -720,7 +736,14 @@ fn validate_tool_scope(
         "gyre_spawn_worker" => {
             if has_repo_scopes(auth) {
                 let repo = args.get("repo_id").and_then(|v| v.as_str()).unwrap_or("");
-                check_repo_scope(auth, Some(repo), true, tool_name)
+                if repo.is_empty() {
+                    // No explicit target: the handler spawns in the caller's
+                    // own repo (repo_orchestrator_scope) — validate the spawn
+                    // right on the token's single repo scope.
+                    check_repo_scope(auth, None, true, tool_name)
+                } else {
+                    check_repo_target_by_id(auth, repo, true, tool_name)
+                }
             } else {
                 Ok(())
             }
@@ -753,28 +776,87 @@ fn validate_tool_scope(
                 .unwrap_or("");
             check_workspace_scope(auth, Some(ws), true, tool_name)
         }
-        // Cross-tier creation tools: accept either a matching repo scope or a
-        // matching workspace scope (both orchestrator tiers may create tasks).
-        "gyre_create_task" | "gyre_update_task" | "gyre_decompose_spec" => {
-            let repo = args.get("repo_id").and_then(|v| v.as_str()).unwrap_or("");
+        // Task-addressing tools: the target task is addressed by id
+        // (`gyre_update_task`) or parent id (`gyre_decompose_spec`), never
+        // by the repo_id/workspace_id args — resolve the task's actual
+        // repo/workspace from state and check it against the token. A
+        // repo-tier token may act on tasks in its own repo; a
+        // workspace-tier token on tasks in its own workspace.
+        "gyre_update_task" | "gyre_decompose_spec" => {
+            let id_key = if tool_name == "gyre_update_task" {
+                "id"
+            } else {
+                "parent_task_id"
+            };
+            let task_id = args.get(id_key).and_then(|v| v.as_str()).unwrap_or("");
+            if task_id.is_empty() {
+                return Ok(()); // handler rejects the missing field — no write happens
+            }
+            let task = match state.tasks.find_by_id(&Id::new(task_id)).await {
+                Ok(Some(t)) => t,
+                // Handler reports "Task not found" — no scope decision needed.
+                Ok(None) => return Ok(()),
+                Err(e) => {
+                    return Err(format!(
+                        "PERMISSION_DENIED: task lookup failed, refusing {tool_name}: {e}"
+                    ))
+                }
+            };
+            check_task_target(auth, &task, task_id, tool_name)
+        }
+        // Task creation: explicit repo_id/workspace_id targets must lie
+        // within the caller's tier; absent targets are clamped to the
+        // caller's own claims by handle_create_task (a scoped caller cannot
+        // create floating unscoped tasks).
+        "gyre_create_task" => check_create_task_target(state, auth, args, tool_name).await,
+        // gyre_search addresses a workspace explicitly via its workspace_id
+        // arg — a scoped caller may only search its own workspace; an absent
+        // target is clamped to the caller's workspace claim in handle_search
+        // rather than widening the query tenant-wide.
+        "gyre_search" => {
+            let own = match &auth.workspace_id {
+                Some(w) => w.clone(),
+                None => {
+                    return Err(format!(
+                        "PERMISSION_DENIED: agent token carries no workspace claim; refusing {tool_name}"
+                    ))
+                }
+            };
             let ws = args
                 .get("workspace_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            if !repo.is_empty() {
-                return check_repo_scope(auth, Some(repo), false, tool_name)
-                    .or_else(|_| check_workspace_scope(auth, Some(ws), false, tool_name));
+            if ws.is_empty() || ws == own {
+                return Ok(());
             }
-            if !ws.is_empty() {
-                return check_workspace_scope(auth, Some(ws), false, tool_name);
+            if has_workspace_scopes(auth) {
+                check_workspace_scope(auth, Some(ws), false, tool_name)
+            } else {
+                Err(format!(
+                    "PERMISSION_DENIED: token scope {:?} does not permit searching workspace {ws}",
+                    auth.scope
+                ))
             }
-            Ok(())
         }
-        // Read-only platform tools (search, analytics, graph, spec-assist,
-        // messaging): scoped callers may read within their tier; the
-        // repo/workspace context is not addressable by these tools' args in
-        // a way that escapes the caller's own principal (message routing is
-        // agent-identity based and already validated per tool).
+        // Repo-addressable read tools (realized-model graph + spec assist):
+        // the explicit repo_id target must be the caller's own repo (repo
+        // tier) or a repo of the caller's workspace (workspace tier — the
+        // repo's real workspace is resolved from state).
+        "graph_summary" | "graph_query_dryrun" | "graph_nodes" | "graph_edges"
+        | "search" | "node_provenance" | "graph_concept" | "spec_assist" => {
+            let repo = args.get("repo_id").and_then(|v| v.as_str()).unwrap_or("");
+            if repo.is_empty() {
+                return Ok(()); // handler rejects the missing field
+            }
+            check_repo_read_target(state, auth, repo, tool_name).await
+        }
+        // Remaining read-only platform tools (analytics, messaging,
+        // conversation upload): scoped callers may read within their tier —
+        // analytics returns aggregate counters with no scope-addressable
+        // args, messaging is agent-identity routed and validated per tool,
+        // conversation upload is caller-bound (see the platform-model.md
+        // §Token Scoping coverage row for the per-tool read-surface
+        // justification).
         _ => Ok(()),
     }
 }
@@ -940,6 +1022,149 @@ fn check_workspace_scope(
     }
 }
 
+/// Repo-targeted action for a repo-tier token: the target repo (addressed
+/// by id) must be the caller's own `repo_id` claim, and the token's scope
+/// entries must grant the required right on the caller's single repo.
+/// Scope entries name repos by *name* while tools address repos by *id*;
+/// both are written by the same mint, so the identity comes from the
+/// signed repo_id claim rather than string-matching the scope list.
+fn check_repo_target_by_id(
+    auth: &AuthenticatedAgent,
+    repo_id: &str,
+    require_spawn_right: bool,
+    action: &str,
+) -> Result<(), String> {
+    match &auth.repo_id {
+        Some(own) if own == repo_id => check_repo_scope(auth, None, require_spawn_right, action),
+        _ => Err(format!(
+            "PERMISSION_DENIED: token scope {:?} does not permit {action} on repo {repo_id}",
+            auth.scope
+        )),
+    }
+}
+
+/// Repo-addressable read for any scoped tier: a repo-tier token must target
+/// its own repo; a workspace-tier token may read any repo of its workspace
+/// (the target repo's real workspace is resolved from state — repo
+/// membership is not derivable from the token alone). Unresolvable repos
+/// fail closed.
+async fn check_repo_read_target(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    repo_id: &str,
+    tool_name: &str,
+) -> Result<(), String> {
+    if has_repo_scopes(auth) {
+        return check_repo_target_by_id(auth, repo_id, false, tool_name);
+    }
+    let ws = match state.repos.find_by_id(&Id::new(repo_id)).await {
+        Ok(Some(repo)) => repo.workspace_id.to_string(),
+        Ok(None) => {
+            return Err(format!(
+                "PERMISSION_DENIED: cannot verify repo {repo_id} belongs to the caller's workspace; refusing {tool_name}"
+            ))
+        }
+        Err(e) => return Err(format!("repo lookup failed, refusing {tool_name}: {e}")),
+    };
+    check_workspace_scope(auth, Some(&ws), false, tool_name)
+}
+
+/// Task-targeted action (`gyre_update_task` / `gyre_decompose_spec`): the
+/// target task's real repo/workspace (resolved from state by the caller)
+/// must lie within the caller's tier — a repo-tier token may act on tasks
+/// in its own repo, a workspace-tier token on tasks in its own workspace.
+fn check_task_target(
+    auth: &AuthenticatedAgent,
+    task: &Task,
+    task_id: &str,
+    tool_name: &str,
+) -> Result<(), String> {
+    if has_repo_scopes(auth) {
+        return check_repo_target_by_id(auth, &task.repo_id.to_string(), false, tool_name)
+            .map_err(|_| {
+                format!(
+                    "PERMISSION_DENIED: token scope {:?} does not permit {tool_name} on task {task_id} (repo {})",
+                    auth.scope, task.repo_id
+                )
+            });
+    }
+    check_workspace_scope(
+        auth,
+        Some(&task.workspace_id.to_string()),
+        false,
+        tool_name,
+    )
+    .map_err(|_| {
+        format!(
+            "PERMISSION_DENIED: token scope {:?} does not permit {tool_name} on task {task_id} (workspace {})",
+            auth.scope, task.workspace_id
+        )
+    })
+}
+
+/// `gyre_create_task` target validation: explicit repo_id/workspace_id
+/// args must lie within the caller's tier (repo-tier: the caller's own
+/// repo/workspace claims; workspace-tier: the caller's workspace). Absent
+/// targets are clamped to the caller's own claims by handle_create_task.
+async fn check_create_task_target(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    args: &Value,
+    tool_name: &str,
+) -> Result<(), String> {
+    let repo = args.get("repo_id").and_then(|v| v.as_str()).unwrap_or("");
+    let ws = args
+        .get("workspace_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if has_repo_scopes(auth) {
+        // Repo-tier token: both explicit targets must be the caller's own,
+        // and the token must carry the write right on its single repo.
+        if !repo.is_empty() {
+            check_repo_target_by_id(auth, repo, false, tool_name)?;
+        }
+        if !ws.is_empty() && auth.workspace_id.as_deref() != Some(ws) {
+            return Err(format!(
+                "PERMISSION_DENIED: token scope {:?} does not permit creating tasks in workspace {ws}",
+                auth.scope
+            ));
+        }
+        check_repo_scope(auth, None, false, tool_name)
+    } else {
+        // Workspace-tier token: explicit targets must resolve into the
+        // caller's workspace (the repo's real workspace comes from state —
+        // a workspace token may not create tasks in repos of another
+        // workspace by omitting the workspace_id arg).
+        if !ws.is_empty() {
+            check_workspace_scope(auth, Some(ws), false, tool_name)?;
+        }
+        if !repo.is_empty() {
+            let repo_ws = match state.repos.find_by_id(&Id::new(repo)).await {
+                Ok(Some(r)) => r.workspace_id.to_string(),
+                Ok(None) => {
+                    return Err(format!(
+                        "PERMISSION_DENIED: cannot verify repo {repo} belongs to the caller's workspace; refusing {tool_name}"
+                    ))
+                }
+                Err(e) => return Err(format!("repo lookup failed, refusing {tool_name}: {e}")),
+            };
+            check_workspace_scope(auth, Some(&repo_ws), false, tool_name)?;
+        }
+        Ok(())
+    }
+}
+
+/// Visibility of a task to a scoped caller (§1 Token Scoping): repo-tier
+/// tokens see their own repo's tasks; workspace-tier tokens their
+/// workspace's tasks. Both bounds come from the signed token's claims.
+fn task_visible_to_caller(auth: &AuthenticatedAgent, task: &Task) -> bool {
+    if let Some(repo) = &auth.repo_id {
+        &task.repo_id.to_string() == repo
+    } else {
+        auth.workspace_id.as_deref() == Some(&task.workspace_id.to_string())
+    }
+}
+
 /// Workspace-orchestrator scope from an agent JWT (task-093): the caller's
 /// workspace_id. `None` when the caller is not a workspace orchestrator.
 fn workspace_orchestrator_scope(auth: &AuthenticatedAgent) -> Option<String> {
@@ -983,7 +1208,7 @@ fn parse_status(s: &str) -> Option<TaskStatus> {
     }
 }
 
-async fn handle_create_task(state: &AppState, args: &Value) -> Value {
+async fn handle_create_task(state: &AppState, args: &Value, auth: &AuthenticatedAgent) -> Value {
     let title = match require_str(args, "title") {
         Ok(t) => t.to_string(),
         Err(_) => return tool_error("missing required field: title"),
@@ -1029,6 +1254,22 @@ async fn handle_create_task(state: &AppState, args: &Value) -> Value {
     }
     if let Some(ws_id) = get_str(args, "workspace_id") {
         task.workspace_id = Id::new(ws_id);
+    }
+    // §1 Token Scoping: a scoped caller creates within its own tier —
+    // validate_tool_scope rejected explicit out-of-scope targets; absent
+    // targets default to the caller's own claims (from the signed token)
+    // instead of floating unscoped values.
+    if is_agent_jwt(auth) {
+        if get_str(args, "repo_id").is_none() {
+            if let Some(own) = &auth.repo_id {
+                task.repo_id = Id::new(own);
+            }
+        }
+        if get_str(args, "workspace_id").is_none() {
+            if let Some(own) = &auth.workspace_id {
+                task.workspace_id = Id::new(own);
+            }
+        }
     }
     match state.tasks.create(&task).await {
         Ok(()) => tool_result(format!("Created task {} (id: {})", task.title, task.id)),
@@ -1268,7 +1509,7 @@ async fn handle_spawn_worker(
     }
 }
 
-async fn handle_list_tasks(state: &AppState, args: &Value) -> Value {
+async fn handle_list_tasks(state: &AppState, args: &Value, auth: &AuthenticatedAgent) -> Value {
     let tasks = if let Some(status_str) = get_str(args, "status") {
         if let Some(status) = parse_status(status_str) {
             state.tasks.list_by_status(&status).await
@@ -1282,7 +1523,18 @@ async fn handle_list_tasks(state: &AppState, args: &Value) -> Value {
     };
     match tasks {
         Ok(list) => {
-            let items: Vec<Value> = list
+            // §1 Token Scoping: a scoped caller enumerates only within its
+            // tier — repo-tier tokens (workers, repo orchestrators) see
+            // their own repo's tasks, workspace-tier tokens see their
+            // workspace's tasks. Non-scoped callers keep the full list.
+            let visible: Vec<Task> = if is_agent_jwt(auth) {
+                list.into_iter()
+                    .filter(|t| task_visible_to_caller(auth, t))
+                    .collect()
+            } else {
+                list
+            };
+            let items: Vec<Value> = visible
                 .into_iter()
                 .map(|t| {
                     let mut v = json!({
@@ -2100,13 +2352,27 @@ async fn handle_analytics_query(state: &AppState, args: &Value) -> Value {
     }
 }
 
-async fn handle_search(state: &AppState, args: &Value) -> Value {
+async fn handle_search(state: &AppState, args: &Value, auth: &AuthenticatedAgent) -> Value {
     let q = match get_str(args, "q") {
         Some(q) => q.to_string(),
         None => return tool_error("missing required field: q"),
     };
     let entity_type = get_str(args, "entity_type").map(|s| s.to_string());
-    let workspace_id = get_str(args, "workspace_id").map(|s| s.to_string());
+    let mut workspace_id = get_str(args, "workspace_id").map(|s| s.to_string());
+    // §1 Token Scoping: a scoped caller's search is bounded to its own
+    // workspace — validate_tool_scope already rejected explicit targets
+    // beyond it; an absent target is clamped to the caller's workspace
+    // claim rather than widening the query tenant-wide.
+    if is_agent_jwt(auth) {
+        match &auth.workspace_id {
+            Some(own) => workspace_id = Some(own.clone()),
+            None => {
+                return tool_error(
+                    "PERMISSION_DENIED: agent token carries no workspace claim",
+                )
+            }
+        }
+    }
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
     match state
@@ -3331,7 +3597,7 @@ pub async fn mcp_handler(
             // §1 Token Scoping: validate the caller's token scope on every
             // tool call. Scoped callers (agent JWTs) may only act within the
             // tenant/workspace/repo their token encodes.
-            if let Err(denial) = validate_tool_scope(tool_name, &args, &auth) {
+            if let Err(denial) = validate_tool_scope(&state, tool_name, &args, &auth).await {
                 return Json(JsonRpcResponse::err(id, PERMISSION_DENIED, denial));
             }
 
@@ -3386,8 +3652,8 @@ pub async fn mcp_handler(
             }
 
             let result = match tool_name {
-                "gyre_create_task" => handle_create_task(&state, &args).await,
-                "gyre_list_tasks" => handle_list_tasks(&state, &args).await,
+                "gyre_create_task" => handle_create_task(&state, &args, &auth).await,
+                "gyre_list_tasks" => handle_list_tasks(&state, &args, &auth).await,
                 "gyre_update_task" => handle_update_task(&state, &args).await,
                 "gyre_create_mr" => handle_create_mr(&state, &args).await,
                 "gyre_list_mrs" => handle_list_mrs(&state, &args).await,
@@ -3395,7 +3661,7 @@ pub async fn mcp_handler(
                 "gyre_agent_heartbeat" => handle_agent_heartbeat(&state, &args).await,
                 "gyre_agent_complete" => handle_agent_complete(&state, &args).await,
                 "gyre_analytics_query" => handle_analytics_query(&state, &args).await,
-                "gyre_search" => handle_search(&state, &args).await,
+                "gyre_search" => handle_search(&state, &args, &auth).await,
                 "conversation_upload" => handle_conversation_upload(&state, &args, &auth).await,
                 "gyre_message_send" => handle_message_send(&state, &args, &auth).await,
                 "gyre_message_poll" => handle_message_poll(&state, &args, &auth).await,
