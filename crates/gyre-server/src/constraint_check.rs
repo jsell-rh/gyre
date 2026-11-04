@@ -1353,15 +1353,25 @@ async fn create_violation_notifications(
         .await
         .unwrap_or_default();
 
-    // Resolve tenant_id from workspace.
-    let tenant_id = state
-        .workspaces
-        .find_by_id(workspace_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|ws| ws.tenant_id.to_string())
-        .unwrap_or_else(|| "default".to_string());
+    // Resolve tenant_id from the workspace record; never fabricate a
+    // "default" tenant. On an unresolvable workspace, skip creating the
+    // notifications entirely (a fabricated tenant would silently re-target
+    // them) and warn — mirrors emit_reconciliation_completed.
+    let tenant_id = match state.workspaces.find_by_id(workspace_id).await {
+        Ok(Some(ws)) => ws.tenant_id.to_string(),
+        Ok(None) => {
+            warn!(
+                "create_violation_notifications: workspace {workspace_id} not found; skipping constraint violation notifications"
+            );
+            return;
+        }
+        Err(e) => {
+            warn!(
+                "create_violation_notifications: failed to resolve workspace tenant for {workspace_id}: {e}"
+            );
+            return;
+        }
+    };
 
     let now = crate::api::now_secs() as i64;
 

@@ -212,7 +212,7 @@ def main():
                     pipeline.discover_stage(store, stage, base)
             selected = allowed_tasks(store)
             tasks = {t['name']:t['data'] for t in store.tasks()}
-            rows = store.db.execute("SELECT * FROM work WHERE state IN ('ready','retry') ORDER BY CASE stage WHEN 'cleanup' THEN 0 WHEN 'publish' THEN 1 WHEN 'verify' THEN 2 WHEN 'review' THEN 3 WHEN 'implement' THEN 4 ELSE 5 END,priority DESC,created").fetchall()
+            rows = store.db.execute("SELECT * FROM work WHERE state IN ('ready','retry') ORDER BY CASE stage WHEN 'cleanup' THEN 0 WHEN 'publish' THEN 1 WHEN 'triage' THEN 2 WHEN 'verify' THEN 3 WHEN 'review' THEN 4 WHEN 'implement' THEN 5 ELSE 6 END,priority DESC,created").fetchall()
             result = {'jobs':[job(store,dict(r),tasks) for r in rows if (selected is None or r['task'] in selected) and eligible(store,dict(r))], 'errors':[]}
         elif action == 'retry':
             control(store,request); result = {}
