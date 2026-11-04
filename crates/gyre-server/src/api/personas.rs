@@ -266,6 +266,10 @@ pub struct ResolvePersonaQuery {
 
 /// GET /api/v1/personas/resolve?scope_kind=Repo&scope_id={id}&slug={slug}
 /// Nearest-wins scope resolution: Repo > Workspace > Tenant.
+///
+/// `scope_id` must name an existing repo/workspace: the parent ids come from the
+/// entities (`Repository.workspace_id`, `Workspace.tenant_id`), so a missing
+/// entity is `NotFound` rather than a persona miss.
 pub async fn resolve_persona(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ResolvePersonaQuery>,
@@ -273,17 +277,45 @@ pub async fn resolve_persona(
     let slug = q.slug.as_str();
     let scope_id = Id::new(&q.scope_id);
 
-    // Try each scope in order: Repo -> Workspace -> Tenant
+    // Each scope level keys on the id of the scope it belongs to, so the parent
+    // ids must come from the entities themselves (Repository.workspace_id,
+    // Workspace.tenant_id) — not from the queried scope_id. Cloning scope_id
+    // into every level makes the parent lookups unreachable (platform-model.md
+    // §2 Scope Resolution: nearest-scope-wins Repo > Workspace > Tenant).
     let scopes_to_try: Vec<PersonaScope> = match q.scope_kind.as_str() {
-        "Repo" => vec![
-            PersonaScope::Repo(scope_id.clone()),
-            PersonaScope::Workspace(scope_id.clone()),
-            PersonaScope::Tenant(scope_id.clone()),
-        ],
-        "Workspace" => vec![
-            PersonaScope::Workspace(scope_id.clone()),
-            PersonaScope::Tenant(scope_id.clone()),
-        ],
+        "Repo" => {
+            let repo = state.repos.find_by_id(&scope_id).await?.ok_or_else(|| {
+                ApiError::NotFound(format!("repo '{}' not found", scope_id.as_str()))
+            })?;
+            let workspace = state
+                .workspaces
+                .find_by_id(&repo.workspace_id)
+                .await?
+                .ok_or_else(|| {
+                    ApiError::NotFound(format!(
+                        "workspace '{}' not found",
+                        repo.workspace_id.as_str()
+                    ))
+                })?;
+            vec![
+                PersonaScope::Repo(scope_id.clone()),
+                PersonaScope::Workspace(repo.workspace_id),
+                PersonaScope::Tenant(workspace.tenant_id),
+            ]
+        }
+        "Workspace" => {
+            let workspace = state
+                .workspaces
+                .find_by_id(&scope_id)
+                .await?
+                .ok_or_else(|| {
+                    ApiError::NotFound(format!("workspace '{}' not found", scope_id.as_str()))
+                })?;
+            vec![
+                PersonaScope::Workspace(scope_id.clone()),
+                PersonaScope::Tenant(workspace.tenant_id),
+            ]
+        }
         "Tenant" => vec![PersonaScope::Tenant(scope_id.clone())],
         other => {
             return Err(ApiError::InvalidInput(format!(
@@ -419,5 +451,233 @@ mod tests {
         assert_eq!(update_resp.status(), StatusCode::OK);
         let updated = body_json(update_resp).await;
         assert_eq!(updated["name"], "senior-reviewer");
+    }
+
+    // ── Nearest-scope-wins resolution (platform-model.md §2 Scope Resolution) ──
+
+    use gyre_common::Id;
+    use gyre_domain::{
+        Persona, PersonaApprovalStatus, PersonaScope, Repository, Tenant, Workspace,
+    };
+    use std::sync::Arc;
+
+    /// Seed the real scope chain tenant `t1` → workspace `ws1` → repo `r1`.
+    /// The three ids are deliberately distinct so a resolution that reuses the
+    /// queried `scope_id` at every level cannot accidentally match.
+    async fn scoped_state() -> Arc<crate::AppState> {
+        let state = test_state();
+        state
+            .tenants
+            .create(&Tenant::new(Id::new("t1"), "Acme", "acme", 1000))
+            .await
+            .unwrap();
+        state
+            .workspaces
+            .create(&Workspace::new(
+                Id::new("ws1"),
+                Id::new("t1"),
+                "Eng",
+                "eng",
+                1000,
+            ))
+            .await
+            .unwrap();
+        state
+            .repos
+            .create(&Repository::new(
+                Id::new("r1"),
+                Id::new("ws1"),
+                "app",
+                "/repos/app",
+                1000,
+            ))
+            .await
+            .unwrap();
+        state
+    }
+
+    /// Seed an approved `security` persona at `scope`. `prompt` tags which scope
+    /// the persona belongs to so a test can prove the resolver returned the
+    /// parent-scope persona rather than an exact-scope one.
+    async fn seed_security(state: &crate::AppState, id: &str, scope: PersonaScope, prompt: &str) {
+        let mut persona = Persona::new(Id::new(id), "security", "security", scope, prompt, 1000);
+        persona.approval_status = PersonaApprovalStatus::Approved;
+        state.personas.create(&persona).await.unwrap();
+    }
+
+    async fn resolve_uri(app: &Router, uri: &str) -> axum::response::Response {
+        app.clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn resolve_repo_scope_falls_back_to_workspace_persona() {
+        let state = scoped_state().await;
+        seed_security(
+            &state,
+            "p-ws",
+            PersonaScope::Workspace(Id::new("ws1")),
+            "workspace prompt",
+        )
+        .await;
+        let app = crate::api::api_router().with_state(state);
+
+        let resp = resolve_uri(
+            &app,
+            "/api/v1/personas/resolve?slug=security&scope_kind=Repo&scope_id=r1",
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resolved = body_json(resp).await;
+        assert_eq!(resolved["id"], "p-ws");
+        assert_eq!(resolved["system_prompt"], "workspace prompt");
+        assert_eq!(resolved["scope"]["kind"], "Workspace");
+        assert_eq!(resolved["scope"]["id"], "ws1");
+    }
+
+    #[tokio::test]
+    async fn resolve_repo_scope_falls_back_to_tenant_persona() {
+        let state = scoped_state().await;
+        seed_security(
+            &state,
+            "p-tenant",
+            PersonaScope::Tenant(Id::new("t1")),
+            "tenant prompt",
+        )
+        .await;
+        let app = crate::api::api_router().with_state(state);
+
+        let resp = resolve_uri(
+            &app,
+            "/api/v1/personas/resolve?slug=security&scope_kind=Repo&scope_id=r1",
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resolved = body_json(resp).await;
+        assert_eq!(resolved["id"], "p-tenant");
+        assert_eq!(resolved["system_prompt"], "tenant prompt");
+        assert_eq!(resolved["scope"]["id"], "t1");
+    }
+
+    #[tokio::test]
+    async fn resolve_workspace_scope_falls_back_to_tenant_persona() {
+        let state = scoped_state().await;
+        seed_security(
+            &state,
+            "p-tenant",
+            PersonaScope::Tenant(Id::new("t1")),
+            "tenant prompt",
+        )
+        .await;
+        let app = crate::api::api_router().with_state(state);
+
+        let resp = resolve_uri(
+            &app,
+            "/api/v1/personas/resolve?slug=security&scope_kind=Workspace&scope_id=ws1",
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["id"], "p-tenant");
+    }
+
+    #[tokio::test]
+    async fn resolve_prefers_nearest_scope() {
+        let state = scoped_state().await;
+        seed_security(
+            &state,
+            "p-tenant",
+            PersonaScope::Tenant(Id::new("t1")),
+            "tenant prompt",
+        )
+        .await;
+        seed_security(
+            &state,
+            "p-ws",
+            PersonaScope::Workspace(Id::new("ws1")),
+            "workspace prompt",
+        )
+        .await;
+        seed_security(
+            &state,
+            "p-repo",
+            PersonaScope::Repo(Id::new("r1")),
+            "repo prompt",
+        )
+        .await;
+        let app = crate::api::api_router().with_state(state);
+
+        // Repo persona shadows workspace and tenant.
+        let repo_scope = resolve_uri(
+            &app,
+            "/api/v1/personas/resolve?slug=security&scope_kind=Repo&scope_id=r1",
+        )
+        .await;
+        assert_eq!(repo_scope.status(), StatusCode::OK);
+        assert_eq!(body_json(repo_scope).await["id"], "p-repo");
+
+        // Workspace persona shadows tenant.
+        let ws_scope = resolve_uri(
+            &app,
+            "/api/v1/personas/resolve?slug=security&scope_kind=Workspace&scope_id=ws1",
+        )
+        .await;
+        assert_eq!(ws_scope.status(), StatusCode::OK);
+        assert_eq!(body_json(ws_scope).await["id"], "p-ws");
+
+        // Tenant scope still resolves its own persona directly.
+        let tenant_scope = resolve_uri(
+            &app,
+            "/api/v1/personas/resolve?slug=security&scope_kind=Tenant&scope_id=t1",
+        )
+        .await;
+        assert_eq!(tenant_scope.status(), StatusCode::OK);
+        assert_eq!(body_json(tenant_scope).await["id"], "p-tenant");
+    }
+
+    #[tokio::test]
+    async fn resolve_unknown_scope_entity_is_not_found() {
+        let state = scoped_state().await;
+        // A tenant persona exists, so an implementation that silently skipped the
+        // unresolvable level (instead of failing) would return 200 here.
+        seed_security(
+            &state,
+            "p-tenant",
+            PersonaScope::Tenant(Id::new("t1")),
+            "tenant prompt",
+        )
+        .await;
+        let app = crate::api::api_router().with_state(state);
+
+        let bad_repo = resolve_uri(
+            &app,
+            "/api/v1/personas/resolve?slug=security&scope_kind=Repo&scope_id=nope",
+        )
+        .await;
+        assert_eq!(bad_repo.status(), StatusCode::NOT_FOUND);
+        let msg = body_json(bad_repo).await["error"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            msg.contains("repo"),
+            "expected repo-not-found error, got: {msg}"
+        );
+
+        let bad_ws = resolve_uri(
+            &app,
+            "/api/v1/personas/resolve?slug=security&scope_kind=Workspace&scope_id=nope",
+        )
+        .await;
+        assert_eq!(bad_ws.status(), StatusCode::NOT_FOUND);
+        let msg = body_json(bad_ws).await["error"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            msg.contains("workspace"),
+            "expected workspace-not-found error, got: {msg}"
+        );
     }
 }

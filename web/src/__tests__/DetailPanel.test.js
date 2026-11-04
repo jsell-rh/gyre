@@ -468,6 +468,37 @@ describe('DetailPanel', () => {
       });
     });
 
+    it('a single bubbling Escape from the editor closes only the EditorSplit — no double-fire into onback', async () => {
+      global.fetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ content: '# Auth' }),
+      });
+      const onback = vi.fn();
+      const { container } = render(DetailPanel, {
+        props: { entity: specEntityWithRepo, onback },
+      });
+      const editTab = screen.getByRole('tab', { name: /edit/i });
+      await fireEvent.click(editTab);
+      const previewBtn = await screen.findByRole('button', { name: /preview/i });
+      await fireEvent.click(previewBtn);
+      // Focus is inside the panel (the normal case — the user was just
+      // editing the textarea), so one Escape reaches BOTH the panel div's
+      // onkeydown and EditorSplit's window handler on its bubbling path.
+      const textarea = await screen.findByTestId('editor-split-textarea');
+      await fireEvent.keyDown(textarea, { key: 'Escape' });
+      // The editor split closed...
+      await waitFor(() => {
+        expect(screen.queryByTestId('editor-split-textarea')).toBeNull();
+      });
+      // ...but the panel did NOT also pop detail history (Esc double-fire).
+      expect(onback).not.toHaveBeenCalled();
+      // The panel itself collapsed via closeEditorSplit, not via close().
+      await waitFor(() => {
+        expect(container.querySelector('.detail-panel.expanded')).toBeNull();
+      });
+    });
+
     it('EditorSplit renders editor and arch preview side by side', async () => {
       global.fetch.mockResolvedValue({
         ok: true,
