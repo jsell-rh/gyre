@@ -201,6 +201,15 @@ export async function retryTask(paths, task) {
   return stdout.trim();
 }
 
+export async function setPriority(paths, task, priority) {
+  if (!/^task-\d+$/.test(task) || (priority !== null && (typeof priority !== "string" || !/^[a-z][a-z0-9-]{0,62}$/.test(priority))))
+    throw new Error("invalid task or priority class");
+  await stat(paths.db);
+  const args = [paths.command, "--state", paths.state, "priority", task, ...(priority === null ? ["--clear"] : [priority])];
+  const { stdout } = await execFileP("python3", args, { cwd: paths.root, timeout: 5000 });
+  return JSON.parse(stdout);
+}
+
 export async function retryAllTasks(paths) {
   const { stdout } = await execFileP("python3", [paths.command, "--state", paths.state, "retry-all"],
     { cwd: paths.root, timeout: 120000, maxBuffer: 1024 * 1024 });

@@ -99,12 +99,14 @@ def main():
     path = checkout / 'specs/tasks' / (task + '.md')
     before = STAGE / 'review-before.json'
     valid = success
+    source_valid = True
     # Returning to the same immutable candidate via detached HEAD is harmless.
     # Reattach without changing the tree or approving edits.
     reattach_candidate(branch, checkout)
     if role in ('review', 'triage'):
         guard = run('python3', str(STAGE / 'dev-review-guard.py'), 'check', str(before), check=False)
-        valid = valid and guard.returncode == 0
+        source_valid = guard.returncode == 0
+        valid = valid and source_valid
     run('python3', str(STAGE / 'dev-checkpoint.py'), branch)
     run('git', 'add', '-A')
     if run('git', 'diff', '--cached', '--quiet', check=False).returncode:
@@ -114,7 +116,7 @@ def main():
     head = git('rev-parse', 'HEAD')
     outcome = {'stage': role, 'head': head, 'base': job['input']['base'], 'tree': git('rev-parse', 'HEAD^{tree}'),
                'agent_exit': 0 if success else 1, 'stream_exit': 0 if success else 1,
-               'valid': valid, 'task_body': path.read_text()}
+               'valid': valid, 'source_valid': source_valid, 'task_body': path.read_text()}
     if role == 'review':
         verdict = STAGE / 'verdict.json'
         if verdict.exists():

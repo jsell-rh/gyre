@@ -62,6 +62,17 @@ elif mode == 'exit7':
         self.assertEqual(child.returncode, 7, error)
         self.assertEqual((self.root / 'calls').read_text(), 'nested\nexit7\n')
 
+    def test_review_rejects_workspace_suite_before_starting_a_build_but_permits_focused_tests(self):
+        self.env['GYRE_PIPELINE_STAGE']='review'
+        for args in (['test','--all'],['build','--workspace'],['clippy','--all-targets']):
+            result=subprocess.run([str(self.root/'cargo'),*args],env=self.env,capture_output=True,text=True)
+            self.assertEqual(result.returncode,64)
+        self.assertFalse((self.root/'calls').exists())
+        focused=subprocess.run([str(self.root/'cargo'),'test','-p','gyre-domain','--','scope_check'],
+                               env=self.env,capture_output=True,text=True)
+        self.assertEqual(focused.returncode,0,focused.stderr)
+        self.assertEqual((self.root/'calls').read_text(),'test\n')
+
 
 if __name__ == '__main__':
     unittest.main()
