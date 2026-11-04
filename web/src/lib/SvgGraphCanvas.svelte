@@ -48,10 +48,21 @@
 
   // ── Layout (ELK / d3-force via layout-engines.js) ────────────────────────
   let positions = $state({});
-  let layoutVersion = $state(0);
+  // Plain (non-$state) invalidation token: bumped on each effect run so a
+  // stale async layout result (from a previous nodes/engine change) is
+  // discarded. Never read in the template — writing $state that the same
+  // effect also reads would loop (effect_update_depth_exceeded).
+  let layoutVersion = 0;
   let layoutError = $state(null);
 
   $effect(() => {
+    // In list-fallback mode the SVG (and therefore the positions) is never
+    // rendered — computing a 300-tick force/ELK layout for >1000 nodes
+    // would burn CPU for a result nothing consumes.
+    if (density.mode === 'list') {
+      positions = {};
+      return;
+    }
     const ns = renderNodes;
     const es = edges;
     const eng = engine;

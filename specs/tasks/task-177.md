@@ -2,7 +2,7 @@
 title: "Rendering Technology — SVG canvas, layout engines, interaction events"
 spec_ref: "ui-layout.md §10"
 depends_on: [task-170]
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "ui-layout.md §10. Rendering Technology"
   - "ui-layout.md §Canvas Rendering"
@@ -84,3 +84,33 @@ Explorer shell handles all events uniformly: click → detail panel, dblclick �
 ## Agent Instructions
 
 Read `ui-layout.md` §10 for the full rendering technology stack. The existing `ExplorerView.svelte` and `ExplorerCanvas.svelte` components are the starting points. Check what layout engines are already installed in `web/package.json`. The `ViewEvent` interface is foundational — every interactive element across all layouts must emit it. The auto-filter thresholds (500/1000) prevent SVG performance degradation. For the flow layout's Canvas 2D particle rendering, that's handled in a separate task focused on Flow Traces.
+
+## Shipped
+
+Rendering technology per ui-layout.md §10, building on the 825b4145 checkpoint (components + tests) and finishing it: the checkpoint's `SvgGraphCanvas.test.js` failed 8/8 at assignment end; this assignment diagnosed and fixed the remaining defects so the full suite is green.
+
+### Behavior
+
+- **SVG canvas** (`web/src/lib/SvgGraphCanvas.svelte`): SVG rendering for `graph`/`hierarchical`/`layered` views with individually addressable node `<g>`s and edge `<line>`s, pan (background drag, window-level pointer tracking) and zoom (wheel around cursor + toolbar buttons + fit), CSS-transitioned hover/selection state, and keyboard access (tabindex 0 + Enter/Space activation on nodes and edges).
+- **Density policy** (`web/src/lib/canvas-density.js`, pure): ≤500 nodes render fully; >500 auto-filter to public-only with a banner + [Show All]; >1000 even after filtering switch to the virtualized list (`VirtualNodeList.svelte`, windowed rows via scroll offset + overscan) with a warning.
+- **Layout engines** (`web/src/lib/layout-engines.js`): `graph` → d3-force (sync 300-tick simulation), `hierarchical` → ELK layered DOWN, `layered` → ELK layered RIGHT (real elkjs `elk.bundled.js`, verified to produce genuine layered positions in plain JS — no mocks), `list` → Svelte `{#each}` + virtual scroll, `timeline` → d3-scale time axis (`MoldableView.svelte`), `side-by-side` → CSS Grid, `diff` → custom `DiffView.svelte`, all eight registered in `layoutRegistry.js` (view spec `layout` selects the renderer).
+- **ViewEvents** (`web/src/lib/viewEvents.js`): every interactive element (SVG nodes, edges, list rows) emits the standardized `ViewEvent` (type/entity_type/entity_id/position); the Explorer shell (`ExplorerView.svelte`) handles all four uniformly — click → detail panel, dblclick → drill into the entity's repo graph, hover → positioned tooltip, context-menu → actions menu (Escape closes).
+
+### Defects fixed in this assignment (checkpoint had left these failing)
+
+1. `SvgGraphCanvas.svelte` `$effect` state loop — `++layoutVersion` read+wrote `$state` inside the same effect; Svelte 5 threw at the write site (the checkpoint's 8/8 failure). Fixed with a plain non-reactive invalidation token; reproduced via a minimal component before fixing.
+2. List-fallback CPU waste — in `list` density mode the layout effect still ran a 300-tick d3-force simulation over 1200 nodes whose positions were never rendered (cause of cleanup-hook timeouts under load). Layout is now skipped when `density.mode === 'list'`.
+3. `ExplorerViewViewEvents.test.js` `vi.mock` hoisting bug (`apiMocks` referenced before initialization) — fixed with `vi.hoisted()`; `afterEach(vi.restoreAllMocks)` replaced with `vi.clearAllMocks()` (restore would strip the `mockResolvedValue` implementations plain `vi.fn()` mocks rely on between tests).
+4. Test-fixture bugs: duplicate node ids in the density fixture (`each_key_duplicate` crash) and a banner assertion not whitespace-normalized across template line breaks.
+5. Strengthened the ELK test to assert real ELK layered output (3 distinct y layers for the c→a→b chain) instead of just node count; mutation-verified — forcing the column fallback makes it fail (`expected 1 to be 3`). Heavyweight density tests (450–1200 nodes) got explicit 60s test timeouts for slow environments; assertions unchanged.
+
+### Test evidence
+
+Logs and probe outputs in `/tmp/stage/review-evidence/` (README.md itemizes commands and exit codes):
+
+- Task-177 suite (7 files): 43/43 pass, two consecutive runs under full batch load.
+- Regression: 16 existing suites covering components touched by the checkpoint (ExplorerView/ExplorerCanvas/MoldableView/…) — 359 passed, 41 pre-existing skips.
+- Real ELK probe: `node elk-probe.mjs` → genuine layered positions (`a 32 12`, `b 12 72`, `c 152 72`), exit 0.
+- ELK mutation proof: forcing the column fallback fails the strengthened test, exit 1.
+
+No exemptions added, no verifiers weakened, no coverage-matrix statuses changed (auditor-owned).

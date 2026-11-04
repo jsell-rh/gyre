@@ -22,10 +22,10 @@ const EDGES = [
   { id: 'e2', source_id: 'c', target_id: 'a', edge_type: 'routes_to' },
 ];
 
-function manyNodes(count, visibility = 'public') {
+function manyNodes(count, visibility = 'public', prefix = 'n') {
   return Array.from({ length: count }, (_, i) => ({
-    id: `n${i}`,
-    name: `node-${i}`,
+    id: `${prefix}${i}`,
+    name: `node-${prefix}${i}`,
     node_type: 'function',
     visibility,
   }));
@@ -51,7 +51,7 @@ describe('SvgGraphCanvas rendering', () => {
     expect(container.querySelector('svg.graph-svg')).toBeTruthy();
   });
 
-  it('positions nodes via the d3-force engine (graph)', async () => {
+  it('positions nodes via the d3-force engine (graph)', { timeout: 60000 }, async () => {
     const { container } = render(SvgGraphCanvas, {
       props: { nodes: NODES, edges: EDGES, engine: 'graph' },
     });
@@ -63,16 +63,28 @@ describe('SvgGraphCanvas rendering', () => {
       // stack at translate(0px, 0px)-ish (40 - NODE_W/2 = -26); force output
       // is centered around the 900x600 canvas middle.
       expect(transforms.some((t) => t && !t.includes('-26px'))).toBe(true);
-    });
+    }, { timeout: 15000 });
   });
 
-  it('positions nodes via the ELK engine (hierarchical)', async () => {
+  it('positions nodes via the ELK engine (hierarchical)', { timeout: 60000 }, async () => {
     const { container } = render(SvgGraphCanvas, {
       props: { nodes: NODES, edges: EDGES, engine: 'hierarchical' },
     });
+    // Real ELK layered layout, not the column fallback: the edge chain
+    // c → a → b must yield three distinct y layers. The column fallback
+    // puts all three (distinct node_types → distinct columns) at the same
+    // y, and pending (layout unresolved) nodes stack in the x = -26px
+    // pending column — both must be excluded.
     await waitFor(() => {
-      expect(container.querySelectorAll('g.svg-node')).toHaveLength(3);
-    });
+      const transforms = [...container.querySelectorAll('g.svg-node')]
+        .map((g) => g.style.transform);
+      expect(transforms).toHaveLength(3);
+      expect(transforms.every((t) => t && !t.includes('-26px'))).toBe(true);
+      const ys = transforms.map(
+        (t) => parseFloat(/translate\([^,]+,\s*(-?[\d.]+)px\)/.exec(t)[1])
+      );
+      expect(new Set(ys).size).toBe(3);
+    }, { timeout: 15000 });
   });
 });
 
@@ -153,8 +165,8 @@ describe('SvgGraphCanvas interactions', () => {
 });
 
 describe('SvgGraphCanvas density policy (ui-layout.md §10)', () => {
-  it('shows the public-only banner above 500 nodes and honors [Show All]', async () => {
-    const nodes = [...manyNodes(450), ...manyNodes(60, 'private')];
+  it('shows the public-only banner above 500 nodes and honors [Show All]', { timeout: 60000 }, async () => {
+    const nodes = [...manyNodes(450), ...manyNodes(60, 'private', 'p')];
     const { container } = render(SvgGraphCanvas, {
       props: { nodes, edges: [], engine: 'graph' },
     });
@@ -175,7 +187,7 @@ describe('SvgGraphCanvas density policy (ui-layout.md §10)', () => {
     expect(container.querySelector('.density-banner')).toBeNull();
   });
 
-  it('switches to the virtualized list above 1000 nodes even after filtering', async () => {
+  it('switches to the virtualized list above 1000 nodes even after filtering', { timeout: 60000 }, async () => {
     const nodes = manyNodes(1200);
     const { container } = render(SvgGraphCanvas, {
       props: { nodes, edges: [], engine: 'graph' },
@@ -183,7 +195,10 @@ describe('SvgGraphCanvas density policy (ui-layout.md §10)', () => {
     await waitFor(() => {
       expect(container.querySelector('.density-banner.density-warn')).toBeTruthy();
     });
-    expect(container.textContent).toContain('switched to list layout with virtual scrolling');
+    // The banner wraps across template lines — normalize whitespace before matching.
+    expect(container.textContent.replace(/\s+/g, ' ')).toContain(
+      'switched to list layout with virtual scrolling'
+    );
     expect(container.querySelector('.vlist')).toBeTruthy();
     // Virtualized: a fraction of the 1200 rows is in the DOM
     const rows = container.querySelectorAll('.vlist-row');

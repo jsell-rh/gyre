@@ -8,13 +8,36 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, fireEvent, waitFor } from '@testing-library/svelte';
 import { dispatchViewEvent } from '../lib/viewEvents.js';
 
-const smallGraph = {
-  nodes: [
-    { id: 'n1', name: 'AuthService', node_type: 'function', visibility: 'public', file_path: 'src/a.rs', repo_id: 'r1' },
-    { id: 'n2', name: 'UserModel', node_type: 'type', visibility: 'public', file_path: 'src/b.rs', repo_id: 'r1' },
-  ],
-  edges: [],
-};
+const { apiMocks, smallGraph } = vi.hoisted(() => {
+  const smallGraph = {
+    nodes: [
+      { id: 'n1', name: 'AuthService', node_type: 'function', visibility: 'public', file_path: 'src/a.rs', repo_id: 'r1' },
+      { id: 'n2', name: 'UserModel', node_type: 'type', visibility: 'public', file_path: 'src/b.rs', repo_id: 'r1' },
+    ],
+    edges: [],
+  };
+  const apiMocks = {
+    workspaces: vi.fn().mockResolvedValue([]),
+    workspaceBudget: vi.fn().mockResolvedValue(null),
+    repos: vi.fn().mockResolvedValue([]),
+    workspaceRepos: vi.fn().mockResolvedValue([]),
+    allRepos: vi.fn().mockResolvedValue([]),
+    repoGraph: vi.fn().mockResolvedValue(smallGraph),
+    getGraphConcept: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
+    repoDependencies: vi.fn().mockResolvedValue([]),
+    repoDependents: vi.fn().mockResolvedValue([]),
+    repoGraphRisks: vi.fn().mockResolvedValue([]),
+    repoGraphTypes: vi.fn().mockResolvedValue({ nodes: [] }),
+    repoGraphModules: vi.fn().mockResolvedValue({ nodes: [] }),
+    repoGraphTimeline: vi.fn().mockResolvedValue([]),
+  };
+  return { apiMocks, smallGraph };
+});
+
+vi.mock('../lib/api.js', () => ({ api: apiMocks }));
+vi.mock('../lib/toast.svelte.js', () => ({ toast: vi.fn() }));
+
+import ExplorerView from '../components/ExplorerView.svelte';
 
 function bigGraph(count) {
   return {
@@ -29,27 +52,6 @@ function bigGraph(count) {
     edges: [],
   };
 }
-
-const apiMocks = {
-  workspaces: vi.fn().mockResolvedValue([]),
-  workspaceBudget: vi.fn().mockResolvedValue(null),
-  repos: vi.fn().mockResolvedValue([]),
-  workspaceRepos: vi.fn().mockResolvedValue([]),
-  allRepos: vi.fn().mockResolvedValue([]),
-  repoGraph: vi.fn().mockResolvedValue(smallGraph),
-  getGraphConcept: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
-  repoDependencies: vi.fn().mockResolvedValue([]),
-  repoDependents: vi.fn().mockResolvedValue([]),
-  repoGraphRisks: vi.fn().mockResolvedValue([]),
-  repoGraphTypes: vi.fn().mockResolvedValue({ nodes: [] }),
-  repoGraphModules: vi.fn().mockResolvedValue({ nodes: [] }),
-  repoGraphTimeline: vi.fn().mockResolvedValue([]),
-};
-
-vi.mock('../lib/api.js', () => ({ api: apiMocks }));
-vi.mock('../lib/toast.svelte.js', () => ({ toast: vi.fn() }));
-
-import ExplorerView from '../components/ExplorerView.svelte';
 
 const REPO_SCOPE = { type: 'repo', workspaceId: 'ws-1', repoId: 'r1' };
 
@@ -88,7 +90,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  vi.restoreAllMocks();
+  // clearAllMocks (not restoreAllMocks): restore would strip the
+  // mockResolvedValue implementations these vi.fn() mocks rely on.
+  vi.clearAllMocks();
 });
 
 function clickEvent(data, extra = {}) {
