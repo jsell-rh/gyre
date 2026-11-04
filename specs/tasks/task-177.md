@@ -2,7 +2,7 @@
 title: "Rendering Technology — SVG canvas, layout engines, interaction events"
 spec_ref: "ui-layout.md §10"
 depends_on: [task-170]
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "ui-layout.md §10. Rendering Technology"
   - "ui-layout.md §Canvas Rendering"
