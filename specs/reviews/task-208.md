@@ -51,3 +51,20 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 20 (2026-11-04) — clobber 20 at candidate `43fa5ab7`; product green
+
+Independent review of assigned candidate `43fa5ab71dec5ce00d4940ef2ea1e070b8b7b867` (base `58deeb75`).
+
+**Sole blocker (process, 20th occurrence of the documented class):** the tip commit `43fa5ab7` ("process: record task-208 branch commits") itself rewrote `commits:` from the fully-attributed four-SHA list restored at its parent `f70eeee1` back to `["a11cbf7e...", "98fd096e..."]`, dropping `ad1121c5093cd2f1f2b3824ed88352ac4e181fd9` (dist regeneration — the round-1 F1 fix removing the shipped my-stuff surface from the RustEmbed bundle) and `ea006d52bb42e96e6f176b02b5390b6cb56a3116` (.gitattributes whitespace-gate exemption). Both are task-208-labeled product-surface commits and verified ancestors of the candidate. Per the AGENTS.md attribution invariant the F1 fix is unscoped for the verifier at this candidate. `scripts/check-task-commit-attribution.sh` exits 0 only via the known regex blind spot (`^(crates/|web/src|web/tests)` at line 114 excludes `web/dist/` and root `.gitattributes`) — same class as clobbers 3–19. Repair is mechanical, product untouched: restore the four-SHA list at the tip.
+
+**Product surfaces verified green at this exact candidate with fresh probes (no drift since `ad1121c5` on the task-208 product files):**
+
+- Dead-code grep (`get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs` over `crates/` + `web/src/`) → zero matches.
+- Committed-dist forbidden-identifier grep (`my-agents|my-tasks|my-mrs|users/me/agents|users/me/tasks|users/me/mrs` over `web/dist/assets/` + `index.html`) → zero matches; kept-surface identifiers present.
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server my_stuff_endpoints_are_removed` → 1 passed (real router-driven 404 assertions on all three URIs, `users.rs:948-970`).
+- `web && npm ci && npx vitest run src/__tests__/UserProfile.test.js` → 23/23 passed, including the exact-six-tab guard (`[role="tab"]` data-id list asserted with `toEqual`).
+- Routes/ABAC: only the kept `users/me/*` endpoints registered; the three my-stuff mappings deleted from `abac_middleware.rs`.
+- Spec amendment intact: user-management.md §"My Stuff" Views supersession, M22.8 row struck Removed, coverage row 22 `n/a`, HSI row 54 `implemented`.
+
+Evidence: `/tmp/stage/review-evidence/task-208-review-round20.txt` and siblings. Verdict: **not approved** — mechanical frontmatter restore required (clobber 20); no product findings.
