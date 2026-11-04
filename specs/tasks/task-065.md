@@ -112,262 +112,97 @@ Key question: Does the current ExplorerView still have separate Graph/Flow tabs,
 
 ## Shipped
 
-**Contract-repair round (2026-10-09).** The prior candidate's task-file edit
-strayed into the assigned contract region (a stray blank line inside the
-Agent Instructions and a reordered `commits:` list), which the harness
-flagged as a contract violation (9b96b72f). This round restored the task
-contract byte-for-byte to the assigned baseline and re-verified the shipped
-work without touching the contract region. No code changes were needed —
-the lineage already carries the full implementation; this round is
-verification plus lifecycle bookkeeping.
+### Shipped behavior (task-065 lineage, carried at the current head)
 
-Shipped behavior (from the branch lineage):
-
-- **Unified cutover** (d82a5a56 lineage): MoldableView with its separate
-  Graph/Flow tabs, FlowCanvas, FlowRenderer, ExplorerFilterPanel, and the
-  duplicate NodeBadge components deleted (−3852 lines). The live surface is
-  ExplorerView's Architecture tab hosting a single ExplorerCanvas.
-- **Props per §17**: `repoId`, `nodes`, `edges`, `activeQuery`,
-  `filter` ($bindable), `lens` ($bindable) — verified at
-  ExplorerCanvas.svelte:20-45.
+- **Unified cutover**: MoldableView with its separate Graph/Flow tabs,
+  FlowCanvas, FlowRenderer, ExplorerFilterPanel, and the duplicate NodeBadge
+  components deleted. The live surface is ExplorerView's Architecture tab
+  hosting a single ExplorerCanvas.
+- **Props per explorer-implementation.md §17**: `repoId`, `nodes`, `edges`,
+  `activeQuery`, `filter` ($bindable), `lens` ($bindable).
 - **Three lenses**: Structural (default/active), Evaluative (functional —
   OTLP trace particles, heat, badges, PlaybackControls), Observable
   (`aria-disabled`, grayed at 0.35 opacity, "requires production telemetry
   integration" label, ObservableBanner on click).
 - **Five filter presets**: All/Endpoints/Types/Calls/Dependencies via
-  FILTER_PRESETS, node dimming (nodeFilterOpacity) + edge gating
-  (edgePassesFilter) in canvas-filters.js.
+  FILTER_PRESETS, node dimming (`nodeFilterOpacity`) + edge gating
+  (`edgePassesFilter`) in canvas-filters.js, pinned by unit tests and
+  component-level draw-path tests (task-065 F1 repair).
 - **Semantic zoom treemap**: path-tree hierarchy, LOD rules per zoom band,
   double-click drill-down via Contains edges with breadcrumb update and
-  eased camera transition (drillInto/onDblClick/navigateBreadcrumb).
+  eased camera transition; workspace-scope `onScopeDrill` on repo_id leaves
+  without Contains children (adopted from upstream task-173 in the rebase
+  repair below).
 - **View query rendering**: scope resolution (focus/filter/concept/
   test_gaps/diff/all + $clicked/$selected), emphasis (highlight, dim,
-  tiered_colors, heat, badges), groups as labeled dashed clusters,
-  callouts as annotated nodes, narrative as numbered steps, annotation
-  title/description with $name and {{var}} substitution.
-- **Interactions**: mousedown pan, wheel zoom, dblclick drill, click
-  select, right-click context menu, minimap click+drag navigation.
+  tiered_colors, heat, badges), groups as labeled dashed clusters, callouts
+  as annotated nodes, narrative as numbered steps, annotation title/
+  description with $name and {{var}} substitution.
+- **Interactions**: mousedown pan, wheel zoom, dblclick drill, click select,
+  right-click context menu, minimap click+drag navigation.
 - **Minimap**: drawMinimap renders full graph + viewport rect;
   minimapToWorld + onMinimapMouseDown/drag navigate.
-- **F1 repair** (6110fe43, re-verified this round): node-side filter
-  dimming extracted to canvas-filters.js (`collectEdgeParticipants`,
-  `nodeFilterOpacity`) and pinned by 18 unit tests + 6 component-level
-  draw-path tests that capture `ctx.globalAlpha` at leaf-label `fillText`
-  and assert participant/non-participant ratios.
+- **Deterministic visual baselines**: committed woff2 font fixtures +
+  forced-font stylesheet so sandbox and CI rasterize identical glyph
+  outlines; 15 explorer-visual.spec.js baselines.
 
-Test evidence (2026-10-09, this round, sandbox):
+### Rebase-repair round (2026-10-10, finding acdb29ed) — current head
 
-- `cd web && npm test` → **56 files passed, 1513 passed | 41 skipped,
-  0 failed**.
-- Focused: `canvas-filters.test.js` + `ExplorerCanvas.test.js` →
-  157 passed.
-- **Mutation re-proof** (evidence:
-  /tmp/stage/review-evidence/task-065-repair-mutation-proof.txt): all
-  three prior mutations re-applied against the pristine tree and killed —
-  (1) `dependencies` reverted to unconditional 0.1 → 2 tests fail;
-  (2) depends_on participant term dropped → 2 tests fail; (3) dim constant
-  0.1→0.5 → 2 tests fail. Sources restored pristine after each mutation
-  (verified by `git diff`).
+Resolved the merge of upstream base e608ac78 (task-173/task-207 lineage)
+into candidate 8af68f80 (merge commit 3c22aeaf, merge-base db37fd02):
 
-Pre-existing, not this task's: check-task-commit-attribution.sh fails on
-task-210 commit a781ede2, which is an ancestor of the assignment base
-8c2d1775 (verified via merge-base; identical failure at base checkout).
-Sandbox note: vitest fork workers are load-sensitive on 8 shared CPUs;
-this round's runs completed at normal load.
+- **ExplorerCanvas.test.js**: both sides appended different describe blocks
+  at EOF — kept both (ours: task-065 F1 filter-dimming draw-path tests;
+  theirs: upstream task-173 scope drill-down tests). Upstream's
+  ghost-overlay rAF-suspension hunk auto-merged.
+- **ExplorerCanvas-performance.test.js**: took the candidate side for all
+  three conflict blocks — the CPU-time timing guard (upstream's side still
+  referenced the pre-refactor `elapsed` variable, undefined in the merged
+  context) and the single text-width-cache test at the candidate's
+  position; upstream's `, 30000` timeout additions outside the conflicts
+  are preserved.
+- **MoldableView.svelte** (deleted by us / modified by them): resolved
+  deleted — this branch's reviewed cutover removed it and nothing in app
+  code imports it even on upstream. Upstream's MoldableViewListView.test.js
+  (renders the deleted component) removed with it; the registry-driven tab
+  refactor of that dead component does not apply to this branch's surface.
+- **layoutRegistry.js** (upstream-new): repaired its import of the deleted
+  FlowRenderer — the 'flow' ViewSpec layout now maps to ExplorerCanvas (the
+  unified canvas renders flow/trace data via its evaluative lens). The
+  registry mechanism and view-spec.test.js extensibility coverage are
+  preserved unchanged.
+- **web/dist** (rename/rename elk bundle + index.html): rebuilt from the
+  merged sources (vite build); the d14fa446 `.gitattributes`
+  `web/dist/** -whitespace` covers regenerated bundles for the whitespace
+  gate.
 
----
+### Test evidence (rebase-repair round, sandbox, at merge head 3c22aeaf)
 
-**Checkpoint-recovery round (2026-10-09).** Recovered an interrupted
-assignment (durable finding 301df7d1: "implementation must finish and
-obtain fresh review"). The implementation was already complete in the
-lineage (working tree clean at candidate 808a7825); this round re-ran the
-full verification with a fresh node_modules install and regenerated the
-evidence for review. No code changes — this round is verification and
-evidence.
+- `cd web && npm ci` → locked versions; `cd web && npm test` → **62 files,
+  1564 passed | 41 skipped, 0 failed** (suite grew from 56/1513 pre-merge:
+  the merge adopts upstream's new suites and both sides' ExplorerCanvas
+  test blocks are kept).
+- explorer-visual.spec.js against the rebuilt dist (static bootstrap server
+  on :2222, forced-font fixtures, committed baselines): **15 passed** —
+  the merged Explorer surface is pixel-identical to the baselines;
+  upstream's ExplorerView/ExplorerCanvas changes shift no pinned pixels.
+- Controller gates at the merge head: `git diff --check HEAD^1 HEAD` exit 0;
+  check-task-commit-attribution.sh OK; all 18 fast static tree-scan gates
+  (arch, abac route registry, mcp write tools, migrations, byte-slice,
+  relative-path, fail-open refs, mem port contracts, fabricated scopes,
+  lossy secrets, scope literals, inert enforcement, forwarded headers,
+  in-memory stores, unbounded http, exempt handlers, sql portability,
+  dead message kinds) pass.
+- Evidence: /tmp/stage/review-evidence/task-065-rebase-repair.txt.
 
-Fresh evidence (this round, sandbox):
+### Verification notes for the reviewer
 
-- `npm ci` (locked versions) → 169 packages, 8s.
-- `cd web && npm test` → **56 files passed, 1513 passed | 41 skipped,
-  0 failed** (90s).
-- Focused `canvas-filters.test.js` + `ExplorerCanvas.test.js` → **157
-  passed**.
-- Acceptance-criteria audit re-verified at head 808a7825 with file:line
-  evidence for all eight criteria (unified cutover, three lenses, five
-  presets, treemap drill, view-query rendering, interactions, minimap,
-  §17 props).
-- Mutation re-proof regenerated (evidence:
-  /tmp/stage/review-evidence/task-065-checkpoint-recovery-evidence.txt):
-  all three mutations (dependencies→unconditional dim; depends_on
-  participant dropped; dim 0.1→0.5) re-applied against the pristine tree
-  and killed; sources restored pristine after each (`git status` clean).
-  The prior round's evidence file names a different path
-  (task-065-repair-mutation-proof.txt) — this sandbox is fresh and only
-  the new evidence file exists.
-- Sandbox transport restriction recorded in the evidence file: TCP
-  listener probe unsupported (errno 95) — live dev-server browser check
-  deferred to host verification (exact-head GitHub CI plus manual UI
-  check at localhost:3000); jsdom-mounted component tests with recorded
-  canvas draw calls serve as the in-sandbox behavioral substitute.
+- app.spec.js (49 tests) requires the real release gyre-server — owned by
+  exact-head GitHub CI (e2e.yml), not runnable in this sandbox (python TCP
+  listener probe errno 95; node http servers bind fine on localhost:2222).
+- Prior rounds' durable findings remain addressed in the lineage: font-truth
+  visual repair (b5fd081f), whitespace-gate exemption for generated dist
+  (d14fa446), F1 filter-dimming repair with mutation-proof evidence
+  (6110fe43).
 
-Progress remains `ready-for-review` awaiting fresh review on this
-candidate.
-
-
-**Prerequisite-adoption round (2026-10-10).** Previous attempt 8188650c
-failed its baseline gate: `check-task-commit-attribution.sh` FAIL at
-repair base 8c2d1775 (a781ede2 task-210 unattributed). Prerequisite
-task-212 shipped a1751da1, which repairs that gate by recording the
-task-210/task-189 attribution in their commits: frontmatter. This round
-merged the repaired prerequisite into the pipeline branch (475e6082,
-merge-base = a1751da1 itself, no web/ or explorer-spec changes
-introduced by the merge — `git diff --stat 418745ab 475e6082 -- web/`
-is empty) and adopted the new `depends_on: [task-062, task-212]`
-contract (db84d6d1), resolving the baseline failure. No product code
-changed this round; the ExplorerCanvas lineage is carried by the branch
-and fully re-verified at the new head:
-
-- `bash scripts/check-task-commit-attribution.sh` at merged head → **OK,
-  exit 0** (evidence:
-  /tmp/stage/review-evidence/task-065-baseline-gate-head.txt).
-- `npm ci` → 169 packages (locked versions).
-- `cd web && npm test` → **56 files passed, 1513 passed | 41 skipped,
-  0 failed** (71s).
-- Focused `canvas-filters.test.js` + `ExplorerCanvas.test.js` → **157
-  passed**.
-- Mutation re-proof re-run in this sandbox (evidence:
-  /tmp/stage/review-evidence/task-065-post-prereq-adoption-evidence.txt):
-  dependencies→unconditional 0.1 dim → 2 fail; collectEdgeParticipants
-  drops target endpoint → 6 fail; dim constant 0.1→0.5 → 8 fail. Tree
-  restored pristine after each (md5-verified, git status clean).
-- Acceptance criteria re-verified at head with file:line evidence:
-  unified surface (MoldableView/FlowCanvas/FlowRenderer/
-  ExplorerFilterPanel/NodeBadge all deleted, zero references in
-  ExplorerView.svelte or ExplorerCanvas.svelte); three lens buttons
-  (ExplorerCanvas.svelte:4967-4972, Observable `aria-disabled` with
-  telemetry label); five filter presets (canvas-filters.js:37-54);
-  minimap (drawMinimap:3657, minimapToWorld:4554,
-  onMinimapMouseDown:4591); drill/breadcrumb (drillInto:4148,
-  onDblClick:4186, navigateBreadcrumb:4375); interactions (onMouseDown:
-  3843, onWheel:3908, onClick:4017); view-query rendering
-  (tiered_colors:2102, narrative:2606-2608, callouts:2007,
-  groups:2317-2318, annotation title/description:4920-4922);
-  §17 props (ExplorerCanvas.svelte:19-44).
-- Sandbox transport restriction (unchanged): TCP listener probe
-  unsupported (errno 95, /tmp/stage/capabilities.json) — live
-  dev-server browser check deferred to host verification (exact-head
-  GitHub CI plus manual UI check at localhost:3000).
-
-Progress remains `ready-for-review` on this head.
-
-**Visual-baseline font-truth repair round (2026-10-10).** CI run
-38014132398 (PR 640, head eec5e3c5) failed 10/64 e2e visual tests:
-sandbox-regenerated baselines rasterized through fontconfig fallback
-glyphs while CI loads the Red Hat webfonts from fonts.googleapis.com —
-different text metrics (toolbar +29px taller, canvas areas +4px), so
-every text-bearing screenshot compared outside its 2% budget. A baseline
-generated in one font environment cannot compare equal in another.
-
-Shipped (commit b5fd081f, continuing checkpoint d4bbe576/d7e62a30):
-
-- **Committed font binaries**: `web/tests/e2e/fixtures/fonts/` — 11
-  @fontsource/red-hat-{text,mono,display} latin woff2 files (the same
-  typefaces Google Fonts serves), so sandbox and CI rasterize identical
-  glyph outlines from the same binaries.
-- **Forced font stylesheet**: `fixtures/forced-fonts.css` declares
-  @font-face for those binaries, overrides the --font-{body,mono,
-  display} design tokens, and !important-overrides every literal font
-  stack on the Explorer surface ('system-ui…', "'SF Mono', Menlo…").
-- **Spec wiring** (explorer-visual.spec.js): fonts.googleapis.com is
-  served an empty stylesheet (network never picks faces); /test-assets/
-  fonts/* route serves the woff2 fixtures; forced-fonts.css injects at
-  document_start before app boot; CanvasRenderingContext2D.font setter
-  rewrites ctx.font strings ('system-ui'→'Red Hat Text', SF Mono stack
-  →'Red Hat Mono') so canvas labels also bypass fontconfig; every face
-  is eagerly decoded at document_start.
-- **Baselines regenerated** under this environment: all 15 modified
-  (none added). Toolbar text pixel-decodes to the mock graph's real
-  stats ("47 nodes  23 edges  3 packages … Structural lens"), proving
-  glyphs come from the forced fonts, not tofu/fallback.
-- **gyre-pw-chrome-launch.cjs**: added --no-zygote (zygote fork fails
-  EPERM here; chromium cannot launch without it).
-
-Test evidence (this round, sandbox; static server serves web/dist on
-:2222 with the seeded fixture's native-fetch bootstrap APIs answered,
-tests supply all data via page.route — a real gyre-server cannot run
-here, see transport note):
-
-- explorer-visual.spec.js: **15 passed** (--update-snapshots), **15
-  passed** (clean compare), **30 passed** (--repeat-each=2) — baselines
-  deterministic under the forced-font environment.
-- gyre-dom-probe.spec.js: **7 passed** — structural scenarios (toolbar
-  lens/filter/stats contents, evaluative overlay + playback controls,
-  annotation bar, blast-radius count, filter active state, chat rail)
-  verified against the real SPA.
-- `npm test`: **56 files, 1513 passed | 41 skipped, 0 failed**.
-- Attribution gate at head b5fd081f: check-task-commit-attribution.sh
-  **OK, exit 0** (b5fd081f recorded in commits: frontmatter).
-- Evidence: /tmp/stage/review-evidence/task-065-visual-repair.txt.
-
-Transport notes for host verification: this sandbox's python TCP
-listener probe fails (errno 95) but node http servers bind and serve
-fine on 127.0.0.1 — the restriction is narrower than the capabilities
-file suggests and was not treated as a code defect. Exact-head GitHub
-CI (e2e.yml: npm ci, npm run build, npm test, playwright test against
-the real release gyre-server) remains the authoritative gate: CI loads
-the same committed woff2 binaries through the route interception, so
-the regenerated baselines should compare equal there. If CI still
-differs, inspect its failure artifacts for a font-truth divergence
-before touching these baselines again — do not regenerate from a
-different font environment.
-
-Progress remains `ready-for-review` on this head (b5fd081f lineage).
-
-**Whitespace-gate repair round (2026-10-10).** The controller's
-`git diff --check HEAD^1 HEAD` (dev-check.sh:8) failed on this branch's
-merge of base db37fd02 with one error: trailing whitespace at
-web/dist/assets/index-CsSeHtzc.js:5 (the checkpoint-rebuilt bundle).
-The flagged byte is a literal TAB inside a JS string literal — the
-minified whitespace character class `bv=[...\` \t\n\r\f\xa0\uFEFF\`]`
-(class-list separator scanner) — and cannot be stripped without
-corrupting the shipped bundle. Main's own committed bundle
-index-fzyK9GaC.js carries the identical byte; main's dist regens pass
-the gate only because they are direct commits rather than
-base-relative additions.
-
-Shipped (commit d14fa446): root `.gitattributes` with
-`web/dist/** -whitespace`, declaring the generated-artifact class once
-for every consumer of git's whitespace machinery without editing any
-verifier script. No hand-written path is exempted; the frozen
-`scripts/*-exemptions.txt` baselines are untouched; task-208's review
-record (verification finding e1de0aac) approved this identical repair
-for this identical false-positive class.
-
-Test evidence (this round, sandbox, at d14fa446):
-
-- `git diff --check db37fd02 HEAD`: exit 2 pre-fix (1 error) →
-  **exit 0** post-fix. `git diff --check HEAD^1 HEAD`: exit 0.
-- `git check-attr whitespace`: all web/dist files `unset`;
-  hand-written crates/, web/src, scripts/ paths `unspecified` (gated).
-- Negative control: a trailing-whitespace line appended to
-  scripts/dev-check.sh IS still flagged by `git diff --check` — the
-  gate on hand-written code is fully preserved.
-- `cd web && npm test` → **56 files passed, 1513 passed | 41 skipped,
-  0 failed** (no frontend regression; the repair touches no code
-  path).
-- Attribution gate at d14fa446: check-task-commit-attribution.sh
-  **OK, exit 0**.
-- Evidence: /tmp/stage/review-evidence/task-065-whitespace-repair.txt.
-
-dist was deliberately NOT regenerated this round: CI builds its own
-dist (`cd web && npm run build` in e2e.yml) and dev-check.sh restores
-committed dist after its build gate, so a regen adds review surface
-without addressing any finding (same reasoning as task-208's approved
-round). One caveat recorded for the reviewer: `git diff --check
-base merge` applies attributes from the *worktree* checkout — if the
-controller's verify merge is checked out at base (no .gitattributes in
-worktree), the historical error would resurface; attributes are read
-from the candidate tree at merge checkout, which is the normal
-controller path (checkout of the merge result).
-
-Progress remains `ready-for-review` on this head (d14fa446 lineage).
+Progress: ready-for-review at merge head 3c22aeaf.
