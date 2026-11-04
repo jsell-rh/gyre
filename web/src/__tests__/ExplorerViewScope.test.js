@@ -10,6 +10,7 @@ vi.mock('../lib/api.js', () => ({
     allRepos: vi.fn().mockResolvedValue([]),
     repoGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     getGraphConcept: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
+    workspaceDependencyGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
   },
 }));
 
