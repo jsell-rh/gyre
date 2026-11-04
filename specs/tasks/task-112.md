@@ -52,23 +52,25 @@ URLs. Storage: new `user_channel_preferences` table (migration 000056, portable
 SQLite/PG SQL), `UserChannelPreferenceRepository` port with SQLite and mem
 adapters (both enforce the upsert contract).
 
-**Test evidence** (all on merged HEAD 5c91da97):
+**Test evidence** (re-verified on rebase-repair HEAD d8e12aa4, after merging
+main 2427ccc1 — conflicts were confined to generated `web/dist` artifacts,
+resolved by regenerating dist from merged `web/src` via `vite build`):
 - `cargo test -p gyre-server --lib notification_dispatcher`: 15 passed
   (HMAC signing + threshold filtering, slack posting + channel override,
   email outbox durability + filtering, escalation recipient chain incl.
   offline-spawner and Urgent fan-out, in-app records per recipient, persona
   approval, merge-queue-paused, budget warning/exhausted, security finding)
-- `cargo test -p gyre-server --lib users`: 17 passed (channel prefs API)
+- `cargo test -p gyre-server --lib api::users`: 13 passed (includes all four
+  channel-prefs API tests: defaults, round-trip, rejected `in_app: false`,
+  rejected relative webhook URL)
 - `cargo test -p gyre-server --lib spawn::`: 29 passed
-- `cargo test -p gyre-server --lib notifications`: 10 passed
-- `cargo test -p gyre-server --lib mcp`: 71 passed
-- `cargo test -p gyre-server --lib merge_processor`: 49 passed
+- `cargo test -p gyre-server --lib mcp::`: 78 passed
+- `cargo test -p gyre-server --lib merge_processor::`: 45 passed
 - `cargo test -p gyre-adapters --lib user_profile`: 5 passed
 - `cargo test -p gyre-domain --lib user::`: 5 passed
-- Prior checkpoint gates (unchanged by merge, which touched only spec .md
-  files): rustfmt + changed-lines clippy clean, `SKIP_WEB_BUILD=1 cargo
-  build -p gyre-server --lib` clean.
-- `scripts/check-abac-exempt-handlers.sh`: OK (91 handlers).
+- `SKIP_WEB_BUILD=1 cargo build -p gyre-server --lib` clean on merged HEAD
+  (full log: /tmp/stage/review-evidence).
+- `scripts/check-task-commit-attribution.sh`: OK after the rebase merge.
 
 Sandbox restriction recorded: TCP listener probe unsupported (`accept` →
 errno 95), so live HTTP round-trip verification against a local listener is
