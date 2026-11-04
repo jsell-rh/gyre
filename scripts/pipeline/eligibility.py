@@ -22,8 +22,15 @@ def eligible(store, work):
         return False
     if stage == 'triage':
         if inputs.get('baseline_probe'):
-            return (probe(task) == inputs['baseline_probe'] and
-                    (data.get('baseline_checked') or {}).get('base') != inputs['base'])
+            if (probe(task) != inputs['baseline_probe'] or
+                    (data.get('baseline_checked') or {}).get('base') == inputs['base']):
+                return False
+            for row in store.db.execute("SELECT id,input FROM work WHERE stage='triage' AND state='claimed'"):
+                other = json.loads(row['input'])
+                if (row['id'] != work['id'] and other.get('base') == inputs['base'] and
+                        other.get('baseline_probe') == inputs['baseline_probe']):
+                    return False
+            return True
         return data.get('triaged') != task['generation']
     if probe(task) and (data.get('baseline_checked') or {}).get('base') != store.setting('observed_main', inputs.get('base')):
         return False

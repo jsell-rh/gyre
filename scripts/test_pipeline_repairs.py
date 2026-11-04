@@ -82,6 +82,13 @@ class RepairReconciliationTests(unittest.TestCase):
         task['data']['baseline_probe']=['bash','/tmp/arbitrary-script']
         self.assertIsNone(probe(task))
 
+    def test_matching_rechecks_share_one_claim_before_a_remote_receipt_exists(self):
+        discover(self.store,'triage','main')
+        first=self.store.claim('triage','first',concurrency=2,capacity=2,eligible=lambda w:eligible(self.store,w))
+        self.assertIsNotNone(first)
+        self.assertIsNone(self.store.claim('triage','second',concurrency=2,capacity=2,eligible=lambda w:eligible(self.store,w)))
+        self.assertEqual(self.store.compute_used(),1)
+
     def test_infrastructure_timeout_does_not_resolve_or_cache_a_repair(self):
         work=discover(self.store,'triage','main')[0]
         execution=Execution(self.store,self.store.claim('triage','fixture',ident=work))
