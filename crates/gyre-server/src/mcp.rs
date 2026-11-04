@@ -872,14 +872,6 @@ fn check_repo_write_scope(
     check_repo_scope(auth, repo, false, action)
 }
 
-fn check_repo_read_scope(
-    auth: &AuthenticatedAgent,
-    repo: Option<&str>,
-    action: &str,
-) -> Result<(), String> {
-    check_repo_scope(auth, repo, false, action)
-}
-
 /// Validate a repo-tier action against the token's scope list.
 ///
 /// A scope entry `repo:{name}:{right}` matches when `right` is the required
@@ -6380,7 +6372,15 @@ mod tests {
             &token,
         )
         .await;
-        assert!(json["result"]["isError"].as_bool().unwrap());
+        // The pre-dispatch validate_tool_scope gate denies the foreign-parent
+        // call with a JSON-RPC error naming the task and its repo.
+        assert!(json["error"].is_object(), "got: {json}");
+        let msg = json["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("PERMISSION_DENIED"), "got: {msg}");
+        assert!(
+            msg.contains("parent-2") && msg.contains("r-x"),
+            "error must name the target task and repo: {msg}"
+        );
 
         let (_status, json) = mcp_post_with_token(
             app,
