@@ -1,7 +1,7 @@
 ---
 title: "Implement spec approval ledger with database schema and API"
 spec_ref: "agent-gates.md §Part 2 Spec Approval Ledger"
-depends_on: []
+depends_on: [task-242]
 progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Spec Approval Ledger"
