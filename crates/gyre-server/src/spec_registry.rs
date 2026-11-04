@@ -2411,6 +2411,7 @@ specs:
     /// (loaded-from-disk) graph as it would right after the push — the graph
     /// consumers (staleness, gates, patrol) must not silently degrade to an
     /// empty graph across a restart.
+    #[tokio::test]
     async fn staleness_query_parity_after_restart() {
         use crate::mem::{MemRepoRepository, MemSpecLedgerRepository, MemWorkspaceRepository};
 
