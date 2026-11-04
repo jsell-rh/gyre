@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "spec-links.md §Forge-Maintained Spec Graph"
-commits: ["89769485d0cdecf5471678a78c2423ca6264bff0", "57f548f620b71856726e7bada6b61ebaad39cc54", "12d95108b029812a4c8fcd863816304a4890f0f5", "17e4b4cb9f0f1d104ca58dc1470ae681163adee1", "e1466abbc4969b239fcb39c5366af4c048526d1e", "b869f5a9e91f06c4838fe3fab41197ff5360b830", "5f33847d5db78436ee063a34210ac6db96a58775", "7a1508bbeab83977ad4361f958d9f71a9bda88ba", "673fce33a1eb4e9273e1ecfff16da1d5bbab56a4", "2bc9b5bdc6a7e24aa0907af934469cd6f9fb3232", "071fd3b7e5aa81a7731cc1af67ffc1555d767d07", "9fb8d851175c88e4485215aa952da2bde6c32a16"]
+commits: ["89769485d0cdecf5471678a78c2423ca6264bff0", "57f548f620b71856726e7bada6b61ebaad39cc54", "12d95108b029812a4c8fcd863816304a4890f0f5", "17e4b4cb9f0f1d104ca58dc1470ae681163adee1", "e1466abbc4969b239fcb39c5366af4c048526d1e", "b869f5a9e91f06c4838fe3fab41197ff5360b830", "5f33847d5db78436ee063a34210ac6db96a58775", "7a1508bbeab83977ad4361f958d9f71a9bda88ba", "673fce33a1eb4e9273e1ecfff16da1d5bbab56a4", "2bc9b5bdc6a7e24aa0907af934469cd6f9fb3232", "071fd3b7e5aa81a7731cc1af67ffc1555d767d07", "9fb8d851175c88e4485215aa952da2bde6c32a16", "2736e818c1980de61c89cdfe33a5e0a44b8024a2"]
 ---
 
 ## Spec Excerpt
@@ -155,7 +155,21 @@ graph queries, and the accountability patrol.
   so PG is compile-verified — same convention as every other PG adapter.
 - `migrations_create_tables` extended with `spec_links`.
 
-**Verification evidence (repair session, HEAD 733ba170, base 18c44f1a):**
+**Verification evidence (repair session, HEAD 2736e818, base 5196f444):**
+
+- Review finding fixed: the section-closing restart-durability test
+  `staleness_query_parity_after_restart` was dead code — it lacked the
+  `#[tokio::test]` attribute, so it was never registered in the test
+  binary. The missing attribute was restored (commit 2736e818); the test
+  body was already sound.
+- `cargo test -p gyre-server --lib staleness_query_parity_after_restart`
+  — ok. 1 passed; 0 failed (test is now genuinely registered and passing;
+  evidence `/tmp/stage/review-evidence/03-parity-test-registered.txt`).
+- `cargo test -p gyre-server --lib spec_registry::tests` — ok. 46 passed;
+  0 failed (all four section-closing tests included: graph rebuild,
+  staleness parity, cross-repo scoping, manifest-removal cleanup).
+
+**Prior verification evidence (repair session, HEAD 733ba170, base 18c44f1a):**
 
 - Focused probes, all PASS (records under /tmp/stage/review-evidence):
   - `cargo test -p gyre-server --lib spec_registry::tests -- restart_rebuilds_spec_link_graph_from_persisted_table staleness_query_parity_after_restart sync_replaces_links_scoped_to_source_repo sync_clears_durable_rows_when_links_removed_from_manifest`
