@@ -108,7 +108,7 @@ def run_claim(store, claim):
             if not eligible(store, claim):
                 raise StaleClaim('stage preconditions changed during execution')
             body, generation = None, None
-            if stage in ('verify', 'publish') and 'dependencies' in updates:
+            if stage in ('verify', 'publish', 'observe') and 'dependencies' in updates:
                 # A prerequisite is desired task metadata, not an ephemeral
                 # field an implementation body can overwrite on completion.
                 import re

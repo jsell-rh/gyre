@@ -20,6 +20,10 @@ def eligible(store, work):
         return False
     if satisfied(data):
         return False
+    if stage == 'observe':
+        from .ci import publication
+        return (not data.get('repair') and data.get('candidate') == inputs['candidate']
+                and data.get('pr') == inputs['url'] and publication(store,task) == inputs['published'])
     if stage == 'triage':
         if inputs.get('baseline_probe'):
             if (probe(task) != inputs['baseline_probe'] or
@@ -51,8 +55,11 @@ def eligible(store, work):
     if review.get('candidate') != candidate or not review.get('approved'):
         return False
     if stage == 'verify':
+        from .ci import verification_ready
+        if not verification_ready(store,task) or not store.integration_available(work):
+            return False
         verified = data.get('verified') or {}
         return verified.get('candidate') != candidate or verified.get('base') != inputs['base']
     if stage == 'publish':
-        return data.get('verified') == inputs['verified']
+        return data.get('verified') == inputs['verified'] and store.integration_available(work)
     return False
