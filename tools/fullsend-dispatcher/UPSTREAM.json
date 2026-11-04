@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/openshift-online/hypershell",
+  "commit": "938329503312cddd3620ac02fda81f2aa44f390f",
+  "path": ".hypershell/execute-sdlc/dispatcher",
+  "license": "Apache-2.0",
+  "local_changes": "Adapter backend port, namespace isolation, and physical-capacity admission for Gyre."
+}
