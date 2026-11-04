@@ -7,7 +7,7 @@ coverage_sections:
   - "user-management.md §Delivery Channels"
   - "user-management.md §Who Gets Notified"
   - "user-management.md §Notification Routing for Agent Escalations"
-commits: ["5c37f969f35a81916ec3f276b2693fae9af22e69", "ee4e434251595b7b664b73d99be3ea3c80c25044", "896c9055969f118b82c0abb688da60453a9028a5", "94cf2f62088dba6d0b7136d792167e0ca7e6e3dd", "a3a3ea0f7f3a0cd48aff40ca57f1c33fbbdea6da"]
+commits: ["5c37f969f35a81916ec3f276b2693fae9af22e69", "ee4e434251595b7b664b73d99be3ea3c80c25044", "896c9055969f118b82c0abb688da60453a9028a5", "94cf2f62088dba6d0b7136d792167e0ca7e6e3dd", "a3a3ea0f7f3a0cd48aff40ca57f1c33fbbdea6da", "64279a35"]
 ---
 
 ## Shipped
@@ -35,9 +35,18 @@ agent-escalation chain — `spawned_by` primary; offline spawner adds workspace
 Admins; Urgent always adds workspace Owners (dedup'd). Helpers cover persona
 approval → owner, merge queue paused → all Admins/Owners, budget warning →
 spawner + Admins, budget exhausted → spawner + Owner, security finding →
-Workspace Owner + tenant Admin. Existing creation paths already cover the
-remaining rows (spec approval → manifest approvers, gate failure → MR author,
-MR merged/reverted, invitation → invited user).
+Workspace Owner + tenant Admin. Honest decomposition boundary: the budget
+warning, budget exhausted, and security finding helpers have no production
+emission triggers yet — those are owned by task-191 (platform-model §Enforcement
+Behavior) and task-137 (agent-gates §Gate Failure Feedback); the helpers and
+their recipient sets are covered by real tests but reviewers must not treat
+those three rows as live until the triggers land. Spec approval, gate failure,
+MR merged/reverted, and invitation rows are covered by existing creation
+paths. The "Breaking change detected → dependent repo team leads" row cannot
+be routed as specced — the domain has no team-lead concept; user-management.md
+is amended (56059f8d) to record the interim superset routing (all members of
+the dependent repo's workspace, pre-existing `process_breaking_changes` path)
+and the dependency on Teams gaining a lead concept (task-122/125).
 
 **Wiring**: `notifications::notify`/`notify_rich` (the central creation
 helpers) fan out through `dispatch_to_channels`, so every emitting path
@@ -76,6 +85,33 @@ Sandbox restriction recorded: TCP listener probe unsupported (`accept` →
 errno 95), so live HTTP round-trip verification against a local listener is
 deferred to host verification; channel delivery is covered by the captured
 `HttpSender` test double asserting URL, headers (HMAC signature), and body.
+
+### Repair round (review finding 296d542)
+
+- **Blocking regression fixed** (64279a35): the channel fan-out callback
+  addition to `check_divergence` had dropped
+  `notif.entity_ref = Some(spec_ref.to_string())` and
+  `notif.repo_id = Some(repo_id.as_str().to_string())`, breaking
+  `graph_integration::test_divergence_detection_creates_notifications`
+  at tests/graph_integration.rs:1167. Both lines restored byte-identical
+  to the pre-regression code (17c81d5a).
+- **Merge resolved**: base ed57c723 (task-201 search backend) merged into
+  the branch; the single conflict (`check-fabricated-scope-defaults.sh`
+  FROZEN_EXEMPTION_COUNT) resolved against the merged tree's actual flagged
+  sites — 4 entries / count 4, gate re-run OK.
+- **Spec finding addressed** (56059f8d): team-lead routing rows amended in
+  user-management.md with the interim superset routing and the Teams-lead
+dependency.
+- **Local re-verification restriction**: this repair sandbox has no
+crates.io access (`cargo test` fails to fetch `prost-derive`; registry
+cache empty, `--offline` cannot resolve) — an infrastructure transport
+  restriction, not a code defect. The regression fix is a two-line
+  restoration byte-identical to code that compiled and passed the failing
+  test at 17c81d5a, but the focused probe
+  `SKIP_WEB_BUILD=1 cargo test -p gyre-server --test graph_integration
+  test_divergence_detection_creates_notifications` must be re-run by remote
+  verification on this HEAD (56059f8d). Evidence:
+  /tmp/stage/review-evidence.
 
 ## Spec Excerpt
 
