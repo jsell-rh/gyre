@@ -3650,9 +3650,13 @@ mod tests {
             .await
             .unwrap();
         let text = String::from_utf8_lossy(&body);
+        // Exact pkt-line framing: the service header pkt-line (001f = 4 + 27
+        // bytes of "# service=git-receive-pack\n"), a flush-pkt, then the
+        // ERR pkt-line. Hardcoded so a framing regression in pkt_line()/
+        // service_header() fails here rather than being mirrored in.
         assert!(
-            text.starts_with("# service=git-receive-pack"),
-            "advertisement must start with the service header, got: {text}"
+            text.starts_with("001f# service=git-receive-pack\n0000"),
+            "advertisement must start with the service header pkt-line + flush-pkt, got: {text}"
         );
         assert!(
             text.contains("ERR push rejected: repository is archived"),
