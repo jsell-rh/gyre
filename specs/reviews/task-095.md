@@ -126,3 +126,123 @@ The R2 scope note ("Circuit Breaker, CLI, UI are not implemented on main, assign
 ### Verdict
 
 **Needs-revision.** R3-F1 is a functional correctness defect in the headline §6 CLI feature (manual revert of a specific MR) with zero test coverage; R3-F2 means the circuit breaker — the other headline feature of `5aaded21` — cannot fire in the workflow the recovery protocol itself prescribes; R3-F3 is a fail-open health signal on the human decision path; R3-F4 must be corrected so the review record matches what actually landed. The R1/R2 findings themselves remain fixed on integrated main.
+
+## Round 4 — review of the R3/R4 revision round (candidate `9508cd02`, base `1a00087c`)
+
+Review target: the task-095 branch head `9508cd02` (merge of main `1a00087c`
+into the revision line). Scope: the diff `1a00087c..9508cd02` — the R3-F1…F4
+product fixes, the R4 group-notification fix, and the R4-F1 non-tip revert
+rework — re-checked against platform-model.md §6 and the R1–R3 finding record.
+
+### R3 findings — resolution status on this candidate
+
+- **R3-F1 (manual revert of the wrong commit) — FIXED.** `MergeRequest`
+  persists `merge_commit_sha` (domain field, migration
+  `2026-09-30-000056_merge_commit_sha` — next free sequence, portable
+  `ALTER TABLE … ADD/DROP COLUMN` SQL for both backends; sqlite + postgres
+  adapters + schema.rs all carry the column). Recorded at merge time on both
+  the single-entry path and every atomic-group member. `revert_mr`
+  (`api/recovery.rs`) reverts the MR's OWN recorded sha — never branch HEAD —
+  returns 409 when no sha is recorded, 403 on repo/MR ownership mismatch,
+  and routes manual reverts through `increment_revert_count` /
+  `trip_circuit_breaker`. Tests observe the exact sha passed to
+  `revert_commit` through a recording double (`revert_calls`), plus the
+  no-sha, foreign-repo, and breaker arms.
+- **R3-F2 (breaker unreachable through the prescribed workflow) — FIXED.**
+  Counter keyed on `revert_breaker_key` (`spec:<spec_ref>` when bound, else
+  `mr:<id>`); `spec_ref` is `path@sha`, so the key is stable across the
+  fresh-branch/fresh-MR resubmission the remediation task prescribes (and the
+  remediation text now instructs binding the resubmitted MR to the same
+  spec). A trip cancels the queue entries of every MR sharing the key.
+  Re-entry of terminal-state MRs is closed at all three doors: `enqueue`
+  (409 for non-Open/Approved), the selection loop's 4b'' check (entry
+  Failed), and atomic-group fetch-time re-validation (stale member → group
+  rollback + terminal Failed). All four tests present and passing.
+- **R3-F3 (fail-open `main_green`) — FIXED.** `repo_status` propagates
+  resolution failure as `main_green: false` (fail closed); test uses a plain
+  directory + always-pass gate to prove the gate never ran. Both exemption
+  entries deleted; `check-fail-open-ref-resolution.sh` frozen at 0 and green.
+- **R3-F4 (review-record drift / dead ABAC duplicates) — FIXED.** The five
+  duplicated resolver entries removed (single first-match block remains;
+  `post-merge-gates` → `gate`); duplicate baseline lowered 22 → 17 (shrink
+  only). Task-096 was briefly rescoped to "UI only" and then **restored
+  byte-identical to the decomposition contract** (commit `a961cb63`, contract
+  repair round 6) with the duplicate-delivery decision recorded in
+  task-095.md for the decomposition owner — the correct process handling:
+  normative contract changes belong to the PM cycle, not an implementation
+  round. All task-labeled commits recorded in frontmatter
+  (`check-task-commit-attribution.sh` green).
+
+### R4 fix — group-failure notification addressing
+
+`rollback_atomic_group` now resolves the author agent's `spawned_by` user
+(agent-id fallback) before notifying, matching `notify_gate_failure` /
+`notify_mr_merged`. Covered by
+`atomic_group_skips_non_mergeable_member_and_rolls_back` (asserts the
+spawner's inbox, not the raw agent id).
+
+### R4-F1 — non-tip revert semantics (the headline rework)
+
+`Git2OpsAdapter::revert_commit` now implements true `git revert -m 1`
+semantics: three-way `merge_trees(ancestor = tree(M), ours = tree(tip),
+theirs = tree(M^1))` = tip + (M^1 − M). Verified correct by construction
+(base = the state the patch acts on; theirs = the pre-merge state; ours =
+current tip): a later merge's untouched files survive, tip-adjacent reverts
+degenerate to the old snapshot behavior, and same-file collisions surface as
+`RevertResult::Conflict` with the branch untouched (no commit written, ref
+never moved). The port contract documents the semantics; the mem doubles
+(`NoopGitOps`, `ConfigurableGitOps`) implement the new signature with a
+double that can both fail and conflict (R1-F8 lesson applied). All three
+callers handle `Conflict` without destructive fallbacks: the REST endpoint
+surfaces 409 with no side effects; both automatic recovery paths (single MR,
+atomic group) stay paused, apply no per-MR side effects (MRs stay `Merged`,
+no revert recorded, no remediation task), and escalate to the author's
+spawner. Real-git regression tests
+(`test_revert_commit_non_tip_preserves_later_merges` — two sequential merges,
+revert of A leaves B's file intact; `test_revert_commit_conflict_leaves_branch_untouched`
+— same-file collision → Conflict, tip unchanged) plus the two
+automatic-path conflict tests and the REST-level 409 test.
+
+### Verification evidence (this review, candidate `9508cd02`; logs under
+`/tmp/stage/review-evidence/`)
+
+- `cargo test -p gyre-adapters --lib git2_ops` → **31 passed, 0 failed**
+  (includes both R4-F1 real-git regression tests).
+- `cargo test -p gyre-server --lib merge_processor` → **54 passed, 0 failed**
+  (six post-merge/recovery protocol tests, breaker/resubmission-key tests,
+  non-mergeable-entry tests, both revert-conflict tests, head_sha gate test).
+- `cargo test -p gyre-server --lib api::recovery` → **6 passed, 0 failed**.
+- `cargo test -p gyre-server --lib api::merge_queue` → **8 passed, 0 failed**.
+- Check scripts green at head: `check-arch`, `check-abac-route-registry`
+  (duplicates 17 ≤ frozen 17), `check-fail-open-ref-resolution` (0
+  exemptions), `check-migration-versions`, `check-inert-enforcement`
+  (drifted line numbers correctly re-pointed at the same task-077-owned
+  sites), `check-byte-slice-truncation`, `check-dead-message-kinds`,
+  `check-mem-port-contracts`, `check-task-commit-attribution`.
+
+### Non-blocking observations (below the finding bar, recorded for the next
+audit cycle)
+
+- `revert_mr` checks MR status before the repo-ownership check, so the
+  error code ordering can disclose one bit of cross-repo MR status
+  (NotFound/InvalidInput/Forbidden) to a caller holding write access to the
+  path repo. The ownership check itself is enforced (403), and the handler
+  is strictly stricter than sibling MR handlers (`get_mr` loads MRs globally
+  with no ownership comparison at all). Reordering the two checks would
+  close it; not a regression introduced here.
+- The breaker kv key (`spec:<path>@<sha>`) is not workspace/repo-scoped, but
+  a cross-boundary collision requires an identical spec path AND identical
+  40-char sha in another repo — not a realistic interference vector.
+
+### Verdict
+
+**Approved.** All four R3 findings are closed in product code with real,
+assertive tests; the R4-F1 rework replaces destructive snapshot semantics
+with correct `git revert -m 1` three-way-merge semantics and fail-closed
+conflict handling on every caller; the full §6 protocol (gates on new HEAD,
+pause, revert, re-run, Reverted status, RevertNotification via MCP event,
+remediation task, gate invalidation, resume/escalate, circuit breaker) is
+present and independently evidenced on this candidate. Focused suites and
+all task-relevant mechanical checks pass. Full-workspace `cargo test --all`
+and transport-level checks remain with the verifier (TCP listener probe
+unsupported in this runtime per `/tmp/stage/capabilities.json`).
