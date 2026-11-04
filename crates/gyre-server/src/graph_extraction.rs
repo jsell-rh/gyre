@@ -600,6 +600,8 @@ pub async fn check_divergence(
             now_i64,
         );
         notif.body = Some(body.clone());
+        notif.entity_ref = Some(spec_ref.to_string());
+        notif.repo_id = Some(repo_id.as_str().to_string());
         if let Err(e) = ports.notification_repo.create(&notif).await {
             warn!(
                 user_id = %member.user_id,
