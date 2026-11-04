@@ -9,7 +9,7 @@ coverage_sections:
   - "platform-model.md §6 Post-Merge Validation"
   - "platform-model.md §6 Recovery Protocol"
   - "platform-model.md §6 Agent Behavior During Recovery"
-commits: ["ee2bcf8eff79c9849b8576ae12ba2a173108cd80", "c2e1ee93344be8f6989615ba84e315b590450273", "e6a6db47dbd8b988c8367a1965db50fd77d5abe7", "3a9b11f69c57cb576d2e3914ff7af7e54941b518", "5aaded213193d1af1cec693e729ac2872893b10b", "86c7d382312fae4fb52ae4effe40e021330f3ac2", "7c723298b41ee761067b15ae426651aa280fb75e"]
+commits: ["ee2bcf8eff79c9849b8576ae12ba2a173108cd80", "c2e1ee93344be8f6989615ba84e315b590450273", "e6a6db47dbd8b988c8367a1965db50fd77d5abe7", "3a9b11f69c57cb576d2e3914ff7af7e54941b518", "5aaded213193d1af1cec693e729ac2872893b10b", "86c7d382312fae4fb52ae4effe40e021330f3ac2", "7c723298b41ee761067b15ae426651aa280fb75e", "c8595a409f15c267ab53b460532f409917124e2b"]
 ---
 
 ## Spec Excerpt
@@ -88,104 +88,70 @@ Read `specs/system/platform-model.md` §6 "Rollback & Recovery". The merge proce
 
 ## Shipped
 
-Revision round for the Round-3 review findings (R3-F1 … R3-F4), all
-closed in product code on this branch:
+Round-5 revision (repair of the Round-4 review findings R5-F1…R5-F3,
+plus the interrupted upstream merge), on top of the previously
+shipped §6 Post-Merge Validation + Recovery Protocol work (Rounds 1–4:
+post-merge gates on merged HEAD, `MrStatus::Reverted`, queue pause on
+failure, `git revert -m 1` three-way-merge semantics with Conflict
+leaving the branch untouched, remediation tasks + RevertNotification,
+resubmission-stable circuit breaker, merge-commit-sha-scoped manual
+revert — details in `specs/reviews/task-095.md`):
 
-- **R3-F1 (manual revert of the wrong commit):** `MergeRequest` now
-  persists `merge_commit_sha`, recorded at merge time on both the
-  single-entry and atomic-group paths (migration `2026-09-30-000056`,
-  sqlite + postgres adapters, schema.rs). `POST /repos/:id/revert/:mr_id`
-  reverts the MR's OWN recorded merge commit — never the current branch
-  HEAD — rejects MRs with no recorded sha (409) and MRs belonging to a
-  different repo (403), and routes manual reverts through
-  `increment_revert_count`/`trip_circuit_breaker` so they count toward
-  the breaker. Tests: `manual_revert_reverts_recorded_merge_commit`
-  (observes the exact SHA passed to `revert_commit` through the
-  `ConfigurableGitOps.revert_calls` double),
-  `manual_revert_without_recorded_merge_commit_is_conflict`,
-  `manual_revert_rejects_foreign_repo_mr`,
-  `manual_revert_counts_toward_circuit_breaker`.
-- **R3-F2 (breaker unreachable through the prescribed workflow):** the
-  breaker counter is keyed on the resubmission-stable identity
-  (`revert_breaker_key`: `spec:<spec_ref>` when bound, else `mr:<id>`);
-  a trip cancels the queue entries of EVERY MR sharing the key; the
-  remediation task now tells the author to bind the resubmitted MR to
-  the same spec; and `enqueue` plus the processor's selection loop
-  (single-entry 4b'' and atomic-group fetch-time re-validation) reject
-  entries whose MR is not Open/Approved, so a Reverted MR can no longer
-  be silently re-merged. Tests:
-  `revert_breaker_accumulates_across_resubmitted_mrs`,
-  `process_next_fails_entry_for_reverted_mr`,
-  `atomic_group_skips_non_mergeable_member_and_rolls_back`,
-  `enqueue` conflict test in `api/merge_queue.rs`.
-- **R3-F3 (fail-open `main_green`):** `repo_status` resolves the default
-  branch HEAD without a default; unresolvable HEAD reports
-  `main_green: false` (fail closed). Test:
-  `repo_status_main_green_fails_closed_when_head_unresolvable` (plain
-  directory fixture + always-pass gate — proves the gate never ran).
-  Both recovery.rs exemption entries removed from
-  `fail-open-ref-resolution-exemptions.txt` (frozen at 0).
-- **R3-F4 (review-record drift / dead ABAC duplicates):** the five
-  duplicated resolver entries removed (single first-match block remains;
-  `post-merge-gates` maps to resource type `gate`, matching sibling
-  gate routes); `check-abac-route-registry.sh` duplicate baseline
-  lowered from 22 to 17; task-096 rescoped to the remaining §6 UI work
-  only (Circuit Breaker + CLI/REST recorded as delivered under
-  task-095); all task-labeled commits recorded in this file's
-  `commits:` frontmatter.
-- **R4 (found during the Round-3 revision):** `rollback_atomic_group`
-  addressed AtomicGroupFailure notifications to the raw author AGENT
-  id — a user that does not exist — so no human ever saw a
-  group-failure notice. Now resolves the agent's spawning user
-  (agent-id fallback), matching `notify_gate_failure`/`notify_mr_merged`
-  (commit `9cceb83b`).
-- **R4-F1 (non-tip revert destroyed later merges — Round-4 major):**
-  `Git2OpsAdapter::revert_commit` now implements true `git revert -m 1`
-  semantics instead of snapshot semantics: a three-way merge of
-  `tree(M^1)` against the current branch tip with `tree(M)` as the
-  merge base, so only the reverted merge's own changes are undone and
-  every later merge survives (the pre-fix code restored M's parent
-  tree wholesale, wiping all later merges while reporting success).
-  When the inverse patch collides with later changes on the same file,
-  the port returns `RevertResult::Conflict` and leaves the branch
-  untouched; all three callers handle it without falling back to
-  anything destructive — the manual REST endpoint surfaces 409 with no
-  side effects, and both automatic recovery paths (single MR and
-  atomic group) stay paused and escalate to a human instead of
-  recording a revert that never happened. The port contract
-  (`gyre-ports/src/git_ops.rs`) documents the semantics. Real-git
-  regression tests: `test_revert_commit_non_tip_preserves_later_merges`
-  (two sequential merges; reverting A leaves B's file intact),
-  `test_revert_commit_conflict_leaves_branch_untouched` (same-file
-  collision → Conflict, branch unchanged). Automatic-path conflict
-  handling is covered by
-  `post_merge_recovery_revert_conflict_stays_paused_without_side_effects`
-  and
-  `atomic_group_recovery_revert_conflict_stops_group_reverts`
-  (pause holds, MR(s) stay Merged with no revert recorded, escalation
-  to the author's spawner, no remediation task), plus the REST-level
-  `manual_revert_conflict_is_409_without_side_effects`.
+- **Upstream merge resolved:** the interrupted merge of base
+  `110180fb` completed. `retention.rs` took the upstream side — a
+  superset evolution of this branch's checkpoint contribution
+  (recovered upstream via `92074d84` and extended: configurable
+  `SnapshotTiers`, `purge_older_than`, band-no-spillover deletion);
+  every function this branch's checkpoint added exists upstream.
+  `web/dist` was rebuilt from the merged `web/src` (`npm ci` +
+  `vite build`), which reproduced the upstream asset set exactly
+  (index-CLIRvdnY.js / index-GeLbLKhg.css / elk.bundled-C7RdDx88.js),
+  confirming the merged sources and committed build output are
+  coherent.
+- **R5-F1 (inert §7.2 Allow):** `builtin:attested-authorization` was
+  seeded `enabled: false`, so `policy_engine::evaluate` (which
+  retains only `p.enabled` policies) never ran it and
+  `builtin-default-deny` denied every push/merge carrying a valid
+  attestation chain. Now seeded `enabled: true`; deployments that
+  already stored the disabled row are refreshed automatically
+  because `builtin_policy_drifted` compares `stored.enabled` against
+  the code definition. Both deterministically-failing tests
+  (`merge_processor::merge_time_abac_valid_chain_merges_under_builtin_policies`,
+  `policy_engine::builtin_signed_authorization_satisfied_by_chain_presence`)
+  consume `m34_builtin_policies()` directly, so the single seed-site
+  fix addresses both.
+- **R5-F2 (rustfmt):** the over-width `updated_at` no-op-seed
+  assertion split across lines; `check-rustfmt-diff.py` clean against
+  both `6a9739e5` and `110180fb` (29/43 files checked), plain
+  `cargo fmt --check -p gyre-server` clean.
+- **R5-F3 (shifted exemption line):** the legacy `git_http.rs` ws_id
+  fallback site moved from line 1495 to 1499 (push-time ABAC
+  insertion above it); the frozen line-keyed exemption entry was
+  moved to 1499 — same legacy site, entry count still 5, baseline
+  unchanged. `check-fabricated-scope-defaults.sh` green.
 
-**Test evidence** (focused probes on this branch head; logs under
-`/tmp/stage/review-evidence/`):
-`cargo test -p gyre-adapters --lib git2_ops` → 31 passed / 0 failed
-(real-git three-way-merge revert, non-tip preservation, conflict
-untouched-branch); `cargo test -p gyre-server --lib merge_processor` →
-54 passed (includes the six post-merge/recovery protocol tests, the
-R3-F1/F2 breaker and revert tests, and the two new R4-F1
-revert-conflict tests); `cargo test -p gyre-server --lib api::recovery`
-→ 6 passed; `cargo test -p gyre-server --lib api::merge_queue` → 8
-passed. Check scripts green at head:
-`check-task-commit-attribution` (after recording `a11ba8d3` in
-task-068's frontmatter — the base commit that entered this branch via
-the recovery merge, same R3-F4 drift class),
-`check-fail-open-ref-resolution`, `check-abac-route-registry`,
-`check-migration-versions`, `check-byte-slice-truncation`,
-`check-dead-message-kinds`, `check-arch`, `check-inert-enforcement`,
-`check-mem-port-contracts`.
+### Test evidence
 
-Sandbox limitation recorded: the TCP listener probe is unsupported in
-this runtime (`errno 95`, `/tmp/stage/capabilities.json`), so no live
-server/browser smoke test was performed here; behavior is verified by
-the in-process axum `oneshot` handler tests above. GitHub CI on the
-branch head remains the authoritative transport-level check.
+Mechanical gates green at head `c8595a40` (logs under
+`/tmp/stage/review-evidence/`): check-arch, check-abac-route-registry,
+check-migration-versions, check-byte-slice-truncation,
+check-dead-message-kinds, check-inert-enforcement,
+check-mem-port-contracts, check-fail-open-ref-resolution,
+check-lossy-secret-conversion, check-fabricated-scope-defaults,
+check-scope-literal-defaults, check-forwarded-header-trust,
+check-relative-path-defaults, check-unbounded-external-http,
+check-mcp-write-tools, check-abac-exempt-handlers,
+check-task-commit-attribution, check-rustfmt-diff (vs `6a9739e5` and
+`110180fb`), web build from merged sources.
+
+Sandbox limitations recorded for remote verification: this runtime
+has no crates.io egress (registry cache holds ~30 index entries, no
+`.crate` archives, no prebuilt target dir), so `cargo test` probes
+for the two R5-F1 suites could not be executed here — the fix is the
+exact change the finding prescribed (`enabled: false` → `true` at the
+single seed site both failing tests read), and the deterministic
+repros (`cargo test -p gyre-server --lib merge_processor` /
+`policy_engine`) must be confirmed by CI/remote verification. The TCP
+listener probe is likewise unsupported (`errno 95`,
+`/tmp/stage/capabilities.json`); GitHub CI on the branch head remains
+the authoritative transport-level check.
