@@ -50,3 +50,40 @@ Test suites run: `cargo test -p gyre-server --lib api::workspaces` (12 passed), 
 ### Verdict
 
 needs-revision — F5 means the task's central deliverable (Supervised trust actually requiring human merge approval, per HSI §2 Mechanical Implementation) is not enforced end-to-end: the Deny policy is created but never consulted. F6 is the same silent-restriction-loss class R1 F1 established, surviving in an adjacent handler. F7/F8 are coverage gaps on fix-introduced branches and an explicit acceptance criterion.
+
+
+## Round: R3
+
+**Reviewer:** Review (independent)
+**Date:** 2026-10-10
+**Candidate:** aa6a512f125765f9681da22461103120e23e77c1 (base 653a696f)
+**Spec ref:** human-system-interface.md §2 (Trust Gradient, §9–13 coverage rows), abac-policy-engine.md
+
+### R2 fix verification (F5–F8)
+
+All four R2 findings verified as genuinely resolved at the candidate, with independent probes:
+
+- [-] **F5 (resolved R3): merge-time ABAC enforcement is real and load-bearing.** `evaluate_merge_abac` (merge_processor.rs:2640) constructs the specced service identity (`subject.type "system"`, `subject.id "merge-processor"`, action `merge`, resource `mr`), filters cross-workspace policies by scope_id, and excludes the pipeline catch-all `builtin-default-deny` by id (documented: leaving it in scope would make Guided/Autonomous unrepresentable; regression tests `guided_workspace_merge_proceeds_with_startup_seeded_builtins` / `supervised_hold_survives_startup_seeded_builtins` seed exactly what startup seeds). Both call sites gate before merge: single-entry requeues (not fails) with a "supervised trust" reason; atomic-group members roll the whole group back to Queued. The human-approval escape (`mr.status == Approved`) is set only via the MR status endpoint, and `transition_mr_status` (merge_requests.rs:604) forbids the Agent role from setting `approved` (tested at :1079). **Mutation probe:** disabling both gate sites (`if mr.status != MrStatus::Approved` → `if false`) fails 3 tests (`supervised_workspace_open_mr_merge_is_held_and_requeued`, `supervised_trust_denies_atomic_group_member_rolls_back_group`, `supervised_hold_survives_startup_seeded_builtins` — `left: Merged, right: Open`); restored and re-verified green, tree pristine at aa6a512f. Evidence: `/tmp/stage/review-evidence/mutation-probe-f5-gate.md`.
+- [-] **F6 (resolved R3): interrogation policy creation fails closed.** `create_interrogation_policies_in` (spawn.rs:252) propagates every `policies.create` error with `?`; the spawn handler (spawn.rs:494) rolls back the agent record and token before returning the error. `cleanup_interrogation_policies` keeps the kv retry handle when any delete fails. Test `create_interrogation_policies_fails_closed_on_duplicate` drives the failure path with a duplicate-rejecting repo. Former exemptions removed from both `inert-enforcement-exemptions.txt` and `warn-continue-creation-exemptions.txt`; both gates run green with zero task-077-owned entries.
+- [-] **F7 (resolved R3): Custom transition directions tested.** `trust_transition_preset_to_custom_preserves_trust_policies` (Supervised → Custom preserves `trust:` policies) and `trust_transition_custom_to_preset_deletes_and_reseeds` (Custom → Guided deletes ALL workspace `trust:` policies including an operator-created `trust:`-prefixed one, reseeds nothing for Guided, non-trust user policy survives).
+- [-] **F8 (resolved R3): field-level generator assertions + from_db_str.** `trust_policies_for_level_supervised_generates_merge_hold_deny` asserts every field the F5 gate consumes (name, Deny, priority 150 in the 100–199 band, actions `[merge]`, resource_types `[mr]`, `subject.type == "system"` Equals condition, Workspace scope/scope_id, enabled, non-immutable, non-builtin, created_by); Guided/Autonomous/Custom assert empty. `from_db_str` four-arm + unknown-fallback tests present (gyre-domain).
+
+### Independent checks (evidence under /tmp/stage/review-evidence/)
+
+- `cargo test -p gyre-server --lib` — **1210 passed, 0 failed** (full lib suite, includes merge_processor 55, api::workspaces 16, policy_engine 19, api::spawn 30, api::merge_requests 22, api::policies 12, abac_middleware 10).
+- `cargo test -p gyre-domain --lib` — 371 passed.
+- `cargo fmt --all --check` — clean.
+- All AGENTS.md-enforced mechanical gates pass (arch, abac-route-registry, abac-exempt-handlers, mcp-write-tools, migration-versions, migration-sql-portability, dead-message-kinds, byte-slice-truncation, relative-path-defaults, fail-open-ref-resolution, task-commit-attribution, mem-port-contracts, fabricated-scope-defaults, lossy-secret-conversion, scope-literal-defaults, inert-enforcement, forged-scope-fields, forwarded-header-trust, in-memory-state-stores, unbounded-external-http, warn-continue-creation, non-atomic-creation).
+- Restored `check-non-atomic-creation.sh` (6bbefbc5): passes on HEAD (rc=0) and detects a planted two-repo creation violation in a scratch tree (negative probe). Non-AGENTS gates failing rc=1 were compared against base 653a696f via worktree — all pre-existing, none introduced by this candidate. rc=2 awk failures are mawk-host infrastructure (this sandbox lacks gawk), same class the python3 port fixed.
+- Acceptance criteria verified one by one: TrustLevel enum + Workspace.trust_level (default Supervised, migration 000050 corrects 000024's Guided default); immutable migration 000028; preset policy sets; single-transaction transitions in BOTH sqlite and postgres adapters (`conn.transaction`, mem adapter atomic + fail hook); 409 with verbatim spec message + rollback assertions; immutable-Deny-first engine evaluation (priority-1000 Allow cannot override immutable Deny at 999 — tested); `builtin:require-human-spec-approval` seeded fail-closed at startup (tests in abac_middleware.rs:1189–1223); prefix rejection (400) on create AND rename; no policy-result cache exists (policies read fresh per request — cache-invalidation criterion satisfied trivially, documented at abac_middleware.rs:836).
+
+### Observations (non-blocking, recorded for spec lifecycle)
+
+- `TrustLevel` lives in `gyre-domain` (with the Workspace entity) rather than `gyre-common` as the implementation plan's step 1 letter says; functionally identical and hexagonal-consistent, the spec itself mandates no crate.
+- A held Supervised head-of-queue entry requeues at unchanged priority, so entries behind it wait until a human approves — standard serialized merge-queue semantics; defensible, not a defect.
+- Preset-mode `trust:` policies are mutable via `PUT /api/v1/policies/:id` (e.g. `enabled: false`) by any subject that passes policy-write ABAC, silently weakening Supervised while `trust_level` still reports Supervised. HSI only mandates creation-prefix rejection (implemented) and Custom mode *requires* user mutability of `trust:` policies, so the code matches the spec letter; the preset-vs-custom mutation distinction is an unspecified spec gap (and the Developer-role policy-write reach is pre-existing M34 `developer-write-access` behavior, present at base). Recommend a spec-lifecycle amendment if preset-mode tamper protection is wanted.
+- Final process commit aa6a512f dropped the short SHA `6bbefbc5` from the `commits:` frontmatter (added by 1197ec21); 6bbefbc5's subject carries no task-NNN label and touches only `scripts/`, so `check-task-commit-attribution.sh` is green and the commit is fully described in Shipped notes — no review-scope loss in practice (this round verified it independently).
+
+### Verdict
+
+approved — the task contract (all acceptance criteria) is met by real, enforced production behavior; F5–F8 are genuinely closed; independent mutation evidence confirms the central Supervised-merge hold is load-bearing.
