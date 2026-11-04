@@ -18,6 +18,10 @@ def invoke(args, timeout=30):
     return result.stdout
 
 
+def gateway_name():
+    return os.environ.get('GYRE_OPEN_GATEWAY', 'gyre-gyre')
+
+
 def login(state):
     with (state / "gateway-login.lock").open("a") as lock:
         deadline = time.monotonic() + 30
@@ -29,7 +33,7 @@ def login(state):
                 if time.monotonic() >= deadline:
                     raise TimeoutError("gateway authentication lock timed out")
                 time.sleep(0.1)
-        invoke(["gateway", "login", "gyre-gyre"])
+        invoke(["gateway", "login", gateway_name()])
 
 
 def decode_page(value):
@@ -69,7 +73,7 @@ def inventory():
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("sandbox inventory exceeded its overall deadline")
-        args = ["-g", "gyre-gyre", "sandbox", "list", "--output", "json", "--page-size", "100"]
+        args = ["-g", gateway_name(), "sandbox", "list", "--output", "json", "--page-size", "100"]
         if token:
             args += ["--page-token", token]
         output = invoke(args, timeout=min(30, remaining))
@@ -104,7 +108,7 @@ def main():
         else:
             if not args.sandbox:
                 parser.error("delete requires --sandbox")
-            invoke(["-g", "gyre-gyre", "sandbox", "delete", args.sandbox], timeout=90)
+            invoke(["-g", gateway_name(), "sandbox", "delete", args.sandbox], timeout=90)
             result = {"ok": True}
     except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
         result = {"ok": False, "error": str(exc)}
