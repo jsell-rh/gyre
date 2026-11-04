@@ -5,7 +5,7 @@ depends_on: []
 progress: needs-revision
 coverage_sections:
   - "observability.md §Audit Event Schema"
-commits: []
+commits: ["9e70fa7f78e58979f79aef505e9120c10460e280"]
 review: specs/reviews/task-102.md
 ---
 
