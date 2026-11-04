@@ -640,32 +640,57 @@ pub(crate) async fn spawn_agent_core(
         // process starts — raw values are never in the agent env.
         // Failure is logged and skipped: a missing/undecryptable secret must
         // not block spawning the agent itself.
-        let tenant_id = workspace
-            .as_ref()
-            .map(|ws| ws.tenant_id.to_string())
-            .unwrap_or_else(|| "default".to_string());
-        match state
-            .secrets
-            .resolve_for_agent(
-                &tenant_id,
-                &repo.workspace_id.to_string(),
-                &req.repo_id,
-                Some(&req.task_id),
-            )
-            .await
-        {
-            Ok(resolved) => {
-                for (name, value) in resolved {
-                    container_env.insert(
-                        format!("GYRE_CRED_{name}"),
-                        String::from_utf8_lossy(&value).into_owned(),
-                    );
+        // Resolve the tenant from the workspace record; never fabricate a
+        // "default" tenant. On an unresolvable workspace, skip tenant-scoped
+        // (and thus all) secret resolution and warn — the spawn itself must
+        // continue without GYRE_CRED_* env vars.
+        match workspace.as_ref() {
+            Some(ws) => {
+                let tenant_id = ws.tenant_id.to_string();
+                match state
+                    .secrets
+                    .resolve_for_agent(
+                        &tenant_id,
+                        &repo.workspace_id.to_string(),
+                        &req.repo_id,
+                        Some(&req.task_id),
+                    )
+                    .await
+                {
+                    Ok(resolved) => {
+                        for (name, value) in resolved {
+                            // Env vars must be UTF-8. Skip (and name, never
+                            // log) non-UTF-8 values rather than corrupting
+                            // them with replacement chars — same availability
+                            // posture as the resolve-failure branch.
+                            match String::from_utf8(value) {
+                                Ok(s) => {
+                                    container_env.insert(format!("GYRE_CRED_{name}"), s);
+                                }
+                                Err(_) => {
+                                    tracing::warn!(
+                                        agent_id = %agent.id,
+                                        secret_name = %name,
+                                        "skipping non-UTF-8 secret; GYRE_CRED_* env vars require UTF-8 values"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            agent_id = %agent.id,
+                            "secret resolution failed; continuing without GYRE_CRED_* env vars: {e:#}"
+                        );
+                    }
                 }
             }
-            Err(e) => {
+            None => {
                 tracing::warn!(
                     agent_id = %agent.id,
-                    "secret resolution failed; continuing without GYRE_CRED_* env vars: {e:#}"
+                    workspace_id = %repo.workspace_id,
+                    repo_id = %req.repo_id,
+                    "workspace unresolvable; skipping scoped secret resolution (no GYRE_CRED_* env vars)"
                 );
             }
         }
@@ -2049,7 +2074,7 @@ async fn create_derived_input_for_agent(
 mod tests {
     use super::{register_spawned_agent, SpawnBackend};
     use gyre_ports::ComputeTarget as _;
-    use crate::mem::test_state;
+    use crate::mem::{test_state, test_state_with_secrets};
     use axum::{body::Body, Router};
     use http::{Request, StatusCode};
     use tower::ServiceExt;
@@ -2132,6 +2157,1006 @@ mod tests {
         let json = body_json(resp).await;
         (app, json)
     }
+
+    #[tokio::test]
+    async fn spawn_creates_agent_active_with_token() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Build feature").await;
+        let (_, json) = do_spawn(app, &repo_id, &task_id, "feat/build").await;
+
+        assert_eq!(json["agent"]["status"], "active");
+        assert!(!json["agent"]["id"].as_str().unwrap().is_empty());
+        assert!(!json["token"].as_str().unwrap().is_empty());
+        assert_eq!(json["branch"], "feat/build");
+        // jj_change_id is present in the response (null when worktree doesn't exist on disk)
+        assert!(json.get("jj_change_id").is_some());
+    }
+
+    #[tokio::test]
+    async fn spawn_response_includes_jj_change_id_field() {
+        // Verifies the jj_change_id field is present in the spawn response JSON.
+        // It will be null if the worktree path doesn't exist on disk (test env),
+        // but the field must always be serialized.
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "jj field task").await;
+        let (_, json) = do_spawn(app, &repo_id, &task_id, "feat/jj-test").await;
+
+        assert!(
+            json.get("jj_change_id").is_some(),
+            "spawn response must include jj_change_id field: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_creates_worktree_record() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "WT task").await;
+        let (app, _) = do_spawn(app, &repo_id, &task_id, "feat/wt-test").await;
+
+        let wt_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/repos/{repo_id}/worktrees"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wt_resp.status(), StatusCode::OK);
+        let wt_json = body_json(wt_resp).await;
+        assert_eq!(wt_json.as_array().unwrap().len(), 1);
+        assert_eq!(wt_json[0]["branch"], "feat/wt-test");
+    }
+
+    #[tokio::test]
+    async fn spawn_assigns_task_to_agent() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Assigned task").await;
+        let (app, json) = do_spawn(app, &repo_id, &task_id, "feat/assign").await;
+        let agent_id = json["agent"]["id"].as_str().unwrap().to_string();
+
+        let task_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/tasks/{task_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let task_json = body_json(task_resp).await;
+        assert_eq!(task_json["assigned_to"].as_str().unwrap(), &agent_id);
+        assert_eq!(task_json["status"], "in_progress");
+    }
+
+    #[tokio::test]
+    async fn spawn_returns_correct_clone_url_format() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "URL task").await;
+        let (_, json) = do_spawn(app, &repo_id, &task_id, "feat/url-test").await;
+
+        let clone_url = json["clone_url"].as_str().unwrap();
+        assert!(
+            clone_url.contains("/git/"),
+            "clone_url should contain /git/: {clone_url}"
+        );
+        assert!(
+            clone_url.contains("ws-1"),
+            "clone_url should contain workspace slug/id: {clone_url}"
+        );
+        assert!(
+            clone_url.contains("test-repo"),
+            "clone_url should contain repo name: {clone_url}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_branch_slashes_become_dashes_in_worktree_path() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Slash task").await;
+        let (_, json) = do_spawn(app, &repo_id, &task_id, "feat/sub/feature").await;
+
+        let wt_path = json["worktree_path"].as_str().unwrap();
+        assert!(
+            !wt_path.ends_with("feat/sub/feature"),
+            "worktree path should not contain raw branch slashes: {wt_path}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_with_parent_id() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Child task").await;
+
+        let body = serde_json::json!({
+            "name": "child-worker",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/child",
+            "parent_id": "parent-agent-123",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        assert_eq!(json["agent"]["parent_id"], "parent-agent-123");
+    }
+
+    #[tokio::test]
+    async fn spawn_requires_valid_auth_token() {
+        let app = app();
+        let body = serde_json::json!({
+            "name": "worker",
+            "repo_id": "r",
+            "task_id": "t",
+            "branch": "feat/x",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn spawn_bad_token_rejected() {
+        let app = app();
+        let body = serde_json::json!({
+            "name": "worker",
+            "repo_id": "r",
+            "task_id": "t",
+            "branch": "feat/x",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer bad-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn spawn_repo_not_found() {
+        let app = app();
+        let body = serde_json::json!({
+            "name": "worker",
+            "repo_id": "no-such-repo",
+            "task_id": "task-1",
+            "branch": "feat/x",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn spawn_task_not_found() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let body = serde_json::json!({
+            "name": "worker",
+            "repo_id": repo_id,
+            "task_id": "no-such-task",
+            "branch": "feat/x",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn complete_creates_merge_request() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Feature task").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/complete-test").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let body = serde_json::json!({
+            "branch": "feat/complete-test",
+            "title": "Add my feature",
+            "target_branch": "main",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/complete"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let mr_json = body_json(resp).await;
+        assert_eq!(mr_json["source_branch"], "feat/complete-test");
+        assert_eq!(mr_json["target_branch"], "main");
+        assert_eq!(mr_json["title"], "Add my feature");
+        assert_eq!(mr_json["status"], "open");
+    }
+
+    #[tokio::test]
+    async fn complete_transitions_task_to_review() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Review task").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/review-test").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let body = serde_json::json!({
+            "branch": "feat/review-test",
+            "title": "Done",
+            "target_branch": "main",
+        });
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/complete"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let task_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/tasks/{task_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let task_json = body_json(task_resp).await;
+        assert_eq!(task_json["status"], "review");
+    }
+
+    #[tokio::test]
+    async fn complete_transitions_agent_to_idle() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Idle task").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/idle-test").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let body = serde_json::json!({
+            "branch": "feat/idle-test",
+            "title": "Done",
+            "target_branch": "main",
+        });
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/complete"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let agent_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/agents/{agent_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let agent_json = body_json(agent_resp).await;
+        assert_eq!(agent_json["status"], "idle");
+    }
+
+    #[tokio::test]
+    async fn complete_agent_not_found() {
+        let body = serde_json::json!({
+            "branch": "feat/x",
+            "title": "Done",
+            "target_branch": "main",
+        });
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/no-such/complete")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn complete_no_worktree_returns_bad_request() {
+        let app = app();
+        // Create agent directly (no worktree)
+        let body = serde_json::json!({"name": "bare-agent"});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        let agent_id = json["id"].as_str().unwrap().to_string();
+
+        let body = serde_json::json!({
+            "branch": "main",
+            "title": "Done",
+            "target_branch": "main",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/complete"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn complete_mr_sets_author_agent_id() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Author task").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/author-test").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let body = serde_json::json!({
+            "branch": "feat/author-test",
+            "title": "Feature",
+            "target_branch": "main",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/complete"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let mr_json = body_json(resp).await;
+        assert_eq!(mr_json["author_agent_id"].as_str().unwrap(), &agent_id);
+    }
+
+    #[tokio::test]
+    async fn complete_revokes_agent_token() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Revoke task").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/revoke-test").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+        let agent_token = spawn_json["token"].as_str().unwrap().to_string();
+
+        // Complete the agent
+        let body = serde_json::json!({
+            "branch": "feat/revoke-test",
+            "title": "Done",
+            "target_branch": "main",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/complete"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // The agent's token must now be rejected (401) — it was revoked on complete.
+        let spawn_body = serde_json::json!({
+            "name": "should-fail",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/should-fail",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", format!("Bearer {agent_token}"))
+                    .body(Body::from(serde_json::to_vec(&spawn_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "agent token must be invalid after complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_idempotent_returns_202_on_double_complete() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Idempotent task").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/idempotent-test").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let body = serde_json::json!({
+            "branch": "feat/idempotent-test",
+            "title": "Idempotent Feature",
+            "target_branch": "main",
+        });
+
+        // First complete — should return 201 CREATED
+        let resp1 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/complete"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp1.status(), StatusCode::CREATED);
+        let mr_json1 = body_json(resp1).await;
+        let mr_id = mr_json1["id"].as_str().unwrap().to_string();
+
+        // Second complete — should return 202 ACCEPTED with the same MR id
+        let resp2 = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/complete"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::ACCEPTED);
+        let mr_json2 = body_json(resp2).await;
+        assert_eq!(mr_json2["id"].as_str().unwrap(), &mr_id);
+    }
+
+    // ── Interrogation agent tests (HSI §4) ────────────────────────────────────
+
+    async fn do_spawn_interrogation(
+        app: Router,
+        repo_id: &str,
+        task_id: &str,
+        conversation_sha: Option<&str>,
+    ) -> (Router, serde_json::Value) {
+        let mut body = serde_json::json!({
+            "name": "interrogation-1",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "interrogation/test",
+            "agent_type": "interrogation",
+        });
+        if let Some(sha) = conversation_sha {
+            body["conversation_sha"] = serde_json::Value::String(sha.to_string());
+        }
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "interrogation spawn should succeed"
+        );
+        let json = body_json(resp).await;
+        (app, json)
+    }
+
+    #[tokio::test]
+    async fn interrogation_spawn_creates_active_agent() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Interrogate agent").await;
+        let (_, json) = do_spawn_interrogation(app, &repo_id, &task_id, None).await;
+
+        assert_eq!(json["agent"]["status"], "active");
+        assert!(!json["token"].as_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn interrogation_spawn_creates_abac_policies() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Policy agent").await;
+        let (app, json) = do_spawn_interrogation(app, &repo_id, &task_id, None).await;
+        let agent_id = json["agent"]["id"].as_str().unwrap().to_string();
+
+        // Verify that ABAC policies were created by listing them.
+        let policies_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/policies")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(policies_resp.status(), StatusCode::OK);
+        let policies_json = body_json(policies_resp).await;
+        let policies = policies_json.as_array().unwrap();
+
+        // Should have 3 interrogation policies for this agent.
+        let interrogation_policies: Vec<_> = policies
+            .iter()
+            .filter(|p| {
+                p["name"]
+                    .as_str()
+                    .map(|n| n.contains(&agent_id))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(
+            interrogation_policies.len(),
+            3,
+            "should create 3 interrogation ABAC policies, found: {policies_json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn interrogation_spawn_without_conversation_sha() {
+        // Spawning without conversation_sha should succeed (best-effort context retrieval).
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "No context agent").await;
+        let (_, json) = do_spawn_interrogation(app, &repo_id, &task_id, None).await;
+
+        assert_eq!(json["agent"]["status"], "active");
+    }
+
+    // ── Compute target resolution tests ────────────────────────────────────────
+
+    /// Helper: create a workspace via the API and return its ID.
+    async fn create_workspace(app: Router, name: &str) -> (Router, String) {
+        let body = serde_json::json!({"name": name});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "workspace create should succeed"
+        );
+        let json = body_json(resp).await;
+        (app, json["id"].as_str().unwrap().to_string())
+    }
+
+    /// Helper: create a compute target via the API and return its ID.
+    async fn create_compute_target(app: Router, name: &str, is_default: bool) -> (Router, String) {
+        let body = serde_json::json!({
+            "name": name,
+            "target_type": "Container",
+            "config": {"image": "gyre-agent:latest", "network": "bridge"},
+            "is_default": is_default,
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/compute-targets")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "compute target create should succeed"
+        );
+        let json = body_json(resp).await;
+        (app, json["id"].as_str().unwrap().to_string())
+    }
+
+    /// Helper: assign a compute target to a workspace via PUT /api/v1/workspaces/:id.
+    async fn assign_compute_target_to_workspace(
+        app: Router,
+        workspace_id: &str,
+        compute_target_id: &str,
+    ) -> Router {
+        let body = serde_json::json!({"compute_target_id": compute_target_id});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{workspace_id}"))
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "workspace update should succeed"
+        );
+        app
+    }
+
+    /// Helper: create a repo in a specific workspace.
+    async fn create_repo_in_workspace(app: Router, workspace_id: &str) -> (Router, String) {
+        let body = serde_json::json!({"workspace_id": workspace_id, "name": "wt-repo"});
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        (app, json["id"].as_str().unwrap().to_string())
+    }
+
+    #[tokio::test]
+    async fn spawn_uses_workspace_assigned_compute_target() {
+        // When a workspace has a compute_target_id set and the spawn request
+        // does not specify one, the workspace target is resolved automatically.
+        let app = app();
+        let (app, ws_id) = create_workspace(app, "workspace-ct-test").await;
+        let (app, ct_id) = create_compute_target(app, "ws-container", false).await;
+        let app = assign_compute_target_to_workspace(app, &ws_id, &ct_id).await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "workspace ct task").await;
+
+        // Spawn without explicit compute_target_id.
+        let body = serde_json::json!({
+            "name": "ws-ct-agent",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/ws-ct-test",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED, "spawn should succeed");
+        let json = body_json(resp).await;
+
+        // Response must include the workspace's assigned compute target.
+        assert_eq!(
+            json["compute_target_id"].as_str().unwrap_or(""),
+            &ct_id,
+            "spawn should resolve workspace-assigned compute target: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_falls_back_to_tenant_default_compute_target() {
+        // When no explicit compute_target_id is requested and the workspace has
+        // no assignment, the tenant's default compute target is used.
+        let app = app();
+        let (app, ws_id) = create_workspace(app, "workspace-default-ct").await;
+        // Create a default compute target for the tenant (is_default = true).
+        let (app, ct_id) = create_compute_target(app, "tenant-default", true).await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "tenant default ct task").await;
+
+        // Spawn without explicit compute_target_id, workspace has no assignment.
+        let body = serde_json::json!({
+            "name": "tenant-default-agent",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/tenant-default-ct",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED, "spawn should succeed");
+        let json = body_json(resp).await;
+
+        // Response must include the tenant's default compute target.
+        assert_eq!(
+            json["compute_target_id"].as_str().unwrap_or(""),
+            &ct_id,
+            "spawn should fall back to tenant-default compute target: {json}"
+        );
+    }
+
+    // ── Signal chain: task_type filtering tests (agent-runtime §1 Phase 4) ───
+
+    /// Helper: create a task with a specific task_type via the API.
+    async fn create_task_with_type(
+        app: Router,
+        title: &str,
+        task_type: Option<&str>,
+    ) -> (Router, String) {
+        let mut body = serde_json::json!({"title": title});
+        if let Some(tt) = task_type {
+            body["task_type"] = serde_json::Value::String(tt.to_string());
+        }
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let json = body_json(resp).await;
+        (app, json["id"].as_str().unwrap().to_string())
+    }
+
+    /// Helper: attempt spawn and return the response (without asserting status).
+    async fn try_spawn(
+        app: Router,
+        name: &str,
+        repo_id: &str,
+        task_id: &str,
+        branch: &str,
+    ) -> (Router, axum::response::Response) {
+        let body = serde_json::json!({
+            "name": name,
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": branch,
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        (app, resp)
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_delegation_tasks() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) =
+            create_task_with_type(app, "Delegation task", Some("delegation")).await;
+        let (_, resp) = try_spawn(app, "worker-deleg", &repo_id, &task_id, "feat/deleg").await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "delegation tasks must not trigger worker agent spawning"
+        );
+        let json = body_json(resp).await;
+        let msg = json["error"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("delegation"),
+            "error should mention delegation: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_coordination_tasks() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) =
+            create_task_with_type(app, "Coordination task", Some("coordination")).await;
+        let (_, resp) = try_spawn(app, "worker-coord", &repo_id, &task_id, "feat/coord").await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "coordination tasks must not trigger worker agent spawning"
+        );
+        let json = body_json(resp).await;
+        let msg = json["error"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("coordination"),
+            "error should mention coordination: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_tasks_without_task_type() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        // Create task without task_type (simulates push-hook pre-approval task).
+        let (app, task_id) = create_task_with_type(app, "Pre-approval push-hook task", None).await;
+        let (_, resp) = try_spawn(app, "worker-none", &repo_id, &task_id, "feat/no-type").await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "tasks without task_type must not trigger agent spawning"
+        );
+        let json = body_json(resp).await;
+        let msg = json["error"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("task_type"),
+            "error should mention task_type: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_allows_implementation_tasks() {
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) =
+            create_task_with_type(app, "Implementation task", Some("implementation")).await;
+        let (_, resp) = try_spawn(app, "worker-impl", &repo_id, &task_id, "feat/impl").await;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "implementation tasks should spawn agents"
+        );
+    }
+
+    #[tokio::test]
+    async fn interrogation_agents_bypass_task_type_check() {
+        // Interrogation agents are system-initiated and should work with any task_type,
+        // including delegation tasks that would normally be rejected.
+        let app = app();
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) =
+            create_task_with_type(app, "Delegation for interrogation", Some("delegation")).await;
+
+        let body = serde_json::json!({
+            "name": "interrogation-bypass",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "interrogation/bypass",
+            "agent_type": "interrogation",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "interrogation agents should bypass task_type filtering"
+        );
+    }
+
 
     #[tokio::test]
     async fn spawn_creates_agent_active_with_token() {
@@ -3246,5 +4271,475 @@ mod tests {
         // Registry cleanup happened.
         assert!(!state.process_registry.lock().await.contains_key("agt-kill-1"));
         assert!(!state.spawned_backends.lock().await.contains_key("agt-kill-1"));
+    }
+    // ── Platform Model §7: scoped secrets delivery (task-097 F2) ──────────────
+    //
+    // These tests exercise the real spawn path end-to-end: secrets are seeded
+    // into the AppState's SecretRepository (the mem adapter), an agent is
+    // spawned via POST /api/v1/agents/spawn, and the resulting child-process
+    // environment is observed. Observability trick: the compute target is a
+    // Kubernetes-typed target whose config.command points at a test-written
+    // shell script — dispatch falls through to the local LocalTarget (no
+    // docker/kube dependency), the config command wins over GYRE_AGENT_COMMAND,
+    // and the script dumps its environment to a tempfile we read back.
+    // Spawn failure is best-effort (201 regardless), so the assertions are on
+    // the dump file, not just the HTTP status.
+
+    use crate::AppState;
+    use gyre_common::{Secret, SecretScope, SecretType};
+    use std::sync::Arc;
+
+    fn test_secret(name: &str, scope: SecretScope, scope_id: &str, tenant_id: &str) -> Secret {
+        let id = uuid::Uuid::new_v4().to_string();
+        Secret {
+            id: gyre_common::Id::new(&id),
+            name: name.to_string(),
+            scope,
+            scope_id: scope_id.to_string(),
+            secret_type: SecretType::Static,
+            created_by: "test".to_string(),
+            created_at: 0,
+            expires_at: None,
+            last_rotated_at: None,
+            tenant_id: tenant_id.to_string(),
+        }
+    }
+
+    async fn seed_secret(
+        state: &Arc<AppState>,
+        name: &str,
+        scope: SecretScope,
+        scope_id: &str,
+        tenant_id: &str,
+        value: &[u8],
+    ) {
+        let secret = test_secret(name, scope, scope_id, tenant_id);
+        state
+            .secrets
+            .create(&secret, value)
+            .await
+            .expect("seeding secret into mem repository must succeed");
+    }
+
+    /// Create a Kubernetes-typed compute target whose config.command is a
+    /// test-written script dumping all GYRE_CRED_* env vars to `dump_path`.
+    /// Kubernetes-typed targets fall through the container/ssh dispatch arms
+    /// to LocalTarget, so the script runs as a plain local process — real
+    /// env delivery, no docker dependency, no process-env mutation.
+    async fn create_env_dump_compute_target(
+        app: Router,
+        name: &str,
+        dump_path: &str,
+    ) -> (Router, String) {
+        let script_path = format!("{dump_path}.sh");
+        let script = format!("#!/bin/sh\nenv | grep '^GYRE_CRED_' | sort > {dump_path}\nexit 0\n");
+        std::fs::write(&script_path, script).expect("writing env-dump script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod env-dump script");
+        }
+        let body = serde_json::json!({
+            "name": name,
+            "target_type": "Kubernetes",
+            "config": {"command": script_path},
+            "is_default": false,
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/compute-targets")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CREATED,
+            "env-dump compute target create should succeed"
+        );
+        let json = body_json(resp).await;
+        (app, json["id"].as_str().unwrap().to_string())
+    }
+
+    /// LocalTarget spawns with `current_dir(work_dir)`, so the worktree path
+    /// must exist on disk — NoopGitOps's create_worktree is a no-op.
+    fn create_worktree_dir(state: &Arc<AppState>, workspace_id: &str, repo: &str, branch: &str) {
+        let worktree_path = format!(
+            "{}/{}/{}.git/worktrees/{}",
+            state.repos_root,
+            workspace_id,
+            repo,
+            branch.replace('/', "-")
+        );
+        std::fs::create_dir_all(&worktree_path).expect("creating worktree dir");
+    }
+
+    /// Wait (bounded) for the env-dump script to write its output file.
+    /// The script redirects `sort` output into the file, so an empty/partial
+    /// read can win the race with the writer — only a complete final line
+    /// (newline-terminated, the last thing `sort > file` writes) counts.
+    async fn wait_for_dump(dump_path: &str) -> Option<String> {
+        for _ in 0..250 {
+            if let Ok(content) = std::fs::read_to_string(dump_path) {
+                if content.is_empty() || !content.ends_with('\n') {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    continue;
+                }
+                return Some(content);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn spawn_delivers_scoped_secrets_across_all_scopes() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp.path().join("env-dump").to_string_lossy().into_owned();
+
+        let (app, ws_id) = create_workspace(app, "secrets-ws").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Secrets delivery task").await;
+        let (app, ct_id) = create_env_dump_compute_target(app, "env-dump-all", &dump_path).await;
+
+        // The test caller is Admin on tenant "default"; the workspace's
+        // tenant derives from the caller, so all scopes live in "default".
+        let tenant = "default";
+        seed_secret(
+            &state,
+            "TENANT_VAR",
+            SecretScope::Tenant,
+            tenant,
+            tenant,
+            b"tenant-value",
+        )
+        .await;
+        seed_secret(
+            &state,
+            "WORKSPACE_VAR",
+            SecretScope::Workspace,
+            &ws_id,
+            tenant,
+            b"workspace-value",
+        )
+        .await;
+        seed_secret(
+            &state,
+            "REPO_VAR",
+            SecretScope::Repo,
+            &repo_id,
+            tenant,
+            b"repo-value",
+        )
+        .await;
+        seed_secret(
+            &state,
+            "TASK_VAR",
+            SecretScope::Task,
+            &task_id,
+            tenant,
+            b"task-value",
+        )
+        .await;
+
+        create_worktree_dir(&state, &ws_id, "wt-repo", "feat/secrets");
+        let (_, json) = do_spawn_with_target(app, &repo_id, &task_id, "feat/secrets", &ct_id).await;
+        assert_eq!(json["agent"]["status"], "active");
+
+        let dump = wait_for_dump(&dump_path)
+            .await
+            .expect("env-dump script should have written its output");
+        assert!(
+            dump.contains("GYRE_CRED_TENANT_VAR=tenant-value\n"),
+            "tenant-scoped secret must be delivered:\n{dump}"
+        );
+        assert!(
+            dump.contains("GYRE_CRED_WORKSPACE_VAR=workspace-value\n"),
+            "workspace-scoped secret must be delivered:\n{dump}"
+        );
+        assert!(
+            dump.contains("GYRE_CRED_REPO_VAR=repo-value\n"),
+            "repo-scoped secret must be delivered:\n{dump}"
+        );
+        assert!(
+            dump.contains("GYRE_CRED_TASK_VAR=task-value\n"),
+            "task-scoped secret must be delivered:\n{dump}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_secret_delivery_nearest_scope_wins() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp.path().join("env-dump").to_string_lossy().into_owned();
+
+        let (app, ws_id) = create_workspace(app, "secrets-ws-nearest").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Nearest scope task").await;
+        let (app, ct_id) =
+            create_env_dump_compute_target(app, "env-dump-nearest", &dump_path).await;
+
+        let tenant = "default";
+        seed_secret(
+            &state,
+            "SHARED",
+            SecretScope::Tenant,
+            tenant,
+            tenant,
+            b"from-tenant",
+        )
+        .await;
+        seed_secret(
+            &state,
+            "SHARED",
+            SecretScope::Repo,
+            &repo_id,
+            tenant,
+            b"from-repo",
+        )
+        .await;
+
+        create_worktree_dir(&state, &ws_id, "wt-repo", "feat/nearest");
+        let (_, json) = do_spawn_with_target(app, &repo_id, &task_id, "feat/nearest", &ct_id).await;
+        assert_eq!(json["agent"]["status"], "active");
+
+        let dump = wait_for_dump(&dump_path)
+            .await
+            .expect("env-dump script should have written its output");
+        // GYRE_CRED_PROXY is injected by the platform itself (spawn.rs:699);
+        // scope the assertion to repo-secret delivery only.
+        assert!(
+            dump.contains("GYRE_CRED_SHARED=from-repo\n")
+                && !dump.contains("GYRE_CRED_SHARED=from-tenant"),
+            "repo (nearer) scope must win over tenant for the same name:\n{dump}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_unresolvable_workspace_skips_secret_resolution() {
+        // A repo in a nonexistent workspace ("ws-ghost") is accepted by the
+        // create-repo validation (it only rejects `..`/`/`), so the spawn
+        // path sees workspace=None. The F3 fix must skip secret resolution
+        // (warn) rather than fabricate tenant "default" — a tenant-scoped
+        // secret named LEAK in the "default" tenant must NOT leak into the
+        // agent env.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp.path().join("env-dump").to_string_lossy().into_owned();
+
+        let (app, repo_id) = create_repo_in_workspace(app, "ws-ghost").await;
+        let (app, task_id) = create_task(app, "Ghost workspace task").await;
+        let (app, ct_id) = create_env_dump_compute_target(app, "env-dump-ghost", &dump_path).await;
+
+        // The previously-fabricated tenant identity — this is exactly the
+        // secret the old code would have delivered.
+        seed_secret(
+            &state,
+            "LEAK",
+            SecretScope::Tenant,
+            "default",
+            "default",
+            b"leaked",
+        )
+        .await;
+
+        create_worktree_dir(&state, "ws-ghost", "wt-repo", "feat/ghost");
+        let (_, json) = do_spawn_with_target(app, &repo_id, &task_id, "feat/ghost", &ct_id).await;
+        assert_eq!(
+            json["agent"]["status"], "active",
+            "unresolvable workspace must not fail the spawn"
+        );
+
+        let dump = wait_for_dump(&dump_path)
+            .await
+            .expect("env-dump script should have written its output");
+        // GYRE_CRED_PROXY is platform-injected (not a secret); assert no
+        // secret-sourced env var leaked.
+        assert!(
+            !dump
+                .lines()
+                .any(|l| l.starts_with("GYRE_CRED_") && l != "GYRE_CRED_PROXY=http://127.0.0.1:8765"),
+            "no secret-sourced GYRE_CRED_* may be delivered when the workspace is unresolvable:\n{dump}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_non_utf8_secret_skipped_others_delivered() {
+        // F4: a non-UTF-8 secret value cannot become an env var; it must be
+        // skipped with a warning naming the secret (never the value), while
+        // the remaining secrets are still delivered.
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp.path().join("env-dump").to_string_lossy().into_owned();
+
+        let (app, ws_id) = create_workspace(app, "secrets-ws-binary").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Binary secret task").await;
+        let (app, ct_id) = create_env_dump_compute_target(app, "env-dump-binary", &dump_path).await;
+
+        let tenant = "default";
+        seed_secret(
+            &state,
+            "BINARY_SECRET",
+            SecretScope::Tenant,
+            tenant,
+            tenant,
+            b"\xff\xfe\x00binary",
+        )
+        .await;
+        seed_secret(
+            &state,
+            "TEXT_SECRET",
+            SecretScope::Tenant,
+            tenant,
+            tenant,
+            b"text-value",
+        )
+        .await;
+
+        create_worktree_dir(&state, &ws_id, "wt-repo", "feat/binary");
+        let (_, json) = do_spawn_with_target(app, &repo_id, &task_id, "feat/binary", &ct_id).await;
+        assert_eq!(json["agent"]["status"], "active");
+
+        let dump = wait_for_dump(&dump_path)
+            .await
+            .expect("env-dump script should have written its output");
+        assert!(
+            dump.contains("GYRE_CRED_TEXT_SECRET=text-value\n"),
+            "UTF-8 secret must still be delivered:\n{dump}"
+        );
+        assert!(
+            !dump.contains("GYRE_CRED_BINARY_SECRET"),
+            "non-UTF-8 secret must be skipped, not corrupted and delivered:\n{dump}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_secret_resolve_error_does_not_fail_spawn() {
+        // A failing SecretRepository must not block the spawn: the resolution
+        // error is logged and the agent starts without GYRE_CRED_* env vars.
+        // The mem-backed state keeps everything real except the secrets port,
+        // which always errors — the resolve-Err branch of the spawn path.
+        struct FailingSecrets;
+        #[async_trait::async_trait]
+        impl gyre_ports::SecretRepository for FailingSecrets {
+            async fn create(
+                &self,
+                _secret: &gyre_common::Secret,
+                _value: &[u8],
+            ) -> anyhow::Result<()> {
+                anyhow::bail!("failing secrets port")
+            }
+            async fn get_value(
+                &self,
+                _id: &gyre_common::Id,
+                _tenant_id: &str,
+            ) -> anyhow::Result<Option<Vec<u8>>> {
+                anyhow::bail!("failing secrets port")
+            }
+            async fn list_by_scope(
+                &self,
+                _scope: gyre_common::SecretScope,
+                _scope_id: &str,
+                _tenant_id: &str,
+            ) -> anyhow::Result<Vec<gyre_common::Secret>> {
+                anyhow::bail!("failing secrets port")
+            }
+            async fn delete(&self, _id: &gyre_common::Id, _tenant_id: &str) -> anyhow::Result<()> {
+                anyhow::bail!("failing secrets port")
+            }
+            async fn rotate(
+                &self,
+                _id: &gyre_common::Id,
+                _new_value: &[u8],
+                _tenant_id: &str,
+            ) -> anyhow::Result<()> {
+                anyhow::bail!("failing secrets port")
+            }
+            async fn resolve_for_agent(
+                &self,
+                _tenant_id: &str,
+                _workspace_id: &str,
+                _repo_id: &str,
+                _task_id: Option<&str>,
+            ) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+                anyhow::bail!("resolve_for_agent failed")
+            }
+        }
+
+        let state = test_state_with_secrets(Arc::new(FailingSecrets));
+        let app = crate::api::api_router().with_state(state.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp.path().join("env-dump").to_string_lossy().into_owned();
+
+        let (app, ws_id) = create_workspace(app, "secrets-ws-fail").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "Failing secrets task").await;
+        let (app, ct_id) = create_env_dump_compute_target(app, "env-dump-fail", &dump_path).await;
+
+        create_worktree_dir(&state, &ws_id, "wt-repo", "feat/failing");
+        let (_, json) = do_spawn_with_target(app, &repo_id, &task_id, "feat/failing", &ct_id).await;
+        assert_eq!(
+            json["agent"]["status"], "active",
+            "secret resolution failure must not fail the spawn"
+        );
+
+        let dump = wait_for_dump(&dump_path)
+            .await
+            .expect("env-dump script should have written its output");
+        // GYRE_CRED_PROXY is platform-injected (not a secret); assert no
+        // secret-sourced env var was delivered.
+        assert!(
+            !dump.lines().any(
+                |l| l.starts_with("GYRE_CRED_") && l != "GYRE_CRED_PROXY=http://127.0.0.1:8765"
+            ),
+            "no secret-sourced GYRE_CRED_* may be delivered when resolution fails:\n{dump}"
+        );
+    }
+
+    /// Like `do_spawn`, but with an explicit compute_target_id in the request
+    /// body so the env-dump target drives the local dispatch.
+    async fn do_spawn_with_target(
+        app: Router,
+        repo_id: &str,
+        task_id: &str,
+        branch: &str,
+        compute_target_id: &str,
+    ) -> (Router, serde_json::Value) {
+        let body = serde_json::json!({
+            "name": "worker-1",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": branch,
+            "compute_target_id": compute_target_id,
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED, "spawn should succeed");
+        let json = body_json(resp).await;
+        (app, json)
     }
 }
