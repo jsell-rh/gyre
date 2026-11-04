@@ -94,6 +94,70 @@ impl From<AuditEvent> for AuditEventResponse {
     }
 }
 
+/// Caller-scope validation (task-102 F2): the scoping fields on a recorded
+/// audit event must resolve within the caller's tenant. `agent_id` is bound
+/// server-side in the handler; letting `workspace_id`/`repo_id` pass through
+/// unvalidated would be partial enforcement of the same anti-forgery
+/// principle — any authenticated agent could attribute its events to
+/// another workspace and corrupt the compliance record the query API
+/// filters on. Each named scope is looked up and its tenant compared
+/// against the caller's; mismatch or unknown id rejects the write.
+async fn validate_workspace_scope(
+    state: &AppState,
+    id: &gyre_common::Id,
+    auth: &AuthenticatedAgent,
+) -> Result<(), ApiError> {
+    let ws = state
+        .workspaces
+        .find_by_id(id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {id} not found")))?;
+    if ws.tenant_id.as_str() != auth.tenant_id {
+        return Err(ApiError::Forbidden(format!(
+            "workspace {id} is outside the caller's tenant"
+        )));
+    }
+    Ok(())
+}
+
+/// Repo-scope validation (task-102 F2): the repo must exist, its workspace
+/// must resolve within the caller's tenant, and — when the event is also
+/// labeled with a workspace — the repo must belong to that workspace.
+/// Inconsistent or cross-tenant attribution is rejected.
+async fn validate_repo_scope(
+    state: &AppState,
+    id: &gyre_common::Id,
+    auth: &AuthenticatedAgent,
+    workspace_id: Option<&gyre_common::Id>,
+) -> Result<(), ApiError> {
+    let repo = state
+        .repos
+        .find_by_id(id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
+    // The repo's workspace is authoritative for its tenant scope.
+    let repo_ws = state
+        .workspaces
+        .find_by_id(&repo.workspace_id)
+        .await?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("workspace {} not found", repo.workspace_id))
+        })?;
+    if repo_ws.tenant_id.as_str() != auth.tenant_id {
+        return Err(ApiError::Forbidden(format!(
+            "repo {id} is outside the caller's tenant"
+        )));
+    }
+    if let Some(ws) = workspace_id {
+        if *ws != repo.workspace_id {
+            return Err(ApiError::Forbidden(format!(
+                "repo {id} does not belong to workspace {ws}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub async fn record_audit_event(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
@@ -112,25 +176,13 @@ pub async fn record_audit_event(
     };
     let user_id = auth.user_id.clone();
 
-    // Caller-scope validation (task-102 F2): the scoping fields on a recorded
-    // audit event must resolve within the caller's tenant. `agent_id` is bound
-    // server-side above; letting `workspace_id`/`repo_id` pass through
-    // unvalidated would be partial enforcement of the same anti-forgery
-    // principle — any authenticated agent could attribute its events to
-    // another workspace and corrupt the compliance record the query API
-    // filters on. Each named scope is looked up and its tenant compared
-    // against the caller's; mismatch or unknown id rejects the write.
+    // Caller-scope validation (task-102 F2), see `validate_workspace_scope` /
+    // `validate_repo_scope` above: mismatch or unknown scope rejects the
+    // write instead of persisting an attribution the caller forged.
     let workspace_id = match req.workspace_id {
         Some(w) => {
             let id = gyre_common::Id::new(w);
-            let ws = state.workspaces.find_by_id(&id).await?.ok_or_else(|| {
-                ApiError::NotFound(format!("workspace {id} not found"))
-            })?;
-            if ws.tenant_id.as_str() != auth.tenant_id {
-                return Err(ApiError::Forbidden(format!(
-                    "workspace {id} is outside the caller's tenant"
-                )));
-            }
+            validate_workspace_scope(&state, &id, &auth).await?;
             Some(id)
         }
         None => None,
@@ -138,31 +190,7 @@ pub async fn record_audit_event(
     let repo_id = match req.repo_id {
         Some(r) => {
             let id = gyre_common::Id::new(r);
-            let repo = state
-                .repos
-                .find_by_id(&id)
-                .await?
-                .ok_or_else(|| ApiError::NotFound(format!("repo {id} not found")))?;
-            // The repo's workspace is authoritative for its tenant scope.
-            let repo_ws = state
-                .workspaces
-                .find_by_id(&repo.workspace_id)
-                .await?
-                .ok_or_else(|| {
-                    ApiError::NotFound(format!("workspace {} not found", repo.workspace_id))
-                })?;
-            if repo_ws.tenant_id.as_str() != auth.tenant_id {
-                return Err(ApiError::Forbidden(format!(
-                    "repo {id} is outside the caller's tenant"
-                )));
-            }
-            if let Some(ws) = &workspace_id {
-                if *ws != repo.workspace_id {
-                    return Err(ApiError::Forbidden(format!(
-                        "repo {id} does not belong to workspace {ws}"
-                    )));
-                }
-            }
+            validate_repo_scope(&state, &id, &auth, workspace_id.as_ref()).await?;
             Some(id)
         }
         None => None,
@@ -490,7 +518,7 @@ mod tests {
                     .header("Authorization", "Bearer test-token")
                     .header("Content-Type", "application/json")
                     .header("X-Forwarded-For", "1.2.3.4")
-                    .extension(ConnectInfo("203.0.113.9:50000".parse().unwrap()))
+                    .extension(ConnectInfo("203.0.113.9:50000".parse::<std::net::SocketAddr>().unwrap()))
                     .body(Body::from(
                         r#"{"event_type":"file_access"}"#.to_string(),
                     ))
@@ -523,7 +551,7 @@ mod tests {
                     .header("Authorization", "Bearer test-token")
                     .header("Content-Type", "application/json")
                     .header("X-Forwarded-For", "198.51.100.7, 10.0.0.1")
-                    .extension(ConnectInfo("10.0.0.2:40000".parse().unwrap()))
+                    .extension(ConnectInfo("10.0.0.2:40000".parse::<std::net::SocketAddr>().unwrap()))
                     .body(Body::from(
                         r#"{"event_type":"file_access"}"#.to_string(),
                     ))

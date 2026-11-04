@@ -71,7 +71,7 @@ fn apply_mask(ip: IpAddr, prefix: u8) -> IpAddr {
             } else {
                 u32::MAX << (32 - prefix)
             };
-            IpAddr::V4(bits & mask)
+            IpAddr::V4((bits & mask).into())
         }
         IpAddr::V6(v6) => {
             let prefix = prefix.min(128);
@@ -81,7 +81,7 @@ fn apply_mask(ip: IpAddr, prefix: u8) -> IpAddr {
             } else {
                 u128::MAX << (128 - prefix)
             };
-            IpAddr::V6(bits & mask)
+            IpAddr::V6((bits & mask).into())
         }
     }
 }
@@ -160,7 +160,7 @@ mod tests {
         let mut h = HeaderMap::new();
         for (k, v) in pairs {
             h.insert(
-                axum::http::HeaderName::from_static(k),
+                axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
                 axum::http::HeaderValue::from_str(v).unwrap(),
             );
         }
