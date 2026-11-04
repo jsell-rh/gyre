@@ -57,3 +57,49 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+## Round 7 — independent re-review at candidate `2a2c7d3c` (verdict: complete, approved)
+
+Base→candidate: `63aa1486` → `2a2c7d3c` (21 commits; the entire product surface rides the
+recorded frontmatter commit `ba78ab2a` "checkpoint: recover interrupted pipeline source" —
+`git show --stat ba78ab2a` matches the base→candidate diff modulo docs/process commits).
+This round re-probed after the base merge `c6c91e01` (task-239/task-192/task-239-extraction)
+and the exemption line re-pin `8d2ae409`.
+
+**Clean gates at `2a2c7d3c` (tree clean):** `check-hierarchy.sh` exit 0;
+`check-tenant-filter.sh` exit 0 (111 read methods on tenant-column tables / 0 violations);
+`check-api-auth.sh` exit 0 (middleware chain + 4 non-ABAC mutating handlers +
+delegated frozen-baseline registry); `check-arch.sh` OK; `check-abac-route-registry.sh` OK;
+`check-task-commit-attribution.sh` OK; `check-scope-literal-defaults.sh crates` OK
+(exemption file at exactly 12 entries = frozen count, lowered honestly 24→18→12).
+
+**Fresh mutation kills (isolated worktree `/tmp/stage/task160-r7-mut`, removed after):**
+- `Task.workspace_id: Id` → `Option<Id>` (task.rs:60) → hierarchy exit 1 naming the site.
+- Field deleted entirely → hierarchy exit 1 "missing from the struct" (deleted-edge kill).
+- Tenant predicate stripped from `sqlite/secret.rs::get_value` → tenant-filter exit 1
+  ("1 violation(s) out of 111", naming secret.rs:229).
+- `RouteResourceMapping` for `/api/v1/activity` deleted from abac_middleware.rs:98 →
+  api-auth exit 1 via the delegated registry check.
+
+**Test kill-proof (the new integration test is not self-confirming):** on clean HEAD
+`cargo test -p gyre-adapters --test tenant_isolation` → 2 passed / 0 failed; with the
+tenant filter removed from `sqlite/repository.rs::find_by_id` (temporary mutation,
+restored) BOTH tests fail with exact leak diagnostics. `cargo test -p gyre-adapters --lib`
+→ 344 passed / 0 failed at the merged HEAD.
+
+**Adapter repairs re-verified as real:** create-stamps use `self.tenant_id` (storage's
+real tenant), reads gain `.filter(<table>::tenant_id.eq(&tenant))`, and the raw-SQL
+aggregation binds `tenant_id = $4` with a real bind — no lint-appeasement.
+
+**Independent blind-spot sweep (probe D):** 15 read-terminal fns outside the `is_read`
+prefix set (upsert_*, meta_spec update/delete, `is_token_revoked`, `kv_get`) — every one
+touches a tenant-less table (verified against migrations: `revoked_tokens`,
+`llm_function_configs`, `prompt_templates`, `meta_specs`, `kv_store`), i.e. backlog class,
+no live false-pass. Consistent with round-4's residual sweep. The two exemption re-pins at
+lib.rs:499/543 are the same unchanged task-099-owned sites (verified by inspection).
+
+Wiring re-confirmed: all three scripts executable, usage-commented, blocking in BOTH
+pre-commit and CI with no `|| true`. Evidence:
+`/tmp/stage/review-evidence/task-160-round7/` (clean-gates.txt, mutation-b/c outputs,
+heuristic-miss-sweep.txt + probe-d-sweep.sh, tenant-isolation.txt, test-kill-proof.txt,
+adapters-lib-tests.txt).
