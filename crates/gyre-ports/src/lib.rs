@@ -101,7 +101,7 @@ pub use quality_gate::{GateResultRepository, QualityGateRepository};
 pub use repository::RepoRepository;
 pub use review::ReviewRepository;
 pub use saved_view::{SavedView, SavedViewRepository};
-pub use search::{SearchDocument, SearchPort, SearchQuery, SearchResult};
+pub use search::{FacetCounts, SearchDocument, SearchPort, SearchQuery, SearchResult, SearchSuggestion};
 pub use secret::SecretRepository;
 pub use spawn_log::{SpawnLogEntry, SpawnLogRepository};
 pub use spec_approval::SpecApprovalRepository;

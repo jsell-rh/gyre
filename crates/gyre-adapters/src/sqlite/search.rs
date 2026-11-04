@@ -23,8 +23,10 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Double, Nullable, Text};
-use gyre_ports::search::{SearchDocument, SearchPort, SearchQuery, SearchResult};
-use std::sync::Arc;
+use gyre_ports::search::{
+    FacetCounts, SearchDocument, SearchPort, SearchQuery, SearchResult, SearchSuggestion,
+};
+use std::{collections::HashMap, sync::Arc};
 
 use super::SqliteStorage;
 
@@ -102,6 +104,73 @@ struct CountRow {
 struct TenantRow {
     #[diesel(sql_type = Text)]
     tenant_id: String,
+}
+
+/// Row carrier for prefix-suggestion queries on the title column.
+#[derive(QueryableByName)]
+#[allow(clippy::redundant_field_names)]
+struct SuggestRow {
+    #[diesel(sql_type = Text)]
+    entity_type: String,
+    #[diesel(sql_type = Text)]
+    entity_id: String,
+    #[diesel(sql_type = Text)]
+    title: String,
+}
+
+/// Row carrier for facet aggregation: scope columns + facets JSON.
+#[derive(QueryableByName)]
+#[allow(clippy::redundant_field_names)]
+struct FacetRow {
+    #[diesel(sql_type = Text)]
+    entity_type: String,
+    #[diesel(sql_type = Text)]
+    workspace_id: String,
+    #[diesel(sql_type = Text)]
+    metadata: String,
+}
+
+/// Escape SQL LIKE wildcards (`%`, `_`) and the escape character itself in a
+/// user-supplied prefix so it is matched literally under `ESCAPE '\'`.
+fn escape_like(prefix: &str) -> String {
+    let mut escaped = String::with_capacity(prefix.len());
+    for c in prefix.chars() {
+        if c == '%' || c == '_' || c == '\\' {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
+}
+
+/// Fold one row into a `FacetCounts` aggregation: the built-in `type` facet
+/// from `entity_type`, `workspace` from a non-empty `workspace_id`, and every
+/// metadata facet key/value.
+fn count_facet_row(counts: &mut FacetCounts, row: FacetRow) {
+    counts
+        .entry("type".to_string())
+        .or_default()
+        .entry(row.entity_type)
+        .and_modify(|c| *c += 1)
+        .or_insert(1);
+    if !row.workspace_id.is_empty() {
+        counts
+            .entry("workspace".to_string())
+            .or_default()
+            .entry(row.workspace_id)
+            .and_modify(|c| *c += 1)
+            .or_insert(1);
+    }
+    if let Ok(facets) = serde_json::from_str::<HashMap<String, String>>(&row.metadata) {
+        for (key, value) in facets {
+            counts
+                .entry(key)
+                .or_default()
+                .entry(value)
+                .and_modify(|c| *c += 1)
+                .or_insert(1);
+        }
+    }
 }
 
 const INSERT_SQL: &str = "
@@ -234,6 +303,85 @@ impl SearchPort for SqliteStorage {
         })
         .await??;
         Ok(())
+    }
+
+    async fn suggest(&self, prefix: &str, limit: usize) -> Result<Vec<SearchSuggestion>> {
+        let pool = Arc::clone(&self.pool);
+        // Trimmed-empty prefixes match every title — treat them as "no
+        // suggestion" (the handler guards this too; the port is safe alone).
+        let prefix = prefix.trim();
+        if prefix.is_empty() {
+            return Ok(vec![]);
+        }
+        let pattern = format!("{}%", escape_like(prefix));
+        Ok(tokio::task::spawn_blocking(move || -> Result<Vec<SearchSuggestion>> {
+            let mut conn = pool.get().context("get db connection")?;
+            // LIKE on the title column is ASCII-case-insensitive in SQLite —
+            // a prefix match, not a token match, which is what autocomplete
+            // needs (mid-word terms are unreachable from a prefix).
+            let rows = diesel::sql_query(
+                "SELECT entity_type, entity_id, title
+                 FROM search_index
+                 WHERE title LIKE ?1 ESCAPE '\\'
+                 ORDER BY title
+                 LIMIT ?2",
+            )
+            .bind::<Text, _>(&pattern)
+            .bind::<BigInt, _>(limit as i64)
+            .load::<SuggestRow>(&mut conn)?;
+
+            Ok(rows
+                .into_iter()
+                .map(|r| SearchSuggestion {
+                    text: r.title,
+                    entity_type: r.entity_type,
+                    entity_id: r.entity_id,
+                })
+                .collect())
+        })
+        .await??)
+    }
+
+    async fn facet_counts(&self, query: Option<SearchQuery>) -> Result<FacetCounts> {
+        let pool = Arc::clone(&self.pool);
+        Ok(tokio::task::spawn_blocking(move || -> Result<FacetCounts> {
+            let mut conn = pool.get().context("get db connection")?;
+
+            // Two shapes: whole-index aggregation (no WHERE) or the same
+            // filtered match set `search()` uses (MATCH + entity_type/
+            // workspace_id clauses), without the result limit — facet counts
+            // must describe the full filtered set, not the truncated page.
+            let rows: Vec<FacetRow> = match query {
+                None => diesel::sql_query(
+                    "SELECT entity_type, workspace_id, metadata FROM search_index",
+                )
+                .load::<FacetRow>(&mut conn)?,
+                Some(q) => {
+                    let match_expr = build_match_expr(&q.query);
+                    if match_expr.is_empty() {
+                        return Ok(FacetCounts::new());
+                    }
+                    diesel::sql_query(
+                        "SELECT entity_type, workspace_id, metadata
+                         FROM search_index
+                         WHERE search_index MATCH ?1
+                           AND (?2 IS NULL OR entity_type = ?2)
+                           AND (?3 IS NULL OR workspace_id = ?3)",
+                    )
+                    .bind::<Text, _>(&match_expr)
+                    .bind::<Nullable<Text>, _>(q.entity_type)
+                    .bind::<Nullable<Text>, _>(q.workspace_id)
+                    .load::<FacetRow>(&mut conn)?
+                }
+            };
+
+            let mut counts = FacetCounts::new();
+            for row in rows {
+                count_facet_row(&mut counts, row);
+            }
+            Ok(counts)
+        })
+        .await??)
     }
 
     async fn reindex_all(&self) -> Result<u64> {

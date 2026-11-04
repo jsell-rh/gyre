@@ -38,6 +38,21 @@ pub struct SearchResult {
     pub facets: HashMap<String, String>,
 }
 
+/// A single autocomplete suggestion (spec §API: `GET /search/suggest`).
+#[derive(Debug, Clone)]
+pub struct SearchSuggestion {
+    /// The matched title text to offer in the autocomplete dropdown.
+    pub text: String,
+    pub entity_type: String,
+    pub entity_id: String,
+}
+
+/// Aggregated facet counts, keyed `facet -> value -> count`. The built-in
+/// `type` facet counts `entity_type` values and `workspace` counts
+/// `workspace_id` values; every other key comes from the documents' facet
+/// maps (status, priority, ...).
+pub type FacetCounts = HashMap<String, HashMap<String, usize>>;
+
 #[async_trait]
 pub trait SearchPort: Send + Sync {
     /// Index (or re-index) a document.
@@ -48,4 +63,13 @@ pub trait SearchPort: Send + Sync {
     async fn delete(&self, entity_type: &str, entity_id: &str) -> Result<()>;
     /// Rebuild the entire index from scratch. Returns number of documents indexed.
     async fn reindex_all(&self) -> Result<u64>;
+    /// Autocomplete: entity titles beginning with `prefix`, case-insensitive,
+    /// at most `limit` results (spec §API: `GET /search/suggest`).
+    async fn suggest(&self, prefix: &str, limit: usize) -> Result<Vec<SearchSuggestion>>;
+    /// Aggregate facet counts over the index (spec §API `GET /search/facets`
+    /// and §Response Format `facet_counts`). `Some(query)` restricts the
+    /// aggregation to that query's filtered match set (text terms plus
+    /// `entity_type`/`workspace_id` filters, ignoring `limit`); `None`
+    /// aggregates the entire index.
+    async fn facet_counts(&self, query: Option<SearchQuery>) -> Result<FacetCounts>;
 }

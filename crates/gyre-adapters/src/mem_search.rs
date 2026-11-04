@@ -2,8 +2,10 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use gyre_ports::search::{SearchDocument, SearchPort, SearchQuery, SearchResult};
-use std::sync::Mutex;
+use gyre_ports::search::{
+    FacetCounts, SearchDocument, SearchPort, SearchQuery, SearchResult, SearchSuggestion,
+};
+use std::{collections::HashMap, sync::Mutex};
 
 /// Extract a short snippet containing a match of `query` within `text`.
 fn make_snippet(text: &str, query: &str, max_len: usize) -> String {
@@ -133,6 +135,81 @@ impl SearchPort for MemSearchAdapter {
         // In-memory adapter has nothing to rebuild — index is always current.
         let count = self.docs.lock().unwrap().len() as u64;
         Ok(count)
+    }
+
+    async fn suggest(&self, prefix: &str, limit: usize) -> Result<Vec<SearchSuggestion>> {
+        let prefix = prefix.trim().to_lowercase();
+        if prefix.is_empty() {
+            return Ok(vec![]);
+        }
+        let docs = self.docs.lock().unwrap();
+        let mut suggestions: Vec<SearchSuggestion> = docs
+            .iter()
+            // Case-insensitive prefix match on the title — same contract as the
+            // SQL adapters' `title LIKE 'prefix%'`.
+            .filter(|d| d.title.to_lowercase().starts_with(&prefix))
+            .map(|d| SearchSuggestion {
+                text: d.title.clone(),
+                entity_type: d.entity_type.clone(),
+                entity_id: d.entity_id.clone(),
+            })
+            .collect();
+        suggestions.sort_by(|a, b| a.text.cmp(&b.text));
+        suggestions.truncate(limit);
+        Ok(suggestions)
+    }
+
+    async fn facet_counts(&self, query: Option<SearchQuery>) -> Result<FacetCounts> {
+        let docs = self.docs.lock().unwrap();
+        // Some(q): restrict to q's filtered match set — same filters as
+        // `search()` (every term must match, plus entity_type/workspace_id),
+        // ignoring q's limit. None: the whole index.
+        let selected: Vec<&SearchDocument> = match &query {
+            None => docs.iter().collect(),
+            Some(q) => {
+                let terms: Vec<&str> = q.query.to_lowercase().split_whitespace().collect();
+                if terms.is_empty() {
+                    return Ok(FacetCounts::new());
+                }
+                docs.iter()
+                    .filter(|doc| {
+                        if let Some(ref et) = q.entity_type {
+                            if doc.entity_type != *et {
+                                return false;
+                            }
+                        }
+                        if let Some(ref ws) = q.workspace_id {
+                            if doc.workspace_id.as_deref() != Some(ws.as_str()) {
+                                return false;
+                            }
+                        }
+                        score_doc(doc, &terms).is_some()
+                    })
+                    .collect()
+            }
+        };
+
+        let mut counts: FacetCounts = HashMap::new();
+        let mut bump = |facet: &str, value: String| {
+            counts
+                .entry(facet.to_string())
+                .or_default()
+                .entry(value)
+                .and_modify(|c| *c += 1)
+                .or_insert(1);
+        };
+        for doc in selected {
+            bump("type", doc.entity_type.clone());
+            if let Some(ws) = doc.workspace_id.as_deref() {
+                if !ws.is_empty() {
+                    bump("workspace", ws.to_string());
+                }
+            }
+            for (key, value) in &doc.facets {
+                bump(key, value.clone());
+            }
+        }
+        Ok(counts)
     }
 }
 
