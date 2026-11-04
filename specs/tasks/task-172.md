@@ -2,7 +2,7 @@
 title: "Editor Split layout component for spec and meta-spec editing"
 spec_ref: "ui-layout.md §2 Editor Split"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "ui-layout.md §Editor Split"
 commits: ["a4c8b6bd80ecbbe4ce43edc666f3b5bbe766d808", "a44ba473711eb46d11bfc6348bc166051144481c", "4b80b93bc68116b0d54d8696fdd3bc78d6931069", "f27a4ef5b2b77f0469c6b5b1100d2156efa597e3", "33b4241d762be547f88f134fe1a4bff84d54cfc8", "471563d7d218003d6d2dbbab3ba0598e801d6f3a", "1ae8ca350439f07c5c75dcfbb7704dbf0ce96021", "a53ade326e99a7954fe976a84981e3df0212465b", "80925c2145b51e64ddb69ef1b4fb900c44ee0a89", "3688b5cddbfddbed2f4cdc158f03ce35bb172951"]
