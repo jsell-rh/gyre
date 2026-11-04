@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Built-In Personas"
-commits: ["e27cc0dab572a10d96ead8578f72bfa1dd71409d", "151cf7d2fef662f87f0306ba70b8f3197fb41802", "fcb712c51c1f27b597e4a0cb798e63d7f341f6e9", "f16e969ce52622e8f6133deb60550d77dd7ed47e"]
+commits: ["e27cc0dab572a10d96ead8578f72bfa1dd71409d", "151cf7d2fef662f87f0306ba70b8f3197fb41802", "fcb712c51c1f27b597e4a0cb798e63d7f341f6e9", "f16e969ce52622e8f6133deb60550d77dd7ed47e", "5f5ab82a4eb3906a5493bf1d51a851281fa79d8b"]
 ---
 
 ## Spec Excerpt
@@ -80,6 +80,8 @@ Implemented in `151cf7d2` (domain defs + adapters + server seeding), `fcb712c5` 
 **Sandbox restriction:** TCP listeners are unsupported in this sandbox (errno 95, `/tmp/stage/capabilities.json`), so the live startup path could not be exercised over HTTP; it is verified via the `main.rs:55` wiring plus the router-level tests above. Live HTTP verification belongs to host verification/CI.
 
 **Contract repair (finding 763d5ad1):** checkpoint `19969af2` had committed a `## Verification Repair (finding 41db4f79)` ledger section into this task file; that heading is not in the pipeline's operational-section strip list (`scripts/dev-contract.py` `requirement_parts`: Shipped / Implementation Notes / Implementation Log / Review), so it registered as an assignment-contract amendment and filed the contract repair. The section is deleted — the task file is now byte-identical to the assigned contract. The underlying dist repair is durably recorded in the `63e2eeff` / `5945c0d5` commit messages (web/dist reverted to main's committed state after checkpoint `ba5227a7` swept regenerated bundles into the branch); no verifier, exemption, or test was touched. Coverage row 13 (platform-model.md §Built-In Personas) is updated to `implemented` with code evidence, SUMMARY.md regenerated.
+
+**Verification repair (finding 93ef2291):** the verification gate (`check-rustfmt-diff.py` + `check-clippy-diff.py`) failed on four task-140 changed lines: rustfmt wanted multi-line form for the `match storage.find_by_slug_and_scope(...)` line in `crates/gyre-adapters/src/sqlite/workspace.rs:630` and the `assert!(p.system_prompt.starts_with('#'), ...)` line in `crates/gyre-cli/src/bootstrap.rs:293`, and `clippy::inconsistent_digit_grouping` fired on `crates/gyre-domain/src/workspace.rs:356,364` (`1700_000_000` vs the codebase-wide `1_700_000_000` convention). Fixed in `5f5ab82a` — pure formatting/digit-grouping, zero behavior change. The branch's merge with base `75ada1c4` (confined to `specs/coverage/SUMMARY.md`) was resolved by regenerating the summary via `scripts/update-coverage-summary.sh`, so the TOTAL row is mechanically derived from the merged per-spec files (310 not-started / 110 implemented). Re-run at tree `5f5ab82a`: rustfmt gate clean (9 files), clippy gate clean (9 files), and the three affected suites green — `gyre-domain --lib builtin` 2 passed, `gyre-adapters --lib sqlite::workspace::persona` 2 passed, `gyre-cli --bin gyre bootstrap` 15 passed. Evidence: `/tmp/stage/review-evidence/gates.log`, `test-domain.log`, `test-adapters.log`, `test-cli.log`.
 
 ## Agent Instructions
 
