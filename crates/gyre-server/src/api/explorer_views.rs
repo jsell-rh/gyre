@@ -1291,8 +1291,22 @@ mod tests {
         assert!(secs >= 1, "Retry-After must be at least 1 second");
     }
 
-    fn app_with_llm_response(response: serde_json::Value) -> axum::Router {
-        let mut s = (*crate::mem::test_state()).clone();
+    async fn app_with_llm_response(response: serde_json::Value, ws_id: &str) -> axum::Router {
+        let state = crate::mem::test_state();
+        // The generate handler grounds the prompt in the real workspace
+        // (name, graph summary), so the workspace must exist.
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new(ws_id),
+                gyre_common::Id::new("default"),
+                ws_id,
+                ws_id,
+                0,
+            ))
+            .await
+            .unwrap();
+        let mut s = (*state).clone();
         s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
             inner: Arc::new(gyre_adapters::MockLlmAdapter::json_response(response)),
         }));
@@ -1457,11 +1471,15 @@ mod tests {
         // invalid spec (flow layout, no trace_source). The server must NOT
         // 500 or forward it — the complete event carries view_spec: null
         // plus a fallback list view (ui-layout.md §2).
-        let app = app_with_llm_response(serde_json::json!({
-            "name": "LLM output",
-            "data": {"node_types": [], "edge_types": [], "depth": 1},
-            "layout": "flow"
-        }));
+        let app = app_with_llm_response(
+            serde_json::json!({
+                "name": "LLM output",
+                "data": {"node_types": [], "edge_types": [], "depth": 1},
+                "layout": "flow"
+            }),
+            "ws-inv",
+        )
+        .await;
         let resp = app
             .oneshot(
                 Request::builder()
@@ -1487,11 +1505,15 @@ mod tests {
 
     #[tokio::test]
     async fn generate_forwards_valid_llm_view_spec() {
-        let app = app_with_llm_response(serde_json::json!({
-            "name": "LLM output",
-            "data": {"node_types": ["Module"], "edge_types": [], "depth": 2},
-            "layout": "hierarchical"
-        }));
+        let app = app_with_llm_response(
+            serde_json::json!({
+                "name": "LLM output",
+                "data": {"node_types": ["Module"], "edge_types": [], "depth": 2},
+                "layout": "hierarchical"
+            }),
+            "ws-ok",
+        )
+        .await;
         let resp = app
             .oneshot(
                 Request::builder()
@@ -1516,6 +1538,17 @@ mod tests {
         // A hallucinated repo_id pointing at another workspace's repo must
         // not be forwarded — the client would render cross-workspace data.
         let state = crate::mem::test_state();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new("ws-leak"),
+                gyre_common::Id::new("default"),
+                "ws-leak",
+                "ws-leak",
+                0,
+            ))
+            .await
+            .unwrap();
         let foreign = gyre_domain::Repository::new(
             gyre_common::Id::new("repo-hallucinated"),
             gyre_common::Id::new("ws-other"),
