@@ -420,3 +420,61 @@ async fn explorer_ws_save_view_validation() {
     let msg = msg.unwrap();
     assert_eq!(msg["type"], "error", "Invalid query should produce error");
 }
+
+#[tokio::test]
+async fn explorer_ws_session_limit_is_per_server_instance() {
+    // The per-user concurrent session limit is a property of a server
+    // instance (AppState), not of the OS process. Two servers in the same
+    // process must not evict each other's sessions even for the same
+    // authenticated user - the global dev token authenticates every
+    // connection as the same ("default", "system") principal.
+    let ctx_a = WsCtx::new().await;
+    let ctx_b = WsCtx::new().await;
+    let repo_a = ctx_a.repo_id().await;
+    let repo_b = ctx_b.repo_id().await;
+
+    // Fill server A up to the per-user cap (default: 3 concurrent sessions).
+    let (mut sink1, mut stream1) = ctx_a.connect(&repo_a).await;
+    let (_sink2, _stream2) = ctx_a.connect(&repo_a).await;
+    let (_sink3, _stream3) = ctx_a.connect(&repo_a).await;
+
+    // A same-user connection on server B (same process) must NOT evict
+    // server A's oldest session.
+    let (_sink_b, _stream_b) = ctx_b.connect(&repo_b).await;
+    // Give a buggy (process-global) registry time to process the eviction
+    // before probing session 1.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    sink1
+        .send(Message::Text(json!({"type": "list_views"}).to_string()))
+        .await
+        .unwrap();
+    let msg = WsCtx::read_msg_skip_warnings(&mut stream1).await;
+    assert!(
+        msg.as_ref().is_some_and(|m| m["type"] == "views"),
+        "Session on server A must survive a same-user connection on server B; \
+         got {:?}",
+        msg
+    );
+
+    // Within ONE server the cap is still enforced: a 4th connection evicts
+    // the oldest session with a "replaced" error.
+    let (_sink4, _stream4) = ctx_a.connect(&repo_a).await;
+    let mut eviction = None;
+    for _ in 0..10 {
+        match WsCtx::read_msg(&mut stream1).await {
+            Some(m) if m["type"] == "error" => {
+                eviction = Some(m);
+                break;
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    let m = eviction.expect("4th connection on the same server should evict the oldest session");
+    assert!(
+        m["message"].as_str().unwrap().contains("replaced"),
+        "evicted session should report replacement, got: {}",
+        m["message"]
+    );
+}
