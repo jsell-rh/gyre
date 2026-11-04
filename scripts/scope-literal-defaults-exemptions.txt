@@ -20,8 +20,8 @@ crates/gyre-server/src/auth.rs:624
 crates/gyre-server/src/auth.rs:654
 crates/gyre-server/src/auth.rs:678
 crates/gyre-server/src/auth.rs:1001
-crates/gyre-server/src/lib.rs:494
-crates/gyre-server/src/lib.rs:538
+crates/gyre-server/src/lib.rs:499
+crates/gyre-server/src/lib.rs:543
 
 # Unowned legacy (domain constructor defaults fabricating tenant on the
 # wire) — opportunistic fixes welcome:
