@@ -119,3 +119,68 @@ view, conflict dialog) and the §1/§7 presence liveness contracts (heartbeat
 legs, departure rebroadcast on all removal paths, session-scoped eviction
 stop, reconnect re-seed). Socket-level end-to-end tests remain for the
 controller's host run — they are environmental here.
+
+## Round 6 — rebase repair + determinism fix verified; approved
+
+Candidate `9243827f` (base `59ff5d01`). This round's changes: the rebase
+merge `fdc44f29` (dist-artifact conflicts resolved by rebuilding
+`web/dist` from the merged `web/src`), test-determinism fix `3c5bdcd7`, the
+root-lockfile sweep gate (`scripts/check-sandbox-sweep-artifacts.sh`, wired
+into pre-commit + CI), and task/review docs. The F1-F4 product behavior is
+unchanged from prior rounds (F1/F2 landed in mainline via `1ac15418`/
+`eee00dba`, both ancestors of the base; F3/F4 are the branch-side diff).
+
+Independent evidence (all probes on the exact candidate, evidence under
+`/tmp/stage/review-evidence/`):
+
+- **Socket tests genuinely ran** — this sandbox's loopback listener is
+  supported, so unlike R5 the four departure-rebroadcast socket tests
+  executed for real: `cargo test -p gyre-server --lib ws::` — **73/73**,
+  including graceful-disconnect, socket-close, cap-eviction, and
+  idle-sweeper departure rebroadcasts.
+- **Determinism fix (`3c5bdcd7`)** — `ws_session_cap_eviction_rebroadcasts_departure`
+  passed 5/5 isolated runs. The interleaved seed-then-confirm pattern is a
+  sound fix for the cross-connection broadcast-order race (test-only change;
+  no product code touched).
+- **Optimistic concurrency at HEAD** — `specs_assist` 21/21, including
+  `save_spec_stale_base_sha_returns_409_with_diff`,  
+  `save_spec_conflict_notifies_caller_and_concurrent_editor` (asserts the
+  persisted diff array both editors' Inboxes render), and
+  `save_spec_overwrite_bypasses_stale_base_sha`.
+- **Web suites** — `npm ci` + the seven task-092 suites: 157/157.
+  The heartbeat tests assert actual sends (send-on-connect, 30s beat,
+  5s debounce, view-change re-send, `disconnected` on beforeunload,
+  session-scoped eviction stop); the banner tests cover reconnect re-seed.
+- **Load-bearing probe (mutation)** — with `broadcast_presence_departure`
+  mutated to an early return (restored after; tree re-verified clean and the
+  full ws:: suite re-run green), `ws_graceful_disconnect_rebroadcasts_departure`
+  FAILS with "timed out waiting for presence message" (exit 101). The
+  departure tests are not self-confirming.
+- **Dist rebuild claim verified** — a fresh `npx vite build` from the merged
+  `web/src` produces byte-identical output to the committed `web/dist`
+  (0 diff lines); no conflict markers; `index.html` references existing
+  assets and the bundle carries the presence message constants.
+- **Gates** — `check-task-commit-attribution.sh` OK (all 8 frontmatter
+  commits are ancestors of the candidate); `check-sandbox-sweep-artifacts.sh`
+  OK; lock ordering in the new broadcast matches the existing update path
+  (both read-only, `ws_connection_workspaces` → `ws_connections`); all
+  broadcasts carry the server-verified `user_id` and session ids validated
+  against the Subscribe-established one.
+
+Non-blocking observations:
+
+- `broadcast_presence_departure_reaches_only_workspace_subscribers` awaits
+  `rx1.recv()` with no timeout — under a regression it hangs instead of
+  failing fast (CI's timeout still fails it, and the mutation probe proved
+  the dependency). Test-robustness nit only.
+- The graceful-disconnect departure broadcast uses the client-supplied
+  `workspace_id` from the UserPresence message, consistent with the
+  pre-existing update path (which also trusts it for the presence entry).
+  Presence is a low-stakes UI signal (ids only, no content); pre-existing
+  base design, unchanged by this round.
+- `evict_stale_presence`'s collect-then-remove window (an entry refreshed
+  between scan and removal could be dropped) is inherited unchanged from
+  the base sweeper.
+
+No new findings. All acceptance criteria hold at the candidate with
+independent evidence. **Verdict: approve.**
