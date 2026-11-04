@@ -57,3 +57,70 @@ Round-2 verdict: the fix is strictly better than the old gate — removes all fa
 - LLM-synthesized briefing architecture narrative over grounded delta facts (prompt-template + model-config aware, 10s-bounded) with template narratives as the quality floor on every failure mode.
 - Docs: api-reference timeline/briefing rows corrected to the shipped response shapes.
 - Gate repair: template-substitution gate's const-span swallowed the next const's `/// Variables:` doc block (7 false positives on pristine main, pre-commit-only so CI never saw it); fixed by comment-stripping the span, proven non-blinding by planted-bug probes for both true-positive classes.
+
+## Round 8 — independent review of candidate `d12a05de` (base `06d70009`, merged lineage)
+
+Continued from an interrupted review (attempt 538, checkpoint `5525a8db`): that run's evidence
+logs were revalidated but not reused as verdict — every probe below was re-run live against the
+exact candidate tree.
+
+Probes (all commands, exit codes, and output under `/tmp/stage/review-evidence/`, `CARGO_HOME=/tmp/cargo`,
+`CARGO_TARGET_DIR=/tmp/gyre-target`, cold build):
+
+- `cargo test -p gyre-domain --lib narrative` → **15 passed** (`r8-domain-narrative.log`).
+- `cargo test -p gyre-server --lib -- narrative briefing` → **22 passed** (`r8-server-narrative-briefing.log`).
+- `cargo test -p gyre-server --lib graph_extraction` → **20 passed** (`r8-server-graph-extraction.log`).
+- `cargo test -p gyre-server --lib session_registry` → **4 passed** (`r8-server-session-registry.log`).
+- `cargo test -p gyre-server --test explorer_ws_integration` → **7 passed** (`r8-explorer-ws-integration.log`),
+  run LIVE: a fresh TCP-accept probe (`r8-tcp-accept-probe.log`, `accept ok, recv: b'ping'`) shows this
+  sandbox does support listeners, superseding the earlier errno-95 restriction claim. This includes
+  `explorer_ws_connect_and_list_views` — the exact test that failed the round-6 verification — passing
+  against the per-`AppState` `ExplorerSessionRegistry` fix.
+- Full package lib suites: `cargo test -p gyre-server --lib` → **1215 passed**; `-p gyre-domain --lib` →
+  **386 passed**; `-p gyre-common --lib` → **97 passed** (`r8-*-lib-full.log`).
+- Mutation probes (test sensitivity, sources restored byte-identical after each):
+  - spec-governance sentence disabled in `generate_template_narrative` → 2 domain tests FAIL
+    (`r8-mutation-spec-governance-disabled.log`);
+  - timeline narrative wiring disabled in `DeltaResponse::from_delta` →
+    `timeline_endpoint_returns_grounded_narrative` FAILS through the real router
+    (`r8-mutation-timeline-narrative-disabled.log`).
+  The suite is discriminating, not self-confirming.
+- Gates: rustfmt-diff vs base → exit 0; check-arch → OK; check-byte-slice-truncation → OK (exemption
+  count reduced, the `raw_preview[..500]` byte-slice now `chars().take(500)`); check-template-substitution
+  → OK; check-in-memory-state-stores → OK (registry is a documented ephemeral struct, not a bare
+  `Arc<Mutex<HashMap>>` alias); check-unbounded-external-http → OK; check-task-commit-attribution → OK
+  (`r8-gates.log`).
+- Clippy: `check-clippy-diff.py` requires `--all-targets`, which the stage wrapper reserves for
+  verification — deferred, not a code defect. Equivalent focused probe: `cargo clippy -p gyre-domain
+  -p gyre-common -p gyre-server --all-features -- -W clippy::all` (lib targets) cross-referenced against
+  the `-U0` diff line sets → **0 diagnostics on candidate-changed lines** (`r8-clippy-changed-lines.log`;
+  538 total diagnostics, all on pre-existing lines — including the base-owned
+  `rust_extractor.rs:1071` `never_loop`, untouched by this candidate and downgraded to a warning under
+  the gate's own `-W clippy::all` flags). Test-target clippy must run in verification.
+
+Acceptance criteria — all independently confirmed against the current tree (code read + live probes):
+template generator real and grounded (module/trait/fields via `NarrativeGrounding::from_graph`,
+soft-deleted excluded, unknown facts omitted never guessed); "Governed by spec:" from GovernedBy edges
++ `spec_path`/`spec_paths` + commit `spec_ref` (`@sha` stripped); "Produced by agent Y under persona Z."
+from real `agents.find_by_id` + `agent_personas` kv with no fabricated fallback identity; timeline AND
+diff `DeltaResponse.narrative`; `llm_architecture_narrative` with 10s timeout and template fallback on
+all four failure modes (unconfigured/error/timeout/empty); briefing appends "Architecture:" narrative
+with template floor (REST + MCP delegate to `assemble_briefing`); tests cover addition, removal,
+modification, grouping, edge-detail, count-only, empty/malformed. The extraction pipeline now records
+`DeltaEdgeEntry` arrays (endpoint-qualified names resolved against merged node state, unknown endpoints
+omitted) with backward-compatible count-only parsing; the dropped `edges_removed_count` regression is
+covered by a real end-to-end git-repo test. Coverage row 9 → implemented with accurate anchors; the
+old "stubbed for now" comment is gone (grep 0).
+
+Non-blocking observations (recorded, not findings):
+- `specs/coverage/system/realized-model.md` row 9 cites commit `f88e55b7` (prior attempt lineage, not
+  an ancestor of this candidate) and "11 unit tests" (now 15) — stale references in a note column; the
+  row's substantive claims were independently re-verified against this tree.
+- `graph/diff` renders narratives consistently but remains the documented approximation for from/to
+  filtering (tracked by §7 row 10, out of §6 scope).
+
+Deferred to verification (infrastructure, not defects): workspace-wide `cargo clippy --all-targets
+--all-features` via `check-clippy-diff.py`; `cargo test --all`.
+
+Round-8 verdict: **approved** — the task contract is satisfied by real, grounded, tested production
+code; every acceptance criterion has independent live evidence.
