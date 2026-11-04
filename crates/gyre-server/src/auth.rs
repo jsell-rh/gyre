@@ -890,10 +890,7 @@ async fn find_or_create_user(
 /// handle, later colliding users get deterministic numeric suffixes
 /// (base-2, base-3, ...). An exhausted suffix space bails and the caller
 /// assigns a generated `u-<id>` handle (unique by the fresh primary key).
-async fn resolve_unique_username(
-    state: &Arc<AppState>,
-    base: &str,
-) -> anyhow::Result<String> {
+async fn resolve_unique_username(state: &Arc<AppState>, base: &str) -> anyhow::Result<String> {
     let mut candidate = base.to_string();
     // Bounded at 2..=10_000 so a pathological store cannot pin this loop
     // open; an exhausted space bails to the generated-handle fallback.
@@ -924,8 +921,10 @@ fn suffixed_username(base: &str, n: u32) -> anyhow::Result<String> {
         .to_vec();
     // Truncation can leave a trailing separator or a dangling "--": pop
     // until the stem itself passes the handle contract.
-    while !User::validate_username(std::str::from_utf8(&stem)
-        .map_err(|_| anyhow::anyhow!("username base {base:?} is not ASCII"))?)
+    while !User::validate_username(
+        std::str::from_utf8(&stem)
+            .map_err(|_| anyhow::anyhow!("username base {base:?} is not ASCII"))?,
+    )
     .is_ok()
     {
         if stem.is_empty() {
@@ -1851,7 +1850,7 @@ mod tests {
             let resp = app
                 .clone()
                 .oneshot(
-                   Request::builder()
+                    Request::builder()
                         .uri("/protected")
                         .header(
                             "Authorization",
