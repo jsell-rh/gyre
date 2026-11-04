@@ -29,6 +29,9 @@ type CodeReadiness struct {
 }
 
 type Job struct {
+	PriorityClass     string          `json:"priority_class,omitempty"`
+	PriorityValue     int             `json:"priority_value,omitempty"`
+	EffectivePriority int             `json:"effective_priority,omitempty"`
 	CodeReadiness     *CodeReadiness  `json:"code_readiness,omitempty"`
 	Unmetered         bool            `json:"unmetered,omitempty"`
 	Key               string          `json:"key"`

@@ -22,8 +22,16 @@ def eligible(store, work):
         return False
     if stage == 'observe':
         from .ci import publication
+        if inputs.get('priority_only'):
+            return data.get('pr') == inputs['url']
         return (not data.get('repair') and data.get('candidate') == inputs['candidate']
                 and data.get('pr') == inputs['url'] and publication(store,task) == inputs['published'])
+    if stage in ('triage','implement','review','verify'):
+        from .priority import task_priority, PriorityError
+        try:
+            task_priority(store,task)
+        except PriorityError:
+            return False
     if stage == 'triage':
         if inputs.get('baseline_probe'):
             if (probe(task) != inputs['baseline_probe'] or
