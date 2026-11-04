@@ -104,3 +104,52 @@ Isolated worktree `/tmp/gyre-mut` (revision 51f29e9) with private
 All 8 attributed commits exist, are descendants of the comparison base, and are
 the only commits touching product files (crates/web/scripts/docs) in
 66422bd4..51f29e9 — no unlisted product commits.
+
+---
+
+# Review: TASK-180 — independent review round (verification-repair candidate)
+
+**Reviewer:** Review stage (independent)
+**Date:** 2026-11-04
+**Comparison base:** 59ff5d01069a22108a40cf370780a4e04f36f854
+**Candidate:** 6a046f6642ef6b9c2bd95f78e21b860ff931ed66
+**Verdict:** complete (approved, no findings)
+
+## Scope
+
+Diff base→candidate touches only the task surface: domain parser/evaluator,
+`SpecAssertionResultRepository` port + SQLite/PostgreSQL/mem adapters +
+migration 000056, post-push check wired into all three push paths
+(git receive-pack, mirror sync, initial mirror clone), priority-9
+`SpecAssertionFailure` notifications, `GET /api/v1/repos/:id/specs/:path/assertions`,
+ExplorerView ✔/✘ inline rendering with persisted-results fallback, and
+Inbox View Code / Update Spec actions. `web/dist` is not in the diff.
+
+## Independent evidence (this sandbox; logs in review-evidence)
+
+- `cargo test -p gyre-domain --lib spec_assertions` — 51 passed, 0 failed.
+- `cargo test -p gyre-server --lib push_check` — 3 passed, 0 failed.
+- `cargo test -p gyre-server --lib spec_assertions` — 6 passed, 0 failed.
+- `cd web && npm ci && npx vitest run src/__tests__/Inbox.test.js` — 34 passed.
+- Mutation probes (restored immediately, tree clean afterwards):
+  (1) `no_dependency` negate branch forced `passed: true` → 2 tests failed;
+  (2) fence-skip removed from `parse_assertions` → 3 tests failed.
+  Tests are behavior-coupled, not self-confirming.
+- Invariant scripts all exit 0: abac-route-registry (exemption count shrank
+  53→52 with both new routes registered in the resolver), arch,
+  migration-versions, mem-port-contracts, in-memory-state-stores,
+  migration-sql-portability, fabricated-scope-defaults, scope-literal-defaults,
+  inert-enforcement, byte-slice-truncation, dead-message-kinds,
+  task-commit-attribution. `git diff --check` clean.
+
+## Notes
+
+- `git_http.rs` `process_spec_lifecycle` fixes a pre-existing fabricated
+  `"default"` workspace-id fallback (skip-and-log on unresolvable scope) —
+  an invariant improvement, not a regression.
+- Relative to this assignment's base, `specs/tasks/task-200.md` is unchanged;
+  the attribution-drift repair documented in Shipped applied to an older
+  base and is moot here.
+- Live HTTP exercise of the GET endpoint over TCP is blocked by the sandbox
+  listener restriction (EOPNOTSUPP); the endpoint is covered in-process by
+  the handler tests above. Not a code defect.
