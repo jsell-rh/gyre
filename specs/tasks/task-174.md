@@ -8,7 +8,7 @@ coverage_sections:
   - "ui-layout.md §Tenant Scope — Workspace Cards"
   - "ui-layout.md §Workspace Scope — Realized Architecture"
   - "ui-layout.md §Repo Scope — Architecture Detail"
-commits: []
+commits: ["65f30e2a"]
 ---
 
 ## Spec Excerpt
