@@ -136,6 +136,9 @@ func relativeAge(age float64) string {
 	}
 }
 func rowStatus(r Row) string {
+	if readiness := readinessStatus(r); readiness != "" {
+		return readiness
+	}
 	if r.Status == "running" && r.CancelRequested {
 		return "Canceling · waiting for cleanup"
 	}
@@ -240,6 +243,29 @@ func (m Model) scopedRows() []Row {
 	}
 	return rows
 }
+func readinessStatus(r Row) string {
+	if r.CodeReadiness == nil || r.Activity == "history" || (r.Status != "succeeded" && r.Status != "waiting") {
+		return ""
+	}
+	switch r.CodeReadiness.Status {
+	case "pending", "infrastructure":
+		return "Waiting for CI"
+	case "candidate_failed", "baseline_failed":
+		if r.CodeReadiness.RepairQueued {
+			return "CI failed · repair queued"
+		}
+		return "CI failed · needs repair"
+	case "policy_pending":
+		if r.CodeReadiness.MergeState == "BEHIND" {
+			return "Integration refresh queued"
+		}
+		return "Waiting for merge policy"
+	case "passed":
+		return "CI passed · awaiting merge"
+	}
+	return ""
+}
+
 func (m Model) visibleRows() []Row {
 	if m.historyIssue != nil {
 		return m.orderRows(m.filterRows(append([]Row(nil), m.historyRows...)))
@@ -247,7 +273,7 @@ func (m Model) visibleRows() []Row {
 	rows := []Row{}
 	seen := map[string]bool{}
 	for _, r := range m.filterRows(m.scopedRows()) {
-		if r.Status == "succeeded" && !m.showCompleted && !(m.screen != "" && r.Key == m.selected) {
+		if r.Status == "succeeded" && readinessStatus(r) == "" && !m.showCompleted && !(m.screen != "" && r.Key == m.selected) {
 			continue
 		}
 		group := r.Scope + "\x00" + r.Repo + "\x00" + r.Item
@@ -692,6 +718,16 @@ func statusColor(status string) string {
 	}
 }
 
+func rowColor(row Row) string {
+	if readiness := readinessStatus(row); readiness != "" {
+		if strings.HasPrefix(readiness, "CI failed") {
+			return "1"
+		}
+		return "3"
+	}
+	return statusColor(row.Status)
+}
+
 func (m Model) workHeader(row Row, width int, section string) []string {
 	status := rowStatus(row)
 	if row.Status == "failed" && row.Activity != "history" {
@@ -701,7 +737,7 @@ func (m Model) workHeader(row Row, width int, section string) []string {
 		m.style("Runs  /  "+section, "8", false),
 		m.style(middle(title(row), width), "7", true),
 		m.style("Agent  ", "8", false) + m.style(middle(row.Agent, max(1, width-7)), "7", false),
-		m.style(middle(status, width), statusColor(row.Status), true),
+		m.style(middle(status, width), rowColor(row), true),
 		"",
 	}
 }
@@ -791,7 +827,7 @@ func (m Model) agentGroups(rows []Row, w, budget int) []string {
 		if w >= 70 {
 			entry = append(entry, m.tableRow(r, prefix, w, false))
 		} else {
-			entry = append(entry, prefix+middle(title(r), w-2), "  "+m.style(middle(tableStatus(r)+" · "+durationLabel(r), w-2), statusColor(r.Status), false))
+			entry = append(entry, prefix+middle(title(r), w-2), "  "+m.style(middle(tableStatus(r)+" · "+durationLabel(r), w-2), rowColor(r), false))
 		}
 
 		if i == m.index {
@@ -1094,7 +1130,7 @@ func (m Model) View() string {
 				if i == m.index {
 					prefix = "> "
 				}
-				color := statusColor(r.Status)
+				color := rowColor(r)
 				if w >= 100 {
 					line := m.tableRow(r, prefix, w-2, true)
 					if i == m.index {

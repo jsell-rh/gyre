@@ -10,7 +10,7 @@ import sqlite3
 import time
 import uuid
 
-STAGES = ('triage', 'implement', 'review', 'verify', 'publish', 'cleanup')
+STAGES = ('triage', 'implement', 'review', 'verify', 'publish', 'observe', 'cleanup')
 
 
 class StaleClaim(RuntimeError):
@@ -146,11 +146,14 @@ class Store:
                 WHERE w.stage=? AND w.state IN ('ready','retry') AND w.retry_at<=?
                 AND (? IS NULL OR w.task=?)
                 AND (? IS NULL OR w.id=?)
-                AND NOT EXISTS(SELECT 1 FROM work x WHERE x.task=w.task AND x.state='claimed')
+                AND NOT EXISTS(SELECT 1 FROM work x WHERE x.task=w.task AND x.state='claimed'
+                    AND (CASE WHEN w.stage='observe' THEN x.stage IN ('observe','publish')
+                         WHEN w.stage='publish' THEN 1 ELSE x.stage<>'observe' END))
                 ORDER BY w.priority DESC,w.created,w.id''', (stage, now, task, task, ident, ident)).fetchall()
             row = next((row for row in rows
                         if (not compute or not self.db.execute(
                             "SELECT 1 FROM resources r JOIN work w ON w.id=r.work WHERE w.task=? AND r.state<>'absent'", (row['task'],)).fetchone())
+                        and self.integration_available(dict(row))
                         and (eligible is None or eligible(dict(row)))), None)
             if not row:
                 return None
@@ -158,6 +161,15 @@ class Store:
                             (owner, now + lease_seconds, now, row['id']))
             claimed = dict(self.db.execute('SELECT * FROM work WHERE id=?', (row['id'],)).fetchone())
             claimed['input'] = json.loads(claimed['input'])
+            if stage in ('verify','publish'):
+                candidate = self.task(claimed['task'])['data'].get('candidate')
+                if candidate:
+                    old = self.integration_lane()
+                    lane = {'task':claimed['task'], 'candidate':candidate, 'generation':claimed['generation'],
+                            'entered':old['entered'] if old else now}
+                    self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',('integration_lane',json.dumps(lane)))
+                    if not old:
+                        self.event('integration_admitted',lane,claimed['task'],claimed['id'])
             if compute:
                 name = self.admission_name(claimed['id'], claimed['token'])
                 self.db.execute('INSERT INTO resources VALUES(?,?,?,?,?,?,?)',
@@ -172,6 +184,32 @@ class Store:
 
     def compute_used(self):
         return self.db.execute("SELECT count(*) FROM resources WHERE kind IN ('sandbox','admission') AND state<>'absent'").fetchone()[0]
+
+    def integration_lane(self):
+        lane = self.setting('integration_lane')
+        if not lane:
+            return None
+        row = self.db.execute('SELECT generation,data FROM tasks WHERE name=?',(lane['task'],)).fetchone()
+        if not row:
+            return None
+        data = json.loads(row['data'])
+        ci = data.get('ci') or {}
+        if (row['generation'] != lane['generation'] or data.get('candidate') != lane['candidate']
+                or data.get('repair') or data.get('delivered') or data.get('resolved')
+                or (ci.get('status') == 'closed' and ci.get('head') == data.get('published_head'))
+                or self.setting('task_paused:'+lane['task'],False)):
+            return None
+        return lane
+
+    def integration_available(self, work):
+        if work['stage'] not in ('verify','publish'):
+            return True
+        data = self.task(work['task'])['data']
+        ci = data.get('ci') or {}
+        if ci.get('status') == 'closed' and ci.get('head') == data.get('published_head'):
+            return False
+        lane = self.integration_lane()
+        return lane is None or (lane['task'] == work['task'] and lane['generation'] == work['generation'])
 
     def _current(self, ident, token, now=None):
         row = self.db.execute('''SELECT w.* FROM work w JOIN tasks t
@@ -208,6 +246,15 @@ class Store:
                                  finding.get('source'), finding['category'], json.dumps(finding), time.time()))
             self.db.execute("UPDATE work SET state='succeeded',result=?,owner=NULL,expires=NULL,updated=? WHERE id=?",
                             (json.dumps(result), time.time(), ident))
+            if row['stage'] == 'observe' and ((updates or {}).get('repair') or result.get('status') == 'merged'):
+                victims = self.db.execute("SELECT id FROM work WHERE task=? AND stage='verify' AND state='claimed'",(row['task'],)).fetchall()
+                for victim in victims:
+                    self.db.execute("UPDATE work SET state='obsolete',token=token+1,owner=NULL,expires=NULL,updated=? WHERE id=?",(time.time(),victim['id']))
+                    self.event('verification_superseded_by_ci',{'observation':ident},row['task'],victim['id'])
+            lane = self.setting('integration_lane')
+            if lane and lane['task'] == row['task'] and self.integration_lane() is None:
+                self.db.execute("DELETE FROM settings WHERE key='integration_lane'")
+                self.event('integration_released',{'reason':'candidate changed, repair, or delivery'},row['task'],ident)
             if row['stage'] == 'review' and (updates or {}).get('review', {}).get('approved'):
                 self.db.execute('UPDATE findings SET resolved_by=? WHERE task=? AND generation=? AND resolved_by IS NULL',
                                 ((updates or {})['review']['candidate'], row['task'], row['generation']))
