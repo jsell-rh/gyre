@@ -110,3 +110,68 @@ The task meets the spec section as scoped (Principle, Architecture, Secret Scopi
 **progress: complete**
 
 — Reviewer, 2026-10-09
+
+## Round 5 (review-repair verification)
+
+Assignment: candidate `3c079391` vs base `63aa1486`. The only open finding was
+round 4's off-by-one in the fabricated-scope-defaults gate's frozen baseline;
+this round verifies its repair and re-confirms the task-097 product surface on
+the exact candidate tree.
+
+### Round-4 finding repair (f8899964) — verified
+
+`scripts/check-fabricated-scope-defaults.sh` now sets `FROZEN_EXEMPTION_COUNT=5`
+against exactly 5 live entries (specs.rs:959, auth.rs:773, git_http.rs:1495,
+speculative_merge.rs:372, gate_executor.rs:111); the exemptions-file header
+comment corrected to 5. Probes on this tree (logs under
+/tmp/stage/review-evidence): clean run exits 0; a working copy with one
+appended entry fails exit 1 with the growth message — the any-growth-fails
+freeze present at base (7/7) is restored. The repair touches only the gate
+script and its header comment; no product code and no check weakened.
+
+### Product surface on the exact candidate (3c079391)
+
+- `git diff c1cb9c8 3c079391 -- crates/gyre-server/src/api/spawn.rs
+  crates/gyre-adapters/src/sqlite/secret.rs
+  crates/gyre-server/src/constraint_check.rs` → **empty**: the task-097 product
+  files are byte-identical to the round-3 mutation-probed tree; only base-side
+  merges (fb55629f) and docs/scripts commits differ.
+- Fresh cold-build suites (`SKIP_WEB_BUILD=1`, private CARGO_TARGET_DIR):
+  `gyre-common --lib secret` → 5 passed; `gyre-adapters --lib sqlite::secret`
+  → 17 passed (encrypted-at-rest, tampered-ciphertext, wrong-key, reopen
+  stability, tenant isolation, scope cascade, expiry); `gyre-server --lib`
+  with filters `api::spawn::tests mem::secret_contract_tests
+  mem::trace_payload_tests` → **44 passed**, including all five end-to-end
+  secret-delivery tests by name (all-scopes, nearest-scope-wins,
+  unresolvable-workspace skip asserting no `GYRE_CRED_LEAK`, non-UTF-8 skip,
+  resolve-error-continue), the four mem duplicate-contract tests, and the six
+  task-087 F2 trace-payload tests absorbed via checkpoint 5b50e3a6.
+- Mutation probe on the absorbed trace-payload repair (new product code since
+  round 3): deleting the `payloads` population in `MemTraceRepository::store`
+  fails `get_span_payload_roundtrip`, `store_replaces_previous_run_payloads`,
+  and `promote_to_attestation_preserves_payloads` (exit 101) — the tests pin
+  the repair, not a mirror. Source restored byte-identical afterwards.
+- Mechanical gates on the candidate: arch, migration-versions,
+  mem-port-contracts, lossy-secret-conversion, unwritten-store-fields,
+  in-memory-state-stores, scope-literal-defaults, inert-enforcement,
+  fabricated-scope-defaults, task-commit-attribution → all OK.
+- Hardcoded `GYRE_AGENT_CREDENTIALS` / `GYRE_AGENT_GCP_SA_JSON`: zero matches
+  in crates/ (grep exit 1) — spawn injects only resolved `GYRE_CRED_*`.
+- `3c079391` itself is docs-only (15 lines in specs/tasks/task-097.md recording
+  the repair); `f8899964` is the two-line gate fix plus header comment.
+
+### Verdict
+
+The round-4 finding is correctly repaired and tight; every previously verified
+property of the task contract re-holds on the exact candidate with fresh
+independent evidence, and the one piece of new product code (mem trace
+payloads) is mutation-verified. Non-blocking observation: the exemptions file
+retains an orphaned "task-097 F3 sites:" section header with no entries
+beneath it — dead comment text only; the gate counts entries, not headers.
+Residual scope items (Admin API/MCP/CLI surface → task-098, teardown
+revocation/rotation → task-100, Postgres stub, SOPS-vs-AES-256-GCM wording)
+remain recorded in coverage rows 39–44 and are outside this task's scope.
+
+**approved**
+
+— Reviewer, 2026-11-04
