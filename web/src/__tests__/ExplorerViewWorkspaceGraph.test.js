@@ -105,6 +105,10 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  // The in-place drill test pushes a ?repo= URL entry (deep-linkable drill,
+  // task-173) and ExplorerView restores the drilled state from the URL on
+  // mount — reset it so later renders in this file start at workspace scope.
+  window.history.replaceState(null, '', '/');
 });
 
 async function renderWorkspaceScope(props = {}) {
