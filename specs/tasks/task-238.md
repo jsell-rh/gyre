@@ -1,7 +1,7 @@
 ---
 title: "Repair verified failure on main 27bd585ca7eb"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
-depends_on: []
+depends_on: [task-243]
 progress: ready-for-review
 commits: []
 ---
@@ -70,14 +70,15 @@ GYRE_BASELINE_FAILURE_JSON {"base": "27bd585ca7eb429905ccbded1f48b4d0167c0c20", 
 
 ## Shipped
 
-**Reproduction:** at clean base `27bd585ca7eb429905ccbded1f48b4d0167c0c20`
-(HEAD = origin/main, tree clean), `bash scripts/check-task-commit-attribution.sh`
-exits 1 with the recorded violation: `27bd585c task-155 feat(task-155):
-Implement gyre search CLI command`. This is the sole probe named in the
+**Reproduction (fresh this round):** detached worktree at the exact clean
+base `27bd585ca7eb429905ccbded1f48b4d0167c0c20` (tree clean, full history):
+`bash scripts/check-task-commit-attribution.sh` exits 1 with the recorded
+violation — `27bd585c task-155 feat(task-155): Implement gyre search CLI
+command`. This is the sole failing probe in the baseline environment's
 machine-readable `GYRE_BASELINE_FAILURE_JSON`. Evidence:
-`/tmp/stage/review-evidence/task-238-attribution-repro.txt`.
+`/tmp/stage/review-evidence/task-238-repro-at-base-27bd585c.txt`.
 
-**Repair (1 line, `specs/tasks/task-155.md:8`):** appended the landing commit
+**Repair (1 line, `specs/tasks/task-155.md`):** appended the landing commit
 SHA `27bd585ca7eb429905ccbded1f48b4d0167c0c20` to task-155's existing
 `commits:` list, preserving the 7 recorded branch SHAs (wip/checkpoint/fix/feat
 lineage of the squashed PR). Same flaw class and remedy as task-228's
@@ -85,63 +86,61 @@ lineage of the squashed PR). Same flaw class and remedy as task-228's
 task-219's `e96d25ab` (task-200 drift): the squash landing commit cannot
 contain its own SHA, so the recorded list stayed one entry short and the
 landing surface (+837 lines across gyre-cli/client.rs, main.rs, docs/cli.md)
-was invisible to review scoping (task-095 R3-F4). No exemptions added —
-`scripts/task-commit-attribution-exemptions.txt` remains frozen at its 3-entry
-baseline (`01493c88 task-097`, `17c81d5a task-072`, `a8d036f4 task-091`);
-no gate, skip, or check weakened; no Rust/JS product source changed
-(`git diff <base> HEAD -- scripts/ crates/ web/` is empty).
+was invisible to review scoping (task-095 R3-F4). The repair is this branch's
+own commit `fb044c37` (parent = the assigned base); its full delta is the
+task-155.md line plus this task file — no product surface.
+
+**Convergence with main:** main independently absorbed the identical
+one-line append via task-231's `7c6ac232`; this branch's merge `66be7eaf`
+(of main `6a9739e519ae473e66dd0d9d403f3108f6784431`) resolved both to the
+same content with no conflict or duplicate entry. The branch's delta vs
+merged main is therefore this task file only (`git diff main HEAD --stat` =
+`specs/tasks/task-238.md`). The re-baselined follow-on failure from the
+current assignment's log (`b1cdb0dd task-170`, base `b1cdb0dd…`) was repaired
+by prerequisite task-243 (`2427ccc1`, in the merged history); the passing
+attribution scan below covers full history including it, so `depends_on:
+[task-243]` is satisfied.
+
+**Probe after repair (current HEAD `66be7eaf`):** exit 0 — `OK: every
+task-labeled product-surface commit is recorded in its task's commits:
+frontmatter (or exempted legacy drift).` Evidence:
+`/tmp/stage/review-evidence/task-238-repair-verified.txt`.
+
+**Mutation check (test-the-repair):** landing SHA removed via sed → the
+identical FAIL exit 1 (`27bd585c task-155 …`); restored via git checkout →
+exit 0. The pass is attributable to the recorded SHA, not gate drift.
+Evidence: `/tmp/stage/review-evidence/task-238-mutation-check.txt`.
+
+**No weakening:** `scripts/task-commit-attribution-exemptions.txt` is
+byte-identical to base (`git diff 27bd585c HEAD -- <exemptions file>` is
+empty) and frozen at its 3-entry baseline (`01493c88 task-097`,
+`17c81d5a task-072`, `a8d036f4 task-091`); no gate, skip, check, or exemption
+was added or relaxed; no Rust/JS product source was changed by this branch.
+
+**Diff-scoped lint:** 0 Rust files changed vs main, so
+`check-clippy-diff.py`'s changed-lines scope is empty by construction;
+`check-rustfmt-diff.py main` exits 0 ("changed lines clean (0 Rust files
+checked)"). Evidence: `/tmp/stage/review-evidence/task-238-rustfmt-diff-vs-main.txt`.
+Full all-target Clippy, the full static gate suite, and GitHub CI are owned
+by verification and publication per this assignment; the prior round's
+per-gate logs (`task-238-check-*.txt`) died with its sandbox and are
+superseded by this round's focused probes above.
+
+**Baseline-log rustfmt/clippy lines are not main-state failures:** the
+original log's `explorer_ws_integration.rs:464,465,466,469,471 need
+formatting` and `:412 clippy::useless_conversion` reference a file state
+that does not exist at base (the file is 420 lines at `27bd585c`); they came
+from the interrupted attempt `dfa38866`'s dirty checkout. The re-baselined
+log at `b1cdb0dd` confirms: `rustfmt: changed lines clean (0 Rust files
+checked)`, `clippy: changed lines clean`, with the task-170 attribution
+FAIL as the sole failure — repaired by task-243, verified above.
 
 **Note on `dev-attribution.py`:** running `python3 scripts/dev-attribution.py
-task-155` derives `["27bd585c..."]` alone because the 7 branch SHAs are not
-ancestors of main (squash-merged) and the script rewrites rather than appends.
-Replacing the 7 SHAs would erase recorded review-scoping history, so this
-repair appends instead — same choice the approved task-228 round made
-(documented in its Shipped section).
-
-**Probe after repair:** exit 0 — `OK: every task-labeled product-surface
-commit is recorded in its task's commits: frontmatter (or exempted legacy
-drift).` Evidence: `/tmp/stage/review-evidence/task-238-attribution-after-repair.txt`.
-
-**Mutation check (test-the-repair):** landing SHA removed via sed → identical
-FAIL exit 1 (`27bd585c task-155 ...`); restored → exit 0. The pass is
-attributable to the recorded SHA, not gate drift. Evidence:
-`/tmp/stage/review-evidence/task-238-attribution-mutated.txt`.
-
-**Full static gate suite on the repaired tree:** all 21 deterministic gates
-pass (`check-arch`, `check-hierarchy`, `check-abac-route-registry`,
-`check-abac-exempt-handlers`, `check-mcp-write-tools`, `check-migration-versions`,
-`check-migration-sql-portability`, `check-dead-message-kinds`,
-`check-byte-slice-truncation`, `check-relative-path-defaults`,
-`check-fail-open-ref-resolution`, `check-task-commit-attribution`,
-`check-mem-port-contracts`, `check-fabricated-scope-defaults`,
-`check-lossy-secret-conversion`, `check-scope-literal-defaults`,
-`check-inert-enforcement`, `check-forged-scope-fields`,
-`check-forwarded-header-trust`, `check-in-memory-state-stores`,
-`check-unbounded-external-http`). Per-gate logs:
-`/tmp/stage/review-evidence/task-238-check-*.txt`.
-
-**Diff-scoped lint gates vs base:** `check-rustfmt-diff.py <base>` exit 0
-(0 Rust files changed); `check-clippy-diff.py <base>` exit 0 ("changed lines
-clean (0 Rust files, 1141 existing warnings outside changes)"). Evidence:
-`/tmp/stage/review-evidence/task-238-rustfmt-diff-gate.txt`,
-`/tmp/stage/review-evidence/task-238-clippy-diff-gate.txt`.
-
-**Baseline-log rustfmt/clippy lines are not main-state failures:** the log's
-`explorer_ws_integration.rs:464,465,466,469,471 need formatting` and
-`:412 clippy::useless_conversion` reference a file state that does not exist
-at base — the file is 420 lines at `27bd585c` (verified across all refs; only
-the unmerged `origin/pipeline/task-069` branch ever had 498). Those lines came
-from the interrupted attempt `dfa38866`'s checkout (base + discarded candidate
-working tree), not from clean main: `check-rustfmt-diff.py` and
-`check-clippy-diff.py` compare base..HEAD, and at clean HEAD the diff is
-empty. The baseline environment's own `GYRE_BASELINE_FAILURE_JSON` records
-exactly one failing probe — the attribution check repaired above. Separately,
-current stable clippy (1.99.0) reports a warning-level `never_loop` at
-`crates/gyre-domain/src/rust_extractor.rs:1071` under the CI invocation
-(`-W clippy::all` downgrades it from the correctness-group default); it is
-pre-existing main debt on an unchanged line, outside every gate's scope, and
-the CI-exact invocation exits 0 at clean HEAD. Evidence:
-`/tmp/stage/review-evidence/task-238-clippy-ci-invocation.txt`.
+task-155` derives `["27bd585c…"]` alone because the 7 branch SHAs are not
+ancestors of main (squash-merged) and the script rewrites rather than
+appends. Replacing the 7 SHAs would erase recorded review-scoping history,
+so this repair appends instead — same choice the approved task-228 round
+made (documented in its Shipped section).
 
 **Attribution for this task:** this branch's only changes are
 `specs/tasks/task-155.md` (the repair) and this task file — no product
