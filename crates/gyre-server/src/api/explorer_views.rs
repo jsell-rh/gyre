@@ -605,16 +605,7 @@ pub async fn generate_explorer_view(
     // Model + per-endpoint max output tokens (ui-layout.md §2).
     let (model, max_tokens) =
         crate::llm_helpers::resolve_llm_model(&state, &ws_id, "explorer-generate").await;
-<<<<<<< HEAD
-    // LLM connection failure is an `event: error` SSE event, not an HTTP
-    // 500 (ui-layout.md §2: "If the LLM connection fails entirely,
-    // `event: error` fires instead (no fallback available)"). The stream
-    // has already been set up by this point; the SSE content type is
-    // fixed, so we return a single-event error stream.
     let result = match factory
-=======
-    let llm_output = factory
->>>>>>> b1cdb0ddd80ecd37f9de7c29559562f8a86dccf3
         .for_model(&model)
         .predict_json(&system_prompt, &user_prompt, max_tokens)
         .await
@@ -654,7 +645,6 @@ pub async fn generate_explorer_view(
     );
     let _ = state.costs.record(&cost_entry).await;
 
-<<<<<<< HEAD
     // Persist the `llm_query` BudgetCallRecord with prompt-template git SHA
     // for audit (ui-layout.md §2 "git SHA recorded in cost entries") and
     // increment the workspace + tenant counters.
@@ -674,43 +664,15 @@ pub async fn generate_explorer_view(
     )
     .await;
 
-    // Validate the LLM's output against the view spec grammar before
-    // `event: complete` (ui-layout.md §2 Canvas+Controls). An invalid spec
-    // is NOT an error event: the client renders the list-layout fallback.
-    let (view_spec, explanation, fallback) = match parse_and_validate(&result) {
-        Ok(()) => (
-            result,
-            format!("Generated view for: {}", req.question),
-            None,
-        ),
-        Err(_) => (
-            serde_json::Value::Null,
-            "Generated view was invalid — try rephrasing".to_string(),
-            Some(serde_json::json!({
-                "layout": "list",
-                "data": {"node_types": [], "edge_types": [], "depth": 1},
-            })),
-        ),
-    };
-
-    let partial_data =
-        serde_json::to_string(&json!({"explanation": "Generating view..."})).unwrap_or_default();
-    let complete_data = serde_json::to_string(&json!({
-        "view_spec": view_spec,
-        "explanation": explanation,
-        "fallback": fallback,
-    }))
-    .unwrap_or_default();
-=======
     // Spec §2: the server validates the LLM's output against the view spec
     // grammar before sending `event: complete`. An invalid spec is reported
     // as `{view_spec: null, explanation, fallback}` (the same null-view-spec
     // pattern as unanswerable questions) — NOT a 500, and NOT forwarded raw
     // to the client.
-    let grammar_ok = parse_and_validate(&llm_output).is_ok();
+    let grammar_ok = parse_and_validate(&result).is_ok();
     let mut complete = if grammar_ok {
         json!({
-            "view_spec": llm_output.clone(),
+            "view_spec": result.clone(),
             "explanation": format!("Generated view for: {}", req.question),
         })
     } else {
@@ -720,7 +682,7 @@ pub async fn generate_explorer_view(
     // Validate repo_id ownership in the generated spec too — a hallucinated
     // repo_id must not leak cross-workspace data when the view renders.
     if grammar_ok {
-        if let Err(e) = validate_repo_ownership(&state, &workspace_id, &llm_output).await {
+        if let Err(e) = validate_repo_ownership(&state, &workspace_id, &result).await {
             tracing::warn!(workspace_id = %workspace_id, error = %e, "LLM view spec referenced foreign repo_id");
             complete = invalid_llm_view_response();
         }
@@ -729,7 +691,6 @@ pub async fn generate_explorer_view(
     let partial_data =
         serde_json::to_string(&json!({"explanation": "Generating view..."})).unwrap_or_default();
     let complete_data = serde_json::to_string(&complete).unwrap_or_default();
->>>>>>> b1cdb0ddd80ecd37f9de7c29559562f8a86dccf3
 
     let events: Vec<Result<Event, std::convert::Infallible>> = vec![
         Ok(Event::default().event("partial").data(partial_data)),
