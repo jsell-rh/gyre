@@ -235,6 +235,11 @@ pub struct AppState {
     pub started_at_secs: u64,
     /// Compose sessions: compose_id -> list of agent_ids.
     pub compose_sessions: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// Explorer WebSocket session registry: per-user live-session tracking
+    /// for the concurrent-session limit. Ephemeral by nature (connections
+    /// cannot outlive the server instance), so it is intentionally not
+    /// port-backed - see `explorer_ws::ExplorerSessionRegistry`.
+    pub(crate) explorer_sessions: Arc<explorer_ws::ExplorerSessionRegistry>,
     /// Data retention policies.
     pub retention_store: RetentionStore,
     /// Background job registry.
@@ -405,12 +410,6 @@ pub struct AppState {
     /// WebSocket ticket store: short-lived, single-use tokens for WS auth.
     /// Replaces the insecure ?token= query parameter pattern.
     pub ws_tickets: auth::WsTicketStore,
-    /// Per-server registry of active explorer WebSocket sessions, keyed by
-    /// (tenant_id, agent_id). Used to enforce the per-user concurrent session
-    /// limit with oldest-first eviction. Process-local by design — matches
-    /// `presence` and `ws_connections` ownership, so each server instance
-    /// (and each test-built state) tracks its own sessions.
-    pub explorer_sessions: Arc<explorer_ws::ExplorerSessionRegistry>,
 }
 
 /// Compute the SHA-256 hash of a workspace's meta-spec set JSON.
@@ -898,6 +897,7 @@ pub fn build_state(
         metrics,
         started_at_secs,
         compose_sessions: Arc::new(Mutex::new(HashMap::new())),
+        explorer_sessions: Arc::new(explorer_ws::ExplorerSessionRegistry::new()),
         retention_store: RetentionStore::new(),
         job_registry: Arc::new(JobRegistry::new()),
         analytics: store!(
@@ -1105,7 +1105,6 @@ pub fn build_state(
             mem::MemJudgmentLedgerRepository
         ),
         ws_tickets: auth::WsTicketStore::new(),
-        explorer_sessions: Arc::new(explorer_ws::ExplorerSessionRegistry::default()),
         llm: match std::env::var("GYRE_VERTEX_PROJECT") {
             Ok(_) => match gyre_adapters::RigVertexAiFactory::from_env() {
                 Ok(factory) => Some(Arc::new(factory) as Arc<dyn gyre_ports::LlmPortFactory>),

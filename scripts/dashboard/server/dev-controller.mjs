@@ -19,7 +19,9 @@ export async function controllerAlive(paths) {
     const pid = Number((await readFile(paths.lock, "utf8")).trim());
     if (!Number.isInteger(pid) || pid <= 0) return false;
     const cmd = await readFile(`/proc/${pid}/cmdline`, "utf8");
-    return cmd.includes("dev-pipeline.py") && cmd.includes("serve");
+    return (cmd.includes("dev-pipeline.py") && cmd.includes("serve")) ||
+      (cmd.includes(join(paths.state, "tools", "gyre-dispatcher-")) &&
+       cmd.split("\0").includes(paths.state));
   } catch { return false; }
 }
 
