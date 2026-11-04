@@ -1,6 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, waitFor, fireEvent } from '@testing-library/svelte';
+import { render, waitFor, fireEvent, screen } from '@testing-library/svelte';
 import MetaSpecs from '../components/MetaSpecs.svelte';
+
+// Mock layout-engines so the embedded EditorSplit's ArchPreviewCanvas renders
+// without ELK (same mock as EditorSplit.test.js).
+vi.mock('../lib/layout-engines.js', async () => {
+  const { columnLayout } = await vi.importActual('../lib/layout-engines.js');
+  return { columnLayout };
+});
 
 const mockPersonas = [
   {
@@ -94,6 +101,10 @@ vi.mock('../lib/api.js', () => ({
     publishPersona: vi.fn().mockRejectedValue(new Error('Not implemented')),
     specsAssist: vi.fn().mockRejectedValue(new Error('Not available')),
     specsAssistGlobal: vi.fn().mockRejectedValue(new Error('Not available')),
+    repoGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
+    graphPredict: vi.fn().mockResolvedValue({ predictions: [] }),
+    specsSave: vi.fn().mockResolvedValue({ mr_id: 1 }),
+    workspacePresence: vi.fn().mockResolvedValue([]),
   },
 }));
 
@@ -802,6 +813,24 @@ describe('MetaSpecs -- required toggle', () => {
 
 // ─── Workspace scope ──────────────────────────────────────────────────────────
 
+// Real PreviewResponse / PreviewStatusResponse shapes from
+// crates/gyre-server/src/api/meta_specs.rs — preview_id, state, specs,
+// blast_radius, structural_impact. No architecture_diff/specs_diff exist on
+// the wire; the workspace §9 loop must work with exactly these.
+const realPreviewShape = (state, specs) => ({
+  preview_id: 'pv-1',
+  state,
+  specs,
+  blast_radius: {
+    affected_workspaces: [{ id: 'ws-1' }],
+    affected_repos: [
+      { id: 'repo-9', workspace_id: 'ws-1', reason: 'specs/payment/retry.md pinned in meta-spec set' },
+    ],
+    affected_workspace_count: 1,
+  },
+  structural_impact: { scope: 'workspace', affected_spec_count: 2 },
+});
+
 describe('MetaSpecs -- workspace scope', () => {
   beforeEach(() => {
     localStorage.clear();
@@ -824,10 +853,13 @@ describe('MetaSpecs -- workspace scope', () => {
     expect(loop).toBeTruthy();
   });
 
-  it('shows persona textarea in editing state', async () => {
+  it('mounts the reusable EditorSplit in meta-spec context (production §9 path)', async () => {
+    // The workspace preview loop must go through the SAME EditorSplit the
+    // spec editor uses — no parallel §9 implementation.
     const { findByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
-    const textarea = await findByTestId('persona-textarea');
-    expect(textarea).toBeTruthy();
+    expect(await findByTestId('editor-split-textarea')).toBeTruthy();
+    expect(await findByTestId('spec-selector')).toBeTruthy();
+    expect(document.body.textContent).toContain('Meta-spec editor');
   });
 
   it('shows meta-spec selector dropdown', async () => {
@@ -837,14 +869,14 @@ describe('MetaSpecs -- workspace scope', () => {
   });
 
   it('shows Preview and Publish buttons in editing state', async () => {
-    const { findByText } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
-    expect(await findByText('Preview')).toBeTruthy();
-    expect(await findByText('Publish')).toBeTruthy();
+    const { findByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+    expect(await findByTestId('preview-btn')).toBeTruthy();
+    expect(await findByTestId('publish-btn')).toBeTruthy();
   });
 
   it('Preview button is disabled when no specs selected', async () => {
-    const { findByText } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
-    const btn = await findByText('Preview');
+    const { findByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+    const btn = await findByTestId('preview-btn');
     expect(btn.disabled).toBe(true);
   });
 
@@ -855,22 +887,22 @@ describe('MetaSpecs -- workspace scope', () => {
   });
 
   it('Select All enables Preview button', async () => {
-    const { findByText } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+    const { findByText, findByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
     const selectAll = await findByText('Select All');
     await fireEvent.click(selectAll);
 
-    const previewBtn = await findByText('Preview');
+    const previewBtn = await findByTestId('preview-btn');
     await waitFor(() => {
       expect(previewBtn.disabled).toBe(false);
     });
   });
 
   it('Clear deselects all specs', async () => {
-    const { findByText } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+    const { findByText, findByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
     await fireEvent.click(await findByText('Select All'));
     await fireEvent.click(await findByText('Clear'));
 
-    const previewBtn = await findByText('Preview');
+    const previewBtn = await findByTestId('preview-btn');
     await waitFor(() => {
       expect(previewBtn.disabled).toBe(true);
     });
@@ -890,145 +922,160 @@ describe('MetaSpecs -- workspace scope', () => {
     });
   });
 
-  it('transitions to running state on Preview click', async () => {
+  it('transitions to running state on Preview click (real PreviewResponse shape)', async () => {
     vi.useFakeTimers();
-    api.previewPersona.mockRejectedValue(new Error('stub'));
+    api.previewPersona.mockResolvedValue(
+      realPreviewShape('running', [
+        { path: 'specs/payment/retry.md', status: 'running' },
+        { path: 'specs/system/design.md', status: 'running' },
+      ]),
+    );
+    api.previewPersonaStatus.mockResolvedValue(
+      realPreviewShape('running', [
+        { path: 'specs/payment/retry.md', status: 'running' },
+        { path: 'specs/system/design.md', status: 'running' },
+      ]),
+    );
 
-    const { findByText } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
-    const selectAll = await findByText('Select All');
-    await fireEvent.click(selectAll);
+    const { findByText, findByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+    await fireEvent.click(await findByText('Select All'));
+    await fireEvent.click(await findByTestId('preview-btn'));
 
-    const previewBtn = await findByText('Preview');
-    await fireEvent.click(previewBtn);
-
+    expect(await findByTestId('preview-running')).toBeTruthy();
     expect(await findByText('Preview: Running')).toBeTruthy();
     expect(await findByText('Cancel Preview')).toBeTruthy();
-    vi.useRealTimers();
   });
 
   it('shows progress items during running state', async () => {
     vi.useFakeTimers();
-    api.previewPersona.mockRejectedValue(new Error('stub'));
+    api.previewPersona.mockResolvedValue(
+      realPreviewShape('running', [
+        { path: 'specs/payment/retry.md', status: 'running' },
+        { path: 'specs/system/design.md', status: 'running' },
+      ]),
+    );
+    api.previewPersonaStatus.mockResolvedValue(
+      realPreviewShape('running', [
+        { path: 'specs/payment/retry.md', status: 'running' },
+        { path: 'specs/system/design.md', status: 'running' },
+      ]),
+    );
 
-    const { findByText, container } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+    const { findByText, findByTestId, container } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
     await fireEvent.click(await findByText('Select All'));
-    await fireEvent.click(await findByText('Preview'));
+    await fireEvent.click(await findByTestId('preview-btn'));
 
+    await findByTestId('preview-running');
     await waitFor(() => {
       const progressItems = container.querySelectorAll('.progress-item');
       expect(progressItems.length).toBe(2);
     });
-
-    vi.useRealTimers();
   });
 
-  it('transitions to complete state after simulation', async () => {
+  it('completes when previewPersonaStatus reports complete (real shape, no fabricated state)', async () => {
     vi.useFakeTimers();
-    api.previewPersona.mockRejectedValue(new Error('stub'));
+    api.previewPersona.mockResolvedValueOnce(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
+    api.previewPersonaStatus.mockResolvedValue(
+      realPreviewShape('complete', [{ path: 'specs/payment/retry.md', status: 'complete' }]),
+    );
 
-    const { findByText, findByTestId } = render(MetaSpecs, {
-      props: { scope: 'workspace', workspaceId: 'ws-1' },
-    });
+    const { findByText, findByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+    await fireEvent.click(await findByText('Select All'));
+    await fireEvent.click(await findByTestId('preview-btn'));
+    await findByTestId('preview-running');
 
-    const selectAll = await findByText('Select All');
-    await fireEvent.click(selectAll);
-    const previewBtn = await findByText('Preview');
-    await fireEvent.click(previewBtn);
-
-    await vi.advanceTimersByTimeAsync(4000);
+    await vi.advanceTimersByTimeAsync(2000);
 
     await waitFor(async () => {
-      expect(await findByTestId('preview-complete')).toBeTruthy();
+      expect(await findByTestId('iterate-btn')).toBeTruthy();
     });
-
-    vi.useRealTimers();
+    // Architecture tab shows the server-computed structural impact
+    const impact = await findByTestId('meta-impact');
+    expect(impact.textContent).toContain('workspace');
+    expect(impact.textContent).toContain('repo-9');
   });
 
-  it('shows simulated preview banner', async () => {
+  it('a previewPersona failure returns to editing with an error banner — no fabricated complete state', async () => {
     vi.useFakeTimers();
-    api.previewPersona.mockRejectedValue(new Error('stub'));
+    api.previewPersona.mockRejectedValue(
+      new Error('API /workspaces/ws-1/meta-specs/preview: 404 Not Found'),
+    );
 
-    const { findByText, container } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+    const { findByText, findByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
     await fireEvent.click(await findByText('Select All'));
-    await fireEvent.click(await findByText('Preview'));
-    await vi.advanceTimersByTimeAsync(4000);
+    await fireEvent.click(await findByTestId('preview-btn'));
 
-    await waitFor(() => {
-      const banner = container.querySelector('.sim-banner');
-      expect(banner).toBeTruthy();
-    });
-
-    vi.useRealTimers();
+    // Honest failure: back to editing with the error banner. The old parallel
+    // implementation fell back to a simulated "complete" state — §9 State 3
+    // must never be presented without a real result.
+    await waitFor(() => expect(findByTestId('preview-error')).toBeTruthy());
+    expect(await findByTestId('editor-split-textarea')).toBeTruthy();
+    expect(document.querySelector('[data-testid="iterate-btn"]')).toBeNull();
   });
 
   it('shows Iterate button in complete state', async () => {
     vi.useFakeTimers();
-    api.previewPersona.mockRejectedValue(new Error('stub'));
+    api.previewPersona.mockResolvedValueOnce(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
+    api.previewPersonaStatus.mockResolvedValue(
+      realPreviewShape('complete', [{ path: 'specs/payment/retry.md', status: 'complete' }]),
+    );
 
-    const { findByText } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
-    const selectAll = await findByText('Select All');
-    await fireEvent.click(selectAll);
-    const previewBtn = await findByText('Preview');
-    await fireEvent.click(previewBtn);
-
-    await vi.advanceTimersByTimeAsync(4000);
+    const { findByText, findByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+    await fireEvent.click(await findByText('Select All'));
+    await fireEvent.click(await findByTestId('preview-btn'));
+    await vi.advanceTimersByTimeAsync(2000);
 
     await waitFor(async () => {
       expect(await findByText('Iterate')).toBeTruthy();
     });
-
-    vi.useRealTimers();
   });
 
   it('Iterate transitions back to editing state', async () => {
     vi.useFakeTimers();
-    api.previewPersona.mockRejectedValue(new Error('stub'));
+    api.previewPersona.mockResolvedValueOnce(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
+    api.previewPersonaStatus.mockResolvedValue(
+      realPreviewShape('complete', [{ path: 'specs/payment/retry.md', status: 'complete' }]),
+    );
 
-    const { findByText, findByTestId } = render(MetaSpecs, {
-      props: { scope: 'workspace', workspaceId: 'ws-1' },
-    });
+    const { findByText, findByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+    await fireEvent.click(await findByText('Select All'));
+    await fireEvent.click(await findByTestId('preview-btn'));
+    await vi.advanceTimersByTimeAsync(2000);
 
-    const selectAll = await findByText('Select All');
-    await fireEvent.click(selectAll);
-    await fireEvent.click(await findByText('Preview'));
-    await vi.advanceTimersByTimeAsync(4000);
-
-    const iterateBtn = await findByText('Iterate');
+    const iterateBtn = await waitFor(() => findByText('Iterate'));
     await fireEvent.click(iterateBtn);
 
     await waitFor(async () => {
-      expect(await findByTestId('persona-textarea')).toBeTruthy();
+      expect(await findByTestId('editor-split-textarea')).toBeTruthy();
     });
-
-    vi.useRealTimers();
-  });
-
-  it('Publish button is visible in editing state', async () => {
-    const { findByText } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
-    expect(await findByText('Publish')).toBeTruthy();
   });
 
   it('Cancel Preview returns to editing state', async () => {
     vi.useFakeTimers();
-    api.previewPersona.mockRejectedValue(new Error('stub'));
+    api.previewPersona.mockResolvedValue(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
+    api.previewPersonaStatus.mockResolvedValue(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
 
-    const { findByText, findByTestId } = render(MetaSpecs, {
-      props: { scope: 'workspace', workspaceId: 'ws-1' },
-    });
-
-    const selectAll = await findByText('Select All');
-    await fireEvent.click(selectAll);
-    await fireEvent.click(await findByText('Preview'));
+    const { findByText, findByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+    await fireEvent.click(await findByText('Select All'));
+    await fireEvent.click(await findByTestId('preview-btn'));
     await fireEvent.click(await findByText('Cancel Preview'));
 
     await waitFor(async () => {
-      expect(await findByTestId('persona-textarea')).toBeTruthy();
+      expect(await findByTestId('editor-split-textarea')).toBeTruthy();
     });
-
-    vi.useRealTimers();
   });
 
-  it('Publish calls API', async () => {
+  it('Publish calls the registry API with the selected persona and current content', async () => {
     api.publishPersona.mockResolvedValue({});
 
     const { findByText } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
@@ -1048,12 +1095,12 @@ describe('MetaSpecs -- workspace scope', () => {
     expect(await findByText(/Preview how persona and principle changes/)).toBeTruthy();
   });
 
-  it('changing meta-spec dropdown updates textarea', async () => {
+  it('changing meta-spec dropdown updates the editor', async () => {
     const { findByLabelText, findByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
     const select = await findByLabelText('Persona');
     await fireEvent.change(select, { target: { value: 'persona-2' } });
 
-    const textarea = await findByTestId('persona-textarea');
+    const textarea = await findByTestId('editor-split-textarea');
     await waitFor(() => {
       expect(textarea.value).toBe('You review code for security vulnerabilities.');
     });
@@ -1087,29 +1134,41 @@ describe('MetaSpecs -- workspace scope', () => {
 
   it('impact tabs (Architecture/Code Diff) are available in complete state', async () => {
     vi.useFakeTimers();
-    api.previewPersona.mockRejectedValue(new Error('stub'));
+    api.previewPersona.mockResolvedValueOnce(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
+    api.previewPersonaStatus.mockResolvedValue(
+      realPreviewShape('complete', [{ path: 'specs/payment/retry.md', status: 'complete' }]),
+    );
 
-    const { findByText } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+    const { findByText, findByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
     await fireEvent.click(await findByText('Select All'));
-    await fireEvent.click(await findByText('Preview'));
-    await vi.advanceTimersByTimeAsync(4000);
+    await fireEvent.click(await findByTestId('preview-btn'));
+    await vi.advanceTimersByTimeAsync(2000);
 
     await waitFor(async () => {
-      expect(await findByText('Architecture')).toBeTruthy();
-      expect(await findByText('Code Diff')).toBeTruthy();
+      expect(await findByTestId('iterate-btn')).toBeTruthy();
     });
-
-    vi.useRealTimers();
+    // Impact tabs with Architecture selected by default (§9 State 3)
+    expect(await findByTestId('tab-architecture')).toBeTruthy();
+    expect(await findByTestId('tab-code-diff')).toBeTruthy();
+    expect(screen.getByTestId('tab-architecture').getAttribute('aria-selected')).toBe('true');
   });
 
   it('switching impact tabs works', async () => {
     vi.useFakeTimers();
-    api.previewPersona.mockRejectedValue(new Error('stub'));
+    api.previewPersona.mockResolvedValueOnce(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
+    api.previewPersonaStatus.mockResolvedValue(
+      realPreviewShape('complete', [{ path: 'specs/payment/retry.md', status: 'complete' }]),
+    );
 
-    const { findByText, container } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+    const { findByText, findByTestId, container } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
     await fireEvent.click(await findByText('Select All'));
-    await fireEvent.click(await findByText('Preview'));
-    await vi.advanceTimersByTimeAsync(4000);
+    await fireEvent.click(await findByTestId('preview-btn'));
+    await vi.advanceTimersByTimeAsync(2000);
+    await waitFor(() => findByText('Code Diff'));
 
     await fireEvent.click(await findByText('Code Diff'));
 
@@ -1117,22 +1176,23 @@ describe('MetaSpecs -- workspace scope', () => {
       const activeTab = container.querySelector('.impact-tab.active');
       expect(activeTab.textContent).toBe('Code Diff');
     });
-
-    vi.useRealTimers();
   });
 
   it('disables meta-spec selector during running state', async () => {
     vi.useFakeTimers();
-    api.previewPersona.mockRejectedValue(new Error('stub'));
+    api.previewPersona.mockResolvedValue(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
+    api.previewPersonaStatus.mockResolvedValue(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
 
-    const { findByText, findByLabelText } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+    const { findByText, findByLabelText, findByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
     await fireEvent.click(await findByText('Select All'));
-    await fireEvent.click(await findByText('Preview'));
+    await fireEvent.click(await findByTestId('preview-btn'));
 
     const select = await findByLabelText('Persona');
     expect(select.disabled).toBe(true);
-
-    vi.useRealTimers();
   });
 });
 
@@ -1165,40 +1225,34 @@ describe('MetaSpecs -- repo scope', () => {
   });
 });
 
-// ─── DiffSuggestion integration ───────────────────────────────────────────────
+// ─── EditorSplit integration ──────────────────────────────────────────────────
 
-describe('MetaSpecs -- DiffSuggestion accept updates textarea', () => {
+describe('MetaSpecs -- EditorSplit content binding (workspace §9 loop)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     api.getSpecs.mockResolvedValue([...mockSpecs]);
     api.getMetaSpecs.mockResolvedValue([...mockPersonas]);
-    global.fetch = vi.fn().mockRejectedValue(new Error('fetch not available'));
   });
 
-  it('AcceptSuggestion appends content to persona textarea', async () => {
-    const { findByTestId, findByLabelText } = render(MetaSpecs, {
+  it('edits in the EditorSplit textarea and publishes the edited content', async () => {
+    api.publishPersona.mockResolvedValue({});
+
+    const { findByTestId, findByText } = render(MetaSpecs, {
       props: { scope: 'workspace', workspaceId: 'ws-1' },
     });
 
-    const textarea = await findByTestId('persona-textarea');
-    const initialValue = textarea.value;
+    const textarea = await findByTestId('editor-split-textarea');
+    await fireEvent.input(textarea, { target: { value: 'Revised persona prompt.' } });
 
-    const chatInput = await findByLabelText('Message input');
-    await fireEvent.input(chatInput, { target: { value: 'Add error handling' } });
-    await fireEvent.keyDown(chatInput, { key: 'Enter', ctrlKey: true });
+    await fireEvent.click(await findByText('Publish'));
 
     await waitFor(() => {
-      const acceptBtns = document.querySelectorAll('.diff-actions button');
-      return acceptBtns.length > 0;
+      expect(api.publishPersona).toHaveBeenCalledWith(
+        'ws-1',
+        'persona-1',
+        { content: 'Revised persona prompt.' },
+      );
     });
-
-    const acceptBtn = document.querySelector('.diff-actions button');
-    if (acceptBtn) {
-      await fireEvent.click(acceptBtn);
-      await waitFor(() => {
-        expect(textarea.value.length).toBeGreaterThan(initialValue.length);
-      });
-    }
   });
 });
 
