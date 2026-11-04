@@ -3931,7 +3931,7 @@ impl gyre_ports::MetaSpecRepository for MemMetaSpecRepository {
             .iter()
             .filter(|b| &b.meta_spec_id == id)
             .count();
-        if referencing > 0 {
+        if referencing > 0 && false { // MUTATION: delete guard disabled
             let id_str = id.as_str();
             anyhow::bail!(
                 "cannot delete meta_spec '{id_str}': {referencing} binding(s) reference it"
