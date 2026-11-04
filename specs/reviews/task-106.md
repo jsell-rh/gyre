@@ -47,3 +47,24 @@ Notes (not findings):
 - `jj_squash_into_parent` flaked twice early in the review run (vim editor killed with signal 15 under harness load), then passed 6+ consecutive times standalone and batched, on both `c1c6dd9e` and `c1c6dd9e^`. Environmental, not a regression.
 
 Verdict: **needs-revision** — F1-F5 are genuinely resolved, but F6-F7 break jj provisioning in the default configuration and on every post-first new-branch spawn respectively, F8 undermines the deferral guarantee this round added, and all three fail silently.
+
+## Round 6 — independent review (candidate `dcf38a02`)
+
+Reviewed the diff from base `8d0625df` (task-106 commits `7de14740`, `d25adcd1`, plus process commits `177b5c86`/`dcf38a02`). Probes run against real jj 0.39.0 built from crates.io (`cargo install jj-cli --version 0.39.0 --locked`); evidence under `/tmp/stage/review-evidence/task-106-r6/`:
+
+- `cargo test -p gyre-adapters jj` → 14/14 EXIT 0 (real jj; incl. rebase clean/conflict, `-b @` whole-stack, resolve exit-code contract, workspace-add import/cleanup fixtures).
+- `cargo test -p gyre-server --lib merge_processor` → 57/57 EXIT 0; `--lib spawn` → 42/42 EXIT 0; `--lib` full → 1254/1254 EXIT 0.
+- `scripts/check-arch.sh`, `check-relative-path-defaults.sh`, `check-ignored-tool-tests.sh`, `check-dead-message-kinds.sh`, `check-in-memory-state-stores.sh`, `check-conditional-test-guards.sh`, `check-task-commit-attribution.sh` → all EXIT 0. (`check-assertionless-tests.sh` could not run in this sandbox: awk is mawk, the script's 3-arg `match()` needs gawk — environment limitation, not a candidate defect; new tests were read and all carry real assertions.)
+
+Verified genuine: R2 F1–F8 fixes are all present and pinned (stderr/exit-code contract, workspace layout with `jj git import` before `-r` resolution, rebase-after-gates in both merge paths, backoff-after-terminal-outcome with pending-marker replay on both paths, `-b @` stack semantics, absolute repos_root + legacy-row absolutization). Adapter tests assert real repository state (commit ids, file contents, exit codes), not mirrored logic. kv_store is port-backed; notifications flow through `emit_event` (signed/persisted/WS).
+
+Findings:
+
+- **F9 (major): new-branch spawns can never provision a jj workspace, so §4's automatic rebase silently does not apply to them.** `spawn_agent_core` attempts jj provisioning BEFORE anything creates the spawn branch; `jj_workspace add -r <branch>` fails for a branch absent from the bare repo (verified empirically: `Error: Revision 'feat/brand-new' doesn't exist`). New-branch spawns are the designed-for case (`entrypoint.sh` `git checkout -b` fallback; base `create_worktree` created missing branches; MCP `gyre_spawn_worker` takes an arbitrary branch). The git-worktree fallback has no jj (the old colocated init was deleted), so `jj_rebase` errs on every movement — audit error only, no rebase, no `baseline_moved`. Every merge_processor/spawn test injects `ConfigurableJjOps` whose `jj_workspace_add` always returns Ok, masking it. Fix: create/resolve the branch before `jj_workspace_add` (e.g. branch-creation first, or workspace add on the target tip + bookmark).
+- **F10 (minor): `find_mr_by_author_branch` doesn't filter `repository_id`** — a rebase conflict in repo A can flag the same agent's same-named-branch MR in repo B (`has_conflicts = Some(true)`).
+- **F11 (minor): `jj_workspace_forget` violates its own port contract** — doc promises idempotence on absent workspace; the adapter body is an identity `match` returning `Err` in exactly that case (dead code + warn noise on every git-fallback agent cleanup).
+- **F12 (minor): `replay_pending_rebases` runs only on idle queue cycles** — under sustained merge load (the spec's 20+-agent scenario) expired deferrals are starved; marker not lost, but the retry-after-expiry claim is best-effort under load.
+
+Note (not a finding): coverage row `source-control.md §4` still reads `task-assigned` with pre-implementation notes; flip to `implemented` only after F9 is fixed and re-verified.
+
+Verdict: **needs-revision** — the mechanism, contracts, and tests are real and the R2 findings are genuinely closed, but F9 leaves the headline behavior (automatic rebase of in-flight agents) inapplicable to agents spawned onto new branches, which is the common case, and the test double hides it.
