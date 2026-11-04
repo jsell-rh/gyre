@@ -17,8 +17,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, fireEvent } from '@testing-library/svelte';
-
+import { render, fireEvent, waitFor } from '@testing-library/svelte';
 vi.mock('../lib/api.js', () => ({
   api: {
     computeList: vi.fn().mockResolvedValue([]),
@@ -27,6 +26,9 @@ vi.mock('../lib/api.js', () => ({
     setWorkspaceBudget: vi.fn().mockResolvedValue({ entity_type: 'workspace', entity_id: 'ws-1', config: { max_tokens_per_day: 5000 }, usage: { tokens_used_today: 0, cost_today: 0, active_agents: 0, period_start: 0 } }),
     workspaceAbacPolicies: vi.fn().mockResolvedValue([]),
     auditEvents: vi.fn().mockResolvedValue([]),
+    workspaceRepos: vi.fn().mockResolvedValue([]),
+    createRepo: vi.fn().mockResolvedValue({ id: 'repo-new', name: 'new-repo' }),
+    createMirrorRepo: vi.fn().mockResolvedValue({ id: 'repo-mirror', name: 'mirrored', is_mirror: true }),
     updateWorkspace: vi.fn().mockResolvedValue({}),
   },
   setAuthToken: vi.fn(),
@@ -83,15 +85,17 @@ describe('WorkspaceSettings', () => {
     expect(tablist.getAttribute('role')).toBe('tablist');
   });
 
-  it('renders all 7 tabs', () => {
+  it('renders all 8 tabs', () => {
     const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
     const tabs = container.querySelectorAll('[role="tab"]');
-    expect(tabs.length).toBe(7);
+    expect(tabs.length).toBe(8);
     const labels = Array.from(tabs).map(t => t.textContent.trim());
     expect(labels).toContain('General');
     expect(labels).toContain('Trust & Policies');
     expect(labels).toContain('Teams');
     expect(labels).toContain('Budget');
+    // HSI §1.5 Admin workspace-scope row: Policies (Trust & Policies) + Repos tabs
+    expect(labels).toContain('Repos');
     expect(labels).toContain('Compute');
     expect(labels).toContain('LLM Config');
     expect(labels).toContain('Audit');
@@ -150,6 +154,45 @@ describe('WorkspaceSettings', () => {
       const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
       await fireEvent.click(container.querySelector('[data-testid="save-general-btn"]'));
       expect(api.updateWorkspace).toHaveBeenCalledWith('ws-1', expect.any(Object));
+    });
+  });
+
+  // HSI §1.5 Admin workspace-scope row: Repos tab (list, create, import)
+  describe('Repos tab', () => {
+    it('lists workspace repos with name and mirror URL', async () => {
+      api.workspaceRepos.mockResolvedValueOnce([
+        { id: 'repo-1', name: 'billing-service', status: 'Active', default_branch: 'main', is_mirror: false },
+        { id: 'repo-2', name: 'payments-mirror', status: 'Active', default_branch: 'main', is_mirror: true, mirror_url: 'https://example.com/payments.git' },
+      ]);
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await fireEvent.click(container.querySelector('#ws-tab-repos'));
+      await waitFor(() => expect(container.querySelector('[data-testid="repos-table"]')).toBeTruthy());
+      const rows = container.querySelectorAll('[data-testid="repos-row"]');
+      expect(rows.length).toBe(2);
+      expect(rows[0].textContent).toContain('billing-service');
+      expect(rows[1].textContent).toContain('https://example.com/payments.git');
+    });
+
+    it('create form calls api.createRepo with the workspace id', async () => {
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await fireEvent.click(container.querySelector('#ws-tab-repos'));
+      await fireEvent.click(container.querySelector('[data-testid="repos-new-btn"]'));
+      await fireEvent.input(container.querySelector('[data-testid="repos-new-name"]'), { target: { value: 'new-repo' } });
+      await fireEvent.submit(container.querySelector('[data-testid="repos-new-form"]'));
+      await waitFor(() => expect(api.createRepo).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'new-repo', workspace_id: 'ws-1' })
+      ));
+    });
+
+    it('import form calls api.createMirrorRepo with the derived name', async () => {
+      const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+      await fireEvent.click(container.querySelector('#ws-tab-repos'));
+      await fireEvent.click(container.querySelector('[data-testid="repos-import-btn"]'));
+      await fireEvent.input(container.querySelector('[data-testid="repos-import-url"]'), { target: { value: 'https://example.com/upstream.git' } });
+      await fireEvent.submit(container.querySelector('[data-testid="repos-import-form"]'));
+      await waitFor(() => expect(api.createMirrorRepo).toHaveBeenCalledWith(
+        expect.objectContaining({ url: 'https://example.com/upstream.git', workspace_id: 'ws-1', name: 'upstream' })
+      ));
     });
   });
 

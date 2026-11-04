@@ -119,7 +119,7 @@ Clicking a repo from Workspace Home enters Repo Mode. The top bar shows `[←] W
 - **Edge type labels**: hover-to-show labels on edges (calls, contains, imports, implements, etc.).
 - Click node to open `DetailPanel` with file path, spec linkage, visibility, doc comment, complexity, churn.
 - **Bidirectional nav**: clicking a node with a `spec_path` shows a "Go to spec" button that opens the Specs tab with that spec's detail panel. Spec → Architecture nav is via the Architecture mini canvas in the spec detail.
-- Controls: lens/view selector, LLM "Ask" SSE chat, filter panel (node type, complexity, churn), Code tab.
+- **Sub-tabs: Graph | Briefing** — the Briefing sub-tab is the repo-scoped narrative (same shape as the workspace Briefing section, narrowed server-side via `?repo_id=` on `GET /api/v1/workspaces/:id/briefing` and `POST .../briefing/ask`); deep-linkable via `?subTab=briefing`.
 - `POST /api/v1/repos/{id}/graph/predict` — structural predictions surfaced in canvas and mini canvas.
 
 ### Decisions Tab
