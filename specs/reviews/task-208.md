@@ -51,3 +51,22 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 14 (2026-11-04) — independent review at candidate d3c709d2, NOT approved (attribution clobber 18)
+
+Candidate: `d3c709d2e600b17fd4940c46a479d35d57787b2d` (base `63aa1486`). All probes run at the exact candidate; evidence: `/tmp/stage/review-evidence/task-208-candidate-d3c709d2.txt`.
+
+**Product surface — every acceptance criterion independently verified green:**
+
+- Spec amendment intact: user-management.md §"My Stuff" Views records the supersession (ui-navigation.md §2 + HSI §12) with the per-user-Needs→workspace-home mapping; §UI Pages My Dashboard row removed; M22.8 completeness row struck to Removed; /@{username} text unchanged; HSI §12 and ui-navigation.md untouched (empty diff). Coverage matrices consistent (user-management row 22 `n/a`, HSI row 54 `implemented`).
+- Backend: `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib api::users::tests::my_stuff_endpoints_are_removed` → 1 passed. Routes (api/mod.rs), handlers (users.rs), and ABAC mappings (abac_middleware.rs) all deleted; only the test's URI literals remain in crates/.
+- Frontend: `npm ci` + `npx vitest run src/__tests__/UserProfile.test.js` → 23/23. The six-tab guard asserts the exact rendered `[role="tab"]` data-id list; Tabs.svelte renders data-id from the tabs prop, so it is mutation-killing, not mirrored logic.
+- Dist (F1 class): `npm run build` regenerated a byte-identical bundle (`git status web/dist` clean); forbidden-identifier grep over web/dist/assets → zero matches; kept-surface identifiers present.
+- Gates: check-abac-route-registry.sh, check-abac-exempt-handlers.sh, check-task-commit-attribution.sh all exit 0.
+- i18n: en.json `user_profile.tabs` holds exactly the five $t-backed kept tabs; removed tabs used hardcoded labels, so no orphaned keys.
+
+**Blocking finding (process, 18th occurrence of the documented clobber class):** the candidate tip's `commits:` frontmatter is `["a11cbf7e", "98fd096e"]`, dropping `ad1121c5` (the dist-regen F1 fix) and `ea006d52` (the whitespace-gate exemption for generated dist). Both are task-208-labeled product-surface commits and verified ancestors of the candidate. Checkpoint `9361b0f1` rewrote the fully-attributed list restored at `46ccba2e` (clobber 17 repair) down to `[98fd096e]`, and the tip rebuilt it from the checkpoint's product-surface regex `^(crates/|web/src|web/tests)` — which excludes `web/dist/` and root `.gitattributes`. The in-repo gate shares the blind spot and passes; per AGENTS.md, an unlisted commit is invisible to review scoping. Repair is mechanical (frontmatter-only): restore `[98fd096e, ad1121c5, ea006d52]` (plus `a11cbf7e` if the recovery commit stays listed).
+
+**Minor (non-blocking):** `specs/milestones/m22-platform-entities.md:101` still reads "My Agents/Tasks/MRs/Notifications tabs" in the M22 UI table while the endpoint rows carry the removal annotation — same historical-record class round 1 deemed optional; recorded for consistency only.
+
+Verdict: **needs-revision** (frontmatter repair only; zero product drift required). Full `cargo test --all` / `npm test` remain owned by verification; sandbox blocks TCP accept (EOPNOTSUPP), so live HTTP probes are impossible here — the in-process router test proves the 404 route table without sockets.
