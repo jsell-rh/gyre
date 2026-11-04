@@ -1279,6 +1279,27 @@ describe('ExplorerCanvas — ghost overlays', () => {
   const GHOST_CHANGE = { id: 'fn1', name: 'create_user', type: 'function', action: 'change', reason: 'Updated validation', confidence: 'medium' };
   const GHOST_REMOVE = { id: 'fn2', name: 'get_user', type: 'function', action: 'remove', confidence: 'low' };
 
+  // The file-level mock runs rAF synchronously. With ghost overlays the
+  // canvas runs its designed 3-cycle pulse animation (~273 frames); under a
+  // synchronous mock the whole burst executes inside render() as ~50k
+  // mocked canvas calls — 5-8s on a loaded host, tripping the 5s per-test
+  // timeout (load-dependent flake). These tests assert DOM state only
+  // (preview bar, legend chips), which is template-driven, not
+  // canvas-pixel-driven, so mirror a hidden browser tab (rAF suspended):
+  // accept the frame, never invoke it. The component cancels its frame on
+  // destroy, so nothing leaks past the block.
+  let pendingCb = null;
+  beforeEach(() => {
+    pendingCb = null;
+    global.requestAnimationFrame = vi.fn(cb => { pendingCb = cb; return 1; });
+    global.cancelAnimationFrame = vi.fn(() => { pendingCb = null; });
+  });
+  afterEach(() => {
+    // Restore the file-level synchronous mock for any test outside this block.
+    global.requestAnimationFrame = vi.fn(cb => { cb(); return 1; });
+    global.cancelAnimationFrame = vi.fn();
+  });
+
   it('renders preview mode indicator with ghost overlays', () => {
     const { container } = render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES, ghostOverlays: [GHOST_ADD] },
@@ -1683,5 +1704,94 @@ describe('ExplorerCanvas -- interactive query template storage', () => {
 
     expect(resolved.scope.node).toBe('create_user');
     expect(resolved.annotation.title).toBe('Blast radius: create_user');
+  });
+});
+
+// ── Scope drill-down (ui-layout.md §3 Drill-Down) ────────────────────────
+
+describe('ExplorerCanvas — scope drill-down', () => {
+  // A workspace-scope graph: real graph nodes carrying repo_id, no Contains
+  // children (repo internals are not in this graph). The single-node layout
+  // is tiny, so the initial fit zoom is high: the parent tree-group exceeds
+  // the 450px summary threshold and the real leaf node (with repo_id) is
+  // visible and hit-testable at the canvas center (W×H default to 900×600
+  // in jsdom; world (0,0) maps to screen (450,300)).
+  const WS_NODE = { id: 'node-a', repo_id: 'repo-123', node_type: 'module', name: 'auth', qualified_name: 'auth', file_path: 'auth.rs', line_start: 1, line_end: 10, visibility: 'public', spec_confidence: 'none', test_node: false };
+
+  function clickCanvas(canvas, type, x = 450, y = 300) {
+    if (type === 'click') {
+      // onClick rejects clicks that moved >4px from mousedown (pan guard)
+      canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: x, clientY: y, bubbles: true }));
+      canvas.dispatchEvent(new MouseEvent('mouseup', { clientX: x, clientY: y, bubbles: true }));
+    }
+    canvas.dispatchEvent(new MouseEvent(type, { clientX: x, clientY: y, bubbles: true }));
+  }
+
+  it('double-click on a repo_id leaf calls onScopeDrill (not onNodeDetail, not drillInto)', async () => {
+    const onScopeDrill = vi.fn();
+    const onNodeDetail = vi.fn();
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: [WS_NODE], edges: [], onScopeDrill, onNodeDetail },
+    });
+    await new Promise(r => setTimeout(r, 50));
+    const canvas = container.querySelector('canvas.treemap-canvas');
+
+    clickCanvas(canvas, 'dblclick');
+    await new Promise(r => setTimeout(r, 20));
+
+    expect(onScopeDrill).toHaveBeenCalledTimes(1);
+    expect(onScopeDrill).toHaveBeenCalledWith(expect.objectContaining({ id: 'node-a', repo_id: 'repo-123' }));
+    expect(onNodeDetail).not.toHaveBeenCalled();
+    // No breadcrumb drill happened (scope change replaces in-graph drill)
+    expect(container.querySelector('.treemap-breadcrumb')).toBeFalsy();
+  });
+
+  it('single-click opens the detail panel without changing scope', async () => {
+    const onScopeDrill = vi.fn();
+    const onNodeDetail = vi.fn();
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: [WS_NODE], edges: [], onScopeDrill, onNodeDetail },
+    });
+    await new Promise(r => setTimeout(r, 50));
+    const canvas = container.querySelector('canvas.treemap-canvas');
+
+    clickCanvas(canvas, 'click');
+    await new Promise(r => setTimeout(r, 20));
+
+    expect(onNodeDetail).toHaveBeenCalledTimes(1);
+    expect(onNodeDetail).toHaveBeenCalledWith(expect.objectContaining({ id: 'node-a' }));
+    expect(onScopeDrill).not.toHaveBeenCalled();
+  });
+
+  it('nodes with Contains children keep in-graph drill (onScopeDrill not called)', async () => {
+    const onScopeDrill = vi.fn();
+    const parent = { id: 'pkg-x', repo_id: 'repo-123', node_type: 'package', name: 'svc', qualified_name: 'svc', file_path: '', line_start: 0, line_end: 0, visibility: 'public', spec_confidence: 'none', test_node: false };
+    const child = { id: 'fn-y', repo_id: 'repo-123', node_type: 'function', name: 'handler', qualified_name: 'svc.handler', file_path: 'svc/handler.rs', line_start: 1, line_end: 5, visibility: 'public', spec_confidence: 'none', test_node: false };
+    const { container } = render(ExplorerCanvas, {
+      props: {
+        nodes: [parent, child],
+        edges: [{ id: 'c1', source_id: 'pkg-x', target_id: 'fn-y', edge_type: 'contains' }],
+        onScopeDrill,
+        onNodeDetail: vi.fn(),
+      },
+    });
+    await new Promise(r => setTimeout(r, 50));
+    const canvas = container.querySelector('canvas.treemap-canvas');
+
+    clickCanvas(canvas, 'dblclick');
+    await new Promise(r => setTimeout(r, 20));
+
+    expect(onScopeDrill).not.toHaveBeenCalled();
+  });
+
+  it('without onScopeDrill callback, repo_id leaf double-click keeps default behavior (no crash)', async () => {
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: [WS_NODE], edges: [] },
+    });
+    await new Promise(r => setTimeout(r, 50));
+    const canvas = container.querySelector('canvas.treemap-canvas');
+
+    expect(() => clickCanvas(canvas, 'dblclick')).not.toThrow();
+    await new Promise(r => setTimeout(r, 20));
   });
 });
