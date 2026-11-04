@@ -489,6 +489,26 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register message expiry job (hourly, message-bus.md §Implementation Notes)
+    registry
+        .register(
+            JobDefinition {
+                name: "message_expiry".to_string(),
+                description: "Deletes expired Event-tier messages and acked dead-agent \
+             inboxes (message-bus.md TTL)"
+                    .to_string(),
+                interval_secs: 3600,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move {
+                crate::message_dispatcher::run_message_expiry(&state)
+                    .await
+                    .map(|_| ())
+            },
+        )
+        .await;
+
     // Register dep_staleness_check job (runs daily, dependency-graph.md §Version Drift)
     registry
         .register(

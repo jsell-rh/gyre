@@ -22,7 +22,7 @@
 | identity-security.md | 12 | 2 | 0 | 2 | 4 | 4 | 80% |
 | lsp-call-graph.md | 12 | 0 | 0 | 12 | 0 | 0 | 0% |
 | merge-dependencies.md | 20 | 3 | 0 | 1 | 0 | 16 | 94% |
-| message-bus.md | 17 | 3 | 0 | 2 | 1 | 11 | 85% |
+| message-bus.md | 17 | 3 | 0 | 0 | 3 | 11 | 100% |
 | meta-spec-reconciliation.md | 18 | 7 | 0 | 7 | 4 | 0 | 36% |
 | observability.md | 9 | 0 | 0 | 3 | 3 | 3 | 66% |
 | platform-model.md | 56 | 5 | 0 | 24 | 19 | 8 | 52% |
