@@ -353,7 +353,7 @@ mod tests {
     #[test]
     fn builtin_personas_are_pre_approved_tenant_scoped() {
         let tenant = Id::new("t1");
-        let personas = builtin_personas(&tenant, 1700_000_000);
+        let personas = builtin_personas(&tenant, 1_700_000_000);
         assert_eq!(personas.len(), 4);
         for (p, def) in personas.iter().zip(BUILTIN_PERSONA_DEFS) {
             assert_eq!(p.slug, def.slug);
@@ -361,7 +361,7 @@ mod tests {
             assert_eq!(p.system_prompt, def.system_prompt);
             assert_eq!(p.approval_status, PersonaApprovalStatus::Approved);
             assert_eq!(p.approved_by.as_deref(), Some("system"));
-            assert_eq!(p.approved_at, Some(1700_000_000));
+            assert_eq!(p.approved_at, Some(1_700_000_000));
             assert_eq!(p.version, 1);
             // content_hash is SHA-256 of system_prompt + capabilities —
             // recomputing independently must match.

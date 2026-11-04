@@ -290,7 +290,11 @@ mod tests {
         // definitions; here we assert the registration surface is identical
         // (name/slug/prompt/capabilities/protocols), not just co-located.
         for p in BUILTIN_PERSONAS {
-            assert!(p.system_prompt.starts_with('#'), "spec-file prompt for {}", p.slug);
+            assert!(
+                p.system_prompt.starts_with('#'),
+                "spec-file prompt for {}",
+                p.slug
+            );
         }
     }
 

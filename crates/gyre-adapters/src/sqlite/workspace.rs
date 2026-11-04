@@ -627,7 +627,11 @@ mod persona_tests {
         // First boot: seed via the same check-then-insert loop as
         // `seed_builtin_personas_for_tenant` (lib.rs).
         for p in gyre_domain::builtin_personas(&tenant, 1_700_000_000) {
-            match storage.find_by_slug_and_scope(&p.slug, &scope).await.unwrap() {
+            match storage
+                .find_by_slug_and_scope(&p.slug, &scope)
+                .await
+                .unwrap()
+            {
                 Some(_) => panic!("fresh DB must not find {} yet", p.slug),
                 None => PersonaRepository::create(&storage, &p).await.unwrap(),
             }
