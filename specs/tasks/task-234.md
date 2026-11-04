@@ -2,7 +2,7 @@
 title: "Repair verified failure on main 27bd585ca7eb"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 commits: ["6c0e8dcb136cf3b32e6c365d70829adba73105ba"]
 ---
 
@@ -103,3 +103,11 @@ TCP `accept()` (errno 95, Operation not supported, per
 `/tmp/stage/capabilities.json`) — irrelevant here: the failing probe is a
 pure git-history script needing no server, listener, or browser. Full gates
 and GitHub CI remain for the verification/publication stage as usual.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/explorer_ws.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.

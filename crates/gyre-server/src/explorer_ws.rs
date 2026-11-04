@@ -137,15 +137,7 @@ impl ExplorerSessionRegistry {
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         let slots = sessions.entry(user.to_string()).or_default();
         // Evict oldest sessions if at the limit.
-        while slots.len() >= max {
-            let evicted = slots.remove(0);
-            info!(
-                user = %user,
-                evicted_session = evicted.id,
-                "Explorer WS: evicting oldest session to make room for new connection"
-            );
-            evicted.shutdown.notify_one();
-        }
+        // MUTATION: eviction disabled
         slots.push(SessionSlot {
             id: session_id,
             shutdown: Arc::clone(&shutdown_notify),
