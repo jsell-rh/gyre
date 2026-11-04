@@ -93,6 +93,8 @@ def discover(store, stage, base):
         inputs = None
         if stage == 'triage' and not triaged:
             inputs = {'error': errors.get(name) or data.get('metadata_error'), 'metadata': safe_metadata(task['body'])}
+            if (repair or {}).get('category') == 'fresh_start':
+                inputs['fresh_start_id'] = repair['id']
             if (inputs['error'] or inputs['metadata'].get('dependencies') is None or
                     not inputs['metadata'].get('title') or not inputs['metadata'].get('spec_ref')):
                 inputs['base'] = base
