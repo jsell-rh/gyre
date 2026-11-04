@@ -51,22 +51,37 @@ pub(crate) fn is_live(a: &gyre_domain::Agent) -> bool {
     )
 }
 
-/// Soft persona validation (§3.1): warn and continue when the seeded persona
-/// meta-spec is missing or unapproved - never block the spawn path on it.
-async fn validate_persona(state: &AppState, name: &str) {
+/// Persona enforcement (§3.1): an orchestrator spawns under its persona
+/// meta-spec, which must exist and be approved (task contract: "must exist
+/// and be approved"). A missing, unapproved, or unreadable persona is a
+/// spawn failure — warn-and-continue here would be audit-only validation
+/// (the task-099 F2 flaw class): the orchestrator would run with no
+/// approved persona behind it. Store read failures propagate rather than
+/// fail-open.
+async fn validate_persona(state: &AppState, name: &str) -> Result<(), ApiError> {
     let filter = MetaSpecFilter {
         kind: Some(MetaSpecKind::Persona),
         ..Default::default()
     };
-    if let Ok(personas) = state.meta_specs.list(&filter).await {
-        match personas.iter().find(|p| p.name == name) {
-            None => tracing::warn!(persona = name, "persona meta-spec not found"),
-            Some(p) if !matches!(p.approval_status, MetaSpecApprovalStatus::Approved) => {
-                tracing::warn!(persona = name, "persona meta-spec not approved")
-            }
-            _ => {}
-        }
+    let personas = state
+        .meta_specs
+        .list(&filter)
+        .await
+        .map_err(ApiError::Internal)?;
+    let persona = personas.iter().find(|p| p.name == name).ok_or_else(|| {
+        ApiError::Internal(anyhow::anyhow!(
+            "persona meta-spec '{name}' not found; an orchestrator spawn requires \
+             its persona to exist and be approved (seed_builtin_meta_specs or \
+             register and approve the persona)"
+        ))
+    })?;
+    if !matches!(persona.approval_status, MetaSpecApprovalStatus::Approved) {
+        return Err(ApiError::Internal(anyhow::anyhow!(
+            "persona meta-spec '{name}' exists but is not approved (status: {})",
+            persona.approval_status.as_str()
+        )));
     }
+    Ok(())
 }
 
 /// Derive an unused agent name from the per-scope default (§3.2
@@ -219,7 +234,7 @@ pub(crate) async fn spawn_workspace_orchestrator_core(
         .await
         .map_err(ApiError::TooManyRequests)?;
 
-    validate_persona(state, "workspace-orchestrator").await;
+    validate_persona(state, "workspace-orchestrator").await?;
 
     spawn_orchestrator(
         state,
@@ -341,7 +356,7 @@ pub(crate) async fn spawn_repo_orchestrator_core(
         .await
         .map_err(ApiError::TooManyRequests)?;
 
-    validate_persona(state, "repo-orchestrator").await;
+    validate_persona(state, "repo-orchestrator").await?;
 
     spawn_orchestrator(
         state,
@@ -452,8 +467,10 @@ mod tests {
         }
     }
 
-    /// Seed ws-1 with tenant t1 plus two repos r-1, r-2.
-    async fn seed(state: &crate::AppState) {
+    /// Seed ws-1 with tenant t1 plus two repos r-1, r-2. No meta-specs —
+    /// tests that exercise the persona enforcement branches use this
+    /// directly.
+    async fn seed_scope(state: &crate::AppState) {
         let ws = gyre_domain::Workspace::new(Id::new("ws-1"), Id::new("t1"), "Ws", "ws", 0);
         state.workspaces.create(&ws).await.unwrap(); // non-atomic-create:ok — test seed, in-memory test state
         for rid in ["r-1", "r-2"] {
@@ -466,6 +483,16 @@ mod tests {
             );
             state.repos.create(&repo).await.unwrap(); // non-atomic-create:ok — test seed, in-memory test state
         }
+    }
+
+    /// Full spawn fixture: scope entities plus the built-in persona
+    /// meta-specs via the production startup seeder — orchestrator spawns
+    /// enforce that the persona exists and is approved, so every test that
+    /// expects a successful spawn needs the seeded personas exactly like a
+    /// real deployment does.
+    async fn seed(state: &std::sync::Arc<crate::AppState>) {
+        seed_scope(state).await;
+        crate::seed_builtin_meta_specs(state).await;
     }
 
     /// Mark a live agent Dead in the store (frees its scope slot, §3.2).
@@ -519,6 +546,75 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stored.as_deref(), Some(token.as_str()));
+    }
+
+    /// Task contract: the persona meta-spec "must exist and be approved".
+    /// Enforcement, not audit — with the persona absent the spawn must fail
+    /// and no agent row may be created. Kills the warn-and-continue variant
+    /// (task-099 F2): with validate_persona void, this spawn succeeds.
+    #[tokio::test]
+    async fn orchestrator_spawn_fails_without_persona() {
+        let state = test_state();
+        seed_scope(&state).await; // scope entities only, no persona meta-specs
+
+        let err = spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ApiError::Internal(e) if e.to_string().contains("'workspace-orchestrator' not found")),
+            "got: {err}"
+        );
+
+        // Enforcement precedes persistence: no orchestrator was created.
+        let agents = state
+            .agents
+            .list_by_workspace(&Id::new("ws-1"))
+            .await
+            .unwrap();
+        assert!(agents.is_empty(), "spawn must not persist an agent");
+    }
+
+    /// The approval branch of persona enforcement: an existing but
+    /// unapproved persona is just as blocking as a missing one. Kills the
+    /// warn-only approval check (with it disabled, this spawn succeeds).
+    #[tokio::test]
+    async fn orchestrator_spawn_fails_with_unapproved_persona() {
+        let state = test_state();
+        seed_scope(&state).await;
+
+        // Persona exists but sits in Pending — never approved.
+        let ms = gyre_domain::meta_spec::MetaSpec {
+            id: Id::new("ms-ws-orch-persona"),
+            kind: MetaSpecKind::Persona,
+            name: "workspace-orchestrator".to_string(),
+            scope: gyre_domain::meta_spec::MetaSpecScope::Global,
+            scope_id: None,
+            prompt: "You are a workspace-level orchestrator agent.".to_string(),
+            version: 1,
+            content_hash: "test-hash".to_string(),
+            required: false,
+            approval_status: MetaSpecApprovalStatus::Pending,
+            approved_by: None,
+            approved_at: None,
+            created_by: "test".to_string(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        state.meta_specs.create(&ms).await.unwrap();
+
+        let err = spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ApiError::Internal(e) if e.to_string().contains("not approved")),
+            "got: {err}"
+        );
+        let agents = state
+            .agents
+            .list_by_workspace(&Id::new("ws-1"))
+            .await
+            .unwrap();
+        assert!(agents.is_empty(), "spawn must not persist an agent");
     }
 
     #[tokio::test]

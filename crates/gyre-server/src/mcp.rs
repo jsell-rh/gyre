@@ -5539,8 +5539,12 @@ mod tests {
     // -- TASK-093: orchestrator tier tools -----------------------------------
 
     /// Seed ws-1 (+ repos r-1, r-2, and r-x in ws-2) and return the state.
+    /// Includes the built-in persona meta-specs via the production startup
+    /// seeder — gyre_spawn_repo_orchestrator enforces that the
+    /// repo-orchestrator persona exists and is approved.
     async fn orch_state() -> std::sync::Arc<crate::AppState> {
         let state = test_state();
+        crate::seed_builtin_meta_specs(&state).await;
         for wid in ["ws-1", "ws-2"] {
             let ws = gyre_domain::Workspace::new(
                 gyre_common::Id::new(wid),
