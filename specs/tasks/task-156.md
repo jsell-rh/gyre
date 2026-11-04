@@ -7,7 +7,7 @@ coverage_sections:
   - "meta-spec-reconciliation.md §6 Reconciliation: The Slow Rollout"
   - "meta-spec-reconciliation.md §10 Conformance Sweeps (Steady State)"
   - "meta-spec-reconciliation.md §11 Observability"
-commits: ["f9a304600763093b730ca77f91c5e8b79a4e4bdd", "f79f504fbda13fb8f103957cf9096dd076f05cc8", "033dcb3a50caec2342d96c3585991bc808318833", "7aa240c0fdd773af954a446b0b0fabc76e3bcbd9", "9c051f3203235f84ef8ccf55947d89a05ea60ed2", "c399d1b44f1b74a42ea0d14ed7bc5ed1c1d8a571", "3ead34c467ba150dae67d8d2d9b34941ca9385c3", "86a98fb1fa7de027fcf0cc81666d3d7415e7900f", "170a785d9d059d4a54dae90664ce1c4e8c804aac", "2197283c0e82fd3d33293758008e1acad3676531", "0299db7cf0b96caea52261ff341097c24082afcd", "2ba1b5bd644071202c19a8642907850bdd9ff645", "cf16edcedb8bc0a68ef4e52bcfc7c5b4e86b49e7", "14798296c463663ccb5b21b8daa36946c3b5f2bb"]
+commits: ["f9a304600763093b730ca77f91c5e8b79a4e4bdd", "f79f504fbda13fb8f103957cf9096dd076f05cc8", "033dcb3a50caec2342d96c3585991bc808318833", "7aa240c0fdd773af954a446b0b0fabc76e3bcbd9", "9c051f3203235f84ef8ccf55947d89a05ea60ed2", "c399d1b44f1b74a42ea0d14ed7bc5ed1c1d8a571", "3ead34c467ba150dae67d8d2d9b34941ca9385c3", "86a98fb1fa7de027fcf0cc81666d3d7415e7900f", "170a785d9d059d4a54dae90664ce1c4e8c804aac", "2197283c0e82fd3d33293758008e1acad3676531", "0299db7cf0b96caea52261ff341097c24082afcd", "2ba1b5bd644071202c19a8642907850bdd9ff645", "cf16edcedb8bc0a68ef4e52bcfc7c5b4e86b49e7", "14798296c463663ccb5b21b8daa36946c3b5f2bb", "379e56bae7ee87a180ba8aaf95328f9909e96932"]
 ---
 
 ## Spec Excerpt
@@ -85,15 +85,28 @@ deduplicated reconciliation task per repo: title `Align code with updated
 {kind} {name} v{version}`, label `meta-spec-reconciliation`, priority Medium,
 task_type Delegation (repo-orchestrator signal-chain), spec_path set. Dedup
 is (workspace, repo, title) against non-terminal tasks; a pending task in
-another repo/workspace never suppresses this one. `diff_meta_spec_set`
-computes changed paths (new/changed SHA pins; removals are not triggers).
+another repo/workspace never suppresses this one. Only APPROVED specs
+reconcile (§6: "a meta-spec change is approved and rolled out") — binding
+a Pending (never-approved) spec is not a rollout; the approval transition
+owns that wave, so one logical rollout (create → bind → approve) produces
+exactly one wave per repo. `diff_meta_spec_set` computes changed paths
+(new/changed SHA pins; removals are not triggers).
 
 **Triggers wired (§6)** — `PUT /api/v1/workspaces/{id}/meta-spec-set`
 diffs old→new set and runs reconciliation only on version change
 (identical re-PUT is a no-op; pinned by tests incl. BTreeMap
 canonical-serialization so the set SHA is stable across re-PUTs). Registry
 content update + approval on `PUT /api/v1/meta-specs-registry/{id}`
-reconciles every workspace whose set binds the changed spec.
+reconciles every workspace whose set binds the changed spec. The §6
+reconciliation trigger keys on the content hash stamped at the last
+approval (`approved_content_hash`), so the two-step edit-then-approve flow
+the shipped UI performs triggers exactly like the combined single-request
+flow, and re-approving unchanged content is a no-op. `ms.version` bumps
+only on content (prompt) change — the version names the content the task
+title pins, so an approval-only PUT never retitles a wave and adjacent
+triggers of one rollout collapse under the dedup. All three adapters
+(mem/sqlite/postgres) archive a version-history row only when the version
+number changed (no duplicate history rows on approval-only updates).
 
 **Conformance sweep (§10)** — `run_conformance_sweep` registered as job
 `meta_spec_conformance_sweep` (daily default, `GYRE_META_SPEC_SWEEP_INTERVAL_SECS`
@@ -114,26 +127,49 @@ deduplicated against persisted wave_started_at),
 `gyre_reconciliation_tasks_total{workspace,status}` and
 `gyre_reconciliation_duration_seconds{workspace}` metrics.
 
-**Per-handler authorization repair (this round)** — the earlier commits in
-this task's file shifted `meta_specs.rs` registry handlers off their
-line-anchored `abac-exempt-handlers-exemptions.txt` entries, failing
-`check-abac-exempt-handlers.sh` (3 F1b violations). Fixed with real
-authorization instead of re-anchoring: create/update/delete registry
-handlers are Admin-only (same NEW-26 rule as `put_meta_spec_set`; a
-non-Admin approval would forge the §6 trigger, and approval is `human_only`
-per spec §1); `list` enforces tenant containment + workspace membership for
-`scope=Workspace&scope_id=` queries. The three exemption lines are deleted
-per the exemption file's own instruction. `domain_events` module
-declaration restored (an early wip commit had dropped it out of scope).
+**Authorization** — registry create/update/delete handlers are Admin-only
+(same NEW-26 rule as `put_meta_spec_set`; a non-Admin approval would forge
+the §6 trigger, and approval is `human_only` per spec §1); `list` enforces
+tenant containment + workspace membership for `scope=Workspace&scope_id=`
+queries. The three stale `abac-exempt-handlers-exemptions.txt` lines are
+deleted per the exemption file's own instruction.
 
-**Tests** — 19 reconciliation tests (task-per-repo, dedup, set-diff, sweep
-drift/clean/skip/empty-sha, API e2e trigger, SHA stability, wave
-completion/idempotency, drift resolution, events) + 30 registry tests
-including new `registry_writes_reject_non_admin` (developer-JWT 403 on
-create/approve/delete, workspace-scoped list 403 for non-members, admin
-path OK). Evidence: `/tmp/stage/review-evidence/task-156-focused-tests.txt`.
-Mechanical checks green: check-abac-exempt-handlers (89 handlers, 0
-violations), check-abac-route-registry, check-arch, check-mcp-write-tools,
-check-dead-message-kinds. Clippy `-D warnings` fails pre-existing in
-`gyre-common` at the checkpoint (verified with changes stashed); task diff
-does not touch gyre-common. Full workspace suites owned by verification.
+### Review-repair round (attempt 749f3553)
+
+Two findings fixed in commit `379e56ba`:
+
+- **Double-trigger**: the standard create→bind→approve lifecycle produced
+  two reconciliation tasks per repo for one logical rollout
+  (`two_step_edit_then_approve_triggers_reconciliation` red at the
+  candidate). Fixed by the Approved-only gate in `run_reconciliation`
+  (Pending bind no longer triggers) and the content-only version bump in
+  `update_meta_spec_registry` (approval-only PUT keeps the wave's title
+  stable so dedup collapses adjacent triggers). The test now also pins
+  both invariants (0 tasks after Pending bind; `...v1` title after first
+  approval). Adapter `update()` archives a version row only when the
+  version changed — new test
+  `same_version_update_does_not_duplicate_history`.
+- **Silent task-170 reversion**: recovery checkpoint f9a30460 committed an
+  interrupted sandbox tree based on a main older than task-170, and the
+  base merge preserved the deletions. All task-170 surfaces restored
+  byte-identical to the assigned base 6a9739e5 (`view_spec.rs` grammar,
+  `explorer_views.rs`, web view-spec/layoutRegistry/MoldableView + tests,
+  committed `web/dist` bundle, `.gitattributes`); the candidate tree no
+  longer differs from base on any task-170 surface.
+
+### Test evidence (this round, candidate HEAD)
+
+`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` — 1236 passed, 0 failed
+(includes 18 reconciliation + 30 registry tests;
+`two_step_edit_then_approve_triggers_reconciliation` run twice,
+deterministic). `cargo test -p gyre-adapters --lib meta_spec` — 10 passed.
+Restored task-170 frontend suites (view-spec, MoldableViewListView,
+ExplorerCanvas, ExplorerCanvas-performance) — 165 passed via
+`npx vitest run` after `npm ci`. Mechanical checks green:
+check-arch, check-abac-exempt-handlers (89 handlers, 0 violations),
+check-abac-route-registry, check-mem-port-contracts, check-mcp-write-tools,
+check-dead-message-kinds, check-task-commit-attribution. Evidence saved
+under `/tmp/stage/review-evidence/`. Clippy `-D warnings` fails pre-existing
+in `gyre-common` at the checkpoint; this round's diff does not touch
+`gyre-common` beyond restoring base content. Full workspace suites and
+GitHub CI owned by verification.
