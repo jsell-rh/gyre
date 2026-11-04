@@ -7,7 +7,7 @@ coverage_sections:
   - "search.md §Search Index"
   - "search.md §Technology"
   - "search.md §Index Schema"
-commits: ["3b3fb0c7cd36d2d1d9e6cf58592bddbcd2ce3326", "a1e4f6b8847d594bbd052f691cbb755dbf2c3cb2", "519eb1366d4ec18ead1edefec7ea09eebda1370f", "a970c75633d707e30e04fb8b6b6d176c9feeda32", "88c715dae50edc514db3beef6f57034c25416f52", "f154a73cae223f5f1ff5d315d52ca66830ec4fdd", "4b2a7b0730aed3a341aff3fd59ac70e4f31dd9d9", "06149be2c21de14e8a3c310cbe9dc6251e49bdfd", "a550da3739d298561cde9eaace74ae7d6fdd0097", "88ab2a656b4477456b83c1788ff22b6e2d91b2ec", "e4cf94f49c2222cda5030e4bd52270c7e721a068", "4319f2bb63eb94de4fc819ebdeaeb9ca6d30e4e8", "0c980dda5cfdd9cebe56cdabe4c1a0db74da56e0"]
+commits: ["3b3fb0c7cd36d2d1d9e6cf58592bddbcd2ce3326", "a1e4f6b8847d594bbd052f691cbb755dbf2c3cb2", "519eb1366d4ec18ead1edefec7ea09eebda1370f", "a970c75633d707e30e04fb8b6b6d176c9feeda32", "88c715dae50edc514db3beef6f57034c25416f52", "f154a73cae223f5f1ff5d315d52ca66830ec4fdd", "4b2a7b0730aed3a341aff3fd59ac70e4f31dd9d9", "06149be2c21de14e8a3c310cbe9dc6251e49bdfd", "a550da3739d298561cde9eaace74ae7d6fdd0097", "88ab2a656b4477456b83c1788ff22b6e2d91b2ec", "e4cf94f49c2222cda5030e4bd52270c7e721a068", "4319f2bb63eb94de4fc819ebdeaeb9ca6d30e4e8", "0c980dda5cfdd9cebe56cdabe4c1a0db74da56e0", "0956e4281e0941bdbe76cd7fb9200ebd0786abf9"]
 ---
 
 ## Spec Excerpt
@@ -114,9 +114,12 @@ filter/limit/upsert semantics. Zero external search dependencies.
 (tasks.rs, merge_requests.rs, agents.rs) are unchanged and now exercise the
 durable backend under `GYRE_DATABASE_URL=sqlite://…`.
 
-**Test evidence** — re-verified at this recovery's head (base `6bf777a6`
-merged via `207e9c6a`, gate repair `3b3fb0c7`; evidence:
-`/tmp/stage/review-evidence/task-201-clippy-gate.txt`):
+**Test evidence** — originally verified at the third recovery's head
+(`3b3fb0c7`; see `/tmp/stage/review-evidence/task-201-clippy-gate.txt`),
+re-verified at this recovery's head (repair commit 0956e428 plus bookkeeping) after the merge with base
+`6a9739e5` (evidence: `/tmp/stage/review-evidence/task-201-review-repair.txt`):
+`cargo test -p gyre-adapters --lib sqlite::search` — 8 passed;
+`cargo test -p gyre-server --test search_wiring` — 1 passed. Earlier rounds:
 - `cargo test -p gyre-adapters --lib sqlite::search` — 8 passed. Includes
   schema assertion against `sqlite_master` (exact columns + tokenizer), porter
   stemming (`running` matches `runs` — fails under any substring/LIKE
@@ -155,8 +158,15 @@ binding `api_integration` suite cannot run here. Required on a listener-capable
 host / GitHub CI: `cargo test --all` and
 `cargo test -p gyre-server --test api_integration`.
 
-Commits: this is the third recovery of the task-201 branch. Implementation
+Commits: this is the fourth recovery of the task-201 branch. Implementation
 lives in the `wip(task-201)`/checkpoint SHAs recorded in this file's
 `commits:` frontmatter; base `6bf777a6` merged via `207e9c6a`; the clippy
-gate repair, the task-200 attribution fix, and this evidence refresh are
-commit `3b3fb0c7`.
+gate repair, the task-200 attribution fix, and the evidence refresh are
+commit `3b3fb0c7`. This recovery (review finding on candidate `0bd8416a`):
+merge commit `72bbae0a` had resolved the specs/tasks/task-200.md conflict
+by keeping only the `commits:` line, destroying the other 130 lines of that
+protected record — restored verbatim from assigned base `6a9739e5` in commit
+`0956e428` (byte-identical to both `27bd585c` and `6a9739e5`; the mangled
+single line had also corrupted one SHA to 39 characters). No product-surface
+change; the search implementation and its test evidence above are unchanged
+from the candidate lineage.
