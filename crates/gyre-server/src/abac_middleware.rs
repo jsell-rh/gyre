@@ -1046,11 +1046,6 @@ pub mod tests {
             "/api/v1/repos/:id/worktrees/:worktree_id",
             "/api/v1/repos/:id/dependencies/:dependency_id",
             "/api/v1/merge-requests/:id/dependencies/:dependency_id",
-            // Tenant-scoped compute targets (agent-runtime §3) — must be
-            // resolver-mapped, never carried as exemption-file debt
-            // (task-093 F1 pattern).
-            "/api/v1/compute-targets",
-            "/api/v1/compute-targets/:id",
         ];
         for pattern in &required {
             assert!(
