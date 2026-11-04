@@ -101,6 +101,7 @@ struct SessionSlot {
     shutdown: Arc<tokio::sync::Notify>,
 }
 
+<<<<<<< HEAD
 /// Registry of live explorer WebSocket sessions, keyed by user
 /// (`tenant_id:agent_id`).
 ///
@@ -147,6 +148,48 @@ impl ExplorerSessionRegistry {
             let evicted = slots.remove(0);
             info!(
                 user = user_key,
+=======
+/// Per-server explorer session registry, keyed by (tenant_id, agent_id).
+/// Uses std::sync::Mutex for Drop compatibility (Drop cannot be async).
+/// Each user has a Vec of active SessionSlots, ordered oldest-first.
+///
+/// Owned by `AppState`, NOT a process global: the per-user concurrent
+/// session limit is a property of a server instance, not of the OS process.
+/// Multiple `AppState` instances in one process (integration tests,
+/// embedding) must not evict each other's sessions - only sessions routed
+/// through the same instance compete for the same cap. This state is
+/// ephemeral by nature (WebSocket connections cannot outlive their server
+/// instance), so it is intentionally not port-backed.
+pub(crate) struct ExplorerSessionRegistry {
+    /// User key -> active session slots, ordered oldest-first.
+    sessions: std::sync::Mutex<HashMap<String, Vec<SessionSlot>>>,
+    /// Monotonic session ID counter for ordering (oldest-first eviction).
+    next_session_id: std::sync::atomic::AtomicU64,
+}
+
+impl ExplorerSessionRegistry {
+    pub(crate) fn new() -> Self {
+        Self {
+            sessions: std::sync::Mutex::new(HashMap::new()),
+            next_session_id: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Register a new session for `user`, evicting (signalling) the oldest
+    /// sessions beyond `max`. Returns the new session's ID and shutdown signal.
+    pub(crate) fn register(&self, user: &str, max: usize) -> (u64, Arc<tokio::sync::Notify>) {
+        let session_id = self
+            .next_session_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let slots = sessions.entry(user.to_string()).or_default();
+        // Evict oldest sessions if at the limit.
+        while slots.len() >= max {
+            let evicted = slots.remove(0);
+            info!(
+                user = %user,
+>>>>>>> 3c39ab1f796bcf52ac0b95d60a4101e27aa69fe8
                 evicted_session = evicted.id,
                 "Explorer WS: evicting oldest session to make room for new connection"
             );
@@ -159,6 +202,7 @@ impl ExplorerSessionRegistry {
         (session_id, shutdown_notify)
     }
 
+<<<<<<< HEAD
     /// Remove a session slot (idempotent; no-op when already released).
     pub fn release(&self, user_key: &str, session_id: u64) {
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
@@ -180,6 +224,18 @@ impl ExplorerSessionRegistry {
             .map(|s| s.len())
             .unwrap_or(0)
     }
+=======
+    /// Remove a session slot (idempotent; called from `SessionGuard::drop`).
+    pub(crate) fn unregister(&self, user: &str, session_id: u64) {
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(slots) = sessions.get_mut(user) {
+            slots.retain(|s| s.id != session_id);
+            if slots.is_empty() {
+                sessions.remove(user);
+            }
+        }
+    }
+>>>>>>> 3c39ab1f796bcf52ac0b95d60a4101e27aa69fe8
 }
 
 impl Default for ExplorerSessionRegistry {
@@ -278,8 +334,14 @@ async fn handle_explorer_session(
     // rather than rejecting the new connection. This handles zombie sessions from
     // unclean disconnects (browser crash, tab close, navigation) gracefully.
     let session_user = format!("{}:{}", auth.tenant_id, auth.agent_id);
+<<<<<<< HEAD
     let registry = Arc::clone(&state.explorer_sessions);
     let (session_id, shutdown_notify) = registry.register(&session_user, max_sessions_per_user());
+=======
+    let (session_id, shutdown_notify) = state
+        .explorer_sessions
+        .register(&session_user, max_sessions_per_user());
+>>>>>>> 3c39ab1f796bcf52ac0b95d60a4101e27aa69fe8
 
     // Guard: remove this session's slot on drop (even if we return early or panic).
     struct SessionGuard {
@@ -289,12 +351,20 @@ async fn handle_explorer_session(
     }
     impl Drop for SessionGuard {
         fn drop(&mut self) {
+<<<<<<< HEAD
             self.registry.release(&self.user_key, self.session_id);
+=======
+            self.registry.unregister(&self.user_key, self.session_id);
+>>>>>>> 3c39ab1f796bcf52ac0b95d60a4101e27aa69fe8
         }
     }
     // Create guard immediately after registration so any subsequent panic cleans up.
     let _session_guard = SessionGuard {
+<<<<<<< HEAD
         registry,
+=======
+        registry: Arc::clone(&state.explorer_sessions),
+>>>>>>> 3c39ab1f796bcf52ac0b95d60a4101e27aa69fe8
         user_key: session_user,
         session_id,
     };
@@ -2933,6 +3003,7 @@ async fn run_explorer_agent(
                     // Stream a warning with the raw JSON so the user can see what was attempted.
                     let raw_preview = serde_json::to_string_pretty(&query_json)
                         .unwrap_or_else(|_| query_json.to_string());
+<<<<<<< HEAD
                     // Char-boundary-safe truncation (task-095 F4 class): the
                     // query JSON can contain multibyte UTF-8 — a fixed byte
                     // index would panic. Uses chars().take() like the
@@ -2941,6 +3012,16 @@ async fn run_explorer_agent(
                         let mut s: String = raw_preview.chars().take(500).collect();
                         s.push_str("...");
                         s
+=======
+                    // Truncate on a UTF-8 char boundary - a fixed byte index
+                    // would panic when byte 500 falls inside a multibyte
+                    // character (task-095 F4 flaw class).
+                    let truncated = if raw_preview.len() > 500 {
+                        format!(
+                            "{}...",
+                            crate::gate_executor::truncate_bytes(&raw_preview, 500)
+                        )
+>>>>>>> 3c39ab1f796bcf52ac0b95d60a4101e27aa69fe8
                     } else {
                         raw_preview
                     };

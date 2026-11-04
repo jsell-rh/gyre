@@ -230,7 +230,11 @@ mod tests {
             metrics: base.metrics.clone(),
             started_at_secs: base.started_at_secs,
             compose_sessions: base.compose_sessions.clone(),
+<<<<<<< HEAD
             explorer_sessions: base.explorer_sessions.clone(),
+=======
+            explorer_sessions: Arc::clone(&base.explorer_sessions),
+>>>>>>> 3c39ab1f796bcf52ac0b95d60a4101e27aa69fe8
             retention_store: base.retention_store.clone(),
             job_registry: base.job_registry.clone(),
             analytics: base.analytics.clone(),

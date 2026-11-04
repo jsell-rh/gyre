@@ -19,7 +19,9 @@ export async function controllerAlive(paths) {
     const pid = Number((await readFile(paths.lock, "utf8")).trim());
     if (!Number.isInteger(pid) || pid <= 0) return false;
     const cmd = await readFile(`/proc/${pid}/cmdline`, "utf8");
-    return cmd.includes("dev-pipeline.py") && cmd.includes("serve");
+    return (cmd.includes("dev-pipeline.py") && cmd.includes("serve")) ||
+      (cmd.includes(join(paths.state, "tools", "gyre-dispatcher-")) &&
+       cmd.split("\0").includes(paths.state));
   } catch { return false; }
 }
 
@@ -197,6 +199,15 @@ export async function retryTask(paths, task) {
   const { stdout } = await execFileP("python3", [paths.command, "--state", paths.state, "retry", task],
     { cwd: paths.root, timeout: 5000, maxBuffer: 1024 * 1024 });
   return stdout.trim();
+}
+
+export async function setPriority(paths, task, priority) {
+  if (!/^task-\d+$/.test(task) || (priority !== null && (typeof priority !== "string" || !/^[a-z][a-z0-9-]{0,62}$/.test(priority))))
+    throw new Error("invalid task or priority class");
+  await stat(paths.db);
+  const args = [paths.command, "--state", paths.state, "priority", task, ...(priority === null ? ["--clear"] : [priority])];
+  const { stdout } = await execFileP("python3", args, { cwd: paths.root, timeout: 5000 });
+  return JSON.parse(stdout);
 }
 
 export async function retryAllTasks(paths) {

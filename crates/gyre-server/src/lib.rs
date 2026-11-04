@@ -236,10 +236,18 @@ pub struct AppState {
     pub started_at_secs: u64,
     /// Compose sessions: compose_id -> list of agent_ids.
     pub compose_sessions: Arc<Mutex<HashMap<String, Vec<String>>>>,
+<<<<<<< HEAD
     /// Live explorer WebSocket sessions per user (per-user concurrent-session
     /// cap). Ephemeral connection state — deliberately not port-backed (see
     /// `ExplorerSessionRegistry`).
     pub explorer_sessions: Arc<ExplorerSessionRegistry>,
+=======
+    /// Explorer WebSocket session registry: per-user live-session tracking
+    /// for the concurrent-session limit. Ephemeral by nature (connections
+    /// cannot outlive the server instance), so it is intentionally not
+    /// port-backed - see `explorer_ws::ExplorerSessionRegistry`.
+    pub(crate) explorer_sessions: Arc<explorer_ws::ExplorerSessionRegistry>,
+>>>>>>> 3c39ab1f796bcf52ac0b95d60a4101e27aa69fe8
     /// Data retention policies.
     pub retention_store: RetentionStore,
     /// Background job registry.
@@ -897,7 +905,11 @@ pub fn build_state(
         metrics,
         started_at_secs,
         compose_sessions: Arc::new(Mutex::new(HashMap::new())),
+<<<<<<< HEAD
         explorer_sessions: Arc::new(ExplorerSessionRegistry::new()),
+=======
+        explorer_sessions: Arc::new(explorer_ws::ExplorerSessionRegistry::new()),
+>>>>>>> 3c39ab1f796bcf52ac0b95d60a4101e27aa69fe8
         retention_store: RetentionStore::new(),
         job_registry: Arc::new(JobRegistry::new()),
         analytics: store!(
@@ -912,7 +924,10 @@ pub fn build_state(
             dyn NetworkPeerRepository,
             mem::MemNetworkPeerRepository::default()
         ),
-        dependencies: Arc::new(mem::MemDependencyRepository::default()),
+        dependencies: store!(
+            dyn DependencyRepository,
+            mem::MemDependencyRepository::default()
+        ),
         breaking_changes: Arc::new(mem::MemBreakingChangeRepository::default()),
         dependency_policies: Arc::new(mem::MemDependencyPolicyRepository::default()),
         rate_limiter: rate_limit::RateLimiter::new(rate_per_sec),
@@ -997,7 +1012,10 @@ pub fn build_state(
             dyn BudgetUsageRepository,
             mem::MemBudgetUsageRepository::default()
         ),
-        search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
+        search: store!(
+            dyn gyre_ports::SearchPort,
+            gyre_adapters::MemSearchAdapter::new()
+        ),
         tenants: store!(
             dyn gyre_ports::TenantRepository,
             mem::MemTenantRepository::default()
