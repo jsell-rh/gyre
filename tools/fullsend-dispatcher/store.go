@@ -20,7 +20,16 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// CodeReadiness is live display metadata, never a worker result or merge permit.
+// Adapted from HyperShell dbe5edc62b168eaa677a8e0bfc40f01f37782951.
+type CodeReadiness struct {
+	Status       string `json:"status"`
+	MergeState   string `json:"merge_state"`
+	RepairQueued bool   `json:"repair_queued"`
+}
+
 type Job struct {
+	CodeReadiness     *CodeReadiness  `json:"code_readiness,omitempty"`
 	Unmetered         bool            `json:"unmetered,omitempty"`
 	Key               string          `json:"key"`
 	Scope             string          `json:"scope"`
