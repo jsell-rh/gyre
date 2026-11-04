@@ -3,7 +3,7 @@ title: "Repair verified failure on main b1cdb0ddd80e"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: []
 progress: ready-for-review
-commits: ["57d944d6ab4c9ed4850fb9c5bd117866aa1d6e35", "6299f9e9c9c63ae6381f524533051fdc0cd545e6", "21e88f8657255d5a06e1e7c7f2f1d0e6c5d79637"]
+commits: ["57d944d6ab4c9ed4850fb9c5bd117866aa1d6e35", "6299f9e9c9c63ae6381f524533051fdc0cd545e6", "21e88f8657255d5a06e1e7c7f2f1d0e6c5d79637", "2df1fb7f1df1a9b2a0fac283b5cdc3cbe32c0a2f"]
 ---
 
 ## Required behavior
