@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Session Management"
-commits: ["2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d"]
+commits: ["2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d", "9879f07d5d84d59934e6b3f28a4c8d0e2f52726d", "fd46822f478d38a8610227870c9ad50b4b2db3e6"]
 ---
 
 ## Spec Excerpt
@@ -100,5 +100,13 @@ Session management is implemented end-to-end against `user-management.md` §Sess
 - `cargo test -p gyre-adapters --lib -- sqlite::user_profile::tests::session` — 8 passed (roundtrip, duplicate-id, device-match on all four fields, newest-match, TTL slide, owner-scoped revoke, revoke-all scope, retention-never-deletes-revoked).
 - `cargo test -p gyre-server --lib -- session` — 12 passed, covering: session listed after auth; revoking one session rejects the credential; revoking one device does not sign out other devices; revoke-all signs out everywhere; foreign-session revoke is 404; TenantAdmin view/revoke; non-Admin forbidden; admin revoke-all; unknown-user 404; throttled touch; expired-session re-mint; sign-out survives retention cleanup.
 - All mechanical checks pass: arch, ABAC route registry + exempt handlers, migration versions + SQL portability, inert enforcement, mem port contracts, in-memory state stores, lossy secret conversion, forwarded-header trust, scope-literal/fabricated-scope defaults (after re-pinning the exemption line numbers that commit 66582a88 had shifted +37 — same 24/8 frozen sites, none added).
+
+### Rebase repair (merge into `75ada1c`)
+
+- Resolved the one conflicted file, `scripts/unwritten-store-fields-exemptions.txt`: took the base side (dropped the `mem.rs:3561` payloads exemption) because the task-097 fix is present in the merged `mem.rs` (`store()` populates `payloads` at line 3570; `trace_payload_tests` at line 4535); `check-unwritten-store-fields.sh` passes with the line removed (commit `9879f07d`).
+- Re-pinned two `scope-literal-defaults` exemption lines shifted +5 by the merge (`lib.rs` 498→503, 542→547 — the same frozen `emit_event`/`emit_telemetry` sites, none added); `check-scope-literal-defaults.sh` passes (commit `fd46822f`).
+- Post-merge focused probes on the merged tree: adapters session suite 8/8 passed; server session suite 12/12 passed (full build, including web assets, clean).
+- All check scripts that pass on base `75ada1c` also pass on the merged head; the 34 that fail on the merged head fail identically on the base worktree, i.e. pre-existing baseline state owned by verification, not introduced by this merge.
+- Stray `web/dist` rebuild artifacts from the local test build were reverted (same class as commit `30cb6ddd`), not committed.
 
 Not verifiable in this sandbox: live-server HTTP transport (TCP listener unsupported, errno 95). Endpoint behavior is proven by in-process Router (oneshot) tests.
