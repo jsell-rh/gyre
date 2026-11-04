@@ -1,8 +1,7 @@
 ---
 title: "Explorer WebSocket Protocol & Server Handler"
 spec_ref: "explorer-implementation.md §3–6, §20–21"
-depends_on:
-  - task-068
+depends_on: [task-068, task-238]
 progress: ready-for-review
 coverage_sections:
   - "explorer-implementation.md §3 WebSocket Protocol"
@@ -127,12 +126,17 @@ else, leaving the status indicator stale.
   `thinking`) before hitting the wire.
 - Adjacent hazard fixed in the same message path: `&raw_preview[..500]`
   (JSON preview in the invalid-view-query warning) panicked on multibyte
-  UTF-8 at the byte boundary; now char-boundary-safe via `chars().take(500)`.
-  Its `byte-slice-truncation-exemptions.txt` entry is removed (exemptions
-  shrink, never grow).
+  UTF-8 at the byte boundary; now char-boundary-safe via the shared
+  `gate_executor::truncate_bytes()` helper (after the base-`75ada1c4`
+  rebase, both sides had fixed this site independently — ours via
+  `chars().take(500)`, the base's via `truncate_bytes`; the shared helper
+  was kept). Its `byte-slice-truncation-exemptions.txt` entry is removed
+  (exemptions shrink, never grow).
 
-Test evidence (2026-10-10, implementation HEAD `30dc2826`; re-verified at
-merged HEAD `b666a474` after base-merge repair, see below):
+### Test evidence
+
+Re-verified at merged HEAD `00684607` (candidate `2f092bcd` rebased onto
+base `75ada1c4`, 2026-10-10):
 
 - `cargo test -p gyre-server --lib explorer_ws` → 39 passed, 0 failed
   (includes 4 new: constants match spec exactly; Status message serializes
@@ -145,7 +149,8 @@ merged HEAD `b666a474` after base-merge repair, see below):
   text done=true + view_query received).
 - Static gates at HEAD: arch, byte-slice-truncation (with the exemption
   entry removed), abac-route-registry, mem-port-contracts,
-  inert-enforcement, fabricated-scope-defaults — all pass.
+  inert-enforcement, fabricated-scope-defaults, task-commit-attribution —
+  all pass.
 - WS integration tests cannot run in this sandbox: loopback `accept()` is
   seccomp-blocked (errno 95; all 8 tests in `explorer_ws_integration.rs`
   fail identically at `WsCtx::new()`'s first HTTP request — the 7
@@ -157,15 +162,19 @@ merged HEAD `b666a474` after base-merge repair, see below):
   HEAD as well — mawk lacks gawk's 3-arg `match()`; CI (gawk) passes it.
   Not task-related.
 
-Repair round (checkpoint continuation, 2026-10-10, merged HEAD `b666a474`
-on base `05709c24`): the base merge touched none of the task-069 files
-(only `api/graph.rs`, briefing web files, task-196/224 docs). All probes
-re-run green at merged HEAD: 39 lib tests, integration binary `--no-run`
-EXIT=0, arch/byte-slice/abac-route-registry/mem-port-contracts/
-inert-enforcement/fabricated-scope-defaults/attribution all pass. One
-concrete merge-introduced CI finding fixed: the merged base commit
-`05709c24` (task-196, product surface) was absent from
-`specs/tasks/task-196.md`'s `commits:` frontmatter, failing
-`check-task-commit-attribution.sh` at this HEAD — added per the gate's
-prescribed remedy (frontmatter, not the frozen exemption file). The
-task-069 implementation itself needed no changes.
+### Repair rounds
+
+- Base merge onto `05709c24` (merged HEAD `b666a474`): base touched none of
+  the task-069 files (only `api/graph.rs`, briefing web files, task-196/224
+  docs); all probes re-run green. One merge-introduced CI finding fixed:
+  base commit `05709c24` (task-196, product surface) was absent from
+  `specs/tasks/task-196.md`'s `commits:` frontmatter, failing
+  `check-task-commit-attribution.sh` — added per the gate's prescribed
+  remedy (frontmatter, not the frozen exemption file).
+- Rebase onto base `75ada1c4` (merged HEAD `00684607`): one content
+  conflict in `explorer_ws.rs` — the independently-fixed truncation site,
+  resolved to the shared helper above. The base also refactored the
+  session registry from process-global to AppState-owned
+  (`ExplorerSessionRegistry`); auto-merged cleanly, status-protocol work
+  unaffected. All probes re-run green at the merged HEAD: 39 lib tests,
+  integration binary `--no-run` EXIT=0, and every static gate listed above.
