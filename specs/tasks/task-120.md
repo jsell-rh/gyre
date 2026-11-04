@@ -7,7 +7,7 @@ coverage_sections:
   - "user-management.md §User Entity"
   - "user-management.md §Username vs Display Name"
   - "user-management.md §User Preferences"
-commits: ["7c52fffda67c3550bf6972774fca12bda819d916", "a3f95bbf83705f915ff76cd89fc2e7aad060f285", "cf32398a7e6284b5c41fe87a41710a34db0350e4", "3ba2ed859cc8139968ce6ee9978fe19dd94f29e5", "9391340519d34cfd5c45a711fc4c1fd98cea99b8", "c76b224d984ddcfe253dcc0b58f0de21093e5238", "7f00472ce2ac51518fae404a0783cd511b679b7e"]
+commits: ["7c52fffda67c3550bf6972774fca12bda819d916", "a3f95bbf83705f915ff76cd89fc2e7aad060f285", "cf32398a7e6284b5c41fe87a41710a34db0350e4", "3ba2ed859cc8139968ce6ee9978fe19dd94f29e5", "9391340519d34cfd5c45a711fc4c1fd98cea99b8", "c76b224d984ddcfe253dcc0b58f0de21093e5238", "7f00472ce2ac51518fae404a0783cd511b679b7e", "7d53b6d2baaaa980439b1b5da704567ac271758b", "7752dd2e6f2a9f8922f8ca0dfde5ed0364bc97fb"]
 review: specs/reviews/task-120.md
 ---
 
@@ -102,111 +102,54 @@ Read `specs/system/user-management.md` §User Entity through §User Preferences 
 
 ## Shipped
 
-**Review-repair round (2026-10-10, evidence under
-/tmp/stage/review-evidence/task-120-pg-bigint-repair/):** repaired durable
-finding `158143620afc440dabd3987cc5d1f808` (review of candidate `465615b7`,
-checkpoint `c9bb159e`) with commit `93913405`: migration 000056's
-`users.last_login_at` column was declared `INTEGER` while every consumer is
-8-byte (`schema.rs` `Nullable<BigInt>`, both `UserRow`s `Option<i64>`) — on
-PostgreSQL (int4) diesel's `FromSql<BigInt, Pg> for i64` rejects the 4-byte
-value at read time, breaking every authenticated request for any user who has
-logged in once; SQLite's INTEGER affinity masked it. One-word fix
-(`INTEGER` → `BIGINT`), in-place: 000056 exists only on task-120 pipeline
-branches, not on main, so no deployment has executed the int4 version.
-Verified: `migration_000056_backfills_unique_url_safe_usernames` 1/1,
-`cargo test -p gyre-adapters --lib` **349 passed, 0 failed** (12 ignored,
-matching the reviewed baseline), migration-versions + SQL-portability gates
-OK, diesel's exact-8-byte `FromSql` check confirmed in the vendored 2.3.7
-source. No PG server/docker in this sandbox (and no postgres job in CI) —
-live-PG round-trip is a host-verification item, recorded in the evidence
-README. The pre-existing INTEGER-vs-BigInt mismatches on other tables
-(personas.updated_at 000012, approved_at 000010/000032) are confirmed present
-but out of scope per the finding's own note. The product surface is otherwise
-unchanged this round; earlier rounds below.
+**Verification-repair round (2026-10-10, evidence under
+/tmp/stage/review-evidence/task-120-rustfmt-clippy-repair/):** repaired
+durable verification finding `09ee56647f38444fa90254ebb9cad8ba` (`checks.sh`
+exit 1 on candidate `f745dafe`) — two changed-line gate failures, both
+repaired:
 
-Merge round (assignment base `6bf777a6` merged as `c817a5f6`; last code-touching
-commit `bad88ded`):
-the task-120 product surface is unchanged by the merge — `git diff
-0ceae938..HEAD -- crates/` touches only the merged task-200 files
-(`gyre-common/src/message.rs`, `api/messages.rs`, `mcp.rs`), all ten task-120
-paths byte-identical — and the full implementation (six product commits,
-Round-1 F1/F2/F3 repairs, Round-2 bookkeeping repair) remains as reviewed in
-`specs/reviews/task-120.md` Round 2 (PASS). This round's work: fresh
-post-merge evidence, two bookkeeping repairs, and removal of stray probe
-artifacts. Earlier rounds' details below.
+- **rustfmt (`auth.rs`):** three violations on task-120 lines — the
+  `resolve_unique_username` signature (fits on one line), the
+  `while !User::validate_username(...)` condition in `suffixed_username`,
+  and a mis-indented `Request::builder()` in the tests. Fixed by applying
+  the gate's own formatter invocation (`rustfmt --edition 2021 --config
+  skip_children=true`) to the file (commit `7d53b6d2`) — behavior-neutral,
+  and the whole-file violation set was exactly those three lines before
+  the fix.
+- **clippy::redundant_field_names (`sqlite/mod.rs`):** the struct-level
+  `#[allow]`s added by checkpoint `c76b224d` on the migration-000056 test's
+  `Row`/`Defaults` row carriers never suppressed the lint —
+  `QueryableByName`'s derive (diesel_derives 2.3.7) expands to
+  `Self { field: field, … }` inside a dummy module that inherits neither
+  struct- nor field-level `#[allow]` (the same mechanism the merged
+  `sqlite/search.rs` documents and works around). Fixed by wrapping both
+  row carriers in a fn-local module carrying a module-level inner
+  `#![allow(clippy::redundant_field_names)]` (commit `7752dd2e`) — the
+  scoping `search.rs` proved effective on the same diesel version.
 
-### Merge-round verification (2026-10-10, evidence under
-/tmp/stage/review-evidence/task-120-merge-c817a5f6/)
+Also resolved the staged merge of assignment base `75ada1c4` (merge commit
+`2ff4dc5b`): the only conflict, the `SUMMARY.md` TOTAL row, was resolved by
+recomputing the total from the merged table rows
+(802/219/0/308/112/163/47%; sum-of-rows and the coverage formula verified
+programmatically against the 40 per-spec rows).
 
-- Product surface identity: `git diff 0ceae938..HEAD -- crates/` → only the
-  three merged task-200 files; all ten task-120 paths byte-identical to the
-  reviewed Round-2 tree.
-- `cargo test -p gyre-domain --lib user` → **11 passed, 0 failed**.
-- `cargo test -p gyre-server --lib auth::` → **39 passed, 0 failed**
-  (`auth-suite.txt`).
-- `cargo test -p gyre-server --lib api::users` → **14 passed**;
-  `api::scim` → **9 passed** (`users-api-suite.txt`, `scim-suite.txt`).
-- `cargo test -p gyre-adapters --lib` → **349 passed, 0 failed** (12 ignored;
-  includes `migration_000056_backfills_unique_url_safe_usernames` and every
-  `SqliteStorage::new` boot path) — `adapters-lib.txt`.
-- Mechanical gates: migration versions, SQL portability, mem-port contracts,
-  arch — OK.
-- Bookkeeping repairs this round:
-  - `SUMMARY.md` merge conflict resolved by recomputing TOTAL from the merged
-  table rows (802/219/0/308/112/163/47%, row formula verified against
-  per-spec rows); merge committed as `c817a5f6`.
-  - task-200 publication commit `6bf777a6` recorded in
-  `specs/tasks/task-200.md` frontmatter (commit `1616755f`) — the merge made
-  it reachable here while its SHA was missing there, the same drift class
-  repaired for task-210 in `4dd13430`. Attribution gate now OK.
-  - Stray `.rlib`/`.rmeta` probe artifacts tracked by the `c76b224d`
-  checkpoint commit removed (commit `bad88ded`) — dead build outputs, no
-  source changes.
-- `web/dist` churn from local test-builds (no `SKIP_WEB_BUILD`) was discarded;
-  committed dist untouched (`git diff 0ceae938..HEAD -- web/` → empty).
+### Repair-round verification (evidence in the directory above)
 
-Checkpoint round (recovered assignment, tree `7f00472c` → this head): the full
-task-120 implementation — all six product commits, the Round-1 F1/F2/F3 repairs,
-and the Round-2 integration-rejection bookkeeping repair — was preserved by the
-interrupted-assignment checkpoint and is byte-identical on this tree (verified:
-`git diff 0dfba43..HEAD -- <all task-120 crate paths>` → empty; `0dfba43` is the
-newest of the six frontmatter product commits, the others are its ancestors via
-`0170f28`). This round's work: re-verification of the checkpointed product
-surface with fresh evidence, plus one pre-existing attribution-drift repair.
-
-### Resume verification (2026-10-09, checkpoint tree, evidence under
-`/tmp/stage/review-evidence/task-120-checkpoint/`)
-
-- Product surface identity: `git diff 0dfba43..HEAD -- crates/gyre-domain/src/user.rs
-  crates/gyre-ports/src/user.rs crates/gyre-adapters/src/sqlite/ crates/gyre-adapters/src/postgres/user.rs
-  crates/gyre-adapters/src/schema.rs crates/gyre-adapters/src/migrations/
-  crates/gyre-server/src/api/users.rs crates/gyre-server/src/api/scim.rs
-  crates/gyre-server/src/auth.rs crates/gyre-server/src/mem.rs` → empty.
-- `cargo test -p gyre-adapters --lib` → **349 passed, 0 failed** (12 ignored;
-  includes the SQLite-boot path the F1 parser overflow broke and
-  `migration_000056_backfills_unique_url_safe_usernames`) —
-  `adapters-lib.txt`.
-- `cargo test -p gyre-server --lib api::scim` → **9 passed**; `api::users` →
-  **14 passed** — `scim-users.txt`.
-- `cargo test -p gyre-server --lib auth::` → **39 passed** (username
-  derivation, last_login_at stamping, SCIM cutover, partial-update
-  preferences).
-- `cargo test -p gyre-domain --lib user` → **11 passed**.
-- Mechanical gates re-run on this tree: migration versions, SQL portability,
-  mem-port contracts, arch, ABAC route registry, ABAC exempt handlers,
-  forwarded-header trust, in-memory-state stores, unbounded external HTTP,
-  fail-open ref resolution, relative path defaults, byte-slice truncation,
-  MCP write tools, dead message kinds, fabricated/scope-literal defaults,
-  inert enforcement, lossy secret conversion, forged scope fields — all OK.
-  Commit attribution initially failed on **pre-existing drift from upstream
-  main** (task-210 commit `a781ede2` absent from `specs/tasks/task-210.md`
-  frontmatter though it is an ancestor of the assignment base `8c2d1775`);
-  repaired on this branch by recording the SHA in the frontmatter
-  (commit `4dd13430`), matching the same fix already shipped on sibling
-  pipeline branches (`63d66b46`). Gate now OK.
+- `python3 scripts/check-rustfmt-diff.py 75ada1c4` → "changed lines clean
+  (11 Rust files checked)".
+- `python3 scripts/check-clippy-diff.py 75ada1c4` → "changed lines clean
+  (11 Rust files, 1119 existing warnings outside changes)" — the full
+  workspace `cargo clippy --all-targets --all-features` behind it also
+  proves both edited files compile.
+- `cargo test -p gyre-adapters --lib migration_000056` → **1 passed, 0
+  failed** — the restructured row carriers behave identically (backfill
+  expectations and column-default assertions unchanged).
+- The task-120 product surface is otherwise unchanged this round. The full
+  implementation (six product commits, Round-1 F1/F2/F3 repairs, Round-2
+  bookkeeping repair, and the 000056 `INTEGER`→`BIGINT` fix `93913405`)
+  remains as reviewed in `specs/reviews/task-120.md` Round 2 (PASS).
 
 Transport note (recorded per assignment): this sandbox's listener probe
-(`accept`) is not supported (errno 95, `capabilities.json`) — server-boot smoke
-over HTTP cannot run here; the SQLite migration-boot path is instead proven by
-every `SqliteStorage::new`-constructing adapter test (349/349). Host-side
-checks: `cargo test --all` + GitHub CI on this exact head.
+(`accept`) is not supported (errno 95, `capabilities.json`) — server-boot
+smoke over HTTP cannot run here. Host-side checks: `cargo test --all` +
+GitHub CI on this exact head.
