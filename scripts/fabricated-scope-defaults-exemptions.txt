@@ -1,4 +1,4 @@
-# fabricated-scope-defaults-exemptions.txt — legacy debt, frozen at 6 entries.
+# fabricated-scope-defaults-exemptions.txt — legacy debt, frozen at 5 entries.
 # Fix a flagged site by skipping the scope-scoped operation and logging
 # (see emit_reconciliation_completed in gyre-server/src/lib.rs); never add
 # entries. If you fix a site, delete its line and lower
