@@ -36,6 +36,9 @@ def prompt(execution, task):
 
 
 def triage(execution, task):
+    if execution.claim['input'].get('baseline_probe'):
+        from .repairs import recheck
+        return recheck(execution, task)
     store = execution.store
     data = task['data']
     graph = {item['name']: item['data'].get('dependencies') or [] for item in store.tasks()}
@@ -119,7 +122,11 @@ def implement(execution, task):
 def review(execution, task):
     result = execution.cloud_step(task, prompt(execution, task))
     if result.get('agent_exit') != 0 or result.get('stream_exit') != 0:
-        raise Retry('review model did not complete; retry independent review on the same candidate')
+        from .diagnostics import diagnose
+        diagnostic = result.get('diagnostic') or diagnose(execution.directory, result.get('agent_exit'))
+        error = Retry(diagnostic['message'] + '; resume saved review evidence on the same candidate')
+        error.category, error.diagnostic = diagnostic['category'], diagnostic
+        raise error
     path = checkout(execution, result['head'])
     assigned = execution.claim['input']['candidate']
     execution.command('git', 'fetch', '--quiet', 'origin', assigned, cwd=path, timeout=180)
@@ -369,16 +376,20 @@ def static_baseline_observation(log, base):
             not isinstance(value.get('probe'), list) or not value['probe'] or
             not all(isinstance(arg, str) and arg for arg in value['probe'])):
         raise Retry('baseline gate evidence does not identify the verified base and probe')
+    from .repairs import fingerprint
     return {'status': 'baseline_failed', 'base': base,
             'environment': 'host-' + value['environment'],
-            'probe': value['probe'], 'baseline_log': str(log)}
+            'probe': value['probe'], 'baseline_log': str(log),
+            'failure_signature': fingerprint(value['probe'], str(value.get('log', '')))}
 
 
 def baseline_repair(execution, observation):
     """Deduplicate a real upstream failure into a scoped prerequisite task."""
     from .catalog import generation_for
     store = execution.store
-    key = observation['base'] + ':' + observation['environment']
+    from .repairs import fingerprint, probe, satisfied
+    signature = observation.get('failure_signature')
+    key = observation['base'] + ':' + (signature or observation['environment'])
     excerpt = Path(observation['baseline_log']).read_text()[-24000:]
     body = ('---\ntitle: "Repair verified failure on main ' + observation['base'][:12] + '"\n'
             'spec_ref: "GOAL.md — real implementations and meaningful verification"\n'
@@ -393,11 +404,23 @@ def baseline_repair(execution, observation):
     generation = generation_for(store, body)
     with store.transaction():
         for task in store.tasks():
-            if task['data'].get('baseline_key') == key:
+            if satisfied(task['data']):
+                continue
+            previous_signature = task['data'].get('baseline_failure')
+            if signature and previous_signature is None and probe(task) == observation.get('probe'):
+                for line in task['body'].split('## Shipped')[0].splitlines():
+                    if line.startswith('GYRE_BASELINE_FAILURE_JSON '):
+                        try:
+                            old = json.loads(line.removeprefix('GYRE_BASELINE_FAILURE_JSON '))
+                            previous_signature = fingerprint(old['probe'], str(old.get('log', '')))
+                        except (ValueError, KeyError, TypeError):
+                            continue
+            if (signature and previous_signature == signature) or task['data'].get('baseline_key') == key:
                 return task['name']
         number = max((int(task['name'][5:]) for task in store.tasks()), default=0) + 1
         name = f'task-{number:03d}'
-        data = metadata(body) | {'baseline_key': key, 'catalog_generation': generation}
+        data = metadata(body) | {'baseline_key': key, 'catalog_generation': generation,
+                                'baseline_probe': observation.get('probe'), 'baseline_failure': signature}
         store.db.execute('INSERT INTO tasks VALUES(?,?,?,?,?)', (name, generation, body, json.dumps(data), time.time()))
         store.event('baseline_prerequisite', {'base': observation['base'], 'evidence': observation['baseline_log']}, name)
         return name
