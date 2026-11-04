@@ -95,3 +95,37 @@ needs-revision — F6/F7 are wrong-or-missing `Calls` edges in realistic Go layo
 ### Verdict
 
 complete — all R1/R2 findings are fixed by real product code verified at this HEAD; the one R3 finding (F9, attribution gate) is fixed in this round and the gate is green. The task's own scope (Go Pass 2 pipeline) is done: port + adapter + pipeline + resolution policy + lifecycle, each with tests that fail on the bugs they guard against.
+
+---
+
+## Round: R4 (independent re-review)
+
+**Reviewer:** Review agent (fresh assignment; prior round lost to inference infrastructure)
+**Date:** 2026-11-04
+**Candidate:** e1fa52c9b84023a2f055baedbb79b737208e8b3b (base 7c6ac232)
+**Spec ref:** lsp-call-graph.md §1–6, §10 Phase 1, §11
+
+### Scope
+
+Independent review of the exact candidate against the task contract and canonical spec. Diff from base touches only task-072 surface: port (`gyre-ports/src/call_graph.rs`, `graph.rs` doc), adapter (`gyre-adapters/src/call_graph.rs`, `mem_graph.rs`, `Cargo.toml`), domain (`call_graph_resolve.rs`, `go_extractor.rs`), server (`graph_extraction.rs`), `Dockerfile`, `docs/server-config.md`, the attribution-gate exemption shrink (3→2, with `FROZEN_EXEMPTION_COUNT` lowered to match — the file's own documented repair path for `17c81d5a`, whose SHA is recorded in this task's frontmatter), and task/review process records. `web/` diff vs base is 0 lines.
+
+### Verification (probes under `/tmp/stage/review-evidence/`)
+
+- `cargo test -p gyre-domain call_graph_resolve` — 16/16 ok; `go_extractor` — 13/13 ok (incl. `qualified_name_uses_import_path_not_package_clause`).
+- `cargo test -p gyre-adapters call_graph` — 3/3 ok (incl. happy-path `env_override_binary_output_is_parsed_into_edges`); `mem_graph` — 1/1 ok (sqlite-parity upsert).
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib graph_extraction` — 22/22 ok (incl. `sync_go_repo_persists_calls_edges_in_graph_store` and all five Pass 2 lifecycle tests).
+- Gates: `check-arch.sh`, `check-task-commit-attribution.sh`, `check-mem-port-contracts.sh`, `check-byte-slice-truncation.sh`, `check-unbounded-external-http.sh`, `check-relative-path-defaults.sh` — all exit 0.
+- rustfmt (`--edition 2021 --check`): all seven branch-touched Rust files clean. Repo-wide `cargo fmt --all --check` shows 100 hunks, all in files this branch never touches (verified by file-set intersection) — pre-existing base baseline, matching the Shipped claim.
+- **Adversarial mutation probes (both killed, then restored; working tree clean at candidate):**
+  1. Removed the `EdgeType::Calls` exemption from `sweep_stale_edges` → `sweep_preserves_calls_edges_owned_by_pass2` FAILS (exit 101). The F8 race guard is genuinely enforced.
+  2. Removed the `existing_calls.contains(&key)` dedup from `resolve_call_edges` → `resolve_dedups_against_existing_calls` FAILS (exit 101). Pass 1/Pass 2 dedup is genuinely enforced.
+- Committed `scripts/go-callgraph/go-callgraph` binary is git-tracked at the candidate and executes; on a two-package Go fixture it reaches `packages.Load` and exits 1 with `go command required, not found` — this sandbox has no Go toolchain (infrastructure restriction, not a code defect; the adapter's non-zero-exit degradation path covers it, and the Dockerfile ships the toolchain for exactly this reason). R3's manual binary run on the fixture stands as the end-to-end positive evidence; a verifier with Go ≥1.22 on PATH should re-run `scripts/go-callgraph/go-callgraph <fixture>` and expect `[{"from":…,"to":…}]` JSON.
+- No Docker daemon in this sandbox: Dockerfile §11 wiring (golang:1.24-bookworm-slim toolchain copy, committed binary at `/usr/local/bin/gyre-go-callgraph`, `ENV GO_CALLGRAPH_BIN`) verified statically.
+
+### Contract check
+
+All nine acceptance criteria verified against production code (not labels): port trait at `crates/gyre-ports/src/call_graph.rs` with the exact specced signature; `SubprocessCallGraphExtractor` shells out with 60s timeout and graceful degradation; `do_extract()` step 7 fires Pass 2 via fire-and-forget `tokio::spawn` after Pass 1 persistence (steps 2–6), wired from git_http.rs/repos.rs/mirror_sync.rs; edges persist via `GraphPort.create_edge` (upsert on content-derived id, `first_seen_at` immutable in both adapters); dedup proven by mutation; unit + integration tests present and real. §11 (Prerequisites, Go) closed via the Dockerfile. Hexagonal boundary enforced and green.
+
+### Verdict
+
+approved — no findings. The candidate satisfies the task contract with real production behavior; key safety properties (Calls sweep exemption, Pass 1/Pass 2 dedup) proven by mutation probes that fail when the behavior is disabled. Sandbox Go-toolchain and Docker-daemon restrictions are recorded above with concrete verifier commands; they are infrastructure, not defects.
