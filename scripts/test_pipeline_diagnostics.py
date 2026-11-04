@@ -43,6 +43,11 @@ class DiagnosisTests(unittest.TestCase):
                     {'type':'tool_execution_end','toolCallId':'one'})
         self.assertEqual(diagnose(self.root,1)['unfinished_tools'], [])
 
+    def test_recovered_api_error_does_not_mask_later_runner_failure(self):
+        self.events({'type':'message_end','message':{'role':'assistant','stopReason':'error','errorMessage':'HTTP 429'}},
+                    {'type':'message_end','message':{'role':'assistant','stopReason':'toolUse'}})
+        self.assertEqual(diagnose(self.root,1)['category'],'runner_failure')
+
     def test_otel_preserves_provisioning_failure_instead_of_calling_it_a_model_error(self):
         self.events()
         frame={'resourceSpans':[{'scopeSpans':[{'spans':[{'name':'run','status':{'code':2,

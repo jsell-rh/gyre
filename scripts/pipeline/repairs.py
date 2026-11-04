@@ -38,16 +38,37 @@ def fingerprint(command, output):
     return hashlib.sha256(json.dumps([command, output.strip()], sort_keys=True).encode()).hexdigest()
 
 
+def cache_key(store, base, command):
+    from .execution import ROOT
+    image = store.setting('fullsend_image') or json.loads((ROOT / '.fullsend/toolchain.json').read_text())['worker_image']
+    return 'baseline-check:' + hashlib.sha256(json.dumps([base, command, image]).encode()).hexdigest()
+
+
+def cached(store, base, command):
+    from .verification import validate_receipt
+    receipt = store.setting(cache_key(store,base,command))
+    if receipt is not None:
+        validate_receipt(receipt, {'candidate':base,'base':base,'head':base}, [command])
+    return receipt
+
+
+def resolution(task, receipt):
+    updates = {'baseline_checked': {'base': receipt['base'], 'passed': receipt['passed']}, 'triaged': task['generation']}
+    if receipt['passed']:
+        updates['resolved'] = {'reason': 'Recorded failure no longer reproduces on upstream main',
+                               'base': receipt['base'], 'probe': receipt['probe'], 'receipt': receipt,
+                               'generation': task['generation']}
+    return updates
+
+
 def recheck(execution, task):
     from .stages import checkout
     from .verification import run, validate_receipt
-    from .execution import ROOT
     store, inp = execution.store, execution.claim['input']
     command, base = inp['baseline_probe'], inp['base']
     if probe(task) != command:
         raise ValueError('baseline recheck does not match the recorded safe probe')
-    image = store.setting('fullsend_image') or json.loads((ROOT / '.fullsend/toolchain.json').read_text())['worker_image']
-    key = 'baseline-check:' + hashlib.sha256(json.dumps([base, command, image]).encode()).hexdigest()
+    key = cache_key(store,base,command)
     with (store.directory / 'baseline-check.lock').open('a') as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -66,9 +87,4 @@ def recheck(execution, task):
             receipt.update(base=base, probe=command, artifact=str(execution.directory / 'remote-verification.json'))
             store.set_setting(key, receipt)
         validate_receipt(receipt, {'candidate':base, 'base':base, 'head':base}, [command])
-        updates = {'baseline_checked': {'base': base, 'passed': receipt['passed']}, 'triaged': task['generation']}
-        if receipt['passed']:
-            updates['resolved'] = {'reason': 'Recorded failure no longer reproduces on upstream main',
-                                   'base': base, 'probe': command, 'receipt': receipt,
-                                   'generation': task['generation']}
-        return receipt, updates, []
+        return receipt, resolution(task,receipt), []

@@ -333,6 +333,9 @@ else: print('fixture control operation')
         refused=self.invoke('--gateway','hypershell-other','provider','list')
         self.assertEqual(refused.returncode,75)
         self.assertEqual(json.loads((self.root/'backend.json').read_text())['gateways'],[alias,alias])
+        streamed=self.invoke('sandbox','upload',self.name,'fixture','/tmp/fixture')
+        self.assertEqual(streamed.returncode,0,streamed.stderr)
+        self.assertEqual(json.loads((self.root/'backend.json').read_text())['gateways'],[alias,alias,alias])
 
     def test_cancellation_allows_cleanup_transport_but_forbids_new_compute(self):
         self.store.set_setting(f"cancel:{self.work}:{self.claim['token']}",True)

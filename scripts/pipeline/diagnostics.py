@@ -10,6 +10,7 @@ def diagnose(directory, runner_exit=None):
     terminal = None
     runner_message = ''
     agent_exit = None
+    incomplete = False
     for path in sorted((directory / 'runs').glob('*/run-telemetry.jsonl')):
         with path.open(errors='replace') as source:
             for line in source:
@@ -23,6 +24,8 @@ def diagnose(directory, runner_exit=None):
                             if span.get('name') == 'run':
                                 runner_message = span.get('status', {}).get('message', '')
                             if span.get('name') == 'agent':
+                                if 'subtype: incomplete' in span.get('status', {}).get('message', ''):
+                                    incomplete = True
                                 for attribute in span.get('attributes', []):
                                     if attribute.get('key') == 'exit_code':
                                         try:
@@ -64,7 +67,8 @@ def diagnose(directory, runner_exit=None):
                 if match:
                     timeout = match.groups()
     details = {'runner_exit': runner_exit, 'agent_exit': agent_exit, 'last_stop_reason': terminal,
-               'unfinished_tools': sorted(set(pending.values())), 'api_error_count': len(errors)}
+               'unfinished_tools': sorted(set(pending.values())), 'api_error_count': len(errors),
+               'transcript_incomplete': incomplete}
     outcome = directory / 'outcome.json'
     try:
         receipt = json.loads(outcome.read_text()) if outcome.exists() else {}
@@ -79,12 +83,14 @@ def diagnose(directory, runner_exit=None):
         category, summary = 'sandbox_provisioning', 'Sandbox provisioning failed before the model started; retry infrastructure with backoff'
     elif 'transport error' in runner_message or 'deadline has elapsed' in runner_message:
         category, summary = 'gateway_transport', 'Gateway transport failed while preparing or collecting the assignment'
-    elif errors and re.search(r'\b429\b|rate.?limit', errors[-1], re.I):
+    elif terminal == 'error' and errors and re.search(r'\b429\b|rate.?limit', errors[-1], re.I):
         category, summary = 'inference_rate_limit', 'Inference returned HTTP 429; retry with backoff'
-    elif errors and re.search(r'\b(?:401|403)\b', errors[-1]):
+    elif terminal == 'error' and errors and re.search(r'\b(?:401|403)\b', errors[-1]):
         category, summary = 'inference_auth', 'Inference rejected authentication (HTTP 401/403)'
-    elif errors:
+    elif terminal == 'error' and errors:
         category, summary = 'inference_error', 'Inference request failed; structured agent error retained locally'
+    elif incomplete:
+        category, summary = 'agent_interrupted', 'Agent stream ended before completing; resume saved evidence (no verdict accepted)'
     elif runner_message.startswith('validation failed'):
         category, summary = 'assignment_validation', 'Assignment validator failed; inspect source guard and verdict evidence'
     else:

@@ -76,7 +76,7 @@ def sync_checkout(store, checkout, revision=None):
 
 
 def discover(store, stage, base):
-    from .repairs import probe, satisfied
+    from .repairs import cached, probe, resolution, satisfied
     tasks = {task['name']: task for task in store.tasks()}
     graph = {name: task['data'].get('dependencies') or [] for name, task in tasks.items()}
     errors = contract.graph_errors(graph)
@@ -107,10 +107,25 @@ def discover(store, stage, base):
                     task['data'] = data
         baseline_probe = probe(task)
         if baseline_probe and (data.get('baseline_checked') or {}).get('base') != base:
+            receipt = cached(store,base,baseline_probe)
+            if receipt is not None:
+                with store.transaction():
+                    current = store.task(name)
+                    if (current['generation'] == task['generation'] and
+                            not store.db.execute("SELECT 1 FROM work WHERE task=? AND state='claimed'",(name,)).fetchone()):
+                        data = current['data'] | resolution(current,receipt)
+                        store.db.execute('UPDATE tasks SET data=? WHERE name=?',(json.dumps(data),name))
+                        task['data'] = data
+                        store.event('baseline_repair_resolved' if receipt['passed'] else 'baseline_reproduced',
+                                    {'base':base,'probe':baseline_probe,'receipt':receipt['artifact']},name)
+                if satisfied(data):
+                    continue
             if stage == 'triage':
-                selected.append(store.enqueue('triage', name, task['generation'],
+                if (data.get('baseline_checked') or {}).get('base') != base:
+                    selected.append(store.enqueue('triage', name, task['generation'],
                                 {'base': base, 'baseline_probe': baseline_probe}, priority=20000))
-            continue
+            if (data.get('baseline_checked') or {}).get('base') != base:
+                continue
         triaged = data.get('triaged') == task['generation']
         candidate = data.get('candidate')
         review = data.get('review') or {}

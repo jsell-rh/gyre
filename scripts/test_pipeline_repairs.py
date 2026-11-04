@@ -40,9 +40,11 @@ class RepairReconciliationTests(unittest.TestCase):
     def test_passing_remote_probe_resolves_two_repairs_with_one_remote_call_and_no_merge(self):
         first,calls=self.run_probe(True)
         self.assertEqual(calls,1)
-        second,calls=self.run_probe(True)
-        self.assertNotEqual(first,second)
-        self.assertEqual(calls,0)
+        # Even a full/drained pool needs no extra admission to apply a shared
+        # authoritative receipt to the second alias.
+        self.store.set_setting('slots',0)
+        self.assertEqual(discover(self.store,'triage','main'),[])
+        second=next(t['name'] for t in self.store.tasks() if t['name']!=first)
         for name in (first,second):
             data=self.store.task(name)['data']
             self.assertEqual(data['resolved']['base'],'main')
@@ -56,7 +58,7 @@ class RepairReconciliationTests(unittest.TestCase):
         name,_=self.run_probe(False)
         self.assertNotIn('resolved',self.store.task(name)['data'])
         work=discover(self.store,'implement','main')
-        self.assertEqual(len(work),1)
+        self.assertEqual(len(work),2)
         self.store.set_setting('observed_main','new-main')
         row=dict(self.store.db.execute('SELECT * FROM work WHERE id=?',(work[0],)).fetchone())
         self.assertFalse(eligible(self.store,row))
