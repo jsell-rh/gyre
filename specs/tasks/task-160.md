@@ -86,149 +86,54 @@ activity/analytics record-conversions now stamp the storage's real tenant
 `tenant_isolation.rs` integration test (2 tests) proves cross-tenant
 invisibility end-to-end.
 
-**Verification at merged HEAD 32865a7c** (evidence:
-`/tmp/stage/review-evidence/task-160-continued/`; task surface byte-identical
-to reviewed candidate 13ff2a51 — empty diff on scripts/adapters/wiring):
+### Verification (latest round — merged HEAD 8d2ae409; evidence:
+`/tmp/stage/review-evidence/task-160-round6/`)
 
-- Clean: hierarchy exit 0; tenant-filter exit 0 (111 checked / 0 violations);
-  api-auth exit 0; scope-literal-defaults `crates` OK; attribution OK.
-- Mutation kills (isolated worktree, restored after each):
-  `Task.workspace_id → Option<Id>` → hierarchy exit 1 (task.rs:60);
-  stripping the tenant predicate from `sqlite/secret.rs::get_value` →
-  tenant-filter exit 1 (file:line); deleting the resolver entry for
-  `/api/v1/activity` → api-auth exit 1; renaming the route without the
-  registry → api-auth exit 1. Deleting a route registration with the registry
-  intact stays green (covered direction only — by design).
-- `cargo test -p gyre-adapters --test tenant_isolation`: 2 passed / 0 failed
-  (cold build resumed past the 300s cell deadline; total ~14 min).
+This round resumed after the prior run exhausted its token budget
+mid-verification. The assigned merge c6c91e01 folded base `63aa1486`
+(shared Fullsend dispatcher extraction, task-192 budget CLI, task-239
+explorer WS sessions) into the candidate; the task-160 surface
+(scripts/adapters/abac_middleware) is byte-stable through the merge — the
+only deltas on wiring paths are base-side CI/dev-check changes that do not
+weaken the lint steps (all three remain blocking in ci.yml, no `|| true`).
 
-**task-210 attribution drift (pre-existing at assignment base, fixed here as
-the lint prescribes):** `a781ede2` landed on main 15:29 (before the 16:32
-base) but was absent from `specs/tasks/task-210.md` frontmatter, failing
-`check-task-commit-attribution.sh`. Recorded the SHA in the task file's
-`commits:` list; no exemption added, frozen exemption file untouched. Gate
-passes.
-
-**Contract-repair round (2026-10-10, HEAD fa6e6952; evidence:
-`/tmp/stage/review-evidence/task-160-contract-repair/`):** the prior
-checkpoint-recovery attempt appended a suffixed `## Shipped (2026-10-10
-refresh …)` header, which the pipeline contract guard
-(`scripts/dev-contract.py requirement_parts`) does not strip as operational
-prose — it read the refresh log as a normative contract amendment and
-rejected the attempt ("changed the assigned requirements"). Repair: contract
-restored byte-exact to the assigned body (frontmatter + prose equal,
-verified against the assigned `job` body with `requirement_parts`) in
-fa6e6952; the task surface (scripts/adapters/wiring) is unchanged from the
-round-4-reviewed candidate — empty diff on those paths. No source change was
-needed; this round is fresh verification only:
-
-- Clean gates at fa6e6952: `check-hierarchy.sh` exit 0;
+- Clean gates at 8d2ae409: `check-hierarchy.sh` exit 0;
   `check-tenant-filter.sh` exit 0 (111 read methods on tenant-column
-  tables / 0 violations); `check-api-auth.sh` exit 0 (3 checks incl.
-  delegated frozen-baseline registry cross-reference);
-  `check-scope-literal-defaults.sh crates` OK; `check-arch.sh` OK;
-  `check-task-commit-attribution.sh` OK.
-- Fresh mutation kills (isolated worktree `/tmp/stage/task160-repair`,
-  restored after each): `Task.workspace_id → Option<Id>` → hierarchy
-  exit 1 naming `task.rs:60` (mut1); tenant predicate stripped from
-  `sqlite/secret.rs::resolve_for_agent` → tenant-filter exit 1 naming
-  `secret.rs:293` (mut2); `RouteResourceMapping` for `/api/v1/activity`
-  deleted → api-auth exit 1 via the delegated registry check (mut3).
-- `cargo test -p gyre-adapters --test tenant_isolation` at fa6e6952:
-  see `tenant-isolation.txt` in the evidence dir for the run record.
-
-**Final verification round (2026-10-10, HEAD aa68bbba → repair commit
-72bd51d1; evidence: `/tmp/stage/review-evidence/task-160-final/`):** this
-assignment resumed after a checkpoint interrupt (prior run died waiting on
-the backgrounded tenant-isolation test). The merged HEAD aa68bbba folded
-base `6bf777a6` (task-200 work) into the candidate; `git diff 2098eddc
-aa68bbba` touches only task-200 files — the task-160 surface is byte-stable
-from the round-4-reviewed candidate, so this round is verification plus one
-bookkeeping repair:
-
-- Clean gates: `check-hierarchy.sh` exit 0; `check-tenant-filter.sh` exit 0
-  (111 read methods on tenant-column tables / 0 violations);
-  `check-api-auth.sh` exit 0 (middleware chain + 4 non-ABAC handlers +
-  delegated frozen-baseline registry); `check-arch.sh` OK;
-  `check-scope-literal-defaults.sh crates` OK.
-- Fresh mutation kills (isolated worktree `/tmp/stage/task160-final`,
-  restored after each; worktree removed after): `Task.workspace_id →
-  Option<Id>` → hierarchy exit 1 naming `task.rs:60`; tenant predicate
-  stripped from `sqlite/secret.rs::resolve_for_agent` → tenant-filter
-  exit 1 naming `secret.rs:293` ("1 violation(s) out of 111");
-  `RouteResourceMapping` for `/api/v1/activity` deleted → api-auth exit 1
-  via the delegated registry check. (Both mutated files use CRLF endings —
-  sed line deletes silently no-op there; mutations applied newline-aware
-  and confirmed by re-read before gating.)
-- `cargo test -p gyre-adapters --test tenant_isolation`: **2 passed /
-  0 failed** (cold build, 7m 11s compile; run record in
-  `tenant-isolation.txt`).
-- Inherited attribution drift repaired in 72bd51d1: the merged base
-  `6bf777a6` (task-200) was absent from `specs/tasks/task-200.md`'s
-  `commits:` frontmatter — same drift class as the task-210 `a781ede2`
-  repair above, fixed the same way (SHA appended to the task's list,
-  mirroring prior repair 5df2f9ab; no exemptions; frozen exemption file
-  untouched). `check-task-commit-attribution.sh` FAIL exit 1 before,
-  OK exit 0 after.
-
-- **Rebase-repair round (2026-10-10, HEAD c4f1df9d; evidence:
-  `/tmp/stage/review-evidence/task-160-rebase-repair/`):** resolved the
-  assigned rebase — `specs/tasks/task-200.md` conflicted on its `commits:`
-  line because the candidate-side repair 72bd51d1 had truncated the SHA
-  `e44f11354629cf2dab7fd7846c8a0a0a1d2d9591` to 38 chars (unresolvable),
-  while base 73a31e0b carried the valid 40-char object. Resolved to the
-  valid side; all 14 task-200 `commits:` SHAs resolve. The merge changes
-  no task-160 surface (empty `git diff 04380470 c4f1df9d -- scripts/
-  crates/gyre-adapters/`); it adds task-213/219 spec files and fixes the
-  task-200 SHA. Clean gates at c4f1df9d: hierarchy, tenant-filter
-  (111/0), api-auth, arch, scope-literal-defaults, attribution all exit 0.
-  Fresh mutation kills in isolated worktree `/tmp/stage/task160-rebase-mut`
+  tables / 0 violations); `check-api-auth.sh` exit 0 (middleware chain +
+  4 non-ABAC handlers + delegated frozen-baseline registry);
+  `check-arch.sh` OK; `check-task-commit-attribution.sh` OK; and all 17
+  dev-check static gates exit 0 (abac-route-registry, abac-exempt-handlers,
+  mcp-write-tools, migration-versions, migration-sql-portability,
+  dead-message-kinds, byte-slice-truncation, relative-path-defaults,
+  fail-open-ref-resolution, mem-port-contracts, fabricated-scope-defaults,
+  lossy-secret-conversion, inert-enforcement, forged-scope-fields,
+  forwarded-header-trust, in-memory-state-stores,
+  unbounded-external-http). `git diff --check HEAD^1 HEAD` clean.
+- Fresh mutation kills in isolated worktree `/tmp/stage/task160-r6-mut`
   (restored after each; worktree removed after):
   `Task.workspace_id → Option<Id>` → hierarchy exit 1 naming `task.rs:60`;
-  tenant predicate stripped from `sqlite/secret.rs::resolve_for_agent`
-  (line 328) → tenant-filter exit 1 ("1 violation(s) out of 111"); deleted
-  `RouteResourceMapping` for `/api/v1/activity` → api-auth exit 1 via the
-  delegated registry check. `cargo test -p gyre-adapters --test
-  tenant_isolation`: **2 passed / 0 failed** (7m 21s compile; run record
-  `tenant-isolation.txt` in the evidence dir).
-
-- **Baseline-repair verification round (2026-10-10, merged HEAD afd7379d;
-  evidence: `/tmp/stage/review-evidence/task-160-baseline-repair/`):** this
-  assignment was re-issued with `status: baseline_failed` — the baseline run
-  at base `27bd585c` failed `check-task-commit-attribution.sh` (task-155
-  commit missing from `specs/tasks/task-155.md`). The merge afd7379d folded
-  verified base `e77537fa` (task-236) into candidate `8b1807de`; the
-  task-155 attribution drift was repaired base-side by `7c6ac232` (task-231)
-  before this merge, so the inherited baseline failure is resolved at HEAD
-  with no new drift: `check-task-commit-attribution.sh` exit 0. The task-160
-  surface is byte-stable from the candidate (empty `git diff 8b1807de
-  afd7379d -- scripts/ crates/gyre-adapters/
-  crates/gyre-server/src/abac_middleware.rs`; the only task-surface-path
-  delta is a base-side *removal* of one byte-slice exemption entry —
-  strengthening, and the dev-check exemption-growth guard compares additions
-  only). The pipeline's frontmatter sync (`depends_on: [task-236]`, matching
-  the assigned contract) is committed with this record. No source change was
-  needed; this round is fresh verification only:
-
-  - Clean gates at afd7379d: `check-hierarchy.sh` exit 0;
-    `check-tenant-filter.sh` exit 0 (111 read methods on tenant-column
-    tables / 0 violations); `check-api-auth.sh` exit 0 (middleware chain +
-    4 non-ABAC handlers + delegated frozen-baseline registry);
-    `check-arch.sh` OK; `check-scope-literal-defaults.sh crates` OK;
-    `check-task-commit-attribution.sh` OK. Pre-commit/CI wiring confirmed
-    intact (`.github/workflows/ci.yml` runs all three gates;
-    `scripts/dev-check.sh` static_gates includes them).
-  - Fresh mutation kills in isolated worktree `/tmp/stage/task160-basemut`
-    (restored after each; worktree removed after):
-    `Task.workspace_id → Option<Id>` → hierarchy exit 1 naming `task.rs:60`;
-    tenant predicate stripped from `sqlite/secret.rs::resolve_for_agent` →
-    tenant-filter exit 1 ("1 violation(s) out of 111", naming
-    `secret.rs:293`); deleted `RouteResourceMapping` for `/api/v1/activity`
-    → api-auth exit 1 via the delegated registry check.
-  - `cargo test -p gyre-adapters --test tenant_isolation`: **2 passed /
-    0 failed** (cold build 7m13s compile; run record in
-    `tenant-isolation.txt` in the evidence dir).
+  tenant predicate stripped from `sqlite/secret.rs::get_value` →
+  tenant-filter exit 1 ("1 violation(s) out of 111", naming
+  `secret.rs:229`); `RouteResourceMapping` for `/api/v1/activity` deleted →
+  api-auth exit 1 via the delegated registry check. (Mutations applied
+  newline-aware — the files carry CRLF endings.)
+- `cargo test -p gyre-adapters --test tenant_isolation`: **2 passed /
+  0 failed** — re-run this round because the base merge brought
+  `gyre-common/src/view_spec.rs` (+257 lines, a gyre-adapters dependency)
+  into the tree; run record in `tenant-isolation.txt` in the evidence dir.
+- Inherited repair 8d2ae409: base-side task-239 inserted 5 lines into
+  `crates/gyre-server/src/lib.rs` (AppState `explorer_sessions` field),
+  shifting the two pre-existing task-099-owned exempted sites
+  (`emit_event`/`emit_telemetry`) from lines 494/538 to 499/543;
+  `check-scope-literal-defaults.sh crates` failed on the stale line-pinned
+  exemption entries. Re-pinned the same two sites to their current lines —
+  no entry added or removed, frozen count stays 12, the sites themselves
+  are unchanged and still owned by the task-099 F1 revision round. FAIL
+  exit 1 before, OK exit 0 after.
 
 Review history: rounds 1–4 in `specs/reviews/task-160.md` (round-3 findings
 F1 dead exemptions / F2 read-name blind spot fixed in 06df8bfb and verified
-complete in round 4).
+complete in round 4). Earlier per-round verification records
+(contract-repair, final, rebase-repair, baseline-repair rounds at HEADs
+fa6e6952, aa68bbba/72bd51d1, c4f1df9d, afd7379d) are preserved in this
+file's git history.
