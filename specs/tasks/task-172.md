@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "ui-layout.md §Editor Split"
-commits: ["4b80b93bc68116b0d54d8696fdd3bc78d6931069", "f27a4ef5b2b77f0469c6b5b1100d2156efa597e3", "33b4241d762be547f88f134fe1a4bff84d54cfc8", "471563d7d218003d6d2dbbab3ba0598e801d6f3a", "1ae8ca350439f07c5c75dcfbb7704dbf0ce96021", "a53ade326e99a7954fe976a84981e3df0212465b", "80925c2145b51e64ddb69ef1b4fb900c44ee0a89", "3688b5cddbfddbed2f4cdc158f03ce35bb172951"]
+commits: ["4b80b93bc68116b0d54d8696fdd3bc78d6931069", "f27a4ef5b2b77f0469c6b5b1100d2156efa597e3", "33b4241d762be547f88f134fe1a4bff84d54cfc8", "471563d7d218003d6d2dbbab3ba0598e801d6f3a", "1ae8ca350439f07c5c75dcfbb7704dbf0ce96021", "a53ade326e99a7954fe976a84981e3df0212465b", "80925c2145b51e64ddb69ef1b4fb900c44ee0a89", "3688b5cddbfddbed2f4cdc158f03ce35bb172951", "a44ba473711eb46d11bfc6348bc166051144481c"]
 ---
 
 ## Spec Excerpt
@@ -70,8 +70,8 @@ Read `ui-layout.md` §2 "Editor Split" and §9 "Meta-specs Preview Loop Layout" 
 
 ## Shipped
 
-EditorSplit (`web/src/lib/EditorSplit.svelte`, 1494 lines) implements the §2
-Editor Split layout as one reusable component with two contexts:
+EditorSplit (`web/src/lib/EditorSplit.svelte`) implements the §2 Editor Split
+layout as one reusable component with two contexts:
 
 - **Spec context** — mounted by DetailPanel (`context="spec"`; pop-out via the
   Preview button in DetailPanel.svelte → `openEditorSplit`, Back/Esc →
@@ -93,59 +93,48 @@ Editor Split layout as one reusable component with two contexts:
   via `previewPersona` + `previewPersonaStatus` polling (1.5 s) with per-spec
   progress indicators, architecture_diff parsing into ghost overlays,
   specs_diff into the Code Diff tab, Iterate/Publish hooks.
-- **i18n** — the 50 `editor_split.*` keys the component uses are defined in
-  `web/src/locales/en.json` (no missing or dead keys); `web/dist/` rebuilt to
-  serve the bundle.
+- **i18n** — all 67 `editor_split.*` keys in `web/src/locales/en.json` are
+  referenced by the component (the nine `md_*_aria` keys are wired as the
+  toolbar buttons' aria-labels/titles via `$t()`); no missing or dead keys.
 - **Coverage** — `specs/coverage/system/ui-layout.md` row #13 (Editor Split)
   marked `implemented` with the SUMMARY row updated; no other coverage rows
   or verifier/exemption files touched.
 
-Test evidence (artifacts under /tmp/stage/review-evidence/): `npm ci` then
-`./node_modules/.bin/vitest run src/__tests__/EditorSplit.test.js
-src/__tests__/DetailPanel.test.js` → **66/66 passed** (EditorSplit 37:
-rendering, contexts, Back/Esc, content binding, LLM streaming +
+### Review-repair round (commit a44ba473)
+
+All six findings from review 70971f1e were fixed at merge head d59d5a06:
+
+- **Esc regression** (`SpecConflictDialog.svelte`): the window keydown
+  handler consumed every Escape (stopPropagation/cancelBubble) even when the
+  dialog was closed, so EditorSplit's Back/Esc in the DetailPanel pop-out
+  never fired. Fixed with an open-dialog guard (`if (!conflict) return;`);
+  Esc is consumed only while the dialog is open. The previously failing test
+  "Esc key closes EditorSplit and collapses panel" now passes.
+- **Stale dist**: `web/dist/index.html` contained git merge-conflict markers
+  and two tracked bundle sets. Rebuilt from this source with `vite build` —
+  one clean bundle set, zero conflict markers, and a fresh rebuild to a
+  temp outDir is byte-identical (`diff -r` clean).
+- **Debug leftover**: removed `console.log('DEBUG EditorSplit...')` from
+  `handleKeydown`; the production bundle contains no match.
+- **Test pollution**: deleted the assertionless
+  `web/src/__tests__/__debug-esc.test.js` scratch test.
+- **Dead i18n keys**: the nine `editor_split.md_*_aria` keys are now wired
+  as localized toolbar aria-labels/titles, pinned by a new test.
+- **Task bookkeeping**: this Shipped section replaces the earlier notes,
+  whose "66/66" and "dist byte-exact" claims were false at the reviewed
+  head.
+
+### Test evidence (artifacts under /tmp/stage/review-evidence/)
+
+`npm ci`, then `./node_modules/.bin/vitest run src/__tests__/EditorSplit.test.js
+src/__tests__/DetailPanel.test.js src/__tests__/SpecConflictDialog.test.js`
+→ **72/72 passed** at this head (EditorSplit 38 — rendering, contexts,
+Back/Esc, content binding, toolbar aria-labels, LLM streaming +
 Accept/Edit/Dismiss, save with base_sha + 409 conflict + overwrite,
 concurrent-edit banner, spec preview with taskStatus polling + cancel,
 iterate retention, meta-spec selector + previewPersona with and without
-persona_id; DetailPanel 29 including the 5 pop-out tests). A bug-injection
-probe (Accept with empty diff ops) fails the Accept test, confirming the
-suite encodes the specced behavior. `./node_modules/.bin/vite build`
-reproduces the committed dist byte-exactly. Attribution gate
-`scripts/check-task-commit-attribution.sh` exit 0 at this head. TCP listener
-probes are unsupported in this sandbox (errno 95, /tmp/stage/capabilities.json),
-so no live server/browser run; exact-head GitHub CI (`web-build`) remains
-mandatory after independent review.
-
-Task-file bookkeeping note: the earlier repair rounds had let this file
-accumulate a round-by-round diagnostic ledger; per the current assignment
-("do not reproduce old diagnostic ledgers in the task") it is reduced to the
-original contract (normative sections byte-identical to base, acceptance
-boxes left unchecked as lifecycle state lives in `progress:`) plus this
-concise Shipped.
-
-Checkpoint-recovery round (merge head `1a8e908f`, base `c9b0a6f9` merged into
-candidate `636a13a7`): merge added only unrelated task files (task-216/218);
-product code unchanged. All probes re-run at this head with results
-unchanged: 66/66 (fresh artifacts under /tmp/stage/review-evidence/),
-bug-injection probe still fails exactly the Accept test, `vite build`
-reproduces committed dist byte-exactly, attribution gate exit 0, 50/50
-i18n keys. Exact-head GitHub CI (`web-build`) remains mandatory after
-independent review.
-
-Rebase-resolution round (durable finding 48bc0e30, merge head `bcc58d03`,
-base `653a696f` merged into candidate `28fb853d`): the only conflict was the
-generated `specs/coverage/SUMMARY.md` (date + TOTAL row); resolved by
-regenerating with the canonical `scripts/dev-coverage.py`, whose output is
-byte-identical to `scripts/update-coverage-summary.sh` and preserves both
-sides' merged coverage rows (message-bus 85%, business-continuity 100%,
-ui-layout 2%) while correcting one stale hand-edited row
-(human-system-interface 20 n/a / 19 task-assigned / 45%, matching that
-coverage file's own 2026-10-09 header). Product code unchanged by the merge.
-All probes re-run fresh at this head (artifacts under
-/tmp/stage/review-evidence/): `npm ci`; EditorSplit + DetailPanel suites
-66/66; hollow-Accept bug-injection probe still fails exactly the Accept test;
-`vite build` reproduces committed dist byte-exactly; attribution gate exit 0;
-50/50 i18n keys, no dead. TCP listener probes remain unsupported in this
-sandbox (errno 95, /tmp/stage/capabilities.json), so no live server/browser
-run; exact-head GitHub CI (`web-build`) remains mandatory after independent
-review.
+persona_id; DetailPanel 29 including the 5 pop-out tests; SpecConflictDialog
+5). Attribution gate `scripts/check-task-commit-attribution.sh` exit 0 at
+this head. TCP listener probes are unsupported in this sandbox (errno 95,
+/tmp/stage/capabilities.json), so no live server/browser run; exact-head
+GitHub CI (`web-build`) remains mandatory after independent review.
