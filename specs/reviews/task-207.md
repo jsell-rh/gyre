@@ -42,3 +42,66 @@ Minor (not blocking, recorded for completeness):
 - `RetentionStore::init` (`retention.rs:124-139`) resets to defaults without a warn log when the persisted KV blob fails to parse, and `persist_best_effort` is fire-and-forget after the PUT response returns (a crash in that window loses the change silently). Both are low-severity robustness gaps; spec's "survive server restart" holds in normal operation.
 
 Scope note: task-207's `commits:` frontmatter lists only `6a908460`; docs commit `ff3fbb87` is attributed to the task lifecycle, not the product surface, so no commit-attribution finding. Postgres adapter tests are absent for the new `delete_older_than` methods — consistent with the repo-wide pattern (Postgres is never integration-tested; `scripts/check-migration-sql-portability.sh` covers SQL portability), not a finding against this task.
+
+## Review — assignment 383c64ff (base 63aa1486), 2026-10-10
+
+Independent review of the F1–F4 revision round delta (base `63aa1486` →
+candidate `383c64ff`). The base already carries the earlier publication
+rounds (KV-persisted policies, per-repo `delete_older_than`, 02:00 UTC
+scheduling); this round's delta is exactly the closure of the four prior
+findings plus durability hardening. No findings — approved.
+
+**Delta audit** (`git diff 63aa1486 383c64ff`): F1 —
+`TelemetryBuffer::purge_older_than` (gyre-common/message.rs) driven from
+`run_cleanup`'s `activity_events` arm with the policy cutoff (s→ms
+conversion correct); dead `ActivityRepository` port + SQLite/Postgres
+adapters removed (verified: `activity_events` DB table has no writer —
+live activity data is the telemetry ring pushed from lib.rs:554 /
+mcp.rs:1330; admin export reads `telemetry_buffer.list_all_since`), and
+the `unwired-port-methods` exemption entry retired rather than grown. F2
+— tier counts live on the `snapshots` policy row
+(`SnapshotTiers { keep_24h, keep_7d, keep_4w }`), threaded from `PUT`
+into `purge_snapshots`; band membership is age-fixed with no spillover,
+so per-window caps cannot be defeated by cascade. F3 — real-tempdir
+disk-level snapshot tests (exact survivor set, both directions,
+idempotency, missing-dir no-op, configured-tiers end-to-end). F4 —
+`validate_policies` requires exactly the 7 spec types each once,
+`max_age_days >= 1`, the notifications read≤unread split, tier counts
+≥ 1, attestations `u64::MAX`; the PUT handler calls it and returns 400
+on invalid lists with policies untouched, and `update()` is durable
+(KV write completes before the 204; corrupt-blob self-heal; read-failure
+never overwrites the stored blob).
+
+**Probes run (all evidence under /tmp/stage/review-evidence):**
+
+- `cargo test -p gyre-server --lib retention` → 29 passed, 0 failed.
+- `cargo test -p gyre-common telemetry_buffer_purge` → 1 passed.
+- `cargo test -p gyre-adapters --lib delete_older_than` → 3 passed.
+- `cargo test -p gyre-server --test api_integration
+  admin_retention_list_and_update` → **passed** — this sandbox's
+  listener probe now succeeds (accept), so the previously-recorded
+  transport restriction no longer applies; the endpoint-level GET/PUT/
+  reject-400 contract is proven on a real listener.
+- Mutation probes (temporary, all restored; tree verified clean
+  afterwards): (1) `purge_older_than` retention disabled →
+  `telemetry_buffer_purge_older_than_both_directions` and
+  `run_cleanup_purges_old_activity_events_from_telemetry_buffer` both
+  FAIL; (2) 24h-band spillover reintroduced → 4 snapshot-tiering tests
+  FAIL; (3) `validate_policies` result discarded in the PUT handler →
+  `admin_update_retention_rejects_incomplete_list` FAILS. The hard
+  tests kill the corresponding production defects.
+- Guard scripts: check-arch, check-unwired-port-methods,
+  check-byte-slice-truncation, check-in-memory-state-stores,
+  check-mem-port-contracts, check-inert-enforcement,
+  check-fail-open-ref-resolution, check-task-commit-attribution — all
+  exit 0.
+- Durable verification finding 9f41b337 (trailing whitespace in a
+  regenerated web/dist bundle): candidate has **no web/ diff vs base**
+  and `git diff --check 63aa1486 383c64ff` exits 0 — repaired.
+
+**Task contract:** frontmatter intact (single `progress:
+ready-for-review`, `review:` pointer present), attribution complete
+(attribution script green), coverage row 7 `implemented` with an
+accurate note, summary regenerated. Agent-log "compress after 7 days"
+remains deferred — pre-authorized by the task plan as a non-blocking
+optimization and disclosed; the 30-day purge is enforced.
