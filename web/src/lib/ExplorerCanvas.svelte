@@ -28,6 +28,7 @@
     canvasState = $bindable({ selectedNode: null, zoom: 1, visibleGroups: [], breadcrumb: [] }),
     onNodeDetail = () => {},
     onInteractiveQuery = () => {},
+    onScopeDrill = null,
     ghostOverlays = [],
     filters = null,
     traceData = null, // { spans: [], root_spans: [] } from GateTraceResponse
@@ -4227,9 +4228,24 @@
     const hit = hitTest(e.clientX, e.clientY);
     if (!hit) return;
 
+    const node = hit.node;
+
+    // Scope drill-down (ui-layout.md §3 Drill-Down): double-clicking a node
+    // that carries a repo_id but has no children in THIS graph drills to the
+    // next C4 level by changing scope — at workspace scope, repo nodes are
+    // the containers, so this transitions to repo scope. The parent handles
+    // the scope change: breadcrumb update, URL pushState, canvas re-render.
+    // Single-click still opens the detail panel without changing scope.
+    // Gated on the callback so repo-scope canvases (whose nodes also carry
+    // repo_id) keep their in-graph zoom drill behavior unchanged.
+    if (onScopeDrill && node?.repo_id && (treeData.parentToChildren.get(node.id) ?? []).length === 0) {
+      trackInteraction(`scope-drill:${node.name ?? node.id}`);
+      onScopeDrill(node);
+      return;
+    }
+
     // Progressive drill-down via Contains edges (explorer-canvas.md §Progressive Drill-Down):
     // Double-click → filter to children, update breadcrumb, smooth zoom transition.
-    const node = hit.node;
     if (node) {
       const children = treeData.parentToChildren.get(node.id) ?? [];
       if (children.length > 0) {

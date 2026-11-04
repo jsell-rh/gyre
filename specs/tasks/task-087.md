@@ -1,7 +1,7 @@
 ---
 title: "HSI Test-Time Trace Capture Gate"
 spec_ref: "human-system-interface.md §3 Test-Time Trace Capture"
-depends_on: []
+depends_on: [task-217]
 progress: ready-for-review
 review: specs/reviews/task-087.md
 coverage_sections:
