@@ -87,3 +87,62 @@ The rejected integration's only preserved item was `specs/coverage/SUMMARY.md`. 
 All three findings repaired with real implementations and regression tests that fail on the original failure classes. No new exemptions, no gate weakening, no deleted tests, no unrelated changes — the round-2 diff beyond the F1/F2/F3 product repairs is spec/coverage bookkeeping and this task file. **progress: complete.**
 
 — Reviewer, 2026-10-09
+
+## Round 3 (2026-10-10) — final merge candidate `f745dafe`, verdict PASS
+
+Candidate is the merge of assignment base `63aa1486` into the task-120 branch
+(this exact head). Compared against the round-2 reviewed tree `7b922a3`, the
+task-120 product surface changed only by:
+
+- **Durable finding `158143620` (PG int4 `last_login_at`): REPAIRED** —
+  `93913405` flips migration 000056's column to `BIGINT`, matching
+  `schema.rs` `Nullable<BigInt>` and both `UserRow.last_login_at:
+  Option<i64>` mappings (verified by inspection on this tree). No live PG
+  server exists in this sandbox (recorded each round); the type now matches
+  every consumer and the users table's own BIGINT convention.
+- **Durable finding `f6b29ff8` (SSO collision lockout): REPAIRED** —
+  `cf32398a` restores the checkpointed suffix-walk design:
+  `find_or_create_user` derives a base handle (sanitize preferred_username →
+  sanitize subject → `u-<id>`), then `resolve_unique_username` probes base,
+  base-2, base-3 … mirroring migration 000056's dedup pass 1; TOCTOU
+  create-conflicts self-heal on the next login. Two permanent tests pin the
+  behavior (`colliding_derived_username_resolves_with_suffix_and_logs_in`,
+  `..._uses_next_suffix_for_third_user`).
+- Everything else in the task-120 files is rustfmt-only reformatting plus a
+  SCIM hardening folded into the repair round (`scim_create_user`'s
+  externalId fallback is now sanitized rather than persisted raw — mirrors
+  the auth path, covered by the scim suite); remaining diff vs round 2 is
+  merged upstream work from other tasks, out of scope here.
+
+**Mutation probe (evidence: `mutation-probe-collision.txt`):** temporarily
+disabling `resolve_unique_username`'s walk (always return base) makes both
+collision tests fail with exactly the original finding's symptom —
+`401 vs 200: a distinct SSO user whose derived handle collides must not be
+locked out` — proving the tests kill the bug class, not just pass. Tree
+restored to the exact candidate afterward (`git diff` empty, HEAD
+`f745dafe`).
+
+Fresh evidence on this tree (`/tmp/stage/review-evidence/task-120-final-f745dafe/`):
+
+- `cargo test -p gyre-domain --lib user` → **11 passed, 0 failed**.
+- `cargo test -p gyre-server --lib auth::` → **43 passed, 0 failed**
+  (39 baseline + collision tests).
+- `cargo test -p gyre-server --lib api::users` → **14 passed**;
+  `api::scim` → **9 passed**.
+- `cargo test -p gyre-adapters --lib` → **349 passed, 0 failed**
+  (12 ignored, matching baseline; includes
+  `migration_000056_backfills_unique_url_safe_usernames`).
+- Gates: migration-versions, SQL portability, mem-port contracts, arch,
+  commit attribution — all OK.
+- `grep -c -F '| not-started |' specs/coverage/system/user-management.md`
+  → **0**; rows 2/3/11 `implemented` with evidence notes matching the code.
+
+Non-blocking note: the SQLite read-path NULL-locale fallback is `"en"` while
+the migration backfills `'en-US'` — fires only for rows whose locale is NULL
+after the backfill; cosmetic, no spec violation.
+
+Both durable findings are closed with real implementations and tests that
+fail on the original failure classes. **Verdict: PASS** — task-120 is
+complete on `f745dafe`.
+
+— Reviewer, 2026-10-10
