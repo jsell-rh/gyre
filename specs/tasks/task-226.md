@@ -2,7 +2,7 @@
 title: "Repair verified failure on main a11ba8d32859"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: [task-229, task-240]
-progress: ready-for-review
+progress: complete
 commits: []
 ---
 
