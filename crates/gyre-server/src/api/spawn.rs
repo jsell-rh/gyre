@@ -601,7 +601,8 @@ pub(crate) async fn spawn_agent_core(
     {
         // Docker requires an absolute working directory path. Canonicalize the
         // worktree path to ensure it's absolute even when GYRE_REPOS_PATH is
-        // relative (e.g. the default "./repos/").
+        // relative (e.g. the default repos/ directory, resolved against the
+        // server cwd).
         let effective_work_dir = if std::path::Path::new(&worktree_path).exists() {
             std::fs::canonicalize(&worktree_path)
                 .map(|p| p.to_string_lossy().into_owned())
@@ -647,34 +648,53 @@ pub(crate) async fn spawn_agent_core(
         // process starts — raw values are never in the agent env.
         // Failure is logged and skipped: a missing/undecryptable secret must
         // not block spawning the agent itself.
-        let tenant_id = workspace
-            .as_ref()
-            .map(|ws| ws.tenant_id.to_string())
-            .unwrap_or_else(|| "default".to_string());
-        match state
-            .secrets
-            .resolve_for_agent(
-                &tenant_id,
-                &repo.workspace_id.to_string(),
-                &req.repo_id,
-                Some(&req.task_id),
-            )
-            .await
-        {
-            Ok(resolved) => {
-                for (name, value) in resolved {
-                    container_env.insert(
-                        format!("GYRE_CRED_{name}"),
-                        String::from_utf8_lossy(&value).into_owned(),
+        // Tenant scope for secret resolution must come from the workspace
+        // record. If the workspace cannot be resolved the scope is unknown:
+        // skip secret resolution rather than fabricate a tenant identity
+        // (task-097 F3 class — a fabricated scope silently re-targets
+        // resolution and can leak a real "default" tenant's secrets).
+        if let Some(tenant_id) = workspace.as_ref().map(|ws| ws.tenant_id.to_string()) {
+            match state
+                .secrets
+                .resolve_for_agent(
+                    &tenant_id,
+                    &repo.workspace_id.to_string(),
+                    &req.repo_id,
+                    Some(&req.task_id),
+                )
+                .await
+            {
+                Ok(resolved) => {
+                    for (name, value) in resolved {
+                        // Secret values are binary; a lossy UTF-8 conversion
+                        // would corrupt them with U+FFFD and the agent would
+                        // use a mangled credential. Skip and name the secret
+                        // (never the value) — task-097 F4.
+                        match String::from_utf8(value) {
+                            Ok(value_str) => {
+                                container_env.insert(format!("GYRE_CRED_{name}"), value_str);
+                            }
+                            Err(_) => {
+                                tracing::warn!(
+                                    agent_id = %agent.id,
+                                    "skipping non-UTF-8 secret {name}: cannot inject as GYRE_CRED_* env var"
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        agent_id = %agent.id,
+                        "secret resolution failed; continuing without GYRE_CRED_* env vars: {e:#}"
                     );
                 }
             }
-            Err(e) => {
-                tracing::warn!(
-                    agent_id = %agent.id,
-                    "secret resolution failed; continuing without GYRE_CRED_* env vars: {e:#}"
-                );
-            }
+        } else {
+            tracing::warn!(
+                agent_id = %agent.id,
+                "workspace scope unresolvable; skipping GYRE_CRED_* secret resolution"
+            );
         }
 
         // M27: cred-proxy addresses for credential routing.
