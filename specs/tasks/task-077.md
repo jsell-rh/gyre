@@ -10,7 +10,7 @@ coverage_sections:
   - "human-system-interface.md §11 Trust Levels"
   - "human-system-interface.md §12 What Each Level Controls"
   - "human-system-interface.md §13 Mechanical Implementation"
-commits: ["3372f2c3e498d1968bd3ef97cd05853280807ccb", "1b07c83be8904c63ad97e8b5d59abf50b8f59878", "ed36c1b6832b0242340a5de9a623d49fcb5a50d5", "545e986f231d1ceed0a5e537ec156c78a9d48d79", "7d0019ae23a5fbe336b29b2cbe4c317be4cb394c", "4cd20f3b4c25b260443ad5a3814e974c038d2e4a", "85830fa44abb6bb2305318f46a4cad4c20e00e33", "2db3f1efe11140eadb6dbe704eda86ba94d2e1b0"]
+commits: ["3372f2c3e498d1968bd3ef97cd05853280807ccb", "1b07c83be8904c63ad97e8b5d59abf50b8f59878", "ed36c1b6832b0242340a5de9a623d49fcb5a50d5", "545e986f231d1ceed0a5e537ec156c78a9d48d79", "7d0019ae23a5fbe336b29b2cbe4c317be4cb394c", "4cd20f3b4c25b260443ad5a3814e974c038d2e4a", "85830fa44abb6bb2305318f46a4cad4c20e00e33", "2db3f1efe11140eadb6dbe704eda86ba94d2e1b0", "f6a3600c3f1d71aef76e77ad7602f8b0ed14f66d"]
 ---
 
 ## Spec Excerpt
@@ -88,6 +88,12 @@ Trust is a **workspace-level setting** (`trust_level: TrustLevel` enum: `Supervi
 Read `specs/system/human-system-interface.md` §9–13 (Trust Gradient) carefully — the mechanical implementation section has precise details about policy naming, priorities, and transaction behavior. Also read `specs/system/abac-policy-engine.md` for the existing ABAC engine design. The key amendment is adding `immutable` flag support to the ABAC evaluation engine. Check `crates/gyre-domain/src/` for existing ABAC evaluation code and `crates/gyre-adapters/migrations/` for migration numbering (currently at 000046+). The workspace entity is in `gyre-common` — grep for `Workspace` struct.
 
 ## Shipped
+
+### Rebase resolution (merge commit `f6a3600c`)
+
+Rebased the branch onto main `ed57c723` (repair `217e6170044a462da9dfe8afff678961`), resolving 6 conflicts: cli `main.rs` took main's task-099 F6 `--starter-kit` fix; `spawn.rs` took main's landed task-097 secret-delivery production code and kept BOTH test blocks (task-077 F6 fail-closed + task-097 F2 scoped-secrets, imports unioned); `retention.rs` took main's `SnapshotTiers` band refactor (task-branch side was formatting-only on a test main replaced); exemption baselines took main's (5 fabricated-scope / 0 lossy-secret entries — main independently fixed `constraint_check.rs:1357`, making the task branch's extra entry obsolete). Post-merge repairs: `test_state_failing_policy_creates` adapted to main's 5-arg `test_state_inner` (cross-file breakage the textual merge cannot flag), `admin_seed` exemption re-anchored 409→419 (count unchanged at 5), `cargo fmt --all`, `web/dist` rebuilt. Probes: `cargo check --workspace --all-targets` clean; `api::spawn` 35, `retention` 29, `api::workspaces` 16, `merge_processor` 55, `policy_engine` 19, `gyre-domain --lib` 379 — all passed; `cargo fmt --all --check` clean; full `scripts/check-*.sh` sweep matches the clean main-baseline worktree exactly (no gate regressed; `check-non-atomic-creation` now passes because the python3 port survived the merge). Evidence: `/tmp/stage/review-evidence/rebase-resolution.md`.
+
+### Revision round (F5–F8)
 
 Revision round (F5–F8 from `specs/reviews/task-077.md` R2), completing the checkpointed implementation:
 
