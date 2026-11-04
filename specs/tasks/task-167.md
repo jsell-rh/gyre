@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "merge-dependencies.md §2. Auto-Detected: Branch Lineage"
-commits: ["6d665d59b6da61bf643ae0875d8fc1dfe0f4efc9", "eede92716ecc3498a859515dd8022c267afb3f97", "27e8e0ad8730c135301b4e48c6b9fc009ba4d1d6", "e390c781981a4ed1463a32e8bf42a06cbbd87761", "15ecde9c5a55dad0fb24aa787ed94712492a9294"]
+commits: ["27e8e0ad8730c135301b4e48c6b9fc009ba4d1d6", "e390c781981a4ed1463a32e8bf42a06cbbd87761", "15ecde9c5a55dad0fb24aa787ed94712492a9294", "6d665d59b6da61bf643ae0875d8fc1dfe0f4efc9", "eede92716ecc3498a859515dd8022c267afb3f97"]
 ---
 
 ## Spec Excerpt
@@ -51,7 +51,7 @@ Read `specs/system/merge-dependencies.md` §"2. Auto-Detected: Branch Lineage". 
 
 ## Shipped
 
-**Status: implemented; ready for review.** merge-dependencies.md §2 (Auto-Detected: Branch Lineage) is implemented in production code recovered from checkpoint `fd5cd2f5` (branch round 535) plus one rustfmt repair commit; this round completed the verification the interrupted round could not run and finalized the task record.
+**Status: implemented; ready for review.** merge-dependencies.md §2 (Auto-Detected: Branch Lineage) is implemented in production code (recovered from earlier checkpoint rounds, preserved through the round's base merge `a4d6744b`, which touched no product code in this surface — only `specs/tasks/task-226.md` changed between candidate `1f9bbb79` and the merge head). This round re-verified the tree and restored the task record after the executor reset the document.
 
 ### Behavior
 
@@ -61,12 +61,11 @@ Read `specs/system/merge-dependencies.md` §"2. Auto-Detected: Branch Lineage". 
 
 ### Test evidence (real on-disk git repos, git plumbing; no mocks)
 
-Focused runs on the exact review tree (post-format commit `eede9271`, test binary `/tmp/gyre-target/debug/deps/gyre_server-44bc3f9aa9aba5c1`, logs under `/tmp/stage/review-evidence/`):
+Fresh focused runs on the exact current tree (merge head `a4d6744b`, `SKIP_WEB_BUILD=1`, logs under `/tmp/stage/review-evidence/`, suffix `-r40eb9a61`):
 
-- Filter `lineage`: **10 passed, 0 failed** (`lineage-test-run-final.log`) — fork-from-MR-branch creates dependency; fork-from-main no dependency; parent-merged satisfies dependency; rebase removes stale dep; re-push after fork adds dep; explicit deps preserved through re-evaluation; parent-rebase re-checks dependents; cross-target-branch detection; parked-on-default-tip candidate not detected; end-to-end `git_receive_pack` push drops the child's lineage edge (`push_rebases_parent_branch_drops_child_lineage_dep`, real pkt-line + packfile push, asserts the ref actually moved).
+- Filter `lineage`: **10 passed, 0 failed** — fork-from-MR-branch creates dependency; fork-from-main no dependency; parent-merged satisfies dependency; rebase removes stale dep; re-push after fork adds dep; explicit deps preserved through re-evaluation; parent-rebase re-checks dependents; cross-target-branch detection; parked-on-default-tip candidate not detected; end-to-end `git_receive_pack` push drops the child's lineage edge (`push_rebases_parent_branch_drops_child_lineage_dep`, real pkt-line + packfile push, asserts the ref actually moved).
 - Filter `merge_requests::`: **30 passed**; filter `git_http::`: **38 passed**; filter `depend`: **105 passed** — no regression in the dependency/merge-queue surface.
-- `rustfmt --check` clean on all three touched Rust files (repair commit `eede9271`); build log `lineage-build2.log` (`SKIP_WEB_BUILD=1`, `-j2`).
 
-`cargo test --all` on the full workspace is owned by the verification stage; this round ran the smallest relevant probes (all lineage + dependency + touched-module tests). Coverage matrix `specs/coverage/system/merge-dependencies.md` row 8 updated `task-assigned` → `implemented` with code references.
+`cargo test --all` on the full workspace is owned by the verification stage; this round ran the smallest relevant probes (all lineage + dependency + touched-module tests). Coverage matrix `specs/coverage/system/merge-dependencies.md` row 8 is `implemented` with code references and survived the base merge unchanged.
 
 Independent review, full deterministic gates, and GitHub checks on the exact PR head remain required.
