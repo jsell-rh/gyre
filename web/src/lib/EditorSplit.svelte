@@ -36,6 +36,10 @@
    *                   When provided (meta-spec context) the right panel shows the
    *                   target spec selector in the editing state.
    *   onpublish     — () => void — Publish hook (meta-spec approval flow, §9 State 3)
+   *   onPreviewStateChange — (state: 'editing' | 'preview_running' | 'preview_complete') => void
+   *                   — notified on every preview state transition so the embedding
+   *                   page (e.g. MetaSpecs) can lock its own controls while a preview
+   *                   runs (§9 State 2 "locked during preview").
    */
   let {
     content = $bindable(''),
@@ -51,6 +55,7 @@
     baseSha = null,
     targetSpecs = [],
     onpublish = undefined,
+    onPreviewStateChange = undefined,
   } = $props();
 
   // 409 conflict body from the last save attempt, or null (HSI §7).
@@ -104,6 +109,12 @@
   // Stop any preview poll when the component is destroyed.
   $effect(() => {
     return () => stopPreviewPoll();
+  });
+
+  // Notify the embedding page of preview state transitions (e.g. MetaSpecs
+  // locks its persona selector while a preview runs — §9 State 2).
+  $effect(() => {
+    onPreviewStateChange?.(previewState);
   });
 
   async function loadGraph() {
@@ -688,6 +699,14 @@
     // While the 409 conflict dialog is open it owns Esc (HSI §7): the dialog
     // closes, the editor stays. The dialog's own window listener handles it.
     if (specConflict) return;
+    // While a preview is running, Esc cancels the preview (§9 State 2
+    // "[Cancel Preview]") rather than closing the split — in every context,
+    // including the DetailPanel pop-out.
+    if (previewState === 'preview_running') {
+      e.preventDefault();
+      cancelPreview();
+      return;
+    }
     // No dismiss surface (e.g. embedded in the MetaSpecs page rather than a
     // pop-out) — Esc does nothing.
     if (!onClose) return;
@@ -872,8 +891,18 @@
 
     <!-- Right: Architecture preview / preview states -->
     <div class="pane pane-right" data-testid="arch-preview-pane">
-      {#if context === 'meta-spec' && previewState === 'editing' && selectableSpecs.length}
-        <!-- Target spec selector (§9 State 1) -->
+      {#if previewError}
+        <!-- A failed/unavailable/timed-out preview surfaces here in EVERY
+             right-pane state (including the meta-spec selector branch the
+             component returns to) — the error is never silently dropped. -->
+        <div class="preview-error" role="alert" data-testid="preview-error">
+          <strong>{$t('editor_split.preview_error_label')}:</strong> {previewError}
+        </div>
+      {/if}
+      {#if context === 'meta-spec' && previewState === 'editing'}
+        <!-- Target spec selector (§9 State 1) — always shown in the meta-spec
+             editing state, with an empty-state message when the workspace
+             has no non-meta specs. -->
         <div class="spec-selector" data-testid="spec-selector">
           <div class="spec-selector-header">
             <span class="pane-title">{$t('editor_split.preview_against')}</span>
@@ -892,6 +921,8 @@
                 />
                 <span class="spec-check-path">{spec.path}</span>
               </label>
+            {:else}
+              <p class="empty-specs">{$t('editor_split.no_specs_available')}</p>
             {/each}
           </div>
         </div>
@@ -913,11 +944,6 @@
         </div>
       {:else}
         <!-- Preview Complete / spec context: Architecture (default) + Code Diff tabs -->
-        {#if previewError}
-          <div class="preview-error" role="alert" data-testid="preview-error">
-            <strong>{$t('editor_split.preview_error_label')}:</strong> {previewError}
-          </div>
-        {/if}
         <div class="pane-header">
           <div class="impact-tabs" role="tablist" aria-label={$t('editor_split.impact_view_aria')}>
             <button
@@ -1639,6 +1665,13 @@
   }
 
   .spec-check-item:hover { background: var(--color-surface-elevated); }
+
+  .empty-specs {
+    margin: 0;
+    padding: var(--space-2);
+    font-size: var(--text-xs);
+    color: var(--color-text-secondary);
+  }
 
   /* Preview Running (§9 State 2) */
   .preview-progress {

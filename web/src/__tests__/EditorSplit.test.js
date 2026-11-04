@@ -452,6 +452,8 @@ describe('EditorSplit', () => {
     vi.useFakeTimers();
     try {
       const { api } = await import('../lib/api.js');
+      // Real PreviewResponse shape (meta_specs.rs): preview_id, state, specs,
+      // blast_radius, structural_impact — no architecture_diff/specs_diff.
       api.previewPersona.mockResolvedValueOnce({
         preview_id: 'pv-1',
         state: 'running',
@@ -459,15 +461,26 @@ describe('EditorSplit', () => {
           { path: 'specs/system/payment-retry.md', status: 'running' },
           { path: 'specs/system/charge-processing.md', status: 'running' },
         ],
+        blast_radius: {
+          affected_workspaces: [{ id: 'ws-1' }],
+          affected_repos: [],
+          affected_workspace_count: 1,
+        },
+        structural_impact: { scope: 'workspace', affected_spec_count: 2 },
       });
       api.previewPersonaStatus.mockResolvedValue({
+        preview_id: 'pv-1',
         state: 'complete',
         specs: [
           { path: 'specs/system/payment-retry.md', status: 'complete' },
           { path: 'specs/system/charge-processing.md', status: 'complete' },
         ],
-        architecture_diff: ['+ ErrorHandler module', '~ ChargeService', '= 45 unchanged'],
-        specs_diff: [{ path: 'specs/system/payment-retry.md', diff: [{ op: 'context', text: 'z' }] }],
+        blast_radius: {
+          affected_workspaces: [{ id: 'ws-1' }],
+          affected_repos: [],
+          affected_workspace_count: 1,
+        },
+        structural_impact: { scope: 'workspace', affected_spec_count: 2 },
       });
       render(EditorSplit, {
         props: {
@@ -496,17 +509,150 @@ describe('EditorSplit', () => {
       // Persona poll completes at 1.5s intervals
       await vi.advanceTimersByTimeAsync(2000);
       await vi.waitFor(() => expect(screen.getByTestId('iterate-btn')).toBeTruthy());
-      // Architecture tab shows the structural impact lines via overlays
-      expect(screen.getByTestId('tab-architecture')).toBeTruthy();
+      // Architecture tab (default) renders the real structural impact summary
+      const impact = screen.getByTestId('meta-impact');
+      expect(impact.textContent).toContain('workspace');
+      expect(impact.textContent).toContain('2');
     } finally {
       vi.useRealTimers();
     }
   }, 20000);
 
+  it('renders the real PreviewResponse fields the server sends (meta_specs.rs shapes)', async () => {
+    vi.useFakeTimers();
+    try {
+      const { api } = await import('../lib/api.js');
+      // Exact wire shapes from crates/gyre-server/src/api/meta_specs.rs —
+      // PreviewResponse and PreviewStatusResponse carry ONLY preview_id,
+      // state, specs, blast_radius and structural_impact. Feeding these
+      // (not synthetic architecture_diff/specs_diff mocks) pins that the
+      // right panel renders what production actually returns.
+      const blast = {
+        affected_workspaces: [{ id: 'ws-1' }],
+        affected_repos: [
+          { id: 'repo-9', workspace_id: 'ws-1', reason: 'specs/payment/retry.md pinned in meta-spec set' },
+        ],
+        affected_workspace_count: 1,
+      };
+      const structural = { scope: 'workspace', affected_spec_count: 2 };
+      api.previewPersona.mockResolvedValueOnce({
+        preview_id: 'pv-real-1',
+        state: 'running',
+        specs: [{ path: 'specs/payment/retry.md', status: 'running' }],
+        blast_radius: blast,
+        structural_impact: structural,
+      });
+      api.previewPersonaStatus.mockResolvedValue({
+        preview_id: 'pv-real-1',
+        state: 'complete',
+        specs: [{ path: 'specs/payment/retry.md', status: 'complete' }],
+        blast_radius: blast,
+        structural_impact: structural,
+      });
+      render(EditorSplit, {
+        props: {
+          content: 'You are a backend dev...',
+          context: 'meta-spec',
+          workspaceId: 'ws-1',
+          specPath: 'persona/backend-dev',
+          targetSpecs: [{ path: 'specs/payment/retry.md' }],
+        },
+      });
+      await fireEvent.click(await screen.findByText('Select All'));
+      await fireEvent.click(screen.getByTestId('preview-btn'));
+      await vi.advanceTimersByTimeAsync(2000);
+      await vi.waitFor(() => expect(screen.getByTestId('iterate-btn')).toBeTruthy());
+      // Architecture tab (default) shows the server-computed structural
+      // impact and blast radius — the fields the real endpoint returns.
+      const impact = screen.getByTestId('meta-impact');
+      expect(impact.textContent).toContain('workspace');
+      expect(impact.textContent).toContain('repo-9');
+      expect(impact.textContent).toContain('specs/payment/retry.md pinned in meta-spec set');
+      // Code Diff tab lists the per-spec statuses (the endpoint produces no
+      // line-level diff).
+      await fireEvent.click(screen.getByTestId('tab-code-diff'));
+      const statuses = await screen.findByTestId('meta-spec-statuses');
+      expect(statuses.textContent).toContain('specs/payment/retry.md');
+      expect(statuses.textContent).toContain('complete');
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 20000);
+
+  it('a thoroughPreview rejection (real deployments: 404 — no server route) returns to editing with an error banner, never a fabricated complete state', async () => {
+    const { api } = await import('../lib/api.js');
+    // POST /repos/:id/graph/thorough-preview has no server route, so every
+    // real spec-context Preview rejects with request()'s 404 error.
+    api.thoroughPreview.mockRejectedValueOnce(
+      new Error('API /repos/repo-1/graph/thorough-preview: 404 Not Found'),
+    );
+    render(EditorSplit, {
+      props: { content: '# Draft', repoId: 'repo-1', specPath: 'specs/auth.md' },
+    });
+    await fireEvent.click(await screen.findByTestId('preview-btn'));
+    // Back to editing with the error banner — §9 State 3 is never presented
+    // without a real completed result.
+    await waitFor(() => expect(screen.getByTestId('preview-error')).toBeTruthy());
+    expect(screen.getByTestId('preview-error').textContent).toContain('404');
+    expect(screen.getByTestId('editor-split-textarea')).toBeTruthy();
+    expect(screen.queryByTestId('iterate-btn')).toBeNull();
+    expect(screen.queryByTestId('preview-running')).toBeNull();
+  });
+
+  it('a previewPersona rejection (endpoint unavailable) returns to editing with an error banner, never a fabricated complete state', async () => {
+    const { api } = await import('../lib/api.js');
+    api.previewPersona.mockRejectedValueOnce(
+      new Error('API /workspaces/ws-1/meta-specs/preview: 404 Not Found'),
+    );
+    render(EditorSplit, {
+      props: {
+        content: 'You are a backend dev...',
+        context: 'meta-spec',
+        workspaceId: 'ws-1',
+        targetSpecs: [{ path: 'specs/a.md' }],
+      },
+    });
+    await fireEvent.click(await screen.findByText('Select All'));
+    await fireEvent.click(screen.getByTestId('preview-btn'));
+    await waitFor(() => expect(screen.getByTestId('preview-error')).toBeTruthy());
+    expect(screen.getByTestId('preview-error').textContent).toContain('404');
+    expect(screen.getByTestId('editor-split-textarea')).toBeTruthy();
+    expect(screen.queryByTestId('iterate-btn')).toBeNull();
+  });
+
+  it('Escape cancels a running preview instead of closing the split (§9 State 2)', async () => {
+    const onClose = vi.fn();
+    const { api } = await import('../lib/api.js');
+    api.thoroughPreview.mockResolvedValueOnce({ task_id: 'task-esc' });
+    api.taskStatus.mockResolvedValue({ status: 'running' });
+    render(EditorSplit, {
+      props: { content: '# Draft', repoId: 'repo-1', specPath: 'specs/auth.md', onClose },
+    });
+    await fireEvent.click(await screen.findByTestId('preview-btn'));
+    await waitFor(() => expect(screen.getByTestId('editor-locked')).toBeTruthy());
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    // Preview cancelled — back to editing — but the split itself stays open.
+    await waitFor(() => expect(screen.getByTestId('editor-split-textarea')).toBeTruthy());
+    expect(screen.queryByTestId('preview-running')).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it('runs previewPersona without persona_id when specPath is null', async () => {
     const { api } = await import('../lib/api.js');
-    api.previewPersona.mockResolvedValueOnce({ preview_id: 'pv-2' });
-    api.previewPersonaStatus.mockResolvedValue({ state: 'complete', specs: [] });
+    api.previewPersona.mockResolvedValueOnce({
+      preview_id: 'pv-2',
+      state: 'complete',
+      specs: [],
+      blast_radius: { affected_workspaces: [], affected_repos: [], affected_workspace_count: 0 },
+      structural_impact: { scope: 'workspace', affected_spec_count: 0 },
+    });
+    api.previewPersonaStatus.mockResolvedValue({
+      preview_id: 'pv-2',
+      state: 'complete',
+      specs: [],
+      blast_radius: { affected_workspaces: [], affected_repos: [], affected_workspace_count: 0 },
+      structural_impact: { scope: 'workspace', affected_spec_count: 0 },
+    });
     render(EditorSplit, {
       props: {
         content: 'prompt text',
