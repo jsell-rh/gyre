@@ -33,6 +33,7 @@ def source(store):
         subprocess.run(['git', 'checkout', '--quiet', '--detach', 'origin/main'], cwd=path, check=True)
         revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=path, text=True).strip()
         sync_checkout(store, path, revision)
+        store.set_setting('observed_main', revision)
         return revision
 
 
@@ -88,13 +89,26 @@ def run_claim(store, claim):
         with execution.heartbeat():
             item = store.task(claim['task'])
             if item['data'].get('task_override'):
-                item['body'] = item['data']['task_override']
+                from pipeline.catalog import contract
+                override = item['data']['task_override']
+                try:
+                    matches = contract.requirement_parts(override) == contract.requirement_parts(item['body'])
+                except ValueError:
+                    matches = False
+                if matches:
+                    item['body'] = override
+                else:
+                    # Interrupted agents can leave a truncated task document.
+                    # Keep their source candidate, but restore the authoritative
+                    # requirements before prompt projection or sandbox creation.
+                    store.event('checkpoint_contract_restored', {'candidate': item['data'].get('candidate')},
+                                claim['task'],claim['id'])
             result, updates, findings = HANDLERS[stage](execution, item)
             execution.current()
             if not eligible(store, claim):
                 raise StaleClaim('stage preconditions changed during execution')
             body, generation = None, None
-            if stage in ('verify', 'publish') and 'dependencies' in updates:
+            if stage in ('verify', 'publish', 'observe') and 'dependencies' in updates:
                 # A prerequisite is desired task metadata, not an ephemeral
                 # field an implementation body can overwrite on completion.
                 import re
@@ -141,11 +155,14 @@ def run_claim(store, claim):
                               'branch': outcome['branch'], 'task_override': body, 'repair': finding,
                               'review': None, 'verified': None}, [finding])
                 return True
+            category = getattr(exc, 'category', None) or ('observation' if isinstance(exc, Wait) else
+                       stage if getattr(exc, 'fresh_model', False) else
+                       'infrastructure' if isinstance(exc, (Retry, OSError, subprocess.TimeoutExpired)) else 'execution')
             store.retry(claim['id'], claim['token'],
-                        {'category': 'observation' if isinstance(exc, Wait) else stage if getattr(exc, 'fresh_model', False) else
-                                     'infrastructure' if isinstance(exc, (Retry, OSError, subprocess.TimeoutExpired)) else 'execution',
-                         'message': str(exc)[-4000:], 'fresh_model': getattr(exc, 'fresh_model', False)},
+                        {'category': category, 'message': str(exc)[-4000:], 'fresh_model': getattr(exc, 'fresh_model', False),
+                         'diagnostic': getattr(exc, 'diagnostic', None)},
                         delay=getattr(exc, 'retry_delay', None), count_failure=not isinstance(exc, Wait))
+            execution.phase('RetryScheduled', reason=str(exc)[-1000:], category=getattr(exc, 'category', None))
         except StaleClaim:
             pass
         except Exception as recovery_error:
@@ -200,6 +217,13 @@ def main():
     commands.add_parser('pause')
     commands.add_parser('resume')
     commands.add_parser('slots').add_argument('count', type=int)
+    commands.add_parser('reserve-verification').add_argument('count',type=int)
+    commands.add_parser('priority-classes')
+    command=commands.add_parser('priority-class')
+    command.add_argument('name');command.add_argument('value',type=int)
+    command=commands.add_parser('priority')
+    command.add_argument('task');command.add_argument('class_name',nargs='?')
+    command.add_argument('--clear',action='store_true')
     command = commands.add_parser('seed')
     command.add_argument('task_file', type=Path)
     command.add_argument('--candidate')
@@ -216,11 +240,11 @@ def main():
             print(json.dumps(snapshot(store)))
         elif args.command in ('retry', 'retry-all'):
             with store.transaction():
-                query = "UPDATE work SET state='ready',retry_at=0 WHERE state IN ('attention','retry')"
-                params = ()
+                query = "UPDATE work SET state='ready',retry_at=0,ready_since=? WHERE state IN ('attention','retry')"
+                params = (time.time(),)
                 if args.command == 'retry':
                     query += ' AND task=?'
-                    params = (args.task,)
+                    params += (args.task,)
                 count = store.db.execute(query, params).rowcount
                 store.event('operator_retry', {'count': count}, getattr(args, 'task', None))
             print(f'retried {count} work items')
@@ -231,6 +255,29 @@ def main():
             if not 0 <= args.count <= 1000:
                 parser.error('slots must be 0–1000')
             store.set_setting('slots', args.count)
+        elif args.command == 'reserve-verification':
+            if not 0 <= args.count <= 1000:
+                parser.error('verification reservation must be 0–1000')
+            store.set_setting('verification_slots',args.count)
+        elif args.command == 'priority-classes':
+            from pipeline.priority import classes
+            print(json.dumps({'classes':classes(store),'default':'normal','preemptionPolicy':'Never'}))
+        elif args.command == 'priority-class':
+            from pipeline.priority import define,PriorityError
+            try:
+                define(store,args.name,args.value)
+            except PriorityError as exc:
+                parser.error(str(exc))
+        elif args.command == 'priority':
+            from pipeline.priority import set_task,task_priority,PriorityError
+            if args.clear and args.class_name is not None:
+                parser.error('--clear cannot be combined with a class name')
+            try:
+                if args.clear or args.class_name is not None:
+                    set_task(store,args.task,None if args.clear else args.class_name)
+                print(json.dumps(task_priority(store,store.task(args.task))))
+            except (PriorityError,KeyError) as exc:
+                parser.error(str(exc))
         elif args.command == 'serve':
             if not 0 < args.interval <= 60:
                 parser.error('interval must be 0–60 seconds')
