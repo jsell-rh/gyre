@@ -74,6 +74,28 @@ class DiscoveryTests(unittest.TestCase):
         self.count('implement')
         self.assertEqual(self.store.db.execute('SELECT count(*) FROM work').fetchone()[0], 1)
 
+    def test_fresh_start_does_not_reuse_completed_stage_work(self):
+        body = '---\ntitle: Fresh work\nspec_ref: fixture\ndepends_on: []\nprogress: not-started\n---\n'
+        self.store.put_task('task-001', 'g', body, {'dependencies': []})
+        old_triage = discover(self.store, 'triage', 'main')[0]
+        claim = self.store.claim('triage', 'old')
+        self.store.finish(old_triage, claim['token'], {'metadata': 'valid'}, {'triaged': 'g'})
+        old_implement = discover(self.store, 'implement', 'main')[0]
+        claim = self.store.claim('implement', 'old')
+        self.store.finish(old_implement, claim['token'], {'old': 'checkpoint'})
+        repair = {'category': 'fresh_start', 'id': 'unique-run'}
+        self.store.put_task('task-001', 'g', body, {'dependencies': [], 'repair': repair})
+        new_triage = discover(self.store, 'triage', 'main')[0]
+        self.assertNotEqual(new_triage, old_triage)
+        claim = self.store.claim('triage', 'new', eligible=lambda work: eligible(self.store, work))
+        self.store.finish(new_triage, claim['token'], {'metadata': 'valid'}, {'triaged': 'g'})
+        new_implement = discover(self.store, 'implement', 'new-main')[0]
+        self.assertNotEqual(new_implement, old_implement)
+        self.assertEqual(self.store.db.execute('SELECT state FROM work WHERE id=?', (old_implement,)).fetchone()[0], 'succeeded')
+        claim = self.store.claim('implement', 'new', eligible=lambda work: eligible(self.store, work))
+        self.assertIsNone(claim['input'].get('candidate'))
+        self.assertEqual(claim['input']['base'], 'new-main')
+
     def test_blocked_review_can_resume_with_same_source_after_dependency_delivery(self):
         self.task('task-001', delivered={'sha': 'one'})
         self.task('task-002', dependencies=['task-001'], candidate='a', candidate_base='main')
