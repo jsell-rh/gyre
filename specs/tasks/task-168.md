@@ -7,7 +7,7 @@ coverage_sections:
   - "repo-lifecycle.md §Admin → Workspace Scope → Repos Tab"
   - "repo-lifecycle.md §Gates (Admin → Repo Scope → Gates)"
   - "repo-lifecycle.md §API Summary"
-commits: ["0106d3a3adfe0e4c7c175d81e0d301583a7b3255", "d8e78bb6c440c7ba24103f18be30dfbcd669f3b5", "df5b32464a082ce008236a2732536755538ebe03", "9ebec6c2713ce824aa5ca9f14df74dcecb074437", "904586888416cb5c5aec355a70875b271e005a90", "b657692571ca3e6f53528afeec1578dfb46c9e7a", "06e11cbcf59b1fdd0247411c5e8910c4c6190714", "1da8dd39d018de0a101f550198ce224d077329f6", "4c11b2644f2435a87e60a38b8b8f356722562f14", "4b5d96563755dec7fbd825880c23661c604f7a8d", "5d5e4046f0af0cf074348b584d632e36f3f6b570", "0a2df7c6a80141bc885937dc3543e13055bf8ee3", "568d27f2cc4ca542ebe3b138872b710dd693a5e0", "68805172e3c0abb0315928d7f24d3ba2aaa16673"]
+commits: ["0106d3a3adfe0e4c7c175d81e0d301583a7b3255", "d8e78bb6c440c7ba24103f18be30dfbcd669f3b5", "df5b32464a082ce008236a2732536755538ebe03", "9ebec6c2713ce824aa5ca9f14df74dcecb074437", "904586888416cb5c5aec355a70875b271e005a90", "b657692571ca3e6f53528afeec1578dfb46c9e7a", "06e11cbcf59b1fdd0247411c5e8910c4c6190714", "1da8dd39d018de0a101f550198ce224d077329f6", "4c11b2644f2435a87e60a38b8b8f356722562f14", "4b5d96563755dec7fbd825880c23661c604f7a8d", "5d5e4046f0af0cf074348b584d632e36f3f6b570", "0a2df7c6a80141bc885937dc3543e13055bf8ee3", "568d27f2cc4ca542ebe3b138872b710dd693a5e0", "68805172e3c0abb0315928d7f24d3ba2aaa16673", "5e617c71945b9650acb026f88664f5bde0568d55"]
 ---
 
 ## Spec Excerpt
@@ -60,8 +60,11 @@ Read `specs/system/repo-lifecycle.md` §"1. Where Repo Management Lives", §"3. 
 
 ## Shipped
 
-All three coverage sections are implemented in production code (earlier checkpoints
-`80d6563`/`6194782` plus the `0106d3a` test-framing fix from this assignment).
+All three coverage sections are implemented in production code (earlier
+checkpoints `80d6563`/`6194782`, the `0106d3a` test-framing fix, and the
+`5e617c7` repair from this round: base merge `110180fb` resolved by
+rebuilding `web/dist` from the merged source, and the stale
+fabricated-scope exemption entry retargeted — see Invariants).
 
 ### Git push rejection for archived repos (§API Summary)
 
@@ -77,7 +80,8 @@ All three coverage sections are implemented in production code (earlier checkpoi
   `info_refs_receive_pack_archived_repo_returns_err_pkt_line`,
   `receive_pack_archived_repo_returns_403`,
   `info_refs_upload_pack_archived_repo_still_serves_clone_advertisement`
-  (28 passed, `cargo-lib-gates-archived.log`), and integration test
+  (4 passed on the current merged tree,
+  `cargo-lib-archived-postmerge.log`), and integration test
   `push_to_archived_repo_rejected` in `crates/gyre-server/tests/git_integration.rs`
   which runs a **real `git push`** against a live server and asserts the push
   fails with an "archived" reason (1 passed,
@@ -108,13 +112,23 @@ All three coverage sections are implemented in production code (earlier checkpoi
 - Evidence: `web/src/__tests__/WorkspaceSettings.test.js` +
   `web/src/__tests__/RepoSettings.test.js` — 114 vitest tests pass
   (`vitest-task168.log`); gates API unit tests in `gates.rs` (position
-  ordering, update validation) pass in the cargo lib run above.
+  ordering, update validation) pass — 11 passed on the current merged tree.
+
+### Repair round (5e617c7)
+
+- Resolved the in-progress merge of base `110180fb`; the only conflicts were
+  generated `web/dist` artifacts, resolved by rebuilding dist from the merged
+  source (`npm ci` + `npm run build`, vite emptied outDir so stale hashed
+  assets are gone and `index.html` references the fresh build).
+- Retargeted the pre-existing fabricated-scope exemption entry from
+  `git_http.rs:1510` to `git_http.rs:1535`, where merge `61947824` had shifted
+  the `ws_id` fallback statement. Line-number update only — no new entry,
+  frozen count still 5. `check-fabricated-scope-defaults.sh` now exits 0.
 
 ### Invariants
 
 `check-arch.sh`, `check-abac-route-registry.sh`, `check-migration-versions.sh`,
 `check-migration-sql-portability.sh`, `check-mem-port-contracts.sh`,
 `check-inert-enforcement.sh`, `check-dead-message-kinds.sh`, and
-`check-fabricated-scope-defaults.sh` all pass on this tree (the
-fabricated-scope exemption diff vs base is a line-number retarget of the
-pre-existing git_http entry, not a new entry).
+`check-fabricated-scope-defaults.sh` all pass at head `5e617c7` on the merged
+tree (logs under `/tmp/stage/review-evidence/`).
