@@ -1,12 +1,12 @@
 ---
 title: "HSI Conflict Prevention — Concurrent Spec Editing Warning"
 spec_ref: "human-system-interface.md §7 Conflict Prevention"
-depends_on: []
+depends_on: [task-237]
 progress: ready-for-review
 review: specs/reviews/task-092.md
 coverage_sections:
   - "human-system-interface.md §7 Conflict Prevention"
-commits: ["a4c3e59e1fc37e7b7dae6155afd9184807d05ee8", "2766274ecc181201ed7f260666734261b29dfb4f", "4c12beeed39ab2f1e8c0e1a13946ec79fe25d3ec", "b7d38b296453170a3a388ea8bf034e1a53874450", "1fce7994689d8c437f0bdc82c8f9cf1adf16f32f", "eee00dbaaac1978e4e2c6e513e7e7c17c92770d5", "1ac154183d15bf3b14b8f16046683d9181940b72"]
+commits: ["a4c3e59e1fc37e7b7dae6155afd9184807d05ee8", "2766274ecc181201ed7f260666734261b29dfb4f", "4c12beeed39ab2f1e8c0e1a13946ec79fe25d3ec", "b7d38b296453170a3a388ea8bf034e1a53874450", "1fce7994689d8c437f0bdc82c8f9cf1adf16f32f", "eee00dbaaac1978e4e2c6e513e7e7c17c92770d5", "1ac154183d15bf3b14b8f16046683d9181940b72", "3c5bdcd7b6d4f159a9c6327cf957290f08447d51"]
 ---
 
 ## Spec Excerpt
@@ -63,13 +63,17 @@ Read `specs/system/human-system-interface.md` §7 "Conflict Prevention" for the 
 
 ## Shipped
 
-Assignment was a repair continuation from checkpoint `cabd3577` (prior attempt
-aborted on an infra 401 after merge). All implementation work (F1-F4 findings
-plus the R3 fixes) was already present in this branch head and verified at the
-current HEAD `51f3905a` — no new product code was needed; this round produced
-fresh test evidence under this sandbox's restrictions.
+This round was a rebase repair: the pending merge of `59ff5d01` into the
+branch had unresolved conflicts in `web/dist/` build artifacts
+(rename/rename on the hashed elk bundle, content conflict in index.html).
+Resolved by rebuilding dist from the merged `web/src`
+(`npm ci` from the lockfile, then `vite build`) and committing the fresh
+output (merge commit `fdc44f29`). It also fixed a real test determinism
+bug the socket-restricted prior rounds could never expose (see below).
+All task-092 product behavior was already implemented in prior rounds
+(F1-F4 findings plus R3 fixes) and is unchanged.
 
-Behavior at HEAD (source-verified this round):
+Behavior at HEAD (source-verified):
 
 - **Presence editing context** — `UserPresence.editing_entity` (serde-skipped
   when `None`) round-trips; server stores it in `PresenceEntry` keyed
@@ -100,24 +104,38 @@ Behavior at HEAD (source-verified this round):
   `EditorSplit`/`DetailPanel` wire overwrite → `specsSave` with
   `overwrite: true`, discard → adopt server content.
 
-Test evidence (this sandbox, evidence in `/tmp/stage/review-evidence/`):
+### This round's fix
+
+`ws_session_cap_eviction_rebroadcasts_departure` was flaky (~2 of 3 runs)
+now that this sandbox permits loopback sockets — prior rounds' socket
+restriction (ConnectionReset at first connect) had masked it. Root cause
+(confirmed by logging the observer's stream): the test seeded 5 concurrent
+WS sessions and drained the observer with ordered `expect_presence` calls,
+but cross-connection broadcast order is not guaranteed (each connection is
+an independent server task), so a later session's presence arrived while
+the drain waited for an earlier one and was consumed-and-discarded; that
+session's turn then timed out. The same reordering made the eviction target
+nondeterministic (`server_last_seen` follows server processing order, so
+`min_by_key` could evict a session other than the first-opened). Fixed in
+`3c5bdcd7` by interleaving seeding with observer confirmation — each
+session's presence broadcast is observed before the next session opens,
+which guarantees in-order drain and strictly increasing `server_last_seen`
+(insert completes before broadcast). Test-only change; no product code
+affected.
+
+### Test evidence (this sandbox, saved under /tmp/stage/review-evidence/)
 
 - `cargo test -p gyre-server --lib specs_assist` — 21/21 ok (cold build,
   `SKIP_WEB_BUILD=1`), including
   `save_spec_stale_base_sha_returns_409_with_diff`,
   `save_spec_conflict_notifies_caller_and_concurrent_editor`,
   `save_spec_overwrite_bypasses_stale_base_sha`.
-- `cargo test -p gyre-server --lib ws::` — 57 passed / 8 failed; all 8 are
-  loopback-socket tests failing at first connect with `ConnectionReset`,
-  matching the sandbox restriction (`accept()` errno 95, capabilities.json,
-  independently re-probed this round; R5 proved identical failures at the
-  pre-task base). The socket-free F4 logic tests pass. Socket-level gates
-  remain for host CI.
-- `npm ci` incomplete (registry timeout; 131/241 packages, full vitest/jsdom/
-  testing-library/svelte toolchain present) — vitest invoked directly from
-  the locked install with `--pool=forks --maxWorkers=1`: presence +
-  ConcurrentEditBanner 26/26, SpecConflictDialog + Inbox + ws + EditorSplit
-  79/79, and the full `web/` suite 58 files / 1548 passed / 0 failed
-  (41 config-level skips).
+- `cargo test -p gyre-server --lib ws::` — **73 passed / 0 failed**, run
+  4x (once standalone, 3x repeated) — all loopback-socket tests now
+  genuinely execute in this sandbox; the previously flaky cap-eviction
+  test passed 10/10 isolated runs after the determinism fix.
+- `npm ci` (full, 169 packages) + `npm test` in `web/` — 65 files /
+  1616 passed / 0 failed (41 config-level skips), on the merged `web/src`
+  that the rebuilt `web/dist` was produced from.
 
 Exact-head GitHub checks remain the independent reviewer's gate.
