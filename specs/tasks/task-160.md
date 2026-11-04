@@ -7,7 +7,7 @@ coverage_sections:
   - "hierarchy-enforcement.md §Invariant Enforcement"
   - "hierarchy-enforcement.md §Enforcement"
   - "hierarchy-enforcement.md §New Scripts"
-commits: ["2698b9b63b73e5f3b2230a0b7e8e30d160265f3d", "ba78ab2a5e1a2147a04cf7e148f53e6c0abb34e3"]
+commits: ["2698b9b63b73e5f3b2230a0b7e8e30d160265f3d", "ba78ab2a5e1a2147a04cf7e148f53e6c0abb34e3", "b297d1b2e6588ae68f35eb1419b73e7652b53b7b"]
 ---
 
 ## Spec Excerpt
@@ -71,7 +71,7 @@ blocking — no `|| true`):**
   `src/sqlite` + `src/postgres` (the real pg dir — the stale `src/pg` path bug
   is fixed); tenant-column tables derived from the migrations themselves
   (CREATE/ALTER/DROP/RENAME, `_new` normalization) rather than hand-maintained;
-  documented SKIP_LIST for the five structurally-isolated adapters (spec §3);
+  documented SKIP_LIST for the structurally-isolated adapters (spec §3);
   tenant-less tables reported as non-failing backlog.
 - `scripts/check-api-auth.sh` — three checks: ABAC middleware chain on the
   api router, per-handler auth extractors on non-ABAC mutating routes, and
@@ -80,60 +80,60 @@ blocking — no `|| true`):**
 
 **Enabling repairs** (shipped with the scripts so they pass clean, not by
 exemption): unfiltered tenant reads fixed in sqlite+postgres
-compute_target/merge_request/notification/repository/saved_view/workspace and
-activity/analytics record-conversions now stamp the storage's real tenant
-(also deleted six dead scope-literal-defaults exemption entries, 18→12);
-`tenant_isolation.rs` integration test (2 tests) proves cross-tenant
-invisibility end-to-end.
+compute_target/merge_request/notification/repository/saved_view/workspace;
+activity/analytics record-conversions stamped the storage's real tenant
+until upstream 75ada1c4 removed the ActivityPort entirely (superseded by
+SearchPort); six dead scope-literal-defaults exemption entries deleted
+(18→12); `tenant_isolation.rs` integration test (2 tests) proves
+cross-tenant invisibility end-to-end.
 
-### Verification (latest round — merged HEAD 8d2ae409; evidence:
-`/tmp/stage/review-evidence/task-160-round6/`)
+### Round 7 — verification-finding repair at HEAD b297d1b2 (evidence:
+`/tmp/stage/review-evidence/task-160-round7/`)
 
-This round resumed after the prior run exhausted its token budget
-mid-verification. The assigned merge c6c91e01 folded base `63aa1486`
-(shared Fullsend dispatcher extraction, task-192 budget CLI, task-239
-explorer WS sessions) into the candidate; the task-160 surface
-(scripts/adapters/abac_middleware) is byte-stable through the merge — the
-only deltas on wiring paths are base-side CI/dev-check changes that do not
-weaken the lint steps (all three remain blocking in ci.yml, no `|| true`).
+This round repaired the three failures from the controller verification run
+(`checks.sh` exit 1 on candidate 3cc3cdf9) and resolved the assigned merge:
 
-- Clean gates at 8d2ae409: `check-hierarchy.sh` exit 0;
-  `check-tenant-filter.sh` exit 0 (111 read methods on tenant-column
-  tables / 0 violations); `check-api-auth.sh` exit 0 (middleware chain +
-  4 non-ABAC handlers + delegated frozen-baseline registry);
-  `check-arch.sh` OK; `check-task-commit-attribution.sh` OK; and all 17
-  dev-check static gates exit 0 (abac-route-registry, abac-exempt-handlers,
-  mcp-write-tools, migration-versions, migration-sql-portability,
-  dead-message-kinds, byte-slice-truncation, relative-path-defaults,
-  fail-open-ref-resolution, mem-port-contracts, fabricated-scope-defaults,
-  lossy-secret-conversion, inert-enforcement, forged-scope-fields,
-  forwarded-header-trust, in-memory-state-stores,
-  unbounded-external-http). `git diff --check HEAD^1 HEAD` clean.
-- Fresh mutation kills in isolated worktree `/tmp/stage/task160-r6-mut`
-  (restored after each; worktree removed after):
-  `Task.workspace_id → Option<Id>` → hierarchy exit 1 naming `task.rs:60`;
-  tenant predicate stripped from `sqlite/secret.rs::get_value` →
-  tenant-filter exit 1 ("1 violation(s) out of 111", naming
-  `secret.rs:229`); `RouteResourceMapping` for `/api/v1/activity` deleted →
-  api-auth exit 1 via the delegated registry check. (Mutations applied
-  newline-aware — the files carry CRLF endings.)
-- `cargo test -p gyre-adapters --test tenant_isolation`: **2 passed /
-  0 failed** — re-run this round because the base merge brought
-  `gyre-common/src/view_spec.rs` (+257 lines, a gyre-adapters dependency)
-  into the tree; run record in `tenant-isolation.txt` in the evidence dir.
-- Inherited repair 8d2ae409: base-side task-239 inserted 5 lines into
-  `crates/gyre-server/src/lib.rs` (AppState `explorer_sessions` field),
-  shifting the two pre-existing task-099-owned exempted sites
-  (`emit_event`/`emit_telemetry`) from lines 494/538 to 499/543;
-  `check-scope-literal-defaults.sh crates` failed on the stale line-pinned
-  exemption entries. Re-pinned the same two sites to their current lines —
-  no entry added or removed, frozen count stays 12, the sites themselves
-  are unchanged and still owned by the task-099 F1 revision round. FAIL
-  exit 1 before, OK exit 0 after.
+- **Merge resolution (c3bf8bc5):** base 75ada1c4 deleted the activity
+  adapters (`ActivityPort` replaced by `SearchPort`); accepted the upstream
+  deletion — nothing in the merged tree references the old adapters, and the
+  new sqlite/postgres `search.rs` adapters derive tenant from the workspace
+  scope row (empty-string sentinel on unknown workspace, never a fabricated
+  "default"). `check-tenant-filter.sh` adapts automatically: 111 → 109 read
+  methods on tenant-column tables, 0 violations.
+- **rustfmt:** `mem.rs:3223` test-helper one-liner exceeded the line budget;
+  split per rustfmt. `check-rustfmt-diff.py 75ada1c4` now clean (31 Rust
+  files); direct `rustfmt --check` on both edited files clean.
+- **Fabricated scope default (real fix, exemption deleted):** the
+  spec-rejected notification fanout in `api/specs.rs` derived `tenant_id`
+  from `entry.repo_id.as_deref().unwrap_or("default")` — a fabricated scope
+  from the wrong field entirely. Now resolves the tenant from the
+  workspace's real scope row and skips the fanout with a warning on lookup
+  failure, mirroring `emit_reconciliation_completed`. Exemption entry
+  deleted and `FROZEN_EXEMPTION_COUNT` lowered 5→4.
+- **Inert-enforcement line drift (re-pin only):** the two task-077-owned
+  `evaluate_attestation_abac` exemption sites in `merge_processor.rs`
+  shifted 1457/1479 → 1455/1477 by the base merge. Re-pinned the same two
+  sites — no entry added or removed; the enforcement fix itself stays owned
+  by the task-077 revision round.
+- **Gates at b297d1b2 (all exit 0):** check-hierarchy, check-tenant-filter
+  (109/0), check-api-auth, check-arch, check-fabricated-scope-defaults,
+  check-inert-enforcement, check-scope-literal-defaults,
+  check-rustfmt-diff vs 75ada1c4, check-task-commit-attribution (after
+  adding b297d1b2 to this file's frontmatter).
+- **Focused tests:** `cargo test -p gyre-adapters --test tenant_isolation`
+  2 passed / 0 failed (re-run: the merge replaced the activity adapters this
+  test guards); `cargo test -p gyre-server --test api_integration
+  spec_approvals` 1 passed / 0 failed; `cargo check -p gyre-server` clean
+  (5m09s). Run records in the evidence dir.
+- **Mutation kills** (isolated worktree, restored after each, worktree
+  removed): re-introducing the `unwrap_or("default")` fallback →
+  fabricated-scope check exit 1 naming `specs.rs:963`; restoring the mem.rs
+  one-liner → rustfmt-diff exit 1 naming `mem.rs:3223`; removing the
+  re-pinned inert-enforcement exemption lines → check exit 1 naming
+  `merge_processor.rs:1455/1477`. Post-restore sanity all green.
 
 Review history: rounds 1–4 in `specs/reviews/task-160.md` (round-3 findings
 F1 dead exemptions / F2 read-name blind spot fixed in 06df8bfb and verified
-complete in round 4). Earlier per-round verification records
-(contract-repair, final, rebase-repair, baseline-repair rounds at HEADs
-fa6e6952, aa68bbba/72bd51d1, c4f1df9d, afd7379d) are preserved in this
-file's git history.
+complete in round 4). Round 5–6 verification records are preserved in this
+file's git history (HEADs 8d2ae409 and earlier: fa6e6952, aa68bbba/72bd51d1,
+c4f1df9d, afd7379d).
