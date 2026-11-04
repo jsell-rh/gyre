@@ -25,6 +25,8 @@ def main():
     execution = context(os.environ['GYRE_FULLSEND_CONTEXT'])
     store = execution.store
     config = json.loads((execution.directory / 'fullsend-context.json').read_text())
+    registration = store.setting('dispatcher_gateway_registration') or {}
+    bound_gateway = (registration['alias'] if config['gateway'] == registration.get('source') else config['gateway'])
     args = sys.argv[1:]
     # Controller hooks also call this shim through Execution.os, which already
     # supplies the gateway. Consume matching selectors rather than duplicating
@@ -32,13 +34,16 @@ def main():
     while args and args[0] in ('-g', '--gateway', '--workspace'):
         if len(args) < 2:
             raise ValueError('missing OpenShell scope value')
-        expected = 'default' if args[0] == '--workspace' else config['gateway']
-        if args[1] != expected:
+        expected = {'default'} if args[0] == '--workspace' else {config['gateway'], bound_gateway}
+        if args[1] not in expected:
             raise ValueError('OpenShell scope differs from the assigned gateway')
         args = args[2:]
-    env = {**os.environ, 'OPENSHELL': config['real_openshell'], 'OPENSHELL_GATEWAY': config['gateway'], 'RUST_LOG': 'error'}
+    env = {**os.environ, 'OPENSHELL': config['real_openshell'], 'OPENSHELL_GATEWAY': bound_gateway, 'RUST_LOG': 'error'}
+    # Refresh the private alias even for a worker started before the cutover.
+    # Changing a shim process's environment cannot retarget its parent or HyperShell.
+    os.environ['GYRE_OPEN_GATEWAY'] = bound_gateway
     def invoke(arguments, **kwargs):
-        return subprocess.run([config['real_openshell'], '-g', config['gateway'], *arguments], env=env, **kwargs)
+        return subprocess.run([config['real_openshell'], '-g', bound_gateway, *arguments], env=env, **kwargs)
     provider_create = args[:2] == ['provider', 'create']
     provider_delete = args[:2] == ['provider', 'delete']
     provider_name = option(args, '--name') if provider_create else (args[2] if provider_delete and len(args) > 2 else None)
@@ -57,6 +62,8 @@ def main():
         if not name or not re.fullmatch(r'fs-[a-z0-9]{3}-[a-f0-9]{12}', name):
             raise ValueError('unexpected fullsend sandbox identity')
         execution.current()
+        if store.setting(f"cancel:{execution.claim['id']}:{execution.claim['token']}", False):
+            raise RuntimeError('assignment canceled before sandbox allocation')
         old = store.db.execute('SELECT * FROM resources WHERE name=?', (name,)).fetchone()
         if old and old['state'] == 'absent':
             raise RuntimeError('fullsend attempted to recreate a deleted sandbox in the same assignment; retry through the controller')
@@ -122,7 +129,7 @@ def main():
         # Python parent whose orphan keeps its stdout pipe open forever.
         store.close()
         os.execvpe(config['real_openshell'],
-                   [config['real_openshell'], '-g', config['gateway'], *args], env)
+                   [config['real_openshell'], '-g', bound_gateway, *args], env)
     if provider_create and owned_provider and result.returncode == 0:
         store.resource_state(provider_name, 'present')
     if provider_delete and owned_provider and result.returncode == 0:

@@ -1,5 +1,9 @@
 import { execFileSync } from 'node:child_process';
 
+// Every ordinary build invocation goes through the stage-aware wrapper;
+// agents should not need to remember to add it to PATH themselves.
+process.env.PATH = '/tmp/stage/bin:' + process.env.PATH;
+
 // Runs before a model request, using measured sandbox behavior rather than
 // asking the implementer to infer infrastructure capabilities from failures.
 export default function (pi) {

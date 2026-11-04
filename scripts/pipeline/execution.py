@@ -25,9 +25,14 @@ class Wait(Retry):
     retry_delay = 30
 
 
+class Cancelled(Wait):
+    """Operator interruption; saved source and cleanup remain owned."""
+
+
 class Execution:
-    def __init__(self, store, claim):
+    def __init__(self, store, claim, honor_cancel=True):
         self.store, self.claim = store, claim
+        self.honor_cancel = honor_cancel
         self.directory = store.directory / 'attempts' / claim['id'] / str(claim['token'])
         self.directory.mkdir(parents=True, exist_ok=True)
         self.directory.chmod(0o700)
@@ -36,6 +41,8 @@ class Execution:
         self.stop = threading.Event()
 
     def current(self):
+        if self.honor_cancel and self.store.setting(f"cancel:{self.claim['id']}:{self.claim['token']}", False):
+            raise Cancelled('Operator canceled this attempt; task paused until explicit retry')
         if self.cancelled.is_set():
             raise StaleClaim(self.claim['id'])
         self.store._current(self.claim['id'], self.claim['token'])

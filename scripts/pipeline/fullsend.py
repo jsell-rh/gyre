@@ -14,6 +14,7 @@ import time
 import threading
 
 from .execution import ROOT, Retry, Wait
+from .diagnostics import DEFAULT_MODEL_TIMEOUT, diagnose
 
 
 def binary(store):
@@ -48,7 +49,7 @@ def context(path):
         store.close()
         raise RuntimeError('fullsend assignment has been fenced')
     claim['input'] = json.loads(claim['input'])
-    execution = Execution(store, claim)
+    execution = Execution(store, claim, honor_cancel=False)
     execution.current()
     execution.branch = value['branch']
     return execution
@@ -115,6 +116,9 @@ def prepare(execution, task, prompt):
     if claim['stage'] in ('review', 'triage'):
         execution.command(sys.executable, str(bundle / 'dev-review-guard.py'), 'snapshot',
                           str(bundle / 'review-before.json'), '--task', task['name'], cwd=repo)
+    if claim['stage'] == 'review':
+        from .review_resume import restore
+        restore(execution, repo, bundle)
     repair = task['data'].get('repair') or task['data'].get('review_context') or {}
     evidence = repair.get('baseline_log') if repair.get('category') == 'baseline' else repair.get('candidate_log')
     if not evidence and repair.get('category') == 'verification':
@@ -153,17 +157,21 @@ def prepare(execution, task, prompt):
         shutil.copyfile(path, bundle / f'resume-{i}.patch')
     cfg = execution.directory / 'fullsend'
     shutil.copytree(ROOT / '.fullsend', cfg, dirs_exist_ok=True)
+    from .isolation import provider_files
+    forge_provider, _ = provider_files(execution.store, cfg)
     stage = claim['stage']
     harness = {'base': 'worker.yaml', 'agent': 'agents/' + stage + '.md',
+               'providers': [forge_provider],
                'role': {'implement': 'coder', 'review': 'review', 'triage': 'triage'}[stage],
                'image': execution.store.setting('fullsend_image', json.loads((ROOT / '.fullsend/toolchain.json').read_text())['worker_image']),
                'sandbox_timeout_seconds': 600,
-               'timeout_minutes': max(1, (execution.store.setting('model_timeout', 3600) + 59) // 60),
+               'timeout_minutes': max(1, (execution.store.setting('model_timeout', DEFAULT_MODEL_TIMEOUT) + 59) // 60),
                'host_files': [{'src': str(p), 'dest': '/tmp/stage/' + str(p.relative_to(bundle))}
                               for p in sorted(bundle.rglob('*')) if p.is_file()],
                'env': {'runner': {'GYRE_FULLSEND_CONTEXT': str(execution.directory / 'fullsend-context.json'),
                                   'GYRE_PIPELINE_ROOT': str(ROOT)},
-                       'sandbox': {'CARGO_BUILD_JOBS': '2', 'CARGO_TARGET_DIR': '/tmp/gyre-target',
+                       'sandbox': {'GYRE_PIPELINE_STAGE': stage,
+                                   'CARGO_BUILD_JOBS': '2', 'CARGO_TARGET_DIR': '/tmp/gyre-target',
                                    'CARGO_HOME': '/tmp/cargo', 'RUSTUP_HOME': '/usr/local/rustup',
                                    'PLAYWRIGHT_BROWSERS_PATH': '/usr/local/share/gyre-playwright',
                                    'GYRE_DEV_REAL_CARGO': '/usr/local/cargo/bin/cargo',
@@ -287,7 +295,7 @@ def cloud_step(execution, task, prompt):
     execution.login()
     from .inference import check, credential
     check(execution.store)
-    outstanding = execution.store.db.execute("SELECT name FROM resources WHERE work=? AND state<>'absent'", (execution.claim['id'],)).fetchall()
+    outstanding = execution.store.db.execute("SELECT name FROM resources WHERE work=? AND state<>'absent' AND kind<>'admission'", (execution.claim['id'],)).fetchall()
     if outstanding:
         raise Wait('Previous attempt still owns resources; cleanup must finish first')
     cfg, repo, shim = prepare(execution, task, prompt)
@@ -308,6 +316,9 @@ def execute(execution, cfg, repo, shim, env, runtime='pi'):
                     model='fixture' if runtime == 'dummy' else 'gateway/rits/zai-org/glm-5-3')
     command = [str(executable), 'run', execution.claim['stage'], '--runtime', runtime, '--forge', 'github',
                '--fullsend-dir', str(cfg), '--target-repo', str(repo), '--output-dir', str(execution.directory / 'runs')]
+    if runtime == 'pi':
+        # Never let another project's exported FULLSEND_MODEL override Gyre's pinned route.
+        command += ['--model', 'gateway/rits/zai-org/glm-5-3']
     process = None
     finished = threading.Event()
     stream = None
@@ -322,20 +333,24 @@ def execute(execution, cfg, repo, shim, env, runtime='pi'):
                                     {'identity': str(execution.directory / 'fullsend-process.json')})
             stream = threading.Thread(target=stream_events, args=(execution, finished), daemon=True)
             stream.start()
-            deadline = time.monotonic() + execution.store.setting('model_timeout', 3600) + 1800
+            deadline = time.monotonic() + execution.store.setting('model_timeout', DEFAULT_MODEL_TIMEOUT) + 1800
             while process.poll() is None:
                 execution.current()
                 if time.monotonic() >= deadline:
                     raise Retry('fullsend execution exceeded assignment deadline')
                 execution.cancelled.wait(1)
         result = execution.directory / 'outcome.json'
+        diagnostic = diagnose(execution.directory, process.returncode) if process.returncode or not result.exists() else None
         if result.exists():
             value = json.loads(result.read_text())
             if process.returncode:
                 value.update(valid=False, agent_exit=process.returncode, stream_exit=process.returncode)
+                value['diagnostic'] = diagnostic
                 result.write_text(json.dumps(value))
             return value
-        raise Retry('fullsend ended without a published source receipt; inspect attempt log')
+        error = Retry(diagnostic['message'] + '; no published source receipt')
+        error.category, error.diagnostic = diagnostic['category'], diagnostic
+        raise error
     finally:
         if process and process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)

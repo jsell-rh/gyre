@@ -79,7 +79,57 @@ class FullsendContracts(FullsendFixture):
         self.assertNotIn('ENMAAS_API_KEY', json.dumps(harness))
         self.assertNotIn('FULLSEND_INFERENCE_GATEWAY_API_KEY', json.dumps(harness))
         self.assertEqual(harness['sandbox_timeout_seconds'], 600)
+        self.assertEqual(harness['timeout_minutes'], 240)
         self.assertTrue((shim / 'openshell').is_file())
+
+    def interrupted_review(self, source_edit=False, wrong_candidate=False):
+        import io
+        self.store.finish(self.work,self.claim['token'],{})
+        work=self.store.enqueue('review','task-9999','g',{'base':self.base,'candidate':self.base})
+        old=Execution(self.store,self.store.claim('review','old-reviewer'))
+        _,repo,_=prepare(old,self.store.task('task-9999'),'review')
+        note=repo/'specs/reviews/task-9999.md';note.parent.mkdir(parents=True)
+        note.write_text('Checked actual add behavior; still need scoped tests.\n')
+        if source_edit:(repo/'code.py').write_text('unsafe reviewer production edit\n')
+        self.call('git','add','.',cwd=repo);self.call('git','commit','-qm','review evidence',cwd=repo)
+        self.call('git','push','-q','origin','HEAD',cwd=repo)
+        head=self.call('git','rev-parse','HEAD',cwd=repo).strip()
+        (old.directory/'outcome.json').write_text(json.dumps({'head':head,'published':True,'valid':False,
+                    'source_valid':not source_edit,'agent_exit':1}))
+        with tarfile.open(old.directory/'evidence.tar.gz','w:gz') as archive:
+            for name,value in [('review-evidence/probe.txt',b'real probe evidence'),
+                               ('verdict.json',b'{"approved":true}'),
+                               ('review-evidence/../../escape',b'must not escape')]:
+                info=tarfile.TarInfo(name);info.size=len(value);archive.addfile(info,io.BytesIO(value))
+        if wrong_candidate:
+            p=old.directory/'bundle/job.json';d=json.loads(p.read_text());d['input']['candidate']='f'*40;p.write_text(json.dumps(d))
+        self.store.retry(work,old.claim['token'],{'message':'interrupted'},delay=0)
+        return Execution(self.store,self.store.claim('review','replacement'))
+
+    def test_interrupted_review_resumes_evidence_without_changing_candidate_or_reusing_verdict(self):
+        replacement=self.interrupted_review()
+        cfg,repo,_=prepare(replacement,self.store.task('task-9999'),'resume review')
+        bundle=replacement.directory/'bundle'
+        manifest=json.loads((bundle/'review-resume.json').read_text())
+        self.assertFalse(manifest['approved'])
+        self.assertEqual(manifest['candidate'],self.base)
+        self.assertEqual(self.call('git','rev-parse','HEAD',cwd=repo).strip(),self.base)
+        self.assertFalse((repo/'specs/reviews/task-9999.md').exists())
+        self.assertTrue((bundle/'review-resume/specs/reviews/task-9999.md').exists())
+        self.assertEqual((bundle/'review-resume/review-evidence/probe.txt').read_text(),'real probe evidence')
+        self.assertFalse((bundle/'review-resume/verdict.json').exists())
+        self.assertFalse((bundle/'escape').exists())
+        self.assertEqual(json.loads((cfg/'harness/review.yaml').read_text())['timeout_minutes'],240)
+
+    def test_review_resume_rejects_modified_source(self):
+        replacement=self.interrupted_review(source_edit=True)
+        prepare(replacement,self.store.task('task-9999'),'review')
+        self.assertFalse((replacement.directory/'bundle/review-resume.json').exists())
+
+    def test_review_resume_rejects_different_candidate(self):
+        replacement=self.interrupted_review(wrong_candidate=True)
+        prepare(replacement,self.store.task('task-9999'),'review')
+        self.assertFalse((replacement.directory/'bundle/review-resume.json').exists())
 
     def test_saved_task_with_null_optional_artifacts_can_resume(self):
         task = self.store.task('task-9999')
@@ -199,7 +249,8 @@ import json,os,sys
 from pathlib import Path
 p=Path(os.environ['BACKEND_STATE']);v=json.loads(p.read_text()) if p.exists() else {'calls':[], 'pods':[]}
 a=sys.argv[1:]
-if a[:1]==['-g']: a=a[2:]
+if a[:1]==['-g']:
+ v.setdefault('gateways',[]).append(a[1]);a=a[2:]
 v['calls'].append(a)
 if a[:2]==['sandbox','create']:
  n=a[a.index('--name')+1];v['pods'].append({'name':n,'phase':'Ready','labels':{}})
@@ -269,6 +320,40 @@ else: print('fixture control operation')
         refused = self.invoke('--gateway', 'foreign', 'provider', 'list')
         self.assertEqual(refused.returncode, 75)
         self.assertEqual(json.loads((self.root / 'backend.json').read_text())['calls'], calls)
+
+    def test_inflight_hooks_follow_only_the_authenticated_instance_alias(self):
+        alias='gyre-d-fixture'
+        self.store.set_setting('dispatcher_gateway_registration',{'source':'gyre-gyre','alias':alias})
+        self.store.set_setting('gateway',alias)
+        for selector in ('gyre-gyre',alias):
+            result=self.invoke('--gateway',selector,'provider','list')
+            self.assertEqual(result.returncode,0,result.stderr)
+        state=json.loads((self.root/'backend.json').read_text())
+        self.assertEqual(state['gateways'],[alias,alias])
+        refused=self.invoke('--gateway','hypershell-other','provider','list')
+        self.assertEqual(refused.returncode,75)
+        self.assertEqual(json.loads((self.root/'backend.json').read_text())['gateways'],[alias,alias])
+        streamed=self.invoke('sandbox','upload',self.name,'fixture','/tmp/fixture')
+        self.assertEqual(streamed.returncode,0,streamed.stderr)
+        self.assertEqual(json.loads((self.root/'backend.json').read_text())['gateways'],[alias,alias,alias])
+
+    def test_cancellation_allows_cleanup_transport_but_forbids_new_compute(self):
+        self.store.set_setting(f"cancel:{self.work}:{self.claim['token']}",True)
+        result=self.invoke('provider','list')
+        self.assertEqual(result.returncode,0,result.stderr)
+        refused=self.invoke('sandbox','create','--name',self.name,'--','sleep','infinity')
+        self.assertEqual(refused.returncode,75)
+        self.assertEqual(json.loads((self.root/'backend.json').read_text())['pods'],[])
+
+    def test_old_worker_auth_refresh_does_not_touch_shared_registration(self):
+        alias='gyre-d-fixture'
+        self.store.set_setting('dispatcher_gateway_registration',{'source':'gyre-gyre','alias':alias})
+        self.store.set_setting('gateway',alias)
+        result=self.invoke('provider','list',extra={'EXPIRE_ONCE':'1','GYRE_OPEN_GATEWAY':'gyre-gyre'})
+        self.assertEqual(result.returncode,0,result.stderr)
+        state=json.loads((self.root/'backend.json').read_text())
+        self.assertTrue(any(c[:2]==['gateway','login'] for c in state['calls']))
+        self.assertEqual(set(state['gateways']),{alias})
 
     def test_expired_gateway_auth_is_refreshed_and_operation_retried(self):
         result=self.invoke('provider','list','--names',extra={'EXPIRE_ONCE':'1'})
