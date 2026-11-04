@@ -77,7 +77,19 @@ def read_rows(store):
         if canceled and status != 'running':
             status = 'canceled'
         started = store.db.execute("SELECT at FROM events WHERE work=? AND kind='claimed' ORDER BY id DESC LIMIT 1", (r['id'],)).fetchone()
+        readiness = None
+        ci = tasks[r['task']].get('ci') or {}
+        inputs = json.loads(r['input'])
+        bound = (inputs.get('published') or inputs.get('verified') or {}).get('head')
+        if r['stage'] == 'review':
+            published = tasks[r['task']].get('published_verified') or {}
+            if published.get('candidate') == inputs.get('candidate'):
+                bound = published.get('head')
+        if ci.get('head') and bound == ci['head']:
+            readiness = {key:ci.get(key) for key in ('status','merge_state')}
+            readiness['repair_queued'] = bool(tasks[r['task']].get('repair'))
         result.append(job(store, r, tasks) | {'status': status, 'failures': r['failures'],
+            'code_readiness':readiness,
             'next_at': r['retry_at'], 'started': started['at'] if started else r['created'],
             'finished': r['updated'] if status not in ('running','queued') else 0,
             'run_id': f"{r['id']}:{r['token']}",
@@ -212,7 +224,7 @@ def main():
                     pipeline.discover_stage(store, stage, base)
             selected = allowed_tasks(store)
             tasks = {t['name']:t['data'] for t in store.tasks()}
-            rows = store.db.execute("SELECT * FROM work WHERE state IN ('ready','retry') ORDER BY CASE stage WHEN 'cleanup' THEN 0 WHEN 'publish' THEN 1 WHEN 'verify' THEN 2 WHEN 'review' THEN 3 WHEN 'implement' THEN 4 ELSE 5 END,priority DESC,created").fetchall()
+            rows = store.db.execute("SELECT * FROM work WHERE state IN ('ready','retry') ORDER BY CASE stage WHEN 'cleanup' THEN 0 WHEN 'observe' THEN 1 WHEN 'publish' THEN 2 WHEN 'triage' THEN 3 WHEN 'verify' THEN 4 WHEN 'review' THEN 5 WHEN 'implement' THEN 6 ELSE 7 END,priority DESC,created").fetchall()
             result = {'jobs':[job(store,dict(r),tasks) for r in rows if (selected is None or r['task'] in selected) and eligible(store,dict(r))], 'errors':[]}
         elif action == 'retry':
             control(store,request); result = {}
