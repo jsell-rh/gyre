@@ -2,7 +2,7 @@
 title: "Expand AuditEvent schema to spec-compliant envelope"
 spec_ref: "observability.md §Audit Event Schema"
 depends_on: []
-progress: needs-revision
+progress: ready-for-review
 coverage_sections:
   - "observability.md §Audit Event Schema"
 commits: ["99de714b08938493b1a60d1e2217baabbf665275", "9e70fa7f78e58979f79aef505e9120c10460e280"]
@@ -91,3 +91,37 @@ The current implementation (`gyre-domain/src/audit.rs`) has a simpler struct: `i
 ## Agent Instructions
 
 Read `specs/system/observability.md` §Audit Event Schema for the full spec. The current domain model is in `gyre-domain/src/audit.rs`. The port is in `gyre-ports/src/audit.rs`. The SQLite adapter is in `gyre-adapters/src/sqlite/audit.rs`. The API handlers are in `gyre-server/src/api/audit.rs`. The SIEM formatter is in `gyre-server/src/siem.rs`. Grep for `AuditEvent::new(` to find all call sites that need updating. Check migration numbering in `gyre-adapters/src/sqlite/migrations.rs` — currently at 000038.
+
+## Shipped
+
+The audit event envelope is implemented end-to-end (domain → port → all three adapters → migration → API → SIEM → web) and every round-1 review finding (F1–F4) is fixed with regression tests.
+
+### Envelope
+
+- `gyre-domain/src/audit.rs`: `AuditEvent` carries all 14 spec fields; `agent_id` is `Option<Id>` (null for server-initiated events); `AuditOutcome` enum (Success/Failure/Blocked) with snake_case serde both ways. Legacy `path`/`pid` are subsumed by the `detail` JSON payload.
+- `gyre-ports/src/audit.rs`: `AuditRepository::query` takes an `AuditQueryFilter` with 9 dimensions (agent_id, event_type, workspace_id, user_id, resource_type, outcome, since, until, limit).
+- SQLite, Postgres, and mem adapters all implement the 14-column row shape and every filter dimension with identical semantics.
+- Migration `2026-09-30-000054_audit_event_envelope` (rebuild-table pattern): adds the 9 new columns, makes `agent_id` nullable, folds legacy `path`/`pid` into `detail`, backfills `resource_type='agent'`/`outcome='success'`. Down migration reverses the shape and restores legacy columns from detail.
+- `gyre-server/src/api/audit.rs`: POST `/api/v1/audit/events` binds `agent_id`/`user_id` to the verified caller (NEW-31), GET supports all new filter dimensions; SSE/broadcasts emit the full envelope.
+- `gyre-server/src/siem.rs`: syslog JSON and CEF extensions include workspaceId, resourceType, outcome, agentId/userId, src, and detail-derived filePath/pid.
+- `container_audit.rs`, `procfs_monitor.rs`, `audit_simulator.rs`, `retention.rs` updated to the new constructor; container events set `resource_type: "container"` with per-class outcomes (started/stopped=Success, crashed/oom=Failure, network_blocked=Blocked).
+
+### Review-revision fixes (F1–F4)
+
+- **F1 (migration portability):** migration 000054's up/down rewritten from SQLite-only JSON1 functions to portable SQL (CASE WHEN + string concatenation) with RFC 7396 merge-patch fold semantics; the four temporary portability exemptions were deleted and the frozen count lowered 5→1. Regression test `migration_000054_folds_legacy_path_pid_into_detail` drives the real embedded up.sql against seeded legacy rows (JSON-hostile paths, non-object details, pre-existing keys) and asserts exact merged payloads.
+- **F2 (forged scope attribution):** `validate_workspace_scope`/`validate_repo_scope` look up every caller-supplied `workspace_id`/`repo_id` and reject (Forbidden/NotFound) anything outside the caller's tenant; tests cover cross-tenant workspace, cross-tenant repo, and mismatched workspace+repo pairs.
+- **F3 (forgeable source_ip):** new `gyre-server/src/trusted_proxy.rs` — source of truth is the socket peer address (`ConnectInfo`); `X-Forwarded-For`/`X-Real-Ip` are honored only when the peer is in `GYRE_TRUSTED_PROXIES` (empty by default), parsed rightmost-untrusted; resolution fails closed to `None` without socket info. `check-forwarded-header-trust.sh` passes.
+- **F4 (outcome filter 400 shape):** `?outcome=` parses as a plain string and a typo returns the repo's `ApiError` JSON shape naming the valid values, consistent with the other handlers.
+
+### Test evidence
+
+Focused suites run on this branch head (logs in `/tmp/stage/review-evidence/`):
+
+- `cargo test -p gyre-domain --lib audit` → 8 passed, 0 failed
+- `cargo test -p gyre-adapters --lib sqlite::` → 263 passed, 0 failed (includes the F1 migration-fold test and 11 audit adapter tests)
+- `cargo test -p gyre-server --lib api::audit` → 12 passed, 0 failed (envelope round-trip, agent-id binding, F2 scope validation, F3 trusted-proxy source_ip both directions, F4 ApiError shape, legacy path/pid fold, outcome filter)
+- `cargo test -p gyre-server --lib trusted_proxy` → 9 passed, 0 failed
+- `cargo test -p gyre-server --lib siem::` → 7 passed, 0 failed
+- Mechanical checks all green: `check-migration-sql-portability`, `check-migration-versions`, `check-arch`, `check-forwarded-header-trust`, `check-forged-scope-fields`, `check-mem-port-contracts`, `check-abac-route-registry`, `check-task-commit-attribution`, `check-inert-enforcement`, `check-scope-literal-defaults`.
+
+Implementation commits: `9e70fa7f` (F2/F3/F4 handler + trusted-proxy layer), `99de714b` (F1 portable migration rewrite + portability-exemption shrink + fold regression test).
