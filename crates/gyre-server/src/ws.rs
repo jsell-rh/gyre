@@ -864,6 +864,17 @@ mod tests {
 
         // Open 5 sessions for the user (the cap). Each is a separate WS
         // connection with its own session_id.
+        //
+        // After sending each presence, wait for its broadcast to reach the
+        // observer BEFORE opening the next session. Cross-connection
+        // broadcast order is not guaranteed (each connection is an independent
+        // server task), so an unordered drain loop would discard a
+        // later-expected session's presence while waiting for an earlier one.
+        // The round-trip also guarantees strictly increasing server_last_seen
+        // (the insert completes before the broadcast), so the eviction below
+        // deterministically targets the first-opened session — min_by_key over
+        // a HashMap breaks ties and reorders by (random) iteration order
+        // otherwise.
         let mut subjects = Vec::new();
         for i in 0..5 {
             let (mut s, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
@@ -875,15 +886,8 @@ mod tests {
             )))
             .await
             .unwrap();
-            // Ensure strictly increasing server_last_seen: min_by_key over a
-            // HashMap breaks ties by (random) iteration order, which would make
-            // the "oldest is evicted" assertion flaky on same-ms inserts.
-            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
             subjects.push(s);
-        }
-        // Drain the observer until all 5 live presences arrived.
-        for i in 0..5 {
-            expect_presence(&mut observer, &format!("sess-cap-{i}"), "specs").await;
+            expect_presence(&mut observer, &sid, "specs").await;
         }
 
         // 6th session: oldest (sess-cap-0) is evicted by the 5-session cap.
