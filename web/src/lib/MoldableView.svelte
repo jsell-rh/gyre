@@ -1,10 +1,13 @@
 <script>
   import Badge from './Badge.svelte';
   import EmptyState from './EmptyState.svelte';
+  import VirtualNodeList from './VirtualNodeList.svelte';
   import { api } from './api.js';
   import { toast as showToast } from './toast.svelte.js';
   import { entityName, shortId } from './entityNames.svelte.js';
   import { listLayouts } from './layoutRegistry.js';
+  import { dispatchViewEvent, viewEventFromDom } from './viewEvents.js';
+  import { scaleTime } from 'd3-scale';
   import { t } from 'svelte-i18n';
 
   let {
@@ -35,6 +38,25 @@
   let activeView = $state('graph'); // active layout name from the registry
 
   let activeLayout = $derived(layouts.find((l) => l.name === activeView));
+
+  // ── ViewEvent emission (ui-layout.md §10 Interaction Events) ───────────────
+  // Every interactive element (list rows, timeline rows) emits the
+  // standardized ViewEvent; the Explorer shell handles them uniformly.
+  function emitNodeEvent(domEvent, node) {
+    dispatchViewEvent(domEvent.currentTarget, viewEventFromDom(domEvent, 'node', node.id, node));
+  }
+
+  function nodeRowClick(domEvent, node) {
+    emitNodeEvent(domEvent, node);
+    onSelectNode?.(node);
+  }
+
+  function nodeRowKeydown(e, node) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      nodeRowClick(e, node);
+    }
+  }
 
   // List view sort
   let sortBy = $state('type'); // 'type' | 'name' | 'file'
@@ -91,6 +113,11 @@
       return 0;
     });
   });
+
+  // Large lists switch from the sortable table to the virtualized renderer
+  // (ui-layout.md §10 list: native {#each} with virtual scroll).
+  const LIST_VIRTUAL_THRESHOLD = 100;
+  let listVirtual = $derived(filteredNodes.length > LIST_VIRTUAL_THRESHOLD);
 
   function typeVariant(type) {
     switch (type) {
@@ -194,6 +221,23 @@
     [...timelineDeltas].sort((a, b) => a.timestamp - b.timestamp)
   );
 
+  // ── d3-scale time axis (ui-layout.md §10: timeline → d3-scale + Svelte) ────
+  // The time axis maps delta timestamps to percentage positions along the
+  // marker track / scrubber, with scale-generated tick marks.
+  let timeScale = $derived.by(() =>
+    scaleTime()
+      .domain([new Date(minTs * 1000), new Date(maxTs * 1000)])
+      .range([0, 100])
+  );
+
+  let timeTicks = $derived.by(() => {
+    try {
+      return timeScale.ticks(5).map((d) => ({ date: d, left: timeScale(d) }));
+    } catch (_e) {
+      return [];
+    }
+  });
+
   // Load timeline when Timeline tab is active and repoId is set
   $effect(() => {
     if (activeView === 'timeline' && repoId) {
@@ -251,10 +295,8 @@
   }
 
   function markerLeft(ts) {
-    const min = minTs;
-    const max = maxTs;
-    if (max === min) return '50%';
-    return `${((ts - min) / (max - min)) * 100}%`;
+    if (maxTs === minTs) return '50%';
+    return `${timeScale(new Date(ts * 1000))}%`;
   }
 </script>
 <div class="moldable-view">
@@ -318,7 +360,13 @@
           />
         </div>
       {:else}
-        <Renderer nodes={displayNodes} edges={displayEdges} {repoId} {onSelectNode} />
+        <Renderer
+          nodes={displayNodes}
+          edges={displayEdges}
+          {repoId}
+          {onSelectNode}
+          engine={activeLayout.engine}
+        />
       {/if}
 
     {:else if activeView === 'list'}
@@ -363,6 +411,12 @@
                 description={$t('moldable_view.no_graph_data_desc')}
               />
             </div>
+          {:else if listVirtual}
+            <!-- ui-layout.md §10: large lists virtualize (sortable order is
+                 preserved by `filteredNodes`; only the visible window renders). -->
+            <div class="list-virtual-wrap">
+              <VirtualNodeList nodes={filteredNodes} {onSelectNode} viewportHeight={520} />
+            </div>
           {:else}
             <table class="list-table">
               <thead>
@@ -380,8 +434,11 @@
                     class="list-row"
                     tabindex="0"
                     aria-label={$t('moldable_view.select_node', { values: { name: node.name } })}
-                    onclick={() => onSelectNode?.(node)}
-                    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectNode?.(node); } }}
+                    onclick={(e) => nodeRowClick(e, node)}
+                    ondblclick={(e) => emitNodeEvent(e, node)}
+                    onmouseenter={(e) => emitNodeEvent(e, node)}
+                    oncontextmenu={(e) => { e.preventDefault(); emitNodeEvent(e, node); }}
+                    onkeydown={(e) => nodeRowKeydown(e, node)}
                   >
                     <td><Badge variant={typeVariant(node.node_type)} value={node.node_type ?? '?'} /></td>
                     <td class="mono">{node.name}</td>
@@ -448,8 +505,11 @@
                     role="button"
                     tabindex="0"
                     aria-label="{node.name} ({node.node_type})"
-                    onclick={() => onSelectNode?.(node)}
-                    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectNode?.(node); } }}
+                    onclick={(e) => nodeRowClick(e, node)}
+                    ondblclick={(e) => emitNodeEvent(e, node)}
+                    onmouseenter={(e) => emitNodeEvent(e, node)}
+                    oncontextmenu={(e) => { e.preventDefault(); emitNodeEvent(e, node); }}
+                    onkeydown={(e) => nodeRowKeydown(e, node)}
                   >
                     <Badge variant={typeVariant(node.node_type)} value={node.node_type ?? '?'} />
                     <span class="tl-node-name">{node.name}</span>
@@ -494,6 +554,17 @@
 
           <!-- Scrubber -->
           <div class="scrubber-area" aria-label={$t('moldable_view.timeline_scrubber')}>
+            <!-- Time axis ticks (d3-scale, ui-layout.md §10 timeline) -->
+            {#if timeTicks.length > 1}
+              <div class="time-axis" aria-hidden="true">
+                {#each timeTicks as tick (tick.left)}
+                  <span class="time-axis-tick" style="left: {tick.left}%">
+                    <span class="time-axis-pip"></span>
+                    <span class="time-axis-label">{tick.date.toLocaleDateString()}</span>
+                  </span>
+                {/each}
+              </div>
+            {/if}
             <!-- Delta markers -->
             <div class="marker-track">
               {#each sortedDeltas as delta}
@@ -988,6 +1059,44 @@
     height: 20px;
     margin-bottom: var(--space-1);
     pointer-events: none;
+  }
+
+  /* Time axis ticks (d3-scale, ui-layout.md §10 timeline layout) */
+  .time-axis {
+    position: relative;
+    height: 16px;
+    margin-bottom: var(--space-1);
+    pointer-events: none;
+  }
+
+  .time-axis-tick {
+    position: absolute;
+    top: 0;
+    transform: translateX(-50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .time-axis-pip {
+    width: 1px;
+    height: 6px;
+    background: var(--color-border-strong, #475569);
+  }
+
+  .time-axis-label {
+    font-size: 10px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .list-virtual-wrap {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
   }
 
   .delta-marker {
