@@ -2,7 +2,7 @@
 title: "Interaction Patterns — scope transitions, drill-down, inline expansion"
 spec_ref: "ui-layout.md §3"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "ui-layout.md §3. Interaction Patterns"
   - "ui-layout.md §Scope Transitions"
