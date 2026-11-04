@@ -216,8 +216,10 @@ fn pod_name(name: &str) -> String {
             }
         })
         .collect();
-    let mut n = sanitized;
-    n.truncate(253);
+    // Char-boundary-safe truncation to the RFC 1123 max length (253).
+    // The sanitized string is ASCII-only by construction, but take()
+    // over chars keeps that invariant local instead of relying on it.
+    let mut n: String = sanitized.chars().take(253).collect();
     // Must start and end with an alphanumeric.
     while n.starts_with('-') || n.starts_with('.') {
         n.remove(0);

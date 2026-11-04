@@ -355,6 +355,19 @@ impl ResourceResolver {
                     "admin",
                     None,
                 ),
+                // Tenant-scoped compute targets (agent-runtime spec §3):
+                // reads are tenant-member visible (handler enforces tenant
+                // scoping), mutations additionally require the Admin role
+                // in the handler body. Registered here rather than carried
+                // as exemption-file debt — the two stale exemption entries
+                // for these paths were removed when the routes landed in
+                // the resolver (check-abac-route-registry.sh shrinks).
+                RouteResourceMapping::api("/api/v1/compute-targets", "compute_target", None),
+                RouteResourceMapping::api(
+                    "/api/v1/compute-targets/:id",
+                    "compute_target",
+                    None,
+                ),
                 // ── Network ────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/network/peers", "network_peer", None),
                 RouteResourceMapping::api(
@@ -1033,6 +1046,11 @@ pub mod tests {
             "/api/v1/repos/:id/worktrees/:worktree_id",
             "/api/v1/repos/:id/dependencies/:dependency_id",
             "/api/v1/merge-requests/:id/dependencies/:dependency_id",
+            // Tenant-scoped compute targets (agent-runtime §3) — must be
+            // resolver-mapped, never carried as exemption-file debt
+            // (task-093 F1 pattern).
+            "/api/v1/compute-targets",
+            "/api/v1/compute-targets/:id",
         ];
         for pattern in &required {
             assert!(
