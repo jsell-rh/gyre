@@ -52,3 +52,35 @@ Non-findings (checked, judged out of scope or acceptable):
 Summary: the envelope work itself is thorough and correct — all 14 fields flow end-to-end (domain → port → all three adapters → migration → API → SIEM → web) with genuine filter parity and real tests, and the migration's legacy-data fold is verified correct on real SQLite. But the migration breaks the PostgreSQL deployment path outright (F1), and the two new provenance attributes the spec added for forensic value (`source_ip`, plus workspace/repo attribution) are caller-forgeable in exactly the way the neighboring NEW-31 binding exists to prevent (F2, F3). Revision required.
 
 — Verifier, 2026-09-30
+
+## Round 2 — revision review (candidate 319cc46c, base 5196f444)
+
+Scope: the F1–F4 revision fixes (`9e70fa7f`, `99de714b`). The envelope itself (14 fields, all three adapters, SIEM, web) was verified in round 1 and is unchanged by this diff apart from the fixes below.
+
+Independent probes (logs and edge-case SQL under `/tmp/stage/review-evidence/`):
+
+- `cargo test -p gyre-adapters --lib migration_000054` → **1 passed** (cold compile 5m26s). The test drives the real embedded up.sql against seeded legacy rows (JSON-hostile path with quote/backslash/newline/tab, non-object details, pre-existing keys) and asserts exact merged payloads.
+- `cargo test -p gyre-server --lib api::audit` → **12 passed, 0 failed** (includes F2 cross-tenant workspace/repo + mismatch + unknown-id, F3 both directions, F4 ApiError shape).
+- `cargo test -p gyre-server --lib trusted_proxy` → **9 passed, 0 failed**; `siem::` → **7 passed**; `cargo test -p gyre-domain --lib audit` → **8 passed**.
+- `bash scripts/check-migration-sql-portability.sh` → OK; exemptions file genuinely shrunk 5→1 (single remaining entry is the pre-existing 000013 `INSERT OR IGNORE`).
+- `check-forwarded-header-trust`, `check-forged-scope-fields`, `check-migration-versions`, `check-arch`, `check-inert-enforcement`, `check-scope-literal-defaults`, `check-mem-port-contracts`, `check-abac-route-registry`, `check-task-commit-attribution` → all OK.
+- Adversarial sqlite3 3.45.1 probe of the fold SQL beyond the shipped test (multibyte path `/tmp/日本語/ファ"イル`, closing brace inside a string value, empty object, trailing whitespace, pre-existing key): all rows fold to valid JSON with correct escaping; the brace-in-string and multibyte cases are handled correctly. The trailing-whitespace and duplicate-key corners cannot occur in real legacy data (in-repo writers emitted canonical `serde_json::to_string` output; legacy `details` never contained `path`/`pid` keys — established in round 1).
+
+Findings from round 1 — all fixed and regression-tested:
+
+- **F1 fixed.** Migration 000054's up/down rewritten from SQLite-only JSON1 functions to portable SQL (`CASE WHEN` + `substr`/`length`/`replace`/`CAST`/`||`). Static portability audit: every construct is valid on both SQLite and PostgreSQL; the backslash/quote escape literals rely on `standard_conforming_strings` (PG default since 9.1), where they denote the same two-character strings as in SQLite; raw newline/CR/tab inside single-quoted literals are legal in both engines. The regression test would not catch a JSON1 regression on SQLite by itself, but the portability script (frozen count 1, exemptions shrunk) now gates that class mechanically. **Verifier item:** no PostgreSQL server exists in the review sandbox — execution of migration 000054 on a real PostgreSQL instance (e.g. `GYRE_DATABASE_URL=postgres://...` boot + legacy-row fold check) should be run in verification where a PG server is available. This is an infrastructure restriction, not a code defect.
+- **F2 fixed.** `validate_workspace_scope`/`validate_repo_scope` look up every caller-supplied `workspace_id`/`repo_id`, compare tenant against the caller, and reject cross-tenant (403), unknown (404), and repo/workspace-mismatch (403) attributions before the write. `user_id`/`agent_id` remain server-bound. The tests assert specific failure statuses, so they fail if the validation is removed.
+- **F3 fixed.** New `gyre-server/src/trusted_proxy.rs`: source of truth is the socket peer (`ConnectInfo`, attached via `into_make_service_with_connect_info` in main.rs); `X-Forwarded-For`/`X-Real-Ip` honored only when the peer is in `GYRE_TRUSTED_PROXIES` (empty by default), parsed rightmost-untrusted; resolution fails closed to `None` without socket info; malformed proxy-list entries are skipped, never widened. Grep confirms no unguarded forwarded-header read remains anywhere in the server. The handler tests assert concrete values (`203.0.113.9` from the peer, `null` for forged headers without a socket), so they kill the old header-trusting behavior.
+- **F4 fixed.** `?outcome=` parses as a plain string; a typo returns the repo's `ApiError` 400 JSON naming the valid values.
+
+Non-findings (checked, acceptable):
+
+- Down migration restores `path`/`pid` as NULL (shape-restoring, detail payload kept verbatim in `details`) — documented in the file; the same one-way character round 1 already accepted for `agent_id`.
+- The up.sql comment "a pre-existing key is never overwritten" is imprecise for the theoretical non-null-`path`-plus-existing-`path`-key corner (it emits a duplicate JSON key; serde_json last-wins gives the folded value, matching RFC 7396 merge-patch and the old `json_patch` behavior anyway) — no behavioral defect, and the corner is unreachable in legacy data.
+- GET query filters still accept arbitrary `workspace_id` strings without read-scope validation — pre-existing, explicitly judged acceptable in round 1, unchanged by this diff (the ABAC layer gates the route).
+- `specs/coverage/system/observability.md` row 4 remains `task-assigned task-102` — correct process state pending merge (matches the pattern of approved-but-unmerged tasks elsewhere in the coverage docs).
+- `web/dist` bundle churn with no `web/src` change — rebuild artifact of the pipeline checkpoint; the committed bundle builds cleanly (`build.rs` ran `npm ci` + `npm run build` successfully during the test compile) and the working tree stayed clean afterward.
+
+Verdict: **approved**. All four round-1 findings are fixed with genuine, bug-killing regression coverage; the migration fold is independently verified correct on real SQLite with adversarial edge cases, and the portability claim is supported by static analysis plus the now-passing mechanical gate (live PostgreSQL execution noted as a verifier item above).
+
+— Reviewer, round 2
