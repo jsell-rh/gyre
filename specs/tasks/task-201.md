@@ -2,7 +2,7 @@
 title: "Implement persistent full-text search backend (SQLite FTS5 + Postgres tsvector)"
 spec_ref: "search.md §Search Index"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "search.md §Search Index"
   - "search.md §Technology"
