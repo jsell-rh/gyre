@@ -73,8 +73,7 @@ pub async fn search_handler(
     // Auto-track search execution (analytics.md §Auto-Emitted Events).
     {
         let entity_types: Vec<String> = {
-            let mut types: Vec<String> =
-                results.iter().map(|r| r.entity_type.clone()).collect();
+            let mut types: Vec<String> = results.iter().map(|r| r.entity_type.clone()).collect();
             types.sort();
             types.dedup();
             types
@@ -200,7 +199,10 @@ mod tests {
             .unwrap();
         assert_eq!(events.len(), 1, "one search.query event expected");
         let ev = &events[0];
-        assert_eq!(ev.properties["query_length"], 14, "\"reconciliation\" has 14 chars");
+        assert_eq!(
+            ev.properties["query_length"], 14,
+            "\"reconciliation\" has 14 chars"
+        );
         assert_eq!(
             ev.properties["entity_types"],
             serde_json::json!(["task"]),

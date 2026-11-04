@@ -334,14 +334,7 @@ pub async fn check_spawn_budget(state: &AppState, project_id: &str) -> Result<()
             }
         }
         if let Some(max_cost) = config.max_cost_per_day {
-            emit_budget_warning(
-                state,
-                project_id,
-                "cost",
-                usage.cost_today,
-                max_cost,
-            )
-            .await;
+            emit_budget_warning(state, project_id, "cost", usage.cost_today, max_cost).await;
             if usage.cost_today >= max_cost {
                 return Err(format!(
                     "workspace budget exceeded: max_cost_per_day=${max_cost:.4} (spent ${:.4})",

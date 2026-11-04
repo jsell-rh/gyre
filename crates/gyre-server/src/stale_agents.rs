@@ -49,7 +49,12 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                     }),
                     now,
                 )
-                .with_scope(None, None, Some(&agent.workspace_id), agent.repo_id.as_ref());
+                .with_scope(
+                    None,
+                    None,
+                    Some(&agent.workspace_id),
+                    agent.repo_id.as_ref(),
+                );
                 let _ = state.analytics.record(&ev).await;
                 let _ = state.agents.update(&agent).await;
 
@@ -304,19 +309,13 @@ mod tests {
         let ws = gyre_domain::Workspace::new(Id::new("ws-1"), Id::new("t1"), "Ws", "ws", 0);
         state.workspaces.create(&ws).await.unwrap();
 
-        let mut agent =
-            gyre_domain::Agent::new(Id::new("stale-agent-1"), "doomed", 1_000);
+        let mut agent = gyre_domain::Agent::new(Id::new("stale-agent-1"), "doomed", 1_000);
         agent.disconnected_behavior = DisconnectedBehavior::Abort;
         agent.transition_status(AgentStatus::Active).unwrap();
         state.agents.create(&agent).await.unwrap();
 
         // Age past the heartbeat timeout, no heartbeat ever recorded.
-        let mut aged = state
-            .agents
-            .find_by_id(&agent.id)
-            .await
-            .unwrap()
-            .unwrap();
+        let mut aged = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
         aged.spawned_at = aged.spawned_at.saturating_sub(10_000);
         aged.last_heartbeat = None;
         state.agents.update(&aged).await.unwrap();

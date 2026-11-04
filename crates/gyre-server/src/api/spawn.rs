@@ -1118,16 +1118,11 @@ pub(crate) async fn spawn_agent_core(
         }),
         now,
     )
-    .with_scope(
-        None,
-        None,
-        Some(&repo.workspace_id),
-        Some(&repo.id),
-    );
+    .with_scope(None, None, Some(&repo.workspace_id), Some(&repo.id));
     let _ = state.analytics.record(&ev).await;
 
     // M22.2: Increment budget active-agent counter for the workspace.
-    super::budget::increment_active_agents(&state, &repo.workspace_id.to_string()).await;
+    super::budget::increment_active_agents(state, &repo.workspace_id.to_string()).await;
 
     // M32: Capture meta-spec set SHA for provenance — workspace lookup via kv_store
     // requires a reverse scan (repo_id → workspace_id) which is not directly indexed.
@@ -1354,12 +1349,7 @@ pub async fn complete_agent(
         }),
         now,
     )
-    .with_scope(
-        None,
-        None,
-        Some(&mr.workspace_id),
-        Some(&mr.repository_id),
-    );
+    .with_scope(None, None, Some(&mr.workspace_id), Some(&mr.repository_id));
     let _ = state.analytics.record(&ev).await;
 
     // Auto-track MR creation
@@ -1371,7 +1361,6 @@ pub async fn complete_agent(
         now,
     );
     let _ = state.analytics.record(&ev).await;
-
 
     // M22.2: Decrement budget active-agent counter when agent completes.
     if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {
@@ -1508,9 +1497,13 @@ pub async fn fail_agent(
         }),
         now,
     )
-    .with_scope(None, None, Some(&agent.workspace_id), agent.repo_id.as_ref());
+    .with_scope(
+        None,
+        None,
+        Some(&agent.workspace_id),
+        agent.repo_id.as_ref(),
+    );
     let _ = state.analytics.record(&ev).await;
-
 
     // Notify the spawning user that the agent failed (HSI §2).
     if let Some(ref spawned_by) = agent.spawned_by {
@@ -1594,7 +1587,12 @@ pub async fn stop_agent(
         }),
         now,
     )
-    .with_scope(None, None, Some(&agent.workspace_id), agent.repo_id.as_ref());
+    .with_scope(
+        None,
+        None,
+        Some(&agent.workspace_id),
+        agent.repo_id.as_ref(),
+    );
     let _ = state.analytics.record(&ev).await;
 
     Ok(StatusCode::OK)
@@ -2373,11 +2371,15 @@ mod tests {
         assert_eq!(ev.agent_id.as_deref(), Some(agent_id.as_str()));
         assert_eq!(ev.properties["task_id"], task_id);
         assert!(
-            ev.properties["compute_target"].as_str().is_some_and(|t| !t.is_empty()),
+            ev.properties["compute_target"]
+                .as_str()
+                .is_some_and(|t| !t.is_empty()),
             "compute_target must be a non-empty string"
         );
         assert!(
-            ev.properties["persona"].as_str().is_some_and(|p| !p.is_empty()),
+            ev.properties["persona"]
+                .as_str()
+                .is_some_and(|p| !p.is_empty()),
             "persona must be a non-empty string"
         );
     }
@@ -2436,7 +2438,10 @@ mod tests {
             .unwrap();
         assert_eq!(created.len(), 1, "one mr.created event expected");
         assert_eq!(created[0].properties["mr_id"], mr_id);
-        assert_eq!(created[0].properties["source_branch"], "feat/analytics-complete");
+        assert_eq!(
+            created[0].properties["source_branch"],
+            "feat/analytics-complete"
+        );
     }
 
     #[tokio::test]
@@ -2471,7 +2476,9 @@ mod tests {
         assert_eq!(ev.agent_id.as_deref(), Some(agent_id.as_str()));
         assert_eq!(ev.properties["task_id"], task_id);
         assert!(
-            ev.properties["reason"].as_str().is_some_and(|r| !r.is_empty()),
+            ev.properties["reason"]
+                .as_str()
+                .is_some_and(|r| !r.is_empty()),
             "reason must be a non-empty string"
         );
     }

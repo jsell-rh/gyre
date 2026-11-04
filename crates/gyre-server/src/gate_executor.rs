@@ -142,7 +142,6 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
     );
     let _ = state.analytics.record(&ev).await;
 
-
     // Emit GateFailure event so the MR's author agent can react immediately.
     if status == GateStatus::Failed {
         let gate_type_str = format!("{:?}", gate.gate_type);
@@ -155,23 +154,37 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
             .map(|mr| (mr.spec_ref, Some(mr.workspace_id)))
             .unwrap_or((None, None));
         let gate_agent_id = format!("gate-agent:{}", gate.id);
-        let ws_id = workspace_id.unwrap_or_else(|| gyre_common::Id::new("default"));
-        state
-            .emit_event(
-                Some(ws_id.clone()),
-                gyre_common::message::Destination::Workspace(ws_id),
-                gyre_common::message::MessageKind::GateFailure,
-                Some(serde_json::json!({
-                    "mr_id": mr_id.to_string(),
-                    "gate_name": gate.name,
-                    "gate_type": gate_type_str,
-                    "status": "Failed",
-                    "output": output,
-                    "spec_ref": spec_ref,
-                    "gate_agent_id": gate_agent_id,
-                })),
-            )
-            .await;
+        // Never fabricate a "default" workspace scope on lookup failure
+        // (task-097 F3): if the MR's workspace cannot be determined, skip
+        // the event emission and log — an invented identity would
+        // re-target the message at whatever workspace is literally named
+        // "default".
+        match workspace_id {
+            Some(ws_id) => {
+                state
+                    .emit_event(
+                        Some(ws_id.clone()),
+                        gyre_common::message::Destination::Workspace(ws_id),
+                        gyre_common::message::MessageKind::GateFailure,
+                        Some(serde_json::json!({
+                            "mr_id": mr_id.to_string(),
+                            "gate_name": gate.name,
+                            "gate_type": gate_type_str,
+                            "status": "Failed",
+                            "output": output,
+                            "spec_ref": spec_ref,
+                            "gate_agent_id": gate_agent_id,
+                        })),
+                    )
+                    .await;
+            }
+            None => {
+                tracing::warn!(
+                    mr_id = %mr_id,
+                    "gate_executor: MR workspace unresolvable; skipping GateFailure event"
+                );
+            }
+        }
     }
 
     // Notify MR author when gate fails (HSI §2).
@@ -958,21 +971,17 @@ async fn run_command_in_dir(
         command.current_dir(dir);
     }
 
-    let result = match tokio::time::timeout(
-        Duration::from_secs(timeout_secs),
-        command.output(),
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(_) => {
-            warn!(cmd = %cmd, timeout_secs, "gate command timed out");
-            return (
-                GateStatus::Failed,
-                format!("timed out after {timeout_secs}s"),
-            );
-        }
-    };
+    let result =
+        match tokio::time::timeout(Duration::from_secs(timeout_secs), command.output()).await {
+            Ok(r) => r,
+            Err(_) => {
+                warn!(cmd = %cmd, timeout_secs, "gate command timed out");
+                return (
+                    GateStatus::Failed,
+                    format!("timed out after {timeout_secs}s"),
+                );
+            }
+        };
 
     match result {
         Ok(output) => {
@@ -1092,12 +1101,9 @@ async fn run_post_merge_gate_commands(
         match &gate.gate_type {
             GateType::TestCommand | GateType::LintCommand => {
                 let timeout = gate.timeout_secs.unwrap_or(AGENT_GATE_TIMEOUT_SECS);
-                let (status, output) = run_command_in_dir(
-                    gate.command.as_deref().unwrap_or("true"),
-                    cwd,
-                    timeout,
-                )
-                .await;
+                let (status, output) =
+                    run_command_in_dir(gate.command.as_deref().unwrap_or("true"), cwd, timeout)
+                        .await;
                 if status == GateStatus::Failed {
                     if gate.required {
                         return Err(format!(

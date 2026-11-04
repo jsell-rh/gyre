@@ -685,12 +685,7 @@ pub async fn transition_mr_status(
             properties,
             ts,
         )
-        .with_scope(
-            None,
-            None,
-            Some(&mr.workspace_id),
-            Some(&mr.repository_id),
-        );
+        .with_scope(None, None, Some(&mr.workspace_id), Some(&mr.repository_id));
         let _ = state.analytics.record(&ev).await;
     }
 
@@ -1128,7 +1123,9 @@ mod tests {
         assert_eq!(ev.properties["mr_id"], mr_id);
         assert_eq!(ev.properties["repo_id"], "repo-1");
         assert!(
-            ev.properties["reason"].as_str().is_some_and(|r| !r.is_empty()),
+            ev.properties["reason"]
+                .as_str()
+                .is_some_and(|r| !r.is_empty()),
             "reason must be a non-empty string"
         );
     }
@@ -1197,10 +1194,15 @@ mod tests {
         let ev = &events[0];
         assert_eq!(ev.properties["mr_id"], mr_id);
         assert_eq!(ev.properties["repo_id"], "repo-1");
-        assert_eq!(ev.properties["gate_count"], 2, "gate_count counts gate results");
+        assert_eq!(
+            ev.properties["gate_count"], 2,
+            "gate_count counts gate results"
+        );
         // The MR never entered the merge queue — queue_wait_secs is absent/null.
         assert!(
-            ev.properties.get("queue_wait_secs").map_or(true, |v| v.is_null()),
+            ev.properties
+                .get("queue_wait_secs")
+                .is_none_or(|v| v.is_null()),
             "queue_wait_secs must be null when the MR never queued"
         );
     }

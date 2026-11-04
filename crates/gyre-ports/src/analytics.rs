@@ -46,6 +46,7 @@ impl AnalyticsQueryFilter {
 }
 
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait AnalyticsRepository: Send + Sync {
     async fn record(&self, event: &AnalyticsEvent) -> Result<()>;
     async fn query(

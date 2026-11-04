@@ -1459,9 +1459,13 @@ async fn handle_agent_complete(state: &AppState, args: &Value) -> Value {
                 }),
                 now_secs(),
             )
-            .with_scope(None, None, Some(&agent.workspace_id), agent.repo_id.as_ref());
+            .with_scope(
+                None,
+                None,
+                Some(&agent.workspace_id),
+                agent.repo_id.as_ref(),
+            );
             let _ = state.analytics.record(&ev).await;
-
 
             match state.agents.update(&agent).await {
                 Ok(()) => tool_result(format!("Agent {agent_id} marked complete")),
@@ -3962,7 +3966,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(
-            json["result"]["isError"].as_bool().unwrap_or(false) == false,
+            !json["result"]["isError"].as_bool().unwrap_or(false),
             "agent completion must succeed: {json}"
         );
 
@@ -4038,7 +4042,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(
-            json["result"]["isError"].as_bool().unwrap_or(false) == false,
+            !json["result"]["isError"].as_bool().unwrap_or(false),
             "task update must succeed: {json}"
         );
 

@@ -175,8 +175,7 @@ impl AnalyticsRepository for PgStorage {
             if let Some(name) = &filter.event_name {
                 // Exact or trailing-`*` prefix match (analytics.md §Query Parameters).
                 if let Some(prefix) = name.strip_suffix('*') {
-                    query =
-                        query.filter(analytics_events::event_name.like(format!("{}%", prefix)));
+                    query = query.filter(analytics_events::event_name.like(format!("{}%", prefix)));
                 } else {
                     query = query.filter(analytics_events::event_name.eq(name.as_str()));
                 }
@@ -208,7 +207,6 @@ impl AnalyticsRepository for PgStorage {
         })
         .await?
     }
-
 
     async fn count(&self, event_name: &str, since: u64, until: u64) -> Result<u64> {
         let pool = Arc::clone(&self.pool);

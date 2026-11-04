@@ -57,7 +57,6 @@ async fn increment_revert_count(state: &AppState, mr_id: &str) -> anyhow::Result
     Ok(next)
 }
 
-
 /// Circuit breaker tripped: cancel the MR's queue entries permanently and
 /// escalate to a human (platform-model.md §6 Circuit Breaker).
 async fn trip_circuit_breaker(
@@ -767,7 +766,12 @@ async fn merge_atomic_group(
             }),
             now,
         )
-        .with_scope(None, None, Some(&updated_mr.workspace_id), Some(&updated_mr.repository_id));
+        .with_scope(
+            None,
+            None,
+            Some(&updated_mr.workspace_id),
+            Some(&updated_mr.repository_id),
+        );
         let _ = state.analytics.record(&ev).await;
         // mr.merged analytics event — deferred with the other side effects
         // so a group rollback (which reverts MR statuses to Open) never
@@ -785,7 +789,6 @@ async fn merge_atomic_group(
             .await;
         }
     }
-
 
     info!(
         group = %group_name,
@@ -1444,9 +1447,13 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
 
     // TASK-061 (§7.2): Populate attestation chain ABAC subject attributes
     // and evaluate policies with action=merge, resource_type=attestation.
-    // Audit-only — logged but not enforced (merge proceeds regardless).
+    // A Deny decision blocks the merge (authorization-provenance.md Phase 3:
+    // "Push and merge are rejected if the attestation chain is invalid or
+    // constraints fail"); with no policies stored the evaluation is Allow
+    // and the merge proceeds unchanged.
     // Look up attestation chain via the source branch head commit or agent task.
     {
+        let mut denial: Option<String> = None;
         let mut chain_found = false;
 
         // Try by source branch head commit first.
@@ -1460,14 +1467,25 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                     .load_chain(&chain_att.id)
                     .await
                     .unwrap_or_default();
-                evaluate_attestation_abac(state, &chain, &chain_att, &mr, &entry, &repo, "merge")
-                    .await;
+                let decision = evaluate_attestation_abac(
+                    state, &chain, &chain_att, &mr, &entry, &repo, "merge",
+                )
+                .await;
+                if decision.effect == gyre_domain::PolicyEffect::Deny {
+                    denial = Some(format!(
+                        "attestation ABAC policy denied merge (policy: {})",
+                        decision
+                            .matched_policy
+                            .as_deref()
+                            .unwrap_or("implicit deny")
+                    ));
+                }
                 chain_found = true;
             }
         }
 
         // Fallback: look up via agent's current task.
-        if !chain_found {
+        if !chain_found && denial.is_none() {
             if let Some(ref author_id) = mr.author_agent_id {
                 if let Ok(Some(agent)) = state.agents.find_by_id(author_id).await {
                     if let Some(ref task_id) = agent.current_task_id {
@@ -1482,15 +1500,41 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                                     .load_chain(&leaf.id)
                                     .await
                                     .unwrap_or_default();
-                                evaluate_attestation_abac(
+                                let decision = evaluate_attestation_abac(
                                     state, &chain, leaf, &mr, &entry, &repo, "merge",
                                 )
                                 .await;
+                                if decision.effect == gyre_domain::PolicyEffect::Deny {
+                                    denial = Some(format!(
+                                        "attestation ABAC policy denied merge (policy: {})",
+                                        decision
+                                            .matched_policy
+                                            .as_deref()
+                                            .unwrap_or("implicit deny")
+                                    ));
+                                }
                             }
                         }
                     }
                 }
             }
+        }
+
+        // Enforcement (task-077 F5): a Deny decision fails the queue entry
+        // before the merge commit is created, mirroring constraint
+        // enforcement above.
+        if let Some(reason) = denial {
+            warn!(
+                entry_id = %entry.id,
+                mr_id = %mr.id,
+                %reason,
+                "attestation ABAC denied merge"
+            );
+            state
+                .merge_queue
+                .update_status(&entry.id, MergeQueueEntryStatus::Failed, Some(reason))
+                .await?;
+            return Ok(());
         }
     }
 
@@ -1543,7 +1587,12 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 }),
                 now,
             )
-            .with_scope(None, None, Some(&updated_mr.workspace_id), Some(&updated_mr.repository_id));
+            .with_scope(
+                None,
+                None,
+                Some(&updated_mr.workspace_id),
+                Some(&updated_mr.repository_id),
+            );
             let _ = state.analytics.record(&ev).await;
 
             // mr.merged analytics event (analytics.md §Auto-Emitted Events)
@@ -1844,12 +1893,7 @@ async fn emit_queue_processed_failed(
 ///
 /// `now` is the merge completion time (unix seconds); `enqueued_at` is the
 /// queue entry's enqueue time, when the MR passed through the queue.
-async fn emit_mr_merged(
-    state: &AppState,
-    mr: &MergeRequest,
-    now: u64,
-    enqueued_at: Option<u64>,
-) {
+async fn emit_mr_merged(state: &AppState, mr: &MergeRequest, now: u64, enqueued_at: Option<u64>) {
     // gate_count: number of gate results recorded for this MR.
     let gate_count = state
         .gate_results
@@ -1881,7 +1925,11 @@ const MERGE_QUEUE_PAUSE_NS: &str = "merge_queue_pause";
 
 /// Is the merge queue paused for this repo?
 async fn merge_queue_paused(state: &AppState, repo_id: &Id) -> bool {
-    match state.kv_store.kv_get(MERGE_QUEUE_PAUSE_NS, repo_id.as_str()).await {
+    match state
+        .kv_store
+        .kv_get(MERGE_QUEUE_PAUSE_NS, repo_id.as_str())
+        .await
+    {
         Ok(Some(v)) => serde_json::from_str::<serde_json::Value>(&v)
             .ok()
             .and_then(|j| j.get("paused").and_then(|p| p.as_bool()))
@@ -1893,7 +1941,11 @@ async fn merge_queue_paused(state: &AppState, repo_id: &Id) -> bool {
 /// Pause the merge queue for this repo (no more merges until main is green).
 /// Persists the pause state and emits a `MergeQueuePaused` event so the
 /// Workspace Orchestrator can reprioritize work (platform-model.md §6).
-pub(crate) async fn pause_merge_queue(state: &AppState, repo: &gyre_domain::Repository, reason: &str) {
+pub(crate) async fn pause_merge_queue(
+    state: &AppState,
+    repo: &gyre_domain::Repository,
+    reason: &str,
+) {
     let payload = serde_json::json!({ "paused": true, "reason": reason }).to_string();
     if let Err(e) = state
         .kv_store
@@ -1955,7 +2007,6 @@ async fn recover_from_post_merge_failure(
     merge_commit_sha: &str,
     failure_reason: &str,
 ) {
-
     // Step 1: pause the merge queue.
     pause_merge_queue(state, repo, failure_reason).await;
 
@@ -1974,9 +2025,12 @@ async fn recover_from_post_merge_failure(
                 "revert commit creation failed — queue stays paused, escalating"
             );
             // Cannot revert: escalate immediately, stay paused.
-            notify_escalation(state, repo, mr, &format!(
-                "revert of merge commit {merge_commit_sha} failed: {e}"
-            ))
+            notify_escalation(
+                state,
+                repo,
+                mr,
+                &format!("revert of merge commit {merge_commit_sha} failed: {e}"),
+            )
             .await;
             return;
         }
@@ -2019,8 +2073,15 @@ async fn recover_from_post_merge_failure(
 
     // Steps 4–7: per-MR side effects (mark Reverted, notify, remediation
     // task, invalidate gate results).
-    apply_revert_side_effects(state, repo, mr, merge_commit_sha, &revert_sha, failure_reason)
-        .await;
+    apply_revert_side_effects(
+        state,
+        repo,
+        mr,
+        merge_commit_sha,
+        &revert_sha,
+        failure_reason,
+    )
+    .await;
 }
 
 /// Per-MR recovery side effects (platform-model.md §6 steps 4–7): mark the
@@ -2092,7 +2153,10 @@ pub(crate) async fn apply_revert_side_effects(
             updated.workspace_id.clone(),
             user_id,
             gyre_common::NotificationType::MrReverted,
-            format!("MR '{}' reverted on {}: post-merge validation failed", updated.title, repo.name),
+            format!(
+                "MR '{}' reverted on {}: post-merge validation failed",
+                updated.title, repo.name
+            ),
             "default",
             Some(payload.to_string()),
             Some(updated.id.to_string()),
@@ -2116,11 +2180,7 @@ pub(crate) async fn apply_revert_side_effects(
         "MR '{}' ({}) was merged to {} but failed post-merge validation: {}. \
          The merge was reverted via commit {}. Re-do the work on a fresh branch \
          and re-open a merge request.",
-        updated.title,
-        updated.id,
-        repo.default_branch,
-        failure_reason,
-        revert_sha,
+        updated.title, updated.id, repo.default_branch, failure_reason, revert_sha,
     ));
     if let Err(e) = state.tasks.create(&task).await {
         error!(task_id = %task.id, error = %e, "failed to persist remediation task");
@@ -2168,7 +2228,11 @@ async fn recover_atomic_group_from_post_merge_failure(
     // Step 2: revert every group merge commit, newest first.
     let mut final_revert_sha: Option<String> = None;
     for sha in group_merge_shas.iter().rev() {
-        match state.git_ops.revert_commit(&repo.path, &repo.default_branch, sha).await {
+        match state
+            .git_ops
+            .revert_commit(&repo.path, &repo.default_branch, sha)
+            .await
+        {
             Ok(revert_sha) => final_revert_sha = Some(revert_sha),
             Err(e) => {
                 error!(
@@ -2272,12 +2336,14 @@ async fn notify_escalation(
         gyre_common::NotificationType::MergeQueueEscalation,
         format!("Merge queue escalation on {}", repo.name),
         "default",
-        Some(serde_json::json!({
-            "repo_id": repo.id.to_string(),
-            "mr_id": mr.id.to_string(),
-            "message": message,
-        })
-        .to_string()),
+        Some(
+            serde_json::json!({
+                "repo_id": repo.id.to_string(),
+                "mr_id": mr.id.to_string(),
+                "message": message,
+            })
+            .to_string(),
+        ),
         Some(mr.id.to_string()),
         Some(repo.id.to_string()),
     )
@@ -2625,7 +2691,7 @@ async fn evaluate_attestation_abac(
         constraint_count = cc,
         decision = ?eval_result.effect,
         matched_policy = ?eval_result.matched_policy,
-        "attestation ABAC evaluation for {action} (audit-only)" // enforcement-mode:ok
+        "attestation ABAC evaluation for {action} (call sites enforce Deny)"
     );
 
     eval_result
@@ -3857,17 +3923,17 @@ mod tests {
 
         // Create a required quality gate.
         let gate = QualityGate {
-          id: Id::new("gate-1"),
-          repo_id: repo.id.clone(),
-          name: "unit-tests".to_string(),
-          gate_type: GateType::TestCommand,
-          command: Some("cargo test".to_string()),
-          required_approvals: None,
-          persona: None,
-          required: true,
-          gate_phase: Default::default(),
-          timeout_secs: None,
-          created_at: 1000,
+            id: Id::new("gate-1"),
+            repo_id: repo.id.clone(),
+            name: "unit-tests".to_string(),
+            gate_type: GateType::TestCommand,
+            command: Some("cargo test".to_string()),
+            required_approvals: None,
+            persona: None,
+            required: true,
+            gate_phase: Default::default(),
+            timeout_secs: None,
+            created_at: 1000,
         };
         state.quality_gates.save(&gate).await.unwrap();
 
@@ -3981,17 +4047,17 @@ mod tests {
 
         // Create a required gate and a failed result for mr-a.
         let gate = QualityGate {
-          id: Id::new("gate-1"),
-          repo_id: repo.id.clone(),
-          name: "unit-tests".to_string(),
-          gate_type: GateType::TestCommand,
-          command: Some("cargo test".to_string()),
-          required_approvals: None,
-          persona: None,
-          required: true,
-          gate_phase: Default::default(),
-          timeout_secs: None,
-          created_at: 1000,
+            id: Id::new("gate-1"),
+            repo_id: repo.id.clone(),
+            name: "unit-tests".to_string(),
+            gate_type: GateType::TestCommand,
+            command: Some("cargo test".to_string()),
+            required_approvals: None,
+            persona: None,
+            required: true,
+            gate_phase: Default::default(),
+            timeout_secs: None,
+            created_at: 1000,
         };
         state.quality_gates.save(&gate).await.unwrap();
 
@@ -4095,17 +4161,17 @@ mod tests {
         // This makes atomic_group_ready("bundle", "mr-a") return Ok(false)
         // because group member mr-c has a pending required gate.
         let gate = QualityGate {
-          id: Id::new("gate-1"),
-          repo_id: repo.id.clone(),
-          name: "unit-tests".to_string(),
-          gate_type: GateType::TestCommand,
-          command: Some("cargo test".to_string()),
-          required_approvals: None,
-          persona: None,
-          required: true,
-          gate_phase: Default::default(),
-          timeout_secs: None,
-          created_at: 1000,
+            id: Id::new("gate-1"),
+            repo_id: repo.id.clone(),
+            name: "unit-tests".to_string(),
+            gate_type: GateType::TestCommand,
+            command: Some("cargo test".to_string()),
+            required_approvals: None,
+            persona: None,
+            required: true,
+            gate_phase: Default::default(),
+            timeout_secs: None,
+            created_at: 1000,
         };
         state.quality_gates.save(&gate).await.unwrap();
 
@@ -4355,7 +4421,10 @@ mod tests {
         for ev in &mr_merged_events {
             let payload = &ev.properties;
             assert!(payload["mr_id"].is_string(), "mr_id required: {payload}");
-            assert!(payload["repo_id"].is_string(), "repo_id required: {payload}");
+            assert!(
+                payload["repo_id"].is_string(),
+                "repo_id required: {payload}"
+            );
             assert!(
                 payload["gate_count"].is_u64(),
                 "gate_count required: {payload}"
@@ -4477,7 +4546,9 @@ mod tests {
         assert_eq!(ev.properties["mr_id"], "mr-solo-merge");
         assert_eq!(ev.properties["repo_id"], repo.id.to_string());
         assert_eq!(ev.properties["gate_count"], 1u64);
-        let wait = ev.properties["queue_wait_secs"].as_u64().expect("queue_wait_secs");
+        let wait = ev.properties["queue_wait_secs"]
+            .as_u64()
+            .expect("queue_wait_secs");
         assert!(
             wait >= entry.enqueued_at.saturating_sub(1000),
             "queue_wait_secs should be measured from enqueued_at (got {wait})"
@@ -5559,17 +5630,12 @@ mod tests {
 
     // ── TASK-095: post-merge validation + recovery protocol ─────────────
 
-    use gyre_domain::{GatePhase, MrStatus};
     use gyre_common::message::MessageKind;
     use gyre_common::NotificationType;
+    use gyre_domain::{GatePhase, MrStatus};
 
     /// Create a post-merge TestCommand gate for a repo.
-    async fn create_post_merge_gate(
-        state: &AppState,
-        repo_id: &Id,
-        command: &str,
-        required: bool,
-    ) {
+    async fn create_post_merge_gate(state: &AppState, repo_id: &Id, command: &str, required: bool) {
         let gate = gyre_domain::QualityGate {
             id: Id::new("gate-pm-1"),
             repo_id: repo_id.clone(),
@@ -5639,13 +5705,26 @@ mod tests {
         // Merge-success notification was delivered to the author's spawner.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-recov"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .list_for_user(
+                &Id::new("user-recov"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                100,
+                0,
+            )
             .await
             .unwrap();
         assert!(
-            notifs.iter().any(|n| n.notification_type == NotificationType::SuggestedSpecLink),
+            notifs
+                .iter()
+                .any(|n| n.notification_type == NotificationType::SuggestedSpecLink),
             "author spawner should receive the merge notification, got {:?}",
-            notifs.iter().map(|n| &n.notification_type).collect::<Vec<_>>()
+            notifs
+                .iter()
+                .map(|n| &n.notification_type)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -5675,7 +5754,10 @@ mod tests {
 
         // 1. Queue is paused with the failure reason.
         let paused = merge_queue_paused(&state, &repo.id).await;
-        assert!(paused, "merge queue should be paused after post-merge failure");
+        assert!(
+            paused,
+            "merge queue should be paused after post-merge failure"
+        );
         let raw = state
             .kv_store
             .kv_get("merge_queue_pause", repo.id.as_str())
@@ -5685,7 +5767,10 @@ mod tests {
         let pause_json: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(pause_json["paused"], true);
         assert!(
-            pause_json["reason"].as_str().unwrap().contains("post-merge-tests"),
+            pause_json["reason"]
+                .as_str()
+                .unwrap()
+                .contains("post-merge-tests"),
             "pause reason should name the failed gate: {}",
             pause_json["reason"]
         );
@@ -5724,7 +5809,15 @@ mod tests {
         //    failed on the noop revert SHA) a MergeQueueEscalation.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-recov"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .list_for_user(
+                &Id::new("user-recov"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                100,
+                0,
+            )
             .await
             .unwrap();
         let types: Vec<&NotificationType> = notifs.iter().map(|n| &n.notification_type).collect();
@@ -5749,7 +5842,11 @@ mod tests {
         assert_eq!(reverted_task.workspace_id.as_str(), "ws-1");
 
         // 6. Gate results invalidated → back to Pending.
-        let results = state.gate_results.list_by_mr_id(mr.id.as_str()).await.unwrap();
+        let results = state
+            .gate_results
+            .list_by_mr_id(mr.id.as_str())
+            .await
+            .unwrap();
         assert!(
             results.iter().all(|r| r.status == GateStatus::Pending),
             "gate results should be invalidated to Pending"
@@ -5757,6 +5854,134 @@ mod tests {
 
         // 7. Escalation branch: queue stays paused (re-run failed on noop adapter).
         assert!(merge_queue_paused(&state, &repo.id).await);
+    }
+
+    /// TASK-077 F5 / task-146 repair: a Deny attestation-ABAC decision must
+    /// block the merge — the evaluation result is enforced at the merge
+    /// queue, not merely logged. Regression test for the audit-only flaw
+    /// (evaluate_attestation_abac results discarded; merge proceeded
+    /// regardless of the policy decision).
+    #[tokio::test]
+    async fn attestation_abac_deny_blocks_merge() {
+        use gyre_common::{
+            Attestation, AttestationInput, AttestationMetadata, AttestationOutput, DerivedInput,
+            KeyBinding,
+        };
+        use gyre_domain::policy::{
+            Condition, ConditionOp, ConditionValue, Policy, PolicyEffect, PolicyScope,
+        };
+
+        let state = test_state();
+        let (repo, mr) = setup_recovery_mr(&state).await;
+
+        // Link the author agent to a task with an attestation chain — the
+        // find_by_task fallback lookup path used when the source branch head
+        // has no chain (and here the repo has no git refs at all).
+        let mut agent = state
+            .agents
+            .find_by_id(&Id::new("agent-recov"))
+            .await
+            .unwrap()
+            .expect("author agent exists");
+        agent.current_task_id = Some(Id::new("task-abac-deny"));
+        state.agents.update(&agent).await.unwrap();
+
+        // Chain leaf (depth=2) for that task. A Derived input whose parent_ref
+        // resolves to nothing makes load_chain return just this node.
+        let att = Attestation {
+            id: "sha256:deny-leaf".to_string(),
+            input: AttestationInput::Derived(DerivedInput {
+                parent_ref: vec![],
+                preconditions: vec![],
+                update: "narrow_scope".to_string(),
+                output_constraints: vec![],
+                signature: vec![1],
+                key_binding: KeyBinding {
+                    public_key: vec![1, 2, 3, 4],
+                    user_identity: "user:deny-signer".to_string(),
+                    issuer: "https://keycloak.example.com".to_string(),
+                    trust_anchor_id: "tenant-keycloak".to_string(),
+                    issued_at: 1_700_000_000,
+                    expires_at: 1_700_003_600,
+                    user_signature: vec![10, 20],
+                    platform_countersign: vec![30, 40],
+                },
+            }),
+            output: AttestationOutput {
+                content_hash: vec![7, 8, 9],
+                commit_sha: "ccc333".to_string(),
+                agent_signature: None,
+                gate_results: vec![],
+            },
+            metadata: AttestationMetadata {
+                created_at: 1_700_000_100,
+                workspace_id: "ws-1".to_string(),
+                repo_id: repo.id.to_string(),
+                task_id: "task-abac-deny".to_string(),
+                agent_id: "agent-recov".to_string(),
+                chain_depth: 2,
+            },
+        };
+        state.chain_attestations.save(&att).await.unwrap();
+
+        // Deny policy: chain_depth > 1 denies merge on attestation resources
+        // (same shape as the evaluate_attestation_abac unit tests).
+        let deny_policy = Policy {
+            id: Id::new("deny-deep-chain-merge"),
+            name: "deny-deep-chain-merge".to_string(),
+            description: "Deny merges with chain_depth > 1".to_string(),
+            scope: PolicyScope::Tenant,
+            scope_id: None,
+            priority: 100,
+            effect: PolicyEffect::Deny,
+            conditions: vec![Condition {
+                attribute: "subject.chain_depth".to_string(),
+                operator: ConditionOp::GreaterThan,
+                value: ConditionValue::Number(1),
+            }],
+            actions: vec!["merge".to_string()],
+            resource_types: vec!["attestation".to_string()],
+            enabled: true,
+            built_in: false,
+            immutable: false,
+            created_by: "test".to_string(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        state.policies.create(&deny_policy).await.unwrap();
+
+        process_next(&state).await.unwrap();
+
+        // The queue entry FAILED with the ABAC denial as the reason...
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-recov"))
+            .await
+            .unwrap()
+            .expect("queue entry exists");
+        assert_eq!(
+            entry.status,
+            gyre_domain::MergeQueueEntryStatus::Failed,
+            "a Deny attestation-ABAC decision must fail the queue entry"
+        );
+        let reason = entry.error_message.as_deref().unwrap_or("");
+        assert!(
+            reason.contains("attestation ABAC policy denied merge"),
+            "failure reason should name the ABAC denial, got: {reason}"
+        );
+
+        // ...and the merge never happened.
+        let updated = state
+            .merge_requests
+            .find_by_id(&mr.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            updated.status,
+            MrStatus::Merged,
+            "merge must not proceed after a Deny attestation-ABAC decision"
+        );
     }
 
     #[tokio::test]
@@ -5804,19 +6029,36 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(updated.status, MrStatus::Merged, "resumed queue should merge the entry");
+        assert_eq!(
+            updated.status,
+            MrStatus::Merged,
+            "resumed queue should merge the entry"
+        );
         assert!(!merge_queue_paused(&state, &repo.id).await);
 
         // Merge-success notification delivered after resume.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-recov"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .list_for_user(
+                &Id::new("user-recov"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                100,
+                0,
+            )
             .await
             .unwrap();
         assert!(
-            notifs.iter().any(|n| n.notification_type == NotificationType::SuggestedSpecLink),
+            notifs
+                .iter()
+                .any(|n| n.notification_type == NotificationType::SuggestedSpecLink),
             "author spawner should receive the merge notification, got {:?}",
-            notifs.iter().map(|n| &n.notification_type).collect::<Vec<_>>()
+            notifs
+                .iter()
+                .map(|n| &n.notification_type)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -5838,23 +6080,44 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(updated.status, MrStatus::Merged);
-        assert!(!merge_queue_paused(&state, &repo.id).await, "advisory failure must not pause");
-        assert!(rx.try_recv().is_err(), "no recovery events for advisory failure");
+        assert!(
+            !merge_queue_paused(&state, &repo.id).await,
+            "advisory failure must not pause"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no recovery events for advisory failure"
+        );
 
         // Merge succeeded → merge notification, but no recovery notifications.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-recov"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .list_for_user(
+                &Id::new("user-recov"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                100,
+                0,
+            )
             .await
             .unwrap();
         assert!(
-            notifs.iter().any(|n| n.notification_type == NotificationType::SuggestedSpecLink),
+            notifs
+                .iter()
+                .any(|n| n.notification_type == NotificationType::SuggestedSpecLink),
             "author spawner should receive the merge notification, got {:?}",
-            notifs.iter().map(|n| &n.notification_type).collect::<Vec<_>>()
+            notifs
+                .iter()
+                .map(|n| &n.notification_type)
+                .collect::<Vec<_>>()
         );
         assert!(
-            !notifs.iter().any(|n| n.notification_type == NotificationType::MrReverted
-                || n.notification_type == NotificationType::MergeQueueEscalation),
+            !notifs
+                .iter()
+                .any(|n| n.notification_type == NotificationType::MrReverted
+                    || n.notification_type == NotificationType::MergeQueueEscalation),
             "advisory failure must not produce recovery notifications"
         );
     }
@@ -5910,7 +6173,10 @@ mod tests {
         process_next(&state).await.unwrap();
 
         // Entries stay Queued and MRs stay Open — no group merge while paused.
-        for (entry_id, mr_id) in [("entry-mr-grp-a", "mr-grp-a"), ("entry-mr-grp-b", "mr-grp-b")] {
+        for (entry_id, mr_id) in [
+            ("entry-mr-grp-a", "mr-grp-a"),
+            ("entry-mr-grp-b", "mr-grp-b"),
+        ] {
             let entry = state
                 .merge_queue
                 .find_by_id(&Id::new(entry_id))
@@ -5928,19 +6194,34 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(updated.status, MrStatus::Open, "{mr_id} should stay open while paused");
+            assert_eq!(
+                updated.status,
+                MrStatus::Open,
+                "{mr_id} should stay open while paused"
+            );
         }
         assert!(rx.try_recv().is_err(), "no events expected while paused");
         // Paused queue must not notify anyone either — merge didn't happen.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-grp"), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+            .list_for_user(
+                &Id::new("user-grp"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                100,
+                0,
+            )
             .await
             .unwrap();
         assert!(
             notifs.is_empty(),
             "no notifications expected while paused, got {:?}",
-            notifs.iter().map(|n| &n.notification_type).collect::<Vec<_>>()
+            notifs
+                .iter()
+                .map(|n| &n.notification_type)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -6003,7 +6284,11 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(updated.status, MrStatus::Reverted, "{mr_id} should be Reverted");
+            assert_eq!(
+                updated.status,
+                MrStatus::Reverted,
+                "{mr_id} should be Reverted"
+            );
             assert!(updated.reverted_at.is_some());
             assert!(updated.revert_commit_sha.is_some());
         }
@@ -6028,13 +6313,26 @@ mod tests {
         for user in ["user-grpa", "user-grpb"] {
             let notifs = state
                 .notifications
-                .list_for_user(&Id::new(user), Some(&Id::new("ws-1")), None, None, None, 100, 0)
+                .list_for_user(
+                    &Id::new(user),
+                    Some(&Id::new("ws-1")),
+                    None,
+                    None,
+                    None,
+                    100,
+                    0,
+                )
                 .await
                 .unwrap();
             assert!(
-                notifs.iter().any(|n| n.notification_type == NotificationType::MrReverted),
+                notifs
+                    .iter()
+                    .any(|n| n.notification_type == NotificationType::MrReverted),
                 "{user} should receive a MrReverted notification, got {:?}",
-                notifs.iter().map(|n| &n.notification_type).collect::<Vec<_>>()
+                notifs
+                    .iter()
+                    .map(|n| &n.notification_type)
+                    .collect::<Vec<_>>()
             );
         }
 
@@ -6047,7 +6345,11 @@ mod tests {
         assert_eq!(reverted_tasks.len(), 2, "one remediation task per member");
         for t in &reverted_tasks {
             assert_eq!(t.priority, TaskPriority::High);
-            assert!(t.title.contains("post-merge-tests"), "task title: {}", t.title);
+            assert!(
+                t.title.contains("post-merge-tests"),
+                "task title: {}",
+                t.title
+            );
         }
 
         // 6. Escalation branch: the noop adapter's revert SHA fails the

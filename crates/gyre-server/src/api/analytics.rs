@@ -189,7 +189,10 @@ pub async fn query_events(
     }
 
     Ok(Json(serde_json::Value::Array(
-        events.into_iter().map(|e| serde_json::to_value(e).unwrap_or_default()).collect(),
+        events
+            .into_iter()
+            .map(|e| serde_json::to_value(e).unwrap_or_default())
+            .collect(),
     )))
 }
 
@@ -343,7 +346,7 @@ pub(crate) fn parse_time_param(s: &str) -> Option<(u64, bool)> {
     }
 
     let days = ymd_to_epoch_days(y, m, d);
-    let total = days as i64 * 86_400 + secs_of_day as i64 - offset_secs;
+    let total = days * 86_400 + secs_of_day as i64 - offset_secs;
     u64::try_from(total).ok().map(|v| (v, rest.is_none()))
 }
 
@@ -369,7 +372,6 @@ pub(crate) fn parse_time_param_req(
             ))
         })
 }
-
 
 pub async fn count_events(
     State(state): State<Arc<AppState>>,
@@ -1081,12 +1083,33 @@ mod tests {
     async fn query_events_filters_by_scope_ids() {
         // Spec: agent_id, workspace_id, repo_id, user_id must each filter.
         let app = app();
-        record_scoped(&app, "mr.merged", Some("agent-1"), None, Some("ws-1"), Some("repo-1"))
-            .await;
-        record_scoped(&app, "mr.merged", Some("agent-2"), None, Some("ws-2"), Some("repo-1"))
-            .await;
-        record_scoped(&app, "mr.closed", Some("agent-1"), Some("user-9"), Some("ws-1"), None)
-            .await;
+        record_scoped(
+            &app,
+            "mr.merged",
+            Some("agent-1"),
+            None,
+            Some("ws-1"),
+            Some("repo-1"),
+        )
+        .await;
+        record_scoped(
+            &app,
+            "mr.merged",
+            Some("agent-2"),
+            None,
+            Some("ws-2"),
+            Some("repo-1"),
+        )
+        .await;
+        record_scoped(
+            &app,
+            "mr.closed",
+            Some("agent-1"),
+            Some("user-9"),
+            Some("ws-1"),
+            None,
+        )
+        .await;
 
         let json = get_events(&app, "agent_id=agent-1").await;
         assert_eq!(
@@ -1107,7 +1130,11 @@ mod tests {
         assert_eq!(json[0]["event_name"], "mr.closed");
 
         // Combined scope filters are conjunctive.
-        let json = get_events(&app, "agent_id=agent-1&workspace_id=ws-1&event_name=mr.merged").await;
+        let json = get_events(
+            &app,
+            "agent_id=agent-1&workspace_id=ws-1&event_name=mr.merged",
+        )
+        .await;
         assert_eq!(json.as_array().unwrap().len(), 1);
     }
 
@@ -1122,7 +1149,9 @@ mod tests {
         let json = get_events(&app, "event_name=mr.*").await;
         let arr = json.as_array().unwrap();
         assert_eq!(arr.len(), 2, "mr.* must match mr.merged and mr.closed");
-        assert!(arr.iter().all(|e| e["event_name"].as_str().unwrap().starts_with("mr.")));
+        assert!(arr
+            .iter()
+            .all(|e| e["event_name"].as_str().unwrap().starts_with("mr.")));
 
         // Exact match still works and excludes the other mr.* events.
         let json = get_events(&app, "event_name=mr.merged").await;
@@ -1233,17 +1262,32 @@ mod tests {
         assert_eq!(parse_time_param("2026-10-08"), Some((1_791_417_600, true)));
         // Full timestamp, Z.
         assert_eq!(parse_time_param("1970-01-01T00:00:30Z"), Some((30, false)));
-        assert_eq!(parse_time_param("1970-01-01T01:02:03Z"), Some((3_723, false)));
+        assert_eq!(
+            parse_time_param("1970-01-01T01:02:03Z"),
+            Some((3_723, false))
+        );
         // No timezone means UTC.
         assert_eq!(parse_time_param("1970-01-01T00:00:30"), Some((30, false)));
         // Minutes precision.
         assert_eq!(parse_time_param("1970-01-01T00:10Z"), Some((600, false)));
         // Fractional seconds truncate.
-        assert_eq!(parse_time_param("1970-01-01T00:00:30.987Z"), Some((30, false)));
+        assert_eq!(
+            parse_time_param("1970-01-01T00:00:30.987Z"),
+            Some((30, false))
+        );
         // Numeric offsets: +HH:MM, -HH:MM, +HHMM, +HH.
-        assert_eq!(parse_time_param("1970-01-01T02:00:00+02:00"), Some((0, false)));
-        assert_eq!(parse_time_param("1970-01-01T00:30:00-00:30"), Some((3_600, false)));
-        assert_eq!(parse_time_param("1970-01-01T02:00:00+0200"), Some((0, false)));
+        assert_eq!(
+            parse_time_param("1970-01-01T02:00:00+02:00"),
+            Some((0, false))
+        );
+        assert_eq!(
+            parse_time_param("1970-01-01T00:30:00-00:30"),
+            Some((3_600, false))
+        );
+        assert_eq!(
+            parse_time_param("1970-01-01T02:00:00+0200"),
+            Some((0, false))
+        );
         assert_eq!(parse_time_param("1970-01-01T05:00:00+05"), Some((0, false)));
         // Leap-year day.
         assert_eq!(
@@ -1305,11 +1349,19 @@ mod tests {
         // 1970-01-01T00:02:30Z == 150 — strictly between the 100 and 200
         // events; inclusive lower bound keeps 200 and 300.
         let json = get_events(&app, "event_name=ev.iso&since=1970-01-01T00:02:30Z").await;
-        assert_eq!(json.as_array().unwrap().len(), 2, "ISO8601 since bounds below");
+        assert_eq!(
+            json.as_array().unwrap().len(),
+            2,
+            "ISO8601 since bounds below"
+        );
 
         // 1970-01-01T00:05Z == 300 — inclusive upper bound.
         let json = get_events(&app, "event_name=ev.iso&until=1970-01-01T00:05Z").await;
-        assert_eq!(json.as_array().unwrap().len(), 3, "ISO8601 until is inclusive");
+        assert_eq!(
+            json.as_array().unwrap().len(),
+            3,
+            "ISO8601 until is inclusive"
+        );
 
         // Date-only bounds: 1970-01-01 covers the whole first day.
         let json = get_events(&app, "event_name=ev.iso&since=1970-01-01&until=1970-01-01").await;

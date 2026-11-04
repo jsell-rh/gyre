@@ -14,9 +14,8 @@ use gyre_domain::{
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult};
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsQueryFilter, AnalyticsRepository,
-    ApiKeyRepository,
-    AuditQueryFilter, AuditRepository, BudgetRepository, BudgetUsageRepository, CostRepository,
-    DependencyRepository, KvJsonStore, LlmConfigRepository, MergeQueueRepository,
+    ApiKeyRepository, AuditQueryFilter, AuditRepository, BudgetRepository, BudgetUsageRepository,
+    CostRepository, DependencyRepository, KvJsonStore, LlmConfigRepository, MergeQueueRepository,
     MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository, PersonaRepository,
     RepoRepository, ReviewRepository, SpawnLogEntry, SpawnLogRepository, TaskRepository,
     TenantRepository, UserRepository, UserWorkspaceStateRepository, WorkspaceRepository,
@@ -1047,7 +1046,7 @@ impl AnalyticsRepository for MemAnalyticsRepository {
             })
             .cloned()
             .collect();
-        events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        events.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
         events.truncate(limit);
         Ok(events)
     }
@@ -1065,19 +1064,28 @@ impl AnalyticsRepository for MemAnalyticsRepository {
                     },
                 };
                 name_ok
-                    && filter.agent_id.as_ref().is_none_or(|id| e.agent_id.as_ref() == Some(id))
-                    && filter.user_id.as_ref().is_none_or(|id| e.user_id.as_ref() == Some(id))
+                    && filter
+                        .agent_id
+                        .as_ref()
+                        .is_none_or(|id| e.agent_id.as_ref() == Some(id))
+                    && filter
+                        .user_id
+                        .as_ref()
+                        .is_none_or(|id| e.user_id.as_ref() == Some(id))
                     && filter
                         .workspace_id
                         .as_ref()
                         .is_none_or(|id| e.workspace_id.as_ref() == Some(id))
-                    && filter.repo_id.as_ref().is_none_or(|id| e.repo_id.as_ref() == Some(id))
+                    && filter
+                        .repo_id
+                        .as_ref()
+                        .is_none_or(|id| e.repo_id.as_ref() == Some(id))
                     && filter.since.is_none_or(|s| e.timestamp >= s)
                     && filter.until.is_none_or(|u| e.timestamp <= u)
             })
             .cloned()
             .collect();
-        events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        events.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
         events.truncate(filter.limit);
         Ok(events)
     }
@@ -1166,15 +1174,39 @@ mod analytics_query_tests {
     #[tokio::test]
     async fn query_filtered_matches_sqlite_filter_semantics() {
         let repo = MemAnalyticsRepository::default();
-        repo.record(&scoped_event("e1", "mr.merged", Some("a1"), None, Some("ws-1"), Some("r1"), 100))
-            .await
-            .unwrap();
-        repo.record(&scoped_event("e2", "mr.merged", Some("a2"), Some("u9"), Some("ws-2"), Some("r1"), 200))
-            .await
-            .unwrap();
-        repo.record(&scoped_event("e3", "task.status_changed", Some("a1"), None, Some("ws-1"), None, 300))
-            .await
-            .unwrap();
+        repo.record(&scoped_event(
+            "e1",
+            "mr.merged",
+            Some("a1"),
+            None,
+            Some("ws-1"),
+            Some("r1"),
+            100,
+        ))
+        .await
+        .unwrap();
+        repo.record(&scoped_event(
+            "e2",
+            "mr.merged",
+            Some("a2"),
+            Some("u9"),
+            Some("ws-2"),
+            Some("r1"),
+            200,
+        ))
+        .await
+        .unwrap();
+        repo.record(&scoped_event(
+            "e3",
+            "task.status_changed",
+            Some("a1"),
+            None,
+            Some("ws-1"),
+            None,
+            300,
+        ))
+        .await
+        .unwrap();
 
         // Prefix wildcard.
         let f = AnalyticsQueryFilter {
@@ -1246,7 +1278,7 @@ impl CostRepository for MemCostRepository {
             })
             .cloned()
             .collect();
-        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
         Ok(entries)
     }
 
@@ -1257,7 +1289,7 @@ impl CostRepository for MemCostRepository {
             .filter(|e| e.task_id.as_ref().map(|id| id.as_str()) == Some(task_id.as_str()))
             .cloned()
             .collect();
-        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
         Ok(entries)
     }
 
@@ -1323,7 +1355,7 @@ impl AuditRepository for MemAuditRepository {
             })
             .cloned()
             .collect();
-        events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        events.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
         events.truncate(filter.limit);
         Ok(events)
     }

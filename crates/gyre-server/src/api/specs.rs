@@ -27,6 +27,7 @@ use gyre_domain::AnalyticsEvent;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::gate_executor::truncate_bytes;
 use crate::spec_registry::{
     ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry, SpecLinkEntry, SpecLinkType,
 };
@@ -280,11 +281,9 @@ pub async fn spec_index(State(state): State<Arc<AppState>>) -> axum::response::R
         md.push_str("| Spec | Status | SHA |\n");
         md.push_str("|------|--------|-----|\n");
         for e in entries {
-            let short_sha = if e.current_sha.len() >= 8 {
-                &e.current_sha[..8]
-            } else {
-                &e.current_sha
-            };
+            // Char-boundary-safe truncation (gate output and spec SHAs may
+            // round-trip non-ASCII; a fixed byte index would panic).
+            let short_sha = truncate_bytes(&e.current_sha, 8);
             md.push_str(&format!(
                 "| [{title}](specs/{path}) | {status} | `{sha}` |\n",
                 title = e.title,
@@ -682,16 +681,16 @@ pub async fn approve_spec(
             // Auto-track spec approval (analytics.md §Auto-Emitted Events).
             {
                 let approver_agent_id = if event.approver_type == "agent" {
-                    event.approver_id.strip_prefix("agent:").map(|s| s.to_string())
+                    event
+                        .approver_id
+                        .strip_prefix("agent:")
+                        .map(|s| s.to_string())
                 } else {
                     None
                 };
                 let approver_user_id = if event.approver_type == "human" {
                     Some(Id::new(
-                        event
-                            .approver_id
-                            .trim_start_matches("user:")
-                            .to_string(),
+                        event.approver_id.trim_start_matches("user:").to_string(),
                     ))
                 } else {
                     None
@@ -709,10 +708,14 @@ pub async fn approve_spec(
                     }),
                     now,
                 )
-                .with_scope(approver_user_id.as_ref(), None, ws_id.as_ref(), repo_id.as_ref());
+                .with_scope(
+                    approver_user_id.as_ref(),
+                    None,
+                    ws_id.as_ref(),
+                    repo_id.as_ref(),
+                );
                 let _ = state.analytics.record(&ev).await;
             }
-
 
             // Emit SpecApproved event on the message bus (agent-runtime.md §1).
             // This is the single trigger for all agent work via the signal chain:
@@ -1001,25 +1004,37 @@ pub async fn reject_spec(
     // workspace Admin/Developer members.
     if let Some(ref ws_id) = entry.workspace_id {
         let ws_id = gyre_common::Id::new(ws_id.as_str());
-        if let Ok(members) = state.workspace_memberships.list_by_workspace(&ws_id).await {
-            for member in &members {
-                if matches!(
-                    member.role,
-                    gyre_domain::WorkspaceRole::Admin
-                        | gyre_domain::WorkspaceRole::Developer
-                        | gyre_domain::WorkspaceRole::Owner
-                ) {
-                    let tenant_id = entry.repo_id.as_deref().unwrap_or("default");
-                    crate::notifications::notify(
-                        state.as_ref(),
-                        ws_id.clone(),
-                        member.user_id.clone(),
-                        gyre_common::NotificationType::SpecRejected,
-                        format!("Spec '{}' rejected: {}", spec_path, req.reason),
-                        tenant_id,
-                    )
-                    .await;
+        // Resolve the tenant from the workspace record — never fabricate a
+        // "default" tenant identity on lookup failure (task-097 F3). If the
+        // scope cannot be determined, skip the notification fanout and log.
+        match state.workspaces.find_by_id(&ws_id).await {
+            Ok(Some(ws)) => {
+                if let Ok(members) = state.workspace_memberships.list_by_workspace(&ws_id).await {
+                    for member in &members {
+                        if matches!(
+                            member.role,
+                            gyre_domain::WorkspaceRole::Admin
+                                | gyre_domain::WorkspaceRole::Developer
+                                | gyre_domain::WorkspaceRole::Owner
+                        ) {
+                            crate::notifications::notify(
+                                state.as_ref(),
+                                ws_id.clone(),
+                                member.user_id.clone(),
+                                gyre_common::NotificationType::SpecRejected,
+                                format!("Spec '{}' rejected: {}", spec_path, req.reason),
+                                ws.tenant_id.to_string(),
+                            )
+                            .await;
+                        }
+                    }
                 }
+            }
+            Ok(None) => {
+                tracing::warn!("spec_reject: workspace {ws_id} not found; skipping notifications");
+            }
+            Err(e) => {
+                tracing::warn!("spec_reject: failed to resolve workspace tenant for {ws_id}: {e}");
             }
         }
     }
@@ -2164,7 +2179,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
-                .unwrap(),
+                    .unwrap(),
             )
             .await
             .unwrap();
@@ -3029,7 +3044,8 @@ specs:
             1700000000,
         );
         mr.workspace_id = gyre_common::Id::new("ws-1");
-        mr.spec_ref = Some("system/reject-mr.md@0000000000000000000000000000000000000000".to_string());
+        mr.spec_ref =
+            Some("system/reject-mr.md@0000000000000000000000000000000000000000".to_string());
         state.merge_requests.create(&mr).await.unwrap();
 
         let app = crate::api::api_router().with_state(state.clone());

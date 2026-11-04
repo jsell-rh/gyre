@@ -175,8 +175,7 @@ impl AnalyticsRepository for SqliteStorage {
             if let Some(ref name) = filter.event_name {
                 // Exact or trailing-`*` prefix match (analytics.md §Query Parameters).
                 if let Some(prefix) = name.strip_suffix('*') {
-                    query =
-                        query.filter(analytics_events::event_name.like(format!("{}%", prefix)));
+                    query = query.filter(analytics_events::event_name.like(format!("{}%", prefix)));
                 } else {
                     query = query.filter(analytics_events::event_name.eq(name.as_str()));
                 }
@@ -508,7 +507,12 @@ mod tests {
     #[tokio::test]
     async fn analytics_query_filtered_all_params() {
         let (_tmp, s) = setup();
-        let mk = |id: &str, name: &str, agent: Option<&str>, ws: Option<&str>, repo: Option<&str>, ts: u64| {
+        let mk = |id: &str,
+                  name: &str,
+                  agent: Option<&str>,
+                  ws: Option<&str>,
+                  repo: Option<&str>,
+                  ts: u64| {
             AnalyticsEvent {
                 id: Id::new(id),
                 event_name: name.to_string(),
@@ -521,15 +525,31 @@ mod tests {
                 timestamp: ts,
             }
         };
-        AnalyticsRepository::record(&s, &mk("f1", "mr.merged", Some("a1"), Some("ws-1"), Some("r1"), 100))
-            .await
-            .unwrap();
-        AnalyticsRepository::record(&s, &mk("f2", "mr.merged", Some("a2"), Some("ws-2"), Some("r1"), 200))
-            .await
-            .unwrap();
-        AnalyticsRepository::record(&s, &mk("f3", "task.status_changed", Some("a1"), Some("ws-1"), None, 300))
-            .await
-            .unwrap();
+        AnalyticsRepository::record(
+            &s,
+            &mk("f1", "mr.merged", Some("a1"), Some("ws-1"), Some("r1"), 100),
+        )
+        .await
+        .unwrap();
+        AnalyticsRepository::record(
+            &s,
+            &mk("f2", "mr.merged", Some("a2"), Some("ws-2"), Some("r1"), 200),
+        )
+        .await
+        .unwrap();
+        AnalyticsRepository::record(
+            &s,
+            &mk(
+                "f3",
+                "task.status_changed",
+                Some("a1"),
+                Some("ws-1"),
+                None,
+                300,
+            ),
+        )
+        .await
+        .unwrap();
 
         // Prefix wildcard.
         let f = AnalyticsQueryFilter {

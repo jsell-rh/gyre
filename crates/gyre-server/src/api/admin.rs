@@ -355,7 +355,12 @@ pub async fn admin_kill_agent(
         }),
         now,
     )
-    .with_scope(None, None, Some(&agent.workspace_id), agent.repo_id.as_ref());
+    .with_scope(
+        None,
+        None,
+        Some(&agent.workspace_id),
+        agent.repo_id.as_ref(),
+    );
     let _ = state.analytics.record(&ev).await;
 
     Ok(StatusCode::NO_CONTENT)
