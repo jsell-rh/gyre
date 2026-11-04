@@ -72,7 +72,7 @@ function updateAgentTimes() {
   });
 }
 function missingDeps(task) {
-  const merged = new Set((snapshot?.tasks || []).filter((t) => t.state === "merged").map((t) => t.name));
+  const merged = new Set((snapshot?.tasks || []).filter((t) => ["merged", "resolved"].includes(t.state)).map((t) => t.name));
   return (task.deps || []).filter((dep) => !merged.has(dep));
 }
 function state(task) { return task.state === "ready" && missingDeps(task).length ? "blocked" : task.state; }
@@ -240,7 +240,7 @@ function renderOverview() {
         : e("p", { class: "muted", text: "No candidate waiting for verification." })));
 }
 
-const FILTERS = ["active", "eligible", "deferred", "blocked", "failed", "candidate", "published", "merged", "all"];
+const FILTERS = ["active", "eligible", "deferred", "blocked", "failed", "candidate", "published", "merged", "resolved", "all"];
 function matches(task) {
   const value = state(task);
   if (filter === "active" && !["running", "checking", "promoting"].includes(value)) return false;
