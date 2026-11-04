@@ -77,9 +77,8 @@ static_gates
 restore_scripts
 trap - EXIT
 static_gates
-# OpenShell cannot accept loopback sockets, including those used by library
-# tests. Clippy above compiles every Rust target; the controller executes the
-# full test suite on the exact merge SHA on the host before promotion.
+# Clippy above compiles every Rust target. The deterministic remote verifier
+# runs full Rust and frontend suites next, on this same exact merge tree.
 gate timeout --signal=INT --kill-after=30s "${GYRE_DEV_GATE_TIMEOUT:-1800}" \
   bash -c 'cd web && npm ci && npm run build'
 git restore --worktree -- web/dist
