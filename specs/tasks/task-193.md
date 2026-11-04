@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "spec-registry.md §9"
-commits: ["1e55eef5973023193199d136a844f072d25f1b36", "b1ead356c8c96561b8b88374922312ca82831824", "5d4ebb171e2f01c7d5fdd6898c5c008f854ac74a", "e42c374d89663ff8bac7990edb2853942534fdf2", "0e6c1b88e05e10e2ab8c40eb958d28e27579a6d6", "56b51b3fa52d5d978ec8ca9519884ddc31bf58a9"]
+commits: ["1e55eef5973023193199d136a844f072d25f1b36", "b1ead356c8c96561b8b88374922312ca82831824", "5d4ebb171e2f01c7d5fdd6898c5c008f854ac74a", "e42c374d89663ff8bac7990edb2853942534fdf2", "0e6c1b88e05e10e2ab8c40eb958d28e27579a6d6", "56b51b3fa52d5d978ec8ca9519884ddc31bf58a9", "c143b504bf2742231dc66d02dfe790c8cbcd2282"]
 ---
 
 ## Spec Excerpt
@@ -78,7 +78,7 @@ Additionally, `SpecApprovalEvent` (`crates/gyre-domain/src/spec_ledger.rs:60-75`
 
 ## Shipped
 
-§9 mode-based approval resolution is implemented and verified at `32c94f62` (crates bit-identical to the reviewed checkpoint `3e467f37`; merge `32c94f62` only brought in the updated base `8c2d1775`).
+§9 mode-based approval resolution is implemented and verified at `32c94f62` (crates bit-identical to the reviewed checkpoint `3e467f37`; merge `32c94f62` only brought in the updated base `8c2d1775`). Verified against the current base `59ff5d01` after the verification-repair round below.
 
 **Behavior:**
 - `SpecApprovalEvent` now carries `attestation_level: Option<u32>` and `stack_hash: Option<String>` (`gyre-domain/src/spec_ledger.rs`), persisted via diesel migration `2026-10-08-000056_spec_approval_attestation` (portable `ALTER TABLE ADD COLUMN`, both SQLite + Postgres adapters map the new columns; mem adapter stores the struct). Schema updated, no data dropped.
@@ -87,12 +87,19 @@ Additionally, `SpecApprovalEvent` (`crates/gyre-domain/src/spec_ledger.rs:60-75`
 - Pure resolver `resolve_approval_status(entry, defaults, current_sha, events)` in `spec_registry.rs`: event valid iff `spec_sha == current_sha` && active; agent validity additionally requires persona ∈ `agent_approvers`, `attestation_level >= min_attestation_level` (default 1), and exact `stack_hash` match when pinned; human validity requires `approver_type == "human"` and `approver_id ∈ human_approvers` when that list is non-empty. Modes: `human_only` → ≥1 valid human; `agent_only` → ≥1 valid agent; `human_and_agent` → both. `requires_approval: false` → Approved regardless (§17). Wired into `approve_spec` and `revoke_spec_approval` via `resolve_new_approval_status` (manifest-less repos fall back to legacy single-approval semantics, logged at debug).
 - `SpecApproved` message-bus event fires only on the transition *into* Approved (partial approvals of a `human_and_agent` pair no longer trigger the signal chain).
 
-**Test evidence (regenerated at the final branch head `667bfe95`; crates bit-identical to `32c94f62` via empty `git diff 32c94f62 667bfe95 -- crates/`; logs in /tmp/stage/review-evidence/):**
+**Test evidence:**
 - 13 resolver unit tests pass, including per-mode tests that fail under a reverted "any valid approval" resolver, attestation-too-low (`test_resolve_agent_only_pending_when_attestation_below_minimum`), stack_hash-mismatch and stack_hash-missing.
 - 4 E2E tests through the real HTTP router with real committed git repos and real minted agent JWTs + workload attestations: `human_and_agent_requires_both_approvals_e2e` (Pending after agent-only, Approved after human completes the pair), `agent_only_rejects_attestation_below_minimum_e2e` (level 2 vs min 3 → Pending; level 3 → Approved), `agent_only_requires_exact_stack_hash_match_e2e` (wrong stack → Pending; pinned stack → Approved), `agent_attestation_fields_round_trip_via_history_api` (JWT-derived level 3 + `sha256:pinned` persist and read back).
-- Adapters round-trip: 3/3 (`agent_attestation_fields_round_trip`, `human_approval_keeps_attestation_fields_null`, `record_and_list_by_path_round_trip`). gyre-domain: 363/363. gyre-server spec_registry: 55/55; api::specs: 55/55 (all suites exit 0, `EXIT:` markers in the logs).
-- `cargo build --all` exit 0. `check-task-commit-attribution.sh`, `check-arch.sh`, `check-migration-versions.sh`, `check-migration-sql-portability.sh`, `check-mem-port-contracts.sh` all pass at `667bfe95` (consolidated in final-gates.log).
+- Adapters round-trip: 3/3 (`agent_attestation_fields_round_trip`, `human_approval_keeps_attestation_fields_null`, `record_and_list_by_path_round_trip`).
 
 Sandbox note: no TCP listener support (capabilities.json), so no live-server HTTP check was performed here; the E2E tests exercise the full axum router (auth middleware → handler → SQLite-backed stores) in-process, which is the strongest available transport-level verification. Exact-head GitHub CI remains mandatory.
 
-**Repair round (head `eb4477d0`):** reverted the accidental `web/dist` bundle rebuild shipped in task-labeled commit `b65efd44` (zero `web/src` changes; trailing whitespace in the vendored svelte-i18n bundle made `git diff --check 8c2d1775 c7e47667` exit 2). `web/dist` restored to base `8c2d1775` (bit-identical to current base `73a31e0b`'s dist) via process commit `eb4477d0`; crates untouched — task files remain 0 diff lines vs candidate `c7e47667`. Post-repair: `git diff --check` vs both base SHAs exits 0, `check-arch.sh`, `check-task-commit-attribution.sh`, `check-migration-versions.sh`, `check-migration-sql-portability.sh` all pass (logs in /tmp/stage/review-evidence/).
+### Verification-repair round (head `c143b504`, vs base `59ff5d01`)
+
+The controller verification run (`checks.sh`, exit 1, attempt `9232b917`) flagged four finding classes against the candidate; all repaired in commit `c143b504`:
+
+- **rustfmt** (3 files) and **clippy** (`obfuscated_if_else` on the resolver's `match {}.then_some().unwrap_or()` chain; `cloned_ref_to_slice_refs` on `&[ev.clone()]` test slices): fixed; `check-rustfmt-diff.py 59ff5d01` and `check-clippy-diff.py 59ff5d01` both exit 0 ("changed lines clean").
+- **fabricated-scope-defaults** (`specs.rs` reject_spec fanout `entry.repo_id.unwrap_or("default")` — legacy site whose path:line exemption drifted when task-193 inserted code above it): fixed for real, not re-exempted — the spec-rejected notification fanout now resolves `tenant_id` from the workspace record via `workspaces.find_by_id` (the `emit_reconciliation_completed` pattern) and skips + warn-logs when the scope cannot be determined. The `specs.rs:959` exemption entry was deleted and `FROZEN_EXEMPTION_COUNT` lowered 5 → 4, so any re-introduction fails at any line.
+- **in-memory-state-stores** (three pre-existing `spec_registry.rs` store aliases exempted at base lines 218/220/249, drifted to 333/335/364 by inserted code): exemption coordinates updated to track the same three pre-existing sites; frozen count unchanged at 5, no new entries. (Porting these legacy stores to adapters is separate scheduled work, not §9.)
+
+Post-repair gates at `c143b504` (logs in /tmp/stage/review-evidence/): `cargo build --all` exit 0; `cargo test -p gyre-server --lib` 1259/1259; `cargo test -p gyre-adapters spec_approval` 3/3; all 21 repo script gates pass, including `check-arch.sh`, `check-fabricated-scope-defaults.sh`, `check-in-memory-state-stores.sh`, and `check-task-commit-attribution.sh`. `check-unnamed-tuple-carriers.sh` has 4 pre-existing unexempted hits at both HEAD and the assignment base and is run by neither the verification suite nor CI — left untouched.
