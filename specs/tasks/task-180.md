@@ -1,7 +1,7 @@
 ---
 title: "Executable Spec Assertions — gyre:assert parsing and knowledge graph validation"
 spec_ref: "system-explorer.md §9"
-depends_on: []
+depends_on: [task-230]
 progress: ready-for-review
 coverage_sections:
   - "system-explorer.md §9. Executable Spec Assertions"
