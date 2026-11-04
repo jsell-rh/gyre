@@ -50,6 +50,14 @@ describe('EditorSplit', () => {
     expect(screen.getByTestId('llm-send-btn')).toBeTruthy();
   });
 
+  it('gives toolbar buttons localized aria-labels', () => {
+    render(EditorSplit, { props: { content: '', repoId: 'repo-1', specPath: 'specs/auth.md' } });
+    // Localized from editor_split.md_<id>_aria — not the raw 'B'/'I' label.
+    expect(screen.getByTestId('md-bold').getAttribute('aria-label')).toBe('Bold');
+    expect(screen.getByTestId('md-italic').getAttribute('aria-label')).toBe('Italic');
+    expect(screen.getByTestId('md-undo').getAttribute('aria-label')).toBe('Undo');
+  });
+
   it('renders the architecture preview pane', () => {
     render(EditorSplit, { props: { content: '', repoId: 'repo-1', specPath: 'specs/auth.md' } });
     expect(screen.getByTestId('arch-preview-pane')).toBeTruthy();

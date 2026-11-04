@@ -684,7 +684,6 @@
   }
 
   function handleKeydown(e) {
-    console.log('DEBUG EditorSplit.handleKeydown', e.key);
     if (e.key !== 'Escape') return;
     // While the 409 conflict dialog is open it owns Esc (HSI §7): the dialog
     // closes, the editor stays. The dialog's own window listener handles it.
@@ -768,8 +767,8 @@
               class="md-btn"
               type="button"
               onclick={() => applyToolbarAction(btn)}
-              aria-label={btn.aria ?? btn.label}
-              title={btn.aria ?? btn.label}
+              aria-label={$t(`editor_split.md_${btn.id}_aria`)}
+              title={$t(`editor_split.md_${btn.id}_aria`)}
               data-testid={`md-${btn.id}`}
             >{btn.label}</button>
           {/each}
