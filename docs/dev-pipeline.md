@@ -25,6 +25,30 @@ publication/merge, and cleanup. Review and verification bind to an exact candida
 and upstream base. Failures produce durable findings consumed by implementation.
 Infrastructure failures retry with backoff without changing the task contract.
 
+Model assignments default to four hours (`model_timeout: 14400` seconds in the
+private ledger). Existing assignments retain the harness deadline they started
+with. A failed run records `diagnostic.json`: the runner's actual timeout budget,
+agent and runner exit codes when available, inference error category, and names
+of unfinished tools. Credentials, tool arguments, and model reasoning are not
+copied into these diagnostics. The cockpit's retry reason uses this diagnosis.
+
+Interrupted independent reviews resume saved notes and bounded probe evidence
+only when the candidate and assignment still match and protected source was not
+changed. The original candidate remains the checkout; previous verdicts are
+never restored. Workspace-wide Cargo commands are rejected in review and remain
+the deterministic verifier's responsibility. Focused package/test probes remain
+available with the longer assignment budget.
+
+Historical generated static-repair tasks first enter model-free triage. A
+strictly recognized `bash scripts/check-*.sh` probe runs on exact current main
+in a disposable gateway sandbox. Its receipt is shared across matching repairs
+for that main revision and worker image. A passing probe records **resolved**,
+distinct from a shipped merge; failures stay repair work, and infrastructure
+errors resolve nothing. Resolved prerequisites unblock their dependents without
+creating a documentation-only PR. New repair identities use the reproduced
+probe/failure rather than incidental environment paths; identical unresolved
+failures share a prerequisite even as main advances.
+
 SQLite is the local authority for work, leases, findings, resource reservations,
 and observations. Claim tokens fence late results. GitHub is authoritative for
 published branches, checks, and merges. Gateway observations are authoritative

@@ -21,19 +21,20 @@ def decode_poll(output):
     return json.loads(frames[0])
 
 
-def validate_receipt(receipt, identity):
+def validate_receipt(receipt, identity, commands=None):
+    commands = COMMANDS if commands is None else commands
     if not isinstance(receipt, dict) or any(receipt.get(key) != expected for key, expected in identity.items()):
         raise Retry('verification receipt differs from the assigned source')
     if receipt.get('infrastructure'):
         raise Retry('remote verification infrastructure unavailable; retained log has details')
     records = receipt.get('checks')
-    if not isinstance(records, list) or not 1 <= len(records) <= len(COMMANDS):
+    if not isinstance(records, list) or not 1 <= len(records) <= len(commands):
         raise Retry('verification receipt lacks its mandatory checks')
     for index, record in enumerate(records):
-        if (not isinstance(record, dict) or record.get('command') != COMMANDS[index]
+        if (not isinstance(record, dict) or record.get('command') != commands[index]
                 or type(record.get('exit_code')) is not int or (index < len(records) - 1 and record['exit_code'] != 0)):
             raise Retry('verification receipt has invalid or reordered checks')
-    passed = len(records) == len(COMMANDS) and all(record['exit_code'] == 0 for record in records)
+    passed = len(records) == len(commands) and all(record['exit_code'] == 0 for record in records)
     if type(receipt.get('passed')) is not bool or receipt['passed'] != passed or (not passed and records[-1]['exit_code'] == 0):
         raise Retry('verification receipt has an inconsistent verdict')
 
@@ -57,7 +58,12 @@ def retire(execution, name):
         execution.store.resource_state(name, 'absent')
 
 
-def run(execution, path, identity):
+def run(execution, path, identity, probe=None):
+    if probe is not None:
+        import re
+        if (not isinstance(probe, list) or len(probe) != 2 or probe[0] != 'bash' or
+                not re.fullmatch(r'scripts/check-[a-z0-9-]+\.sh', probe[1])):
+            raise ValueError('unsupported upstream baseline probe')
     store = execution.store
     os.environ.setdefault('RUST_LOG', 'error')
     execution.login()
@@ -74,6 +80,8 @@ def run(execution, path, identity):
         gate = (ROOT / 'scripts/dev-check.sh').read_text().replace('/tmp/gyre', '/sandbox/workspace/checkout')
         (bundle / 'checks.sh').write_text(gate)
         job = identity | {'image': image, 'repo_url': store.setting('repo_url', 'https://github.com/jsell-rh/gyre.git')}
+        if probe is not None:
+            job['probe'] = probe
         (bundle / 'verify-job.json').write_text(json.dumps(job))
         if identity['head'] != identity['base']:
             execution.command('git', 'bundle', 'create', str(bundle / 'candidate.bundle'), 'HEAD', '^' + identity['base'], cwd=path, timeout=300)
@@ -118,7 +126,7 @@ def run(execution, path, identity):
                 failures = 0
                 if value['receipt'] is not None:
                     receipt = value['receipt']
-                    validate_receipt(receipt, identity)
+                    validate_receipt(receipt, identity, [probe] if probe is not None else None)
                     receipt['sandbox'] = name
                     (execution.directory / 'remote-verification.json').write_text(json.dumps(receipt))
                     return receipt
