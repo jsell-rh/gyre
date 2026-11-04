@@ -53,7 +53,7 @@ def snapshot(store):
                                    'running' if item['state'] == 'claimed' else item['state']),
                          'started': event['at'], 'phase': phase.get('phase'),
                          'reason': phase.get('reason'), 'detail': json.dumps(result)[:3000]})
-    resources = store.db.execute("SELECT state,count(*) FROM resources WHERE kind='sandbox' AND state<>'absent' GROUP BY state").fetchall()
+    resources = store.db.execute("SELECT state,count(*) FROM resources WHERE kind IN ('sandbox','admission') AND state<>'absent' GROUP BY state").fetchall()
     inventory = store.db.execute("SELECT at FROM events WHERE kind='gateway_inventory' ORDER BY id DESC LIMIT 1").fetchone()
     events = []
     for row in store.db.execute('SELECT * FROM events ORDER BY id DESC LIMIT 100'):
