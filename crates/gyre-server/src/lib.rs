@@ -914,7 +914,10 @@ pub fn build_state(
             dyn NetworkPeerRepository,
             mem::MemNetworkPeerRepository::default()
         ),
-        dependencies: Arc::new(mem::MemDependencyRepository::default()),
+        dependencies: store!(
+            dyn DependencyRepository,
+            mem::MemDependencyRepository::default()
+        ),
         breaking_changes: Arc::new(mem::MemBreakingChangeRepository::default()),
         dependency_policies: Arc::new(mem::MemDependencyPolicyRepository::default()),
         rate_limiter: rate_limit::RateLimiter::new(rate_per_sec),
@@ -1003,7 +1006,10 @@ pub fn build_state(
             dyn BudgetCallRepository,
             mem::MemBudgetCallRepository::default()
         ),
-        search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
+        search: store!(
+            dyn gyre_ports::SearchPort,
+            gyre_adapters::MemSearchAdapter::new()
+        ),
         tenants: store!(
             dyn gyre_ports::TenantRepository,
             mem::MemTenantRepository::default()

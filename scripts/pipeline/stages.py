@@ -197,11 +197,11 @@ def verify(execution, task):
     execution.command('git', 'add', '--', str(task_file), cwd=path)
     changed = execution.command('git', 'diff', '--cached', '--quiet', cwd=path, check=False)
     if changed.returncode:
-        execution.command('git', '-c', 'core.hooksPath=/dev/null', 'commit', '-m',
+        execution.command('git', '-c', 'core.hooksPath=/dev/null', 'commit', '--no-gpg-sign', '-m',
                           f"process({task['name']}): record independent approval", cwd=path)
     approved_candidate = execution.command('git', 'rev-parse', 'HEAD', cwd=path).stdout.strip()
     execution.command('git', 'checkout', '--detach', inp['base'], cwd=path)
-    merge = execution.command('git', '-c', 'core.hooksPath=/dev/null', 'merge', '--no-ff',
+    merge = execution.command('git', '-c', 'core.hooksPath=/dev/null', 'merge', '--no-gpg-sign', '--no-ff',
                               '-m', f"verify({task['name']}): reconcile candidate with main",
                               approved_candidate, cwd=path, check=False)
     if merge.returncode:
@@ -240,6 +240,7 @@ def verify(execution, task):
     return receipt, {'verified': receipt}, []
 
 def publish(execution, task):
+    from .ci import publication, read as observe_ci, failure as ci_failure
     verified = execution.claim['input']['verified']
     head = verified['head']
     repo = execution.store.setting('repository', 'jsell-rh/gyre')
@@ -265,6 +266,16 @@ def publish(execution, task):
                 execution.store.resource_state(resource['name'], 'absent')
             return {'merged': sha, 'pr': url}, {'progress': 'complete', 'delivered': {'sha': sha, 'pr': url,
                      'candidate': head, 'tree': tree, 'generation': task['generation']}}, []
+        previous = publication(execution.store,task)
+        if previous and previous['head'] != head and previous.get('candidate') == data.get('candidate'):
+            # Do not overwrite a known failing published head with another
+            # integration merge before its failure reaches implementation.
+            observed = observe_ci(execution,task,previous)
+            rejected = ci_failure(execution,task,previous,observed)
+            if rejected:
+                return rejected
+            if observed['status'] not in ('passed','policy_pending') or observed.get('checks') != 'green':
+                raise Wait('Awaiting CI on the recorded published head before changing the branch')
     path = checkout(execution, head)
     shipped = helper('dev-merge-message').message(task['name'],
                                                 path / 'specs/tasks' / (task['name'] + '.md'),
@@ -300,32 +311,25 @@ def publish(execution, task):
     with execution.store.transaction():
         execution.store._current(execution.claim['id'], execution.claim['token'])
         current = execution.store.task(task['name'])['data']
-        current.update(pr=url, published_head=head, delivery_branch=branch, pr_body_hash=body_hash)
+        current.update(pr=url, published_head=head, published_verified=verified,
+                       delivery_branch=branch, pr_body_hash=body_hash)
         execution.store.db.execute('UPDATE tasks SET data=? WHERE name=?', (json.dumps(current), task['name']))
         execution.store.event('pull_request', {'url': url, 'head': head}, task['name'], execution.claim['id'])
-    latest = execution.command('git', 'ls-remote', 'origin', 'refs/heads/main', cwd=path).stdout.split()[0]
-    if latest != verified['base']:
-        return {'base_changed': latest}, {'verified': None}, []
-    observation = helper('dev-ci').observe(execution.command, url, head, verified['base'], execution.directory)
+    task = execution.store.task(task['name'])
+    observation = observe_ci(execution,task,verified)
     if observation['status'] == 'infrastructure':
         for ident in observation.get('runs', []):
             if ident is not None:
                 execution.command('gh', 'run', 'rerun', str(ident), '--failed', '--repo', repo,
                                   timeout=30, check=False)
         raise Retry('GitHub infrastructure checks were rerun on the same verified head')
-    if observation['status'] == 'baseline_failed':
-        prerequisite = baseline_repair(execution, observation)
-        finding = observation | {'id': execution.claim['id'], 'category': 'baseline',
-                                 'source': head, 'prerequisite': prerequisite,
-                                 'log_tail': Path(observation['log']).read_text()[-16000:]}
-        return observation, {'dependencies': sorted(set(task['data']['dependencies']) | {prerequisite}),
-                             'repair': finding}, [finding]
-    if observation['status'] in ('candidate_failed', 'baseline_failed', 'closed'):
-        finding = observation | {'id': execution.claim['id'], 'category': 'ci', 'source': head}
-        if observation.get('log'):
-            finding['log_tail'] = Path(observation.get('candidate_log', observation['log'])).read_text()[-16000:]
-        return observation, {'repair': finding, 'candidate': head,
-                             'candidate_base': verified['base'], 'review': None, 'verified': None}, [finding]
+    rejected = ci_failure(execution,task,verified,observation)
+    if rejected:
+        return rejected
+    if observation.get('checks') == 'green':
+        latest = execution.command('git', 'ls-remote', 'origin', 'refs/heads/main', cwd=path).stdout.split()[0]
+        if latest != verified['base']:
+            return {'base_changed': latest}, {'verified': None}, []
     if observation['status'] != 'passed':
         raise Wait('GitHub merge gate: ' + observation['status'])
     permit = 'merge-' + execution.claim['id']
@@ -578,3 +582,5 @@ if p.exists():
 
 HANDLERS = {'triage': triage, 'implement': implement, 'review': review,
             'verify': verify, 'publish': publish, 'cleanup': cleanup}
+from .ci import observe
+HANDLERS['observe'] = observe
