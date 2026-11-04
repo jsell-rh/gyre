@@ -860,11 +860,30 @@
     }
   }
 
+  /** Read the drilled repo name from the current URL (?repo=name), or null.
+   *  Scope drill per ui-layout.md §3: selectRepo pushes this param; reading
+   *  it back makes the drilled state deep-linkable on reload/refresh and
+   *  lets popstate (browser Back/Forward) keep the view in sync with the
+   *  URL instead of drifting. */
+  function drilledRepoFromUrl() {
+    try {
+      const param = new URL(window.location.href).searchParams.get('repo');
+      return param || null;
+    } catch {
+      return null;
+    }
+  }
+
   function selectRepo(repo) {
-    // In workspace-scope mode, selecting a repo loads its graph in this view
+    // In workspace-scope mode, selecting a repo loads its graph in this view.
+    // Scope drill per ui-layout.md §3: URL updates via pushState (no reload),
+    // so the drilled state is deep-linkable and Back returns to the repo list.
     selectedRepoId = repo.id;
     showingRepoGraph = true;
     clearConceptSearch();
+    const url = new URL(window.location.href);
+    url.searchParams.set('repo', repo.name ?? repo.id);
+    window.history.pushState(window.history.state, '', url.toString());
     loadGraph(repo.id);
   }
 
@@ -873,7 +892,61 @@
     selectedRepoId = '';
     graph = null;
     graphError = null;
+    // Pop the drill URL entry pushed by selectRepo (Back from drilled state)
+    const url = new URL(window.location.href);
+    if (url.searchParams.has('repo')) {
+      url.searchParams.delete('repo');
+      window.history.pushState(window.history.state, '', url.toString());
+    }
   }
+
+  // Restore the drilled repo from ?repo= once the workspace repo list is
+  // available (repo name -> id resolution needs the loaded list). Runs only
+  // at workspace scope with a drill param present; the mount-time restore
+  // deliberately does NOT push another history entry - the URL is already
+  // the drilled one.
+  let drillRestored = false;
+  $effect(() => {
+    if (drillRestored || scopeType !== 'workspace' || wsReposLoading || !wsRepos.length) return;
+    const name = drilledRepoFromUrl();
+    if (!name) return;
+    const repo = wsRepos.find(r => (r.name ?? r.id) === name);
+    if (!repo) return;
+    drillRestored = true;
+    selectedRepoId = repo.id;
+    showingRepoGraph = true;
+    clearConceptSearch();
+    loadGraph(repo.id);
+  });
+
+  // Browser Back/Forward (popstate): keep the view in sync with the URL.
+  // App-level popstate handles mode changes; this handles the drill param
+  // within the explorer view. Back from a drilled state (param gone) returns
+  // to the repo list; Forward re-enters the drilled graph.
+  $effect(() => {
+    const onPopstate = () => {
+      if (scopeType !== 'workspace') return;
+      const name = drilledRepoFromUrl();
+      if (!name) {
+        if (showingRepoGraph) {
+          showingRepoGraph = false;
+          selectedRepoId = '';
+          graph = null;
+          graphError = null;
+        }
+        return;
+      }
+      const repo = wsRepos.find(r => (r.name ?? r.id) === name);
+      if (repo && (!showingRepoGraph || selectedRepoId !== repo.id)) {
+        selectedRepoId = repo.id;
+        showingRepoGraph = true;
+        clearConceptSearch();
+        loadGraph(repo.id);
+      }
+    };
+    window.addEventListener('popstate', onPopstate);
+    return () => window.removeEventListener('popstate', onPopstate);
+  });
 
   async function loadRepos() {
     reposLoading = true;
@@ -2943,6 +3016,8 @@
   }
   .toolchain-warning-dismiss:hover { opacity: 1; background: rgba(245, 158, 11, 0.2); }
 
+  /* Slide-in per ui-layout.md §3 Drill-Down: 200ms ease-out from the right.
+     Width 0→target animates the slide; min-width animates in lockstep. */
   .explorer-detail-area {
     width: 320px;
     min-width: 280px;
@@ -2951,6 +3026,7 @@
     display: flex;
     flex-direction: column;
     border-left: 1px solid var(--color-border);
+    transition: width 200ms ease-out, min-width 200ms ease-out;
   }
 
   .explorer-chat-area {
@@ -2995,6 +3071,7 @@
   }
 
   /* ── Spec Editor slide-out panel ───────────────────────────────── */
+  /* Slide-in per ui-layout.md §3 Drill-Down: 200ms ease-out from the right. */
   .spec-editor-panel {
     width: 420px;
     min-width: 320px;
@@ -3004,6 +3081,7 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    transition: width 200ms ease-out, min-width 200ms ease-out;
   }
 
   .spec-editor-header {

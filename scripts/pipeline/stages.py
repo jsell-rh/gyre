@@ -36,6 +36,9 @@ def prompt(execution, task):
 
 
 def triage(execution, task):
+    if execution.claim['input'].get('baseline_probe'):
+        from .repairs import recheck
+        return recheck(execution, task)
     store = execution.store
     data = task['data']
     graph = {item['name']: item['data'].get('dependencies') or [] for item in store.tasks()}
@@ -119,7 +122,11 @@ def implement(execution, task):
 def review(execution, task):
     result = execution.cloud_step(task, prompt(execution, task))
     if result.get('agent_exit') != 0 or result.get('stream_exit') != 0:
-        raise Retry('review model did not complete; retry independent review on the same candidate')
+        from .diagnostics import diagnose
+        diagnostic = result.get('diagnostic') or diagnose(execution.directory, result.get('agent_exit'))
+        error = Retry(diagnostic['message'] + '; resume saved review evidence on the same candidate')
+        error.category, error.diagnostic = diagnostic['category'], diagnostic
+        raise error
     path = checkout(execution, result['head'])
     assigned = execution.claim['input']['candidate']
     execution.command('git', 'fetch', '--quiet', 'origin', assigned, cwd=path, timeout=180)
@@ -190,11 +197,11 @@ def verify(execution, task):
     execution.command('git', 'add', '--', str(task_file), cwd=path)
     changed = execution.command('git', 'diff', '--cached', '--quiet', cwd=path, check=False)
     if changed.returncode:
-        execution.command('git', '-c', 'core.hooksPath=/dev/null', 'commit', '-m',
+        execution.command('git', '-c', 'core.hooksPath=/dev/null', 'commit', '--no-gpg-sign', '-m',
                           f"process({task['name']}): record independent approval", cwd=path)
     approved_candidate = execution.command('git', 'rev-parse', 'HEAD', cwd=path).stdout.strip()
     execution.command('git', 'checkout', '--detach', inp['base'], cwd=path)
-    merge = execution.command('git', '-c', 'core.hooksPath=/dev/null', 'merge', '--no-ff',
+    merge = execution.command('git', '-c', 'core.hooksPath=/dev/null', 'merge', '--no-gpg-sign', '--no-ff',
                               '-m', f"verify({task['name']}): reconcile candidate with main",
                               approved_candidate, cwd=path, check=False)
     if merge.returncode:
@@ -233,6 +240,7 @@ def verify(execution, task):
     return receipt, {'verified': receipt}, []
 
 def publish(execution, task):
+    from .ci import publication, read as observe_ci, failure as ci_failure
     verified = execution.claim['input']['verified']
     head = verified['head']
     repo = execution.store.setting('repository', 'jsell-rh/gyre')
@@ -258,6 +266,16 @@ def publish(execution, task):
                 execution.store.resource_state(resource['name'], 'absent')
             return {'merged': sha, 'pr': url}, {'progress': 'complete', 'delivered': {'sha': sha, 'pr': url,
                      'candidate': head, 'tree': tree, 'generation': task['generation']}}, []
+        previous = publication(execution.store,task)
+        if previous and previous['head'] != head and previous.get('candidate') == data.get('candidate'):
+            # Do not overwrite a known failing published head with another
+            # integration merge before its failure reaches implementation.
+            observed = observe_ci(execution,task,previous)
+            rejected = ci_failure(execution,task,previous,observed)
+            if rejected:
+                return rejected
+            if observed['status'] not in ('passed','policy_pending') or observed.get('checks') != 'green':
+                raise Wait('Awaiting CI on the recorded published head before changing the branch')
     path = checkout(execution, head)
     shipped = helper('dev-merge-message').message(task['name'],
                                                 path / 'specs/tasks' / (task['name'] + '.md'),
@@ -293,32 +311,25 @@ def publish(execution, task):
     with execution.store.transaction():
         execution.store._current(execution.claim['id'], execution.claim['token'])
         current = execution.store.task(task['name'])['data']
-        current.update(pr=url, published_head=head, delivery_branch=branch, pr_body_hash=body_hash)
+        current.update(pr=url, published_head=head, published_verified=verified,
+                       delivery_branch=branch, pr_body_hash=body_hash)
         execution.store.db.execute('UPDATE tasks SET data=? WHERE name=?', (json.dumps(current), task['name']))
         execution.store.event('pull_request', {'url': url, 'head': head}, task['name'], execution.claim['id'])
-    latest = execution.command('git', 'ls-remote', 'origin', 'refs/heads/main', cwd=path).stdout.split()[0]
-    if latest != verified['base']:
-        return {'base_changed': latest}, {'verified': None}, []
-    observation = helper('dev-ci').observe(execution.command, url, head, verified['base'], execution.directory)
+    task = execution.store.task(task['name'])
+    observation = observe_ci(execution,task,verified)
     if observation['status'] == 'infrastructure':
         for ident in observation.get('runs', []):
             if ident is not None:
                 execution.command('gh', 'run', 'rerun', str(ident), '--failed', '--repo', repo,
                                   timeout=30, check=False)
         raise Retry('GitHub infrastructure checks were rerun on the same verified head')
-    if observation['status'] == 'baseline_failed':
-        prerequisite = baseline_repair(execution, observation)
-        finding = observation | {'id': execution.claim['id'], 'category': 'baseline',
-                                 'source': head, 'prerequisite': prerequisite,
-                                 'log_tail': Path(observation['log']).read_text()[-16000:]}
-        return observation, {'dependencies': sorted(set(task['data']['dependencies']) | {prerequisite}),
-                             'repair': finding}, [finding]
-    if observation['status'] in ('candidate_failed', 'baseline_failed', 'closed'):
-        finding = observation | {'id': execution.claim['id'], 'category': 'ci', 'source': head}
-        if observation.get('log'):
-            finding['log_tail'] = Path(observation.get('candidate_log', observation['log'])).read_text()[-16000:]
-        return observation, {'repair': finding, 'candidate': head,
-                             'candidate_base': verified['base'], 'review': None, 'verified': None}, [finding]
+    rejected = ci_failure(execution,task,verified,observation)
+    if rejected:
+        return rejected
+    if observation.get('checks') == 'green':
+        latest = execution.command('git', 'ls-remote', 'origin', 'refs/heads/main', cwd=path).stdout.split()[0]
+        if latest != verified['base']:
+            return {'base_changed': latest}, {'verified': None}, []
     if observation['status'] != 'passed':
         raise Wait('GitHub merge gate: ' + observation['status'])
     permit = 'merge-' + execution.claim['id']
@@ -369,16 +380,20 @@ def static_baseline_observation(log, base):
             not isinstance(value.get('probe'), list) or not value['probe'] or
             not all(isinstance(arg, str) and arg for arg in value['probe'])):
         raise Retry('baseline gate evidence does not identify the verified base and probe')
+    from .repairs import fingerprint
     return {'status': 'baseline_failed', 'base': base,
             'environment': 'host-' + value['environment'],
-            'probe': value['probe'], 'baseline_log': str(log)}
+            'probe': value['probe'], 'baseline_log': str(log),
+            'failure_signature': fingerprint(value['probe'], str(value.get('log', '')))}
 
 
 def baseline_repair(execution, observation):
     """Deduplicate a real upstream failure into a scoped prerequisite task."""
     from .catalog import generation_for
     store = execution.store
-    key = observation['base'] + ':' + observation['environment']
+    from .repairs import fingerprint, probe, satisfied
+    signature = observation.get('failure_signature')
+    key = observation['base'] + ':' + (signature or observation['environment'])
     excerpt = Path(observation['baseline_log']).read_text()[-24000:]
     body = ('---\ntitle: "Repair verified failure on main ' + observation['base'][:12] + '"\n'
             'spec_ref: "GOAL.md — real implementations and meaningful verification"\n'
@@ -393,11 +408,23 @@ def baseline_repair(execution, observation):
     generation = generation_for(store, body)
     with store.transaction():
         for task in store.tasks():
-            if task['data'].get('baseline_key') == key:
+            if satisfied(task['data']):
+                continue
+            previous_signature = task['data'].get('baseline_failure')
+            if signature and previous_signature is None and probe(task) == observation.get('probe'):
+                for line in task['body'].split('## Shipped')[0].splitlines():
+                    if line.startswith('GYRE_BASELINE_FAILURE_JSON '):
+                        try:
+                            old = json.loads(line.removeprefix('GYRE_BASELINE_FAILURE_JSON '))
+                            previous_signature = fingerprint(old['probe'], str(old.get('log', '')))
+                        except (ValueError, KeyError, TypeError):
+                            continue
+            if (signature and previous_signature == signature) or task['data'].get('baseline_key') == key:
                 return task['name']
         number = max((int(task['name'][5:]) for task in store.tasks()), default=0) + 1
         name = f'task-{number:03d}'
-        data = metadata(body) | {'baseline_key': key, 'catalog_generation': generation}
+        data = metadata(body) | {'baseline_key': key, 'catalog_generation': generation,
+                                'baseline_probe': observation.get('probe'), 'baseline_failure': signature}
         store.db.execute('INSERT INTO tasks VALUES(?,?,?,?,?)', (name, generation, body, json.dumps(data), time.time()))
         store.event('baseline_prerequisite', {'base': observation['base'], 'evidence': observation['baseline_log']}, name)
         return name
@@ -555,3 +582,5 @@ if p.exists():
 
 HANDLERS = {'triage': triage, 'implement': implement, 'review': review,
             'verify': verify, 'publish': publish, 'cleanup': cleanup}
+from .ci import observe
+HANDLERS['observe'] = observe
