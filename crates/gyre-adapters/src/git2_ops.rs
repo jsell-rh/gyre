@@ -650,8 +650,7 @@ impl GitOpsPort for Git2OpsAdapter {
         tokio::task::spawn_blocking(move || {
             let repo = Repository::open(&repo_path).context("failed to open repository")?;
 
-            let revert_oid =
-                git2::Oid::from_str(&sha_to_revert).context("invalid revert SHA")?;
+            let revert_oid = git2::Oid::from_str(&sha_to_revert).context("invalid revert SHA")?;
             let revert_commit = repo
                 .find_commit(revert_oid)
                 .context("revert SHA is not a valid commit")?;
@@ -679,8 +678,7 @@ impl GitOpsPort for Git2OpsAdapter {
             let their_tree = revert_commit.parent(0)?.tree()?;
             let our_tree = tip_commit.tree()?;
 
-            let mut index =
-                repo.merge_trees(&ancestor_tree, &our_tree, &their_tree, None)?;
+            let mut index = repo.merge_trees(&ancestor_tree, &our_tree, &their_tree, None)?;
 
             if index.has_conflicts() {
                 // Same file changed by the reverted commit AND by a later
@@ -709,13 +707,8 @@ impl GitOpsPort for Git2OpsAdapter {
             let tree = repo.find_tree(tree_id)?;
 
             // Message mirrors `git revert`'s default.
-            let subject = revert_commit
-                .summary()
-                .unwrap_or("commit")
-                .to_string();
-            let message = format!(
-                "Revert \"{subject}\"\n\nThis reverts commit {sha_to_revert}."
-            );
+            let subject = revert_commit.summary().unwrap_or("commit").to_string();
+            let message = format!("Revert \"{subject}\"\n\nThis reverts commit {sha_to_revert}.");
             let sig = git2::Signature::now("Gyre", "gyre@local")?;
             let commit_id = repo.commit(
                 Some(&format!("refs/heads/{branch}")),
@@ -883,7 +876,9 @@ mod tests {
         std::fs::write(dir.path().join("file.txt"), "base").unwrap();
         let root = make_commit(&repo, "root");
 
-        let result = adapter.revert_commit(&workdir, "main", &root.to_string()).await;
+        let result = adapter
+            .revert_commit(&workdir, "main", &root.to_string())
+            .await;
         assert!(result.is_err());
     }
 
@@ -1071,7 +1066,11 @@ mod tests {
             .get()
             .peel_to_commit()
             .unwrap();
-        assert_eq!(tip.id(), pre_revert_tip, "branch must be untouched on conflict");
+        assert_eq!(
+            tip.id(),
+            pre_revert_tip,
+            "branch must be untouched on conflict"
+        );
         assert_eq!(tip.id().to_string(), merge_b);
     }
 

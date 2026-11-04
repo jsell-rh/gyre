@@ -199,9 +199,7 @@ pub struct ConfigurableGitOps {
 impl Default for ConfigurableGitOps {
     fn default() -> Self {
         Self {
-            conflict_branches: Arc::new(std::sync::Mutex::new(
-                std::collections::HashSet::new(),
-            )),
+            conflict_branches: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             revert_calls: Arc::new(parking_lot::Mutex::new(Vec::new())),
             revert_fails: false,
             revert_conflicts: false,

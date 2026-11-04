@@ -110,7 +110,10 @@ fn gate_type_to_str(t: &GateType) -> &'static str {
     }
 }
 
-async fn post_merge_gates(state: &AppState, repo_id: &str) -> Result<Vec<PostMergeGateDto>, ApiError> {
+async fn post_merge_gates(
+    state: &AppState,
+    repo_id: &str,
+) -> Result<Vec<PostMergeGateDto>, ApiError> {
     let gates = state
         .quality_gates
         .list_by_repo_id_and_phase(repo_id, GatePhase::PostMerge)
@@ -299,9 +302,7 @@ pub async fn revert_mr(
         .revert_commit(&repo.path, &repo.default_branch, &merge_sha)
         .await
     {
-        Ok(gyre_domain::RevertResult::Success {
-            revert_commit_sha,
-        }) => revert_commit_sha,
+        Ok(gyre_domain::RevertResult::Success { revert_commit_sha }) => revert_commit_sha,
         // The inverse patch collides with later changes on the branch.
         // The branch is untouched — surface the conflict to the caller
         // instead of destroying later merges (task-095 R4-F1).
@@ -316,13 +317,10 @@ pub async fn revert_mr(
     // Manual reverts count toward the circuit breaker (task-095 R3-F1):
     // the breaker keyed on the resubmission-stable key fires after 3
     // reverts of the same work no matter who initiated them.
-    if let Ok(revert_count) =
-        crate::merge_processor::increment_revert_count(&state, &mr).await
-    {
+    if let Ok(revert_count) = crate::merge_processor::increment_revert_count(&state, &mr).await {
         if revert_count >= 3 {
             if let Err(e) =
-                crate::merge_processor::trip_circuit_breaker(&state, repo.id.as_str(), &mr)
-                    .await
+                crate::merge_processor::trip_circuit_breaker(&state, repo.id.as_str(), &mr).await
             {
                 tracing::error!(mr_id = %mr.id, error = %e, "failed to trip circuit breaker");
             }
@@ -425,7 +423,10 @@ pub async fn set_post_merge_gates(
 
     let gates = post_merge_gates(&state, &repo_id).await?;
 
-    Ok((StatusCode::OK, Json(PostMergeGatesResponse { repo_id, gates })))
+    Ok((
+        StatusCode::OK,
+        Json(PostMergeGatesResponse { repo_id, gates }),
+    ))
 }
 
 #[cfg(test)]
@@ -434,8 +435,8 @@ mod tests {
     use crate::mem::{test_state, test_state_with_git_ops, ConfigurableGitOps};
     use axum::body::Body;
     use axum::Router;
-    use http::{Request, StatusCode};
     use gyre_domain::{MergeQueueEntry, MergeQueueEntryStatus, MergeRequest, Repository};
+    use http::{Request, StatusCode};
     use std::sync::Arc;
     use tower::ServiceExt;
 
@@ -508,7 +509,13 @@ mod tests {
         let recorded = git.revert_calls.clone();
         let state = test_state_with_git_ops(git);
         let repo = seed_repo(&state, "revert-sha").await;
-        seed_merged_mr(&state, &repo.id, "mr-sha", Some("a1b2c3d4e5f60718293a4b5c6d7e8f9011223344")).await;
+        seed_merged_mr(
+            &state,
+            &repo.id,
+            "mr-sha",
+            Some("a1b2c3d4e5f60718293a4b5c6d7e8f9011223344"),
+        )
+        .await;
 
         let resp = post_revert(&app(state.clone()), repo.id.as_str(), "mr-sha").await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -543,8 +550,10 @@ mod tests {
     /// effects — the branch is untouched and the MR stays Merged.
     #[tokio::test]
     async fn manual_revert_conflict_is_409_without_side_effects() {
-        let mut git = ConfigurableGitOps::default();
-        git.revert_conflicts = true;
+        let git = ConfigurableGitOps {
+            revert_conflicts: true,
+            ..Default::default()
+        };
         let recorded = git.revert_calls.clone();
         let state = test_state_with_git_ops(Arc::new(git));
         let repo = seed_repo(&state, "revert-conflict").await;
@@ -604,7 +613,13 @@ mod tests {
         let state = test_state_with_git_ops(git);
         let repo_a = seed_repo(&state, "revert-a").await;
         let repo_b = seed_repo(&state, "revert-b").await;
-        seed_merged_mr(&state, &repo_a.id, "mr-foreign", Some("aabbccddeeff00112233445566778899aabbccdd")).await;
+        seed_merged_mr(
+            &state,
+            &repo_a.id,
+            "mr-foreign",
+            Some("aabbccddeeff00112233445566778899aabbccdd"),
+        )
+        .await;
 
         let resp = post_revert(&app(state.clone()), repo_b.id.as_str(), "mr-foreign").await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -619,7 +634,13 @@ mod tests {
         let git = Arc::new(ConfigurableGitOps::default());
         let state = test_state_with_git_ops(git);
         let repo = seed_repo(&state, "revert-breaker").await;
-        let mr = seed_merged_mr(&state, &repo.id, "mr-brk", Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")).await;
+        let mr = seed_merged_mr(
+            &state,
+            &repo.id,
+            "mr-brk",
+            Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+        )
+        .await;
 
         // Two prior reverts of the same work already counted (namespace
         // literal mirrors merge_processor::REVERT_COUNTS_NS).

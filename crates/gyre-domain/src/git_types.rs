@@ -14,11 +14,15 @@ pub enum MergeResult {
 /// (task-095 R4-F1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RevertResult {
-    Success { revert_commit_sha: String },
+    Success {
+        revert_commit_sha: String,
+    },
     /// The inverse patch conflicts with changes that landed after the
     /// reverted commit (same file modified both there and later). The
     /// branch is untouched; the caller decides how to proceed.
-    Conflict { message: String },
+    Conflict {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

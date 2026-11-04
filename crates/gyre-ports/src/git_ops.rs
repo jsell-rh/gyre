@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use gyre_domain::{BranchInfo, CommitInfo, DiffResult, MergeResult, RevertResult};
 
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait GitOpsPort: Send + Sync {
     /// Initialize a new bare repository at the given path.
     async fn init_bare(&self, path: &str) -> Result<()>;
