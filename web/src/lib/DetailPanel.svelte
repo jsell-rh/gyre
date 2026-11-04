@@ -221,6 +221,14 @@
 
   function handleKeydown(e) {
     if (e.key === 'Escape') {
+      // While the EditorSplit pop-out is open it owns Escape (ui-layout.md
+      // §2: Back/Esc returns to the normal detail panel view). This panel
+      // div sits on the bubbling path BEFORE EditorSplit's window handler,
+      // so without this guard a single Escape fired with focus inside the
+      // panel (the normal case — the user was just editing the textarea)
+      // both closes the editor split AND pops detail history via onback()
+      // (the Esc double-fire). The split's own handler closes it.
+      if (showEditorSplit) return;
       e.preventDefault();
       // Escape goes back if there's history, otherwise closes
       if (onback) onback();
@@ -5343,7 +5351,7 @@
     flex-direction: column;
     background: var(--color-surface);
     border-left: 1px solid var(--color-border);
-    transition: width var(--transition-normal) ease-out, min-width var(--transition-normal) ease-out;
+    transition: width 200ms ease-out, min-width 200ms ease-out;
     flex-shrink: 0;
   }
 

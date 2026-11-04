@@ -93,9 +93,6 @@ async fn maybe_send_ping(
     Ok(())
 }
 
-/// Monotonic session ID counter for ordering sessions (oldest-first eviction).
-static SESSION_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 /// Per-session slot: stores a unique ID and a shutdown signal so we can evict
 /// the oldest session when a new connection arrives at the limit.
 struct SessionSlot {
@@ -104,11 +101,75 @@ struct SessionSlot {
     shutdown: Arc<tokio::sync::Notify>,
 }
 
-/// Global per-user session tracker, keyed by (tenant_id, agent_id).
+/// Per-server explorer session registry, keyed by (tenant_id, agent_id).
 /// Uses std::sync::Mutex for Drop compatibility (Drop cannot be async).
 /// Each user has a Vec of active SessionSlots, ordered oldest-first.
-static ACTIVE_SESSIONS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Vec<SessionSlot>>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+///
+/// Owned by `AppState`, NOT a process global: the per-user concurrent
+/// session limit is a property of a server instance, not of the OS process.
+/// Multiple `AppState` instances in one process (integration tests,
+/// embedding) must not evict each other's sessions - only sessions routed
+/// through the same instance compete for the same cap. This state is
+/// ephemeral by nature (WebSocket connections cannot outlive their server
+/// instance), so it is intentionally not port-backed.
+pub(crate) struct ExplorerSessionRegistry {
+    /// User key -> active session slots, ordered oldest-first.
+    sessions: std::sync::Mutex<HashMap<String, Vec<SessionSlot>>>,
+    /// Monotonic session ID counter for ordering (oldest-first eviction).
+    next_session_id: std::sync::atomic::AtomicU64,
+}
+
+impl ExplorerSessionRegistry {
+    pub(crate) fn new() -> Self {
+        Self {
+            sessions: std::sync::Mutex::new(HashMap::new()),
+            next_session_id: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Register a new session for `user`, evicting (signalling) the oldest
+    /// sessions beyond `max`. Returns the new session's ID and shutdown signal.
+    pub(crate) fn register(&self, user: &str, max: usize) -> (u64, Arc<tokio::sync::Notify>) {
+        let session_id = self
+            .next_session_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let slots = sessions.entry(user.to_string()).or_default();
+        // Evict oldest sessions if at the limit.
+        while slots.len() >= max {
+            let evicted = slots.remove(0);
+            info!(
+                user = %user,
+                evicted_session = evicted.id,
+                "Explorer WS: evicting oldest session to make room for new connection"
+            );
+            evicted.shutdown.notify_one();
+        }
+        slots.push(SessionSlot {
+            id: session_id,
+            shutdown: Arc::clone(&shutdown_notify),
+        });
+        (session_id, shutdown_notify)
+    }
+
+    /// Remove a session slot (idempotent; called from `SessionGuard::drop`).
+    pub(crate) fn unregister(&self, user: &str, session_id: u64) {
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(slots) = sessions.get_mut(user) {
+            slots.retain(|s| s.id != session_id);
+            if slots.is_empty() {
+                sessions.remove(user);
+            }
+        }
+    }
+}
+
+impl Default for ExplorerSessionRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Maximum concurrent explorer sessions per user.
 /// Override with GYRE_EXPLORER_MAX_SESSIONS env var.
@@ -200,46 +261,24 @@ async fn handle_explorer_session(
     // rather than rejecting the new connection. This handles zombie sessions from
     // unclean disconnects (browser crash, tab close, navigation) gracefully.
     let session_user = format!("{}:{}", auth.tenant_id, auth.agent_id);
-    let session_id = SESSION_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+    let (session_id, shutdown_notify) = state
+        .explorer_sessions
+        .register(&session_user, max_sessions_per_user());
 
     // Guard: remove this session's slot on drop (even if we return early or panic).
     struct SessionGuard {
+        registry: Arc<ExplorerSessionRegistry>,
         user_key: String,
         session_id: u64,
     }
     impl Drop for SessionGuard {
         fn drop(&mut self) {
-            let mut sessions = ACTIVE_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(slots) = sessions.get_mut(&self.user_key) {
-                slots.retain(|s| s.id != self.session_id);
-                if slots.is_empty() {
-                    sessions.remove(&self.user_key);
-                }
-            }
+            self.registry.unregister(&self.user_key, self.session_id);
         }
-    }
-
-    {
-        let mut sessions = ACTIVE_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-        let slots = sessions.entry(session_user.clone()).or_default();
-        // Evict oldest sessions if at the limit.
-        while slots.len() >= max_sessions_per_user() {
-            let evicted = slots.remove(0);
-            info!(
-                user = %session_user,
-                evicted_session = evicted.id,
-                "Explorer WS: evicting oldest session to make room for new connection"
-            );
-            evicted.shutdown.notify_one();
-        }
-        slots.push(SessionSlot {
-            id: session_id,
-            shutdown: Arc::clone(&shutdown_notify),
-        });
     }
     // Create guard immediately after registration so any subsequent panic cleans up.
     let _session_guard = SessionGuard {
+        registry: Arc::clone(&state.explorer_sessions),
         user_key: session_user,
         session_id,
     };
@@ -2878,8 +2917,14 @@ async fn run_explorer_agent(
                     // Stream a warning with the raw JSON so the user can see what was attempted.
                     let raw_preview = serde_json::to_string_pretty(&query_json)
                         .unwrap_or_else(|_| query_json.to_string());
+                    // Truncate on a UTF-8 char boundary - a fixed byte index
+                    // would panic when byte 500 falls inside a multibyte
+                    // character (task-095 F4 flaw class).
                     let truncated = if raw_preview.len() > 500 {
-                        format!("{}...", &raw_preview[..500])
+                        format!(
+                            "{}...",
+                            crate::gate_executor::truncate_bytes(&raw_preview, 500)
+                        )
                     } else {
                         raw_preview
                     };
@@ -3402,8 +3447,7 @@ async fn execute_tool(
                 .input
                 .get("query")
                 .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_lowercase();
+                .unwrap_or("");
             let limit = tool_call
                 .input
                 .get("limit")
@@ -3411,33 +3455,7 @@ async fn execute_tool(
                 .unwrap_or(30)
                 .min(50) as usize; // Cap at 50 to limit conversation history bloat
 
-            let results: Vec<serde_json::Value> = nodes
-                .iter()
-                .filter(|n| n.deleted_at.is_none())
-                .filter(|n| {
-                    n.name.to_lowercase().contains(&query)
-                        || n.qualified_name.to_lowercase().contains(&query)
-                        || n.file_path.to_lowercase().contains(&query)
-                        || n.doc_comment
-                            .as_ref()
-                            .map_or(false, |d| d.to_lowercase().contains(&query))
-                        || n.spec_path
-                            .as_ref()
-                            .map_or(false, |s| s.to_lowercase().contains(&query))
-                })
-                .take(limit)
-                .map(|n| {
-                    json!({
-                        "id": n.id.to_string(),
-                        "name": n.name,
-                        "qualified_name": n.qualified_name,
-                        "node_type": format!("{:?}", n.node_type).to_lowercase(),
-                        "file_path": n.file_path,
-                        "spec_path": n.spec_path,
-                        "doc_comment": n.doc_comment.as_deref().map(|d| if d.len() > 100 { &d[..100] } else { d }),
-                    })
-                })
-                .collect();
+            let results = gyre_domain::view_query_resolver::search_graph_nodes(query, nodes, limit);
 
             format!(
                 "{} results:\n{}",
