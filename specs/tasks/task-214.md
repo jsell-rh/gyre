@@ -2,7 +2,7 @@
 title: "Repair verified failure on main f4acb4ebcaf9"
 spec_ref: "GOAL.md — real implementations and meaningful verification"
 depends_on: [task-239]
-progress: ready-for-review
+progress: complete
 commits: ["52a7d4afb5c5ecccaf548409c9478817c410fd02", "8e5852493dd00fae67c93cc1f74679eea9b7c43a", "96d2a28c0e5068d00924db884877712e1cbd4dee"]
 ---
 
