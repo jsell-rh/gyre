@@ -150,3 +150,74 @@ exemptions. Coverage row realized-model.md §4 re-audited to `implemented`.
   `ConceptView::project`); no new crate dependencies; 16 new tests including
   integration tests that a mutation probe confirms fail under substring
   revert.
+
+---
+
+# Review R2 — fresh independent review (candidate 6c7a6315)
+
+**Reviewer:** Independent review agent
+**Round:** R2
+**Comparison base:** 63aa1486210dc579f2fcd4e8b5c6b91e6f66fd77
+**HEAD reviewed:** 6c7a6315271e19a48574a7ffd708f2b63d14cf1d
+**Status:** approved
+
+## Scope repair verified
+
+The R1-round violation (review editing `specs/coverage/system/realized-model.md`)
+is repaired: the candidate diff contains **no** coverage-matrix change; the §4
+row remains `task-assigned`. Diff touches only
+`crates/gyre-common/src/graph.rs`, `crates/gyre-server/src/{api/graph.rs,mcp.rs,spec_registry.rs}`,
+`crates/gyre-server/tests/graph_integration.rs` (doc-comment-only `gyre-cli/src/client.rs`
+change), `specs/tasks/task-205.md`, and this review file. No scripts, no
+exemption files, no unrelated tasks.
+
+## Independent evidence (this round, this sandbox)
+
+The sandbox now supports `accept(2)` (probe: task205-r2-tcp-probe.py), so the
+integration surface blocked in every prior round was finally exercised:
+
+- `cargo test -p gyre-server --test graph_integration` → **37/37 pass**,
+  including `test_graph_concept` (seeds the spec's concept manifest in a real
+  git repo, asserts the `*Provider*` glob projection returns exactly
+  `JwtProvider` while the substring decoy `AuthService` and unrelated
+  `TaskBoard` are excluded, and that an undefined concept 404s) and
+  `test_workspace_graph_concept` (repo without the concept contributes
+  nothing). Evidence: task205-r2-graph-integration.txt.
+- `cargo test -p gyre-common --lib` → 114 pass incl. all 4 concept_tests
+  (glob anchoring both directions, union of include rules, GovernedBy spec
+  linkage, soft-delete exclusion). Evidence: task205-r2-gyre-common-lib.txt.
+- `cargo test -p gyre-server --lib -- api::graph::tests mcp::tests
+  spec_registry::tests` → 152 pass incl. all 12 concept tests. Evidence:
+  task205-r2-gyre-server-lib.txt.
+- **Own mutation probe:** replaced `ConceptView::matches_node` with the old
+  hollow case-insensitive-substring-on-concept-name behavior → all three
+  guard tests (`graph_concept_returns_manifest_projection_not_substring`,
+  `workspace_graph_concept_unions_manifest_projections`,
+  `mcp_graph_concept_manifest_projection_not_substring`) **FAILED** (exit
+  101). Mutation restored; working tree verified identical to candidate.
+  Evidence: task205-r2-mutation-substring-revert.txt.
+- Gates at candidate, all pass: `check-arch.sh`, `check-abac-route-registry.sh`,
+  `check-mcp-write-tools.sh`, `check-mem-port-contracts.sh`,
+  `check-dead-message-kinds.sh`, `check-task-commit-attribution.sh`.
+
+## Findings
+
+None. Both concept routes remain ABAC-registered (abac_middleware.rs:167,
+:411); replacing `require_repo` (a pure existence check) with `find_by_id` +
+404 in `get_graph_concept` preserves semantics — authorization is middleware
+ABAC, unchanged. `ConceptView` is instantiated from real manifest content in
+production code (`resolve_concept_view`, api/graph.rs:683-695, via
+`spec_registry::read_git_file` at the repo's default branch — the prescribed
+pattern). The `?concept=` substring surface on `GET /graph` is preserved and
+covered by `test_full_graph_concept_query_param`. No new crate dependencies.
+
+## Coverage re-audit
+
+realized-model.md §4 Concept Views: production code now satisfies the section
+(manifest parsing, glob projection, both endpoints + MCP parity, 404 on
+undefined concepts). The matrix row can be updated to `implemented`
+(task-205); left untouched here per review scope.
+
+## Verdict
+
+**approved** — candidate 6c7a6315271e19a48574a7ffd708f2b63d14cf1d.
