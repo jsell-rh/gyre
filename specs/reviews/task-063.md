@@ -257,3 +257,44 @@ No new findings. F1/F2/F3 remain repaired (verified R2, unchanged by rebase), th
 coverage rows are implementer-authored and accurate, and the committed dist matches
 the fixed source. The task meets spec §4–9 on every verifiable surface.
 Setting `progress: complete`.
+
+## Round 12 (candidate `d8fc0795` — post-CI-repair verification)
+
+Independent re-verification of the exact candidate after the round-11 baseline
+re-pin and the round-10/11 bookkeeping commits. Base `59ff5d01`; diff is 6 files
+(coverage rows 4–9, review record, task file, tests +207, ExplorerCanvas +67,
+e2e baseline png). No unrelated changes; dist diff empty; whitespace clean;
+attribution script rc=0; all 7 frontmatter SHAs resolve.
+
+- **Focused suites** (fresh sandbox, mold/clang now present): `cargo test -p
+  gyre-domain --lib view_query_resolver` → 124 passed, 0 failed; `npm ci` rc=0;
+  `npx vitest run src/__tests__/ExplorerCanvas.test.js` → 143 passed, 0 failed.
+- **Mutation probes** (three, all restored, tree clean after each): deleting the
+  `scope.type === 'all'` branch, reverting the diff SHA branch to the dead
+  `last_commit_sha` field, and disabling the highlight-label draw each fail
+  exactly their targeted test — the new tests are behavioral guards, not
+  self-confirming.
+- **Baseline re-pin provenance**: the committed `view-query-container-linux.png`
+  (sha256 `36c54349…`) is byte-identical to the retained CI artifact
+  (`view-query-container-actual.png`) from failing run 41888697099 at PR head
+  `3b2179a2` — the actual GitHub rendering, not a local substitute. The e2e
+  spec is unchanged by the diff (threshold still 0.02, same locator/test).
+  A pixelmatch-style YIQ diff between old and new baselines measures 3.03%
+  (threshold 0.2), consistent with CI's reported 2.83%, spanning both toolbar
+  rows (upstream staleness — `a781ede2` missed this one baseline) and canvas
+  rows (the intended task-063 change: the fixture at mock-graph.js:315 is
+  exactly `scope: all` + `highlight.matched` label + `zoom: fit`, the
+  primitives this task's client resolution enables for all-scope).
+  CI head `3b2179a2` is an ancestor of the candidate; the only intervening
+  ExplorerCanvas change is task-172's `onScopeDrill` double-click event handler
+  (event-only, no render effect), so the baseline remains valid for
+  `d8fc0795`.
+- **Coverage rows 4–9 spot-checked** against the current tree: all 6 client
+  scope branches present (:1941/:1947/:1975/:1981/:2006/:2040); dim, edge
+  restriction, annotation templates, `$clicked` line references accurate;
+  client Diff semantics mirror the server resolver (temporal half-open,
+  ≥7-char prefix, from-exclusion).
+
+No defects found. Approved.
+
+Evidence: `/tmp/stage/review-evidence/task-063-r12/`.
