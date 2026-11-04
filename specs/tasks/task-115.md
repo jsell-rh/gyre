@@ -10,7 +10,7 @@ coverage_sections:
   - "agent-runtime.md §Phase 1: Spec Approval Triggers Orchestration"
   - "agent-runtime.md §Phase 2: Workspace Orchestrator — Cross-Repo Coordination"
   - "agent-runtime.md §Phase 3: Repo Orchestrator — Task Decomposition"
-commits: ["336dd201779aed45093e5b6fe49cbb6ab9bea85e", "fc7939f7d647bb52b35fe53abed237739886b0f6", "30cc63e7bc35165d3841872c54cdf1492e880840", "79b06a7ae27ba9f1da101b8f824ecb08c831cca1", "7f9f113cf2c00c7ce2366d1204a1ed75893fe97d", "e62a9d7e8943ad0ece7495c2ae9b8f3e5ad57d78", "0a13a2ee8fd20987829dab377cebbe75e2edc768", "e2153b406a60c0565053e1792731eef3d1d1557c"]
+commits: ["336dd201779aed45093e5b6fe49cbb6ab9bea85e", "fc7939f7d647bb52b35fe53abed237739886b0f6", "30cc63e7bc35165d3841872c54cdf1492e880840", "79b06a7ae27ba9f1da101b8f824ecb08c831cca1", "7f9f113cf2c00c7ce2366d1204a1ed75893fe97d", "e62a9d7e8943ad0ece7495c2ae9b8f3e5ad57d78", "0a13a2ee8fd20987829dab377cebbe75e2edc768", "e2153b406a60c0565053e1792731eef3d1d1557c", "f5df0c01b81a0e72ff454f34a6ac6ffa1620778a"]
 ---
 
 ## Spec Excerpt
@@ -92,15 +92,21 @@ Read `specs/system/agent-runtime.md` §1 (all of it, Phases 1-8) for full contex
 
 ## Shipped
 
-Checkpoint-recovery round (2026-10-10, assignment base `a1751da1`, candidate
-`4519192e`, HEAD under review `309c7000` = merge of the base into this
-branch): product surface at HEAD verified byte-identical to the candidate
-(`git diff 4519192e..HEAD -- crates/ scripts/` → empty); all four
-attribution commits in HEAD ancestry. No product files changed this round —
-this round rebuilt, re-ran the focused probes, and recorded fresh evidence.
+Repair round (2026-10-10, assignment base `6a9739e5`, review finding
+`25a53951`, fix commit `f5df0c01` on HEAD of
+`pipeline/task-115/e84ba8250dd64aa39a8421f491f8b3dc-1`):
 
-Implementation: `7f9f113c` (retained from the checkpointed rounds; product
-surface unchanged since).
+- **Fix** (`signal_chain.rs`, `decompose_delegation`): the Delegation
+  sub-task creation loop never set `repo_id`/`workspace_id`, so every
+  Implementation sub-task carried `Task::new` defaults (`repo_id=Id("")`,
+  `workspace_id=Id("default")`) — the scheduler's repo resolution treats an
+  empty repo id as unresolvable, stranding the decomposition output before
+  Phase 4's worker-spawn path. Now mirrors `assess_coordination`:
+  `sub.repo_id = repo.id`, `sub.workspace_id = repo.workspace_id`. The
+  existing test `scheduler_decomposes_delegation_into_ordered_subtasks`
+  already asserted `sub.repo_id == Id("r-1")` and failed deterministically
+  before the fix; it passes after. (2-line product change; nothing else
+  changed this round.)
 
 - **Phase 1** (`api/specs.rs`): `approve_spec` records the ledger approval,
   emits the bus `SpecApproved` message (`Destination::Workspace(ws)`,
@@ -138,16 +144,18 @@ surface unchanged since).
   confusion. Now resolves the tenant from the workspace record, skips+logs
   when unresolvable; exemption entry deleted, `FROZEN_EXEMPTION_COUNT` 7→6.
 
-Test evidence (all run fresh this round at HEAD `309c7000`):
-`cargo test -p gyre-server --lib signal_chain` → 10 passed, 0 failed;
-`--lib api::specs` → 73 passed, 0 failed (incl.
-`approve_spec_emits_spec_approved_and_triggers_chain`); `--lib
-api::orchestrator` → 6 passed, 0 failed; `--lib jobs` → 11 passed, 0 failed;
-`cargo build -p gyre-server` → exit 0 (15m 16s). `mcp.rs` is untouched by
-this branch and the base merge — prior 71/71 applies to identical source.
-Attribution gate (`check-task-commit-attribution.sh`) and
-`check-fabricated-scope-defaults.sh` → OK. Sandbox transport restriction
-recorded (`tcp_listener_probe: unsupported, errno 95`,
+Test evidence (all run fresh this round at fix commit `f5df0c01`, fix
+verified before + after):
+`cargo test -p gyre-server --lib signal_chain` → 11 passed, 0 failed
+(incl. `scheduler_decomposes_delegation_into_ordered_subtasks`, which
+fails at the pre-fix source); `--lib api::specs` → 74 passed, 0 failed;
+`--lib api::orchestrator` → 7 passed, 0 failed; `--lib jobs` → 11 passed,
+0 failed; `--lib mcp` → 79 passed, 0 failed. Invariant gates at the fix
+commit: `check-scope-literal-defaults.sh` OK,
+`check-fabricated-scope-defaults.sh` OK, `check-arch.sh` OK,
+`check-task-commit-attribution.sh` OK (after adding `f5df0c01...` to this
+file's `commits:`). Sandbox transport restriction recorded
+(`tcp_listener_probe: unsupported, errno 95`,
 `/tmp/stage/capabilities.json`): listener-bound tests (`tty::`, `ws::`,
 `otlp_receiver::`, `git_http::`, gyre-cli `ws_integration`) cannot run here —
 unchanged from base, must run on host/CI; `cargo test --all` and exact-head
