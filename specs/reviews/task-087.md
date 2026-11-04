@@ -66,3 +66,33 @@ Independently re-checked each Round 1 finding against the current diff. All thre
 ## Verdict
 
 All Round 1 findings (F1, F2, F3) are repaired with real enforcement and hard regression tests; the handoff's two open questions are verified consistent. **progress: complete.**
+
+## Round 3 — rebase-repair verification (base 75ada1c4 → candidate 058ff98b)
+
+Independently reviewed the merge-repaired candidate against the assigned base (which IS the upstream the task branch was merged with, so any dropped upstream content would appear as a reversal in the base→candidate diff — none exists; the delta contains only task-consistent additions).
+
+### Merge resolution verified
+
+- `MemTraceRepository` keeps the round-2-verified contract (raw payload blobs, empty-side→None decode, 4KB column truncation, replacement cascade) and gains upstream's retained `trace_payload_tests` — both suites pass together (mem::trace 9/9). No mutex double-lock in `delete_by_mr` (locks store → permanent → payloads, consistent order with `store()`).
+- `web/dist` genuinely rebuilt from merged `web/src`: the committed bundle contains the new case-insensitive span-status comparisons and `index.html` references the fresh asset hashes.
+- Both task-owned exemption entries stay **removed** (fixed in code, not exempted): `check-abac-exempt-handlers.sh` (89 handlers) and `check-unwritten-store-fields.sh` pass without them; `check-abac-route-registry.sh`, `check-arch.sh`, `check-task-commit-attribution.sh`, `check-mem-port-contracts.sh` all OK.
+
+### Independent probes (evidence: /tmp/stage/review-evidence/task-087-round3.md)
+
+- `cargo test -p gyre-common --lib trace` — 8/8 ok (PascalCase wire format, legacy aliases).
+- `cargo test -p gyre-server --lib api::traces` — 6/6 ok (200 base64 decode, 401, 403 cross-tenant, 404s, replacement). Verified the 403 test is load-bearing: `test-token` maps to tenant "default" (auth.rs:507) while the seeded workspace is "ws-other-tenant" — without the handler's tenant guard the response would be 200.
+- `cargo test -p gyre-server --lib mem::trace` — 9/9 ok.
+- `cargo test -p gyre-server --lib otlp_receiver` — 10/10 ok, **including the live loopback gRPC test `grpc_receiver_accepts_export`** (this sandbox permits TCP listeners) and the new `resolve_graph_linkage_resolves_http_function_db_spans` (HTTP→Endpoint via `http.route`, function→Function via `code.function`, DB→Module, unresolved→None).
+- Web: focused DetailPanel + FlowRenderer suites 68/68; full `npm test` passes except a load-sensitive jsdom perf guard (`ExplorerCanvas-performance.test.js`, 34.7s vs 15s threshold at sandbox load average 17–20) which passes 15/15 when re-run in isolation — environmental, file untouched by this diff.
+- Lifecycle call sites confirmed in production code: `promote_to_attestation` at merge_processor.rs:694/1518 and api/merge_requests.rs:612; `delete_by_mr` on close paths (api/merge_requests.rs:616, api/specs.rs:889, api/repos.rs:312).
+
+### Informational (non-blocking; all pre-existing in base 75ada1c4, not introduced by this candidate)
+
+- Mem/SQLite divergence in the promote→re-run→close edge case (mem clears the permanent flag on re-store; SQLite keeps the permanent row): requires a gate re-run on an already-merged MR, not reachable through normal flow.
+- Mem adapter does not enforce the port-documented 1MB payload cap (dev/test adapter only).
+- `get_span_payload` scans all MRs' traces (O(N), fail-closed first-match tenant check) — correct, not indexed.
+- Merge commit 1ca273d3's message claims upstream's parallel fix "double-locked the store mutex"; 75ada1c4's actual `delete_by_mr` does not. The resolution itself is sound and strictly stronger than both parents; the inaccurate justification is cosmetic.
+
+## Round 3 verdict
+
+The rebase repair preserves both the round-2-verified task fixes and all upstream content, with real enforcement and hard regression tests re-verified independently. **Approved.**
