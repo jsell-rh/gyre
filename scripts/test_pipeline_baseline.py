@@ -38,7 +38,14 @@ class BaselineIdentityTests(unittest.TestCase):
         self.assertEqual(baseline_repair(execution, first), baseline_repair(execution, second))
         self.assertEqual(len(self.store.tasks()), 1)
         other = static_baseline_observation(self.log('attempt-c', 'f' * 64), self.base)
-        self.assertNotEqual(baseline_repair(execution, first), baseline_repair(execution, other))
+        self.assertEqual(baseline_repair(execution, first), baseline_repair(execution, other))
+        # The same failure remains one prerequisite as main advances.
+        other['base'] = 'b' * 40
+        self.assertEqual(baseline_repair(execution, first), baseline_repair(execution, other))
+        # A different failure of the same probe must not be conflated.
+        different = self.log('different')
+        different.write_text(different.read_text().replace('A commit is missing its attribution.', 'Another independent failure.'))
+        self.assertNotEqual(baseline_repair(execution, first), baseline_repair(execution, static_baseline_observation(different,self.base)))
 
     def test_a_process_exit_without_matching_reproduction_cannot_create_a_repair(self):
         path = self.root / 'failed.log'
