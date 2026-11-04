@@ -107,9 +107,19 @@ adapter.
 Full workspace suite and exact-head GitHub CI remain owned by verification
 and publication, per assignment constraints.
 
-Note for reviewers: two repo checks fail identically at the pristine base
-commit 8c2d1775 and are unrelated to this task —
-`check-notification-test-coverage.sh` (its awk uses gawk-only 3-arg `match()`;
-mawk on this host exits 2 with a syntax error before any file is scanned) and
-`check-task-commit-attribution.sh` (a task-210 commit `a781ede2` on main is
-missing from task-210's frontmatter; task-162's attribution is complete).
+### Merge repair (rebase finding d208c79f)
+
+Resolved the rebase conflict against main tip ed57c723 (merge commit
+e19285cc). Only `specs/coverage/system/message-bus.md` conflicted: the
+header audit note/count. Resolution combines both sides — main's row 7
+(Payload Schemas, task-200) stays `verified`, task-162's rows 12/15 stay
+`implemented`; header now reads 14/14 (3 n/a), and `specs/coverage/SUMMARY.md`'s
+message-bus row was updated from main's stale 85% to 100% to match. All
+focused suites re-run green post-merge (evidence above, recorded under
+/tmp/stage/review-evidence), and `check-task-commit-attribution.sh` now
+passes (main fixed the task-210 attribution gap noted earlier).
+
+Note for reviewers: `check-notification-test-coverage.sh` still exits 2 on
+this host before scanning any file — its awk uses gawk-only 3-arg `match()`
+and this host has mawk 1.3.4. Identical failure at pristine base 8c2d1775;
+host-tooling issue, unrelated to this task.
