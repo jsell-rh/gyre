@@ -109,3 +109,78 @@ asymmetry each fail at least one test.
 
 R1: no findings — task meets platform-model.md §2 Built-In Personas. Progress set to
 complete.
+
+---
+
+## R2 Review (this round)
+
+Comparison base: `1a00087c5bd7dcd8703c7506086a1c5f089f3b13` → candidate
+`5369d1e0f6c22cbd801e992205c3399e44f5708f` (merge of base into the task branch).
+Diff: 19 files — domain defs + seeding (gyre-domain/workspace.rs, gyre-server/lib.rs,
+main.rs, api/tenants.rs, api/admin.rs), SQLite persona contract tests, CLI
+single-source-of-truth consolidation (e27cc0da: CLI's four private prompt copies
+deleted, `BUILTIN_PERSONAS` re-exported from `gyre_domain::BUILTIN_PERSONA_DEFS`),
+task file (allowed sections only: progress, commits, Shipped), coverage row 13 →
+implemented. No changes to scripts/, exemptions, or unrelated tasks.
+
+### Findings
+
+None. All acceptance criteria independently verified with live evidence.
+
+### Live startup probe (new — supersedes the R1-era "no TCP listener" restriction)
+
+`/tmp/stage/capabilities.json` in this round's sandbox reports
+`tcp_listener_probe: supported`, so the real startup path was exercised end to end
+(evidence: `/tmp/stage/review-evidence/live-startup-probe.log`,
+script `live-probe.sh`):
+
+1. Booted the real `gyre-server` debug binary (built at candidate `5369d1e0`)
+   against a fresh SQLite DB (`GYRE_DATABASE_URL=sqlite://<tmp>/gyre.db`).
+2. `POST /api/v1/tenants` (Bearer gyre-dev-token) → HTTP 201; tenant-create hook
+   seeded exactly the four personas at `scope=tenant&scope_id=<new tenant>`:
+   `accountability`, `repo-orchestrator`, `security`, `workspace-orchestrator`,
+   each `approval_status=Approved`, `approved_by=system`, `version=1`,
+   64-hex-char content hash.
+3. Killed the server, restarted against the same DB (exercises the
+   `main.rs:53` startup seeding over an existing tenant) → still exactly 4
+   personas, same slugs — restart idempotency against real durable storage.
+4. Independently recomputed each persona's `content_hash` in Python from
+   `specs/personas/<slug>.md` + capabilities join → all four match the API-served
+   hashes (SHA-256, byte-identical prompts to the canonical spec files).
+
+Note: the task's Shipped section still claims TCP listeners are unsupported
+(errno 95) — that was true of an earlier sandbox, not this one; the live probe
+above supersedes it. Documentation staleness only, no code defect.
+
+### Focused tests (re-run at candidate `5369d1e0`, all exit 0)
+
+- `cargo test -p gyre-domain --lib builtin` → 2 passed.
+- `cargo test -p gyre-server --lib seed_builtin_personas` → 3 passed
+  (creates-four + idempotent, preserves customized existing, tenant-scoped).
+- `cargo test -p gyre-server --lib create_tenant_seeds` → 1 passed (real router).
+- `cargo test -p gyre-adapters --lib sqlite::workspace::persona_tests` → 2 passed
+  (SQLite round-trip; slug+scope lookup contract for idempotent reseed).
+- `cargo test -p gyre-cli --bin gyre bootstrap` → 15 passed (incl. pointer-equality
+  of `BUILTIN_PERSONAS` with `gyre_domain::BUILTIN_PERSONA_DEFS`).
+- Gates: `check-arch.sh`, `check-task-commit-attribution.sh`,
+  `check-mem-port-contracts.sh`, `check-scope-literal-defaults.sh`,
+  `check-fabricated-scope-defaults.sh`, `check-in-memory-state-stores.sh` —
+  all exit 0.
+
+### Diff-quality notes
+
+- All four attributed commits (e27cc0da, 151cf7d2, fcb712c5, f16e969c) are in the
+  candidate's history and in the task frontmatter (attribution gate passes).
+- The single-source-of-truth repair (e27cc0da) is real: the CLI's
+  `bootstrap/personas/*.md` private copies are deleted in the diff;
+  `BUILTIN_PERSONAS` is a `pub use` re-export, so drift is now impossible.
+- No test inflation: each new test kills a real failure mode (missing seed,
+  duplicate seed, overwrite of customized persona, SQLite scope-JSON asymmetry,
+  CLI/server definition drift).
+- web/dist regenerated as a side effect of building the server binary for the
+  probe was restored; working tree byte-identical to the candidate at review end.
+
+### Verdict
+
+R2: no findings — task meets platform-model.md §2 Built-In Personas and its
+acceptance criteria with live, durable-storage evidence.
