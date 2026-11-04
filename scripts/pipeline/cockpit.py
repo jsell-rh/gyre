@@ -7,24 +7,25 @@ from .store import STAGES
 
 
 def snapshot(store):
+    from .repairs import satisfied
     records = store.tasks()
     work = [dict(row) for row in store.db.execute('SELECT * FROM work ORDER BY created DESC')]
     tasks, attempts, counts = [], [], {}
     graph = {task['name']: task['data'].get('dependencies') or [] for task in records}
     errors = contract.graph_errors(graph)
-    delivered = {task['name'] for task in records if task['data'].get('delivered')}
+    delivered = {task['name'] for task in records if satisfied(task['data'])}
     for task in records:
         data = task['data']
         related = [item for item in work if item['task'] == task['name'] and item['generation'] == task['generation']]
         active = next((item for item in related if item['state'] == 'claimed' and item['expires'] > time.time()), None)
         retry = next((item for item in related if item['state'] == 'retry'), None)
         attention = next((item for item in related if item['state'] == 'attention'), None)
-        state = ('merged' if data.get('delivered') else 'failed' if attention else
+        state = ('merged' if data.get('delivered') else 'resolved' if data.get('resolved') else 'failed' if attention else
                  'running' if active else 'published' if retry and retry['stage'] == 'publish' and data.get('pr') else 'deferred' if retry else
                  'blocked' if task['name'] in errors or not set(graph[task['name']]) <= delivered else
                  'ready' if data.get('repair') or not data.get('candidate') else
                  'published' if data.get('pr') else 'candidate')
-        condition = errors.get(task['name']) or (json.loads((attention or retry)['result']).get('message') if attention or retry else None)
+        condition = (data.get('resolved') or {}).get('reason') or errors.get(task['name']) or (json.loads((attention or retry)['result']).get('message') if attention or retry else None)
         tasks.append({'name': task['name'], 'title': data.get('title'), 'spec_ref': data.get('spec_ref'),
                       'deps': graph[task['name']], 'state': state, 'stage': active['stage'] if active else None,
                       'progress': data.get('progress'), 'candidate': data.get('candidate'),
