@@ -51,7 +51,7 @@ Read `specs/system/merge-dependencies.md` §"2. Auto-Detected: Branch Lineage". 
 
 ## Shipped
 
-**Status: implemented; ready for review.** merge-dependencies.md §2 (Auto-Detected: Branch Lineage) is implemented in production code (recovered from earlier checkpoint rounds, preserved through the round's base merge `a4d6744b`, which touched no product code in this surface — only `specs/tasks/task-226.md` changed between candidate `1f9bbb79` and the merge head). This round re-verified the tree and restored the task record after the executor reset the document.
+**Status: implemented; ready for review.** merge-dependencies.md §2 (Auto-Detected: Branch Lineage) is implemented in production code, preserved through the round's base merge `e608ac78` (branch head `17bf80ce`). This round re-verified the production fix on the merged tree and restored the task record after the executor reset the document to the assigned contract.
 
 ### Behavior
 
@@ -61,11 +61,15 @@ Read `specs/system/merge-dependencies.md` §"2. Auto-Detected: Branch Lineage". 
 
 ### Test evidence (real on-disk git repos, git plumbing; no mocks)
 
-Fresh focused runs on the exact current tree (merge head `a4d6744b`, `SKIP_WEB_BUILD=1`, logs under `/tmp/stage/review-evidence/`, suffix `-r40eb9a61`):
+Fresh focused runs on the exact current tree (merge head `17bf80ce`, `SKIP_WEB_BUILD=1`, logs under `/tmp/stage/review-evidence/`, suffix `-r65f3b97-merged`):
 
 - Filter `lineage`: **10 passed, 0 failed** — fork-from-MR-branch creates dependency; fork-from-main no dependency; parent-merged satisfies dependency; rebase removes stale dep; re-push after fork adds dep; explicit deps preserved through re-evaluation; parent-rebase re-checks dependents; cross-target-branch detection; parked-on-default-tip candidate not detected; end-to-end `git_receive_pack` push drops the child's lineage edge (`push_rebases_parent_branch_drops_child_lineage_dep`, real pkt-line + packfile push, asserts the ref actually moved).
-- Filter `merge_requests::`: **30 passed**; filter `git_http::`: **38 passed**; filter `depend`: **105 passed** — no regression in the dependency/merge-queue surface.
+- Filter `merge_requests::`: **30 passed**; filter `depend`: **105 passed** — no regression in the dependency/merge-queue surface.
 
 `cargo test --all` on the full workspace is owned by the verification stage; this round ran the smallest relevant probes (all lineage + dependency + touched-module tests). Coverage matrix `specs/coverage/system/merge-dependencies.md` row 8 is `implemented` with code references and survived the base merge unchanged.
 
 Independent review, full deterministic gates, and GitHub checks on the exact PR head remain required.
+
+### Round notes
+
+- The executor reset the task document to the assigned contract, dropping commits `6d665d59` and `eede9271` (task-labeled rustfmt commits on this task's product code) from the `commits:` frontmatter, which failed `scripts/check-task-commit-attribution.sh`. Both are restored in the frontmatter this round; the gate now passes. No product code changed this round — the fix itself is unchanged from the previously checkpointed candidate `65f3b97`.
