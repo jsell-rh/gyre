@@ -478,11 +478,41 @@ fn sign_bus_message(key: &auth::AgentSigningKey, msg: &Message) -> (String, Stri
 }
 
 impl AppState {
+    /// Resolve the tenant that owns `workspace_id`, from the workspace record.
+    ///
+    /// Returns `None` (and logs) when the scope cannot be determined — the
+    /// caller must skip the operation, never re-target it with a fabricated
+    /// "default" identity (task-099 F1 flaw class, enforced by
+    /// scripts/check-scope-literal-defaults.sh).
+    async fn tenant_for_workspace(&self, workspace_id: &Id) -> Option<Id> {
+        match self.workspaces.find_by_id(workspace_id).await {
+            Ok(Some(ws)) => Some(ws.tenant_id),
+            Ok(None) => {
+                tracing::warn!(
+                    "tenant_for_workspace: workspace {workspace_id} not found; \
+                     skipping operation"
+                );
+                None
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "tenant_for_workspace: failed to load workspace {workspace_id}: {e}"
+                );
+                None
+            }
+        }
+    }
+
     /// Emit an Event-tier server-originated message: sign, persist, broadcast to WS clients,
     /// and dispatch to consumers. Best-effort: logs errors, never panics.
+    ///
+    /// The message's tenant is resolved from the workspace record — a
+    /// server-originated message never rides a fabricated scope identity. If
+    /// the owning tenant cannot be resolved, the message is dropped with a
+    /// warning (skip-and-log, per the task-099 F1 remediation direction).
     pub async fn emit_event(
         &self,
-        workspace_id: Option<Id>,
+        workspace_id: Id,
         to: Destination,
         kind: MessageKind,
         payload: Option<serde_json::Value>,
@@ -494,11 +524,22 @@ impl AppState {
             .as_millis() as u64;
         let id = Id::new(uuid::Uuid::new_v4().to_string());
 
+        let tenant_id = match self.tenant_for_workspace(&workspace_id).await {
+            Some(tenant_id) => tenant_id,
+            None => {
+                tracing::warn!(
+                    "emit_event: cannot resolve tenant for workspace {workspace_id}; \
+                     dropping {kind:?} message"
+                );
+                return;
+            }
+        };
+
         let mut msg = Message {
             id,
-            tenant_id: Id::new("default"),
+            tenant_id,
             from: MessageOrigin::Server,
-            workspace_id,
+            workspace_id: Some(workspace_id),
             to,
             kind,
             payload,
@@ -526,7 +567,12 @@ impl AppState {
 
     /// Emit a Telemetry-tier message: push to TelemetryBuffer and broadcast to WS clients.
     /// Unsigned and not persisted.
-    pub fn emit_telemetry(
+    ///
+    /// Async because the message's tenant is resolved from the workspace
+    /// record (see [`AppState::emit_event`]); a telemetry message whose scope
+    /// cannot be resolved is dropped with a warning, never re-targeted to a
+    /// fabricated identity.
+    pub async fn emit_telemetry(
         &self,
         workspace_id: Id,
         kind: MessageKind,
@@ -538,9 +584,19 @@ impl AppState {
             .unwrap_or_default()
             .as_millis() as u64;
         let id = Id::new(uuid::Uuid::new_v4().to_string());
+        let tenant_id = match self.tenant_for_workspace(&workspace_id).await {
+            Some(tenant_id) => tenant_id,
+            None => {
+                tracing::warn!(
+                    "emit_telemetry: cannot resolve tenant for workspace {workspace_id}; \
+                     dropping {kind:?} message"
+                );
+                return;
+            }
+        };
         let msg = Message {
             id,
-            tenant_id: Id::new("default"),
+            tenant_id,
             from: MessageOrigin::Server,
             workspace_id: Some(workspace_id.clone()),
             to: Destination::Workspace(workspace_id),
@@ -1190,7 +1246,7 @@ pub async fn emit_reconciliation_completed(
     // Emit Event-tier message.
     state
         .emit_event(
-            Some(workspace_id.clone()),
+            workspace_id.clone(),
             Destination::Workspace(workspace_id.clone()),
             MessageKind::ReconciliationCompleted,
             payload,

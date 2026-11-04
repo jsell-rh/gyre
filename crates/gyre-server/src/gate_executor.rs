@@ -111,7 +111,7 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
         let ws_id = workspace_id.unwrap_or_else(|| gyre_common::Id::new("default"));
         state
             .emit_event(
-                Some(ws_id.clone()),
+                ws_id.clone(),
                 gyre_common::message::Destination::Workspace(ws_id),
                 gyre_common::message::MessageKind::GateFailure,
                 Some(serde_json::json!({
@@ -911,21 +911,17 @@ async fn run_command_in_dir(
         command.current_dir(dir);
     }
 
-    let result = match tokio::time::timeout(
-        Duration::from_secs(timeout_secs),
-        command.output(),
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(_) => {
-            warn!(cmd = %cmd, timeout_secs, "gate command timed out");
-            return (
-                GateStatus::Failed,
-                format!("timed out after {timeout_secs}s"),
-            );
-        }
-    };
+    let result =
+        match tokio::time::timeout(Duration::from_secs(timeout_secs), command.output()).await {
+            Ok(r) => r,
+            Err(_) => {
+                warn!(cmd = %cmd, timeout_secs, "gate command timed out");
+                return (
+                    GateStatus::Failed,
+                    format!("timed out after {timeout_secs}s"),
+                );
+            }
+        };
 
     match result {
         Ok(output) => {
@@ -1045,12 +1041,9 @@ async fn run_post_merge_gate_commands(
         match &gate.gate_type {
             GateType::TestCommand | GateType::LintCommand => {
                 let timeout = gate.timeout_secs.unwrap_or(AGENT_GATE_TIMEOUT_SECS);
-                let (status, output) = run_command_in_dir(
-                    gate.command.as_deref().unwrap_or("true"),
-                    cwd,
-                    timeout,
-                )
-                .await;
+                let (status, output) =
+                    run_command_in_dir(gate.command.as_deref().unwrap_or("true"), cwd, timeout)
+                        .await;
                 if status == GateStatus::Failed {
                     if gate.required {
                         return Err(format!(

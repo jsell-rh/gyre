@@ -760,7 +760,7 @@ pub(crate) async fn spawn_agent_core(
                         // M19.3: Emit AgentContainerSpawned event.
                         state
                             .emit_event(
-                                Some(agent.workspace_id.clone()),
+                                agent.workspace_id.clone(),
                                 gyre_common::message::Destination::Workspace(
                                     agent.workspace_id.clone(),
                                 ),

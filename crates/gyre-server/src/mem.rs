@@ -3193,6 +3193,36 @@ pub fn test_state() -> Arc<crate::AppState> {
     test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None)
 }
 
+/// Ensure a workspace record exists so server-originated emissions resolve a
+/// real tenant.
+///
+/// `emit_event`/`emit_telemetry` resolve the owning tenant from the workspace
+/// record and DROP messages whose scope cannot be determined (never
+/// fabricate a "default" identity). Tests that expect messages to be emitted
+/// must create the workspace their entities live in — this helper makes that
+/// a one-liner. Idempotent.
+#[cfg(test)]
+pub async fn ensure_test_workspace(state: &crate::AppState, ws_id: &str) {
+    let id = gyre_common::Id::new(ws_id);
+    if state
+        .workspaces
+        .find_by_id(&id)
+        .await
+        .expect("workspace lookup")
+        .is_some()
+    {
+        return;
+    }
+    let ws = gyre_domain::Workspace::new(
+        id,
+        gyre_common::Id::new("tenant-1"),
+        format!("Workspace {ws_id}"),
+        ws_id,
+        0,
+    );
+    state.workspaces.create(&ws).await.expect("workspace create");
+}
+
 /// Build a test AppState backed by a real `StoragePort` (e.g. a temp-file
 /// SQLite instance) so infrastructure health probes evaluate real storage.
 #[cfg(test)]

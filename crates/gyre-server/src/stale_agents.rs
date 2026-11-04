@@ -80,7 +80,7 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                         "status": "dead",
                         "reason": format!("Agent {} aborted (no heartbeat, abort behavior)", agent.name),
                     })),
-                );
+                ).await;
 
                 // Notify the spawning user that the agent was abandoned (HSI §2).
                 if let Some(ref spawned_by) = agent.spawned_by {
@@ -124,7 +124,7 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                         "status": "stopped",
                         "reason": format!("Agent {} stopped (no heartbeat, pause behavior)", agent.name),
                     })),
-                );
+                ).await;
             }
 
             DisconnectedBehavior::ContinueOffline => {
@@ -232,7 +232,7 @@ async fn escalate_repo_orchestrator_death(state: &AppState, dead: &gyre_domain::
 
     state
         .emit_event(
-            Some(dead.workspace_id.clone()),
+            dead.workspace_id.clone(),
             Destination::Agent(ws_orch.id.clone()),
             MessageKind::Escalation,
             Some(serde_json::json!({

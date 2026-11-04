@@ -681,29 +681,30 @@ pub async fn approve_spec(
             // This is the single trigger for all agent work via the signal chain:
             // SpecApproved → workspace orchestrator → delegation task → repo orchestrator → sub-tasks → agents.
             // Destination: Workspace(workspace_id) — consumed by workspace orchestrator.
-            let dest = match entry.workspace_id.as_deref() {
-                Some(ws_id) => {
-                    gyre_common::message::Destination::Workspace(gyre_common::Id::new(ws_id))
-                }
-                None => gyre_common::message::Destination::Broadcast,
-            };
-            state
-                .emit_event(
-                    entry
-                        .workspace_id
-                        .as_ref()
-                        .map(|ws| gyre_common::Id::new(ws.as_str())),
-                    dest,
-                    gyre_common::message::MessageKind::SpecApproved,
-                    Some(serde_json::json!({
-                        "repo_id": entry.repo_id,
-                        "spec_path": spec_path,
-                        "spec_sha": req.sha,
-                        "approved_by": event.approver_id,
-                        "approval_id": event.id,
-                    })),
-                )
-                .await;
+            // A ledger entry without a workspace scope cannot be targeted safely:
+            // the event is skipped (and logged), never broadcast under a
+            // fabricated tenant identity.
+            if let Some(ws_id) = entry.workspace_id.as_deref() {
+                state
+                    .emit_event(
+                        gyre_common::Id::new(ws_id),
+                        gyre_common::message::Destination::Workspace(gyre_common::Id::new(ws_id)),
+                        gyre_common::message::MessageKind::SpecApproved,
+                        Some(serde_json::json!({
+                            "repo_id": entry.repo_id,
+                            "spec_path": spec_path,
+                            "spec_sha": req.sha,
+                            "approved_by": event.approver_id,
+                            "approval_id": event.id,
+                        })),
+                    )
+                    .await;
+            } else {
+                tracing::warn!(
+                    "spec approval: ledger entry {spec_path} has no workspace \
+                     scope; skipping SpecApproved event"
+                );
+            }
         }
     }
 
@@ -728,29 +729,32 @@ pub async fn approve_spec(
                     target_entry.updated_at = now;
                     let _ = state.spec_ledger.save(&target_entry).await;
 
-                    // Emit deprecation event on the message bus.
-                    let dest = match target_entry.workspace_id.as_deref() {
-                        Some(ws_id) => gyre_common::message::Destination::Workspace(
-                            gyre_common::Id::new(ws_id),
-                        ),
-                        None => gyre_common::message::Destination::Broadcast,
-                    };
-                    state
-                        .emit_event(
-                            target_entry
-                                .workspace_id
-                                .as_ref()
-                                .map(|ws| gyre_common::Id::new(ws.as_str())),
-                            dest,
-                            gyre_common::message::MessageKind::StaleSpecWarning,
-                            Some(serde_json::json!({
-                                "type": "spec_deprecated",
-                                "spec_path": link.target_path,
-                                "superseded_by": spec_path,
-                                "deprecated_at": now,
-                            })),
-                        )
-                        .await;
+                    // Emit deprecation event on the message bus. Skipped (and
+                    // logged) when the target entry has no workspace scope —
+                    // never broadcast under a fabricated tenant identity.
+                    if let Some(ws_id) = target_entry.workspace_id.as_deref() {
+                        state
+                            .emit_event(
+                                gyre_common::Id::new(ws_id),
+                                gyre_common::message::Destination::Workspace(gyre_common::Id::new(
+                                    ws_id,
+                                )),
+                                gyre_common::message::MessageKind::StaleSpecWarning,
+                                Some(serde_json::json!({
+                                    "type": "spec_deprecated",
+                                    "spec_path": link.target_path,
+                                    "superseded_by": spec_path,
+                                    "deprecated_at": now,
+                                })),
+                            )
+                            .await;
+                    } else {
+                        tracing::warn!(
+                            "spec-links: ledger entry {} has no workspace \
+                             scope; skipping deprecation event",
+                            link.target_path
+                        );
+                    }
 
                     tracing::info!(
                         source = %spec_path,
@@ -925,10 +929,12 @@ pub async fn reject_spec(
                     let _ = agent.transition_status(gyre_domain::AgentStatus::Stopped);
                     let _ = state.agents.update(&agent).await;
 
-                    // Send shutdown message to agent's inbox.
+                    // Send shutdown message to agent's inbox. The message is
+                    // scoped to the cancelled task's workspace — the agent's
+                    // scope, never a fabricated identity.
                     state
                         .emit_event(
-                            None,
+                            task.workspace_id.clone(),
                             gyre_common::message::Destination::Agent(agent.id.clone()),
                             gyre_common::message::MessageKind::StatusUpdate,
                             Some(serde_json::json!({

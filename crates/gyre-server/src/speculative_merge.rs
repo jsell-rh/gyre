@@ -382,7 +382,7 @@ async fn store_and_emit(
         SpeculativeStatus::Clean => {
             state
                 .emit_event(
-                    Some(ws_id.clone()),
+                    ws_id.clone(),
                     gyre_common::message::Destination::Workspace(ws_id),
                     gyre_common::message::MessageKind::SpeculativeMergeClean,
                     Some(serde_json::json!({"repo_id": repo_id, "branch": branch})),
@@ -392,7 +392,7 @@ async fn store_and_emit(
         SpeculativeStatus::Conflict => {
             state
                 .emit_event(
-                    Some(ws_id.clone()),
+                    ws_id.clone(),
                     gyre_common::message::Destination::Workspace(ws_id),
                     gyre_common::message::MessageKind::SpeculativeConflict,
                     Some(serde_json::json!({

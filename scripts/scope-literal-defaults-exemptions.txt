@@ -1,18 +1,21 @@
 # scope-literal-defaults-exemptions.txt — legacy pre-existing sites that
 # fabricate a "default" tenant/workspace identity at construction time.
-# Frozen at 12 entries (seeded at 24 by the task-099 process revision;
+# Frozen at 10 entries (seeded at 24 by the task-099 process revision;
 # lowered to 18 by task-160 — the four adapter create() sites now stamp
 # the storage's real tenant; lowered to 12 in the task-160 repair round —
 # the six record-conversion From-impl / analytics create-stamp sites now
-# carry the storage's real tenant too). Fix a site by resolving the real
-# scope (or refusing to create the entity without it), then DELETE its
-# line and lower FROZEN_EXEMPTION_COUNT in
+# carry the storage's real tenant too; lowered to 10 in the task-160
+# verification-repair round — emit_event/emit_telemetry now resolve the
+# owning tenant from the workspace record and drop messages whose scope
+# cannot be determined). Fix a site by resolving the real scope (or
+# refusing to create the entity without it), then DELETE its line and
+# lower FROZEN_EXEMPTION_COUNT in
 # scripts/check-scope-literal-defaults.sh.
 # NEVER add entries; NEVER raise the frozen count.
 
 # task-099 F1 revision round owns these (admin user is never bound to a
 # tenant; AuthenticatedAgent for API-key users hardcodes the fabricated
-# identity; emit_event/emit_telemetry messages carry it):
+# identity):
 crates/gyre-server/src/auth.rs:512
 crates/gyre-server/src/auth.rs:550
 crates/gyre-server/src/auth.rs:583
@@ -20,8 +23,6 @@ crates/gyre-server/src/auth.rs:624
 crates/gyre-server/src/auth.rs:654
 crates/gyre-server/src/auth.rs:678
 crates/gyre-server/src/auth.rs:1001
-crates/gyre-server/src/lib.rs:499
-crates/gyre-server/src/lib.rs:543
 
 # Unowned legacy (domain constructor defaults fabricating tenant on the
 # wire) — opportunistic fixes welcome:

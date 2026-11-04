@@ -392,7 +392,7 @@ pub async fn create_mr(
         .await;
     state
         .emit_event(
-            Some(mr.workspace_id.clone()),
+            mr.workspace_id.clone(),
             gyre_common::message::Destination::Workspace(mr.workspace_id.clone()),
             gyre_common::message::MessageKind::MrCreated,
             Some(serde_json::json!({"mr_id": mr.id.to_string()})),
@@ -632,7 +632,7 @@ pub async fn transition_mr_status(
         };
         state
             .emit_event(
-                Some(ws_id.clone()),
+                ws_id.clone(),
                 gyre_common::message::Destination::Workspace(ws_id),
                 kind,
                 Some(payload),

@@ -685,6 +685,10 @@ mod tests {
 
     async fn create_repo_in_workspace(state: &Arc<AppState>, name: &str, workspace_id: &str) -> Id {
         use gyre_domain::Repository;
+        // The workspace must exist: domain events emitted for the repo resolve
+        // their tenant from the workspace record and are dropped when it is
+        // missing.
+        crate::mem::ensure_test_workspace(state, workspace_id).await;
         let repo = Repository::new(
             Id::new(uuid::Uuid::new_v4().to_string()),
             Id::new(workspace_id),

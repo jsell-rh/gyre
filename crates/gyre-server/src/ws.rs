@@ -303,25 +303,34 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                     description,
                                     timestamp,
                                 } => {
-                                    // Scope telemetry to the caller's first subscribed workspace
-                                    // (or a per-tenant default workspace).
-                                    let ws_id = subscribed_workspaces
-                                        .first()
-                                        .cloned()
-                                        .unwrap_or_else(|| {
-                                            gyre_common::Id::new(format!("default-{}", caller.tenant_id))
-                                        });
-                                    state.emit_telemetry(
-                                        ws_id,
-                                        MessageKind::StateChanged,
-                                        Some(serde_json::json!({
-                                            "event_id": event_id,
-                                            "agent_id": agent_id,
-                                            "event_type": event_type,
-                                            "description": description,
-                                            "timestamp": timestamp,
-                                        })),
-                                    );
+                                    // Scope telemetry to the caller's first
+                                    // subscribed workspace. With no
+                                    // subscription the scope cannot be
+                                    // determined, so the message is dropped
+                                    // rather than re-targeted to a fabricated
+                                    // workspace identity (task-099 F1 class).
+                                    if let Some(ws_id) =
+                                        subscribed_workspaces.first().cloned()
+                                    {
+                                        state
+                                            .emit_telemetry(
+                                                ws_id,
+                                                MessageKind::StateChanged,
+                                                Some(serde_json::json!({
+                                                    "event_id": event_id,
+                                                    "agent_id": agent_id,
+                                                    "event_type": event_type,
+                                                    "description": description,
+                                                    "timestamp": timestamp,
+                                                })),
+                                            )
+                                            .await;
+                                    } else {
+                                        tracing::debug!(
+                                            "ws: dropping ActivityEvent from client \
+                                             with no subscribed workspace"
+                                        );
+                                    }
                                 }
                                 WsMessage::ActivityQuery { since, limit } => {
                                     // Query TelemetryBuffer scoped to subscribed workspaces.
@@ -584,8 +593,30 @@ mod tests {
     #[tokio::test]
     async fn ws_activity_event_emits_to_telemetry() {
         let (url, state) = start_test_server("tok").await;
+
+        // Telemetry is scoped to the caller's subscribed workspace, and the
+        // subscription is validated against the workspace record — so the
+        // workspace must exist and the client must subscribe before sending
+        // activity (an unsubscribed client has no determinable scope and its
+        // events are dropped).
+        crate::mem::ensure_test_workspace(&state, "ws-1").await;
+
         let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
         auth_ws(&mut ws, "tok").await;
+
+        // Subscribe to the workspace so the telemetry has a resolvable scope.
+        let subscribe = WsMessage::Subscribe {
+            scopes: vec![gyre_common::SubscribeScope {
+                workspace_id: gyre_common::Id::new("ws-1"),
+            }],
+            last_seen: None,
+            session_id: None,
+        };
+        ws.send(tungstenite::Message::Text(
+            serde_json::to_string(&subscribe).unwrap(),
+        ))
+        .await
+        .unwrap();
 
         // Send ActivityEvent (legacy path).
         let event = WsMessage::ActivityEvent {
