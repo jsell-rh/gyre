@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["38c2c5e777fb71633ba6106f6cb8ff037c58e4ff"]
+commits: ["38c2c5e777fb71633ba6106f6cb8ff037c58e4ff", "dc13ede362c2ce9111036cf243dd4d9f4bf56e2d"]
 ---
 
 ## Spec Excerpt
@@ -93,3 +93,73 @@ pub struct AnalyticsEvent {
 - Read `crates/gyre-server/src/api/specs.rs` for spec approval events
 - Read `crates/gyre-server/src/api/search.rs` for search endpoint
 - Do NOT create new endpoints — the query API routes already exist. Only add missing auto-emitted events and verify completeness.
+
+## Shipped
+
+### Analytics event schema and auto-emitted events (commit 38c2c5e)
+
+- `AnalyticsEvent` (gyre-domain/src/analytics.rs) carries all 9 spec fields
+  (`id`, `event_name`, `agent_id`, `user_id`, `session_id`, `workspace_id`,
+  `repo_id`, `properties`, `timestamp`); `with_scope` populates the
+  user/session/workspace/repo scope fields. A serde round-trip test pins
+  the shape against the spec schema.
+- All 12 spec-required auto-emitted events record at their real trigger
+  points with all spec-required properties, each proven by a passing
+  per-event test: `task.status_changed`, `mr.merged`, `mr.closed`,
+  `agent.spawned`, `agent.completed`, `agent.failed` (fail/admin-kill/
+  stale-abort paths), `merge_queue.processed`, `gate.failed`,
+  `gate.passed`, `spec.approved`, `budget.warning`, `search.query`.
+- Query API: `POST/GET /api/v1/analytics/events`, `GET /count`, `GET /daily`
+  with the full spec filter set — `event_name` (exact or trailing-`*`
+  prefix), `agent_id`, `user_id`, `workspace_id`, `repo_id`, `since`,
+  `until`, `limit` (default 100, cap 10_000), `group_by` — implemented on
+  SQLite, Postgres, and mem adapters (adapter test
+  `analytics_query_filtered_all_params`).
+
+### Verification-finding repair round (commit dc13ede3)
+
+The prior candidate failed the deterministic verification gates (rustfmt,
+ clippy, forbidden exemption replacements, and four static checks). All
+ findings were fixed with real enforcement, never by re-adding exemptions:
+
+- **Orchestrator tenant containment (task-093 F2/F3):** both
+  `spawn_workspace_orchestrator` and `spawn_repo_orchestrator` now load the
+  scoped entity, compare its tenant against `auth.tenant_id`, and return
+  `Forbidden` on mismatch. Integration test
+  `orchestrator_spawn_denied_across_tenants` proves 403 + no agent created
+  for a foreign-tenant workspace and 201 for a same-tenant control.
+- **Attestation ABAC enforcement (task-077 F5):** `evaluate_attestation_abac`
+  results are bound at both call sites; a `Deny` decision fails the merge
+  queue entry before the merge commit is created (with no policies stored
+  the evaluation is `Allow` and merges proceed unchanged). Regression test
+  `attestation_abac_deny_blocks_merge` fails on the old audit-only code.
+- **Advisory persona check renamed (task-099 F2):** `validate_persona` →
+  `warn_unapproved_persona`; behavior unchanged (spec: soft check), but the
+  name can no longer be mistaken for an enforcement gate.
+- **specs.rs:** SHA truncation is char-boundary-safe via `truncate_bytes`;
+  spec-rejected notification fanout resolves the tenant from the workspace
+  record (skip + warn when unresolvable) instead of fabricating a
+  `"default"` tenant from `repo_id`.
+- **gate_executor.rs:** GateFailure event emission is skipped with a
+  warning when the MR's workspace cannot be resolved, instead of
+  fabricating a `"default"` workspace scope.
+- **recovery.rs:** both `resolve_ref` sites fail closed (unresolvable
+  default-branch HEAD reports `main_green=false` with a warning;
+  `revert_mr` returns 409 when the target branch no longer resolves)
+  instead of proceeding with empty-string SHAs.
+- Exemption entries for every fixed site were deleted (never replaced),
+  `FROZEN_EXEMPTION_COUNT` for fabricated-scope-defaults lowered 5 → 3,
+  and the `scope-literal-defaults` entries restored byte-identical to
+  main (pre-existing debt this branch does not own).
+
+### Test evidence
+
+- `cargo test -p gyre-server --lib`: 1274 passed, 0 failed.
+- `cargo test -p gyre-server --test api_integration`: 67 passed, 0 failed.
+- `cargo test -p gyre-server --test dependency_persistence --test
+  search_wiring`: 2 passed.
+- `cargo test -p gyre-ports -p gyre-domain -p gyre-common`: 483 passed.
+- All 20 static gates pass with this branch's scripts AND with the base
+  (75ada1c4) scripts; rustfmt and clippy diff gates clean against the
+  base; exemption-growth subset check passes. Evidence retained under
+  review-evidence/ (see the controller's artifact store).
