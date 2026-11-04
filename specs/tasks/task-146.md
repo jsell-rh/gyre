@@ -2,7 +2,7 @@
 title: "Complete analytics event schema and auto-emitted events coverage"
 spec_ref: "analytics.md §Event Schema"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "analytics.md §Purpose"
   - "analytics.md §Event Schema"
@@ -93,3 +93,11 @@ pub struct AnalyticsEvent {
 - Read `crates/gyre-server/src/api/specs.rs` for spec approval events
 - Read `crates/gyre-server/src/api/search.rs` for search endpoint
 - Do NOT create new endpoints — the query API routes already exist. Only add missing auto-emitted events and verify completeness.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/api/budget.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.

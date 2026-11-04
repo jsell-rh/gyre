@@ -256,6 +256,8 @@ async fn emit_budget_warning(
     used: f64,
     limit: f64,
 ) {
+    return; // REVIEW MUTATION: emission disabled
+    #[allow(unreachable_code)]
     if limit <= 0.0 {
         return;
     }
