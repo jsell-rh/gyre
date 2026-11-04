@@ -3076,3 +3076,219 @@ mod registry_tests {
         assert_eq!(del_resp.status(), StatusCode::NO_CONTENT);
     }
 }
+
+// TEMPORARY REVIEW PROBE — reverted after evidence capture. Do not commit.
+#[cfg(test)]
+mod review_probe {
+    use crate::mem::test_state_with_preview_config;
+    use axum::{body::Body, Router};
+    use http::{Request, StatusCode};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    fn git(repo: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .expect("git must run");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    async fn body_json(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// Full production router: require_auth + ABAC middleware + seeded builtin
+    /// policies, mirroring main.rs startup.
+    async fn prod_app(
+        repos_root: &std::path::Path,
+    ) -> (Router, Arc<crate::AppState>, String) {
+        use gyre_domain::{Repository, Workspace};
+
+        let repo_dir = repos_root.join("src-repo.git");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        git(&repo_dir, &["init", "--bare", "--initial-branch=main"]);
+        let workdir = repos_root.join("seed-workdir");
+        std::fs::create_dir_all(workdir.join("specs/system")).unwrap();
+        git(&workdir, &["init", "--initial-branch=main"]);
+        git(&workdir, &["config", "user.email", "test@gyre.local"]);
+        git(&workdir, &["config", "user.name", "Gyre Test"]);
+        std::fs::write(
+            workdir.join("specs/system/search.md"),
+            "# Search\n\nThe search spec under test.\n",
+        )
+        .unwrap();
+        git(&workdir, &["add", "."]);
+        git(&workdir, &["commit", "-m", "seed specs"]);
+        git(
+            &workdir,
+            &["push", repo_dir.to_str().unwrap(), "HEAD:refs/heads/main"],
+        );
+
+        let state = test_state_with_preview_config(
+            Arc::new(gyre_adapters::Git2OpsAdapter::new()),
+            86_400,
+            None,
+        );
+        let ws = Workspace::new(
+            gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+            gyre_common::Id::new("default"),
+            "probe-ws",
+            format!("probe-ws-{}", uuid::Uuid::new_v4()),
+            0,
+        );
+        state.workspaces.create(&ws).await.unwrap();
+        let repo = Repository::new(
+            gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+            ws.id.clone(),
+            "src-repo",
+            repo_dir.to_str().unwrap().to_string(),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        crate::abac_middleware::seed_builtin_policies(&state).await;
+        let app = crate::build_router(state.clone());
+        (app, state, repo.id.to_string())
+    }
+
+    /// PROBE 1 (durable finding: REST ceremony bypass). A preview agent's own
+    /// JWT must NOT be able to drive task/MR/provenance ceremony over REST —
+    /// §5 forbids MR creation, provenance recording, and the Idle state for
+    /// preview agents. Spec behavior: 403 / no side effects.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn probe_preview_rest_ceremony_bypass() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (app, state, repo_id) = prod_app(tmp.path()).await;
+
+        // Agent entrypoint: stay alive so the preview token stays live.
+        let script = tmp.path().join("agent-entrypoint.sh");
+        std::fs::write(&script, "#!/bin/sh\nexec sleep 300\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = std::fs::metadata(&script).unwrap().permissions();
+            p.set_mode(0o755);
+            std::fs::set_permissions(&script, p).unwrap();
+        }
+        std::env::set_var("GYRE_AGENT_COMMAND", script.to_str().unwrap());
+
+        let body = serde_json::json!({
+            "draft": { "kind": "meta:persona", "content": "DRAFT-BODY probe" },
+            "targets": [ { "repo_id": repo_id, "spec_path": "specs/system/search.md" } ]
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs/preview")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED, "preview spawn failed");
+        let json = body_json(resp).await;
+        let agent_id = json["agents"][0]["agent_id"].as_str().unwrap().to_string();
+        let branch = json["agents"][0]["branch"].as_str().unwrap().to_string();
+        let preview_id = json["preview_id"].as_str().unwrap().to_string();
+
+        // The preview agent's live token (stored by the spawn path).
+        let token = state
+            .kv_store
+            .kv_get("agent_tokens", &agent_id)
+            .await
+            .unwrap()
+            .expect("preview agent token must exist while running");
+
+        // ── Attack A: preview JWT calls POST /agents/:id/complete ──
+        let complete_body = serde_json::json!({
+            "branch": branch,
+            "title": "preview ceremony bypass",
+            "target_branch": "main",
+            "conversation_sha": "0f".repeat(32)
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/complete"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(complete_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let complete_status = resp.status();
+        println!("PROBE complete status = {complete_status}");
+        let _ = body_json(resp).await;
+
+        let mrs = state.merge_requests.list_by_repo(&gyre_common::Id::new(&repo_id)).await.unwrap();
+        println!("PROBE mrs after complete = {}", mrs.len());
+        let agent = state.agents.find_by_id(&gyre_common::Id::new(&agent_id)).await.unwrap().unwrap();
+        println!("PROBE agent status after complete = {:?}", agent.status);
+        let prov = state.kv_store.kv_get("agent_provenance", &format!("conv_sha:{agent_id}")).await.unwrap();
+        println!("PROBE provenance kv = {prov:?}");
+
+        // ── Attack B: preview JWT calls POST /merge-requests directly ──
+        let mr_body = serde_json::json!({
+            "repository_id": repo_id,
+            "title": "preview ceremony bypass B",
+            "source_branch": branch,
+            "target_branch": "main",
+            "author_agent_id": agent_id
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/merge-requests")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(mr_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mr_status = resp.status();
+        println!("PROBE create-mr status = {mr_status}");
+        let _ = body_json(resp).await;
+        let mrs2 = state.merge_requests.list_by_repo(&gyre_common::Id::new(&repo_id)).await.unwrap();
+        println!("PROBE mrs after create-mr = {}", mrs2.len());
+
+        std::env::remove_var("GYRE_AGENT_COMMAND");
+
+        // Spec assertions (§5: preview runs skip MR/provenance ceremony and
+        // never reach Idle). Any failure here is the defect.
+        assert_eq!(complete_status, StatusCode::FORBIDDEN,
+            "preview JWT must not be able to complete an agent over REST");
+        assert!(mrs.is_empty(), "preview complete must not create an MR");
+        assert_ne!(agent.status, gyre_domain::AgentStatus::Idle,
+            "preview agent must never transition to Idle");
+        assert!(prov.is_none(), "preview complete must not write provenance kv");
+        assert_eq!(mr_status, StatusCode::FORBIDDEN,
+            "preview JWT must not be able to create an MR over REST");
+        assert!(mrs2.is_empty(), "preview token must not create an MR");
+
+        // Cleanup so the probe leaves no stray processes.
+        let record = state.kv_store.kv_get("meta_spec_previews", &preview_id).await.unwrap().unwrap();
+        let rec: super::PreviewRecord = serde_json::from_str(&record).unwrap();
+        super::teardown_preview(&state, &rec).await;
+    }
+}

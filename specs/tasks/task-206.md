@@ -2,7 +2,7 @@
 title: "Implement meta-spec preview mode: real agent preview runs with branches, diffs, and cleanup"
 spec_ref: "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "meta-spec-reconciliation.md §5 Preview Mode: The Fast Iteration Loop"
 commits: ["5acfb52cf75848d140e78e9b5864cf84f016a9a9", "a490f37ed3eac5051c5ed25e898244aa26fdc287", "f15a9aadf6832febdfb3df189e3e10436c338e64", "961293be186a902f0cd3e1ae47cbf6abbd235cc5", "2842238c2ba65f303e68c03afeca3dcbe2372227", "83961ddf2eab00c3cb1d055d4f72e7a97f7c0364", "079d9ec36964a850c26a537c69091c8458aab02e", "edff6d52fa5e693cf1d3aefd2efdb36a797ee822", "7488e163a0a77744f44906753dd79d76a293d52a", "4a769ae4145560612d22de8cbab97b1119548558"]
@@ -144,3 +144,11 @@ Preview mode is a real agent run path, not an estimate (meta-spec-reconciliation
 - Gates on head: arch, abac-route-registry, and all 16 mechanical check scripts OK; `check-clippy-diff.py HEAD^1` and `check-rustfmt-diff.py HEAD^1` clean; `git diff --check` clean. `check-task-commit-attribution.sh` fails only on base commit 6bf777a6 (task-200 frontmatter debt, reproducible on base in a clean worktree — pre-existing, not this diff).
 
 Sandbox limitation: TCP listener probes are unsupported here (capabilities.json, errno 95), so no live HTTP/browser verification was possible; the REST surface is exercised through the same router via `tower::ServiceExt::oneshot` against real git + real processes, and exact-head GitHub CI checks remain mandatory after review.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/api/meta_specs.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
