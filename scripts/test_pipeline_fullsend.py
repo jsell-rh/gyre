@@ -199,7 +199,8 @@ import json,os,sys
 from pathlib import Path
 p=Path(os.environ['BACKEND_STATE']);v=json.loads(p.read_text()) if p.exists() else {'calls':[], 'pods':[]}
 a=sys.argv[1:]
-if a[:1]==['-g']: a=a[2:]
+if a[:1]==['-g']:
+ v.setdefault('gateways',[]).append(a[1]);a=a[2:]
 v['calls'].append(a)
 if a[:2]==['sandbox','create']:
  n=a[a.index('--name')+1];v['pods'].append({'name':n,'phase':'Ready','labels':{}})
@@ -269,6 +270,37 @@ else: print('fixture control operation')
         refused = self.invoke('--gateway', 'foreign', 'provider', 'list')
         self.assertEqual(refused.returncode, 75)
         self.assertEqual(json.loads((self.root / 'backend.json').read_text())['calls'], calls)
+
+    def test_inflight_hooks_follow_only_the_authenticated_instance_alias(self):
+        alias='gyre-d-fixture'
+        self.store.set_setting('dispatcher_gateway_registration',{'source':'gyre-gyre','alias':alias})
+        self.store.set_setting('gateway',alias)
+        for selector in ('gyre-gyre',alias):
+            result=self.invoke('--gateway',selector,'provider','list')
+            self.assertEqual(result.returncode,0,result.stderr)
+        state=json.loads((self.root/'backend.json').read_text())
+        self.assertEqual(state['gateways'],[alias,alias])
+        refused=self.invoke('--gateway','hypershell-other','provider','list')
+        self.assertEqual(refused.returncode,75)
+        self.assertEqual(json.loads((self.root/'backend.json').read_text())['gateways'],[alias,alias])
+
+    def test_cancellation_allows_cleanup_transport_but_forbids_new_compute(self):
+        self.store.set_setting(f"cancel:{self.work}:{self.claim['token']}",True)
+        result=self.invoke('provider','list')
+        self.assertEqual(result.returncode,0,result.stderr)
+        refused=self.invoke('sandbox','create','--name',self.name,'--','sleep','infinity')
+        self.assertEqual(refused.returncode,75)
+        self.assertEqual(json.loads((self.root/'backend.json').read_text())['pods'],[])
+
+    def test_old_worker_auth_refresh_does_not_touch_shared_registration(self):
+        alias='gyre-d-fixture'
+        self.store.set_setting('dispatcher_gateway_registration',{'source':'gyre-gyre','alias':alias})
+        self.store.set_setting('gateway',alias)
+        result=self.invoke('provider','list',extra={'EXPIRE_ONCE':'1','GYRE_OPEN_GATEWAY':'gyre-gyre'})
+        self.assertEqual(result.returncode,0,result.stderr)
+        state=json.loads((self.root/'backend.json').read_text())
+        self.assertTrue(any(c[:2]==['gateway','login'] for c in state['calls']))
+        self.assertEqual(set(state['gateways']),{alias})
 
     def test_expired_gateway_auth_is_refreshed_and_operation_retried(self):
         result=self.invoke('provider','list','--names',extra={'EXPIRE_ONCE':'1'})
