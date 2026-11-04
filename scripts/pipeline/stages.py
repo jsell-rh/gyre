@@ -433,6 +433,11 @@ def merge_observation(execution, url):
 def cleanup(execution, task):
     resource = execution.claim['input']['resource']
     record = execution.store.db.execute('SELECT * FROM resources WHERE name=?', (resource,)).fetchone()
+    if record['kind'] == 'admission':
+        # No external create can precede the atomic transfer to a sandbox
+        # reservation. An expired pre-launch admission owns no remote compute.
+        execution.store.resource_state(resource, 'absent')
+        return {'released_admission': resource}, {}, []
     if record['kind'] in ('host', 'runner'):
         identity = json.loads(record['data']).get('identity')
         if identity and Path(identity).exists():
