@@ -137,18 +137,28 @@ three priority selects; loads via `api.repoSpecLifecycle`, saves via
 `scripts/dev-contract.py:requirement_parts` counts as a change to the
 assigned requirements (checkboxes are contract prose; only `Shipped` /
 `Review` are operational sections excluded from the contract hash). Same
-failure mode as task-170's documented repair. This round restored the
+failure mode as task-170's documented repair. That round restored the
 assigned contract — the task file keeps its original `[ ]` checkboxes and
 carries status via `progress:` plus this section, matching completed tasks
-task-189/task-212 on main. Implementation tree is byte-identical to the
-published candidate apart from this file (`git diff b1526c71 HEAD --
-crates/ web/src/ docs/` empty); the assignment base merge 918f16bf is
-specs-only (task-216.md), so no code re-verification gap. Contract-hash
-equivalence proven with `dev-contract.py.requirement_parts`: base ==
-this file's final form (True), base == checkbox-flipped form (False).
+task-189/task-212 on main. Contract-hash equivalence proven with
+`dev-contract.py.requirement_parts`: base == this file's final form (True),
+base == checkbox-flipped form (False).
 
-**Test evidence** (focused probes at HEAD `9f5e5e81` on this branch,
-recorded under `/tmp/stage/review-evidence/task-109/`):
+**Rebase repair round:** merged the new assignment base `ed57c723`
+(task-201 persistent search backend) into the branch as `2bb4d127`. The
+only conflicts were `web/dist` build artifacts — a rename/rename on the
+elk chunk (both sides' staged blobs byte-identical, `bfe42bf9`; the
+conflict was purely the content-hashed filename) and `index.html` asset
+references. Resolved by rebuilding `web/dist` from the merged source
+(`npm ci` + `vite build`), yielding a self-consistent artifact set
+(`index-D2h9x6eS.js`, `index-73iubGlx.css`, `elk.bundled-BR0HWlJG.js`).
+The merge touched no task-109 surface: `git diff c7658cc 2bb4d127 --
+<spec_lifecycle files> git_http.rs RepoSettings.svelte` is empty — all
+auto-merged files (`lib.rs`, `mem.rs`, `middleware.rs`, `api/*.rs`) come
+from the already-verified base.
+
+**Test evidence** (focused probes re-run at merged HEAD `2bb4d127` on
+this branch, recorded under `/tmp/stage/review-evidence/task-109/`):
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-domain --lib spec_lifecycle` — 5/5
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib spec_lifecycle` — 4/4
   (unconfigured defaults, round-trip, upsert overwrite, per-repo isolation)
@@ -164,15 +174,13 @@ recorded under `/tmp/stage/review-evidence/task-109/`):
   custom paths, ignored-override, configured priorities)
 - `cd web && npm ci && npx vitest run
   src/__tests__/RepoSettings.test.js` — 56/56
-- All 17 mechanical invariant checks exit 0 (arch, ABAC route registry,
-  migration versions, migration SQL portability, mem port contracts,
-  in-memory state stores, forged scope fields, relative path defaults,
-  scope literal defaults, inert enforcement, task-commit attribution, byte
-  slice truncation, fail-open ref resolution, fabricated scope defaults,
-  lossy secret conversion, unbounded external HTTP).
+- Post-merge spot checks at `2bb4d127` (recorded alongside the above):
+  arch, ABAC route registry, migration versions, mem port contracts, and
+  in-memory state stores all exit 0 — the merged route/migration surface
+  from `ed57c723` combines cleanly with this task's registrations.
 
-`cargo test --all` and exact-head GitHub checks are owned by the
-verification stage per assignment instructions; this sandbox cannot run TCP
-listeners (capability probe errno 95, `capabilities.json`), so the
-`git_clone_empty_repo_via_smart_http` test and live-UI browser drive
-require host verification.
+`cargo test --all`, the remaining mechanical checks, and exact-head GitHub
+checks are owned by the verification stage per assignment instructions;
+this sandbox cannot run TCP listeners (capability probe errno 95,
+`capabilities.json`), so the `git_clone_empty_repo_via_smart_http` test and
+live-UI browser drive require host verification.
