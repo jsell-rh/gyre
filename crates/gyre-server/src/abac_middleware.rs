@@ -707,7 +707,7 @@ pub fn m34_builtin_policies() -> Vec<Policy> {
             }],
             actions: vec!["push".to_string(), "merge".to_string()],
             resource_types: vec!["attestation".to_string()],
-            enabled: false,
+            enabled: true,
             built_in: true,
             immutable: false,
             created_by: by.clone(),
@@ -1342,7 +1342,10 @@ pub mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(before.conditions, after.conditions);
-        assert_eq!(before.updated_at, after.updated_at, "no-op seed must not bump updated_at");
+        assert_eq!(
+            before.updated_at, after.updated_at,
+            "no-op seed must not bump updated_at"
+        );
     }
 
     /// TASK-077 (HSI §2): `builtin:require-human-spec-approval` must be
