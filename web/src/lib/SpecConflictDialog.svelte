@@ -35,10 +35,20 @@
   }
 
   function handleKeydown(e) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      onClose?.();
-    }
+    if (e.key !== 'Escape') return;
+    // Dialog closed (conflict === null): never consume Esc — the same
+    // keypress must keep flowing to other window handlers (e.g. EditorSplit's
+    // Back/Esc in the DetailPanel pop-out). stopPropagation sets cancelBubble,
+    // which makes Svelte skip all later svelte:window handlers, so consuming
+    // unconditionally would break Esc for every mounted consumer.
+    if (!conflict) return;
+    // Consume Esc here: only the dialog closes. Without the guard the same
+    // keypress also reaches EditorSplit's window handler, collapsing the
+    // editor while the user only meant to dismiss the dialog.
+    e._escConsumed = true;
+    e.preventDefault();
+    e.stopPropagation();
+    onClose?.();
   }
 </script>
 

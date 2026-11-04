@@ -21,9 +21,75 @@ charged. Lowering slots drains new admission while already admitted work finishe
 Cleanup and publication remain schedulable when every compute slot is occupied.
 
 The stages are triage, implementation, independent review, verification,
-publication/merge, and cleanup. Review and verification bind to an exact candidate
+publication/merge, CI observation, and cleanup. Review and verification bind to an exact candidate
 and upstream base. Failures produce durable findings consumed by implementation.
 Infrastructure failures retry with backoff without changing the task contract.
+
+## Scheduling priority and reserved capacity
+
+The harness uses non-preempting priority classes, inspired by Kubernetes
+`PriorityClass` with `preemptionPolicy: Never`. A class changes queue order,
+never authorization, dependencies, backoff, source identity, or running claims.
+Built-in values are `background=-100`, `normal=0`, `high=100`, `repair=200`, and
+`urgent=300`. CI, verification, rebase and review findings automatically use
+`repair`; that priority survives incomplete implementation checkpoints until
+fresh review resolves the findings. Cleanup, PR observation, publication and
+verification have protected system priorities above user classes.
+
+Apply exactly one `priority/<class>` label to a task's associated GitHub PR,
+including a PR whose failed CI is already queued for implementation. The
+observer refreshes these labels without repeating the failed CI handoff. A
+cockpit task's Priority selector or the CLI below sets a durable local override
+that takes precedence over PR labels; clear it to return to labels/automatic
+priority. Unknown classes and conflicting labels block new compute admission
+for that task and appear as a scheduling condition; control/cleanup continue.
+
+```bash
+python3 scripts/dev-pipeline.py priority task-063 urgent
+python3 scripts/dev-pipeline.py priority task-063 --clear
+python3 scripts/dev-pipeline.py priority-classes
+python3 scripts/dev-pipeline.py priority-class hotfix 500
+python3 scripts/dev-pipeline.py reserve-verification 1
+```
+
+Classes accept values from -1000 to 1000. Unlike strict Kubernetes priority,
+the harness adds one point per minute spent queued, with FIFO ties. Execution,
+retry backoff, and obsolete work do not accumulate queue age. Priority changes
+do not reset queue age or invalidate independent review. The claim event records
+the actual class/score used for admission. Custom classes and overrides live
+only in this Gyre ledger, separate from another local dispatcher's settings.
+
+One physical/admission slot is reserved for verification by default. Other model
+stages cannot borrow it even when the verifier is idle; that is what guarantees
+a finishing stage can run without evicting a four-hour coding assignment.
+Reservations count pending creation/deletion, share the existing total sandbox
+budget, and are checked atomically with claims. The reservation clamps to zero
+for a single-slot deployment so it can bootstrap; zero total slots drains all
+compute. Changing reservation/priority lets existing workers finish naturally.
+The cockpit shows the reservation, class, and class source. These are host
+scheduling controls, not PriorityClass objects in the remote Kubernetes cluster.
+
+CI observation is a separate, sandbox-free stage bound to the recorded published
+head and its verified base. It can run alongside a verifier, but never races a
+branch publisher. A completed failing check is actionable even while sibling
+checks remain pending or main advances. Head and check state are rechecked after
+evidence collection. A confirmed candidate failure retains the failed head and
+logs, requests implementation, and fences any now-obsolete verifier. Pending CI
+waits; upstream failures and transient CI infrastructure retain their distinct
+recovery paths. PR readiness is visible separately from a successful review run.
+
+A durable **integration lane** admits one candidate at a time to final
+verification, CI, and merge. Implementation and independent review remain
+parallel up to the normal shared sandbox budget. The lane survives worker
+restarts, infrastructure retries, and gaps while GitHub checks run; repair,
+delivery, cancellation, or a changed contract/candidate releases it. Queued
+candidates pick up current main when admitted. This prevents the controller's
+own merges from repeatedly invalidating one another's full integration checks.
+If an external merge advances main, the current lane owner first observes its
+published CI and then refreshes integration once needed. Independent review is
+retained for the unchanged candidate. Checks on a different merge tree are
+never reused as proof of the final tree; protected exact-head GitHub checks
+and authoritative upstream-tree comparison still gate delivery.
 
 Model assignments default to four hours (`model_timeout: 14400` seconds in the
 private ledger). Existing assignments retain the harness deadline they started
@@ -136,6 +202,7 @@ python3 scripts/dev-pipeline.py tick implement
 python3 scripts/dev-pipeline.py tick review
 python3 scripts/dev-pipeline.py tick verify
 python3 scripts/dev-pipeline.py tick publish
+python3 scripts/dev-pipeline.py tick observe
 python3 scripts/dev-pipeline.py tick cleanup
 python3 scripts/dev-pipeline.py status --json
 python3 scripts/dev-pipeline.py retry task-123
@@ -158,6 +225,16 @@ allows unattended authentication refresh. Do not replace it with interactive
 browser auth for an unattended supervisor. Fullsend configures its providers;
 `dev-gateway.py --inference` is the older standalone setup helper, not a required
 step of the fullsend harness.
+
+Gateway authentication refresh is coordinated under the private ledger's lock.
+The controller proactively refreshes at most every five minutes, and known
+expired-token errors request a forced refresh before retrying the operation.
+Token-service failures retry with exponential backoff (5 seconds to 5 minutes).
+A real read-only gateway request must succeed before cached authentication can
+be used during refresh failures; known-expired credentials never get that
+fallback. The cockpit reports degraded cached operation and the next retry.
+Status files contain timing/error types only, not credentials, and are scoped
+to this ledger and gateway alias so another local dispatcher is unaffected.
 
 ## Isolation from another local dispatcher
 
