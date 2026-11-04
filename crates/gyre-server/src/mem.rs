@@ -3278,6 +3278,7 @@ fn test_state_inner(
             .unwrap_or_default()
             .as_secs(),
         compose_sessions: Arc::new(Mutex::new(HashMap::new())),
+        explorer_sessions: Arc::new(crate::explorer_ws::ExplorerSessionRegistry::new()),
         retention_store: crate::retention::RetentionStore::new(),
         job_registry: Arc::new(crate::jobs::JobRegistry::new()),
         analytics: Arc::new(MemAnalyticsRepository::default()),
@@ -3368,7 +3369,6 @@ fn test_state_inner(
         judgment_ledger: Arc::new(MemJudgmentLedgerRepository),
         secrets: Arc::new(MemSecretRepository::default()),
         ws_tickets: crate::auth::WsTicketStore::new(),
-        explorer_sessions: Default::default(),
     })
 }
 
