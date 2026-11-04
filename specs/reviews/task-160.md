@@ -57,3 +57,72 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+## Round 5 — final review of candidate 179883a8 (verdict: complete, approved)
+
+Candidate `179883a8cb09d3bfbc016c4fac31e6d2b76a8f5d` (assigned HEAD; the two
+commits after `b297d1b2` — `3dbacf1d`, `179883a8` — touch only
+`specs/tasks/task-160.md`, so production code at the candidate is byte-identical
+to `b297d1b2`). Comparison base: assigned base `75ada1c4`. Tree clean
+throughout; all mutations performed in a disposable worktree, restored and
+removed after. Evidence: `/tmp/stage/review-evidence/task-160-final/`.
+
+**Acceptance criteria, independently re-verified at the candidate:**
+
+- All three scripts exist, executable (`-rwxr-xr-x`), usage-commented; wired
+  blocking in BOTH pre-commit (`language: script`, `pass_filenames: false`) and
+  CI (ci.yml:71/73/75 — the `|| true` advisories on api-auth/tenant-filter are
+  gone; only unrelated scripts keep theirs).
+- Clean runs, all exit 0: check-hierarchy ("all hierarchy fields are
+  non-optional"); check-tenant-filter (109 read methods on tenant-column
+  tables, 0 violations, documented 5-entry SKIP_LIST with spec-cited
+  rationales, tenant-less tables as visible non-failing backlog);
+  check-api-auth (middleware chain + 4 non-ABAC handlers + delegated
+  route-registry cross-reference).
+- Mutation kills, this round, all exit 1 with exact file:line:
+  `Task.workspace_id → Option<Id>` (task.rs:60); field deletion ("missing from
+  the struct"); deleting the tenant filter from
+  `sqlite/workspace.rs::find_by_slug` (tenant-filter names it); deleting the
+  `RouteResourceMapping` for `/api/v1/workspaces` (api-auth Check 3 via the
+  frozen-baseline registry script); swapping the `abac_middleware` layer out
+  of the api router chain (api-auth Check 1).
+- `cargo test -p gyre-adapters --test tenant_isolation` at the candidate:
+  **2 passed, 0 failed** (cold compile via /tmp/stage/bin/cargo, ~30 min).
+  Mutation kill: removing the tenant filter from
+  `WorkspaceRepository::list` makes
+  `tenant_reads_never_see_another_tenants_rows` **FAIL** with the exact leak
+  diagnostic (`left: ["ws-a","ws-b"]`, `right: ["ws-a"]`) — the test guards
+  real behavior, it is not self-confirming.
+- Enabling repairs re-inspected in the diff: sqlite+postgres
+  compute_target/merge_request/notification/repository/saved_view/workspace
+  read filters and create-stamps use the storage's real tenant (`.filter(
+  <table>::tenant_id.eq(&tenant))` derived from `self.tenant_id`; the
+  `"default"` literals are gone); the spec-rejected fanout in `api/specs.rs`
+  resolves tenant from the workspace's scope row and skips+warns on lookup
+  failure; `api/admin.rs` `emit_telemetry` became scope-resolving with a new
+  hard test (`admin_audit_drops_telemetry_with_unresolvable_scope`).
+  Exemption files: fabricated-scope 5→4 (site genuinely fixed, line deleted),
+  inert-enforcement re-pin only (same two task-077 sites, lines shifted by the
+  base merge), scope-literal-defaults pruned per prior rounds.
+- Gates at the candidate, all exit 0: check-arch,
+  check-fabricated-scope-defaults, check-inert-enforcement,
+  check-scope-literal-defaults, check-abac-route-registry,
+  check-task-commit-attribution.
+
+**Non-findings (checked, recorded in findings-notes.txt, not material):**
+(a) check-tenant-filter's `has_tenant` regex matches `tenant_id.eq(` text
+inside `//` comments, so a filter commented out (not deleted) still satisfies
+the lint — the spec's own §3 letter (pattern grep) has the same property, and
+the tenant_isolation runtime test guards the leak class end-to-end; suggested
+follow-up hardening: strip comments before pattern application. (b)
+check-hierarchy default-on (`=0` opt-out) vs spec §103's `GYRE_CHECK_HIERARCHY=1`
+gate: the M34 non-optional migration has landed (all five fields verified
+`Id`), so default-on is the spec's documented end-state and CI still pins the
+env var explicitly. (c) Secondary reads (find_by_slug class) are lint-covered
+but not all runtime-test-covered; the lint kill covers their regression class.
+
+Full workspace `cargo test --all` belongs to the verification stage; this
+review's focused compile/test evidence covers the task-owned surface (the
+candidate adds no production-code change after `b297d1b2`, whose server
+compile/spec_approvals evidence is recorded in the task file's round-7
+section).
