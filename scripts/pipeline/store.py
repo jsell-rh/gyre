@@ -50,6 +50,7 @@ class Store:
               name TEXT PRIMARY KEY, work TEXT REFERENCES work(id), token INTEGER,
               kind TEXT NOT NULL, state TEXT NOT NULL, data TEXT NOT NULL,
               updated REAL NOT NULL);
+            CREATE INDEX IF NOT EXISTS resource_capacity ON resources(kind,state);
             CREATE TABLE IF NOT EXISTS events(
               id INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT, work TEXT,
               kind TEXT NOT NULL, detail TEXT NOT NULL, at REAL NOT NULL);
@@ -124,9 +125,10 @@ class Store:
             return self.db.execute('SELECT id FROM work WHERE stage=? AND task=? AND generation=? AND input_key=?',
                                    (stage, task, generation, key)).fetchone()['id']
 
-    def claim(self, stage, owner, concurrency=1, lease_seconds=90, now=None, task=None, eligible=None):
+    def claim(self, stage, owner, concurrency=1, lease_seconds=90, now=None, task=None, eligible=None,
+              ident=None, capacity=None):
         now = time.time() if now is None else now
-        if concurrency < 1 or lease_seconds <= 0:
+        if concurrency < 0 or lease_seconds <= 0:
             raise ValueError('invalid claim limits')
         with self.transaction():
             expired = self.db.execute("SELECT id,task FROM work WHERE state='claimed' AND expires<=?", (now,)).fetchall()
@@ -136,21 +138,40 @@ class Store:
             active = self.db.execute("SELECT count(*) FROM work WHERE stage=? AND state='claimed'", (stage,)).fetchone()[0]
             if active >= concurrency:
                 return None
+            compute = stage in ('triage', 'implement', 'review', 'verify') and capacity is not None
+            if compute and self.compute_used() >= capacity:
+                return None
             rows = self.db.execute('''SELECT w.* FROM work w JOIN tasks t
                 ON t.name=w.task AND t.generation=w.generation
                 WHERE w.stage=? AND w.state IN ('ready','retry') AND w.retry_at<=?
                 AND (? IS NULL OR w.task=?)
+                AND (? IS NULL OR w.id=?)
                 AND NOT EXISTS(SELECT 1 FROM work x WHERE x.task=w.task AND x.state='claimed')
-                ORDER BY w.priority DESC,w.created,w.id''', (stage, now, task, task)).fetchall()
-            row = next((row for row in rows if eligible is None or eligible(dict(row))), None)
+                ORDER BY w.priority DESC,w.created,w.id''', (stage, now, task, task, ident, ident)).fetchall()
+            row = next((row for row in rows
+                        if (not compute or not self.db.execute(
+                            "SELECT 1 FROM resources r JOIN work w ON w.id=r.work WHERE w.task=? AND r.state<>'absent'", (row['task'],)).fetchone())
+                        and (eligible is None or eligible(dict(row)))), None)
             if not row:
                 return None
             self.db.execute("UPDATE work SET state='claimed',token=token+1,owner=?,expires=?,updated=? WHERE id=?",
                             (owner, now + lease_seconds, now, row['id']))
             claimed = dict(self.db.execute('SELECT * FROM work WHERE id=?', (row['id'],)).fetchone())
             claimed['input'] = json.loads(claimed['input'])
+            if compute:
+                name = self.admission_name(claimed['id'], claimed['token'])
+                self.db.execute('INSERT INTO resources VALUES(?,?,?,?,?,?,?)',
+                                (name, claimed['id'], claimed['token'], 'admission', 'intent', '{}', now))
+                self.event('admitted', {'resource': name, 'stage': stage}, claimed['task'], claimed['id'])
             self.event('claimed', {'stage': stage, 'token': claimed['token'], 'owner': owner}, row['task'], row['id'])
             return claimed
+
+    @staticmethod
+    def admission_name(ident, token):
+        return f'admission-{ident}-{token}'
+
+    def compute_used(self):
+        return self.db.execute("SELECT count(*) FROM resources WHERE kind IN ('sandbox','admission') AND state<>'absent'").fetchone()[0]
 
     def _current(self, ident, token, now=None):
         row = self.db.execute('''SELECT w.* FROM work w JOIN tasks t
@@ -204,17 +225,26 @@ class Store:
     def reserve(self, name, ident, token, kind, limit, data=None):
         with self.transaction():
             self._current(ident, token)
+            admission = self.admission_name(ident, token)
+            admitted = kind == 'sandbox' and bool(self.db.execute(
+                "SELECT 1 FROM resources WHERE name=? AND kind='admission' AND state='intent'", (admission,)).fetchone())
+            def used():
+                return self.compute_used() - int(admitted) if kind == 'sandbox' else self.db.execute(
+                    "SELECT count(*) FROM resources WHERE kind=? AND state<>'absent'", (kind,)).fetchone()[0]
+            def transfer():
+                if admitted:
+                    self.db.execute("UPDATE resources SET state='absent',updated=? WHERE name=?", (time.time(), admission))
             old = self.db.execute('SELECT * FROM resources WHERE name=?', (name,)).fetchone()
             if old:
                 if old['work'] != ident or old['token'] > token:
                     raise StaleClaim('resource belongs to another claim')
                 if old['state'] == 'absent':
-                    count = self.db.execute("SELECT count(*) FROM resources WHERE kind=? AND state<>'absent'", (kind,)).fetchone()[0]
-                    if count >= limit:
+                    if not admitted and used() >= limit:
                         return False
                     self.db.execute("UPDATE resources SET token=?,state='intent',data=?,updated=? WHERE name=?",
                                     (token, json.dumps(data or {}), time.time(), name))
                     self.event('resource_reserved', {'name': name, 'kind': kind}, work=ident)
+                    transfer()
                     return True
                 if old['token'] < token:
                     self.db.execute('UPDATE resources SET token=?,updated=? WHERE name=?',
@@ -223,13 +253,14 @@ class Store:
                 if data:
                     self.db.execute('UPDATE resources SET data=? WHERE name=?',
                                     (json.dumps(json.loads(old['data']) | data), name))
+                transfer()
                 return old['state'] != 'absent'
-            count = self.db.execute("SELECT count(*) FROM resources WHERE kind=? AND state<>'absent'", (kind,)).fetchone()[0]
-            if count >= limit:
+            if not admitted and used() >= limit:
                 return False
             self.db.execute('INSERT INTO resources VALUES(?,?,?,?,?,?,?)',
                             (name, ident, token, kind, 'intent', json.dumps(data or {}), time.time()))
             self.event('resource_reserved', {'name': name, 'kind': kind}, work=ident)
+            transfer()
             return True
 
     def resource_state(self, name, state, data=None):
