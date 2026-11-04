@@ -95,3 +95,38 @@ needs-revision — F6/F7 are wrong-or-missing `Calls` edges in realistic Go layo
 ### Verdict
 
 complete — all R1/R2 findings are fixed by real product code verified at this HEAD; the one R3 finding (F9, attribution gate) is fixed in this round and the gate is green. The task's own scope (Go Pass 2 pipeline) is done: port + adapter + pipeline + resolution policy + lifecycle, each with tests that fail on the bugs they guard against.
+
+---
+
+## Round: R4 (repair-round review)
+
+**Reviewer:** Independent review (candidate `3a4f0ba0`, base `ed57c723`)
+**Date:** 2026-10-08
+**Delta under review:** the full task-072 branch surface vs the assigned base, centered on the repair commits `1eefe38c` (clippy-diff gate fix) and `3a4f0ba0` (process record).
+
+### Repair-commit verification
+
+- `1eefe38c` is verifiably comment-only: the `create_edge` upsert-contract doc moved from inside the `GraphPort` trait body (inside the `async_trait` `double_must_use` warning spans that caused the 22 gate findings) to the trait-level doc above `#[async_trait]`; the method doc reverts to main's text verbatim. No behavior, verifier, or exemption change.
+- `3a4f0ba0` touches only `specs/tasks/task-072.md` (records `1eefe38c` in `commits:`, replaces the diagnostic ledger with the round summary).
+- The `check-task-commit-attribution.sh` change (FROZEN_EXEMPTION_COUNT 3→2 plus removal of the `17c81d5a` exemption line) is the documented shrink procedure: the SHA is recorded in task-072's frontmatter and the gate exits 0.
+
+### Independent probes (evidence under /tmp/stage/review-evidence/)
+
+- **Clippy gate (the recorded verification failure):** the executor's cargo wrapper blocks workspace-wide `--all-targets` in review, so the gate's exact changed-line/span-intersection logic was replicated against per-package `cargo clippy -p <pkg> --tests --all-features` runs (`clippy_gate_probe.py`): **0 findings intersect the changed lines** in all 6 changed Rust files; 1537 pre-existing warnings outside changes. The 22 `graph.rs` findings are gone. Deferred to verification: the literal `python3 scripts/check-clippy-diff.py ed57c723` workspace run.
+- `python3 scripts/check-rustfmt-diff.py ed57c723` — clean (6 files). `git diff --check ed57c723 HEAD` — clean.
+- `bash scripts/check-arch.sh` exit 0; `bash scripts/check-task-commit-attribution.sh` exit 0.
+- Suites at the candidate: `cargo test -p gyre-domain call_graph_resolve` 16/16; `go_extractor` 13/13; `cargo test -p gyre-adapters call_graph` 3/3; `mem_graph` 1/1; `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib graph_extraction` 22/22 (incl. `sync_go_repo_persists_calls_edges_in_graph_store`).
+- **Mutation probes** (throwaway worktree at the candidate, removed after; main checkout untouched):
+  - Mutation A — revert the F7 ambiguity policy to the pre-R3 `candidates[0]` guess: 4 tests fail (`resolve_go_refuses_ambiguous_method_candidates`, `resolve_go_prefix_similar_package_is_not_guessed`, `resolve_go_divergence_package_clause_name_does_not_resolve`, `resolve_go_vendored_prefix_similar_path_is_not_guessed`). The refuse-on-ambiguity tests kill the real bug.
+  - Mutation B — revert `calls_edge_id` to per-run random ids: `calls_edge_ids_are_content_derived` fails (and the server-level `pass2_edge_ids_stable_across_runs` asserts the same property end-to-end). The F8 id-stability fix is guarded.
+
+### Findings
+
+None blocking. Notes:
+
+- `specs/coverage/system/lsp-call-graph.md` rows for §1–11 remain `task-assigned` with prose describing the R2 state (F6/F7/F8 "open") — stale relative to this HEAD, but row status is lifecycle-managed (task reaches `complete` via the pipeline; the matrix "reflects reality, does not define it" per GOAL.md) and no review round required the branch to edit it. Zero `not-started` rows in the file.
+- Sandbox limitations (recorded, not defects): no Go toolchain (`scripts/go-callgraph/go-callgraph` executes but fails at `packages.Load` → `go list`, matching the documented degradation); no Docker daemon (Dockerfile §11 wiring verified statically — `golang:1.24-bookworm-slim` toolchain copy, committed binary at `/usr/local/bin/gyre-go-callgraph`, `ENV GO_CALLGRAPH_BIN`, documented in `docs/server-config.md`).
+
+### Verdict
+
+approve — the repair is exactly as claimed (comment-only, gate-verified clean by an independent replication of the gate's intersection rule), the attribution/arch/rustfmt gates are green at the candidate, all five focused suites pass, and mutation probes prove the F6/F7/F8 tests fail when their production behavior is reverted. Deferred to verification: the literal workspace-wide clippy-diff gate, the Docker image build, and an end-to-end Go-repo sync on a host with a Go toolchain.
