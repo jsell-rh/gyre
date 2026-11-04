@@ -16,8 +16,10 @@ def check_sets(pr):
             pending.append(check)
         elif conclusion in ('CANCELLED', 'TIMED_OUT', 'STALE', 'ERROR'):
             infrastructure.append(check)
-        elif conclusion not in ('SUCCESS', 'NEUTRAL', 'SKIPPED'):
+        elif conclusion in ('FAILURE','FAILED'):
             failed.append(check)
+        elif conclusion not in ('SUCCESS', 'NEUTRAL', 'SKIPPED'):
+            pending.append(check)  # Missing/unknown conclusions are not defects.
     return pending, failed, infrastructure
 
 

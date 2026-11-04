@@ -77,6 +77,11 @@ class GitHubChecksTest(unittest.TestCase):
         self.assertEqual(observed['status'],'candidate_failed')
         self.assertIn('broken feature',Path(observed['candidate_log']).read_text())
 
+    def test_missing_or_unknown_completed_conclusion_is_not_a_code_failure(self):
+        for conclusion in (None,'UNKNOWN','ACTION_REQUIRED'):
+            self.pr['statusCheckRollup']=[self.check(conclusion)]
+            self.assertEqual(self.observe()['status'],'pending')
+
     def test_repair_evidence_separates_current_candidate_from_old_baseline(self):
         self.pr['statusCheckRollup'] = [self.check('FAILURE')]
         self.baseline = [{'head_sha': self.base, 'workflow_id': 5, 'status': 'completed',
