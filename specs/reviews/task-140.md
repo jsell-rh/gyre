@@ -109,3 +109,73 @@ asymmetry each fail at least one test.
 
 R1: no findings — task meets platform-model.md §2 Built-In Personas. Progress set to
 complete.
+
+## R2 Review (independent, candidate eb0e6eb8 vs base 75ada1c4)
+
+Assignment: candidate `eb0e6eb84222178399f00099c845749fb33bec0d`, base
+`75ada1c4073ee9d56d3a1aebf5c780582d8867cb`. All five task-attributed commits
+(`5f5ab82a`, `e27cc0da`, `151cf7d2`, `fcb712c5`, `f16e969c`) present on the branch.
+Diff: 9 Rust files + Cargo.toml/lock + specs; no `scripts/`, no exemption files,
+no `web/` changes (dist identical to base).
+
+### Independent verification (fresh probes in this sandbox)
+
+- `cargo test -p gyre-domain --lib builtin` — 2 passed (spec-table order,
+  pre-approved tenant scope, independently recomputed SHA-256 hashes).
+- `cargo test -p gyre-adapters --lib sqlite::workspace::persona` — 2 passed
+  (round-trip through real SQLite rows; slug+scope JSON lookup contract that
+  idempotent reseed depends on, proven against real rows).
+- `cargo test -p gyre-server --lib seed_builtin_personas` — 3 passed
+  (creates four + idempotent restart, preserves a customized existing persona,
+  scoped to own tenant).
+- `cargo test -p gyre-server --lib create_tenant_seeds` — 1 passed (tenant-create
+  hook through the real router, asserts the 4 slugs and `"Approved"` over HTTP).
+- `cargo test -p gyre-cli --bin gyre bootstrap` — 15 passed (incl. pointer-equality
+  of `BUILTIN_PERSONAS` with `gyre_domain::BUILTIN_PERSONA_DEFS` — single source
+  of truth is mechanical).
+- Mutation probe: temporarily flipping `builtin_personas` to `Pending` made
+  `builtin_personas_are_pre_approved_tenant_scoped` FAIL (left: Pending,
+  right: Approved) — the pre-approval assertion is live, not self-confirming.
+  File restored; tree byte-clean at candidate afterwards.
+- Gates: `check-arch.sh`, `check-task-commit-attribution.sh`,
+  `check-scope-literal-defaults.sh`, `check-in-memory-state-stores.sh`,
+  `check-rustfmt-diff.py 75ada1c4` (9 files, changed lines clean) — all exit 0.
+- Evidence: `/tmp/stage/review-evidence/` (tree-sha.txt, test-*.log,
+  mutation-domain.log, gate-*.log, clippy-domain.log).
+
+### Spec conformance (platform-model.md §2)
+
+- Exactly the four spec-table personas at `PersonaScope::Tenant`, in table order;
+  `Approved` + `approved_by: "system"` + `approved_at` (pre-approved).
+- Prompts embedded via `include_str!` from `specs/personas/<slug>.md` —
+  compile-time failure if missing; `repo-orchestrator.md` present with
+  Ralph-loop content matching the spec table's purpose column.
+- Idempotent: check-before-insert keyed on `find_by_slug_and_scope(slug,
+  Tenant(id))`; existing/customized personas never overwritten (§2 override
+  path preserved). Every tenant-creation path is covered: startup enumeration
+  (main.rs), `POST /api/v1/tenants` hook, admin demo-seed, CLI bootstrap.
+- `content_hash` = SHA-256 of prompt+capabilities via `refresh_content_hash()`,
+  independently recomputed in the domain test.
+
+### Observations (not findings)
+
+- Sandbox wrapper rejects workspace-wide cargo invocations, so
+  `check-clippy-diff.py 75ada1c4` could not be run here (deferred to
+  verification). Focused `cargo clippy -p gyre-domain --lib` shows zero
+  diagnostics in the task's changed file (`workspace.rs`); the digit-grouping
+  repair (`1_700_000_000`) is in place.
+- That focused clippy run surfaces a pre-existing `never_loop` **error** at
+  `crates/gyre-domain/src/rust_extractor.rs:1071` (introduced by `d7940e85`,
+  present identically in base `75ada1c4`, untouched by task-140). Under this
+  sandbox's clippy 0.1.99 (2026-09-28) the workspace-wide diff-gate would fail
+  on it for base-identical reasons — environmental/pre-existing, not a candidate
+  defect. Verifier should confirm with `python3 scripts/check-clippy-diff.py
+  75ada1c4` on the CI toolchain.
+- TCP listeners are unsupported in this sandbox (capabilities.json), so the live
+  HTTP startup path was not exercised; it is covered by the main.rs wiring plus
+  the router-level tests above.
+
+### Verdict
+
+Approved — no findings. The task contract is satisfied by real production code
+with meaningful tests; all acceptance criteria independently re-verified.
