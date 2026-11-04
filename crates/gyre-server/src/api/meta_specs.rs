@@ -267,7 +267,9 @@ pub async fn put_meta_spec_set(
         .await?;
 
     // §6: only version changes (new or re-pinned entries) trigger
-    // reconciliation — an identical re-PUT is a no-op.
+    // reconciliation — an identical re-PUT is a no-op, and `run_reconciliation`
+    // itself skips specs that are not yet Approved (a Pending bind is not a
+    // rollout; the approval transition owns that wave).
     let changed_paths = crate::reconciliation::diff_meta_spec_set(&old_set, &set);
     if !changed_paths.is_empty() {
         // §11 MetaSpecSetUpdated: workspace meta-spec set binding changed.
@@ -929,7 +931,7 @@ mod tests {
 // GET    /api/v1/meta-specs-registry           — list (query: scope, scope_id, kind, required)
 // POST   /api/v1/meta-specs-registry           — create
 // GET    /api/v1/meta-specs-registry/:id       — get by id
-// PUT    /api/v1/meta-specs-registry/:id       — update (new version, bumps version)
+// PUT    /api/v1/meta-specs-registry/:id       — update (content edit bumps version; approval-only PUT does not)
 // DELETE /api/v1/meta-specs-registry/:id       — delete (409 if bindings)
 // GET    /api/v1/meta-specs-registry/:id/versions       — list versions
 // GET    /api/v1/meta-specs-registry/:id/versions/:ver  — get specific version
@@ -1189,6 +1191,13 @@ pub async fn update_meta_spec_registry(
         let prompt = prompt.clone();
         ms.content_hash = sha256_hex(&prompt);
         ms.prompt = prompt;
+        // New content is a new version. Metadata-only updates (approval,
+        // required flag, name) do NOT bump: the version names the content
+        // the §6 reconciliation title pins ("... {name} v{version}"), and a
+        // bump on every PUT would give adjacent triggers of one logical
+        // rollout (bind → approve) different titles, defeating the
+        // (workspace, repo, title) dedup.
+        ms.version += 1;
         // Spec §2: editing content resets approval to Pending until re-reviewed.
         ms.approval_status = MetaSpecApprovalStatus::Pending;
         ms.approved_by = None;
@@ -1209,7 +1218,6 @@ pub async fn update_meta_spec_registry(
         ms.approval_status = status;
     }
 
-    ms.version += 1;
     ms.updated_at = now;
 
     state
@@ -1645,6 +1653,17 @@ mod registry_tests {
             }
         };
 
+        // Binding a never-approved (Pending) spec must NOT trigger
+        // reconciliation: §6 gates the rollout on approval, so the
+        // approval transition owns the wave. A trigger here would
+        // double-fire with the approval below (one logical rollout,
+        // two reconciliation tasks).
+        assert_eq!(
+            recon_count().await,
+            0,
+            "binding a Pending (never-approved) meta-spec must not trigger reconciliation"
+        );
+
         // Initial approval (Pending → Approved): first approval of content
         // never approved before is a trigger.
         let approve1 = app
@@ -1666,6 +1685,27 @@ mod registry_tests {
             1,
             "first approval of never-approved content must trigger reconciliation"
         );
+        // The wave's task names the version of the APPROVED content (v1).
+        // An approval-only PUT must not bump the version: it does not
+        // change content, and a bump here would retitle the wave's tasks
+        // ("v2") so the (workspace, repo, title) dedup could never
+        // collapse adjacent triggers of one logical rollout.
+        {
+            let tasks: Vec<_> = state
+                .tasks
+                .list_by_workspace(&gyre_common::Id::new(&ws_id))
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|t| t.labels.iter().any(|l| l == "meta-spec-reconciliation"))
+                .collect();
+            assert_eq!(tasks.len(), 1);
+            assert_eq!(
+                tasks[0].title,
+                "Align code with updated meta:persona 2step-worker v1",
+                "approval-only PUT must not bump the version (title pins approved content's version)"
+            );
+        }
 
         // Terminal-complete wave 1 so the dedup set is empty again.
         let tasks: Vec<_> = state

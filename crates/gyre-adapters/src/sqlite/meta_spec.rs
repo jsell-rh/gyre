@@ -301,20 +301,25 @@ impl MetaSpecRepository for SqliteStorage {
                 .context("fetch current meta_spec for archive")?;
 
             if let Some(current_row) = current {
-                // Archive current version into meta_spec_versions.
-                let version_id = uuid::Uuid::new_v4().to_string();
-                let ver_row = InsertVersionRow {
-                    id: &version_id,
-                    meta_spec_id: &current_row.id,
-                    version: current_row.version,
-                    prompt: &current_row.prompt,
-                    content_hash: &current_row.content_hash,
-                    created_at: now,
-                };
-                diesel::insert_into(meta_spec_versions::table)
-                    .values(&ver_row)
-                    .execute(&mut *conn)
-                    .context("archive meta_spec version")?;
+                // Archive only when the content version changed — a
+                // same-version update (approval of unchanged content,
+                // required-flag toggle) is not a new version and must not
+                // create a duplicate history row.
+                if current_row.version != version {
+                    let version_id = uuid::Uuid::new_v4().to_string();
+                    let ver_row = InsertVersionRow {
+                        id: &version_id,
+                        meta_spec_id: &current_row.id,
+                        version: current_row.version,
+                        prompt: &current_row.prompt,
+                        content_hash: &current_row.content_hash,
+                        created_at: now,
+                    };
+                    diesel::insert_into(meta_spec_versions::table)
+                        .values(&ver_row)
+                        .execute(&mut *conn)
+                        .context("archive meta_spec version")?;
+                }
             }
 
             // Update the meta_spec row.
@@ -626,5 +631,49 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    /// A same-version update (approval of unchanged content, required-flag
+    /// toggle) must NOT create a duplicate version-history row: the version
+    /// number names the content, and `update()` only archives when it
+    /// changed. Without the guard, every approval-only PUT would append a
+    /// copy of the current version to `meta_spec_versions`.
+    #[tokio::test]
+    async fn same_version_update_does_not_duplicate_history() {
+        let s = storage();
+        let ms = sample_meta_spec();
+        MetaSpecRepository::create(&s, &ms).await.unwrap();
+
+        // Approval-only update: same version, same content.
+        let mut approved = ms.clone();
+        approved.approval_status = MetaSpecApprovalStatus::Approved;
+        approved.approved_by = Some("admin".to_string());
+        approved.updated_at = ms.updated_at + 1;
+        MetaSpecRepository::update(&s, &approved).await.unwrap();
+
+        // No history row: version 1 is still the live row.
+        let versions = MetaSpecRepository::list_versions(&s, &ms.id).await.unwrap();
+        assert_eq!(
+            versions.len(),
+            0,
+            "same-version update must not archive a duplicate history row"
+        );
+        let got = MetaSpecRepository::get_by_id(&s, &ms.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.version, 1);
+        assert_eq!(got.approval_status, MetaSpecApprovalStatus::Approved);
+
+        // A content edit (version bump) archives exactly one row.
+        let mut edited = approved.clone();
+        edited.prompt = "Updated prompt.".to_string();
+        edited.content_hash = sha256_hex(&edited.prompt);
+        edited.version = 2;
+        edited.updated_at = approved.updated_at + 1;
+        MetaSpecRepository::update(&s, &edited).await.unwrap();
+        let versions = MetaSpecRepository::list_versions(&s, &ms.id).await.unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].version, 1);
     }
 }

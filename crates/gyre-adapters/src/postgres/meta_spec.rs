@@ -289,19 +289,25 @@ impl MetaSpecRepository for PgStorage {
                 .context("fetch current meta_spec")?;
 
             if let Some(current_row) = current {
-                let version_id = uuid::Uuid::new_v4().to_string();
-                let ver_row = InsertVersionRow {
-                    id: &version_id,
-                    meta_spec_id: &current_row.id,
-                    version: current_row.version,
-                    prompt: &current_row.prompt,
-                    content_hash: &current_row.content_hash,
-                    created_at: now,
-                };
-                diesel::insert_into(meta_spec_versions::table)
-                    .values(&ver_row)
-                    .execute(&mut *conn)
-                    .context("archive meta_spec version")?;
+                // Archive only when the content version changed — a
+                // same-version update (approval of unchanged content,
+                // required-flag toggle) is not a new version and must not
+                // create a duplicate history row.
+                if current_row.version != version {
+                    let version_id = uuid::Uuid::new_v4().to_string();
+                    let ver_row = InsertVersionRow {
+                        id: &version_id,
+                        meta_spec_id: &current_row.id,
+                        version: current_row.version,
+                        prompt: &current_row.prompt,
+                        content_hash: &current_row.content_hash,
+                        created_at: now,
+                    };
+                    diesel::insert_into(meta_spec_versions::table)
+                        .values(&ver_row)
+                        .execute(&mut *conn)
+                        .context("archive meta_spec version")?;
+                }
             }
 
             diesel::update(meta_specs::table.filter(meta_specs::id.eq(&ms_id)))

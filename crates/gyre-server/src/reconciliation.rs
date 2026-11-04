@@ -6,9 +6,13 @@
 //! - `run_reconciliation` — the slow rollout (§6). Triggered when a
 //!   workspace's meta-spec set binding moves to a new version of a
 //!   meta-spec (via `PUT /api/v1/workspaces/{id}/meta-spec-set`) or when a
-//!   registry meta-spec is approved on new content. Computes the blast
-//!   radius (repos in the workspace bound to the changed meta-spec) and
-//!   creates a deduplicated reconciliation task per affected repo.
+//!   registry meta-spec is approved on new content. Only APPROVED specs
+//!   reconcile (§6: "a meta-spec change is approved and rolled out") —
+//!   binding a Pending spec is not a rollout; the approval transition
+//!   owns that wave, so one logical rollout produces exactly one wave.
+//!   Computes the blast radius (repos in the workspace bound to the
+//!   changed meta-spec) and creates a deduplicated reconciliation task
+//!   per affected repo.
 //!
 //! - `run_conformance_sweep` — steady state (§10). A background job that
 //!   periodically sweeps every workspace, comparing the workspace's active
@@ -402,10 +406,30 @@ pub async fn run_reconciliation(
     // name, new version). The set entry `path` is the registry meta-spec
     // name (the registry is the spec-content source of truth; the set
     // pins `name@sha`).
+    //
+    // §6 gates reconciliation on an APPROVED rollout: "when a meta-spec
+    // change is approved and rolled out". Binding a spec that is still
+    // Pending (never approved) is not a rollout — reconciling now would
+    // create a task for content no human has approved, and the later
+    // approval trigger would fire a second wave for the same logical
+    // rollout (double-trigger). The approval transition owns the
+    // reconciliation for never-approved content.
     let mut changed_specs: Vec<gyre_domain::MetaSpec> = Vec::new();
     for path in changed_paths {
         match find_meta_spec_by_name(state, path).await {
-            Ok(Some(ms)) => changed_specs.push(ms),
+            Ok(Some(ms)) => {
+                if ms.approval_status
+                    != gyre_domain::meta_spec::MetaSpecApprovalStatus::Approved
+                {
+                    info!(
+                        meta_spec = %path,
+                        status = ms.approval_status.as_str(),
+                        "reconciliation: changed meta-spec is not Approved yet; the approval trigger owns this rollout"
+                    );
+                    continue;
+                }
+                changed_specs.push(ms);
+            }
             Ok(None) => {
                 warn!(
                     meta_spec = %path,

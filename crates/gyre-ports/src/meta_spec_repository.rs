@@ -35,7 +35,10 @@ pub trait MetaSpecRepository: Send + Sync {
     /// List meta-specs, optionally filtered.
     async fn list(&self, filter: &MetaSpecFilter) -> Result<Vec<MetaSpec>>;
 
-    /// Update an existing meta-spec (creates a version history entry, bumps version).
+    /// Update an existing meta-spec. Archives a version-history entry when
+    /// (and only when) the content version changed — a same-version update
+    /// (e.g. approving unchanged content) must not create duplicate history
+    /// rows for the same version.
     async fn update(&self, meta_spec: &MetaSpec) -> Result<()>;
 
     /// Delete a meta-spec by ID. Returns an error if bindings reference it.
