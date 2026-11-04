@@ -8,7 +8,7 @@ coverage_sections:
   - "ui-navigation.md §2 Workspace Home"
   - "ui-navigation.md §3 Repo Mode"
   - "ui-navigation.md §10 Cross-Workspace View"
-commits: ["2836e2a5451986bf8f0c91ceb3697dbf5549a44e", "315545f3d23ba96665646409108149cc147b3391", "4e5fd9fe4785d4f4885ecdc6b831031fa62fbce9", "8ee005dfdcc814d07d1a319fdff284a9f9c418fa", "d2a1fc6151132667da637e20b34c0efc4b35d8cf", "41f04f5d67f2a7f7185b8d13a48feee00e8237ec", "454af032edcebb0b71098688ed35f69a0f6a84fd", "987c8067be9ae1f231adf1358bdb006e9fd33c9b", "07eb5915a082ae5a9334f41bb349379280f0fa3e", "7a12fa3665be2123f2793ec3c12015c04cf261cc", "ba656318cd5da9ee833bbb625ecd6b421e30e53c", "ad35a4a8a961c36bf876b5299020198af7f00e2d", "d6073fb363d8be7335f9509c78c26224d2abc9f3", "4a781f24150f595948019832e908f74fc4dda8ae", "70c4a880250b835a455728b7a246d0c54b881a99", "c793573beecc212e18ee4fae664e5adedb1941ee"]
+commits: ["2836e2a5451986bf8f0c91ceb3697dbf5549a44e", "315545f3d23ba96665646409108149cc147b3391", "4e5fd9fe4785d4f4885ecdc6b831031fa62fbce9", "8ee005dfdcc814d07d1a319fdff284a9f9c418fa", "d2a1fc6151132667da637e20b34c0efc4b35d8cf", "41f04f5d67f2a7f7185b8d13a48feee00e8237ec", "454af032edcebb0b71098688ed35f69a0f6a84fd", "987c8067be9ae1f231adf1358bdb006e9fd33c9b", "07eb5915a082ae5a9334f41bb349379280f0fa3e", "7a12fa3665be2123f2793ec3c12015c04cf261cc", "ba656318cd5da9ee833bbb625ecd6b421e30e53c", "ad35a4a8a961c36bf876b5299020198af7f00e2d", "d6073fb363d8be7335f9509c78c26224d2abc9f3", "4a781f24150f595948019832e908f74fc4dda8ae", "70c4a880250b835a455728b7a246d0c54b881a99", "c793573beecc212e18ee4fae664e5adedb1941ee", "ede46f2c2a70b5d21cf0c5702cf95b589bdfd66e", "a387ad9827e8b414b171ab60b97a156304cd5be7"]
 ---
 
 ## Authority and Scope
@@ -114,67 +114,44 @@ is claimed here, per section, with the verifying evidence below.
   error toasts/states (cross-workspace unknown-workspace toast, Agent Rules
   error + Retry, per-section load errors) rather than empty success.
 
-Focused probes (all this branch, `npm ci` locked versions; logs in
-`/tmp/stage/review-evidence/`):
+Verification (rebase-repair round at merge head `a387ad98` = candidate
+`ede46f2c` + new base `ed57c723`, conflicts resolved by hand; `npm ci`
+locked versions; log: `/tmp/stage/review-evidence/task-083-rebase-a387ad98.txt`):
 
-- Full frontend suite: 58 files, **1545 passed / 0 failed** (41 pre-existing
-  skips) — includes the behavioral regressions for repo-scope Briefing fetch
-  args + rendered sections, Inbox scope filtering (server `?workspace_id=`;
-  repo `repo_id` null exclusion), Agent-Rules failure→retry, cross-workspace
-  stale-response guard, drawer navigation to real DOM anchors, repo-mode
-  Briefing drawer click staying in repo scope, no-sidebar shell, settings
-  tabs.
-- `cargo test -p gyre-server --lib api::graph::tests` → **23 passed**
-  (incl. `briefing_repo_filter_narrows_sections_to_that_repo` and
-  `briefing_repo_filter_completed_agents_by_agent_binding`);
-  `... --lib briefing` → **19 passed** (covers every `assemble_briefing`
-  call site incl. the MCP delegation).
-- Fresh review round (candidate 831b9f00 + repair commits 4e5fd9fe/93f229be):
-  all probes re-run and passing — frontend suite **1545 passed / 0 failed**
-  (41 pre-existing skips), `api::graph::tests` **23 passed**, `--lib briefing`
-  **19 passed**; logs in `/tmp/stage/review-evidence/task-083-focused-probes.txt`.
-  Repair during this round: `check-forged-scope-fields.sh` flagged the
-  `briefing_ask` `req.repo_id` read (new on this branch). The read is already
-  containment-validated (repo lookup 404 / workspace mismatch 403 against the
-  ABAC-scoped path workspace); the script's guard regex only recognizes
-  auth-derived comparisons, so the validated line now carries the script's
-  designed inline `forged-scope-fields:ok` marker — no verifier change, no
-  exemption-file entry, no handler logic change. Post-fix: check passes,
-  server builds, graph tests green.
-- Host verification items: Playwright e2e (default-tab, back/forward,
-  visual snapshots) needs a TCP listener on :2222; this sandbox's `accept()`
-  fails with errno 95 (see `/tmp/stage/capabilities.json`). Static review
-  shows this branch changes none of the e2e specs' selectors; exact-head
-  GitHub CI remains mandatory. `check-task-commit-attribution.sh` fails on
-  `a781ede2`/task-210 at the old base 8c2d1775; main has since recorded that
-  SHA in task-210.md (f38abb7e), so the check passes there today. The
-  equivalent drift on the new base — `6bf777a6`/task-200, never recorded by
-  main's task-200 process — was repaired on this branch in c2a01d35 by the
-  check's prescribed remedy (SHA appended to task-200.md's `commits:`
-  frontmatter, no exemption); the check passes at this branch head.
-
-Checkpoint continuation round (merge head `eb0d7fac` = candidate `9552a1a6`
-+ new base `6bf777a6`, then repair commit `c2a01d35`): the prior attempt
-crashed (exit 130) mid-verification under CPU starvation (load ~45 on 8
-cores); this round re-ran the focused probes at the merged head with a
-clean box (load ~3, `npm ci` locked versions). No code changed in this
-round — product surface is byte-identical to the reviewed candidate
-`9552a1a6`; only specs bookkeeping (task-200 frontmatter repair, this
-section) differs. All probes green at `eb0d7fac`:
-
-- Frontend suite: 58 files, **1546 passed / 0 failed** (41 pre-existing
-  skips), EXIT=0.
-- `cargo test -p gyre-server --lib api::graph::tests` → **26 passed / 0
+- Full frontend suite: 65 files, **1598 passed / 0 failed** (41 pre-existing
+  skips), EXIT=0 — includes this task's behavioral regressions (repo-scope
+  Briefing fetch args + rendered sections, Inbox scope filtering with
+  `repo_id`-null exclusion, Agent-Rules failure→retry, cross-workspace
+  stale-response guard, drawer navigation, no-sidebar shell) alongside the
+  base's accordion/entity-reference suites, which the merge keeps intact.
+- `cargo test -p gyre-server --lib api::graph::tests` → **28 passed / 0
   failed** (incl. both `briefing_repo_filter_*` regressions);
-  `... --lib briefing` → **22 passed / 0 failed**.
-- `check-forged-scope-fields.sh` → OK after the mcp.rs merge; attribution
-  check → OK after the task-200 frontmatter repair. Logs in
-  `/tmp/stage/review-evidence/*-eb0d7fac.txt`.
+  `... --lib briefing` → **24 passed / 0 failed**;
+  `... --test graph_integration` → **37 passed / 0 failed** (exercises the
+  merged GET briefing and POST briefing/ask endpoints). The four merged
+  integration test targets compile against the resolved lib.
+- `check-forged-scope-fields.sh`, `check-arch.sh`,
+  `check-inert-enforcement.sh`, `check-task-commit-attribution.sh` → all OK
+  at the merged head; no exemptions added, no verifier changes.
 
-  The graph/briefing test counts rose from 23→26 and 19→22 vs the prior
-  round: the new base added message-bus tests to those same modules
-  (`api::graph::tests` gained 3, `--lib briefing` filter gained 3), all
-  passing alongside the task-083 regressions.
+Rebase-resolution note (the only product change in this round): main's
+task-196 reworked `briefing_ask` into grounded Q&A (briefing JSON + replayed
+history in `{{context}}`, >20-entry history rejected with 400 before the
+rate limiter, `{answer, sources}` terminal SSE event) after this branch had
+added repo scoping to the same handler. The merged handler keeps both
+behaviors: main's history rejection and grounding, plus this task's repo
+scope — ABAC caller-scope guard on `req.repo_id`, repo-exists and
+belongs-to-workspace validation (404/403), `assemble_briefing` narrowed by
+the repo filter (so the grounding JSON and the `sources` array are
+repo-scoped), and an explicit "asking about repository X only" context
+note. The Briefing/Inbox test-file conflicts were both-sides-additive; both
+suites are kept and pass. Host verification items are unchanged: Playwright
+e2e needs a TCP listener (errno 95 in this sandbox, see
+`/tmp/stage/capabilities.json`); exact-head GitHub CI remains mandatory.
+Prior-round ledgers (fresh review round at 831b9f00/4e5fd9fe/93f229be,
+checkpoint continuation at `eb0d7fac` with the task-200 frontmatter repair
+`c2a01d35`) are superseded by this round's evidence; the task-200
+frontmatter repair remains in the tree.
 
 Contract note for the reviewer: an earlier attempt ticked the acceptance
 checkboxes in this file, which the pipeline's `requirement_parts` treats as
