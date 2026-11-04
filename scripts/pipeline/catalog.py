@@ -91,6 +91,9 @@ def discover(store, stage, base):
             if (published and published.get('candidate') == data.get('candidate') and not data.get('repair')):
                 selected.append(store.enqueue('observe',name,task['generation'],
                     {'candidate':data['candidate'],'url':data['pr'],'published':published},priority=30000))
+            elif data.get('pr'):
+                selected.append(store.enqueue('observe',name,task['generation'],
+                    {'url':data['pr'],'priority_only':True},priority=30000))
             continue
         repair = data.get('repair') or {}
         prerequisite = tasks.get(repair.get('prerequisite'))

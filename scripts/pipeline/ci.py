@@ -90,6 +90,20 @@ def failure(execution, task, receipt, observation):
 
 
 def observe(execution, task):
+    labels=json.loads(execution.command('gh','pr','view',task['data']['pr'],'--json','labels',timeout=30).stdout)
+    priority_labels=sorted({label['name'] for label in labels.get('labels',[]) if label['name'].startswith('priority/')})
+    with execution.store.transaction():
+        execution.store._current(execution.claim['id'],execution.claim['token'])
+        current=execution.store.task(task['name'])
+        if current['data'].get('pr') != task['data'].get('pr'):
+            raise StaleClaim('associated PR changed during priority observation')
+        data=current['data']
+        if data.get('priority_labels') != priority_labels:
+            data['priority_labels']=priority_labels
+            execution.store.db.execute('UPDATE tasks SET data=? WHERE name=?',(json.dumps(data),task['name']))
+            execution.store.event('priority_labels_observed',{'labels':priority_labels},task['name'],execution.claim['id'])
+    if execution.claim['input'].get('priority_only'):
+        raise Wait('Watching PR priority labels while implementation handles the recorded finding')
     receipt = execution.claim['input']['published']
     observation = read(execution,task,receipt)
     rejected = failure(execution,task,receipt,observation)
