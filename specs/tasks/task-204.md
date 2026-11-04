@@ -87,15 +87,8 @@ Every finding escalates to the workspace orchestrator as a REAL persisted
 (`spec` resource, write action) — real policy evaluation, no exemption file
 entry.
 
-This round resolved the pending merge of the assigned base
-(`75ada1c4`) into the branch: the only conflict was the
-`specs/coverage/SUMMARY.md` TOTAL row, resolved by recomputing totals from the
-merged per-spec rows (hsi row corrected by the base, spec-lifecycle row carried
-by this branch) — the merged matrix is internally consistent
-(`802/219/0/310/110/163`, verified by summing all 40 per-spec rows). The
-previously-reported kill-test mutant is confirmed absent from the checkpoint
-(no `if true` stub in `spec_lifecycle_patrol.rs`), and all focused probes were
-re-run green after the merge.
+This repair round removed a leftover kill-test mutant (`if true { return 0; }`
+stubbing `escalate_findings`) from the interrupted assignment's checkpoint.
 
 ## Test evidence
 
@@ -104,21 +97,19 @@ re-run green after the merge.
   `one escalation per finding` / `escalation must be emitted, not skipped` —
   `spec_lifecycle_patrol` + endpoint tests detect skipped escalation
   (`/tmp/stage/review-evidence/task204-killtest-mutant.log`, exit 101).
-- Clean run (re-run post-merge): `cargo test -p gyre-server --lib
-  spec_lifecycle_patrol` — 11 passed, 0 failed (incl. stale/fresh,
-  Backlog/non-Backlog, orphaned/covered, cancelled-task coverage,
-  threshold-override, broadcast routing tests);
-  `/tmp/stage/review-evidence/task204-merge-resolution-patrol.log`.
-- Endpoint tests (re-run post-merge): `cargo test -p gyre-server --lib
-  api::specs::tests` — 53 passed (incl.
-  `spec_lifecycle_patrol_endpoint_flags_and_escalates` and
+- Clean run: `cargo test -p gyre-server --lib spec_lifecycle_patrol` — 11
+  passed, 0 failed (incl. stale/fresh, Backlog/non-Backlog, orphaned/covered,
+  cancelled-task coverage, threshold-override, broadcast routing tests).
+- Endpoint tests: `cargo test -p gyre-server --lib api::specs::tests` — 53
+  passed (incl. `spec_lifecycle_patrol_endpoint_flags_and_escalates` and
   `..._honours_thresholds`, which assert persisted escalations via the real
-  router); `/tmp/stage/review-evidence/task204-merge-resolution-api-specs.log`.
-- Spec-links patrol regression (re-run post-merge, shared `PatrolFinding` gained
+  router).
+- Spec-links patrol regression (shared `PatrolFinding` gained
   `task_id`/`workspace_id`): `cargo test -p gyre-server --lib spec_patrol` —
-  19 passed; `/tmp/stage/review-evidence/task204-merge-resolution-spec-patrol.log`.
-- Post-merge `bash scripts/check-arch.sh`, `check-abac-route-registry.sh`, and
-  `check-dead-message-kinds.sh` all passed.
+  19 passed.
+- `bash scripts/check-arch.sh` passed; `check-abac-route-registry.sh`,
+  `check-fabricated-scope-defaults.sh`, `check-scope-literal-defaults.sh`,
+  `check-mem-port-contracts.sh`, `check-dead-message-kinds.sh` all passed.
 - HTTP checks deferred to host verification: this sandbox's listener probe is
   unsupported (`accept` → `Errno 95`, see `/tmp/stage/capabilities.json`), so
   the route was verified through the in-process router tests above; exact-head
