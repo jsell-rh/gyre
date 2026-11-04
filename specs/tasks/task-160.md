@@ -7,7 +7,7 @@ coverage_sections:
   - "hierarchy-enforcement.md §Invariant Enforcement"
   - "hierarchy-enforcement.md §Enforcement"
   - "hierarchy-enforcement.md §New Scripts"
-commits: ["ba78ab2a5e1a2147a04cf7e148f53e6c0abb34e3"]
+commits: ["2698b9b63b73e5f3b2230a0b7e8e30d160265f3d", "ba78ab2a5e1a2147a04cf7e148f53e6c0abb34e3"]
 ---
 
 ## Spec Excerpt
