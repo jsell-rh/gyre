@@ -3220,7 +3220,11 @@ pub async fn ensure_test_workspace(state: &crate::AppState, ws_id: &str) {
         ws_id,
         0,
     );
-    state.workspaces.create(&ws).await.expect("workspace create");
+    state
+        .workspaces
+        .create(&ws)
+        .await
+        .expect("workspace create");
 }
 
 /// Build a test AppState backed by a real `StoragePort` (e.g. a temp-file

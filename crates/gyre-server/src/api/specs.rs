@@ -954,25 +954,41 @@ pub async fn reject_spec(
     // workspace Admin/Developer members.
     if let Some(ref ws_id) = entry.workspace_id {
         let ws_id = gyre_common::Id::new(ws_id.as_str());
-        if let Ok(members) = state.workspace_memberships.list_by_workspace(&ws_id).await {
-            for member in &members {
-                if matches!(
-                    member.role,
-                    gyre_domain::WorkspaceRole::Admin
-                        | gyre_domain::WorkspaceRole::Developer
-                        | gyre_domain::WorkspaceRole::Owner
-                ) {
-                    let tenant_id = entry.repo_id.as_deref().unwrap_or("default");
-                    crate::notifications::notify(
-                        state.as_ref(),
-                        ws_id.clone(),
-                        member.user_id.clone(),
-                        gyre_common::NotificationType::SpecRejected,
-                        format!("Spec '{}' rejected: {}", spec_path, req.reason),
-                        tenant_id,
-                    )
-                    .await;
+        // Resolve tenant_id from the workspace's real scope row (§Access
+        // Scoping). A lookup failure means the scope cannot be determined —
+        // skip the fanout and log; never fabricate a "default" tenant
+        // (task-097 F3), which silently re-targets the notification.
+        match state.workspaces.find_by_id(&ws_id).await {
+            Ok(Some(ws)) => {
+                let tenant_id = ws.tenant_id.to_string();
+                if let Ok(members) = state.workspace_memberships.list_by_workspace(&ws_id).await {
+                    for member in &members {
+                        if matches!(
+                            member.role,
+                            gyre_domain::WorkspaceRole::Admin
+                                | gyre_domain::WorkspaceRole::Developer
+                                | gyre_domain::WorkspaceRole::Owner
+                        ) {
+                            crate::notifications::notify(
+                                state.as_ref(),
+                                ws_id.clone(),
+                                member.user_id.clone(),
+                                gyre_common::NotificationType::SpecRejected,
+                                format!("Spec '{}' rejected: {}", spec_path, req.reason),
+                                tenant_id.clone(),
+                            )
+                            .await;
+                        }
+                    }
                 }
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    "spec rejected fanout: workspace {ws_id} not found; skipping notifications"
+                );
+            }
+            Err(e) => {
+                tracing::warn!("spec rejected fanout: failed to resolve workspace tenant: {e}");
             }
         }
     }
