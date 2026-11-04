@@ -432,9 +432,7 @@ pub(crate) async fn detect_lineage_deps(
 
     let candidates: Vec<_> = all_mrs
         .into_iter()
-        .filter(|m| {
-            m.source_branch != source_branch && m.status == MrStatus::Open
-        })
+        .filter(|m| m.source_branch != source_branch && m.status == MrStatus::Open)
         .collect();
 
     if candidates.is_empty() {
@@ -2094,10 +2092,7 @@ mod tests {
 
         let deps = repo.deps_of(&mr_b_id).await;
         assert_eq!(deps.len(), 2, "explicit + re-detected lineage: {deps:?}");
-        let sources: Vec<&str> = deps
-            .iter()
-            .map(|d| d["source"].as_str().unwrap())
-            .collect();
+        let sources: Vec<&str> = deps.iter().map(|d| d["source"].as_str().unwrap()).collect();
         assert!(sources.contains(&"explicit"));
         assert!(sources.contains(&"branch-lineage"));
     }
@@ -2130,12 +2125,9 @@ mod tests {
         // Push-triggered selection exactly as the post-receive hook runs it:
         // only feat/a was pushed, yet the child holding the lineage edge
         // must be selected and re-evaluated.
-        let selected = super::mrs_needing_lineage_reeval(
-            &repo.state,
-            &repo.repo_id,
-            &["feat/a".to_string()],
-        )
-        .await;
+        let selected =
+            super::mrs_needing_lineage_reeval(&repo.state, &repo.repo_id, &["feat/a".to_string()])
+                .await;
         assert!(
             selected.contains(&Id::new(&mr_b_id)),
             "child MR must be selected when only the parent branch was pushed"
