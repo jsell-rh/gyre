@@ -89,6 +89,7 @@
       let data = Array.isArray(raw) ? raw : (raw?.notifications ?? []);
       // Normalize PascalCase notification types from the server to snake_case
       const typeNormMap = {
+        TaskCreated: 'task_created',
         AgentCompleted: 'agent_completed',
         AgentFailed: 'agent_failed',
         SpecPendingApproval: 'spec_approval',

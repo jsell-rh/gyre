@@ -143,8 +143,18 @@ pub async fn create_persona(
     persona.max_tokens = req.max_tokens;
     persona.budget = req.budget;
     // The creator owns the persona (its approval notifications route to the
-    // owner per user-management.md §Who Gets Notified).
-    persona.owner = Some(auth.agent_id.clone());
+    // owner per user-management.md §Who Gets Notified). Use the
+    // authenticated user's id — `auth.agent_id` is only the display name
+    // for JWT/API-key auth (and "system" for the global dev token), which
+    // is not a real user inbox. Callers without a user identity (dev/
+    // agent tokens) fall back to the "system" inbox so the approval
+    // request stays visible rather than dropped.
+    persona.owner = Some(
+        auth.user_id
+            .as_ref()
+            .map(|id| format!("user:{id}"))
+            .unwrap_or_else(|| "system".to_string()),
+    );
     // Recompute hash now that capabilities are set.
     persona.refresh_content_hash();
     state.personas.create(&persona).await?;

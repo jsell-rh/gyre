@@ -710,6 +710,31 @@ pub async fn save_spec(
     }
     if approval_recipients.is_empty() {
         approval_recipients.push(Id::new("system"));
+    } else {
+        // A recipient id with no registered user maps to the "system"
+        // inbox so the request is still visible rather than dropped
+        // (manifest approvers/owner are free-form names, not guaranteed
+        // user ids). Unknown recipients collapse into a single "system"
+        // entry to avoid duplicate deliveries.
+        let mut resolved: Vec<Id> = Vec::new();
+        for recipient in approval_recipients.drain(..) {
+            let known = state
+                .users
+                .find_by_id(&recipient)
+                .await
+                .ok()
+                .flatten()
+                .is_some();
+            let target = if known {
+                recipient
+            } else {
+                Id::new("system")
+            };
+            if !resolved.contains(&target) {
+                resolved.push(target);
+            }
+        }
+        approval_recipients = resolved;
     }
 
     for recipient in approval_recipients {
