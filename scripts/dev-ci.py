@@ -7,6 +7,22 @@ import subprocess
 from pathlib import Path
 
 
+def check_sets(pr):
+    pending, failed, infrastructure = [], [], []
+    for check in pr.get('statusCheckRollup') or []:
+        status = check.get('status') or check.get('state')
+        conclusion = check.get('conclusion') or check.get('state')
+        if status in ('QUEUED', 'IN_PROGRESS', 'PENDING', 'EXPECTED', 'WAITING', 'REQUESTED'):
+            pending.append(check)
+        elif conclusion in ('CANCELLED', 'TIMED_OUT', 'STALE', 'ERROR'):
+            infrastructure.append(check)
+        elif conclusion in ('FAILURE','FAILED'):
+            failed.append(check)
+        elif conclusion not in ('SUCCESS', 'NEUTRAL', 'SKIPPED'):
+            pending.append(check)  # Missing/unknown conclusions are not defects.
+    return pending, failed, infrastructure
+
+
 def observe(run, url, head, base, directory):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -20,17 +36,8 @@ def observe(run, url, head, base, directory):
         return {'status': 'closed'}
     checks = pr.get('statusCheckRollup') or []
     (directory / 'github-checks.json').write_text(json.dumps(pr, indent=2))
-    pending, failed, infrastructure = [], [], []
-    for check in checks:
-        status = check.get('status') or check.get('state')
-        conclusion = check.get('conclusion') or check.get('state')
-        if status in ('QUEUED', 'IN_PROGRESS', 'PENDING', 'EXPECTED', 'WAITING', 'REQUESTED'):
-            pending.append(check)
-        elif conclusion in ('CANCELLED', 'TIMED_OUT', 'STALE', 'ERROR'):
-            infrastructure.append(check)
-        elif conclusion not in ('SUCCESS', 'NEUTRAL', 'SKIPPED'):
-            failed.append(check)
-    if pending or not checks:
+    pending, failed, infrastructure = check_sets(pr)
+    if (pending and not failed) or not checks:
         return {'status': 'pending'}
     if infrastructure and not failed:
         ids = sorted({run_id(check) for check in infrastructure}, key=str)
@@ -38,7 +45,8 @@ def observe(run, url, head, base, directory):
     if not failed:
         # Includes required reviews/rules and late required checks. Never use an
         # admin push to evade GitHub's merge policy.
-        return {'status': 'passed' if pr['mergeStateStatus'] == 'CLEAN' else 'policy_pending'}
+        return {'status': 'passed' if pr['mergeStateStatus'] == 'CLEAN' else 'policy_pending',
+                'checks': 'green', 'merge_state': pr['mergeStateStatus']}
     repo = re.fullmatch(r'https://github.com/([^/]+/[^/]+)/pull/\d+', url).group(1)
     candidate_evidence, baseline_evidence = [], []
     artifact_directories = []
@@ -52,7 +60,18 @@ def observe(run, url, head, base, directory):
             continue
         metadata = json.loads(run('gh', 'run', 'view', str(ident), '--repo', repo,
                                   '--json', 'workflowDatabaseId,name', timeout=30).stdout)
-        candidate_log = run('gh', 'run', 'view', str(ident), '--repo', repo, '--log-failed', timeout=60).stdout
+        try:
+            fetched = run('gh', 'run', 'view', str(ident), '--repo', repo, '--log-failed', timeout=60, check=False)
+            candidate_log = fetched.stdout if fetched.returncode == 0 else ''
+        except (OSError, subprocess.TimeoutExpired):
+            candidate_log = ''
+        if not candidate_log:
+            # A completed failed job can coexist with running sibling jobs.
+            # Logs may be unavailable until its workflow ends; that cannot
+            # turn a confirmed failure back into indefinite pending.
+            candidate_log = 'Completed failed check; logs not yet available.\n' + json.dumps([
+                {key:check.get(key) for key in ('name','conclusion','detailsUrl','targetUrl')}
+                for check in failed if run_id(check) == ident])
         (directory / f'github-run-{ident}.log').write_text(candidate_log)
         allowance = max(1024, 60000 // (2 * len(failed)))
         candidate_evidence.append(f'## Current PR head {head}: {metadata["name"]}, run {ident}\n\n{candidate_log[-allowance:]}')
