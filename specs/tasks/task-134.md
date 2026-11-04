@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "agent-gates.md §Gate Types (Extended)"
   - "agent-gates.md §AgentReview Gate"
-commits: ["ae0bffcf6ffd6bd7742cf532171c9bb12c287ea1", "7a58b2e7d746ba5e3d6f507ae6a04429166a9704", "aff2111ca1f8af66ef35c7e23249c9b0d1de5e2e", "42d79754d2d60ec536a1f7d4ff24d68af364e6e6", "22a25fab8fb3412e6d09da0a5c45d1f714c2d9d0", "e248e5f1a8fb7dce36deaf471f8acd7ae5710426", "e7172465f4a51aba2b8fc13bd672af94ac433ace", "a53b998f148b442a502d859a159908c6256b83e7", "3bf9f6fb007555d64986a22264e6a1f9de10999c", "4e44c4b532959cfe04e5e797600e14cc509e29fd", "71046576b850cfb675489c3ad36cd73f1ed64c4f", "596d2170113c32f67339f141ef3a871b40f509b8", "da4b7a36edb07bb3fdd683e7eb372c4a9b445db7", "1b40aacb758aa0fbf8aae9fec8e1f084899055c8"]
+commits: ["ae0bffcf6ffd6bd7742cf532171c9bb12c287ea1", "7a58b2e7d746ba5e3d6f507ae6a04429166a9704", "aff2111ca1f8af66ef35c7e23249c9b0d1de5e2e", "42d79754d2d60ec536a1f7d4ff24d68af364e6e6", "22a25fab8fb3412e6d09da0a5c45d1f714c2d9d0", "e248e5f1a8fb7dce36deaf471f8acd7ae5710426", "e7172465f4a51aba2b8fc13bd672af94ac433ace", "a53b998f148b442a502d859a159908c6256b83e7", "3bf9f6fb007555d64986a22264e6a1f9de10999c", "4e44c4b532959cfe04e5e797600e14cc509e29fd", "71046576b850cfb675489c3ad36cd73f1ed64c4f", "596d2170113c32f67339f141ef3a871b40f509b8", "da4b7a36edb07bb3fdd683e7eb372c4a9b445db7", "1b40aacb758aa0fbf8aae9fec8e1f084899055c8", "72c5bb03916852ff7f070c32cf65498e49f46ee7"]
 ---
 
 ## Spec Excerpt
@@ -88,7 +88,8 @@ Read `specs/system/agent-gates.md` Part 1 §Gate Types through §AgentReview Gat
 
 Both `agent-gates.md` coverage sections are implemented with real, production
 behavior (product commits `42d79754`…`1b40aacb`, recovered across interrupted
-runs and completed in this assignment, including the review-F1/F2/F3 repairs).
+runs and completed across assignments, including the review-F1/F2/F3 repairs
+and the review-round TTL repair `72c5bb03`).
 
 - **Gate types**: `AgentReview` and `AgentValidation` variants in
   `gyre-common`'s `GateType`; `QualityGate` carries `persona` (existing) and
@@ -113,6 +114,18 @@ runs and completed in this assignment, including the review-F1/F2/F3 repairs).
   reviewer identity to the token subject (forged `reviewer_agent_id` in the
   body is ignored). Covered by `tests/task134_review_probe.rs` (7 passed) —
   oneshot router calls, no listener required.
+- **Token TTL tracks the configured gate window** (review repair `72c5bb03`):
+  both mint sites derive the JWT TTL from
+  `gate.timeout_secs.unwrap_or(AGENT_GATE_TIMEOUT_SECS) + 60` via the shared
+  `gate_token_ttl_secs` helper. Previously the TTL was fixed at 360s while
+  the process timeout honored per-gate `timeout_secs`, so a verdict
+  submitted after t=360s in a `timeout_secs > 360` gate hit a 401 (expired
+  JWT) and the gate falsely failed with "exited without submitting a
+  review". Regression tests on both mint paths
+  (`review_token_ttl_covers_configured_gate_timeout`,
+  `validation_token_ttl_covers_configured_gate_timeout`) assert the minted
+  token's `exp − iat` covers a configured `timeout_secs=700` window; both
+  fail against the previous fixed-TTL code (verified by mutation).
 - **Verdict mapping**: Approved → Passed, ChangesRequested → Failed with the
   agent's feedback surfaced in gate output; only the gate's own agent's
   verdict counts; exit-0-without-review fails ("cannot determine state" is
@@ -129,20 +142,14 @@ runs and completed in this assignment, including the review-F1/F2/F3 repairs).
   `GYRE_VALIDATION_TYPE` delivered and attributed in output; pass/fail from
   the exit code; no-command fails closed.
 
-Test evidence (this sandbox, branch `pipeline/task-134/8f3dfc3c…-1`, in
-`/tmp/stage/review-evidence/task-134-verification.md`): gate_executor 35/35,
-task134_review_probe 7/7, abac_middleware 9/9, git_http 36/37 — the single
-failure is `git_clone_empty_repo_via_smart_http`, pre-existing on base and
-unmodified by this branch, whose clone client fails with `getpeername()
-errno 95` — the documented sandbox transport restriction (capabilities.json
-records loopback `accept()` errno 95), not a code defect; it must pass on
-host/GitHub CI. All 18 frozen-baseline mechanical checks pass, plus migration
-versions/portability and commit attribution. The two
-`agent_review_end_to_end` tests SKIP here for the same errno-95 reason; they
-must run on host/GitHub CI, which is mandatory for exact-head verification
-anyway. `cargo test --all` is owned by verification and publication; focused
-suites above cover every touched module. This round also repaired a
-verification finding outside task-134's surface: base commit `27bd585c`
-(task-155) was missing from `specs/tasks/task-155.md`'s `commits:` list,
-failing `check-task-commit-attribution.sh` at this head — appended, gate
-green.
+### Test evidence
+
+This sandbox, branch `pipeline/task-134/4bf5857a…-1` (this round's head
+`72c5bb03`, evidence in `/tmp/stage/review-evidence/task-134-verification.md`):
+gate_executor 37/37 (including both new TTL regression tests and both e2e
+review tests, which run here — this sandbox permits loopback HTTP),
+task134_review_probe 7/7. Both TTL regression tests were verified to FAIL
+against the pre-fix fixed-TTL code (mutation check, output captured in the
+evidence file). `cargo test --all` and the full mechanical-check suite are
+owned by verification and publication; the focused suites above cover the
+only module touched this round (`gate_executor.rs`).
