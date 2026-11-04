@@ -129,7 +129,7 @@ def main():
         # Python parent whose orphan keeps its stdout pipe open forever.
         store.close()
         os.execvpe(config['real_openshell'],
-                   [config['real_openshell'], '-g', config['gateway'], *args], env)
+                   [config['real_openshell'], '-g', bound_gateway, *args], env)
     if provider_create and owned_provider and result.returncode == 0:
         store.resource_state(provider_name, 'present')
     if provider_delete and owned_provider and result.returncode == 0:
