@@ -14,6 +14,7 @@ import time
 import threading
 
 from .execution import ROOT, Retry, Wait
+from .diagnostics import DEFAULT_MODEL_TIMEOUT, diagnose
 
 
 def binary(store):
@@ -115,6 +116,9 @@ def prepare(execution, task, prompt):
     if claim['stage'] in ('review', 'triage'):
         execution.command(sys.executable, str(bundle / 'dev-review-guard.py'), 'snapshot',
                           str(bundle / 'review-before.json'), '--task', task['name'], cwd=repo)
+    if claim['stage'] == 'review':
+        from .review_resume import restore
+        restore(execution, repo, bundle)
     repair = task['data'].get('repair') or task['data'].get('review_context') or {}
     evidence = repair.get('baseline_log') if repair.get('category') == 'baseline' else repair.get('candidate_log')
     if not evidence and repair.get('category') == 'verification':
@@ -161,12 +165,13 @@ def prepare(execution, task, prompt):
                'role': {'implement': 'coder', 'review': 'review', 'triage': 'triage'}[stage],
                'image': execution.store.setting('fullsend_image', json.loads((ROOT / '.fullsend/toolchain.json').read_text())['worker_image']),
                'sandbox_timeout_seconds': 600,
-               'timeout_minutes': max(1, (execution.store.setting('model_timeout', 3600) + 59) // 60),
+               'timeout_minutes': max(1, (execution.store.setting('model_timeout', DEFAULT_MODEL_TIMEOUT) + 59) // 60),
                'host_files': [{'src': str(p), 'dest': '/tmp/stage/' + str(p.relative_to(bundle))}
                               for p in sorted(bundle.rglob('*')) if p.is_file()],
                'env': {'runner': {'GYRE_FULLSEND_CONTEXT': str(execution.directory / 'fullsend-context.json'),
                                   'GYRE_PIPELINE_ROOT': str(ROOT)},
-                       'sandbox': {'CARGO_BUILD_JOBS': '2', 'CARGO_TARGET_DIR': '/tmp/gyre-target',
+                       'sandbox': {'GYRE_PIPELINE_STAGE': stage,
+                                   'CARGO_BUILD_JOBS': '2', 'CARGO_TARGET_DIR': '/tmp/gyre-target',
                                    'CARGO_HOME': '/tmp/cargo', 'RUSTUP_HOME': '/usr/local/rustup',
                                    'PLAYWRIGHT_BROWSERS_PATH': '/usr/local/share/gyre-playwright',
                                    'GYRE_DEV_REAL_CARGO': '/usr/local/cargo/bin/cargo',
@@ -328,20 +333,24 @@ def execute(execution, cfg, repo, shim, env, runtime='pi'):
                                     {'identity': str(execution.directory / 'fullsend-process.json')})
             stream = threading.Thread(target=stream_events, args=(execution, finished), daemon=True)
             stream.start()
-            deadline = time.monotonic() + execution.store.setting('model_timeout', 3600) + 1800
+            deadline = time.monotonic() + execution.store.setting('model_timeout', DEFAULT_MODEL_TIMEOUT) + 1800
             while process.poll() is None:
                 execution.current()
                 if time.monotonic() >= deadline:
                     raise Retry('fullsend execution exceeded assignment deadline')
                 execution.cancelled.wait(1)
         result = execution.directory / 'outcome.json'
+        diagnostic = diagnose(execution.directory, process.returncode) if process.returncode or not result.exists() else None
         if result.exists():
             value = json.loads(result.read_text())
             if process.returncode:
                 value.update(valid=False, agent_exit=process.returncode, stream_exit=process.returncode)
+                value['diagnostic'] = diagnostic
                 result.write_text(json.dumps(value))
             return value
-        raise Retry('fullsend ended without a published source receipt; inspect attempt log')
+        error = Retry(diagnostic['message'] + '; no published source receipt')
+        error.category, error.diagnostic = diagnostic['category'], diagnostic
+        raise error
     finally:
         if process and process.poll() is None:
             os.killpg(process.pid, signal.SIGTERM)
