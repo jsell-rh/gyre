@@ -111,7 +111,7 @@ def main():
             previous = os.environ.get('OPENSHELL')
             os.environ['OPENSHELL'] = config['real_openshell']
             try:
-                gateway.login(store.directory)
+                gateway.login(store.directory,force=True)
             finally:
                 if previous is None: os.environ.pop('OPENSHELL', None)
                 else: os.environ['OPENSHELL'] = previous
