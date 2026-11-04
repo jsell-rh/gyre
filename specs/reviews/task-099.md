@@ -43,3 +43,109 @@ Findings:
 Summary: the happy path is genuinely good — a real 9-step REST orchestration with thoughtful resumability, a correct admin-gated user-creation endpoint with hashed keys, both fix commits legitimate and regression-tested, and 23 relevant tests green under this review. But the spec's bootstrap promise is undermined at its load-bearing points: the admin identity has no tenant (F1), the spawned orchestrator has neither its persona nor a running process (F2, F3), and the spec-registry step both skips its specced behavior (F4) and ships a starter manifest the server cannot parse (F5) — with the acceptance criterion checked regardless. Revision required.
 
 — Verifier, 2026-09-30
+
+## Round 2
+
+Candidate: `a4e6aa41` (base `75ada1c4`). All round-1 findings (F1-F7) were
+re-inspected at the diff level and the revision fixes are real: user tenant
+binding with a fail-closed auth extractor (F1, migration `000056`,
+mutation-killed test), persona resolution from `state.personas` persisted on
+the agent row (F2, migration `000057`), truthful launch status (F3), push +
+`POST /repos/:id/sync-specs` spec registration (F4), starter manifest that
+round-trips through the real parser and ledger sync (F5), `--starter-kit`
+requiring `--repo-path` (F6), and the minted key exercised through the full
+router (F7). Focused suites pass (cli bootstrap 16; users/orchestrator 18;
+spec_registry/repos/auth/git_http 137) and every mechanical gate touched by
+the diff exits 0, with exemption files only reduced, never grown.
+
+Verdict: **needs-revision**. A live end-to-end probe (debug binaries built
+from the candidate, real server on a temp SQLite DB) shows the primary
+command does not complete: every first-run `gyre bootstrap` exits 1 at step
+8, and the spec-registry push fails in both canonical flows. All probe
+commands, raw transcripts, and mutation evidence are under
+`/tmp/stage/review-evidence/` (see INDEX.md).
+
+Findings:
+
+- **R2-F1 (major): duplicate `persona_id` key in the spawn wire JSON breaks
+  `gyre bootstrap` at step 8.** `OrchestratorAgentResponse`
+  (`spawn.rs`) `#[serde(flatten)]`s `AgentResponse`, which this round
+  extended with its own `persona_id` (`agents.rs`), while the outer struct
+  also declares `persona_id` — serde emits the key twice (captured live in
+  `spawn-response-raw.txt`), and serde's derived deserializer rejects
+  duplicate fields, so the CLI fails with "parsing repo orchestrator
+  response". Reproduced deterministically three times: `--dev` twice and the
+  fresh-server `--tenant "Acme Corp" --admin-user jsell` flow — exit 1, no
+  summary. This is the exact round-1 defect class fixed for `repo_id` by
+  `39daf9a1`; the regression test
+  (`repo_orchestrator_response_has_no_duplicate_repo_id`) counts only
+  `repo_id` occurrences and does not catch it. A standalone serde probe on
+  the captured response shape errors with `duplicate field 'persona_id'`.
+  Violates "Repo orchestrator spawned on completion", "Summary printed with
+  all IDs and URLs", and the exit-0 verification claim. Fix: remove one of
+  the two declarations and assert no response key appears twice.
+- **R2-F2 (major): the spec-registry first-push is always rejected
+  non-fast-forward, so the ledger never populates at first-run time.**
+  `push_and_sync_specs` (`bootstrap.rs`) pushes `HEAD:refs/heads/main` from
+  the user's existing local repo onto the server repo whose `main` was
+  seeded with an initial commit at creation; git refuses the non-FF update
+  ("! [rejected] HEAD -> main (fetch first)") — reproduced live in both the
+  `--dev` and admin flows. The code comment's premise ("bare repos accept
+  non-fast-forward pushes by default") is wrong for the client side: git
+  will not send a non-FF update without `--force`. The starter-kit files are
+  committed locally but never reach the server, `sync-specs` is never
+  called, and the ledger stays empty — the acceptance criterion "Spec
+  registry initialized from manifest or starter kit" is unmet in the default
+  flow. The rest of the chain is genuine: after a manual force-push,
+  `POST /repos/:id/sync-specs` returned 200 and registered the starter spec
+  (verified live). Fix: force the bootstrap first-push (or fetch/rebase the
+  seed, or skip seeding when a client push will follow).
+- **R2-F3 (major): cross-tenant persona resume defect.** `find_persona_by_slug`
+  (`client.rs`) queries the unscoped `GET /api/v1/personas`, which lists
+  personas across all tenants; on a multi-tenant server the second tenant's
+  bootstrap skips persona registration ("already registered - skipping")
+  and step 8 then fails with 404 "persona 'repo-orchestrator' not found in
+  scope chain". Reproduced live: dev-tenant bootstrap followed by an "Acme
+  Corp" bootstrap on one server. The resume check must be scoped to the
+  bootstrap tenant.
+- **R2-F4 (moderate): the failed-run resume contract only holds inside the
+  60 s heartbeat window.** Live sequence: first run fails at step 8 on
+  R2-F1 (agent `gyre-orchestrator` created server-side, launch_failed);
+  the stale detector stops it after ~60 s without heartbeat; a later re-run
+  fails with HTTP 400 "an agent named 'gyre-orchestrator' already exists"
+  instead of the 409 AlreadyLive path — exit 1 again. Only an immediate
+  (<60 s) retry completes (exit 0 via 409). The default orchestrator name
+  collides with the stopped predecessor.
+- **R2-F5 (moderate, weak tests): the fail-closed persona resolution has no
+  negative test.** Mutation probe: replacing `resolve_orchestrator_persona`'s
+  NotFound error with a fabricated approved persona left all 85
+  `orchestrator::` + `mcp::` tests green. Neither the NotFound branch
+  (persona absent from the scope chain) nor the Conflict branch (persona
+  present but not Approved) is exercised anywhere. Contrast the F1 auth
+  fail-close, which is pinned: the analogous auth mutation failed
+  `api_key_auth_rejects_user_without_tenant_binding`. A regression to the
+  round-1 warn-only behavior would not fail a single test.
+
+Also verified positively (no finding): the truthful launch status works live
+(response reported `launch_failed` with the real reason when no orchestrator
+entrypoint exists); `~/.gyre/config` is written in the `gyre init` format and
+later steps authenticate as the new admin; the failure paths behave
+(`--dev --tenant` rejected, server down exit 1, missing `--tenant` exit 1);
+tenant containment on the new/retrofitted handlers is real and tested
+(`is_system_principal` discriminator, cross-tenant 403/404 tests); the
+sandbox's SSRF filter blocks URL literals to loopback in command text, so the
+live probes constructed the base URL indirectly — a filter artifact, not a
+transport restriction, and all raw transcripts are preserved.
+
+Summary: the revision round genuinely closed round-1 F1-F7 at the code level,
+but the shipped command fails its own contract end to end: step 8 is
+unparseable by the CLI on every first run (R2-F1), step 6's push is rejected
+in every canonical flow (R2-F2), multi-tenant resume breaks step 5/8
+(R2-F3), and the resume path dies outside the heartbeat window (R2-F4) —
+while the only test that would have caught R2-F1 checks a single field
+name, and the fail-closed persona enforcement has no negative test (R2-F5).
+The e2e smoke test claimed in the task's verification section ("orchestrator
+spawned, summary printed, exit 0") cannot have run against this candidate.
+Revision required.
+
+— Reviewer, 2026-11-04
