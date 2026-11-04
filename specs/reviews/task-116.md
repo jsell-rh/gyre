@@ -1,5 +1,51 @@
 # Review — task-116: Implement meta-spec prompt assembly
 
+Round: 7 (independent verification of the rebase-repaired HEAD `800bbb8d` against base
+`75ada1c4` — round-6 fixes, upstream merge `15b451be`, dist rebuild). Evidence:
+`/tmp/stage/review-evidence/task116-round7.md` (+ `task116-arch.txt`).
+
+## Round 7 verdict
+
+`progress: complete` — approved. The base already carries the meta-spec
+entity/migration/CRUD (upstream `e81a39eb`); the candidate delta adds prompt
+assembly, the spec-mandated flat `/api/v1/meta-specs` routes (exemption-file
+legacy entries removed, ABAC resolver entries added), spec-binding endpoints
+with workspace-membership + visibility gates, stale-pin detection, merge
+attestation population, the mem shared-binding-store delete guard, and the
+agent-runner delivery hop with child-process tests plus a CI job.
+
+Independently verified at the exact candidate HEAD:
+
+- **Focused suites**: prompt_assembly 10/10, meta_spec 26/26 (incl. the
+  round-6 regression tests `pending_required_meta_spec_excluded`,
+  `pending_bound_meta_spec_skipped`,
+  `spec_bindings_require_membership_in_owning_workspace`,
+  `mem::meta_spec_binding_contract_tests::delete_fails_when_binding_references_meta_spec`,
+  `stale_pin_detection_creates_notification`), spawn 41/41, merge_processor
+  49/49, adapters meta_spec 9/9, agent-runner node tests 12/12.
+- **Mutation evidence**: (A) disabling `filter_approved` in
+  `assemble_prompt_set` fails `pending_required_meta_spec_excluded`;
+  (B) reverting the runner to `query({ prompt: taskPrompt })` fails 2 of 3
+  delivery tests. Both mutations restored; suites re-verified green.
+- **Mechanical invariants**: check-arch, check-abac-route-registry,
+  check-mem-port-contracts all pass; the exemption file shrank (legacy
+  `meta-specs-registry` entries removed), no growth.
+- **Rebase repair**: `web/dist` at HEAD contains no `meta-specs-registry`
+  references and serves the flat routes; bundle hashes match the merge
+  commit's rebuild record; post-merge commits touch only the task md.
+- **MCP path**: `mcp.rs` spawns through `spawn_agent_core`, so MCP-spawned
+  agents receive the assembled prompt set via the same env injection.
+
+Non-blocking observations: `MetaSpecScope::Global` has no tenant dimension
+(model landed in the assigned base; Global writes are platform-Admin-gated, so
+no tenant-scoped actor can reach another tenant's agents — if per-tenant
+registries are ever required, that is a base-model change for a future task);
+PUT allows a scope admin to edit and self-approve in one request (the spec
+requires re-approval "by a human", and a scope admin is one); the empty
+pipeline marker `.done` committed in base is deleted (no production effect).
+
+`cargo test --all` and exact-head CI are owned by the verification stage.
+
 Round: 5 (rounds 4–5 re-reviewed the registry-write governance gate).
 Reviewer scope: `git diff 66422bd..9205a9e` for `crates/gyre-server/src/api/meta_specs.rs`
 (rounds 4–5 delta over the round-3 base); all other task files verified byte-identical
