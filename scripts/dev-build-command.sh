@@ -6,6 +6,14 @@ case "$command_name" in cargo|npm|npx) ;; *) exit 2;; esac
 key="GYRE_DEV_REAL_${command_name^^}"
 real=${!key:?missing original build command}
 case "${1:-}" in --version|-V|--help|-h|help|metadata|locate-project) exec "$real" "$@";; esac
+if [ "${GYRE_PIPELINE_STAGE:-}" = review ] && [ "$command_name" = cargo ]; then
+  for option in "$@"; do
+    case "$option" in --all|--workspace|--all-targets)
+      echo 'Gyre: workspace-wide builds and suites belong to deterministic verification. Run a focused package/test probe and record deferred checks in review-evidence.' >&2
+      exit 64
+    ;; esac
+  done
+fi
 if [ "${GYRE_DEV_BUILD_LOCK_HELD:-0}" != 1 ]; then
   # Inherit the lock into compiler children so an orphaned compiler still
   # occupies the lane. Build scripts can invoke npm/cargo recursively without
