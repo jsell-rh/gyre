@@ -1,7 +1,7 @@
 ---
 title: "Specs and Inbox view layouts — spec list, inbox cards, briefing narrative"
 spec_ref: "ui-layout.md §6-§8"
-depends_on: []
+depends_on: [task-214]
 progress: ready-for-review
 coverage_sections:
   - "ui-layout.md §6. Specs View Layout"
@@ -61,9 +61,9 @@ Read `ui-layout.md` §6-§8 for the exact layout specifications. Also reference 
 
 ## Shipped
 
-Recovered from an interrupted assignment (checkpoint 30f286baf33140dd94b1091c72dd0f6e): the prior
-rounds had built the full §6-§8 surface; this round audited every acceptance criterion against the
-spec, fixed one real defect, and closed the missing test coverage for the server-side change.
+The full §6-§8 surface was built across earlier rounds; this round repaired the verification
+findings (rustfmt + clippy in `specs_assist.rs`) and resolved the merge onto base 59ff5d01
+(task-172 Editor Split / AccordionItem refactor).
 
 **§6 Specs View** (`SpecDashboard.svelte` + `DetailPanel.svelte`): workspace/tenant scope renders
 the sortable table (Path, Status, Kind, Owner, Last Updated) with status/kind filter pills and the
@@ -101,28 +101,47 @@ selector (last visit/24h/7d/30d/custom with since epoch passed to `GET
 /workspaces/:id/briefing`), and the "Ask about this briefing" InlineChat at the bottom. Tenant
 scope aggregates all workspaces with per-item workspace badges.
 
-**Defect fixed this round**: `web/src/locales/en.json` was missing 6 `decisions.*` keys referenced
-by Inbox.svelte (view_mr, view_agent, resume_queue, resuming_queue, queue_resumed,
-resume_failed) — those buttons rendered raw key text. Key-extraction audit now reports zero
-missing keys for Inbox/Briefing/SpecDashboard.
+**i18n defect fixed in an earlier round**: `web/src/locales/en.json` was missing 6 `decisions.*`
+keys referenced by Inbox.svelte (view_mr, view_agent, resume_queue, resuming_queue,
+queue_resumed, resume_failed) - those buttons rendered raw key text. Key-extraction audit
+reports zero missing keys for Inbox/Briefing/SpecDashboard.
+
+**Repairs this round (verification finding 1462f7a9)**:
+- rustfmt: `crates/gyre-server/src/api/specs_assist.rs` reformatted where the fan-out round
+  left lines unformatted (the `get_blob_sha` call chain in `save_spec` and the
+  `list_for_user` call in the fan-out test).
+- clippy `needless_borrows_for_generic_args`: `Id::new(&format!("membership-{uid}"))` changed
+  to `Id::new(format!("membership-{uid}"))` in the fan-out test.
+- Merge onto base 59ff5d01: the `Inbox.test.js` conflict was resolved keeping BOTH suites -
+  this branch's P5 conflict-action, PascalCase wire-format, and spec_approval inline-diff
+  tests, plus the base's entity-ref detail-panel and accordion-header-structure tests. Both
+  suites pass against the merged `Inbox.svelte`/`AccordionItem.svelte`.
 
 **Test evidence** (focused probes; full gates owned by verification):
-- `cd web && npx vitest run src/__tests__/Inbox.test.js src/__tests__/Briefing.test.js
-  src/__tests__/SpecDashboard.test.js src/__tests__/DetailPanel.test.js` — 141 passed, 0 failed.
-  Covers: accordion behavior, all 10 priority types' action buttons incl. the PascalCase
-  wire-format matrix, tenant-scope workspace badges, P2 inline diff before approve, P3
-  override/close-MR API calls, P5 revert arbitration, P7 pause paths, briefing sections,
-  entity-ref detail-panel navigation, time-range selector, spec table columns/sorting/filters,
-  repo-scope progressbar aria attributes, spec detail-panel tab set.
-- `cargo test -p gyre-server --offline --lib api::specs_assist::tests::save_spec` — 8 passed,
-  0 failed, including the new `save_spec_fans_out_approval_notification_to_eligible_members`
-  (Admin+Developer get exactly one notification with the structured body, Viewer gets none,
-  system fallback unused when members exist) and the strengthened
-  `save_spec_creates_mr_for_existing_repo` (body fields + fallback recipient).
-- `cargo check -p gyre-server --offline` — clean. `cd web && npx vite build` — clean (dist
-  rebuild not committed, per task-210 convention 08361ee0).
+- `cd web && npx vitest run src/__tests__/Inbox.test.js src/__tests__/AccordionItem.test.js
+  src/__tests__/AccordionScoping.test.js` - 78 passed, 0 failed.
+- `cd web && npx vitest run src/__tests__/Briefing.test.js src/__tests__/SpecDashboard.test.js
+  src/__tests__/DetailPanel.test.js src/__tests__/EditorSplit.test.js` - 127 passed, 0 failed.
+  Together the probes cover: accordion behavior, all 10 priority types' action buttons incl.
+  the PascalCase wire-format matrix, tenant-scope workspace badges, P2 inline diff before
+  approve, P3 override/close-MR API calls, P5 revert arbitration, P7 pause paths, briefing
+  sections, entity-ref detail-panel navigation, time-range selector, spec table
+  columns/sorting/filters, repo-scope progressbar aria attributes, spec detail-panel tab set,
+  and the merged AccordionItem header/quick-link structure.
+- `cargo test -p gyre-server --lib api::specs_assist::tests::save_spec` - 8 passed, 0 failed,
+  including `save_spec_fans_out_approval_notification_to_eligible_members` (Admin+Developer
+  get exactly one notification with the structured body, Viewer gets none, system fallback
+  unused when members exist).
+- `rustfmt --edition 2021 --check crates/gyre-server/src/api/specs_assist.rs` - clean; the
+  clippy finding is fixed (no specs_assist diagnostics from a local `cargo clippy -p
+  gyre-server --lib` pass).
+- `cd web && npx vite build` - clean (dist rebuild not committed, per task-210 convention
+  08361ee0).
 
-Sandbox restriction: TCP listener probe unsupported (errno 95), so no local server/browser
-end-to-end run in this sandbox; component tests + production build stand in. Probe commands,
-exit codes, and the pre-existing task-210 attribution failure on origin/main are recorded in
+Sandbox notes: this sandbox's cargo registry cache is cold, so crates were fetched online
+instead of `--offline`. The sandbox clippy (1.99) additionally fires `never_loop` on
+pre-existing `gyre-domain/src/rust_extractor.rs` code that is identical on base 59ff5d01 -
+not a task finding, left to verification's pinned toolchain. TCP listener probe unsupported,
+so no local server/browser end-to-end run; component tests + production build stand in.
+Probe commands, exit codes, and outputs are recorded in
 `/tmp/stage/review-evidence/task-175-probes.md`.

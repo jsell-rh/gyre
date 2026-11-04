@@ -692,14 +692,9 @@ pub async fn save_spec(
     //   mr_id / branch / repo_id — for the MR quick links
     let blob_sha = {
         let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
-        crate::spec_registry::get_blob_sha(
-            &git_bin,
-            &repo.path,
-            &branch_name,
-            &req.spec_path,
-        )
-        .await
-        .unwrap_or_default()
+        crate::spec_registry::get_blob_sha(&git_bin, &repo.path, &branch_name, &req.spec_path)
+            .await
+            .unwrap_or_default()
     };
     let notif_body = serde_json::json!({
         "spec_path": req.spec_path,
@@ -1046,7 +1041,7 @@ mod tests {
             state
                 .workspace_memberships
                 .create(&WorkspaceMembership::new(
-                    Id::new(&format!("membership-{uid}")),
+                    Id::new(format!("membership-{uid}")),
                     Id::new(uid),
                     ws_id.clone(),
                     role,
@@ -1106,7 +1101,15 @@ mod tests {
         }
         let viewer_notifs = state
             .notifications
-            .list_for_user(&Id::new("user-viewer"), Some(&ws_id), None, None, None, 100, 0)
+            .list_for_user(
+                &Id::new("user-viewer"),
+                Some(&ws_id),
+                None,
+                None,
+                None,
+                100,
+                0,
+            )
             .await
             .unwrap();
         assert!(
