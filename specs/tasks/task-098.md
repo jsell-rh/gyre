@@ -7,7 +7,7 @@ progress: not-started
 coverage_sections:
   - "platform-model.md §7 MCP Integration"
   - "platform-model.md §7 Admin API"
-commits: []
+commits: ["b569f9886cfaf216d04a0ae3ad8dc4149693f6fb"]
 ---
 
 ## Spec Excerpt
