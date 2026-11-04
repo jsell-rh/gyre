@@ -81,7 +81,8 @@ def failure(execution, task, receipt, observation):
     if status == 'baseline_failed':
         from .stages import baseline_repair
         prerequisite = baseline_repair(execution,observation)
-        finding.update(category='baseline',prerequisite=prerequisite)
+        finding.update(category='baseline',prerequisite=prerequisite,
+                       source=task['data']['candidate'],published_head=receipt['head'])
         return observation, {'repair':finding,
                 'dependencies':sorted(set(task['data'].get('dependencies') or []) | {prerequisite})}, [finding]
     return observation, {'repair':finding,'candidate':receipt['head'],'candidate_base':receipt['base'],

@@ -83,6 +83,19 @@ class CIReconciliationTests(unittest.TestCase):
         self.assertEqual(data['ci']['status'],'pending')
         self.assertEqual(discover(self.store,'verify','new-main'),[])
 
+    def test_upstream_failure_keeps_original_reviewed_source_for_reverification(self):
+        from pipeline.ci import failure
+        observer=self.observer()
+        log=observer.directory/'baseline.log';log.write_text('upstream defect')
+        observed={'status':'baseline_failed','base':self.base,'environment':'github-fixture',
+                  'baseline_log':str(log),'log':str(log)}
+        with patch('pipeline.stages.baseline_repair',return_value='task-999'):
+            _,updates,_=failure(observer,self.store.task('task-001'),self.receipt,observed)
+        self.assertEqual(updates['repair']['source'],self.candidate)
+        self.assertEqual(updates['repair']['published_head'],self.head)
+        self.assertNotIn('candidate',updates)
+        self.assertNotIn('review',updates)
+
     def test_observation_is_discarded_if_ci_recovers_or_head_changes_while_logs_download(self):
         for changed in ({'headRefOid':'f'*40},{'statusCheckRollup':[dict(self.checks[0],conclusion='SUCCESS')]}):
             with self.subTest(change=changed):
