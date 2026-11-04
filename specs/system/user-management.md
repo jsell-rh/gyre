@@ -415,10 +415,24 @@ pub enum DigestFrequency { Immediate, Hourly, Daily, Off }
 | MR merged | MR author (if human) |
 | MR reverted | MR author + workspace Admin |
 | Merge queue paused | All workspace Admins/Owners |
-| Breaking change detected | Dependent repo team leads |
+| Breaking change detected | Dependent repo team leads (see note below) |
 | Spec drift detected | Spec owner |
 | Security finding (Critical/High) | Workspace Owner + tenant Admin |
 | Invitation | Invited user |
+
+> **Team-lead routing note (amended 2026-11, task-112 review):** The
+> `team lead` recipient in the "Agent escalation to Overseer" and
+> "Breaking change detected" rows requires a lead role on `Team`
+> (platform-model.md §Teams), which the domain model does not yet have —
+> Teams currently carry only `member_ids` with no lead field and no
+> repo→team mapping. Until Teams gain a lead concept (task-122/task-125
+> territory), the interim production routing is the closest available
+> concept, a superset: agent escalations follow the
+> §Notification Routing for Agent Escalations chain (spawning user →
+> workspace Admins if offline → workspace Owners if Urgent), and breaking
+> changes notify all members of the dependent repo's workspace
+> (`process_breaking_changes` in `git_http.rs`). When a lead role lands,
+> narrow both rows to the specced recipients.
 
 ### Notification Routing for Agent Escalations
 
