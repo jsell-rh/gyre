@@ -1,11 +1,63 @@
 # Review — task-116: Implement meta-spec prompt assembly
 
+Round: 7 (re-review of the round-6 repairs at candidate `9743aa07`).
+Reviewer scope: full `git diff 05709c24..9743aa07` — re-verification of all three
+round-6 findings plus whole-diff inspection. Evidence:
+`/tmp/stage/review-evidence/task116-round7-review.md` (focused suites, mutation
+probes, mechanical checks).
+
 Round: 5 (rounds 4–5 re-reviewed the registry-write governance gate).
 Reviewer scope: `git diff 66422bd..9205a9e` for `crates/gyre-server/src/api/meta_specs.rs`
 (rounds 4–5 delta over the round-3 base); all other task files verified byte-identical
 between the round-3-tested HEAD (`2cbca13`) and current HEAD (`9205a9e`), so round-3
 evidence carries over. Mutation evidence persisted at
 `/tmp/stage/review-evidence/task116-round5-mutation-evidence.md`.
+
+## Round 7 verdict
+
+**Approved.** All three round-6 code findings are closed by real, load-bearing
+production code, and the rest of the diff re-checked clean against
+`agent-runtime.md` §2.
+
+- **Fix 1 (approval gating):** `assemble_prompt_set` runs both required bands
+  through `filter_approved` (approval_status == Approved, skip-with-warn) and
+  band 3 fail-closes on the entity's CURRENT approval status, so an
+  edited-to-Pending meta-spec injects none of its pinned versions until a
+  human re-approves. Mutation-verified: disabling the gate fails both
+  `pending_required_meta_spec_excluded` and `pending_bound_meta_spec_skipped`.
+- **Fix 2 (binding membership):** `put_spec_meta_spec_bindings` resolves the
+  spec's workspace from the spec ledger and requires global Admin or
+  Owner/Admin/Developer membership in that workspace (agent tokens 403,
+  unscoped specs admin-only), and validates each bound meta-spec is visible
+  from that workspace (Global anywhere, Workspace only its own).
+  Mutation-verified: removing the gate reproduces the hole (non-member
+  Developer gets 200 where 403 is required) and fails
+  `spec_bindings_require_membership_in_owning_workspace`.
+- **Fix 3 (mem port contract):** `MemMetaSpecRepository::delete` enforces the
+  port-documented binding-reference error against the binding store shared
+  with `MemMetaSpecBindingRepository` (wired in both `test_state` and
+  production `lib.rs`). Mutation-verified: disabling the guard fails
+  `mem::meta_spec_binding_contract_tests::delete_fails_when_binding_references_meta_spec`.
+
+Focused suites at the exact candidate: prompt_assembly 10/10, api::meta_specs
+19/19, mem 14/14, sqlite::meta_spec 9/9, api::spawn 29/29; agent-runner
+delivery tests 3/3 (real runner child process vs stubbed SDK);
+check-arch / check-abac-route-registry / check-mem-port-contracts /
+check-migration-versions / check-dead-message-kinds / check-mcp-write-tools
+all pass. Every mutation was restored; tree identity to `9743aa07` confirmed
+afterwards (`git status` / `git diff` clean).
+
+Non-blocking observations (recorded in the evidence file, no action required
+for this task):
+
+- SSH compute targets with `container_mode: true` spawn `docker run` with an
+  empty env map — no env vars (GYRE_META_SPEC_PROMPT included) reach that
+  path. Pre-existing at base, affects all env vars equally; container, local,
+  and plain-SSH backends all deliver the meta-spec prompt.
+- Registry read endpoints authorize via middleware ABAC role policy only
+  (list-across-workspaces is possible for any read-capable role). This
+  matches the base behavior (previously middleware-exempt) and the §2 API
+  text imposes no read scoping; write paths are fully scope-admin gated.
 
 ## Round 4/5 verdict
 
