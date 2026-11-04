@@ -85,6 +85,13 @@ def discover(store, stage, base):
         data = task['data']
         if satisfied(data):
             continue
+        if stage == 'observe':
+            from .ci import publication
+            published = publication(store,task)
+            if (published and published.get('candidate') == data.get('candidate') and not data.get('repair')):
+                selected.append(store.enqueue('observe',name,task['generation'],
+                    {'candidate':data['candidate'],'url':data['pr'],'published':published},priority=30000))
+            continue
         repair = data.get('repair') or {}
         prerequisite = tasks.get(repair.get('prerequisite'))
         reviewed = data.get('review') or {}
@@ -149,7 +156,8 @@ def discover(store, stage, base):
         elif stage == 'verify' and triaged and deps_ready and candidate and not repair:
             if review.get('candidate') == candidate and review.get('approved'):
                 if verified.get('candidate') != candidate or verified.get('base') != base:
-                    if not (data.get('pr') and verified.get('candidate') == candidate):
+                    from .ci import verification_ready
+                    if verification_ready(store,task):
                         inputs = {'candidate': candidate, 'base': base}
         elif stage == 'publish' and deps_ready and candidate and not repair:
             if verified.get('candidate') == candidate and (verified.get('base') == base or data.get('pr')):
