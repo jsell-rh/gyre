@@ -102,52 +102,41 @@ Read `specs/system/user-management.md` §User Entity through §User Preferences 
 
 ## Shipped
 
-**Verification-repair round (2026-10-10, evidence under
-/tmp/stage/review-evidence/task-120-rustfmt-clippy-repair/):** repaired
-durable verification finding `09ee56647f38444fa90254ebb9cad8ba` (`checks.sh`
-exit 1 on candidate `f745dafe`) — two changed-line gate failures, both
-repaired:
+The task-120 product surface — User entity profile fields
+(username/display_name/avatar_url/timezone/locale/preferences/last_login_at/
+updated_at), `UserPreferences` with Theme/UiDensity/DiffView/FeedScope,
+per-tenant unique immutable URL-safe username derived from SSO
+`preferred_username` on first login, server-side JSON preferences via
+`GET`/`PUT /api/v1/users/me`, migration 000056 — is complete and unchanged
+this round: six product commits plus the Round-1/2 repairs, the rustfmt fix
+`7d53b6d2`, the clippy derive-scoping fix `7752dd2e`, and the 000056
+`INTEGER` to `BIGINT` fix `93913405`, as reviewed in
+`specs/reviews/task-120.md` Round 2 (PASS).
 
-- **rustfmt (`auth.rs`):** three violations on task-120 lines — the
-  `resolve_unique_username` signature (fits on one line), the
-  `while !User::validate_username(...)` condition in `suffixed_username`,
-  and a mis-indented `Request::builder()` in the tests. Fixed by applying
-  the gate's own formatter invocation (`rustfmt --edition 2021 --config
-  skip_children=true`) to the file (commit `7d53b6d2`) — behavior-neutral,
-  and the whole-file violation set was exactly those three lines before
-  the fix.
-- **clippy::redundant_field_names (`sqlite/mod.rs`):** the struct-level
-  `#[allow]`s added by checkpoint `c76b224d` on the migration-000056 test's
-  `Row`/`Defaults` row carriers never suppressed the lint —
-  `QueryableByName`'s derive (diesel_derives 2.3.7) expands to
-  `Self { field: field, … }` inside a dummy module that inherits neither
-  struct- nor field-level `#[allow]` (the same mechanism the merged
-  `sqlite/search.rs` documents and works around). Fixed by wrapping both
-  row carriers in a fn-local module carrying a module-level inner
-  `#![allow(clippy::redundant_field_names)]` (commit `7752dd2e`) — the
-  scoping `search.rs` proved effective on the same diesel version.
+**This round — rebase repair (finding `8884e159`, evidence under
+/tmp/stage/review-evidence/task-120-rebase-8884e159/):** resolved the
+staged merge of assignment base `3c39ab1f` (merge commit `ab7a779b`). The
+only conflict was the `specs/coverage/SUMMARY.md` TOTAL row: each parent's
+TOTAL was consistent with its own table but wrong for the merged table
+(main landed task-172, moving ui-layout 38 assigned/0 implemented to 37/1;
+this branch landed task-120, moving user-management 26/0 to 23/3).
+Resolved by regenerating `SUMMARY.md` with the repo's canonical generator
+`scripts/update-coverage-summary.sh` from the merged per-spec files —
+TOTAL 802/219/0/307/113/163/47%.
 
-Also resolved the staged merge of assignment base `75ada1c4` (merge commit
-`2ff4dc5b`): the only conflict, the `SUMMARY.md` TOTAL row, was resolved by
-recomputing the total from the merged table rows
-(802/219/0/308/112/163/47%; sum-of-rows and the coverage formula verified
-programmatically against the 40 per-spec rows).
+### Verification
 
-### Repair-round verification (evidence in the directory above)
-
-- `python3 scripts/check-rustfmt-diff.py 75ada1c4` → "changed lines clean
-  (11 Rust files checked)".
-- `python3 scripts/check-clippy-diff.py 75ada1c4` → "changed lines clean
-  (11 Rust files, 1119 existing warnings outside changes)" — the full
-  workspace `cargo clippy --all-targets --all-features` behind it also
-  proves both edited files compile.
-- `cargo test -p gyre-adapters --lib migration_000056` → **1 passed, 0
-  failed** — the restructured row carriers behave identically (backfill
-  expectations and column-default assertions unchanged).
-- The task-120 product surface is otherwise unchanged this round. The full
-  implementation (six product commits, Round-1 F1/F2/F3 repairs, Round-2
-  bookkeeping repair, and the 000056 `INTEGER`→`BIGINT` fix `93913405`)
-  remains as reviewed in `specs/reviews/task-120.md` Round 2 (PASS).
+- All 40 merged per-spec rows match their coverage files (programmatic
+  status-count comparison); the recomputed TOTAL equals both the row sums
+  and the generator's own formula (276/583 to 47%).
+- Generator idempotency: re-running `update-coverage-summary.sh` on
+  `ab7a779b` produces a zero diff.
+- Merge integrity: `git diff 3c39ab1f ab7a779b` over all merge-staged
+  paths is empty except SUMMARY.md's 3 expected lines; no `crates/` files
+  were touched, so the task-120 product surface is bit-identical to the
+  reviewed `4bd6c4c1`.
+- `bash scripts/check-task-commit-attribution.sh` returns OK (merge
+  commits are out of its scope by design).
 
 Transport note (recorded per assignment): this sandbox's listener probe
 (`accept`) is not supported (errno 95, `capabilities.json`) — server-boot
