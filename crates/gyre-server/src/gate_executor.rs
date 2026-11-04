@@ -15,6 +15,17 @@ use crate::AppState;
 /// Default timeout for agent-based gates (5 minutes).
 const AGENT_GATE_TIMEOUT_SECS: u64 = 300;
 
+/// TTL for a gate agent's scoped JWT. The token must outlive the agent
+/// process's whole run window — the agent submits its verdict at the END of
+/// the window, and the auth extractor rejects expired JWTs, so a token
+/// shorter than the configured `gate.timeout_secs` would discard a verdict
+/// submitted within the allowed window and falsely fail the gate. The +60s
+/// grace keeps the token valid for the submission round-trip after a
+/// last-moment verdict.
+fn gate_token_ttl_secs(gate: &gyre_domain::QualityGate) -> u64 {
+    gate.timeout_secs.unwrap_or(AGENT_GATE_TIMEOUT_SECS) + 60
+}
+
 /// Maximum output length to include in gate attestation hash.
 const GATE_ATTESTATION_OUTPUT_LIMIT: usize = 4096;
 
@@ -574,7 +585,7 @@ async fn build_review_agent_context(
             gate.id.as_str(),
             "forge",
             &state.base_url,
-            AGENT_GATE_TIMEOUT_SECS + 60,
+            gate_token_ttl_secs(gate),
             crate::auth::REVIEW_SUBMIT_SCOPE,
         )
         .map_err(|e| format!("failed to mint scoped review token: {e}"))?;
@@ -849,7 +860,7 @@ async fn run_validation_agent_process(
         gate.id.as_str(),
         "forge",
         &state.base_url,
-        AGENT_GATE_TIMEOUT_SECS + 60,
+        gate_token_ttl_secs(gate),
         crate::auth::VALIDATION_REPORT_SCOPE,
     ) {
         Ok(token) => token,
@@ -2069,6 +2080,72 @@ mod tests {
         assert!(
             gate_tokens.is_empty(),
             "gate tokens should be revoked: {gate_tokens:?}"
+        );
+    }
+
+    /// Review-token TTL must cover the gate's CONFIGURED timeout, not the
+    /// default: a review agent that submits its verdict late in a
+    /// `timeout_secs > 360` window authenticates with an expired JWT
+    /// otherwise (auth rejects it with 401) and the gate falsely fails
+    /// with "exited without submitting a review". Regression test for the
+    /// fixed-TTL bug: asserts the minted token's lifetime is at least the
+    /// configured window + the 60s submission grace.
+    #[tokio::test]
+    async fn review_token_ttl_covers_configured_gate_timeout() {
+        let state = test_state();
+        let (mr_id, _repo_id) = seed_mr_with_repo_and_persona(&state, "slow-reviewer").await;
+        let mut gate = make_gate(GateType::AgentReview, None);
+        gate.persona = Some("personas/slow-reviewer.md".to_string());
+        gate.timeout_secs = Some(700); // > the old fixed 360s token TTL
+
+        let ctx = build_review_agent_context(&state, &gate, &mr_id, gate.persona.as_deref().unwrap())
+            .await
+            .expect("review context must build");
+
+        let claims = state
+            .agent_signing_key
+            .validate(&ctx.token, &state.base_url)
+            .expect("minted review JWT must validate");
+        let ttl = claims.exp - claims.iat;
+        assert!(
+            ttl >= 700 + 60,
+            "review token TTL {ttl}s must cover configured timeout_secs=700 + 60s grace; \
+             a shorter token discards a verdict submitted within the window"
+        );
+    }
+
+    /// Same regression on the validation mint site: the validator's scoped
+    /// token must live at least as long as the configured gate window.
+    /// Mirrors `agent_validation_token_carries_validation_scope_not_review`:
+    /// the gate runs a real `printenv GYRE_VALIDATION_TOKEN` process so the
+    /// minted token is captured from the production spawn path.
+    #[tokio::test]
+    async fn validation_token_ttl_covers_configured_gate_timeout() {
+        let state = test_state();
+        let mut gate = make_gate(
+            GateType::AgentValidation,
+            Some("printenv GYRE_VALIDATION_TOKEN".to_string()),
+        );
+        gate.timeout_secs = Some(700); // > the old fixed 360s token TTL
+        let mr_id = make_mr_id();
+
+        let (status, output) = run_agent_validation_gate(&state, &gate, &mr_id).await;
+
+        assert_eq!(status, GateStatus::Passed, "output: {output}");
+        let token = output
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("ey"))
+            .map(|rest| format!("ey{rest}"))
+            .unwrap_or_else(|| panic!("no JWT in gate output: {output}"));
+        let claims = state
+            .agent_signing_key
+            .validate(&token, &state.base_url)
+            .expect("gate-agent JWT must validate against the server signing key");
+        let ttl = claims.exp - claims.iat;
+        assert!(
+            ttl >= 700 + 60,
+            "validation token TTL {ttl}s must cover configured timeout_secs=700 + 60s grace; \
+             a shorter token expires mid-window"
         );
     }
 
