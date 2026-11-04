@@ -204,3 +204,18 @@ and clippy-diff run cold on the merged crates — see probe logs). The four
 task-owned crates files, scripts, and specs are untouched by the repair;
 probe evidence under /tmp/stage/review-evidence (ws-findings.txt,
 gate-*.log, verification-repair-fd65ff50.md).
+
+### Review repair (attempt 1f0972bd, review finding)
+
+The round-4 review flagged an off-by-one in the fabricated-scope-defaults
+gate's frozen baseline: the F3 drain-down removed two exemption entries
+(spawn.rs:643 + constraint_check.rs:1357 sibling) but lowered
+FROZEN_EXEMPTION_COUNT only 7 to 6, leaving 5 entries against a count of 6.
+Since the gate fails only when entries > count, one future exemption re-add
+(6 <= 6) passed silently, where base was tight at 7/7 so ANY growth failed.
+Repair commit `f8899964` sets FROZEN_EXEMPTION_COUNT=5 and corrects the
+exemptions-file header comment to 5 entries, restoring the any-growth-fails
+freeze. Verified on this tree: clean run exits 0 (5 entries / count 5), and
+appending one entry to a working copy now fails with exit 1 (probe logs
+fabricated-scope-clean.log, fabricated-scope-tight-demo.log under
+/tmp/stage/review-evidence). No product code changed.
