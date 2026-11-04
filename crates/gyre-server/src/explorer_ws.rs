@@ -101,46 +101,52 @@ struct SessionSlot {
     shutdown: Arc<tokio::sync::Notify>,
 }
 
-/// Per-server explorer session registry, keyed by (tenant_id, agent_id).
-/// Uses std::sync::Mutex for Drop compatibility (Drop cannot be async).
-/// Each user has a Vec of active SessionSlots, ordered oldest-first.
+/// Registry of live explorer WebSocket sessions, keyed by user
+/// (`tenant_id:agent_id`).
 ///
-/// Owned by `AppState`, NOT a process global: the per-user concurrent
-/// session limit is a property of a server instance, not of the OS process.
-/// Multiple `AppState` instances in one process (integration tests,
-/// embedding) must not evict each other's sessions - only sessions routed
-/// through the same instance compete for the same cap. This state is
-/// ephemeral by nature (WebSocket connections cannot outlive their server
-/// instance), so it is intentionally not port-backed.
-pub(crate) struct ExplorerSessionRegistry {
-    /// User key -> active session slots, ordered oldest-first.
+/// Scoped to a single [`AppState`] on purpose: the per-user concurrent-session
+/// cap bounds concurrent LLM cost for one server deployment. A process-global
+/// map couples unrelated `AppState` instances — each test server is built with
+/// its own storage and port yet all authenticate as the same dev user, so a
+/// process-global map evicts a live session on one server merely because a
+/// different server accepted a connection (observed as a spurious mid-test
+/// socket close in the explorer WS integration binary). Live sessions are
+/// ephemeral process-local state by definition — a TCP connection cannot
+/// outlive its process — so this is deliberately not port-backed.
+pub struct ExplorerSessionRegistry {
+    /// Monotonic counter for ordering sessions (oldest-first eviction).
+    next_id: std::sync::atomic::AtomicU64,
+    /// Active sessions per user, oldest-first. std::sync::Mutex for Drop
+    /// compatibility (Drop cannot be async).
     sessions: std::sync::Mutex<HashMap<String, Vec<SessionSlot>>>,
-    /// Monotonic session ID counter for ordering (oldest-first eviction).
-    next_session_id: std::sync::atomic::AtomicU64,
 }
 
 impl ExplorerSessionRegistry {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
+            next_id: std::sync::atomic::AtomicU64::new(0),
             sessions: std::sync::Mutex::new(HashMap::new()),
-            next_session_id: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
-    /// Register a new session for `user`, evicting (signalling) the oldest
-    /// sessions beyond `max`. Returns the new session's ID and shutdown signal.
-    pub(crate) fn register(&self, user: &str, max: usize) -> (u64, Arc<tokio::sync::Notify>) {
+    /// Register a new session for `user_key`, evicting (signalling) the oldest
+    /// sessions beyond `max`. Returns the new session's ID and the shutdown
+    /// signal it must watch.
+    ///
+    /// A `max` of 0 is treated as 1: the registering session itself is always
+    /// admitted (a literal 0 would otherwise deadlock the eviction loop on an
+    /// empty slot list and panic the server on connect).
+    pub fn register(&self, user_key: &str, max: usize) -> (u64, Arc<tokio::sync::Notify>) {
         let session_id = self
-            .next_session_id
+            .next_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let shutdown_notify = Arc::new(tokio::sync::Notify::new());
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        let slots = sessions.entry(user.to_string()).or_default();
-        // Evict oldest sessions if at the limit.
-        while slots.len() >= max {
+        let slots = sessions.entry(user_key.to_string()).or_default();
+        while slots.len() >= max.max(1) {
             let evicted = slots.remove(0);
             info!(
-                user = %user,
+                user = user_key,
                 evicted_session = evicted.id,
                 "Explorer WS: evicting oldest session to make room for new connection"
             );
@@ -153,15 +159,26 @@ impl ExplorerSessionRegistry {
         (session_id, shutdown_notify)
     }
 
-    /// Remove a session slot (idempotent; called from `SessionGuard::drop`).
-    pub(crate) fn unregister(&self, user: &str, session_id: u64) {
+    /// Remove a session slot (idempotent; no-op when already released).
+    pub fn release(&self, user_key: &str, session_id: u64) {
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(slots) = sessions.get_mut(user) {
+        if let Some(slots) = sessions.get_mut(user_key) {
             slots.retain(|s| s.id != session_id);
             if slots.is_empty() {
-                sessions.remove(user);
+                sessions.remove(user_key);
             }
         }
+    }
+
+    /// Number of live sessions for `user_key` (tests).
+    #[cfg(test)]
+    fn live_count(&self, user_key: &str) -> usize {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(user_key)
+            .map(|s| s.len())
+            .unwrap_or(0)
     }
 }
 
@@ -261,9 +278,8 @@ async fn handle_explorer_session(
     // rather than rejecting the new connection. This handles zombie sessions from
     // unclean disconnects (browser crash, tab close, navigation) gracefully.
     let session_user = format!("{}:{}", auth.tenant_id, auth.agent_id);
-    let (session_id, shutdown_notify) = state
-        .explorer_sessions
-        .register(&session_user, max_sessions_per_user());
+    let registry = Arc::clone(&state.explorer_sessions);
+    let (session_id, shutdown_notify) = registry.register(&session_user, max_sessions_per_user());
 
     // Guard: remove this session's slot on drop (even if we return early or panic).
     struct SessionGuard {
@@ -273,12 +289,12 @@ async fn handle_explorer_session(
     }
     impl Drop for SessionGuard {
         fn drop(&mut self) {
-            self.registry.unregister(&self.user_key, self.session_id);
+            self.registry.release(&self.user_key, self.session_id);
         }
     }
     // Create guard immediately after registration so any subsequent panic cleans up.
     let _session_guard = SessionGuard {
-        registry: Arc::clone(&state.explorer_sessions),
+        registry,
         user_key: session_user,
         session_id,
     };
@@ -2917,17 +2933,7 @@ async fn run_explorer_agent(
                     // Stream a warning with the raw JSON so the user can see what was attempted.
                     let raw_preview = serde_json::to_string_pretty(&query_json)
                         .unwrap_or_else(|_| query_json.to_string());
-                    // Truncate on a UTF-8 char boundary - a fixed byte index
-                    // would panic when byte 500 falls inside a multibyte
-                    // character (task-095 F4 flaw class).
-                    let truncated = if raw_preview.len() > 500 {
-                        format!(
-                            "{}...",
-                            crate::gate_executor::truncate_bytes(&raw_preview, 500)
-                        )
-                    } else {
-                        raw_preview
-                    };
+                    let truncated = truncate_invalid_query_preview(&raw_preview);
                     stream_text(
                         sender,
                         &format!(
@@ -3626,6 +3632,16 @@ fn system_default_views() -> Vec<(&'static str, &'static str, serde_json::Value)
         .collect()
 }
 
+/// Truncate a raw view-query JSON preview to at most 500 bytes on a UTF-8
+/// char boundary (task-095 F4 class: pretty-printed JSON from the LLM can
+/// be multibyte, and a fixed byte index panics mid-character).
+fn truncate_invalid_query_preview(raw: &str) -> String {
+    if raw.len() <= 500 {
+        return raw.to_string();
+    }
+    format!("{}...", crate::gate_executor::truncate_bytes(raw, 500))
+}
+
 /// Extract node name references from computed expressions.
 /// E.g. `$governed_by('my-spec.md')` yields `"my-spec.md"`;
 /// `$intersect($callers(FooService), $governed_by('bar.md'))` yields
@@ -3827,6 +3843,41 @@ This shows all callers of TaskPort."#;
             prompt.contains("EVERY claim must be traceable"),
             "System prompt should require grounded claims"
         );
+    }
+
+    // ── truncate_invalid_query_preview (task-095 F4: byte-index panic) ─────
+
+    #[test]
+    fn test_truncate_invalid_query_preview_multibyte_no_panic() {
+        // 250 three-byte chars = 750 bytes; byte 500 falls inside a char.
+        // The original fixed-index byte slice panicked here (F4 class).
+        let raw = "日".repeat(250);
+        let truncated = truncate_invalid_query_preview(&raw);
+        assert!(truncated.ends_with("..."));
+        let body = truncated.trim_end_matches('.');
+        assert!(
+            body.chars().all(|c| c == '日'),
+            "must cut at a char boundary, not mid-character"
+        );
+        // Char boundaries of a 3-byte char are multiples of 3; the largest
+        // boundary <= 500 is 498, so truncation backs off to byte 498.
+        assert_eq!(body.len(), 498, "largest multiple of 3 that is <= 500");
+    }
+
+    #[test]
+    fn test_truncate_invalid_query_preview_short_input_passthrough() {
+        let raw = r#"{"scope": {"type": "all"}}"#.to_string();
+        assert_eq!(truncate_invalid_query_preview(&raw), raw);
+    }
+
+    #[test]
+    fn test_truncate_invalid_query_preview_ascii_at_limit() {
+        let raw = "x".repeat(501);
+        let truncated = truncate_invalid_query_preview(&raw);
+        // ASCII input: exactly 500 bytes kept, matching the pre-fix cap.
+        assert!(truncated.starts_with(&"x".repeat(500)));
+        assert!(truncated.ends_with("..."));
+        assert_eq!(truncated.len(), 500 + 3);
     }
 
     // ── parse_view_query_from_text with malformed JSON ──────────────────────
@@ -4285,5 +4336,106 @@ Attempt 2:
             MAX_REFINEMENT_TURNS > 0,
             "Must allow at least 1 refinement turn for self-check"
         );
+    }
+
+    // ── ExplorerSessionRegistry ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn session_registry_evicts_oldest_beyond_cap() {
+        let registry = ExplorerSessionRegistry::new();
+        let user = "default:system";
+
+        // Fill up to the cap: sessions 0, 1, 2.
+        let (id0, _s0) = registry.register(user, 3);
+        let (id1, _s1) = registry.register(user, 3);
+        let (id2, _s2) = registry.register(user, 3);
+        assert_eq!(registry.live_count(user), 3);
+
+        // 4th registration evicts the oldest (id0) and signals its shutdown.
+        let (_id3, _s3) = registry.register(user, 3);
+        assert_eq!(registry.live_count(user), 3);
+        // The evicted session's Notify fires once; a permit is stored, so a
+        // later await on the evicted session's notify resolves immediately.
+        tokio::time::timeout(std::time::Duration::from_secs(1), _s0.notified())
+            .await
+            .expect("evicted session must be signalled");
+        // Live sessions are NOT signalled.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), _s1.notified())
+                .await
+                .is_err(),
+            "session 1 must not be signalled"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), _s2.notified())
+                .await
+                .is_err(),
+            "session 2 must not be signalled"
+        );
+        let _ = (id0, id1, id2);
+    }
+
+    #[tokio::test]
+    async fn session_registry_release_frees_slot_and_is_idempotent() {
+        let registry = ExplorerSessionRegistry::new();
+        let user = "default:system";
+
+        let (id0, _s0) = registry.register(user, 2);
+        let (_id1, _s1) = registry.register(user, 2);
+        assert_eq!(registry.live_count(user), 2);
+
+        // Releasing an unknown ID is a no-op.
+        registry.release(user, 999);
+        assert_eq!(registry.live_count(user), 2);
+
+        // Release one slot; a new session now fits without eviction.
+        registry.release(user, id0);
+        assert_eq!(registry.live_count(user), 1);
+        let (_id2, s2) = registry.register(user, 2);
+        assert_eq!(registry.live_count(user), 2);
+        // The previously-live session (id1) must not have been signalled.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), _s1.notified())
+                .await
+                .is_err(),
+            "live session must not be signalled after a release+register"
+        );
+
+        // Double release is idempotent.
+        registry.release(user, id0);
+        assert_eq!(registry.live_count(user), 2);
+        let _ = s2;
+    }
+
+    #[test]
+    fn session_registry_is_per_instance_not_process_global() {
+        // Two independent registries (one per AppState / test server) must not
+        // evict each other's sessions: this is the regression the integration
+        // binary caught (all 7 tests share the `default:system` user; a
+        // process-global map evicted live sessions across servers).
+        let reg_a = ExplorerSessionRegistry::new();
+        let reg_b = ExplorerSessionRegistry::new();
+        let user = "default:system";
+
+        // Both registries fill to the cap concurrently.
+        reg_a.register(user, 3);
+        reg_a.register(user, 3);
+        reg_a.register(user, 3);
+        reg_b.register(user, 3);
+        reg_b.register(user, 3);
+        reg_b.register(user, 3);
+
+        assert_eq!(reg_a.live_count(user), 3, "registry A keeps its sessions");
+        assert_eq!(reg_b.live_count(user), 3, "registry B keeps its sessions");
+    }
+
+    #[tokio::test]
+    async fn session_registry_zero_cap_admits_registering_session() {
+        // A 0 cap (misconfiguration) must not panic or spin: the registering
+        // session itself is admitted.
+        let registry = ExplorerSessionRegistry::new();
+        let (id, _s) = registry.register("t:a", 0);
+        assert_eq!(registry.live_count("t:a"), 1);
+        assert_eq!(id, 0);
     }
 }
