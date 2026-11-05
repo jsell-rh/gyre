@@ -11,15 +11,10 @@
 #
 # See: specs/reviews/task-106.md F1, F2 (the findings that created this check)
 #
-# --- task-106 revision round owns these (jj adapter contract) ---
-crates/gyre-adapters/src/jj_ops.rs:47       # jj_init — colocated init refused inside git worktrees (review F2)
-crates/gyre-adapters/src/jj_ops.rs:53       # jj_new — stderr/stdout contract unpinned (review F1 class)
-crates/gyre-adapters/src/jj_ops.rs:74       # jj_describe — ignored-only coverage
-crates/gyre-adapters/src/jj_ops.rs:80       # jj_log — ignored-only coverage
-crates/gyre-adapters/src/jj_ops.rs:116      # jj_squash — ignored-only coverage
-crates/gyre-adapters/src/jj_ops.rs:137      # jj_bookmark_create — ignored-only coverage
-crates/gyre-adapters/src/jj_ops.rs:143      # jj_undo — ignored-only coverage
-#
+# --- task-106 jj adapter entries: FIXED (recorded-fixture tests now run
+# in CI for jj_init/jj_new/jj_describe/jj_log/jj_squash/
+# jj_bookmark_create/jj_undo and the rebase/workspace contract set) —
+# entries deleted per this file's policy. ---
 # --- unowned; fix opportunistically when touching these files ---
 crates/gyre-adapters/src/compute/container.rs:143   # spawn_process — ignored-only coverage
 crates/gyre-adapters/src/compute/container.rs:212   # kill_process — ignored-only coverage
