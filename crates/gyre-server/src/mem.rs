@@ -3359,14 +3359,50 @@ fn test_state_inner(
 ) -> Arc<crate::AppState> {
     use std::collections::HashMap;
     use tokio::sync::{broadcast, Mutex};
+
+    // Mirror production wiring (lib.rs): entity repositories are wrapped in
+    // search-sync decorators so tests exercise the same index-on-write
+    // behavior as every real write path.
+    let search =
+        search.unwrap_or_else(|| Arc::new(gyre_adapters::MemSearchAdapter::new()) as Arc<dyn gyre_ports::SearchPort>);
+    let agents = crate::search_sync::wrap_agents(
+        Arc::new(MemAgentRepository::default()),
+        Arc::clone(&search),
+    );
+    let tasks = crate::search_sync::wrap_tasks(
+        Arc::new(MemTaskRepository::default()),
+        Arc::clone(&search),
+    );
+    let merge_requests = crate::search_sync::wrap_mrs(
+        Arc::new(MemMrRepository::default()),
+        Arc::clone(&search),
+    );
+    let reviews = crate::search_sync::wrap_reviews(
+        Arc::new(MemReviewRepository::default()),
+        Arc::clone(&merge_requests),
+        Arc::clone(&search),
+    );
+    let personas = crate::search_sync::wrap_personas(
+        Arc::new(MemPersonaRepository::default()),
+        Arc::clone(&search),
+    );
+    let analytics = crate::search_sync::wrap_analytics(
+        Arc::new(MemAnalyticsRepository::default()),
+        Arc::clone(&search),
+    );
+    let audit = crate::search_sync::wrap_audit(
+        Arc::new(MemAuditRepository::default()),
+        Arc::clone(&search),
+    );
+
     Arc::new(crate::AppState {
         auth_token: "test-token".to_string(),
         base_url: "http://localhost:3000".to_string(),
         repos: Arc::new(MemRepoRepository::default()),
-        agents: Arc::new(MemAgentRepository::default()),
-        tasks: Arc::new(MemTaskRepository::default()),
-        merge_requests: Arc::new(MemMrRepository::default()),
-        reviews: Arc::new(MemReviewRepository::default()),
+        agents,
+        tasks,
+        merge_requests,
+        reviews,
         merge_queue: Arc::new(MemMergeQueueRepository::default()),
         git_ops,
         jj_ops: Arc::new(NoopJjOps),
@@ -3390,9 +3426,9 @@ fn test_state_inner(
         explorer_sessions: Arc::new(crate::explorer_ws::ExplorerSessionRegistry::new()),
         retention_store: crate::retention::RetentionStore::new(),
         job_registry: Arc::new(crate::jobs::JobRegistry::new()),
-        analytics: Arc::new(MemAnalyticsRepository::default()),
+        analytics,
         costs: Arc::new(MemCostRepository::default()),
-        audit: Arc::new(MemAuditRepository::default()),
+        audit,
         siem_store: crate::siem::SiemStore::new(),
         audit_broadcast_tx: broadcast::channel(64).0,
         network_peers: Arc::new(MemNetworkPeerRepository::default()),
@@ -3429,10 +3465,10 @@ fn test_state_inner(
         spec_links_store: Arc::new(Mutex::new(Vec::new())),
         budget_configs: Arc::new(MemBudgetConfigRepository::default()),
         budget_usages: Arc::new(MemBudgetUsageRepository::default()),
-        search: search.unwrap_or_else(|| Arc::new(gyre_adapters::MemSearchAdapter::new())),
+        search,
         tenants: Arc::new(MemTenantRepository::default()),
         workspaces,
-        personas: Arc::new(MemPersonaRepository::default()),
+        personas,
         policies,
         workspace_memberships: Arc::new(MemWorkspaceMembershipRepository::default()),
         teams: Arc::new(MemTeamRepository::default()),
