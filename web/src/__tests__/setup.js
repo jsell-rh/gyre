@@ -19,7 +19,9 @@ global.fetch = vi.fn(() =>
 // Reset mocks between tests
 beforeEach(() => {
   vi.clearAllMocks();
-  localStorage.clear();
+  // localStorage exists only in DOM test environments; node-environment
+  // files (e.g. compile-time CSS guards) skip it.
+  if (typeof localStorage !== 'undefined') localStorage.clear();
   global.fetch = vi.fn(() =>
     Promise.resolve({
       ok: true,
