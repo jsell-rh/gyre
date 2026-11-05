@@ -5,7 +5,7 @@ depends_on: [task-201]
 progress: not-started
 coverage_sections:
   - "search.md §Access Scoping"
-commits: []
+commits: ["a18e6e25807a53a9ec7e149b7ea5aa1a2b93717b"]
 ---
 
 ## Spec Excerpt
