@@ -2,7 +2,7 @@
 title: "Manifest-driven Concept Views for the knowledge graph"
 spec_ref: "realized-model.md §4 Concept Views"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "realized-model.md §4. Concept Views"
 commits: ["a95c9df6f51de1d9b7d9424e091ca2e16f2d1954", "9aea8b653eb82b01f6cc715d3c964908410de98f", "b88725880feef95d020e3e115a93064adbc95043", "d75afe7c1e3d163f64d5ad42a1edf8588cbb7a07", "4052081908cf27a9d7abec9923fe24ee850f1a88", "fcd83271fbb7b8dacaadf7709e4e67a892c26a1d"]
@@ -237,5 +237,13 @@ Re-verification at repaired HEAD (`2076ba76`):
 ### Review changed source code
 
 - specs/coverage/system/realized-model.md
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-common/src/graph.rs
 
 Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.

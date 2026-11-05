@@ -353,6 +353,14 @@ impl ConceptView {
         governed_spec_node_ids: &std::collections::HashSet<&str>,
         endpoint_routes: &std::collections::HashMap<&str, String>,
     ) -> bool {
+        // MUTATION PROBE (temporary): reproduce the old hollow substring
+        // behavior to prove the tests guard against regression.
+        let _ = (governed_spec_node_ids, endpoint_routes);
+        let pat = self.name.to_lowercase();
+        if !pat.is_empty() {
+            return n.name.to_lowercase().contains(&pat)
+                || n.qualified_name.to_lowercase().contains(&pat);
+        }
         match n.node_type {
             NodeType::Type | NodeType::Class | NodeType::Enum => {
                 glob_any(&self.include_types, &n.name)
