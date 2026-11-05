@@ -16,6 +16,7 @@
     computeTestUnreachable as computeTestUnreachableSet,
   } from './test-reachability.js';
   import { edgePassesFilter } from './canvas-filters.js';
+  import { ZoomInteractionTracker } from './canvas-state.js';
 
   /** @type {{ repoId: string, nodes: any[], edges: any[], activeQuery: import('./types/view-query.ts').ViewQuery | null }} */
   let {
@@ -247,6 +248,35 @@
   let recentInteractions = $state([]);
   function trackInteraction(action) {
     recentInteractions = [...recentInteractions.slice(-9), action];
+  }
+
+  // §10 Interaction Context: significant zoom changes are recorded as
+  // { action: "zoom_in"|"zoom_out", to_level } interactions. The baseline is
+  // the last recorded level; gestures coalesce into one trailing entry.
+  // Only user-initiated zoom (wheel, keyboard, pinch) is recorded - the
+  // initial auto-fit, drill transitions and query-driven zoom are not user
+  // interactions and are represented by their own interaction records.
+  // ZoomInteractionTracker holds the armed/disarmed state: programmatic
+  // camera control calls disarmZoomTracking() so animated zooms are never
+  // attributed to the user; wheel/keyboard/pinch handlers call armZoomTracking().
+  const zoomTracker = new ZoomInteractionTracker();
+  function armZoomTracking() {
+    zoomTracker.arm();
+  }
+  // Call when a programmatic zoom source (drill transition, breadcrumb
+  // navigation, query-driven fit, search fit, zoom-to-node, auto-fit on data
+  // change) takes control of the camera.
+  function disarmZoomTracking() {
+    zoomTracker.disarm(cam.zoom);
+  }
+  function trackZoomChange() {
+    const interactions = zoomTracker.record(recentInteractions, cam.zoom);
+    if (interactions !== recentInteractions) {
+      recentInteractions = interactions;
+      try {
+        canvasState = { ...canvasState, recent_interactions: recentInteractions };
+      } catch { /* ignore during init */ }
+    }
   }
 
   let tooltipNode = $state(null);
@@ -649,6 +679,7 @@
         const cy = (minY + maxY) / 2;
         const bw = maxX - minX + 100;
         const bh = maxY - minY + 100;
+        disarmZoomTracking();
         targetCam.x = cx;
         targetCam.y = cy;
         targetCam.zoom = Math.max(MIN_ZOOM, Math.min(W / bw, H / bh, 4) * 0.85);
@@ -661,6 +692,7 @@
   function zoomToNode(nodeId) {
     const ln = layoutNodes.find(l => (l.node?.id ?? l.id) === nodeId);
     if (ln) {
+      disarmZoomTracking();
       targetCam.x = ln.x;
       targetCam.y = ln.y;
       targetCam.zoom = Math.min(W / (ln.w + 60), H / (ln.h + 60), 4) * 0.85;
@@ -740,17 +772,16 @@
   // Keep canvasState enriched with active filter, lens, and visible tree groups
   // so the LLM receives full context about what the user is looking at.
   // Deferred to avoid errors during initial mount (test environments).
+  // zoom_level and visible_tree_groups are NOT snapshotted here: they go stale
+  // between lens toggles. They are owned by the reactive sync effects below
+  // (zoom $effect / visible-tree-groups $effect), and toWireCanvasState()
+  // prefers the live `zoom` over any snapshot.
   function syncCanvasState() {
     try {
-      const visibleGroups = (rootLayoutNodes ?? [])
-        .filter(ln => ln.kind === 'tree-group' && ln.treeNode?.label)
-        .map(ln => ln.treeNode.label);
       canvasState = {
         ...canvasState,
         active_filter: filter,
         active_lens: lens,
-        visible_tree_groups: visibleGroups,
-        zoom_level: cam.zoom,
         recent_interactions: recentInteractions,
       };
     } catch { /* ignore during init */ }
@@ -1456,6 +1487,7 @@
 
     if (isDataChange) {
       const fitZoom = Math.min(W / layoutW, H / layoutH) * 0.85;
+      disarmZoomTracking();
       targetCam = { x: 0, y: 0, zoom: fitZoom };
       cam = { ...targetCam };
     }
@@ -3836,6 +3868,8 @@
     if (Math.abs(cam.zoom - targetCam.zoom) < 0.0005) cam.zoom = targetCam.zoom;
     // Clamp zoom to prevent NaN/Infinity in screenToWorld calculations
     cam.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, cam.zoom));
+    // Track significant zoom changes for the interaction context (§10)
+    trackZoomChange();
   }
 
   let lastAnimTime = 0;
@@ -4001,6 +4035,7 @@
   function onWheel(e) {
     e.preventDefault();
     if (drillTransitioning) return;
+    armZoomTracking();
 
     // Accumulate velocity for inertial zoom
     const impulse = e.deltaY > 0 ? -0.08 : 0.08;
@@ -4269,6 +4304,7 @@
     targetCam.x = wx;
     targetCam.y = wy;
     const fitZoom = Math.min(W / (ww + 60), H / (wh + 60), 4) * 0.85;
+    disarmZoomTracking();
     targetCam.zoom = Math.max(fitZoom, cam.zoom * 1.5);
     drillTransitioning = true;
     drillTransitionStart = performance.now();
@@ -4309,6 +4345,7 @@
 
     if (hit.kind === 'tree-group') {
       // Zoom into this tree group smoothly
+      disarmZoomTracking();
       targetCam.x = hit.x;
       targetCam.y = hit.y;
       const fitZoom = Math.min(W / hit.w, H / hit.h) * 0.85;
@@ -4318,6 +4355,7 @@
       // Zoom into leaf node — open its detail panel
       selectedNodeId = node?.id;
       onNodeDetail(node);
+      disarmZoomTracking();
       targetCam.x = hit.x;
       targetCam.y = hit.y;
       targetCam.zoom = Math.max(cam.zoom * 2, 3);
@@ -4492,6 +4530,7 @@
     onNodeDetail(null);
 
     // Smooth zoom-out: animate camera with ease-out cubic to the target parent node or fit all.
+    disarmZoomTracking();
     cam._drillStartX = cam.x;
     cam._drillStartY = cam.y;
     cam._drillStartZoom = cam.zoom;
@@ -4620,12 +4659,14 @@
     // Keyboard zoom (+/- or =/-)
     if (e.key === '=' || e.key === '+') {
       e.preventDefault();
+      armZoomTracking();
       targetCam.zoom = Math.min(MAX_ZOOM, targetCam.zoom * 1.2);
       scheduleRedraw();
       return;
     }
     if (e.key === '-') {
       e.preventDefault();
+      armZoomTracking();
       targetCam.zoom = Math.max(MIN_ZOOM, targetCam.zoom / 1.2);
       scheduleRedraw();
       return;
@@ -4738,6 +4779,7 @@
       scheduleRedraw();
     } else if (e.touches.length === 2) {
       e.preventDefault();
+      armZoomTracking();
       const dx = e.touches[0].clientX - e.touches[1].clientX;
       const dy = e.touches[0].clientY - e.touches[1].clientY;
       const dist = Math.hypot(dx, dy);
@@ -4788,6 +4830,7 @@
     if (activeQuery === lastZoomedQuery) return;
     // Handle { level: N } zoom
     if (typeof activeQuery.zoom === 'object' && activeQuery.zoom.level != null) {
+      disarmZoomTracking();
       targetCam.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, activeQuery.zoom.level));
       lastZoomedQuery = activeQuery;
       scheduleRedraw();
@@ -4811,6 +4854,7 @@
     if (minX === Infinity) return;
     const mw = maxX - minX, mh = maxY - minY;
     const fitZoom = Math.min(W / (mw || 1), H / (mh || 1)) * 0.8;
+    disarmZoomTracking();
     targetCam = { x: (minX + maxX) / 2, y: (minY + maxY) / 2, zoom: Math.min(fitZoom, MAX_ZOOM) };
     lastZoomedQuery = activeQuery;
     scheduleRedraw();
@@ -4925,6 +4969,28 @@
   $effect(() => {
     if (Math.abs(cam.zoom - (canvasState.zoom ?? 1)) > 0.01) {
       canvasState = { ...canvasState, zoom: cam.zoom };
+    }
+  });
+
+  // Keep canvasState.visible_tree_groups fresh (§10 interaction context).
+  // rootLayoutNodes changes on data reloads, layout-mode switches and drill
+  // navigation; snapshotting the groups only on lens change (the old
+  // syncCanvasState behavior) sent stale groups to the agent. The guard only
+  // writes when the list actually changed, so the effect settles.
+  $effect(() => {
+    const groups = (rootLayoutNodes ?? [])
+      .filter(ln => ln.kind === 'tree-group' && ln.treeNode?.label)
+      .map(ln => ln.treeNode.label);
+    const current = canvasState.visible_tree_groups;
+    const same = Array.isArray(current)
+      && current.length === groups.length
+      && current.every((g, i) => g === groups[i]);
+    if (!same) {
+      canvasState = {
+        ...canvasState,
+        visible_tree_groups: groups,
+        visibleGroups: groups,
+      };
     }
   });
 

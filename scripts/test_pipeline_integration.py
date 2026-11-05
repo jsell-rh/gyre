@@ -73,6 +73,29 @@ print(json.dumps(c and c['id']))'''
         self.store.finish(next_claim['id'],next_claim['token'],{}, {'delivered':{'sha':'next-sha'}})
         self.assertIsNotNone(self.store.claim('publish','rejoin',ident=publish))
 
+    def test_green_behind_pr_rejoins_integration_but_real_external_waits_stay_parked(self):
+        from pipeline.catalog import discover
+        from pipeline.eligibility import eligible
+        data={'candidate':'candidate-1','candidate_base':'old-main','dependencies':[], 'triaged':'g',
+              'review':{'candidate':'candidate-1','approved':True},
+              'published_head':'published','pr':'https://github.com/example/repo/pull/1',
+              'published_verified':{'candidate':'candidate-1','head':'published','base':'old-main'},
+              'ci':{'head':'published','checks':'green','status':'policy_pending',
+                    'merge_state':'BEHIND','waiting_since':time.time()-3600}}
+        self.store.put_task('task-001','g','body',data)
+        self.assertFalse(self.store.integration_waiting(data))
+        queued=discover(self.store,'verify','current-main')
+        refresh=next(dict(r) for r in self.store.db.execute('SELECT * FROM work WHERE id IN (%s)' % ','.join('?' for _ in queued),queued) if r['task']=='task-001')
+        claim=self.store.claim('verify','base-refresher',ident=refresh['id'],eligible=lambda w:eligible(self.store,w))
+        self.assertIsNotNone(claim)
+        self.assertEqual(claim['input']['base'],'current-main')
+        self.assertEqual(self.store.task('task-001')['data']['review'],data['review'])
+        self.assertEqual(self.store.integration_lane()['task'],'task-001')
+        for merge_state,checks in [('BLOCKED','green'),('UNKNOWN','green'),('BEHIND',None)]:
+            with self.subTest(merge_state=merge_state,checks=checks):
+                data['ci'].update(merge_state=merge_state,checks=checks)
+                self.assertTrue(self.store.integration_waiting(data))
+
     def test_closed_pr_releases_lane_without_reopening_it_or_blocking_other_candidates(self):
         first=self.store.claim('verify','verifier')
         data=self.store.task(first['task'])['data']
