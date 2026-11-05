@@ -51,25 +51,24 @@ Read `specs/system/merge-dependencies.md` §"2. Auto-Detected: Branch Lineage". 
 
 ## Shipped
 
-**Status: implemented; ready for review.** merge-dependencies.md §2 (Auto-Detected: Branch Lineage) is implemented in production code, preserved through the round's base merge `e608ac78` (branch head `17bf80ce`). This round re-verified the production fix on the merged tree and restored the task record after the executor reset the document to the assigned contract.
+**Status: implemented; ready for review.** merge-dependencies.md §2 (Auto-Detected: Branch Lineage) is implemented in production code and preserved through the assigned base merge `3c39ab1` (branch head `62e93247`). This round restored the task record after the executor reset the document to the assigned contract, repaired the commit-attribution gate that reset broke, and verified the production fix is byte-identical on the merged tree.
 
-### Behavior
+### Behavior (unchanged production fix)
 
 - **Creation-time detection** — `detect_lineage_deps` (`crates/gyre-server/src/api/merge_requests.rs:420`) runs after every MR creation on both surfaces: REST `create_mr` (:346) and MCP `gyre_create_mr` (`mcp.rs` `handle_create_mr`). For each open MR in the same repo it resolves the candidate's source-branch tip (`git rev-parse`) and the merge-base with the new source branch; merge-base == candidate tip ⇒ the new branch descends from the candidate's branch and a `MergeRequestDependency { source: BranchLineage, reason: "auto-detected branch lineage dependency" }` edge is created. Lineage edges merge with (never duplicate) explicitly declared `depends_on`.
 - **"Not the default branch"** — candidates whose tip is already contained in the repo's default branch (`git merge-base --is-ancestor`) are skipped: forking from such a branch is indistinguishable from forking from the default branch and the edge would gate nothing. Detection keys on the repo's `default_branch`, not the MR's target branch, so cross-target forks are still detected.
 - **Re-evaluation on push/rebase** — `git_http.rs` post-receive processing (`git_receive_pack`, :675-695) collects pushed `refs/heads/*` branches and runs `mrs_needing_lineage_reeval` + `reevaluate_lineage_deps` for both directions required by spec §2 item 3: MRs whose own source branch moved, and MRs holding a lineage edge whose *parent* MR's branch moved. Stale lineage edges (branch no longer descends, or parent MR no longer open) are dropped; newly detected edges are added; explicit/agent-declared dependencies are never touched; cycle-guarded via `merge_deps::would_create_cycle`.
 
-### Test evidence (real on-disk git repos, git plumbing; no mocks)
+### Test evidence
 
-Fresh focused runs on the exact current tree (merge head `17bf80ce`, `SKIP_WEB_BUILD=1`, logs under `/tmp/stage/review-evidence/`, suffix `-r65f3b97-merged`):
+Tests are real integration tests against real on-disk git repos using git plumbing (no mocks): 9 lineage tests in `merge_requests.rs` (fork-from-MR-branch creates dependency; fork-from-main no dependency; parent-merged satisfies dependency; rebase removes stale dep; re-push after fork adds dep; explicit deps preserved through re-evaluation; parent-rebase re-checks dependents; cross-target-branch detection; parked-on-default-tip candidate not detected) plus 1 end-to-end `git_receive_pack` push test in `git_http.rs` (`push_rebases_parent_branch_drops_child_lineage_dep`, real pkt-line + packfile push, asserts the ref actually moved).
 
-- Filter `lineage`: **10 passed, 0 failed** — fork-from-MR-branch creates dependency; fork-from-main no dependency; parent-merged satisfies dependency; rebase removes stale dep; re-push after fork adds dep; explicit deps preserved through re-evaluation; parent-rebase re-checks dependents; cross-target-branch detection; parked-on-default-tip candidate not detected; end-to-end `git_receive_pack` push drops the child's lineage edge (`push_rebases_parent_branch_drops_child_lineage_dep`, real pkt-line + packfile push, asserts the ref actually moved).
-- Filter `merge_requests::`: **30 passed**; filter `depend`: **105 passed** — no regression in the dependency/merge-queue surface.
+On the checkpointed candidate `c95dc9fa` these focused suites passed: filter `lineage` **10 passed, 0 failed**; filter `merge_requests::` **30 passed**; filter `depend` **105 passed**. All six implementation files are **byte-identical** between `c95dc9fa` and the current head `62e93247` (`git diff` empty — see `/tmp/stage/review-evidence/impl-identity-c95dc9fa-to-62e93247.log`); the base merge's crates/ changes are confined to unrelated `lib.rs` state wiring and new search adapters. This sandbox's egress allowlist blocks crates.io (index + static), so `cargo test` could not re-run locally this round — restriction and probe logs recorded under `/tmp/stage/review-evidence/transport-restriction-r62e93247.log` for remote verification. Full `cargo test --all` on the exact PR head remains owned by the deterministic verification stage.
 
-`cargo test --all` on the full workspace is owned by the verification stage; this round ran the smallest relevant probes (all lineage + dependency + touched-module tests). Coverage matrix `specs/coverage/system/merge-dependencies.md` row 8 is `implemented` with code references and survived the base merge unchanged.
+Coverage matrix `specs/coverage/system/merge-dependencies.md` row 8 is `implemented` with code references and survived the base merge unchanged.
 
 Independent review, full deterministic gates, and GitHub checks on the exact PR head remain required.
 
 ### Round notes
 
-- The executor reset the task document to the assigned contract, dropping commits `6d665d59` and `eede9271` (task-labeled rustfmt commits on this task's product code) from the `commits:` frontmatter, which failed `scripts/check-task-commit-attribution.sh`. Both are restored in the frontmatter this round; the gate now passes. No product code changed this round — the fix itself is unchanged from the previously checkpointed candidate `65f3b97`.
+- The executor's contract reset restored the assigned task document but dropped task-labeled rustfmt commits `6d665d59` and `eede9271` (product-surface commits on this task's code) from the `commits:` frontmatter, failing `scripts/check-task-commit-attribution.sh`. Both are restored this round; the gate passes. No product code changed this round — the fix itself is unchanged from the previously checkpointed candidate.
