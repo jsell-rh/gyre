@@ -903,6 +903,10 @@ pub fn api_router() -> Router<Arc<AppState>> {
             post(spec_assertions::check_spec_assertions),
         )
         .route(
+            "/api/v1/repos/:id/specs/:path/assertions",
+            get(spec_assertions::get_spec_assertion_results),
+        )
+        .route(
             "/api/v1/workspaces/:id/graph",
             get(graph::get_workspace_graph),
         )
