@@ -42,6 +42,7 @@ pub(crate) mod spa;
 pub mod spec_link_staleness;
 pub mod spec_patrol;
 pub mod spec_registry;
+pub mod search_scope;
 pub mod speculative_merge;
 // sqlite.rs (rusqlite) removed — use gyre_adapters::SqliteStorage (Diesel) instead.
 pub(crate) mod explorer_ws;

@@ -22,7 +22,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use diesel::prelude::*;
-use diesel::sql_types::{BigInt, Double, Nullable, Text};
+use diesel::sql_types::{Array, BigInt, Double, Text};
 use gyre_ports::search::{SearchDocument, SearchPort, SearchQuery, SearchResult};
 use std::sync::Arc;
 
@@ -108,20 +108,24 @@ impl SearchPort for PgStorage {
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut conn = pool.get().context("get db connection")?;
 
-            // Derive tenant from the workspace's real scope row (§Access Scoping);
-            // empty string when the workspace is unknown — never a fabricated scope.
-            let tenant_id = match doc.workspace_id.as_deref() {
-                Some(ws) if !ws.is_empty() => {
-                    match diesel::sql_query("SELECT tenant_id FROM workspaces WHERE id = $1")
-                        .bind::<Text, _>(ws)
-                        .get_result::<TenantRow>(&mut conn)
-                    {
-                        Ok(r) => r.tenant_id,
-                        Err(diesel::result::Error::NotFound) => String::new(),
-                        Err(e) => return Err(e.into()),
+            // Tenant scope (§Access Scoping): caller-provided when known,
+            // otherwise derived from the workspace's real scope row. Empty
+            // string when the workspace is unknown — never a fabricated scope.
+            let tenant_id = match doc.tenant_id.as_deref() {
+                Some(t) if !t.is_empty() => t.to_string(),
+                _ => match doc.workspace_id.as_deref() {
+                    Some(ws) if !ws.is_empty() => {
+                        match diesel::sql_query("SELECT tenant_id FROM workspaces WHERE id = $1")
+                            .bind::<Text, _>(ws)
+                            .get_result::<TenantRow>(&mut conn)
+                        {
+                            Ok(r) => r.tenant_id,
+                            Err(diesel::result::Error::NotFound) => String::new(),
+                            Err(e) => return Err(e.into()),
+                        }
                     }
-                }
-                _ => String::new(),
+                    _ => String::new(),
+                },
             };
 
             let workspace_id = doc.workspace_id.clone().unwrap_or_default();
@@ -152,10 +156,14 @@ impl SearchPort for PgStorage {
             }
             // websearch_to_tsquery applies implicit AND between terms (spec
             // §Simple Search default) and tolerates punctuation without a
-            // syntax error. entity_type/workspace_id filters are WHERE clauses
-            // evaluated by the index query itself, not post-filtered.
-            // ts_headline wraps matches in ** markers, mirroring the FTS5 adapter.
-            let rows = diesel::sql_query(
+            // syntax error. entity_type/workspace_id filters and the
+            // §Access Scoping constraints (tenant + accessible workspace/repo
+            // sets) are WHERE clauses evaluated by the index query itself,
+            // never post-filtered, so result counts cannot leak inaccessible
+            // documents. ts_headline wraps matches in ** markers, mirroring
+            // the FTS5 adapter. Binds are appended in $N order via the boxed
+            // raw query.
+            let mut q = diesel::sql_query(
                 "SELECT s.entity_type,
                         s.entity_id,
                         s.title,
@@ -164,17 +172,64 @@ impl SearchPort for PgStorage {
                                     'StartSel=**,StopSel=**,MaxFragments=1,MinWords=5,MaxWords=12') AS snip,
                         s.metadata::text AS metadata
                  FROM search_index s, websearch_to_tsquery('english', $1) q
-                 WHERE s.tsv @@ q
-                   AND ($2::text IS NULL OR s.entity_type = $2)
-                   AND ($3::text IS NULL OR s.workspace_id = $3)
-                 ORDER BY rank DESC
-                 LIMIT $4",
+                 WHERE s.tsv @@ q",
             )
-            .bind::<Text, _>(&query.query)
-            .bind::<Nullable<Text>, _>(query.entity_type)
-            .bind::<Nullable<Text>, _>(query.workspace_id)
-            .bind::<BigInt, _>(query.limit as i64)
-            .load::<TsRow>(&mut conn)?;
+            .into_boxed();
+            q = q.bind::<Text, _>(query.query.clone());
+            let mut n = 2;
+
+            if let Some(et) = &query.entity_type {
+                q = q
+                    .sql(format!(" AND s.entity_type = ${n}"))
+                    .bind::<Text, _>(et.clone());
+                n += 1;
+            }
+            if let Some(ws) = &query.workspace_id {
+                // User-supplied narrowing filter — intersects with the
+                // accessible set below, so it can only narrow, never widen.
+                q = q
+                    .sql(format!(" AND s.workspace_id = ${n}"))
+                    .bind::<Text, _>(ws.clone());
+                n += 1;
+            }
+            match &query.accessible_workspace_ids {
+                None => {}
+                Some(ids) if ids.is_empty() => {
+                    // Caller has access to no workspace: no rows, by query.
+                    q = q.sql(" AND FALSE");
+                }
+                Some(ids) => {
+                    q = q
+                        .sql(format!(" AND s.workspace_id = ANY(${n})"))
+                        .bind::<Array<Text>, _>(ids.clone());
+                    n += 1;
+                }
+            }
+            match &query.accessible_repo_ids {
+                None => {}
+                Some(ids) if ids.is_empty() => {
+                    q = q.sql(" AND FALSE");
+                }
+                Some(ids) => {
+                    // Repo-less (workspace-level) documents stay visible:
+                    // repo scope restricts repos, not the workspace itself.
+                    q = q
+                        .sql(format!(
+                            " AND (s.repo_id = '' OR s.repo_id = ANY(${n}))"
+                        ))
+                        .bind::<Array<Text>, _>(ids.clone());
+                    n += 1;
+                }
+            }
+            q = q
+                .sql(format!(" AND s.tenant_id = ${n}"))
+                .bind::<Text, _>(query.tenant_id.clone());
+            n += 1;
+            q = q
+                .sql(format!(" ORDER BY rank DESC LIMIT ${n}"))
+                .bind::<BigInt, _>(query.limit as i64);
+
+            let rows = q.load::<TsRow>(&mut conn)?;
 
             Ok(rows
                 .into_iter()
