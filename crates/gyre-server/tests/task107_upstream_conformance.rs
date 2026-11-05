@@ -29,13 +29,11 @@
 //! not base64. Feeding that bundle JSON into a `FixedBundle` transport and
 //! verifying any Fulcio-issued record exercises the same decode path.
 
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use gyre_server::commit_signatures::{SigningAttribution, SigningConfig, SigningMode};
-use gyre_server::sigstore::{
-    sign_commit_keyless, verify_signature_fulcio, SigningHttpTransport,
-};
-use anyhow::{anyhow, Context, Result};
+use gyre_server::sigstore::{sign_commit_keyless, verify_signature_fulcio, SigningHttpTransport};
 
 // ── A Fulcio built from the upstream proto documentation ─────────────────────
 
@@ -108,10 +106,7 @@ impl SigningHttpTransport for UpstreamFulcio {
             .context("probe: publicKey.content must parse as PEM SPKI")?;
         use rcgen::PublicKeyData as _;
         use ring::signature::UnparsedPublicKey;
-        let vk = UnparsedPublicKey::new(
-            &ring::signature::ECDSA_P256_SHA256_ASN1,
-            spki.der_bytes(),
-        );
+        let vk = UnparsedPublicKey::new(&ring::signature::ECDSA_P256_SHA256_ASN1, spki.der_bytes());
         vk.verify(sub.as_bytes(), &pop)
             .map_err(|_| anyhow!("probe: proof of possession failed"))?;
 
@@ -225,7 +220,10 @@ async fn production_signs_against_upstream_pem_chain() {
         "production keyless signing must succeed against a Fulcio that serves \
          the upstream PEM-string chain contract",
     );
-    assert_eq!(signed.record.sigstore_mode, gyre_ports::commit_signature_repo::SigstoreMode::Fulcio);
+    assert_eq!(
+        signed.record.sigstore_mode,
+        gyre_ports::commit_signature_repo::SigstoreMode::Fulcio
+    );
     assert!(signed.record.certificate_pem.is_some());
     assert!(signed.record.rekor_entry_id.is_some());
 }
@@ -251,8 +249,13 @@ async fn production_verifies_against_upstream_pem_bundle() {
     .await
     .expect("signing leg must succeed first");
 
-    let result = verify_signature_fulcio(&signed.record, &probe_config(), &fulcio, probe_now()).await;
-    assert!(result.valid, "verification against the upstream PEM bundle must pass all four phases: {:?}", result.reason);
+    let now = probe_now();
+    let result = verify_signature_fulcio(&signed.record, &probe_config(), &fulcio, now).await;
+    assert!(
+        result.valid,
+        "verification against the upstream PEM bundle must pass all four phases: {:?}",
+        result.reason
+    );
     assert!(result.certificate_chain_valid);
     assert!(result.signature_valid);
     assert!(result.subject_matches);

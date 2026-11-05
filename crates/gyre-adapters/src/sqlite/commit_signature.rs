@@ -226,7 +226,8 @@ mod tests {
     #[tokio::test]
     async fn find_is_scoped_by_repo() {
         let s = storage().await;
-        s.save(&sample_record("repo-a", "sha-shared")).await
+        s.save(&sample_record("repo-a", "sha-shared"))
+            .await
             .unwrap();
         // Same SHA stored for repo B is a distinct record.
         let mut other = sample_record("repo-b", "sha-shared");

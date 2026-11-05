@@ -8,7 +8,6 @@ pub mod attestation;
 pub mod audit_simulator;
 pub(crate) mod auth;
 pub mod commit_signatures;
-pub mod sigstore;
 pub(crate) mod constraint_check;
 pub mod container_audit;
 pub mod dep_staleness;
@@ -18,6 +17,7 @@ pub(crate) mod git_http;
 pub mod git_refs;
 pub mod graph_extraction;
 pub mod procfs_monitor;
+pub mod sigstore;
 
 pub(crate) mod health;
 pub mod jobs;
@@ -813,8 +813,9 @@ fn load_or_persist_agent_signing_key(
         let der = B64
             .decode(encoded.trim())
             .unwrap_or_else(|e| panic!("GYRE_AGENT_SIGNING_KEY is not valid base64: {e}"));
-        let key = auth::AgentSigningKey::from_pkcs8(&der)
-            .unwrap_or_else(|e| panic!("GYRE_AGENT_SIGNING_KEY is not valid Ed25519 PKCS#8 material: {e}"));
+        let key = auth::AgentSigningKey::from_pkcs8(&der).unwrap_or_else(|e| {
+            panic!("GYRE_AGENT_SIGNING_KEY is not valid Ed25519 PKCS#8 material: {e}")
+        });
         tracing::info!(
             kid = %key.kid,
             "using operator-provisioned agent signing key from GYRE_AGENT_SIGNING_KEY"
@@ -832,7 +833,8 @@ fn load_or_persist_agent_signing_key(
     };
 
     match persisted {
-        Ok(Some(encoded)) => match B64.decode(encoded.trim())
+        Ok(Some(encoded)) => match B64
+            .decode(encoded.trim())
             .map_err(|e| format!("base64: {e}"))
             .and_then(|der| auth::AgentSigningKey::from_pkcs8(&der))
         {
@@ -870,9 +872,17 @@ fn load_or_persist_agent_signing_key(
     let key = Arc::new(auth::AgentSigningKey::generate());
     let encoded = B64.encode(key.pkcs8_der());
     let store_result = if let Some(pg) = pg_db {
-        pg.kv_set_sync(AGENT_SIGNING_KEY_KV_NAMESPACE, AGENT_SIGNING_KEY_KV_KEY, &encoded)
+        pg.kv_set_sync(
+            AGENT_SIGNING_KEY_KV_NAMESPACE,
+            AGENT_SIGNING_KEY_KV_KEY,
+            &encoded,
+        )
     } else if let Some(sqlite) = sqlite_db {
-        sqlite.kv_set_sync(AGENT_SIGNING_KEY_KV_NAMESPACE, AGENT_SIGNING_KEY_KV_KEY, &encoded)
+        sqlite.kv_set_sync(
+            AGENT_SIGNING_KEY_KV_NAMESPACE,
+            AGENT_SIGNING_KEY_KV_KEY,
+            &encoded,
+        )
     } else {
         Ok(())
     };

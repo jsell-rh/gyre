@@ -11,12 +11,11 @@
 //! Own test binary (own process): `build_state` reads `GYRE_DATABASE_URL` and
 //! `GYRE_AGENT_SIGNING_KEY` from the process environment.
 
-use gyre_ports::KvJsonStore as _;
 use gyre_server::{
     build_state,
     commit_signatures::{sign_commit_local, SigningAttribution},
-    sigstore::verify_state_commit_signature, AGENT_SIGNING_KEY_KV_KEY,
-    AGENT_SIGNING_KEY_KV_NAMESPACE,
+    sigstore::verify_state_commit_signature,
+    AGENT_SIGNING_KEY_KV_KEY, AGENT_SIGNING_KEY_KV_NAMESPACE,
 };
 use tempfile::TempDir;
 
@@ -86,7 +85,10 @@ async fn env_provisioned_key_wins_and_rotation_is_reported_as_rotation() {
             .kv_get(AGENT_SIGNING_KEY_KV_NAMESPACE, AGENT_SIGNING_KEY_KV_KEY)
             .await
             .unwrap();
-        assert_eq!(persisted, None, "operator-provisioned key must not be persisted");
+        assert_eq!(
+            persisted, None,
+            "operator-provisioned key must not be persisted"
+        );
 
         // The provisioned key actually signs, and its records verify.
         let repo_id = "repo-f12-v1";
@@ -103,7 +105,10 @@ async fn env_provisioned_key_wins_and_rotation_is_reported_as_rotation() {
             .await
             .unwrap()
             .expect("record must exist");
-        assert!(result.valid, "v1-provisioned key must sign verifiable records");
+        assert!(
+            result.valid,
+            "v1-provisioned key must sign verifiable records"
+        );
 
         unsafe { std::env::remove_var("GYRE_AGENT_SIGNING_KEY") };
     }

@@ -321,49 +321,44 @@ pub async fn get_verification(
     // API. Unsigned commits (e.g. GYRE_SIGNING_MODE=none) are reported as a
     // neutral node, not a failure; a stored signature that fails to verify
     // fails the overall result.
-    let commit_sig_node = match crate::sigstore::verify_state_commit_signature(
-        &state,
-        &repo_id,
-        &commit_sha,
-    )
-    .await
-    {
-        Ok(Some(result)) => gyre_common::VerificationResult {
-            valid: result.valid,
-            label: "commit_signature".to_string(),
-            message: if result.valid {
-                format!(
-                    "commit signature verified (mode={:?}, signer={}, task={}, spawned_by={})",
-                    result.sigstore_mode, result.signer_id, result.task_id, result.spawned_by
-                )
-            } else {
-                format!(
-                    "commit signature verification FAILED (mode={:?}): {}",
-                    result.sigstore_mode,
-                    result.reason.as_deref().unwrap_or("unknown reason")
-                )
+    let commit_sig_node =
+        match crate::sigstore::verify_state_commit_signature(&state, &repo_id, &commit_sha).await {
+            Ok(Some(result)) => gyre_common::VerificationResult {
+                valid: result.valid,
+                label: "commit_signature".to_string(),
+                message: if result.valid {
+                    format!(
+                        "commit signature verified (mode={:?}, signer={}, task={}, spawned_by={})",
+                        result.sigstore_mode, result.signer_id, result.task_id, result.spawned_by
+                    )
+                } else {
+                    format!(
+                        "commit signature verification FAILED (mode={:?}): {}",
+                        result.sigstore_mode,
+                        result.reason.as_deref().unwrap_or("unknown reason")
+                    )
+                },
+                children: vec![],
             },
-            children: vec![],
-        },
-        Ok(None) => gyre_common::VerificationResult {
-            valid: true,
-            label: "commit_signature".to_string(),
-            message: "no commit signature record for this commit (unsigned)".to_string(),
-            children: vec![],
-        },
-        Err(e) => gyre_common::VerificationResult {
-            valid: false,
-            label: "commit_signature".to_string(),
-            message: format!("commit signature lookup failed: {e}"),
-            children: vec![],
-        },
-    };
+            Ok(None) => gyre_common::VerificationResult {
+                valid: true,
+                label: "commit_signature".to_string(),
+                message: "no commit signature record for this commit (unsigned)".to_string(),
+                children: vec![],
+            },
+            Err(e) => gyre_common::VerificationResult {
+                valid: false,
+                label: "commit_signature".to_string(),
+                message: format!("commit signature lookup failed: {e}"),
+                children: vec![],
+            },
+        };
 
     // Combine Phase 1 (chain structure), Phase 4 (constraint evaluation),
     // Phase 5 (output signatures), and Phase 6 (commit signature) into the
     // overall verification result.
     let overall_valid = chain_result.valid
-        && constraint_result.as_ref().map_or(true, |r| r.valid)
+        && constraint_result.as_ref().is_none_or(|r| r.valid)
         && output_sig_result.valid
         && commit_sig_node.valid;
     let overall_message = if overall_valid {

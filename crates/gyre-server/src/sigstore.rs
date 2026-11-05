@@ -223,6 +223,7 @@ pub struct FulcioSignedCommit {
 /// Fulcio/Rekor contract so assertions exercise real wire-format
 /// compatibility instead of a self-confirming mock (review F1/F7).
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait SigningHttpTransport: Send + Sync {
     /// POST `{fulcio}/api/v2/signingCert` with the JSON body; return the
     /// JSON response text.
@@ -585,11 +586,7 @@ impl SignatureVerificationResult {
     /// signature cannot be checked against the sign-time key, which is
     /// reported honestly as unverifiable-by-rotation rather than as a
     /// tamper failure.
-    pub fn local_mode(
-        record: &CommitSignature,
-        active_kid: &str,
-        signature_valid: bool,
-    ) -> Self {
+    pub fn local_mode(record: &CommitSignature, active_kid: &str, signature_valid: bool) -> Self {
         let (valid, reason) = if record.signing_key_id != active_kid {
             (
                 false,
@@ -1064,6 +1061,59 @@ pub fn production_transport(client: reqwest::Client) -> Box<dyn SigningHttpTrans
         client,
         timeout: Duration::from_secs(crate::commit_signatures::SIGNING_HTTP_TIMEOUT_SECS),
     })
+}
+
+/// Verify a stored `(repo_id, commit_sha)` signature record against the
+/// state's configured trust anchors. Shared by the signature-verification
+/// endpoint and the provenance chain API (task-107 F6).
+///
+/// Returns `Ok(None)` when no signature record exists for the commit — the
+/// caller decides whether that is meaningful (e.g. `GYRE_SIGNING_MODE=none`
+/// produces unsigned commits by design).
+pub async fn verify_state_commit_signature(
+    state: &crate::AppState,
+    repo_id: &str,
+    commit_sha: &str,
+) -> Result<Option<SignatureVerificationResult>> {
+    let Some(record) = state
+        .commit_signatures
+        .find(repo_id, commit_sha)
+        .await
+        .context("commit signature lookup failed")?
+    else {
+        return Ok(None);
+    };
+    let result = match record.sigstore_mode {
+        SigstoreMode::Local => {
+            // Real Ed25519 verification against the forge key. The forge key
+            // is persisted across boots (task-107 F12: DB-backed KV or
+            // operator-provisioned GYRE_AGENT_SIGNING_KEY), so the active key
+            // is the sign-time key for every record signed by this
+            // deployment. A kid mismatch means the record predates a key
+            // rotation and is unverifiable rather than tampered.
+            let sig_valid = crate::commit_signatures::verify_commit_signature(
+                &record,
+                &state.agent_signing_key.public_key_bytes,
+            );
+            SignatureVerificationResult::local_mode(
+                &record,
+                &state.agent_signing_key.kid,
+                sig_valid,
+            )
+        }
+        SigstoreMode::Fulcio => {
+            let transport = production_transport(state.http_client.clone());
+            let verified = verify_signature_fulcio(
+                &record,
+                &state.signing_config,
+                transport.as_ref(),
+                std::time::SystemTime::now(),
+            )
+            .await;
+            verified
+        }
+    };
+    Ok(Some(result))
 }
 
 #[cfg(test)]
@@ -1574,7 +1624,10 @@ mod tests {
         .unwrap();
         let rogue_sig = BASE64.encode(
             rogue_ecdsa
-                .sign(&ring::rand::SystemRandom::new(), record.commit_sha.as_bytes())
+                .sign(
+                    &ring::rand::SystemRandom::new(),
+                    record.commit_sha.as_bytes(),
+                )
                 .unwrap()
                 .as_ref(),
         );
@@ -1768,52 +1821,4 @@ mod tests {
         );
         assert!(!result.valid);
     }
-}
-
-/// Verify a stored `(repo_id, commit_sha)` signature record against the
-/// state's configured trust anchors. Shared by the signature-verification
-/// endpoint and the provenance chain API (task-107 F6).
-///
-/// Returns `Ok(None)` when no signature record exists for the commit — the
-/// caller decides whether that is meaningful (e.g. `GYRE_SIGNING_MODE=none`
-/// produces unsigned commits by design).
-pub async fn verify_state_commit_signature(
-    state: &crate::AppState,
-    repo_id: &str,
-    commit_sha: &str,
-) -> Result<Option<SignatureVerificationResult>> {
-    let Some(record) = state
-        .commit_signatures
-        .find(repo_id, commit_sha)
-        .await
-        .context("commit signature lookup failed")?
-    else {
-        return Ok(None);
-    };
-    let result = match record.sigstore_mode {
-        SigstoreMode::Local => {
-            // Real Ed25519 verification against the forge key. The forge key
-            // is persisted across boots (task-107 F12: DB-backed KV or
-            // operator-provisioned GYRE_AGENT_SIGNING_KEY), so the active key
-            // is the sign-time key for every record signed by this
-            // deployment. A kid mismatch means the record predates a key
-            // rotation and is unverifiable rather than tampered.
-            let sig_valid = crate::commit_signatures::verify_commit_signature(
-                &record,
-                &state.agent_signing_key.public_key_bytes,
-            );
-            SignatureVerificationResult::local_mode(&record, &state.agent_signing_key.kid, sig_valid)
-        }
-        SigstoreMode::Fulcio => {
-            let transport = production_transport(state.http_client.clone());
-            verify_signature_fulcio(
-                &record,
-                &state.signing_config,
-                transport.as_ref(),
-                std::time::SystemTime::now(),
-            )
-            .await
-        }
-    };
-    Ok(Some(result))
 }

@@ -4398,17 +4398,16 @@ pub struct MemCommitSignatureRepository {
 }
 
 #[async_trait]
-impl gyre_ports::commit_signature_repo::CommitSignatureRepository
-    for MemCommitSignatureRepository
-{
+impl gyre_ports::commit_signature_repo::CommitSignatureRepository for MemCommitSignatureRepository {
     async fn save(
         &self,
         record: &gyre_ports::commit_signature_repo::CommitSignature,
     ) -> Result<()> {
         let mut store = self.store.lock().await;
-        match store.iter_mut().find(|r| {
-            r.repo_id == record.repo_id && r.commit_sha == record.commit_sha
-        }) {
+        match store
+            .iter_mut()
+            .find(|r| r.repo_id == record.repo_id && r.commit_sha == record.commit_sha)
+        {
             Some(existing) => *existing = record.clone(),
             None => store.push(record.clone()),
         }

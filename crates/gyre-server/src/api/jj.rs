@@ -640,8 +640,8 @@ mod tests {
             .unwrap();
         assert_eq!(ver_resp.status(), StatusCode::OK);
         let ver_json = body_json(ver_resp).await;
-        assert_eq!(ver_json["valid"].as_bool().unwrap(), true);
-        assert_eq!(ver_json["signature_valid"].as_bool().unwrap(), true);
+        assert!(ver_json["valid"].as_bool().unwrap());
+        assert!(ver_json["signature_valid"].as_bool().unwrap());
         assert_eq!(ver_json["signer_id"].as_str().unwrap(), "agent-fallback");
         assert_eq!(ver_json["task_id"].as_str().unwrap(), "task-77");
         assert_eq!(ver_json["spawned_by"].as_str().unwrap(), "user-fallback");

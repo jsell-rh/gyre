@@ -76,14 +76,11 @@ pub struct CommitSignature {
 /// Records are keyed by `(repo_id, commit_sha)`; a lookup through repo A never
 /// returns a record stored for repo B.
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait CommitSignatureRepository: Send + Sync {
     /// Store (upsert) a signature record.
     async fn save(&self, signature: &CommitSignature) -> Result<()>;
 
     /// Find the signature record for a commit within a repo.
-    async fn find(
-        &self,
-        repo_id: &str,
-        commit_sha: &str,
-    ) -> Result<Option<CommitSignature>>;
+    async fn find(&self, repo_id: &str, commit_sha: &str) -> Result<Option<CommitSignature>>;
 }
