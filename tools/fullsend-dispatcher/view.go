@@ -757,6 +757,9 @@ func (m Model) listTitle(r Row) string {
 	if m.historyIssue != nil {
 		return "#" + r.Item + "  " + time.Unix(int64(r.Started), 0).Local().Format("Jan 02 15:04:05")
 	}
+	if r.PriorityClass != "" && r.PriorityClass != "normal" {
+		return "[" + r.PriorityClass + "] " + title(r)
+	}
 	return title(r)
 }
 func (m Model) firstColumn() string {
@@ -869,6 +872,11 @@ func (m Model) detailContent(rows []Row, w int) ([]string, []string) {
 			body = append(body, m.style("Last attempt", "8", true))
 			message := strings.TrimSuffix(r.Error, "; see "+r.Log)
 			body = append(body, m.wrapped(message, w, "1")...)
+			body = append(body, "")
+		}
+		if r.PriorityClass != "" {
+			body = append(body, m.style("Scheduling priority", "8", true))
+			body = append(body, m.wrapped(fmt.Sprintf("%s · value %d · effective %d · non-preempting", r.PriorityClass, r.PriorityValue, r.EffectivePriority), w, "7")...)
 			body = append(body, "")
 		}
 		body = append(body, m.style("Log files", "8", true))
