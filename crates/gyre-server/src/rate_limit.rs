@@ -114,15 +114,21 @@ mod tests {
 
     #[test]
     fn refills_to_full_rate_on_new_second() {
-        // Scripted clock: advances one second between acquires.
-        let tick = AtomicU64::new(1_700_000_000);
-        let rl = RateLimiter::with_clock(1, {
+        // Scripted clock: the test advances the shared tick between acquires,
+        // so the second-boundary refill is exercised deterministically.
+        let tick = Arc::new(AtomicU64::new(1_700_000_000));
+        let clock = {
+            let tick = Arc::clone(&tick);
             Box::new(move || tick.load(Ordering::Relaxed))
-        });
+        };
+        let rl = RateLimiter::with_clock(1, clock);
         // Rate of 1: first acquire in the current second succeeds.
         assert!(rl.try_acquire());
         // Same second: bucket is empty.
-        assert!(!rl.try_acquire(), "second acquire in the same second must be rejected");
+        assert!(
+            !rl.try_acquire(),
+            "second acquire in the same second must be rejected"
+        );
         // New second: bucket refills to the full rate.
         tick.store(1_700_000_001, Ordering::Relaxed);
         assert!(rl.try_acquire(), "new second must refill the bucket");
