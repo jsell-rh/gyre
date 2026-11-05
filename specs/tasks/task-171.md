@@ -9,7 +9,7 @@ coverage_sections:
   - "ui-layout.md §Available Data"
   - "ui-layout.md §Output Format"
   - "ui-layout.md §Constraints"
-commits: ["ed457c45c87bc569a6aabcfd2e1b11d26b33abfa", "8c5468225eda8d28476bb8ff824a23c2c52de23b", "8da4333aaf3c17fd0d8e5068815efc647a16559f", "932ef894d0dfbfd7952d2a2c9babbe9857e13ebd", "93d0f4b995f15a0c00878228dfc080ba54b425fa", "daf00443522544ff1c56bed4ae092fadcd6a8f0b", "046663dbd9f4dc1f45fbbfb792cecdbf2b54f026", "8259c9413c9862d0a49bc6e920a63fadea24d3ba", "dd322e125c3fff0a964387467ee90d8059ea1ce3", "c2d61905b9eebd2bedee4664cf34f3b261d1f0c3", "cd206b555cbf5053060b92c862b3824241e2d011", "4489f0f44e7375d8ce2c0f5fe7e84f6a24636796", "33ead7c1309bfef123974a7135c189931c1d3b31", "f7bf82e9dd77b992d2138e95592b2cd6efc58bf1"]
+commits: ["ed457c45c87bc569a6aabcfd2e1b11d26b33abfa", "8c5468225eda8d28476bb8ff824a23c2c52de23b", "8da4333aaf3c17fd0d8e5068815efc647a16559f", "932ef894d0dfbfd7952d2a2c9babbe9857e13ebd", "93d0f4b995f15a0c00878228dfc080ba54b425fa", "daf00443522544ff1c56bed4ae092fadcd6a8f0b", "046663dbd9f4dc1f45fbbfb792cecdbf2b54f026", "8259c9413c9862d0a49bc6e920a63fadea24d3ba", "dd322e125c3fff0a964387467ee90d8059ea1ce3", "c2d61905b9eebd2bedee4664cf34f3b261d1f0c3", "cd206b555cbf5053060b92c862b3824241e2d011", "4489f0f44e7375d8ce2c0f5fe7e84f6a24636796", "33ead7c1309bfef123974a7135c189931c1d3b31", "f7bf82e9dd77b992d2138e95592b2cd6efc58bf1", "7fcbf2723c67e4ee7f289965bfa4a1e55f0fc9be"]
 ---
 
 ## Spec Excerpt
@@ -78,7 +78,7 @@ Read `ui-layout.md` §2 "LLM Endpoint Contract" for the full contract. Check exi
 
 ## Shipped
 
-All eight acceptance criteria are implemented in production code across the listed commits (13 implementation commits, test-fix commit `ed457c45`, merge reconciliations `e67f0012`/`d2c12b52`/`509e3b66`). This round is a contract repair: the production fix is preserved unchanged through the executor's merge of the newly assigned base `722179f0`.
+All eight acceptance criteria are implemented in production code across the listed commits (13 implementation commits, test-fix commit `ed457c45`, merge reconciliations `e67f0012`/`d2c12b52`/`509e3b66`, review repair `7fcbf272`). This round repaired the two findings from the independent review of candidate `2cd03cf4`; the endpoint behavior below is unchanged.
 
 ### Behavior
 
@@ -89,13 +89,16 @@ All eight acceptance criteria are implemented in production code across the list
 - **Budget charging**: every LLM call records an `llm_query` cost entry with prompt-template git SHA for audit, enforced in all three handlers plus the `prompts/save` path.
 - **ABAC**: resource mappings for all four routes present in `src/abac_middleware.rs`; cross-workspace repo scope rejected (`validate_repo_scope`), LLM-hallucinated foreign `repo_id` in view specs nulled with fallback.
 
-### This round (contract repair, base merge 509e3b66)
+### This round (review repair, commit `7fcbf272`)
 
-- The executor restored the assigned task document and merged the newly assigned base `722179f0` (task-063). `git diff 7c8a80bc..509e3b66 --stat -- crates/` is empty — the merge brought only `specs/` and `web/` files, so the Rust server tree at HEAD is byte-identical to the prior-round candidate `7c8a80bc`, whose full lib suite passed 1266/0 and was independently reviewed. No production code changed this round.
-- Restored `progress: ready-for-review` and re-added `ed457c45` to the `commits:` frontmatter (dropped by the document restore; required by `check-task-commit-attribution.sh`). The acceptance-criteria checkboxes are left in the assigned unchecked state — completion is recorded here, not by editing the protected contract text.
+Both findings from the review of candidate `2cd03cf4` are repaired:
+
+- **ABAC registry check false positive + invisible FAIL** (`scripts/check-abac-route-registry.sh`): the script's whole-file grep counted the `developer_jwt_can_generate_on_llm_endpoints` test's route fixtures as resolver duplicates, inflating the frozen duplicate count 22 → 27 on every run. The test itself is unchanged — its route patterns must exactly match the resolver's (`resolve()` is an exact string match) for the `generate` action override to be exercised, so the reviewer's alternative remedy was applied: both the coverage scan and the duplicate scan now read only the production region of `abac_middleware.rs` (everything before `#[cfg(test)]`), guarded by a sanity check that the stripped region still contains `RouteResourceMapping`. `FROZEN_DUPLICATE_COUNT` is lowered to the real resolver duplicate count (6). The script's pre-existing exit-code bug (FAIL=1 set but exit 0 — the guard was invisible to pre-commit/CI) is fixed: the flag is now honored. The missing-routes branch also captures its list before the temp files are deleted, so it prints the actual routes instead of nothing.
+- **Dead error-injection mocks / missing SSE error-event coverage** (`api/{graph,specs_assist,explorer_views}.rs`): `MockLlmAdapter::failing()` and `stream_error_after()` are now wired into five handler tests — `briefing/ask` and `specs/assist` for both LLM connection failure and mid-stream failure, `explorer-views/generate` for connection failure (it uses `predict_json`, which has no mid-stream mode). Each asserts 200 + `text/event-stream`, exactly one `event: error`, zero `complete` events, and the failure cause in the error payload. Mutation-verified as killing tests: reintroducing the old `filter_map(|r| r.ok())` silent-drop in both handlers fails both mid-stream tests.
 
 ### Test evidence
 
-- Mechanical checks re-run green on the merged HEAD (exit 0, logs in `/tmp/stage/review-evidence/`): `check-abac-route-registry.sh`, `check-arch.sh`, `check-task-commit-attribution.sh`, `check-in-memory-state-stores.sh`.
-- Full lib suite on the byte-identical Rust tree (prior round, `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib`): **1266 passed, 0 failed**, including all task-171 modules (`api::explorer_views`, `api::specs_assist`, `api::graph`, `llm_rate_limit`, `llm_helpers`, `api::llm_prompts`, `api::llm_config`).
-- Fresh focused run on the merged HEAD this round (`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib -- api::explorer_views api::specs_assist api::graph llm_rate_limit llm_helpers api::llm_prompts api::llm_config`): **91 passed, 0 failed** (1175 filtered out), including the SSE-streaming, rate-limit (10 req/min + eviction), prompt-template (git-tree load, `{{...}}` substitution, DB override), `llm_query` budget-charging, and `prompts/save` commit-SHA tests. Log: `/tmp/stage/review-evidence/task171-focused-tests-r3.log`. The first launch of this run stalled on a CPU-starved host (load average ≈ 20, test-binary link progressing ~1 CPU-second per 10 minutes wall); after the sandbox freed up, the rerun compiled and linked in 4m40s — recorded as transient infrastructure contention, not a code defect.
+- `./scripts/check-abac-route-registry.sh` on HEAD: OK, exit 0; guard proven live — a synthetic duplicate resolver entry trips `FAIL: 7 duplicate path entries (baseline: 6)` with exit 1, reverted after the probe. Sibling checks re-run green: `check-abac-exempt-handlers.sh`, `check-api-auth.sh`, `check-abac-context-parity.sh`.
+- New tests: 5/5 passed (`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib --` the five new test names). Mutation probe (silent-drop reintroduced in `graph.rs` + `specs_assist.rs`): both mid-stream tests FAILED, reverted, 5/5 pass again.
+- Focused task-171 suite on HEAD: **96 passed, 0 failed** (1181 filtered out) — covers SSE streaming, rate limiting, prompt templates, budget charging, `prompts/save`, plus the five new error-event tests. `gyre-adapters` mock tests: 8/8 passed; no dead-code warnings.
+- Logs retained in `/tmp/stage/review-evidence/` (task171-review-repair-*).
