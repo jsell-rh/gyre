@@ -3,7 +3,7 @@
  *
  * Covers:
  *   - Renders without throwing
- *   - 6 inner tabs (General, Gates, Policies, Budget, Audit, Danger Zone)
+ *   - 9 inner tabs (General, Gates, Policies, Budget, Dependencies, Release, Secrets, Audit, Danger Zone)
  *   - General tab: repo name display-only, editable fields, save button
  *   - Gates tab: loads api.repoGates, shows gate cards
  *   - Policies tab: loads api.repoSpecPolicy, renders toggles
@@ -27,6 +27,10 @@ vi.mock('../lib/api.js', () => ({
     setRepoSpecPolicy: vi.fn().mockResolvedValue({}),
     archiveRepo: vi.fn().mockResolvedValue({}),
     deleteRepo: vi.fn().mockResolvedValue({}),
+    secretsList: vi.fn().mockResolvedValue([]),
+    secretCreate: vi.fn().mockResolvedValue({}),
+    secretDelete: vi.fn().mockResolvedValue(null),
+    secretRotate: vi.fn().mockResolvedValue({}),
   },
   setAuthToken: vi.fn(),
 }));
@@ -67,10 +71,10 @@ describe('RepoSettings', () => {
     expect(tablist.getAttribute('aria-label')).toBe('Repo settings sections');
   });
 
-  it('renders all 8 inner tabs', () => {
+  it('renders all 9 inner tabs', () => {
     const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
     const tabs = container.querySelectorAll('[role="tab"]');
-    expect(tabs.length).toBe(8);
+    expect(tabs.length).toBe(9);
     const labels = Array.from(tabs).map(t => t.textContent.trim());
     expect(labels).toContain('General');
     expect(labels).toContain('Gates');
@@ -78,8 +82,18 @@ describe('RepoSettings', () => {
     expect(labels).toContain('Budget');
     expect(labels).toContain('Dependencies');
     expect(labels).toContain('Release');
+    expect(labels).toContain('Secrets');
     expect(labels).toContain('Audit');
     expect(labels).toContain('Danger Zone');
+  });
+
+  it('Secrets tab loads the repo-scoped secrets panel', async () => {
+    const { container } = render(RepoSettings, { props: { workspace: mockWorkspace, repo: mockRepo } });
+    await fireEvent.click(container.querySelector('#repo-stab-secrets'));
+    const panel = container.querySelector('[data-testid="secrets-panel"]');
+    expect(panel).toBeTruthy();
+    expect(panel.getAttribute('data-scope')).toBe('repo');
+    expect(api.secretsList).toHaveBeenCalledWith('repo', 'repo-1');
   });
 
   it('General tab is active by default', () => {

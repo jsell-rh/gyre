@@ -505,6 +505,22 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register secret expiry check job (every 5 minutes, platform-model.md §7)
+    registry
+        .register(
+            JobDefinition {
+                name: "secret_rotation_check".to_string(),
+                description: "Creates SecretExpiring notifications for workspace admins \
+                             when secrets expire within 1 hour (platform-model.md §7)"
+                    .to_string(),
+                interval_secs: 300,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::secret_rotation::run_once(&state).await },
+        )
+        .await;
+
     // Schedulers are NOT spawned here — existing background tasks in main.rs handle
     // periodic execution. Handlers registered above enable on-demand triggering and
     // status tracking via POST /admin/jobs/{name}/run and GET /admin/jobs.

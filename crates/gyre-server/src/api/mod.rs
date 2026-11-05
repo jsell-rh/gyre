@@ -44,6 +44,7 @@ pub mod repos;
 pub mod saved_views;
 pub mod scim;
 pub mod search;
+pub mod secrets;
 pub mod spawn;
 pub mod spec_assertions;
 pub mod spec_policy;
@@ -712,6 +713,16 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:workspace_id/presence",
             get(workspaces::get_workspace_presence),
+        )
+        // Secrets Admin API (platform-model.md §7, task-098) — Admin only.
+        .route(
+            "/api/v1/secrets",
+            post(secrets::create_secret).get(secrets::list_secrets),
+        )
+        .route("/api/v1/secrets/:id", delete(secrets::delete_secret))
+        .route(
+            "/api/v1/secrets/:id/rotate",
+            post(secrets::rotate_secret),
         )
         // LLM prompt templates (Slice 2)
         .route(
