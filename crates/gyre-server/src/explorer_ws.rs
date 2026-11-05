@@ -853,9 +853,7 @@ async fn handle_explorer_session(
                         message: "Please wait before sending another message.".to_string(),
                     };
                     let _ = sender
-                        .send(Message::Text(
-                            serialize_msg(&err).unwrap_or_default().into(),
-                        ))
+                        .send(Message::Text(serialize_msg(&err).unwrap_or_default()))
                         .await;
                 }
 
