@@ -51,3 +51,15 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 33 — attribution clobber #32 at candidate `3f7e3132`
+
+Assigned base `ba5ebe10` (task-064), candidate `3f7e3132`. Probes run fresh at the candidate; evidence in `/tmp/stage/review-evidence/task-208-round33-review.txt`.
+
+**Finding (process, same class as clobbers 2–32):** the tip commit `3f7e3132` ("process: record task-208 branch commits") has exactly one change (`git diff 138b8f2e 3f7e3132`) — it rewrites `commits:` from the four-SHA list restored by the round-32 repair at parent `138b8f2e` back to `["a11cbf7e", "98fd096e"]`, dropping `ad1121c5` (the F1 dist regen that removed the HSI-§12-forbidden my-stuff surface from the shipped `SKIP_WEB_BUILD=1` artifact) and `ea006d52` (`.gitattributes` whitespace-gate exemption). Both are verified ancestors of the candidate (`git merge-base --is-ancestor` exit 0), so content is intact — only review scoping is damaged: an unlisted commit is invisible to the verifier. `scripts/check-task-commit-attribution.sh` exits 0 because its product-surface regex excludes `web/dist/`-only and root-`.gitattributes`-only commits — the documented blind spot shared with the checkpoint attribution pass (`dev-attribution.py`). Repair is mechanical, product untouched: restore the four-SHA list at a new tip.
+
+**Product surfaces re-verified green at this exact candidate:** dead-code grep over `crates/` + `web/src/` → zero; routes and ABAC registrations for `/api/v1/users/me/{agents,tasks,mrs}` absent; regression test `my_stuff_endpoints_are_removed` present (`users.rs:948`) and source-inspected genuine; remaining `users/me/*` endpoints keep the per-handler-auth ABAC-exempt model; `UserProfile.svelte` renders exactly the six permitted tabs; committed dist (`index-CT5URoV_.js`) clean of forbidden identifiers with kept-surface identifiers present; spec amendment and coverage rows 22/23 (user-management) + row 54 (HSI) intact; zero product drift across `users.rs`, `api/mod.rs`, `abac_middleware.rs`, `api.js`, `UserProfile.svelte`, `UserProfile.test.js`, and the amended specs since the round-32-verified merge `c76ec97c`. Frontend: fresh `npm ci`, `UserProfile.test.js` 23/23, full `npm test` 1645 passed | 41 skipped. Rust test execution is transport-blocked in this sandbox (index.crates.io connection refused, no registry cache) — the verifier must run `cargo test -p gyre-server my_stuff_endpoints_are_removed` and `cargo test --all`.
+
+**Residual for the process owner (32nd occurrence):** the checkpoint attribution pass (`dev-attribution.py` path filter) re-clobbers the `web/dist/`/`.gitattributes` commits at every checkpoint; the in-repo gate shares the blind spot. The fix belongs in the gate's product-surface regex, not in per-round mechanical repairs.
+
+Verdict: **needs-revision** (metadata repair only; product approved as-is).
