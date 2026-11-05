@@ -113,3 +113,99 @@
 - **Test assertions on the mock stack** — the five task-107 tests and the mock (`spawn_mock_signing_stack`) were re-read in full: the mock's single-chain trustBundle and body-discarding rekor_post remain the test-side enablers of F11 and F4 respectively; the JWT-payload decode without signature verification remains subsumed by F7. No new gaps beyond the recorded findings.
 
 **Verdict: needs-revision** (unchanged). The implementation cannot issue a certificate from any real Fulcio instance (F1), does not bind the task/user attribution the spec's Layer 3 sentence requires (F2), and its verification path is subvertible (F3, F4, F5, F11), non-durable (F9), unregistered with ABAC (F8), un-integrated with the provenance API (F6), unbounded in external-call latency (F10), and negatively tested only on one of four verification legs (F7).
+## R9 — 2026-11-05 (candidate `e428686f`, base `5df14f34`)
+
+**Status:** the F1–F18 line is genuinely closed on this candidate: issuance sends PEM
+`publicKey.content` and a body-field OIDC JWT (both verified against upstream
+`fulcio.proto`/`grpc_server.go` fetched this round), the response chain decodes PEM
+strings, Rekor hashedrekord matches the upstream v0.0.1 schema exactly, the leaf is
+bound to the stored chain (round-6 attack now fails closed with a dedicated negative
+test), the forge key persists across boots (KV store + `GYRE_AGENT_SIGNING_KEY`,
+restart test), attribution comes from validated JWT claims, records survive restarts
+via the `CommitSignatureRepository` port with SQLite/PostgreSQL/mem adapters, all
+outbound calls are timeout-bounded, ABAC registers the verification route, and the
+F15/F16/F17 fmt/clippy/exemption regressions are fixed: `check-rustfmt-diff.py
+5df14f34` exits 0 and a per-target replication of `check-clippy-diff.py 5df14f34`
+(`--lib`/`--bins`/`--tests` legs for all three changed packages; the sandbox wrapper
+rejects `--all-targets`) shows 0 clippy warnings on candidate-changed lines. All 22
+mechanical gates exit 0 on the exact head; focused suites pass (sigstore 16/16,
+commit_signatures 6/6, api::jj 14/14, api::provenance 5/5, task107_signing_key_env
+1/1, task107_signing_key_persistence 1/1, task107_upstream_conformance 3/3, adapters
+5/5). **One new blocking finding** from upstream wire verification; live Fulcio
+interop remains network-blocked in-sandbox.
+
+**Verification performed this round:** read the full diff base..candidate (26 Rust
+files, ~4400 insertions) including `sigstore.rs` (1824 lines), `commit_signatures.rs`,
+`lib.rs` key persistence, both kv_store adapters, both commit_signature adapters, the
+migration (portable SQL, next unused version 000056), `api/jj.rs` sign/verify handlers,
+`api/provenance.rs` Phase 6, `mem.rs`, `auth.rs`; ran the gate sweep and focused suites
+above; fetched upstream ground truth over the GitHub API (network to
+fulcio.sigstore.dev is blocked): `fulcio.proto`, `pkg/server/grpc_server.go`,
+`cmd/app/http.go` (sigstore/fulcio), `pkg/signature/ecdsa.go` (sigstore/sigstore),
+`runtime/marshaler_registry.go` (grpc-gateway), `sigstore/_internal/fulcio/client.py`
+(sigstore-python), `pkg/types/hashedrekord/v0.0.1/hashedrekord_v0_0_1_schema.json`
+(sigstore/rekor) — all retained under `/tmp/stage/review-evidence/`; ran a new probe
+(`r9-upstream-bundle-probe-source.rs`, output `r9-upstream-bundle-probe.txt`) driving
+the production sign/verify paths against a trust bundle encoded exactly as upstream
+serves it.
+
+- [-] **F19 (blocking, verification can never succeed against a real Fulcio): the
+  trust-bundle response is deserialized with the wrong shape — `chains:
+  Vec<Vec<String>>` (list-of-lists) — but upstream Fulcio v2 `GET /api/v2/trustBundle`
+  returns the protojson of `message TrustBundle { repeated CertificateChain chains = 1;
+  }`, i.e. `{"chains": [{"certificates": ["<PEM>", ...]}]}` — each chain is an OBJECT
+  carrying a `certificates` array.** Confirmed from three independent upstream sources
+  fetched this round: `fulcio.proto` (`TrustBundle.chains` is
+  `repeated CertificateChain`; `CertificateChain { repeated string certificates = 1; }`),
+  `grpc_server.go` `GetTrustBundle()` (builds `[]*CertificateChain` message objects),
+  and sigstore-python's working REST client (iterates
+  `trust_bundle_json["chains"][i]["certificates"]`). Serde cannot deserialize the chain
+  object as `Vec<String>`, so `fetch_trust_bundle` errors and `verify_signature_fulcio`
+  returns early — every real deployment returns `valid:false, "cannot fetch Fulcio
+  trust bundle: fulcio trust bundle response invalid"` for EVERY Fulcio-mode record,
+  and provenance Phase 6 then fails the entire chain verification for every
+  fulcio-mode commit (false integrity alarm on every legitimate commit). Acceptance
+  criterion "Verification endpoint checks certificate chain and Rekor entry" is unmet
+  against real instances. Both the in-module mock (`MockSigningStack::trust_bundle_json`)
+  and the "independent" conformance probe (`UpstreamFulcio::trust_bundle_json` in
+  `tests/task107_upstream_conformance.rs`) serve the same wrong list-of-lists shape
+  (`{"chains": [[pem]]}`), so all 19 tests pass while production verification is
+  broken — the F1/F7 self-confirming-mock failure class, in the probe that claims
+  independence from it. Reproduced on the exact head: probe
+  `production_verification_against_upstream_trust_bundle_shape` fails with
+  "cannot fetch Fulcio trust bundle: fulcio trust bundle response invalid"
+  (`/tmp/stage/review-evidence/r9-upstream-bundle-probe.txt`; the probe's
+  signing leg succeeds, isolating the defect to the trust-bundle decode). Fix:
+  deserialize each chain as a `struct { certificates: Vec<String> }` (optionally
+  also tolerating the bare-array shape), switch the mock and the conformance probe
+  to the upstream object shape, and re-run the probe — it must pass. Post-fix live
+  check for the verifier: `curl -s https://fulcio.sigstore.dev/api/v2/trustBundle |
+  jq '.chains[0]'` must show an object with a `certificates` array of PEM strings.
+
+**Areas examined and cleared this round (recorded so future rounds don't re-litigate):**
+
+- **`"algorithm": "ecdsa"` is not the canonical protojson enum name (`ECDSA`)** —
+  harmless: grpc-gateway's default marshaler (fulcio `cmd/app/http.go` uses
+  `runtime.NewServeMux` with no override) runs protojson with `DiscardUnknown: true`,
+  which silently drops unrecognized enum names, and `fulcio.proto` documents the field
+  as "currently ignored; the algorithm is inferred from the public key when it is
+  parsed". Recommend `"ECDSA"` (or omitting the field) in a future touch; no
+  production impact.
+- **PoP signature encoding (base64 DER ECDSA over the JWT `sub`)** — correct:
+  protojson `bytes` fields are base64 strings; fulcio reads the OIDC token from the
+  request body's `credentials.oidcIdentityToken` before gRPC metadata (so no
+  Authorization header is required); sigstore's ECDSA verifier (used by fulcio's
+  challenge check) accepts both ASN.1 DER and P1363 encodings; the challenge preimage
+  is `principal.Name(ctx)`, which for username/uri/spiffe issuer types is the token's
+  `sub` claim.
+- **Rekor wire contract** — request and GET-response handling match the upstream
+  hashedrekord v0.0.1 JSON schema and the entries-API envelope exactly
+  (lowercase-hex sha256 `data.hash.value`, base64 `signature.content`, base64
+  `signature.publicKey.content`, UUID-keyed response map with base64 `body`).
+- **F12 restart persistence, F9 adapters, F10 timeouts, F2 attribution, F3/F4/F5/F11
+  verification phases, F8 ABAC, F6 provenance integration** — re-verified on the exact
+  head, all real; `task107_signing_key_persistence` exercises two genuine
+  `build_state` boots over one SQLite file.
+
+**Verdict: needs-revision** (F19). Deferred to exact-head CI: workspace-wide
+`cargo test --all` and live Fulcio interop.
