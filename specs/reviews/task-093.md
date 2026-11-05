@@ -82,3 +82,21 @@ What this round checked and found:
 No material gap remains. Round 2's ten findings stay resolved; the integration-blocking formatting defect is repaired with no behavioral change.
 
 — Verifier, 2026-10-09
+
+# Verification-repair review — task-093 (round 5)
+
+Candidate: `525d2d2cd38c869288122612c39d11d83213ae89` (base `59ff5d01`, merged as `0f9e3298`; delta = fix `45d6d869` + two process commits touching only specs/tasks/task-093.md). Verdict: **complete / approved**.
+
+What this round checked:
+
+- **Persona enforcement is real.** `validate_persona` (orchestrator.rs) returns `Result`: store read failures propagate as `Internal`, a missing persona and an unapproved persona each fail the spawn *before* any agent row is persisted; both spawn cores call it with `?`. Two kill-tests (`orchestrator_spawn_fails_without_persona`, `orchestrator_spawn_fails_with_unapproved_persona`) assert `unwrap_err` plus an empty agent store — structurally kill-valid (with the check disabled, the spawn succeeds and `unwrap_err` panics). Both `inert-enforcement-exemptions.txt` entries deleted with the fix, not re-anchored; the check passes green.
+- **Fixtures exercise the deployment path.** Successful-spawn fixtures seed personas via the production `seed_builtin_meta_specs` (same seeder `main.rs` runs at startup); MCP fixtures do the same, so the passing `gyre_spawn_repo_orchestrator` MCP tests prove the enforcement is live on the MCP path as well.
+- **Exemption/registry deltas all honest:** both orchestrator routes resolver-registered (`repo`/`write`, `workspace`/`write`), `FROZEN_EXEMPTION_COUNT` shrunk 53→51, abac-exempt-handlers entries for the two handlers deleted, `gyre_message_send` in the `needs_write` gate with the exemption emptied.
+- **Merge resolution clean:** `web/dist` has zero diff vs base (taken wholesale from main; this branch never touches `web/src`); `.done` (empty stray marker committed at base by a task-082 sandbox) deleted, nothing references it.
+- **Mechanical checks green** (logs in review-evidence): inert-enforcement, ABAC route registry, ABAC exempt-handlers (87), MCP write-tools (7 gated), arch, task-commit attribution — all exit 0.
+- **Focused tests green:** `api::orchestrator` 24/24, `api::spawn` 34/34, `mcp::` 80/80 (exit 0 each). `check-rustfmt-diff.py 59ff5d01` → changed lines clean (5 files).
+- **Clippy:** `cargo clippy -p gyre-server --lib` exits 101 only on `clippy::never_loop` in `gyre-domain/src/rust_extractor.rs:1071` — a file byte-identical to base under this sandbox's newer clippy (1.99); pre-existing, not a candidate defect. With that lint allowed: exit 0 and zero warnings attributable to any changed file.
+
+Deferred to host CI (sandbox limits, not code defects): workspace-wide `cargo test --all` (wrapper forbids workspace-wide probes in review stage; focused suites green) and a live server smoke (no TCP listener per capabilities.json).
+
+— Reviewer, 2026-11-05 (round 5, candidate 525d2d2c)
