@@ -57,3 +57,51 @@ Round-2 verdict: the fix is strictly better than the old gate — removes all fa
 - LLM-synthesized briefing architecture narrative over grounded delta facts (prompt-template + model-config aware, 10s-bounded) with template narratives as the quality floor on every failure mode.
 - Docs: api-reference timeline/briefing rows corrected to the shipped response shapes.
 - Gate repair: template-substitution gate's const-span swallowed the next const's `/// Variables:` doc block (7 false positives on pristine main, pre-commit-only so CI never saw it); fixed by comment-stripping the span, proven non-blinding by planted-bug probes for both true-positive classes.
+
+## Round 7 — attempt-16 review of candidate f3efccbe (this review)
+
+Assigned candidate: `f3efccbe4ac0ce4f981b7105a98fc7447cf73c2e` (branch
+`pipeline/task-152/f25fff906527412ab0519a8360b0e377-16`), base `3c39ab1f`.
+
+**Verdict: not approved — the candidate does not compile.** The checkpoint
+commit `f3efccbe` ("implement(task-152): pipeline checkpoint") is the merge of
+the pipeline branch with the assigned base, and it was committed with **9
+unresolved merge-conflict regions** in production source files:
+
+- `crates/gyre-server/src/explorer_ws.rs` — 6 regions (lines 104, 205, 337, 354, 363, 3006)
+- `crates/gyre-server/src/lib.rs` — 2 regions (lines 239, 908)
+- `crates/gyre-server/src/middleware.rs` — 1 region (line 233)
+
+Both sides of the conflict independently carry an `ExplorerSessionRegistry`
+scoped to `AppState` (the branch's round-6 fix and an equivalent fix landed on
+main via the assigned base), so the merge produced real conflicts that were
+never resolved. Proof (dependency-free, see `/tmp/stage/review-evidence/`):
+
+- `git grep -n '^<<<<<<< ' f3efccbe -- crates` → the 9 regions above (`conflict-marker-probe.txt`).
+- `rustc --edition 2021 --crate-type lib crates/gyre-server/src/{middleware,lib,explorer_ws}.rs` → exit 1, "error: encountered diff marker" in each file (`rustc-parse-*.log`). rustc rejects diff markers as a hard parse error, so no build, test, or endpoint probe can run at this SHA.
+
+Consequence: every acceptance criterion is unverifiable on the assigned
+candidate, and the test-evidence claims in the task's `## Shipped` section were
+produced on earlier trees (`b8c5a8d9`, `180db347`, `f29a4fdc`, ...), never on
+`f3efccbe` itself. A prior interrupted review (attempt 8,
+`/tmp/stage/review-resume.json`) died on the same markers in `lib.rs`
+(`rustfmt-parse-lib-rs.log`); this round revalidated that evidence against the
+exact candidate and extended it to all three files. No prior approval is
+carried forward.
+
+Infrastructure restriction (recorded, not a code finding): crates.io is
+unreachable from this sandbox and the local registry mirror is incomplete (174
+of 399 locked packages missing, incl. tokio, serde_json, axum; prior target
+dirs cleaned), so no `cargo test`/`cargo check` probe of any kind was possible
+(`cargo-check-offline-attempt.log`). The parse-level proof above requires no
+dependencies and is decisive on its own.
+
+The narrative implementation content itself (`narrative.rs` grounding/rendering,
+timeline/briefing wiring, LLM synthesis with template fallback) remains
+substantive on read-through and was approved in rounds 1–2 on the tree where it
+was authored. The repair required here is mechanical: re-do the merge of
+`f3efccbe`'s parents, resolve the 9 conflicts (the two registry variants are
+functionally equivalent — pick one, keep its tests), rebuild, and re-run the
+narrative/briefing/session-registry suites plus the diff gates
+(`check-rustfmt-diff.py`, `check-clippy-diff.py`) against the assigned base on
+the resolved tree before re-submission.
