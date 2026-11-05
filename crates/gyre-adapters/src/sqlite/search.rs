@@ -669,6 +669,176 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn suggest_prefix_matches_titles_case_insensitively() {
+        let (_f, storage) = tmp_storage();
+        storage
+            .index(doc("spec", "s1", "Identity security", "spiffe workload identity"))
+            .await
+            .unwrap();
+        storage
+            .index(doc("task", "t1", "Rotate signing keys", "jwt rotation job"))
+            .await
+            .unwrap();
+        storage
+            .index(doc("task", "t2", "identity provider audit", "oidc audit trail"))
+            .await
+            .unwrap();
+
+        // Case-insensitive prefix on the title: lowercase query, mixed-case titles.
+        let sugg = storage.suggest("iden", 10).await.unwrap();
+        assert_eq!(sugg.len(), 2, "expected both identity-prefixed titles: {sugg:?}");
+        // ORDER BY title: binary collation puts uppercase 'I' before lowercase 'i'.
+        assert_eq!(sugg[0].text, "Identity security");
+        assert_eq!(sugg[0].entity_type, "spec");
+        assert_eq!(sugg[0].entity_id, "s1");
+        assert_eq!(sugg[1].text, "identity provider audit");
+        assert_eq!(sugg[1].entity_id, "t2");
+
+        // A term appearing mid-title is NOT a prefix match — autocomplete must
+        // not degrade to substring search.
+        let mid = storage.suggest("security", 10).await.unwrap();
+        assert!(
+            mid.is_empty(),
+            "mid-title term must not prefix-match: {mid:?}"
+        );
+
+        // Limit truncates.
+        let limited = storage.suggest("iden", 1).await.unwrap();
+        assert_eq!(limited.len(), 1);
+
+        // Trimmed-empty prefix matches every title — must yield nothing.
+        assert!(storage.suggest("", 10).await.unwrap().is_empty());
+        assert!(storage.suggest("   ", 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn suggest_escapes_like_wildcards_in_prefix() {
+        let (_f, storage) = tmp_storage();
+        storage
+            .index(doc("task", "t1", "100% coverage task", "metrics body"))
+            .await
+            .unwrap();
+        // Without ESCAPE, the pattern "100%%" would match this title too
+        // ("%" as wildcard) — the escaped literal must not.
+        storage
+            .index(doc("task", "t2", "100 percent plan", "planning body"))
+            .await
+            .unwrap();
+        // Same kill for "_": unescaped, "a_" matches any "a?" title.
+        storage
+            .index(doc("task", "t3", "a_b literal", "underscore body"))
+            .await
+            .unwrap();
+        storage
+            .index(doc("task", "t4", "axb wildcard", "underscore body"))
+            .await
+            .unwrap();
+
+        let pct = storage.suggest("100%", 10).await.unwrap();
+        assert_eq!(pct.len(), 1, "literal % must not act as wildcard: {pct:?}");
+        assert_eq!(pct[0].entity_id, "t1");
+
+        let und = storage.suggest("a_", 10).await.unwrap();
+        assert_eq!(und.len(), 1, "literal _ must not act as wildcard: {und:?}");
+        assert_eq!(und[0].entity_id, "t3");
+    }
+
+    #[tokio::test]
+    async fn facet_counts_whole_index_and_filtered_match_set() {
+        let (_f, storage) = tmp_storage();
+
+        let mut t1 = doc("task", "t1", "jwt rotation one", "jwt jwt jwt rotation");
+        t1.facets
+            .insert("status".to_string(), "in_progress".to_string());
+        t1.facets
+            .insert("priority".to_string(), "high".to_string());
+        storage.index(t1).await.unwrap();
+
+        let mut t2 = doc("task", "t2", "jwt rotation two", "jwt rotation");
+        t2.facets
+            .insert("status".to_string(), "done".to_string());
+        t2.workspace_id = Some("ws-a".to_string());
+        storage.index(t2).await.unwrap();
+
+        let mut m1 = doc("mr", "m1", "jwt merge", "jwt handling");
+        m1.facets
+            .insert("status".to_string(), "in_progress".to_string());
+        storage.index(m1).await.unwrap();
+
+        // No "jwt" term — never in the filtered match set.
+        storage
+            .index(doc("task", "t3", "dns fix", "dns resolver cache"))
+            .await
+            .unwrap();
+
+        // None: whole-index aggregation.
+        let all = storage.facet_counts(None).await.unwrap();
+        assert_eq!(all["type"]["task"], 3);
+        assert_eq!(all["type"]["mr"], 1);
+        assert_eq!(all["workspace"]["ws-a"], 1);
+        assert_eq!(all["status"]["in_progress"], 2);
+        assert_eq!(all["status"]["done"], 1);
+        assert_eq!(all["priority"]["high"], 1);
+
+        // Some(query): the query's filtered match set. limit=1 must be IGNORED
+        // — facet counts describe the full filtered set, not the result page.
+        let filtered = storage
+            .facet_counts(Some(SearchQuery {
+                query: "jwt".to_string(),
+                entity_type: None,
+                workspace_id: None,
+                limit: 1,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(filtered["type"]["task"], 2);
+        assert_eq!(filtered["type"]["mr"], 1);
+        assert_eq!(filtered["status"]["in_progress"], 2);
+        assert_eq!(filtered["priority"]["high"], 1);
+
+        // entity_type filter restricts the aggregation set.
+        let mr_only = storage
+            .facet_counts(Some(SearchQuery {
+                query: "jwt".to_string(),
+                entity_type: Some("mr".to_string()),
+                workspace_id: None,
+                limit: 10,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(mr_only["type"]["mr"], 1);
+        assert!(
+            !mr_only["type"].contains_key("task"),
+            "entity_type filter must exclude tasks: {mr_only:?}"
+        );
+
+        // workspace_id filter restricts the aggregation set.
+        let ws_only = storage
+            .facet_counts(Some(SearchQuery {
+                query: "jwt".to_string(),
+                entity_type: None,
+                workspace_id: Some("ws-a".to_string()),
+                limit: 10,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(ws_only["type"]["task"], 1);
+        assert_eq!(ws_only["status"]["done"], 1);
+
+        // No matching term at all: empty aggregation, not whole-index.
+        let none = storage
+            .facet_counts(Some(SearchQuery {
+                query: "zzz-nonexistent".to_string(),
+                entity_type: None,
+                workspace_id: None,
+                limit: 10,
+            }))
+            .await
+            .unwrap();
+        assert!(none.is_empty(), "non-matching query must aggregate nothing: {none:?}");
+    }
+
+    #[tokio::test]
     async fn upsert_replaces_and_deletes() {
         let (_f, storage) = tmp_storage();
         storage

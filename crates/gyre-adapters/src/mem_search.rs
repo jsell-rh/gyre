@@ -167,7 +167,8 @@ impl SearchPort for MemSearchAdapter {
         let selected: Vec<&SearchDocument> = match &query {
             None => docs.iter().collect(),
             Some(q) => {
-                let terms: Vec<&str> = q.query.to_lowercase().split_whitespace().collect();
+                let query_lower = q.query.to_lowercase();
+                let terms: Vec<&str> = query_lower.split_whitespace().collect();
                 if terms.is_empty() {
                     return Ok(FacetCounts::new());
                 }
@@ -389,5 +390,128 @@ mod tests {
             .await
             .unwrap();
         assert!(old_results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_suggest_prefix_contract() {
+        // Same port contract as the SQL adapters: case-insensitive prefix on
+        // the title, mid-title terms excluded, limit truncates, empty prefix
+        // yields nothing (mem adapter guards in code — it has no schema).
+        let adapter = MemSearchAdapter::new();
+        adapter
+            .index(make_doc("spec", "s1", "Identity security", "spiffe identity"))
+            .await
+            .unwrap();
+        adapter
+            .index(make_doc("task", "t1", "identity provider audit", "oidc audit"))
+            .await
+            .unwrap();
+        adapter
+            .index(make_doc("task", "t2", "Rotate keys", "jwt rotation"))
+            .await
+            .unwrap();
+
+        let sugg = adapter.suggest("IDEN", 10).await.unwrap();
+        assert_eq!(sugg.len(), 2, "case-insensitive prefix: {sugg:?}");
+        assert_eq!(sugg[0].text, "Identity security");
+        assert_eq!(sugg[0].entity_type, "spec");
+        assert_eq!(sugg[0].entity_id, "s1");
+        assert_eq!(sugg[1].text, "identity provider audit");
+
+        // Mid-title term: not a prefix.
+        let mid = adapter.suggest("security", 10).await.unwrap();
+        assert!(mid.is_empty(), "mid-title term must not match: {mid:?}");
+
+        // Limit truncates.
+        assert_eq!(adapter.suggest("iden", 1).await.unwrap().len(), 1);
+
+        // Empty / whitespace-only prefix: no suggestions.
+        assert!(adapter.suggest("", 10).await.unwrap().is_empty());
+        assert!(adapter.suggest("   ", 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_facet_counts_contract() {
+        // Same port contract as the SQL adapters: None aggregates the whole
+        // index, Some(q) aggregates q's filtered match set (terms + filters,
+        // limit ignored).
+        let adapter = MemSearchAdapter::new();
+
+        let mut t1 = make_doc("task", "t1", "jwt one", "jwt jwt jwt rotation");
+        t1.facets.insert("status".to_string(), "in_progress".to_string());
+        adapter.index(t1).await.unwrap();
+
+        let mut t2 = make_doc("task", "t2", "jwt two", "jwt rotation");
+        t2.facets.insert("status".to_string(), "done".to_string());
+        t2.workspace_id = Some("ws-a".to_string());
+        adapter.index(t2).await.unwrap();
+
+        let mut m1 = make_doc("mr", "m1", "jwt merge", "jwt handling");
+        m1.facets.insert("status".to_string(), "in_progress".to_string());
+        adapter.index(m1).await.unwrap();
+
+        adapter
+            .index(make_doc("task", "t3", "dns fix", "dns resolver"))
+            .await
+            .unwrap();
+
+        let all = adapter.facet_counts(None).await.unwrap();
+        assert_eq!(all["type"]["task"], 3);
+        assert_eq!(all["type"]["mr"], 1);
+        assert_eq!(all["workspace"]["ws-a"], 1);
+        assert_eq!(all["status"]["in_progress"], 2);
+        assert_eq!(all["status"]["done"], 1);
+
+        // limit=1 must be ignored — counts describe the full filtered set.
+        let filtered = adapter
+            .facet_counts(Some(SearchQuery {
+                query: "jwt".to_string(),
+                entity_type: None,
+                workspace_id: None,
+                limit: 1,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(filtered["type"]["task"], 2);
+        assert_eq!(filtered["type"]["mr"], 1);
+        assert_eq!(filtered["status"]["in_progress"], 2);
+
+        // entity_type filter restricts the aggregation.
+        let mr_only = adapter
+            .facet_counts(Some(SearchQuery {
+                query: "jwt".to_string(),
+                entity_type: Some("mr".to_string()),
+                workspace_id: None,
+                limit: 10,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(mr_only["type"]["mr"], 1);
+        assert!(!mr_only["type"].contains_key("task"));
+
+        // workspace filter restricts the aggregation.
+        let ws_only = adapter
+            .facet_counts(Some(SearchQuery {
+                query: "jwt".to_string(),
+                entity_type: None,
+                workspace_id: Some("ws-a".to_string()),
+                limit: 10,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(ws_only["type"]["task"], 1);
+        assert_eq!(ws_only["status"]["done"], 1);
+
+        // Non-matching query aggregates nothing.
+        let none = adapter
+            .facet_counts(Some(SearchQuery {
+                query: "zzz-nonexistent".to_string(),
+                entity_type: None,
+                workspace_id: None,
+                limit: 10,
+            }))
+            .await
+            .unwrap();
+        assert!(none.is_empty());
     }
 }

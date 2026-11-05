@@ -249,8 +249,10 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/workspaces/{id}/budget` | Current `BudgetConfig` (limits) + `BudgetUsage` (real-time snapshot) for a project-scoped workspace; `id` is the project UUID (M22.2) |
 | `PUT` | `/api/v1/workspaces/{id}/budget` | Set workspace budget limits: `{max_tokens_per_day?, max_cost_per_day?, max_concurrent_agents?, max_agent_lifetime_secs?}`; returns 400 if any limit exceeds the tenant ceiling (cascade validation); **Admin only** (M22.2) |
 | `GET` | `/api/v1/budget/summary` | Tenant-wide `BudgetConfig` + `BudgetUsage` plus per-workspace breakdown; **Admin only** (M22.2) |
-| `GET` | `/api/v1/search` | Full-text search (`?q=&entity_type=&workspace_id=&limit=20`); results: `[{entity_type, id, title, snippet, score}]` (M22.7) |
-| `POST` | `/api/v1/search/reindex` | Trigger full entity reindex; **Admin only** (H-14, M22.7) |
+| `GET` | `/api/v1/search` | Full-text search (`?q=&entity_type=&workspace_id=&limit=20`); response: `{query, total, results: [{entity_type, entity_id, title, snippet, score, facets}], facet_counts}` where `facet_counts` aggregates `type`/`workspace` plus document facets over the filtered match set (M22.7, task-153) |
+| `GET` | `/api/v1/search/suggest` | Autocomplete suggestions (`?q={prefix}&limit=10`, max 50); case-insensitive prefix match on titles; response: `{suggestions: [{text, entity_type, entity_id}]}`; empty prefix returns an empty list (task-153) |
+| `GET` | `/api/v1/search/facets` | Available facets and their value counts over the whole index; response: `{facets: {type: {...}, workspace: {...}, status: {...}}}` (task-153) |
+| `POST` | `/api/v1/search/reindex` | Trigger full entity reindex; **Admin only** (H-14, M22.7; route lives at `/api/v1/admin/search/reindex`) |
 | `POST/GET` | `/api/v1/policies` | Create / list declarative ABAC policies; 8 operators (Equals, NotEquals, In, NotIn, GreaterThan, LessThan, Contains, Exists); first-match-wins; default-deny (M22.6) |
 | `GET/PUT/DELETE` | `/api/v1/policies/{id}` | Read / update / delete policy (M22.6) |
 | `POST` | `/api/v1/policies/evaluate` | Dry-run evaluation: `{context}` -> `{decision: Allow|Deny, matched_policy?, reason}` (M22.6) |

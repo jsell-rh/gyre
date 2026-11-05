@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// A document to be indexed for search.
@@ -39,7 +40,7 @@ pub struct SearchResult {
 }
 
 /// A single autocomplete suggestion (spec §API: `GET /search/suggest`).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchSuggestion {
     /// The matched title text to offer in the autocomplete dropdown.
     pub text: String,
