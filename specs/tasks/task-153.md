@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "search.md §API"
   - "search.md §Response Format"
-commits: ["60493e2757358bd1012d709fbe4ced4cbf6e8dc6", "2750325700f93b1cd1aa5c43890ebb92e84bc469", "774499be5a1b4438739e0733f2e6b333141bd803"]
+commits: ["60493e2757358bd1012d709fbe4ced4cbf6e8dc6", "2750325700f93b1cd1aa5c43890ebb92e84bc469", "774499be5a1b4438739e0733f2e6b333141bd803", "6da69d14fd64403a89ece7fcc2b2ce5bbbaaac33"]
 ---
 
 ## Spec Excerpt
@@ -134,7 +134,7 @@ Tests are written at two levels:
   filtered aggregation, limit-ignored aggregation, entity_type/workspace
   filter restriction, non-matching query aggregates nothing.
 
-### Execution status (round 8)
+### Execution status (round 9)
 
 This sandbox cannot reach crates.io (TCP connection refused to
 index/static.crates.io; no cached registry, no prebuilt target/), so
@@ -145,17 +145,19 @@ defect. Remote verification must run:
     cargo test -p gyre-server --test search_wiring
     cargo test -p gyre-adapters search
 
-Offline checks that ran this round and pass: `rustfmt --check` on all six
-task-touched files, `check-abac-route-registry.sh`, `check-arch.sh`,
-`check-mem-port-contracts.sh`, and `check-task-commit-attribution.sh` after
-this round's frontmatter repair (raw logs: /tmp/stage/review-evidence/,
-files `*-round8.log`).
+Offline checks that ran this round and pass: `rustfmt --check` on
+crates/gyre-ports/src/lib.rs, `python3 scripts/check-rustfmt-diff.py
+d81b0fe4ab93abff06089432e4a8fca5be6e5d31` (exit 0, 9 Rust files clean),
+and `check-task-commit-attribution.sh` after adding this round's commit
+to the frontmatter (raw logs: /tmp/stage/review-evidence/). Earlier
+rounds' logs remain in the same directory (`*-round8.log` and older).
 
-### Round 8 contract repair
+### Round 9 review repair
 
-The executor-restored task document dropped implement-labeled commit
-`60493e27` from the `commits:` frontmatter, failing
-`check-task-commit-attribution.sh`. Repaired by re-adding it; the protected
-task body text is unchanged and the existing production fix is preserved
-(verified against HEAD source this round: routes, ABAC resolver entries, all
-three adapter implementations, and both test suites are present).
+Review finding fbb29ab8: the one-line `pub use search::{...}` re-export
+added to `crates/gyre-ports/src/lib.rs` by task commit 774499be was 103
+chars, over rustfmt's 100-col max_width, so the CI Format job
+(check-rustfmt-diff.py) failed on any PR carrying the diff. Fixed in
+commit 6da69d14 by wrapping the use item as rustfmt suggests; the
+repo's changed-lines policy now passes against the review base
+d81b0fe4. No production behavior changed.
