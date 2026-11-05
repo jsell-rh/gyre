@@ -2,7 +2,7 @@
 title: "Supply chain — gyre-stack.lock parsing and attestation level enforcement"
 spec_ref: "supply-chain.md §gyre-stack.lock"
 depends_on: []
-progress: ready-for-review
+progress: needs-revision
 coverage_sections:
   - "supply-chain.md §gyre-stack.lock"
   - "supply-chain.md §Attestation Levels"
@@ -169,3 +169,11 @@ identity + server-minted JWT claims, not SPIFFE/eBPF cryptographic
 environment proof; stack attestation is not sigstore-signed (pre-existing,
 rows 4/5/10). Consistent with the task's implementation plan, which scoped
 L3 detection to the container-claim check.
+
+## Review
+
+### Review changed source code
+
+- crates/gyre-server/src/git_http.rs
+
+Preserved these edits for implementation. Review cannot approve its own source or verifier edits. Repair them within task scope and request a fresh independent review.

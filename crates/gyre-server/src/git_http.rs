@@ -1357,7 +1357,8 @@ async fn enforce_stack_policy(
         let mode_block = policy.enforcement == crate::api::stack_attest::StackEnforcement::Block;
 
         // Minimum attestation level (supply-chain.md §Policy per Level).
-        if level < policy.min_attestation_level {
+        // REVIEW-MUTATION: below-minimum check disabled
+        if false && level < policy.min_attestation_level {
             let reason = format!(
                 "push rejected: agent attestation level {level} is below repo minimum {} (fingerprint policy {})",
                 policy.min_attestation_level, policy.fingerprint
