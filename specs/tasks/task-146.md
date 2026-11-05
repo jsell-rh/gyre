@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["b818d20ddb3ae88181a40284928f6671bf69416a", "dc13ede362c2ce9111036cf243dd4d9f4bf56e2d", "38c2c5e777fb71633ba6106f6cb8ff037c58e4ff"]
+commits: ["b818d20ddb3ae88181a40284928f6671bf69416a", "dc13ede362c2ce9111036cf243dd4d9f4bf56e2d", "38c2c5e777fb71633ba6106f6cb8ff037c58e4ff", "6a3ce040b6dce783827b1c959921cd8fc11964df"]
 ---
 
 ## Spec Excerpt
@@ -205,8 +205,37 @@ The prior candidate failed the deterministic verification gates (rustfmt,
   and the `scope-literal-defaults` entries restored byte-identical to
   main (pre-existing debt this branch does not own).
 
+### Review-repair round: migration collision and exemption pin (commit 6a3ce040)
+
+The independent review found two gate regressions introduced by the
+  merge with main (a488d9df), both fixed:
+
+- **Duplicate Diesel migration version 20261008000056** — this branch's
+  `analytics_scope_columns` migration collided with
+  `2026-10-08-000056_spec_assertion_results` brought in from main.
+  Diesel runs only one migration per version (alphabetically first
+  wins), so the analytics migration was silently dropped and fresh
+  databases had no user_id/session_id/workspace_id/repo_id columns on
+  `analytics_events` (6 adapter test failures, guard-test panic,
+  check-migration-versions.sh exit 1). Renumbered to the next unused
+  sequence 000057; content unchanged. The adapter scope-filter tests
+  (`analytics_query_filtered_all_params` and siblings) now pass again on
+  real storage.
+- **Stale line-pinned exemption** — branch insertions shifted the
+  `'./repos/'` prose comment in spawn.rs from line 597 to 605,
+  invalidating the `relative-path-defaults-exemptions.txt` pin and
+  failing `check-relative-path-defaults.sh`. Pin updated to :605 (and
+  the canonicalize-call reference to :606-609); no new exemption added.
+
 ### Test evidence
 
+- This round: `cargo test -p gyre-adapters --lib`: 348 passed, 0 failed
+  (includes the previously failing analytics adapter tests and the
+  `no_duplicate_migration_version_prefixes` guard);
+  `check-migration-versions.sh`, `check-relative-path-defaults.sh`,
+  `check-migration-sql-portability.sh`, and
+  `check-task-commit-attribution.sh` all pass (evidence under
+  /tmp/stage/review-evidence).
 - `cargo test -p gyre-server --lib`: 1293 passed, 0 failed (includes
   the 11 new/extended trigger-point regression tests).
 - `cargo test -p gyre-server --test api_integration`: 67 passed, 0 failed.
