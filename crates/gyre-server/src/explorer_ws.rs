@@ -1770,6 +1770,7 @@ fn explorer_tool_definitions() -> Vec<ToolDefinition> {
 async fn run_explorer_agent_sdk(
     state: &AppState,
     repo_id: &str,
+    sdk_script_path: &str,
     user_question: &str,
     canvas_state: &gyre_common::view_query::CanvasState,
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
@@ -1832,8 +1833,8 @@ async fn run_explorer_agent_sdk(
     let mut current_question = user_question.to_string();
     loop {
         let (assistant_text, view_query) = run_sdk_subprocess_once(
-            state,
             repo_id,
+            sdk_script_path,
             &current_question,
             canvas_state,
             sender,
@@ -1980,8 +1981,8 @@ async fn run_explorer_agent_sdk(
 /// (self-check loop's) responsibility, so the query can be dry-run and refined
 /// before the frontend ever sees it (spec §11).
 async fn run_sdk_subprocess_once(
-    state: &AppState,
     repo_id: &str,
+    sdk_script_path: &str,
     user_question: &str,
     canvas_state: &gyre_common::view_query::CanvasState,
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
@@ -2037,13 +2038,16 @@ async fn run_sdk_subprocess_once(
         "history": history_json,
     });
 
-    let sdk_script = std::env::var("GYRE_EXPLORER_SDK_PATH")
-        .unwrap_or_else(|_| "scripts/explorer-agent.mjs".to_string());
+    // Spawn the dispatch site's validated, canonicalized script path. Do NOT
+    // re-resolve GYRE_EXPLORER_SDK_PATH here: a relative default (e.g.
+    // "scripts/explorer-agent.mjs") would be resolved by the child `node`
+    // process against the server's CWD, diverging from the path the dispatch
+    // site validated (exe-dir-relative in installed layouts).
     // Clear environment and only pass needed variables to prevent
     // leaking DATABASE_URL, API keys, etc. to the subprocess.
     let mut child_cmd = tokio::process::Command::new("node");
     child_cmd
-        .arg(&sdk_script)
+        .arg(sdk_script_path)
         .env_clear()
         .env("GYRE_API_URL", &server_url)
         .env("GYRE_API_TOKEN", token)
@@ -2572,6 +2576,9 @@ async fn run_explorer_agent(
     // Validate SDK path: MUST exist and canonicalize to a known safe directory.
     // Reject non-existent paths to prevent TOCTOU attacks (file could be
     // replaced between validation and execution).
+    // `validated_sdk_script` is the canonicalized path that PASSED validation —
+    // it is what gets spawned, so execution cannot diverge from validation.
+    let mut validated_sdk_script: Option<String> = None;
     let sdk_path_valid = if let Ok(canonical) = sdk_path.canonicalize() {
         let exe_dir = std::env::current_exe()
             .ok()
@@ -2582,7 +2589,11 @@ async fn run_explorer_agent(
             .unwrap_or(false);
         let in_usr = canonical.starts_with("/usr/");
         let in_nix = canonical.starts_with("/nix/");
-        in_exe_dir || in_usr || in_nix
+        let ok = in_exe_dir || in_usr || in_nix;
+        if ok {
+            validated_sdk_script = Some(canonical.to_string_lossy().into_owned());
+        }
+        ok
     } else {
         // Path doesn't exist — reject rather than allow unchecked execution
         false
@@ -2606,9 +2617,12 @@ async fn run_explorer_agent(
             );
         } else {
             send_status_with_path(sender, STATUS_THINKING, Some("sdk")).await;
+            // `use_sdk` implies `sdk_path_valid`, which implies Some(canonical).
+            let sdk_script = validated_sdk_script.unwrap_or_default();
             return run_explorer_agent_sdk(
                 state,
                 repo_id,
+                &sdk_script,
                 user_question,
                 canvas_state,
                 sender,
