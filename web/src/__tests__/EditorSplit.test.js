@@ -11,10 +11,16 @@ vi.mock('../lib/layout-engines.js', async () => {
 // Mock api
 vi.mock('../lib/api.js', () => ({
   api: {
+    repoGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     graphPredict: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     specsAssist: vi.fn(),
     specsSave: vi.fn().mockResolvedValue({ mr_id: 42 }),
     workspacePresence: vi.fn().mockResolvedValue([]),
+    thoroughPreview: vi.fn(),
+    taskStatus: vi.fn(),
+    previewMetaSpec: vi.fn(),
+    previewMetaSpecStatus: vi.fn(),
+    deleteMetaSpecPreview: vi.fn(),
   },
 }));
 
@@ -22,6 +28,7 @@ vi.mock('../lib/api.js', () => ({
 vi.mock('../lib/toast.svelte.js', () => ({
   toastSuccess: vi.fn(),
   toastError: vi.fn(),
+  toastInfo: vi.fn(),
 }));
 
 describe('EditorSplit', () => {
@@ -42,6 +49,14 @@ describe('EditorSplit', () => {
     render(EditorSplit, { props: { content: '', repoId: 'repo-1', specPath: 'specs/auth.md' } });
     expect(screen.getByTestId('llm-input')).toBeTruthy();
     expect(screen.getByTestId('llm-send-btn')).toBeTruthy();
+  });
+
+  it('gives toolbar buttons localized aria-labels', () => {
+    render(EditorSplit, { props: { content: '', repoId: 'repo-1', specPath: 'specs/auth.md' } });
+    // Localized from editor_split.md_<id>_aria — not the raw 'B'/'I' label.
+    expect(screen.getByTestId('md-bold').getAttribute('aria-label')).toBe('Bold');
+    expect(screen.getByTestId('md-italic').getAttribute('aria-label')).toBe('Italic');
+    expect(screen.getByTestId('md-undo').getAttribute('aria-label')).toBe('Undo');
   });
 
   it('renders the architecture preview pane', () => {
@@ -294,5 +309,447 @@ describe('EditorSplit', () => {
     await waitFor(() => {
       expect(screen.getByTestId('concurrent-edit-banner')).toBeTruthy();
     });
+  });
+
+  // ── Preview state machine (ui-layout.md §2/§9) ─────────────────────────────
+
+  it('shows Preview button and starts thorough preview on click (spec context)', async () => {
+    const { api } = await import('../lib/api.js');
+    api.thoroughPreview.mockResolvedValueOnce({
+      predictions: [
+        { node_id: 'RetryPolicy', change_type: 'new' },
+        { node_id: 'PaymentPort', change_type: 'modified' },
+      ],
+      code_diff: [
+        { path: 'src/retry.rs', diff: [{ op: 'context', text: 'fn main() {}' }] },
+      ],
+    });
+    render(EditorSplit, {
+      props: { content: '# Draft', repoId: 'repo-1', specPath: 'specs/auth.md' },
+    });
+    const previewBtn = await screen.findByTestId('preview-btn');
+    await fireEvent.click(previewBtn);
+    await waitFor(() => {
+      expect(api.thoroughPreview).toHaveBeenCalledWith('repo-1', {
+        spec_path: 'specs/auth.md',
+        draft_content: '# Draft',
+      });
+    });
+    // Immediate result → complete state with Iterate available
+    await waitFor(() => {
+      expect(screen.getByTestId('iterate-btn')).toBeTruthy();
+    });
+  });
+
+  it('renders Architecture (default) and Code Diff tabs in the right panel', async () => {
+    const { api } = await import('../lib/api.js');
+    api.thoroughPreview.mockResolvedValueOnce({
+      predictions: [{ node_id: 'RetryPolicy', change_type: 'new' }],
+      code_diff: [{ path: 'src/retry.rs', diff: [{ op: 'context', text: 'fn main() {}' }] }],
+    });
+    render(EditorSplit, {
+      props: { content: '# Draft', repoId: 'repo-1', specPath: 'specs/auth.md' },
+    });
+    await fireEvent.click(await screen.findByTestId('preview-btn'));
+    // Architecture tab is selected by default
+    const archTab = await screen.findByTestId('tab-architecture');
+    expect(archTab.getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByTestId('tab-code-diff').getAttribute('aria-selected')).toBe('false');
+
+    // Switch to Code Diff tab — line-level diff from the preview result
+    await fireEvent.click(screen.getByTestId('tab-code-diff'));
+    const panel = await screen.findByTestId('code-diff-panel');
+    expect(panel.textContent).toContain('src/retry.rs');
+    expect(screen.getByTestId('tab-code-diff').getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('iterating returns to the editing state with results still visible', async () => {
+    const { api } = await import('../lib/api.js');
+    api.thoroughPreview.mockResolvedValueOnce({
+      predictions: [{ node_id: 'RetryPolicy', change_type: 'new' }],
+      code_diff: [{ path: 'src/retry.rs', diff: [{ op: 'context', text: 'x' }] }],
+    });
+    render(EditorSplit, {
+      props: { content: '# Draft', repoId: 'repo-1', specPath: 'specs/auth.md' },
+    });
+    await fireEvent.click(await screen.findByTestId('preview-btn'));
+    await screen.findByTestId('iterate-btn');
+    await fireEvent.click(screen.getByTestId('iterate-btn'));
+    // Back in editing state: textarea active again, Preview button available,
+    // code diff still rendered when switching tabs (results retained).
+    await waitFor(() => expect(screen.getByTestId('editor-split-textarea')).toBeTruthy());
+    expect(screen.getByTestId('preview-btn')).toBeTruthy();
+    await fireEvent.click(screen.getByTestId('tab-code-diff'));
+    expect(screen.getByTestId('code-diff-panel').textContent).toContain('src/retry.rs');
+  });
+
+  it('polls taskStatus while the thorough preview runs and completes', async () => {
+    vi.useFakeTimers();
+    try {
+      const { api } = await import('../lib/api.js');
+      api.thoroughPreview.mockResolvedValueOnce({ task_id: 'task-9' });
+      api.taskStatus
+        .mockResolvedValueOnce({ status: 'running' })
+        .mockResolvedValueOnce({
+          status: 'completed',
+          predictions: [{ node_id: 'ErrorHandler', change_type: 'new' }],
+          code_diff: [{ path: 'src/error.rs', diff: [{ op: 'context', text: 'y' }] }],
+        });
+      render(EditorSplit, {
+        props: { content: '# Draft', repoId: 'repo-1', specPath: 'specs/auth.md' },
+      });
+      await fireEvent.click(await screen.findByTestId('preview-btn'));
+      // Running state: editor locked (§9 State 2), cancel available
+      await vi.waitFor(() => expect(screen.getByTestId('editor-locked')).toBeTruthy());
+      expect(screen.getByTestId('cancel-preview')).toBeTruthy();
+      // Poll fires at 10s intervals — advance through both statuses
+      await vi.advanceTimersByTimeAsync(10000);
+      await vi.advanceTimersByTimeAsync(10000);
+      await vi.waitFor(() => expect(screen.getByTestId('iterate-btn')).toBeTruthy());
+      expect(api.taskStatus).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 20000);
+
+  it('cancel during a running preview returns to the editing state', async () => {
+    const { api } = await import('../lib/api.js');
+    api.thoroughPreview.mockResolvedValueOnce({ task_id: 'task-10' });
+    api.taskStatus.mockResolvedValue({ status: 'running' });
+    render(EditorSplit, {
+      props: { content: '# Draft', repoId: 'repo-1', specPath: 'specs/auth.md' },
+    });
+    await fireEvent.click(await screen.findByTestId('preview-btn'));
+    await waitFor(() => expect(screen.getByTestId('editor-locked')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('cancel-preview'));
+    await waitFor(() => expect(screen.getByTestId('editor-split-textarea')).toBeTruthy());
+    expect(screen.queryByTestId('editor-locked')).toBeNull();
+  });
+
+  // ── Meta-spec context (§9 preview loop via EditorSplit) ───────────────────
+
+  it('shows target spec selector in editing state for meta-spec context', async () => {
+    render(EditorSplit, {
+      props: {
+        content: 'You are a backend dev...',
+        context: 'meta-spec',
+        repoId: null,
+        workspaceId: 'ws-1',
+        targetSpecs: [
+          { path: 'specs/system/payment-retry.md', repo_id: 'repo-1' },
+          { path: 'specs/system/charge-processing.md', repo_id: 'repo-1' },
+          { path: 'specs/system/identity-security.md', repo_id: 'repo-2' },
+        ],
+      },
+    });
+    const selector = await screen.findByTestId('spec-selector');
+    expect(selector.textContent).toContain('specs/system/payment-retry.md');
+    expect(selector.textContent).toContain('specs/system/identity-security.md');
+    // Preview disabled until a target is selected (§9 State 1)
+    expect(screen.getByTestId('preview-btn').disabled).toBe(true);
+  });
+
+  it('selecting specs enables Preview and runs previewMetaSpec against them (real §5 body)', async () => {
+    vi.useFakeTimers();
+    try {
+      const { api } = await import('../lib/api.js');
+      // Real §5 PreviewResponse (meta_specs.rs): { preview_id, agents: [{
+      // agent_id, repo_id, spec_path, branch }] } — nothing else.
+      api.previewMetaSpec.mockResolvedValueOnce({
+        preview_id: 'pv-1',
+        agents: [
+          { agent_id: 'ag-1', repo_id: 'repo-1', spec_path: 'specs/system/payment-retry.md', branch: 'preview/pv-1/payment-retry' },
+          { agent_id: 'ag-2', repo_id: 'repo-1', spec_path: 'specs/system/charge-processing.md', branch: 'preview/pv-1/charge-processing' },
+        ],
+      });
+      api.previewMetaSpecStatus.mockResolvedValue({
+        preview_id: 'pv-1',
+        state: 'complete',
+        agents: [
+          { agent_id: 'ag-1', repo_id: 'repo-1', spec_path: 'specs/system/payment-retry.md', branch: 'preview/pv-1/payment-retry', status: 'complete', diff: null },
+          { agent_id: 'ag-2', repo_id: 'repo-1', spec_path: 'specs/system/charge-processing.md', branch: 'preview/pv-1/charge-processing', status: 'complete', diff: null },
+        ],
+      });
+      render(EditorSplit, {
+        props: {
+          content: 'You are a backend dev...',
+          context: 'meta-spec',
+          workspaceId: 'ws-1',
+          targetSpecs: [
+            { path: 'specs/system/payment-retry.md', repo_id: 'repo-1' },
+            { path: 'specs/system/charge-processing.md', repo_id: 'repo-1' },
+          ],
+        },
+      });
+      // Select all targets
+      await fireEvent.click(await screen.findByText('Select All'));
+      const previewBtn = screen.getByTestId('preview-btn');
+      expect(previewBtn.disabled).toBe(false);
+      await fireEvent.click(previewBtn);
+      await vi.waitFor(() => {
+        expect(api.previewMetaSpec).toHaveBeenCalledWith({
+          draft: { kind: 'meta:persona', content: 'You are a backend dev...' },
+          targets: [
+            { repo_id: 'repo-1', spec_path: 'specs/system/payment-retry.md' },
+            { repo_id: 'repo-1', spec_path: 'specs/system/charge-processing.md' },
+          ],
+        });
+      });
+      // The status poll completes at 2s intervals
+      await vi.advanceTimersByTimeAsync(2100);
+      await vi.waitFor(() => expect(screen.getByTestId('iterate-btn')).toBeTruthy());
+      // Architecture tab (default) renders the per-agent run summary — the
+      // spec paths and preview branches the real §5 status reports.
+      const impact = screen.getByTestId('meta-impact');
+      expect(impact.textContent).toContain('specs/system/payment-retry.md');
+      expect(impact.textContent).toContain('preview/pv-1/payment-retry');
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 20000);
+
+  it('renders the produced per-agent diff in the Code Diff tab (real §5 status shape)', async () => {
+    vi.useFakeTimers();
+    try {
+      const { api } = await import('../lib/api.js');
+      // Exact wire shapes from crates/gyre-server/src/api/meta_specs.rs —
+      // PreviewStatusResponse carries per-agent { spec_path, branch, status,
+      // diff } where diff.patches hold the unified-diff text the preview
+      // branch produced. Feeding this (not synthetic mocks) pins that the
+      // right panel renders what production actually returns.
+      api.previewMetaSpec.mockResolvedValueOnce({
+        preview_id: 'pv-real-1',
+        agents: [
+          { agent_id: 'ag-9', repo_id: 'repo-9', spec_path: 'specs/payment/retry.md', branch: 'preview/pv-real-1/retry' },
+        ],
+      });
+      api.previewMetaSpecStatus.mockResolvedValue({
+        preview_id: 'pv-real-1',
+        state: 'complete',
+        agents: [
+          {
+            agent_id: 'ag-9',
+            repo_id: 'repo-9',
+            spec_path: 'specs/payment/retry.md',
+            branch: 'preview/pv-real-1/retry',
+            status: 'complete',
+            diff: {
+              files_changed: 1,
+              insertions: 3,
+              deletions: 1,
+              patches: [{ patch: '@@ specs/payment/retry.md@@\n-old line\n+new line\n context' }],
+            },
+          },
+        ],
+      });
+      render(EditorSplit, {
+        props: {
+          content: 'You are a backend dev...',
+          context: 'meta-spec',
+          workspaceId: 'ws-1',
+          targetSpecs: [{ path: 'specs/payment/retry.md', repo_id: 'repo-9' }],
+        },
+      });
+      await fireEvent.click(await screen.findByText('Select All'));
+      await fireEvent.click(screen.getByTestId('preview-btn'));
+      await vi.advanceTimersByTimeAsync(2100);
+      await vi.waitFor(() => expect(screen.getByTestId('iterate-btn')).toBeTruthy());
+      // Architecture tab (default) shows the per-agent run summary with the
+      // diff stats the real endpoint returns.
+      const impact = screen.getByTestId('meta-impact');
+      expect(impact.textContent).toContain('specs/payment/retry.md');
+      expect(impact.textContent).toContain('preview/pv-real-1/retry');
+      expect(impact.textContent).toContain('+3/-1');
+      // Code Diff tab shows the agent's produced unified diff lines.
+      await fireEvent.click(screen.getByTestId('tab-code-diff'));
+      const panel = await screen.findByTestId('code-diff-panel');
+      expect(panel.textContent).toContain('-old line');
+      expect(panel.textContent).toContain('+new line');
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 20000);
+
+  it('a thoroughPreview rejection (real deployments: 404 — no server route) returns to editing with an error banner, never a fabricated complete state', async () => {
+    const { api } = await import('../lib/api.js');
+    // POST /repos/:id/graph/thorough-preview has no server route, so every
+    // real spec-context Preview rejects with request()'s 404 error.
+    api.thoroughPreview.mockRejectedValueOnce(
+      new Error('API /repos/repo-1/graph/thorough-preview: 404 Not Found'),
+    );
+    render(EditorSplit, {
+      props: { content: '# Draft', repoId: 'repo-1', specPath: 'specs/auth.md' },
+    });
+    await fireEvent.click(await screen.findByTestId('preview-btn'));
+    // Back to editing with the error banner — §9 State 3 is never presented
+    // without a real completed result.
+    await waitFor(() => expect(screen.getByTestId('preview-error')).toBeTruthy());
+    expect(screen.getByTestId('preview-error').textContent).toContain('404');
+    expect(screen.getByTestId('editor-split-textarea')).toBeTruthy();
+    expect(screen.queryByTestId('iterate-btn')).toBeNull();
+    expect(screen.queryByTestId('preview-running')).toBeNull();
+  });
+
+  it('a previewMetaSpec rejection (endpoint unavailable) returns to editing with an error banner, never a fabricated complete state', async () => {
+    const { api } = await import('../lib/api.js');
+    api.previewMetaSpec.mockRejectedValueOnce(
+      new Error('API /meta-specs/preview: 404 Not Found'),
+    );
+    render(EditorSplit, {
+      props: {
+        content: 'You are a backend dev...',
+        context: 'meta-spec',
+        workspaceId: 'ws-1',
+        targetSpecs: [{ path: 'specs/a.md', repo_id: 'repo-1' }],
+      },
+    });
+    await fireEvent.click(await screen.findByText('Select All'));
+    await fireEvent.click(screen.getByTestId('preview-btn'));
+    await waitFor(() => expect(screen.getByTestId('preview-error')).toBeTruthy());
+    expect(screen.getByTestId('preview-error').textContent).toContain('404');
+    expect(screen.getByTestId('editor-split-textarea')).toBeTruthy();
+    expect(screen.queryByTestId('iterate-btn')).toBeNull();
+  });
+
+  it('only sends targets with a repo_id — a spec without one can never spawn a preview agent', async () => {
+    const { api } = await import('../lib/api.js');
+    api.previewMetaSpec.mockResolvedValueOnce({ preview_id: 'pv-2', agents: [] });
+    api.previewMetaSpecStatus.mockResolvedValue({ preview_id: 'pv-2', state: 'complete', agents: [] });
+    render(EditorSplit, {
+      props: {
+        content: 'prompt text',
+        context: 'meta-spec',
+        workspaceId: 'ws-1',
+        targetSpecs: [
+          { path: 'specs/with-repo.md', repo_id: 'repo-1' },
+          { path: 'specs/no-repo.md' },
+        ],
+      },
+    });
+    await fireEvent.click(await screen.findByText('Select All'));
+    await fireEvent.click(screen.getByTestId('preview-btn'));
+    await waitFor(() => {
+      expect(api.previewMetaSpec).toHaveBeenCalledWith({
+        draft: { kind: 'meta:persona', content: 'prompt text' },
+        targets: [{ repo_id: 'repo-1', spec_path: 'specs/with-repo.md' }],
+      });
+    });
+  });
+
+  it('Escape cancels a running preview instead of closing the split (§9 State 2)', async () => {
+    const onClose = vi.fn();
+    const { api } = await import('../lib/api.js');
+    api.thoroughPreview.mockResolvedValueOnce({ task_id: 'task-esc' });
+    api.taskStatus.mockResolvedValue({ status: 'running' });
+    render(EditorSplit, {
+      props: { content: '# Draft', repoId: 'repo-1', specPath: 'specs/auth.md', onClose },
+    });
+    await fireEvent.click(await screen.findByTestId('preview-btn'));
+    await waitFor(() => expect(screen.getByTestId('editor-locked')).toBeTruthy());
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    // Preview cancelled — back to editing — but the split itself stays open.
+    await waitFor(() => expect(screen.getByTestId('editor-split-textarea')).toBeTruthy());
+    expect(screen.queryByTestId('preview-running')).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('sends the caller-provided draftKind as the draft kind', async () => {
+    const { api } = await import('../lib/api.js');
+    api.previewMetaSpec.mockResolvedValueOnce({ preview_id: 'pv-3', agents: [] });
+    api.previewMetaSpecStatus.mockResolvedValue({ preview_id: 'pv-3', state: 'complete', agents: [] });
+    render(EditorSplit, {
+      props: {
+        content: 'principle text',
+        context: 'meta-spec',
+        draftKind: 'meta:principle',
+        workspaceId: 'ws-1',
+        targetSpecs: [{ path: 'specs/a.md', repo_id: 'repo-1' }],
+      },
+    });
+    await fireEvent.click(await screen.findByText('Select All'));
+    await fireEvent.click(screen.getByTestId('preview-btn'));
+    await waitFor(() => {
+      expect(api.previewMetaSpec).toHaveBeenCalledWith({
+        draft: { kind: 'meta:principle', content: 'principle text' },
+        targets: [{ repo_id: 'repo-1', spec_path: 'specs/a.md' }],
+      });
+    });
+  });
+
+  // ── LLM suggestion Accept / Edit / Dismiss (§3 steps 4-6) ──────────────────
+
+  /** Build an SSE response body from (event, data) pairs, server format. */
+  function sseResponse(events) {
+    const text = events.map(([evt, data]) => `event: ${evt}\ndata: ${JSON.stringify(data)}\n\n`).join('');
+    return {
+      ok: true,
+      status: 200,
+      body: {
+        getReader: () => {
+          let sent = false;
+          return {
+            read: () => {
+              if (sent) return Promise.resolve({ value: undefined, done: true });
+              sent = true;
+              return Promise.resolve({ value: new TextEncoder().encode(text), done: false });
+            },
+          };
+        },
+      },
+    };
+  }
+
+  async function getLlmSuggestion(diff) {
+    const { api } = await import('../lib/api.js');
+    api.specsAssist.mockResolvedValueOnce(
+      sseResponse([
+        ['partial', { text: 'Adding error handling section.' }],
+        ['complete', { diff, explanation: 'Adding error handling section.' }],
+      ]),
+    );
+    render(EditorSplit, {
+      props: { content: '# Auth\n\nExisting body.\n', repoId: 'repo-1', specPath: 'specs/auth.md' },
+    });
+    await fireEvent.input(screen.getByTestId('llm-input'), { target: { value: 'add error handling' } });
+    await fireEvent.click(screen.getByTestId('llm-send-btn'));
+    return screen.findByTestId('llm-suggestion');
+  }
+
+  it('Accept applies the LLM diff to the editor content in-memory', async () => {
+    const block = await getLlmSuggestion([
+      { op: 'add', path: '## Existing', content: '## Error Handling\n\nReturn structured errors.' },
+    ]);
+    expect(block).toBeTruthy();
+    await fireEvent.click(screen.getByTestId('accept-suggestion'));
+    // Suggestion dismissed; content updated with the applied diff (not saved)
+    await waitFor(() => expect(screen.queryByTestId('llm-suggestion')).toBeNull());
+    const ta = screen.getByTestId('editor-split-textarea');
+    expect(ta.value).toContain('## Error Handling');
+    const { api } = await import('../lib/api.js');
+    expect(api.specsSave).not.toHaveBeenCalled();
+  });
+
+  it('Edit copies the suggested text into the editor for manual refinement', async () => {
+    const block = await getLlmSuggestion([
+      { op: 'add', path: '## Existing', content: '## Error Handling\n\nReturn structured errors.' },
+    ]);
+    expect(block).toBeTruthy();
+    await fireEvent.click(screen.getByTestId('edit-suggestion'));
+    await waitFor(() => expect(screen.queryByTestId('llm-suggestion')).toBeNull());
+    const ta = screen.getByTestId('editor-split-textarea');
+    // Suggested text appended verbatim for the human to refine (§3 step 5)
+    expect(ta.value).toContain('## Error Handling');
+    expect(ta.value).toContain('# Auth');
+  });
+
+  it('Dismiss removes the suggestion without touching the editor content', async () => {
+    const before = '# Auth\n\nExisting body.\n';
+    const block = await getLlmSuggestion([
+      { op: 'add', path: '## Existing', content: '## Error Handling\n\nReturn structured errors.' },
+    ]);
+    expect(block).toBeTruthy();
+    await fireEvent.click(screen.getByTestId('dismiss-suggestion'));
+    await waitFor(() => expect(screen.queryByTestId('llm-suggestion')).toBeNull());
+    expect(screen.getByTestId('editor-split-textarea').value).toBe(before);
   });
 });
