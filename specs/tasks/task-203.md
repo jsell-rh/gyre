@@ -5,7 +5,7 @@ depends_on: [task-201]
 progress: ready-for-review
 coverage_sections:
   - "search.md §Access Scoping"
-commits: ["a18e6e25807a53a9ec7e149b7ea5aa1a2b93717b", "a8bcf43543955725bf52b8ba00c8555a48a3aa77"]
+commits: ["a18e6e25807a53a9ec7e149b7ea5aa1a2b93717b"]
 ---
 
 ## Spec Excerpt
