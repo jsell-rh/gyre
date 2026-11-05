@@ -197,3 +197,61 @@ Repair (this round):
 - Stale pin detection (hourly job, priority-6 drift notifications with dedup)
   and merge attestation recording `meta_specs_used` from the spawn-time
   prompt-set record; 9 default meta-specs seeded at first startup.
+
+---
+
+# Review — round 7 (post-rebase re-verification)
+
+Candidate: `5ebf92ffbf39253a2a27c167c02b539640e8c99c` (base `3c39ab1f`, merge
+commit `6c327592` + process commit `5ebf92ff`). Diff scope: prompt assembly
+pipeline, spawn env wiring, merge-attestation population, stale-pin job,
+flat-route rename with ABAC registry updates, round-6 regression tests, mem
+binding-contract fix, and the web/dist merge resolution.
+
+## Verdict
+
+Approved. All §2 acceptance criteria are implemented in production code and
+independently verified in this round; the three round-6 fixes are pinned by
+durable regression tests that were mutation-verified this round.
+
+## What was verified this round
+
+- **Focused tests** (`/tmp/stage/bin/cargo test -p gyre-server --lib`):
+  meta_spec/prompt_assembly/stale_pin/spec_bindings/mem:: filters → 43 pass /
+  0 fail; spawn+attestation filters → 93 pass / 0 fail;
+  `gyre-adapters --lib meta_spec` → 9 pass / 0 fail (includes
+  `update_archives_version`, `delete_with_binding_fails` against real SQLite).
+- **Mutation kill-switches** (applied, tested, fully restored — tree clean):
+  disabling `check_scope_admin` fails `required_gate_rejects_non_admin` and
+  `create_workspace_scoped_requires_membership` while
+  `spec_bindings_require_membership_in_owning_workspace` still passes (the
+  binding endpoint's membership gate is independent, not shared fate);
+  disabling the band-3 approval fail-close fails `pending_bound_meta_spec_skipped`;
+  disabling `filter_approved` fails `pending_required_meta_spec_excluded`.
+- **Agent delivery**: `docker/gyre-agent` `npm ci` + `node --test
+  agent-runner.test.mjs` → 3 pass / 0 fail (real runner child process, stubbed
+  SDK); CI job `gyre-agent-tests` runs it.
+- **Mechanical invariants**: check-arch, check-abac-route-registry,
+  check-mem-port-contracts, check-migration-versions, check-inert-enforcement
+  all OK. The four legacy `meta-specs-registry` exemption entries were removed
+  (registry shrank, no growth).
+- **Rebase repair**: `web && npm ci && npx vite build` reproduces the committed
+  `web/dist` byte-for-byte (no git diff) — the merge-conflict resolution is a
+  genuine rebuild of the merged web/src with the locked toolchain.
+
+## Non-blocking observations (recorded, no action required)
+
+- Spec §2 mentions a UI "Meta-spec bindings panel"; the API
+  (`PUT/GET /api/v1/specs/:path/meta-spec-bindings`) is complete and tested,
+  `web/src/lib/api.js` has no bindings client yet. Not in this task's
+  acceptance criteria; follow-up UI work.
+- Registry read paths are not membership-scoped — matches the
+  `/api/v1/policies` flat-route precedent the spec explicitly cites; all
+  writes (POST/PUT/DELETE, bindings PUT) are scope-admin/membership gated.
+- `meta_specs` has no tenant_id ("Global" = server-global), same as the
+  pre-existing `personas`/`policies` tables the spec extends and cites.
+- `merge_processor.rs` meta_specs_used population has no dedicated
+  end-to-end test; store/load round-trip is tested and the wiring is
+  inspected (load by `author_agent_id` → `MergeAttestation.meta_specs_used`).
+
+Evidence: `/tmp/stage/review-evidence/task116-round7.md`.
