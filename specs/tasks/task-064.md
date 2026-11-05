@@ -12,7 +12,7 @@ coverage_sections:
   - "view-query-grammar.md §14 High-risk untested code"
   - "view-query-grammar.md §15 Authentication concept"
   - "view-query-grammar.md §16 Relationship to Other Specs"
-commits: ["3b1c93fe6f3498f4d5ab67a1cd0e48fd564dd916", "8f65014884ec0a5173d695f1d4610c7e35a1c65e"]
+commits: ["3b1c93fe6f3498f4d5ab67a1cd0e48fd564dd916", "8f65014884ec0a5173d695f1d4610c7e35a1c65e", "e9c6e76b7ab97b0a1a51ff63d3c94680384b9cf3"]
 ---
 
 ## Spec Excerpt
@@ -86,11 +86,12 @@ Focus areas:
 
 ## Shipped
 
-Verified the task-062/063 grammar primitives end-to-end, closed the §10 wiring defects between the frontend canvas and the agent, and added the integration evidence for the canonical composition examples. Two review rounds found and fixed real defects; both repairs are in the history below.
+Verified the task-062/063 grammar primitives end-to-end, closed the §10 wiring defects between the frontend canvas and the agent, and added the integration evidence for the canonical composition examples. Three review rounds found and fixed real defects; all repairs are in the history below.
 
-### §10 Interaction Context — full shape end to end
+### §10 Interaction Context — full shape, fresh, end to end
 
 - **Wire format**: `ExplorerChat.svelte` previously sent the raw internal canvas state (camelCase `selectedNode`), which the server's serde `CanvasState` silently dropped. `web/src/lib/canvas-state.js` `toWireCanvasState()` now normalizes to the exact §10 shape (selected_node, zoom_level, visible_tree_groups, active_filter, active_lens, active_query, recent_interactions) at the single send site.
+- **Freshness** (round-4 repair): `zoom_level` and `visible_tree_groups` used to be snapshotted only by `syncCanvasState()` on lens toggles, so both went stale afterwards — the agent could receive `zoom_level: 1.0` while `recent_interactions` correctly reported `zoom_in to_level: 3.0`. Now `toWireCanvasState()` prefers the live `zoom` (kept fresh by the canvas zoom-sync effect; snake-only normalized inputs still pass through), `syncCanvasState()` no longer snapshots those fields, and a reactive effect on `rootLayoutNodes` refreshes `visible_tree_groups`/`visibleGroups` whenever the root tree groups change (data reloads, layout-mode switches, drill navigation), guarded to write only on change.
 - **`active_query`** is synced from `activeViewQuery` via an ExplorerView `$effect`; **query actions** record as `{action: "query", preset|detail}` for saved-view loads, LLM-generated views, user-composed JSON, and interactive `$clicked` re-runs.
 - **Zoom actions** record as `{action: "zoom_in"|"zoom_out", to_level}` for user-initiated zoom only. `ZoomInteractionTracker` (canvas-state.js) owns the armed/disarmed state machine: wheel/keyboard/pinch handlers arm it; every programmatic zoom source (initial auto-fit and data-change refit, drill transitions, breadcrumb navigation, query-driven `"fit"`/level zoom, search-result fits, zoom-to-node) calls `disarm()`, which re-baselines without recording. Coalescing is gesture-scoped, so a pre-disarm entry stays frozen at the level the user actually reached instead of being rewritten by programmatic zoom (the round-2 review finding). Rust side: `InteractionRecord` carries `to_level`/`preset`.
 - **LLM boundary** (round-3 repair): the `<canvas_state>` block built for the LLM previously dropped `zoom_level` and `active_filter` even though the server deserialized them. The block is now built by `build_canvas_context_json()` (explorer_ws.rs) and surfaces both fields; the system prompt documents them. Regression tests assert the exact §10 JSON survives deserialization AND reaches the LLM context.
@@ -107,13 +108,14 @@ Verified the task-062/063 grammar primitives end-to-end, closed the §10 wiring 
 
 ### Committed dist
 
-Each round that changed `web/src` rebuilt the committed `web/dist` in the same source, so `SKIP_WEB_BUILD=1` deployments serve the fixed SPA. The current bundle contains the §10 wire fields and the `ZoomInteractionTracker` logic (allowCoalesce/gestureEntry symbols verified).
+Each round that changed `web/src` rebuilt the committed `web/dist` in the same source, so `SKIP_WEB_BUILD=1` deployments serve the fixed SPA. The current bundle contains the §10 wire fields, the `ZoomInteractionTracker` logic, and the round-4 freshness fix (live-zoom preference and the reactive visible-tree-groups effect verified as minified symbols in the bundle).
 
-### Test evidence (re-verified this round; logs in /tmp/stage/review-evidence/task-064-round3)
+### Test evidence (re-verified this round; logs in /tmp/stage/review-evidence/task-064-round5)
 
-- Rust: `cargo test -p gyre-server --lib -- explorer_ws::` — 38 passed, 0 failed (includes the new LLM-boundary §10 tests: canvas-context JSON surfacing zoom_level/active_filter, system-prompt documentation, plus prior §10 deserialization).
-- Rust: `cargo test -p gyre-server --test explorer_ws_integration` — 8 passed, 0 failed.
-- Rust: `cargo test -p gyre-domain --test view_query_composition` — 8 passed, 0 failed.
-- Web: `npx vitest run src/__tests__/canvas-state.test.js` — 20 passed, 0 failed (wire normalization, zoom/query recording, coalescing, and the new ZoomInteractionTracker cases: programmatic fit after user zoom does not rewrite the entry, disarmed drill/auto-fit records nothing, re-arm starts a new entry from the settled level, small nudge does not resurrect the old entry, consecutive user gestures still coalesce).
-- Node probe (`zoom-arming-probe.mjs`, real module): the round-2 review scenario — user zoom 1.0→1.5 then query-driven fit to 2.8 — leaves the entry at `to_level 1.5`; PASS.
+- Rust: `cargo test -p gyre-server --lib -- explorer_ws::` — 38 passed, 0 failed (includes the LLM-boundary §10 tests: canvas-context JSON surfacing zoom_level/active_filter, system-prompt documentation, plus §10 deserialization). Unchanged this round (frontend-only repair); last run in round 3.
+- Rust: `cargo test -p gyre-server --test explorer_ws_integration` — 8 passed, 0 failed. Unchanged this round; last run in round 3.
+- Rust: `cargo test -p gyre-domain --test view_query_composition` — 8 passed, 0 failed. Unchanged this round; last run in round 3.
+- Web: `npx vitest run src/__tests__/canvas-state.test.js` — 21 passed, 0 failed (wire normalization with live-zoom preference and the round-4 staleness regression — wire zoom must agree with the interaction trail — zoom/query recording, coalescing, ZoomInteractionTracker cases).
+- Web: `npx vitest run` on ExplorerCanvas/ExplorerCanvas-performance/ExplorerChat/ExplorerViewScope/ExplorerViewDrillUrl — 275 passed, 0 failed (component suites touching the changed canvas state plumbing).
+- Node probe (`wire-staleness-probe.mjs`, real module): the round-4 review scenario — stale `zoom_level: 1.0` snapshot alongside live `zoom: 3.0` — serializes `zoom_level: 3` matching the trail's `to_level: 3.0`; PASS.
 - Full workspace suites (`cargo test --all`, full web vitest, arch/Clippy/CI) are owned by deterministic verification.
