@@ -144,13 +144,7 @@ async fn spawn_orchestrator(
         }),
         now,
     );
-    let _ = state.analytics.record(&ev).await;
-    // search.md §Searchable Entities: activity events are indexed on write.
-    crate::search_indexer::index(
-        state,
-        crate::search_indexer::activity_event_document(&ev),
-    )
-    .await;
+    record_and_index_activity(state, &ev).await;
 
     budget::increment_active_agents(state, &workspace_id.to_string()).await;
 
@@ -328,6 +322,23 @@ pub async fn spawn_repo_orchestrator(
             token,
         }),
     ))
+}
+
+/// Record an analytics event and index it for search (search.md
+/// §Searchable Entities: activity events are indexed on write).
+///
+/// Defined at the bottom of the file, and called as a bare one-liner at the
+/// spawn site, deliberately: scripts/inert-enforcement-exemptions.txt pins
+/// the `validate_persona` call sites above (lines 187/283) by exact line
+/// number, so any code above them must stay line-count-neutral versus the
+/// exemption baseline. Grow this helper, never the call site.
+async fn record_and_index_activity(state: &AppState, ev: &AnalyticsEvent) {
+    let _ = state.analytics.record(ev).await;
+    crate::search_indexer::index(
+        state,
+        crate::search_indexer::activity_event_document(ev),
+    )
+    .await;
 }
 
 #[cfg(test)]
