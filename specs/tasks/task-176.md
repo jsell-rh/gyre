@@ -2,10 +2,10 @@
 title: "Meta-specs Preview Loop layout — editor split states and preview workflow"
 spec_ref: "ui-layout.md §9"
 depends_on: [task-172]
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "ui-layout.md §9. Meta-specs Preview Loop Layout"
-commits: []
+commits: ["eee86b3e"]
 ---
 
 ## Spec Excerpt
@@ -62,3 +62,59 @@ The preview loop is the primary meta-spec interaction: edit → preview → iter
 ## Agent Instructions
 
 Read `ui-layout.md` §9 for the exact wireframes of all three states. Also read `meta-spec-reconciliation.md` §5 for the preview loop protocol. The existing `MetaSpecs.svelte` has the registry view and basic editing — this task adds the full EditorSplit preview workflow. Check the preview API endpoints: the spec mentions throwaway branches and agent spawning. Use the EditorSplit component created in task-172.
+
+## Shipped
+
+The §9 preview loop runs through the shared EditorSplit (task-172) in
+`context="meta-spec"`, mounted by the MetaSpecs workspace view. Most of
+the loop (State 1 selector + Preview/Publish, State 2 lock + per-spec
+◐/✓ progress + Cancel, State 3 Architecture/Code Diff tabs + Iterate +
+Publish → approval reset) landed with task-172's review rounds
+(a4c8b6bd); this task closes the one §9 wireframe requirement that was
+still unimplemented: **State 2's left panel must show the diff of
+changes**, not the verbatim draft.
+
+### What eee86b3e adds
+
+- `web/src/lib/lineDiff.js` — LCS line diff (prefix/suffix-trimmed DP,
+  block-diff degradation above 4M mid-section cells, trailing-newline
+  normalization) plus `diffSummary` row counts. Unit-tested for
+  add/remove/context correctness, minimal edit scripts on moved lines,
+  and exact round-trip reconstruction of both sides.
+- `EditorSplit.svelte` — new `baselineContent` prop. While a preview
+  runs, the locked left pane now renders the pending-changes diff
+  (draft vs. the published baseline) with `+`/`-` markers, green/red
+  line styling, and a `+N -M` summary header — the §9 State 2
+  wireframe's "+ Handle all errors with Result<T, E>..." display. No
+  baseline, or an unchanged draft, falls back to the verbatim draft.
+- `MetaSpecs.svelte` — tracks the selected meta-spec's stored registry
+  prompt as `selectedMsBaseline` (set on load and on persona switch)
+  and passes it to EditorSplit, so the locked diff is always against
+  the real published version.
+- Tests: four new EditorSplit tests (diff shown with markers and
+  summary, removed-line marking, no-baseline fallback, equal-draft
+  fallback), two new MetaSpecs workspace tests (edited persona shows
+  the "+" pending line vs. the published prompt; empty-prompt fallback),
+  and 13 lineDiff unit tests.
+
+### Test evidence
+
+`npm ci`, then `./node_modules/.bin/vitest run src/__tests__/lineDiff.test.js
+src/__tests__/EditorSplit.test.js src/__tests__/MetaSpecs.test.js` →
+**163/163 passed**. Full suite regression sweep: 1619 passed / 41
+skipped, with the only 2 failures in ExplorerCanvas-performance.test.js
+timing budgets — that file passes 15/15 in isolation both on the stashed
+base tree and on this tree, so the full-run failures are sandbox
+CPU-saturation flakiness, not a regression. `web/dist` rebuilt from this
+source (contains the new `locked-diff` code). Evidence retained at
+`/tmp/stage/review-evidence/task-176-test-evidence.md`.
+
+### Scope boundary
+
+The §9 backend gaps the wireframe alludes to — agents actually spawned
+on `preview/{preview_id}/*` throwaway branches, line-level code diffs,
+DELETE cleanup — belong to the preview endpoint itself and are tracked
+by task-206 against meta-spec-reconciliation.md coverage row 9
+("Hollow (code-verified 2026-09-29)"). The UI consumes exactly the real
+PreviewResponse/PreviewStatusResponse shapes the server sends today
+and never fabricates a completed State 3.
