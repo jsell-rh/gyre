@@ -3,6 +3,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 from pipeline.store import Store
@@ -53,6 +54,24 @@ print(json.dumps(c and c['id']))'''
             self.assertIsNone(other.integration_lane())
             self.assertIsNotNone(other.claim('verify','next-candidate',task='task-002',concurrency=8))
         finally:other.close()
+
+    def test_external_ci_wait_yields_lane_until_observer_sees_ready(self):
+        first=self.store.claim('verify','verifier')
+        data=self.store.task(first['task'])['data']
+        data.update(published_head='published',ci={'head':'published','status':'pending','waiting_since':time.time()-901})
+        self.store.finish(first['id'],first['token'],{},data)
+        self.assertIsNone(self.store.integration_lane())
+        publish=self.store.enqueue('publish',first['task'],'g',{'candidate':'candidate-1'})
+        self.assertIsNone(self.store.claim('publish','still-waiting',ident=publish))
+        next_claim=self.store.claim('verify','next-verifier')
+        self.assertNotEqual(next_claim['task'],first['task'])
+        # The observer runs outside the lane. Ready CI can rejoin only after
+        # the next integration finishes; all ordinary publication gates remain.
+        data['ci']={'head':'published','status':'passed','checks':'green'}
+        self.store.put_task(first['task'],'g','body',data)
+        self.assertIsNone(self.store.claim('publish','ready-but-lane-busy',ident=publish))
+        self.store.finish(next_claim['id'],next_claim['token'],{}, {'delivered':{'sha':'next-sha'}})
+        self.assertIsNotNone(self.store.claim('publish','rejoin',ident=publish))
 
     def test_closed_pr_releases_lane_without_reopening_it_or_blocking_other_candidates(self):
         first=self.store.claim('verify','verifier')
