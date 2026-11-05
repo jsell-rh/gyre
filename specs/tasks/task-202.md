@@ -5,7 +5,7 @@ depends_on: [task-201]
 progress: not-started
 coverage_sections:
   - "search.md §Searchable Entities"
-commits: ["309fc7dd426b346fdfa576a5770c49d65fc2aced"]
+commits: ["80f13a7059e1458ce3f10551909461a4a5677342", "309fc7dd426b346fdfa576a5770c49d65fc2aced"]
 ---
 
 ## Spec Excerpt
