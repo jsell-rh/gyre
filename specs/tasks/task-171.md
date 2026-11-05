@@ -63,14 +63,14 @@ Prompt template format uses `{{variable}}` substitution. Templates are committed
 
 ## Acceptance Criteria
 
-- [x] SSE streaming helper produces correct event format
-- [x] Prompt templates loaded from repo git tree with `{{...}}` substitution
-- [x] Rate limiter enforces 10 req/min per (user, workspace) with 429 + Retry-After
-- [x] Budget charging records `llm_query` cost entries
-- [x] Three LLM endpoints registered and return SSE streams
-- [x] ABAC resource mappings configured for all three endpoints
-- [x] `prompts/save` endpoint commits directly to default branch
-- [x] Tests pass
+- [ ] SSE streaming helper produces correct event format
+- [ ] Prompt templates loaded from repo git tree with `{{...}}` substitution
+- [ ] Rate limiter enforces 10 req/min per (user, workspace) with 429 + Retry-After
+- [ ] Budget charging records `llm_query` cost entries
+- [ ] Three LLM endpoints registered and return SSE streams
+- [ ] ABAC resource mappings configured for all three endpoints
+- [ ] `prompts/save` endpoint commits directly to default branch
+- [ ] Tests pass
 
 ## Agent Instructions
 
@@ -78,7 +78,7 @@ Read `ui-layout.md` §2 "LLM Endpoint Contract" for the full contract. Check exi
 
 ## Shipped
 
-All eight acceptance criteria are implemented in production code across the listed commits (13 implementation commits, repair commit `ed457c45`, merge reconciliation `d2c12b52`).
+All eight acceptance criteria are implemented in production code across the listed commits (13 implementation commits, test-fix commit `ed457c45`, merge reconciliations `e67f0012`/`d2c12b52`/`509e3b66`). This round is a contract repair: the production fix is preserved unchanged through the executor's merge of the newly assigned base `722179f0`.
 
 ### Behavior
 
@@ -87,23 +87,15 @@ All eight acceptance criteria are implemented in production code across the list
 - **Rate limiting**: `src/llm_rate_limit.rs` implements the in-memory sliding window (10 req/60 s keyed on `(principal, workspace)`, auth-context-derived principal, 429 with `Retry-After`, 60 s inactivity eviction); applied inside each handler after auth, distinct from the global limiter.
 - **Model + token limits**: per-workspace `llm_model` with `GYRE_LLM_MODEL` default; per-endpoint max tokens from `GYRE_LLM_MAX_TOKENS_{GENERATE,ASK,ASSIST}` (2000/4000/4000) passed into `predict_json`.
 - **Budget charging**: every LLM call records an `llm_query` cost entry with prompt-template git SHA for audit, enforced in all three handlers plus the `prompts/save` path.
-- **ABAC**: resource mappings for all four routes present in `src/abac_middleware.rs` (`scripts/check-abac-route-registry.sh` passes); cross-workspace repo scope rejected (`validate_repo_scope`), LLM-hallucinated foreign `repo_id` in view specs nulled with fallback.
+- **ABAC**: resource mappings for all four routes present in `src/abac_middleware.rs`; cross-workspace repo scope rejected (`validate_repo_scope`), LLM-hallucinated foreign `repo_id` in view specs nulled with fallback.
 
-### Repair in earlier rounds
+### This round (contract repair, base merge 509e3b66)
 
-- `ed457c45` fixed the test setup of 3 task-170-era tests (`generate_forwards_valid_llm_view_spec`, `generate_rejects_invalid_llm_view_spec_with_fallback`, `generate_rejects_llm_spec_with_foreign_repo_id`) that never created their target workspaces and only passed because the pre-task-171 handler skipped the workspace lookup; no production code or assertion strength changed.
-- `e67f0012` resolved the prior round's merge of base `e608ac78` (mem.rs test-module union: `budget_call_tests` + `secret_contract_tests`/`trace_payload_tests`, each module byte-identical to its parent).
-
-### Repair in this round (merge with assigned base 2f215b1e, commit d2c12b52)
-
-- The checkout arrived mid-merge of the assigned base `2f215b1e` (task-180) with four conflicted files, resolved as a union:
-  - `crates/gyre-server/src/lib.rs`: kept this branch's `budget_calls` port store and took the base's port-backed `SearchPort` store in place of the bare `Arc<MemSearchAdapter>` (satisfies `check-in-memory-state-stores.sh`; all `.search` call sites go through the trait).
-  - `docs/api-reference.md`: kept the base's two spec-assertion endpoint rows plus this branch's detailed `prompts/save` row.
-  - `web/dist/`: took the base's rebuilt artifacts wholesale — this branch made no `web/src` changes since the previous merge point, so the base's build is the only one consistent with the merged sources; the branch's stale assets (including a previously committed index.html containing literal conflict markers) were removed.
-- Restored this task document to `ready-for-review` after the executor reset it to the assigned contract, re-adding `ed457c45` to the `commits:` list (dropped by the restore, flagged by `check-task-commit-attribution.sh`).
+- The executor restored the assigned task document and merged the newly assigned base `722179f0` (task-063). `git diff 7c8a80bc..509e3b66 --stat -- crates/` is empty — the merge brought only `specs/` and `web/` files, so the Rust server tree at HEAD is byte-identical to the prior-round candidate `7c8a80bc`, whose full lib suite passed 1266/0 and was independently reviewed. No production code changed this round.
+- Restored `progress: ready-for-review` and re-added `ed457c45` to the `commits:` frontmatter (dropped by the document restore; required by `check-task-commit-attribution.sh`). The acceptance-criteria checkboxes are left in the assigned unchecked state — completion is recorded here, not by editing the protected contract text.
 
 ### Test evidence
 
-- Full suite on the merged tree (`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib`): **1266 passed, 0 failed** — including all task-171 modules (`api::explorer_views`, `api::specs_assist`, `api::graph`, `llm_rate_limit`, `llm_helpers`, `api::llm_prompts`, `api::llm_config`) and both sides of the merged mem test modules (`budget_call_tests`, `secret_contract_tests`, `trace_payload_tests`). Log: `/tmp/stage/review-evidence/task171-full-lib-tests.log`.
-- Focused run (`api::explorer_views api::specs_assist api::graph llm_rate_limit llm_helpers api::llm_prompts api::llm_config mem::`): **102 passed, 0 failed**. Log: `/tmp/stage/review-evidence/task171-focused-tests.log`.
-- Mechanical checks green on the merged tree: `check-arch.sh`, `check-abac-route-registry.sh`, `check-in-memory-state-stores.sh`, `check-migration-versions.sh`, `check-mem-port-contracts.sh`, `check-mcp-write-tools.sh`, `check-inert-enforcement.sh`, `check-task-commit-attribution.sh` (all exit 0; logs under `/tmp/stage/review-evidence/`).
+- Mechanical checks re-run green on the merged HEAD (exit 0, logs in `/tmp/stage/review-evidence/`): `check-abac-route-registry.sh`, `check-arch.sh`, `check-task-commit-attribution.sh`, `check-in-memory-state-stores.sh`.
+- Full lib suite on the byte-identical Rust tree (prior round, `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib`): **1266 passed, 0 failed**, including all task-171 modules (`api::explorer_views`, `api::specs_assist`, `api::graph`, `llm_rate_limit`, `llm_helpers`, `api::llm_prompts`, `api::llm_config`).
+- Fresh focused run on the merged HEAD this round (`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib -- api::explorer_views api::specs_assist api::graph llm_rate_limit llm_helpers api::llm_prompts api::llm_config`): **91 passed, 0 failed** (1175 filtered out), including the SSE-streaming, rate-limit (10 req/min + eviction), prompt-template (git-tree load, `{{...}}` substitution, DB override), `llm_query` budget-charging, and `prompts/save` commit-SHA tests. Log: `/tmp/stage/review-evidence/task171-focused-tests-r3.log`. The first launch of this run stalled on a CPU-starved host (load average ≈ 20, test-binary link progressing ~1 CPU-second per 10 minutes wall); after the sandbox freed up, the rerun compiled and linked in 4m40s — recorded as transient infrastructure contention, not a code defect.
