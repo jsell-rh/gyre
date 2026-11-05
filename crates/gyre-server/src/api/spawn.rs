@@ -1110,7 +1110,13 @@ pub(crate) async fn spawn_agent_core(
         new_id(),
         "agent.spawned",
         Some(agent.id.to_string()),
-        serde_json::json!({ "task_id": req.task_id }),
+        serde_json::json!({
+            "task_id": req.task_id,
+            // Scope facets (search.md §Searchable Entities: Activity Event
+            // is filterable by workspace/repo).
+            "workspace_id": repo.workspace_id.to_string(),
+            "repo_id": repo.id.to_string(),
+        }),
         now,
     );
     let _ = state.analytics.record(&ev).await;
@@ -1342,7 +1348,13 @@ pub async fn complete_agent(
         new_id(),
         "agent.completed",
         Some(agent.id.to_string()),
-        serde_json::json!({ "mr_id": mr.id.to_string() }),
+        serde_json::json!({
+            "mr_id": mr.id.to_string(),
+            // Scope facets (search.md §Searchable Entities: Activity Event
+            // is filterable by workspace/repo).
+            "workspace_id": mr.workspace_id.to_string(),
+            "repo_id": mr.repository_id.to_string(),
+        }),
         now,
     );
     let _ = state.analytics.record(&ev).await;
@@ -1358,7 +1370,14 @@ pub async fn complete_agent(
         new_id(),
         "mr.created",
         Some(agent.id.to_string()),
-        serde_json::json!({ "mr_id": mr.id.to_string(), "source_branch": mr.source_branch }),
+        serde_json::json!({
+            "mr_id": mr.id.to_string(),
+            "source_branch": mr.source_branch,
+            // Scope facets (search.md §Searchable Entities: Activity Event
+            // is filterable by workspace/repo).
+            "workspace_id": mr.workspace_id.to_string(),
+            "repo_id": mr.repository_id.to_string(),
+        }),
         now,
     );
     let _ = state.analytics.record(&ev).await;

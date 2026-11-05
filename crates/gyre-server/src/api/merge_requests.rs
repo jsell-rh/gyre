@@ -634,7 +634,13 @@ pub async fn transition_mr_status(
             new_id(),
             "mr.merged",
             mr.author_agent_id.as_ref().map(|id| id.to_string()),
-            serde_json::json!({ "mr_id": mr.id.to_string() }),
+            serde_json::json!({
+                "mr_id": mr.id.to_string(),
+                // Scope facets (search.md §Searchable Entities: Activity
+                // Event is filterable by workspace/repo).
+                "workspace_id": mr.workspace_id.to_string(),
+                "repo_id": mr.repository_id.to_string(),
+            }),
             ts,
         );
         let _ = state.analytics.record(&ev).await;
