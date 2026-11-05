@@ -314,32 +314,34 @@ impl SearchPort for SqliteStorage {
             return Ok(vec![]);
         }
         let pattern = format!("{}%", escape_like(prefix));
-        Ok(tokio::task::spawn_blocking(move || -> Result<Vec<SearchSuggestion>> {
-            let mut conn = pool.get().context("get db connection")?;
-            // LIKE on the title column is ASCII-case-insensitive in SQLite —
-            // a prefix match, not a token match, which is what autocomplete
-            // needs (mid-word terms are unreachable from a prefix).
-            let rows = diesel::sql_query(
-                "SELECT entity_type, entity_id, title
+        Ok(
+            tokio::task::spawn_blocking(move || -> Result<Vec<SearchSuggestion>> {
+                let mut conn = pool.get().context("get db connection")?;
+                // LIKE on the title column is ASCII-case-insensitive in SQLite —
+                // a prefix match, not a token match, which is what autocomplete
+                // needs (mid-word terms are unreachable from a prefix).
+                let rows = diesel::sql_query(
+                    "SELECT entity_type, entity_id, title
                  FROM search_index
                  WHERE title LIKE ?1 ESCAPE '\\'
                  ORDER BY title
                  LIMIT ?2",
-            )
-            .bind::<Text, _>(&pattern)
-            .bind::<BigInt, _>(limit as i64)
-            .load::<SuggestRow>(&mut conn)?;
+                )
+                .bind::<Text, _>(&pattern)
+                .bind::<BigInt, _>(limit as i64)
+                .load::<SuggestRow>(&mut conn)?;
 
-            Ok(rows
-                .into_iter()
-                .map(|r| SearchSuggestion {
-                    text: r.title,
-                    entity_type: r.entity_type,
-                    entity_id: r.entity_id,
-                })
-                .collect())
-        })
-        .await??)
+                Ok(rows
+                    .into_iter()
+                    .map(|r| SearchSuggestion {
+                        text: r.title,
+                        entity_type: r.entity_type,
+                        entity_id: r.entity_id,
+                    })
+                    .collect())
+            })
+            .await??,
+        )
     }
 
     async fn facet_counts(&self, query: Option<SearchQuery>) -> Result<FacetCounts> {
@@ -672,7 +674,12 @@ mod tests {
     async fn suggest_prefix_matches_titles_case_insensitively() {
         let (_f, storage) = tmp_storage();
         storage
-            .index(doc("spec", "s1", "Identity security", "spiffe workload identity"))
+            .index(doc(
+                "spec",
+                "s1",
+                "Identity security",
+                "spiffe workload identity",
+            ))
             .await
             .unwrap();
         storage
@@ -680,13 +687,22 @@ mod tests {
             .await
             .unwrap();
         storage
-            .index(doc("task", "t2", "identity provider audit", "oidc audit trail"))
+            .index(doc(
+                "task",
+                "t2",
+                "identity provider audit",
+                "oidc audit trail",
+            ))
             .await
             .unwrap();
 
         // Case-insensitive prefix on the title: lowercase query, mixed-case titles.
         let sugg = storage.suggest("iden", 10).await.unwrap();
-        assert_eq!(sugg.len(), 2, "expected both identity-prefixed titles: {sugg:?}");
+        assert_eq!(
+            sugg.len(),
+            2,
+            "expected both identity-prefixed titles: {sugg:?}"
+        );
         // ORDER BY title: binary collation puts uppercase 'I' before lowercase 'i'.
         assert_eq!(sugg[0].text, "Identity security");
         assert_eq!(sugg[0].entity_type, "spec");
@@ -750,13 +766,11 @@ mod tests {
         let mut t1 = doc("task", "t1", "jwt rotation one", "jwt jwt jwt rotation");
         t1.facets
             .insert("status".to_string(), "in_progress".to_string());
-        t1.facets
-            .insert("priority".to_string(), "high".to_string());
+        t1.facets.insert("priority".to_string(), "high".to_string());
         storage.index(t1).await.unwrap();
 
         let mut t2 = doc("task", "t2", "jwt rotation two", "jwt rotation");
-        t2.facets
-            .insert("status".to_string(), "done".to_string());
+        t2.facets.insert("status".to_string(), "done".to_string());
         t2.workspace_id = Some("ws-a".to_string());
         storage.index(t2).await.unwrap();
 
@@ -835,7 +849,10 @@ mod tests {
             }))
             .await
             .unwrap();
-        assert!(none.is_empty(), "non-matching query must aggregate nothing: {none:?}");
+        assert!(
+            none.is_empty(),
+            "non-matching query must aggregate nothing: {none:?}"
+        );
     }
 
     #[tokio::test]

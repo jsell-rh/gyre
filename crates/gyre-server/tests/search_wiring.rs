@@ -209,10 +209,7 @@ async fn sqlite_url_wires_fts5_search_port() {
     );
     assert_eq!(suggestions[0]["text"], "Quokka census");
     assert_eq!(suggestions[0]["entity_type"], "task");
-    assert!(!suggestions[0]["entity_id"]
-        .as_str()
-        .unwrap()
-        .is_empty());
+    assert!(!suggestions[0]["entity_id"].as_str().unwrap().is_empty());
 
     // Empty prefix: empty list — never "every title in the index".
     let resp = call(&app, "GET", "/api/v1/search/suggest?q=", None).await;

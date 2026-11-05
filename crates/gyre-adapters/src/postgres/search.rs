@@ -289,32 +289,34 @@ impl SearchPort for PgStorage {
             return Ok(vec![]);
         }
         let pattern = format!("{}%", escape_like(prefix));
-        Ok(tokio::task::spawn_blocking(move || -> Result<Vec<SearchSuggestion>> {
-            let mut conn = pool.get().context("get db connection")?;
-            // ILIKE is case-insensitive prefix matching on the title column —
-            // what autocomplete needs (mid-word terms are unreachable from a
-            // prefix).
-            let rows = diesel::sql_query(
-                "SELECT entity_type, entity_id, title
+        Ok(
+            tokio::task::spawn_blocking(move || -> Result<Vec<SearchSuggestion>> {
+                let mut conn = pool.get().context("get db connection")?;
+                // ILIKE is case-insensitive prefix matching on the title column —
+                // what autocomplete needs (mid-word terms are unreachable from a
+                // prefix).
+                let rows = diesel::sql_query(
+                    "SELECT entity_type, entity_id, title
                  FROM search_index
                  WHERE title ILIKE $1 ESCAPE '\\'
                  ORDER BY title
                  LIMIT $2",
-            )
-            .bind::<Text, _>(&pattern)
-            .bind::<BigInt, _>(limit as i64)
-            .load::<SuggestRow>(&mut conn)?;
+                )
+                .bind::<Text, _>(&pattern)
+                .bind::<BigInt, _>(limit as i64)
+                .load::<SuggestRow>(&mut conn)?;
 
-            Ok(rows
-                .into_iter()
-                .map(|r| SearchSuggestion {
-                    text: r.title,
-                    entity_type: r.entity_type,
-                    entity_id: r.entity_id,
-                })
-                .collect())
-        })
-        .await??)
+                Ok(rows
+                    .into_iter()
+                    .map(|r| SearchSuggestion {
+                        text: r.title,
+                        entity_type: r.entity_type,
+                        entity_id: r.entity_id,
+                    })
+                    .collect())
+            })
+            .await??,
+        )
     }
 
     async fn facet_counts(&self, query: Option<SearchQuery>) -> Result<FacetCounts> {

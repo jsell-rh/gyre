@@ -399,11 +399,21 @@ mod tests {
         // yields nothing (mem adapter guards in code — it has no schema).
         let adapter = MemSearchAdapter::new();
         adapter
-            .index(make_doc("spec", "s1", "Identity security", "spiffe identity"))
+            .index(make_doc(
+                "spec",
+                "s1",
+                "Identity security",
+                "spiffe identity",
+            ))
             .await
             .unwrap();
         adapter
-            .index(make_doc("task", "t1", "identity provider audit", "oidc audit"))
+            .index(make_doc(
+                "task",
+                "t1",
+                "identity provider audit",
+                "oidc audit",
+            ))
             .await
             .unwrap();
         adapter
@@ -438,7 +448,8 @@ mod tests {
         let adapter = MemSearchAdapter::new();
 
         let mut t1 = make_doc("task", "t1", "jwt one", "jwt jwt jwt rotation");
-        t1.facets.insert("status".to_string(), "in_progress".to_string());
+        t1.facets
+            .insert("status".to_string(), "in_progress".to_string());
         adapter.index(t1).await.unwrap();
 
         let mut t2 = make_doc("task", "t2", "jwt two", "jwt rotation");
@@ -447,7 +458,8 @@ mod tests {
         adapter.index(t2).await.unwrap();
 
         let mut m1 = make_doc("mr", "m1", "jwt merge", "jwt handling");
-        m1.facets.insert("status".to_string(), "in_progress".to_string());
+        m1.facets
+            .insert("status".to_string(), "in_progress".to_string());
         adapter.index(m1).await.unwrap();
 
         adapter
