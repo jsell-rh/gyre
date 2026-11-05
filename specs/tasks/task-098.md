@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "platform-model.md §7 MCP Integration"
   - "platform-model.md §7 Admin API"
-commits: ["794b018dc654fef3acfc47fa7343185f10603d9c", "b569f9886cfaf216d04a0ae3ad8dc4149693f6fb", "d44ab7676100568e0a84c74f9c30b28450257d00", "1d4a583730b59b652758067ad6819143539769bb"]
+commits: ["1d4a583730b59b652758067ad6819143539769bb", "d44ab7676100568e0a84c74f9c30b28450257d00"]
 ---
 
 ## Spec Excerpt
