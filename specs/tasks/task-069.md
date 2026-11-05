@@ -2,7 +2,7 @@
 title: "Explorer WebSocket Protocol & Server Handler"
 spec_ref: "explorer-implementation.md §3–6, §20–21"
 depends_on: [task-068, task-238]
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "explorer-implementation.md §3 WebSocket Protocol"
   - "explorer-implementation.md §4 Endpoint"
