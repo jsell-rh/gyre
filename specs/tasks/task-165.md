@@ -61,35 +61,31 @@ Read `specs/system/supply-chain.md` §"gyre-stack.lock", §"Attestation Levels",
 
 ## Shipped
 
-Rebase repair (round `bc4e6b8a`, merge commit `6b2a84a7`): resolved the
-assigned merge of upstream `ed57c723` (task-201 persistent full-text
-search backend) into this branch. Three conflict classes, all resolved
-without changing task-165 behavior:
+Repair round (review findings 4492822e, two items, both resolved at HEAD
+`68c0be4e` without changing task-165 production behavior):
 
-- `crates/gyre-cli/src/main.rs`: HEAD's `Stack` command and upstream's
-  `Budget` command were both added at the same enum/match sites — resolved
-  by union (both commands kept; zero stack-related lines changed,
-  `git diff 0f9cd02c 6b2a84a7 -- crates/gyre-cli/src/main.rs` contains no
-  `[Ss]tack` hunk).
-- `web/dist` build artifacts: rename/rename on `elk.bundled-*.js` (both
-  variants byte-identical, md5 `1be96051…`) plus `index.html` script-hash
-  conflict — took upstream's build (`index-D4CX8rVo.js` referencing
-  `elk.bundled-OwdVv5y8.js`) because this branch has zero `web/src`
-  changes since merge base `db37fd02`, so the merged `web/src` is
-  byte-identical to upstream's and their dist is the matching build.
-- `specs/coverage/SUMMARY.md`: TOTAL-line conflict resolved mechanically by
-  re-running `scripts/update-coverage-summary.sh` (802 total / 219 n/a /
-  0 not-started / 307 assigned / 113 implemented / 163 verified / 47%).
-
-All task-165 implementation files are byte-identical to checkpoint
-`19a3d5af`: `git diff 19a3d5af HEAD --stat` over `gyre-domain/src/stack.rs`,
-`gyre-server/src/git_http.rs`, `api/stack_attest.rs`, `api/agents.rs`,
-`gyre-domain/src/agent.rs`, and the task-165 migration is empty; the only
-deltas under `gyre-adapters/` and `gyre-cli/src/main.rs` are upstream
-task-201's search/budget work absorbed by the merge. The `commits:` list
-keeps the assignment's two checkpoint SHAs (`96dfd8b8`, `19a3d5af`), which
-carry the full implementation; the merge and earlier process commits sit
-on top outside the list.
+- **Invariant gate `check-fabricated-scope-defaults.sh`**: the finding's
+  stale line-anchored exemption (`git_http.rs:1495`, drifted to 1727 by
+  task-165 insertions) is now moot — the exempted ws_id push-event
+  fallback site was fixed upstream with the skip-and-log pattern
+  (git_http.rs:1730-1737: repo lookup failure now skips the
+  workspace-scoped emission instead of fabricating "default"). Per the
+  exemption file's own instructions, the dead entry was deleted and
+  FROZEN_EXEMPTION_COUNT lowered 5→4; the remaining 4 entries still match
+  their live sites exactly (auth.rs:773, specs.rs:959,
+  speculative_merge.rs:372, gate_executor.rs:111). Gate passes at HEAD.
+- **L3 record accuracy (coverage rows 8/9)**: corrected the sub-bullet
+  that presented JWT `wl_container_id`/`wl_image_hash` claims as a live
+  Level-3 detection signal. The claims are defined (auth.rs:93-96) and
+  `mint_with_workload` (auth.rs:189) can mint them, but no production
+  minting site populates them — spawn.rs:429-443 pre-mints with `mint()`
+  (no workload claims) and is `mint_with_workload`'s only caller — so the
+  JWT branch of `resolve_push_attestation_level` is unreachable in
+  production today and is recorded as defense-in-depth, not a live
+  signal. Production L3 detection runs via the KV workload-attestation
+  path (spawn.rs `attest_agent_with_container` writes container_id +
+  image_hash for M19.4 container targets), which the
+  `level3_detected_from_workload_attestation` test exercises.
 
 ### Actual behavior
 
@@ -105,10 +101,11 @@ on top outside the list.
    via `GET /api/v1/agents/:id/stack` and writes the TOML lockfile.
 3. **Attestation level resolution** — `resolve_push_attestation_level`
    (`git_http.rs`): L3 = server-recorded workload attestation with
-   container identity (written by spawn.rs for M19.4 container targets) or
-   verified agent JWT carrying `wl_container_id`+`wl_image_hash`; L2 =
-   registered stack in KV `agent_stacks`; L1 = no attestation. Stored on the
-   agent record (migration `2026-10-10-000056_agent_attestation_level`,
+   container identity (written by spawn.rs for M19.4 container targets;
+   the JWT `wl_container_id`+`wl_image_hash` branch exists but has no
+   production minting site — see above); L2 = registered stack in KV
+   `agent_stacks`; L1 = no attestation. Stored on the agent record
+   (migration `2026-10-10-000056_agent_attestation_level`,
    sqlite/postgres round-trip, mem via whole-struct clone), exposed on
    `GET /api/v1/agents/:id` as `attestation_level`, and mapped to commit
    provenance labels (server-verified / self-reported / unattested).
@@ -126,46 +123,41 @@ on top outside the list.
 
 ### Test evidence
 
-All suites re-run this round at merge HEAD `6b2a84a7` (logs under
-`/tmp/stage/review-evidence/`, `task165-merge-*.log`):
+This repair round changed no Rust code, so the focused probe set is the
+affected gates plus the task-165 suites from the prior round (logs under
+`/tmp/stage/review-evidence/`):
 
-- gyre-domain `stack`: 9 passed (round-trip, integrity, drift, malformed
-  TOML, zero-timestamp, missing-persona, fingerprint discrimination).
-- gyre-server `api::stack_attest`: 14 passed (register/get stack, policy
-  set/get/clear, level-3 policy, min-level + warn mode, bad-level/mode 400s,
-  legacy parse fallbacks, agent-role 403 NEW-39).
-- gyre-server git_http task-165 push tests: 7 passed —
-  `push_below_min_attestation_level_blocked`,
-  `push_below_min_level_warn_mode_flagged_and_accepted`,
-  `push_meeting_min_level_accepted_and_level_stored`,
-  `level3_detected_from_workload_attestation`,
-  `lockfile_drift_blocked_in_block_mode`, `lockfile_match_accepted`,
-  `tampered_lockfile_rejected_by_integrity_check`.
-- gyre-server `constraint_check`: 31 passed — re-run because the merge
-  touched `constraint_check.rs` (upstream); `derive_attestation_level` /
-  `get_repo_required_attestation_level` still green through
-  `parse_stack_policy`.
-- gyre-cli bin unit tests: 129 passed (110 prior + 19 upstream budget
-  tests absorbed by the merge; `Stack` command paths unchanged).
-- gyre-cli + gyre-domain compile clean (`cargo build -p gyre-cli -p
-  gyre-domain`), which also compiles the merged server test tree the suites
-  above ran against.
-- Invariant gates at HEAD: arch, migration versions, ABAC route registry,
-  mem port contracts, task attribution — all OK.
+- `bash scripts/check-fabricated-scope-defaults.sh` → OK, exit 0, at HEAD
+  with the lowered count (log: `task165-repair-fabscope.log`).
+- Repo-wide raw detector output re-verified by hand: exactly 4 live
+  violations, each at its exempted line; the git_http.rs site is gone.
+- `bash scripts/check-task-commit-attribution.sh` → OK (log:
+  `task165-repair-attribution.log`).
+- Prior-round suites at merge HEAD `6b2a84a7` (implementation unchanged
+  since — no Rust file touched this round): gyre-domain `stack` 9,
+  gyre-server `api::stack_attest` 14, git_http task-165 push tests 7
+  (push_below_min_attestation_level_blocked,
+  push_below_min_level_warn_mode_flagged_and_accepted,
+  push_meeting_min_level_accepted_and_level_stored,
+  level3_detected_from_workload_attestation,
+  lockfile_drift_blocked_in_block_mode, lockfile_match_accepted,
+  tampered_lockfile_rejected_by_integrity_check), constraint_check 31,
+  gyre-cli bins 129.
 - `cargo test --all` is owned by the verification/publication stage and
-  not repeated here; the focused suites above cover every task-165
-  behavior. `ws_integration::test_auth_and_ping_roundtrip` fails in this
-  sandbox on `TcpListener::bind` errno 95 (`capabilities.json`:
-  `tcp_listener_probe.supported=false`) — pre-existing test predating the
-  task base, an infrastructure restriction, not a code defect; requires
-  exact-head GitHub CI verification.
+  not repeated here. `ws_integration::test_auth_and_ping_roundtrip`
+  fails in this sandbox on `TcpListener::bind` errno 95
+  (`capabilities.json`: `tcp_listener_probe.supported=false`) —
+  pre-existing test predating the task base, an infrastructure
+  restriction, not a code defect; requires exact-head GitHub CI
+  verification.
 
 ### Known partials
 
 (also recorded in coverage rows 7/8/9): lockfile is not approver-signed
 (integrity is self-verifying via the recomputed fingerprint, but no
 signature over the file); L3 trust basis is server-observed container
-identity + server-minted JWT claims, not SPIFFE/eBPF cryptographic
-environment proof; stack attestation is not sigstore-signed (pre-existing,
-rows 4/5/10). Consistent with the task's implementation plan, which scoped
-L3 detection to the container-claim check.
+identity, not SPIFFE/eBPF cryptographic environment proof, and the JWT
+workload-claim minting path is unwired in production (recorded above);
+stack attestation is not sigstore-signed (pre-existing, rows 4/5/10).
+Consistent with the task's implementation plan, which scoped L3
+detection to the container-identity check.
