@@ -21,15 +21,15 @@ r=pathlib.Path(__file__).parent
 a=sys.argv[1]
 base={'scope':str(r),'agent':'code-implementation','item':'one','title':'Existing worker','key':'existing','fingerprint':'one'}
 if a=='rows':
- print(json.dumps({'capacity':1,'rows':[dict(base,status='running',run_id='owned',started=1,log='')]}))
+ print(json.dumps({'capacity':1,'rows':[dict(base,status='running',run_id='owned',started=1,log=''),dict(base,key='priority',item='new/control',status='queued',started=100,log='')]}))
 elif a=='discover':
- print(json.dumps({'jobs':[dict(base,key='queued',item='two'),dict(base,key='cleanup',item='old/resource',unmetered=True)],'errors':[]}))
+ print(json.dumps({'jobs':[dict(base,key='priority',item='new/control',unmetered=True),dict(base,key='queued',item='two'),dict(base,key='cleanup',item='old/resource',unmetered=True)],'errors':[]}))
 elif a=='authorize':
  request=json.load(sys.stdin); print(json.dumps({'allowed':request['scope']==str(r)}))
 elif a=='launch':
  request=json.load(sys.stdin)
  with (r/'launches').open('a') as f: f.write(request['key']+'\n')
- print(json.dumps({'started':request['key']=='cleanup'}))
+ print(json.dumps({'started':request['key'] in ('priority','cleanup')}))
 else: print('{}')
 `
 	if err := os.WriteFile(path, []byte(code), 0600); err != nil {
@@ -85,6 +85,9 @@ func TestAdapterBackendGlobalAdmissionAndIndependentInstances(t *testing.T) {
 		data, _ := os.ReadFile(filepath.Join(config.StateDir, "launches"))
 		if strings.Contains(string(data), "queued") {
 			t.Fatal("launched model while global capacity was occupied")
+		}
+		if !strings.HasPrefix(string(data), "priority\n") {
+			t.Fatal("dispatcher overrode the domain adapter's control-work priority")
 		}
 		pid, err := os.ReadFile(config.SupervisorLock)
 		if err != nil || string(pid) != fmt.Sprint(os.Getpid()) {
