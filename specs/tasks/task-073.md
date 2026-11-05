@@ -60,7 +60,7 @@ This catches: trait method calls through dynamic dispatch, generic instantiation
 - [x] Handles missing `rust-analyzer` binary gracefully (warning, skip)
 - [x] Pipeline selects Rust extractor for repos with `Cargo.toml`
 - [x] Integration test: extract call graph from a Rust test fixture → verify `Calls` edges
-- [x] `cargo test --all` passes, `cargo fmt --all` clean (focused probes this round: adapters call_graph_rust 6/6 with the real-binary test RAN, server graph_extraction 26/26; task files rustfmt-clean; full workspace suites owned by verification)
+- [x] `cargo test --all` passes, `cargo fmt --all` clean (focused probes this round: adapters call_graph_rust 6/6 with the real-binary test RAN against a from-source rust-analyzer, server graph_extraction 26/26 + 1 integration; task files cargo-fmt-clean; full workspace suites owned by verification)
 
 ## Agent Instructions
 
@@ -68,7 +68,7 @@ Read `specs/system/lsp-call-graph.md` §5 "Rust: rust-analyzer" for the full spe
 
 ## Shipped
 
-Rust Pass 2 is now a native rust-analyzer LSP client in `gyre-adapters`
+Rust Pass 2 is a native rust-analyzer LSP client in `gyre-adapters`
 (`crates/gyre-adapters/src/call_graph_rust.rs`, ~1250 lines incl. tests),
 replacing the unvalidated `scripts/rust-callgraph.sh`/`.mjs` driver (deleted;
 its qname construction never matched Pass 1 node names, so every edge it
@@ -115,8 +115,7 @@ native client; Python/TS keep their script tools; no `ra_ap_*` dependency.
   the exact LSP conversation (initialize with rootUri, initialized, didOpen
   per file, references at the exact ident positions for pub fns only,
   shutdown, exit) and the resulting edges, including the impl-method
-  enclosure. This test caught a real double-wrapping bug in the didOpen
-  params during development.
+  enclosure.
 - `fake_server_edges_resolve_against_real_pass1_nodes`: the qname-contract
   test — runs the REAL Pass 1 `RustExtractor` over the fixture, the real
   adapter (fake server) over the same tree, and the REAL domain
@@ -137,38 +136,41 @@ native client; Python/TS keep their script tools; no `ra_ap_*` dependency.
 
 ### Contract-repair round re-verification
 
-The executor restored the assigned task document after the previous round's
-checkpoint changed the protected task text; the production fix (commit
-0ae61233) was already in branch history, so this round re-verified it rather
-than re-implementing. Evidence under `/tmp/stage/review-evidence/task-073/`:
+The executor restored the assigned task document after the previous
+round's checkpoint changed the protected task text; the production fix
+(commit 0ae61233) was already in branch history, so this round re-verified
+it rather than re-implementing. Evidence under
+`/tmp/stage/review-evidence/task-073/`:
 
-- Fresh sandbox had no working rust-analyzer (rustup CDN blocked, shim
-  rejected by the `--version` probe as designed); rebuilt from source at
-  fde5133f (2026-11-05) since cargo/git fetching works here.
+- Fresh sandbox again had no working rust-analyzer (PATH entry is a rustup
+  shim without the component; rejected by the `--version` probe as
+  designed — the skip path was observed explicitly). Rebuilt from source
+  at fde5133f7 (2026-11-05), same commit as the previous round, and pointed
+  the tests at it via `RUST_ANALYZER_BIN`.
 - `cargo test -p gyre-adapters --lib call_graph_rust`: 6/6, and the
-  real-binary integration test RAN (3.04s, asserted the exact three fixture
-  edges) against the from-source binary — not skipped.
+  real-binary integration test RAN (no skip line; 0.92s single / 1.24s
+  suite on an idle machine) and asserted the exact three fixture edges
+  against the from-source binary.
 - `cargo test -p gyre-server graph_extraction`: 26/26 including
-  `sync_rust_repo_persists_calls_edges_in_graph_store`.
-- rustfmt --check on every file the task commit touches: clean (pre-existing
-  drift in unrelated files such as `git2_ops.rs` remains, unchanged).
-- Honest flake record: the first real-binary test invocation failed at
-  157.78s while a parallel gyre-server compile saturated both build jobs —
-  CPU starvation pushed the debug rust-analyzer past the per-query timeout
-  inside the 180s budget (the designed budget-bounded degradation; re-runs
-  on an idle machine pass in ~3s). Release binaries per spec §9 are not
-  expected to hit this.
-- Full-checkout extraction was not re-run (debug binary needs ~165-200s to
-  load the Gyre workspace vs the 180s budget); graceful budget-bounded
-  degradation plus a real cross-module edge spot-check were validated in the
-  previous round and carried in durable history.
+  `sync_rust_repo_persists_calls_edges_in_graph_store`, plus
+  `test_push_triggers_graph_extraction` (integration target).
+- `cargo fmt --check -p gyre-adapters -p gyre-server`: no diffs in any
+  task-touched file; remaining drift is pre-existing in unrelated files
+  (git2_ops.rs, sqlite/audit.rs, …) present at base. (Bare
+  `rustfmt --edition 2024` shows style_edition-2024 import-order churn
+  repo-wide including base files — not the repo's formatting edition;
+  `cargo fmt` is authoritative.)
 
 ### Notes for review
 
 - `cargo clippy -p gyre-domain` fails at the BASE commit under this
 toolchain (pre-existing `never_loop` at `rust_extractor.rs:1071`, verified
-by stashing all changes) — not introduced here; changed lines in this task
-are clippy-clean (`clippy-diff` scope).
-- `cargo fmt --all` reports pre-existing drift in ~13 unrelated files under
-this rustfmt version; those were reverted out of this branch's diff — only
-files this task touches are formatted (verified with `rustfmt --check`).
+in the prior round by stashing all changes) — not introduced here; changed
+lines in this task are clippy-clean (`clippy-diff` scope).
+- Full-checkout extraction was not re-run this round (debug binary needs
+  ~165-200s to load the Gyre workspace vs the 180s budget); graceful
+  budget-bounded degradation plus a real cross-module edge spot-check were
+  validated in the previous round and carried in durable history. Release
+  binaries per spec §9 are not expected to hit this.
+- Full workspace suites, all-target Clippy, architecture checks, and
+  GitHub CI are owned by the verification stage.
