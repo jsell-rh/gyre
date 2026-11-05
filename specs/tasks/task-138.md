@@ -7,7 +7,7 @@ coverage_sections:
   - "agent-gates.md §Spec Approval Ledger"
   - "agent-gates.md §The Provenance Chain"
   - "agent-gates.md §How It Works"
-commits: ["30e80d9504f0ae390819ab593c460693f08bcee7", "2f424b88f966e26d656ecac0d382586f26bcc705", "72f61cbdc55fab1c8a593b2961db695e0804dcd2"]
+commits: ["30e80d9504f0ae390819ab593c460693f08bcee7", "2f424b88f966e26d656ecac0d382586f26bcc705", "72f61cbdc55fab1c8a593b2961db695e0804dcd2", "b27d3787ea35b25fa8070a496a6f457422d5d906"]
 ---
 
 ## Spec Excerpt
@@ -224,6 +224,40 @@ Verification on this round's working tree (evidence:
   (`git diff 27bd585c HEAD -- crates/gyre-cli` empty), so no CLI probe is
   required beyond the server suite compiling against it.
 
-Sandbox limitation unchanged (see above); host checklist: e2e
+### Round 4 (merge repair)
+
+The run-3 checkpoint (4e291509) was complete, but the run itself died at
+pre-flight (GitHub API TLS timeout — infra, recorded in the run-4 job log).
+This round's controller base merge (0cca712d) was committed with two
+defects, both repaired in b27d3787:
+
+- **Unresolved conflict markers** in `git_http.rs` (spec-lifecycle push
+  hook): the branch resolves the repo's workspace scope once per push
+  (Option-typed `ws_id`, events skipped on unresolvable repo); main's
+  task-180 landing re-resolved it inline per task. Kept the branch's
+  once-per-push resolution — the common emission code below the conflict
+  uses `ws_id.as_ref()` Option semantics and the inline version would
+  shadow it with a non-Option type.
+- **Migration version collision**: task-138's branch-local
+  `spec_approval_ledger` and task-180's already-published
+  `spec_assertion_results` both claimed `20261008000056`; Diesel runs only
+  one per version (alphabetically first wins). Renumbered the branch-local
+  migration to `2026-10-08-000057_spec_approval_ledger` (same remedy as
+  f1340baf) since 000056 is live on origin/main.
+
+Verification on this exact tree (evidence:
+`/tmp/stage/review-evidence/task-138-r4.md`): `gyre-domain spec_approval`
+4/4; `gyre-adapters sqlite::spec_approval` 7/7; server suites
+`api::gates` + `api::specs` 83/83, lifecycle trio
+(`push_modifying_spec_revokes_ledger_approvals`,
+`require_current_spec_blocks_stale_spec_ref`,
+`find_by_spec_sha_scopes_to_exact_version`) 3/3, `git_http` +
+`spec_lifecycle` 38/38, and main's merged `spec_assert` surface 8/8
+(server) + 51/51 (domain) — the conflict resolution preserves task-180's
+behavior. Static gates: migration-versions, migration-SQL-portability,
+arch, mem-port-contracts, task-commit-attribution all exit 0.
+
+Sandbox limitation unchanged (TCP listener blocked, EOPNOTSUPP — see
+above); host checklist: e2e
 `spec_approval_auto_invalidated_on_spec_change`, `cargo test --all`, full
 `npm test`, GitHub CI on the exact head.
