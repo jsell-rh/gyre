@@ -323,28 +323,43 @@ mod tests {
     #[test]
     fn migration_000054_folds_legacy_path_pid_into_detail() {
         use diesel::sql_types::{Integer, Nullable, Text};
-        use diesel::{QueryableByName, RunQueryDsl};
+        use diesel::RunQueryDsl;
 
-        #[derive(QueryableByName)]
-        struct FoldedRow {
-            #[diesel(sql_type = Text)]
-            id: String,
-            #[diesel(sql_type = Text)]
-            detail: String,
-            #[diesel(sql_type = Nullable<Text>)]
-            agent_id: Option<String>,
-            #[diesel(sql_type = Text)]
-            resource_type: String,
-            #[diesel(sql_type = Nullable<Text>)]
-            resource_id: Option<String>,
-            #[diesel(sql_type = Text)]
-            outcome: String,
+        // `QueryableByName`'s derive (diesel_derives 2.3.7) expands to
+        // `Self { field: field, … }` with spans mapped onto the field
+        // declarations below, so clippy::redundant_field_names fires on
+        // derive-generated code. The generated construction sits in a dummy
+        // module that inherits neither struct- nor field-level `#[allow]`
+        // (verified in sqlite/search.rs), so the lint is scoped off for this
+        // small row-carrier module instead. Nothing here writes
+        // `field: field` initializations by hand.
+        mod rows {
+            #![allow(clippy::redundant_field_names)]
+            use diesel::sql_types::{Nullable, Text};
+            use diesel::QueryableByName;
+
+            #[derive(QueryableByName)]
+            pub(super) struct FoldedRow {
+                #[diesel(sql_type = Text)]
+                pub(super) id: String,
+                #[diesel(sql_type = Text)]
+                pub(super) detail: String,
+                #[diesel(sql_type = Nullable<Text>)]
+                pub(super) agent_id: Option<String>,
+                #[diesel(sql_type = Text)]
+                pub(super) resource_type: String,
+                #[diesel(sql_type = Nullable<Text>)]
+                pub(super) resource_id: Option<String>,
+                #[diesel(sql_type = Text)]
+                pub(super) outcome: String,
+            }
+            #[derive(QueryableByName)]
+            pub(super) struct VersionRow {
+                #[diesel(sql_type = Text)]
+                pub(super) version: String,
+            }
         }
-        #[derive(QueryableByName)]
-        struct VersionRow {
-            #[diesel(sql_type = Text)]
-            version: String,
-        }
+        use rows::{FoldedRow, VersionRow};
 
         let (_tmp, storage) = tmp_storage();
         let mut conn = storage.pool.get().unwrap();
@@ -372,12 +387,7 @@ mod tests {
             ("both", Some("/etc/hosts"), r#"{"mode":"read"}"#, Some(1234)),
             ("nulls", None, "{}", None),
             ("pid_only", None, r#"{"k":1}"#, Some(77)),
-            (
-                "hostile",
-                Some("/tmp/we\"ird\\pa\nth\t"),
-                "{}",
-                None,
-            ),
+            ("hostile", Some("/tmp/we\"ird\\pa\nth\t"), "{}", None),
             ("scalar", Some("/x"), "42", None),
             ("existing_key", None, r#"{"path":"already","k":2}"#, None),
         ];

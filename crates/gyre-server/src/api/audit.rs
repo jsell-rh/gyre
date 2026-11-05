@@ -140,9 +140,7 @@ async fn validate_repo_scope(
         .workspaces
         .find_by_id(&repo.workspace_id)
         .await?
-        .ok_or_else(|| {
-            ApiError::NotFound(format!("workspace {} not found", repo.workspace_id))
-        })?;
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {} not found", repo.workspace_id)))?;
     if repo_ws.tenant_id.as_str() != auth.tenant_id {
         return Err(ApiError::Forbidden(format!(
             "repo {id} is outside the caller's tenant"
@@ -201,10 +199,9 @@ pub async fn record_audit_event(
     // and honored only when the immediate peer is a configured trusted proxy
     // (GYRE_TRUSTED_PROXIES, empty by default = every connection is direct).
     // Fails closed to None when no socket information is available.
-    let source_ip = state.trusted_proxies.resolve_source_ip(
-        connect_info.map(|c| c.0.ip()),
-        &headers,
-    );
+    let source_ip = state
+        .trusted_proxies
+        .resolve_source_ip(connect_info.map(|c| c.0.ip()), &headers);
     let user_agent = headers
         .get(axum::http::header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
@@ -500,7 +497,10 @@ mod tests {
             "user_agent",
             "timestamp",
         ] {
-            assert!(json.get(key).is_some(), "response missing envelope field {key}");
+            assert!(
+                json.get(key).is_some(),
+                "response missing envelope field {key}"
+            );
         }
     }
 
@@ -518,10 +518,10 @@ mod tests {
                     .header("Authorization", "Bearer test-token")
                     .header("Content-Type", "application/json")
                     .header("X-Forwarded-For", "1.2.3.4")
-                    .extension(ConnectInfo("203.0.113.9:50000".parse::<std::net::SocketAddr>().unwrap()))
-                    .body(Body::from(
-                        r#"{"event_type":"file_access"}"#.to_string(),
+                    .extension(ConnectInfo(
+                        "203.0.113.9:50000".parse::<std::net::SocketAddr>().unwrap(),
                     ))
+                    .body(Body::from(r#"{"event_type":"file_access"}"#.to_string()))
                     .unwrap(),
             )
             .await
@@ -551,10 +551,10 @@ mod tests {
                     .header("Authorization", "Bearer test-token")
                     .header("Content-Type", "application/json")
                     .header("X-Forwarded-For", "198.51.100.7, 10.0.0.1")
-                    .extension(ConnectInfo("10.0.0.2:40000".parse::<std::net::SocketAddr>().unwrap()))
-                    .body(Body::from(
-                        r#"{"event_type":"file_access"}"#.to_string(),
+                    .extension(ConnectInfo(
+                        "10.0.0.2:40000".parse::<std::net::SocketAddr>().unwrap(),
                     ))
+                    .body(Body::from(r#"{"event_type":"file_access"}"#.to_string()))
                     .unwrap(),
             )
             .await
@@ -774,8 +774,14 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["detail"]["path"].as_str().unwrap(), "/etc/hosts");
         assert_eq!(json["detail"]["pid"].as_u64().unwrap(), 1234);
-        assert!(json.get("path").is_none(), "path must not be a top-level field");
-        assert!(json.get("pid").is_none(), "pid must not be a top-level field");
+        assert!(
+            json.get("path").is_none(),
+            "path must not be a top-level field"
+        );
+        assert!(
+            json.get("pid").is_none(),
+            "pid must not be a top-level field"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

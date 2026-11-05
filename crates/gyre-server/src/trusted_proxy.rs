@@ -180,9 +180,14 @@ mod tests {
         let v6 = IpNet::parse("fd00::/16").unwrap();
         assert!(v6.contains("fd00::1".parse().unwrap()));
         assert!(!v6.contains("fe80::1".parse().unwrap()));
-        assert!(IpNet::parse("0.0.0.0/0").unwrap().contains("1.2.3.4".parse().unwrap()));
+        assert!(IpNet::parse("0.0.0.0/0")
+            .unwrap()
+            .contains("1.2.3.4".parse().unwrap()));
         // Host bits are masked into the network at parse time.
-        assert_eq!(IpNet::parse("10.1.2.3/8").unwrap(), IpNet::parse("10.0.0.0/8").unwrap());
+        assert_eq!(
+            IpNet::parse("10.1.2.3/8").unwrap(),
+            IpNet::parse("10.0.0.0/8").unwrap()
+        );
         // Malformed input is rejected, never widened.
         assert!(IpNet::parse("not-an-ip").is_none());
         assert!(IpNet::parse("10.0.0.0/33").is_none());
@@ -224,7 +229,10 @@ mod tests {
     fn resolve_trusted_peer_all_trusted_xff_falls_to_x_real_ip_then_peer() {
         let tp = TrustedProxies::from_csv("10.0.0.0/8");
         // Every XFF entry is itself a trusted proxy → X-Real-Ip.
-        let h = headers(&[("x-forwarded-for", "10.0.0.1"), ("x-real-ip", "198.51.100.7")]);
+        let h = headers(&[
+            ("x-forwarded-for", "10.0.0.1"),
+            ("x-real-ip", "198.51.100.7"),
+        ]);
         assert_eq!(
             tp.resolve_source_ip(Some("10.0.0.2".parse().unwrap()), &h),
             Some("198.51.100.7".to_string())
