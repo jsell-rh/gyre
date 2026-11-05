@@ -43,3 +43,71 @@ Findings:
 Summary: the happy path is genuinely good — a real 9-step REST orchestration with thoughtful resumability, a correct admin-gated user-creation endpoint with hashed keys, both fix commits legitimate and regression-tested, and 23 relevant tests green under this review. But the spec's bootstrap promise is undermined at its load-bearing points: the admin identity has no tenant (F1), the spawned orchestrator has neither its persona nor a running process (F2, F3), and the spec-registry step both skips its specced behavior (F4) and ships a starter manifest the server cannot parse (F5) — with the acceptance criterion checked regardless. Revision required.
 
 — Verifier, 2026-09-30
+
+## Round 4 (candidate 92c383e3, base 2f215b1e)
+
+All five round-3 findings verified FIXED with independent evidence — source diff
+review plus live e2e against a server built from the candidate head (logs under
+`/tmp/stage/review-evidence/` in the review sandbox):
+
+- R3-1 (duplicate `persona_id` on the spawn wire): `OrchestratorAgentResponse` no
+  longer declares `persona_id`; the new wire test asserts on the serialized TEXT
+  that no top-level key appears twice and that the CLI's strict shape parses.
+  Live: dev first-run bootstrap parsed the spawn response and printed the summary
+  (exit 0).
+- R3-2 (unforced push always rejected): `push_and_sync_specs` commits starter-kit
+  paths and pushes with `--force`; live first-run populated the spec ledger at
+  bootstrap time (`GET /api/v1/specs` -> 1 entry from the starter kit).
+- R3-3 (cross-tenant persona resume): `find_persona_by_slug_in_tenant` passes
+  `?scope=tenant&scope_id=...`; live second-tenant "Acme Corp" bootstrap registered
+  its own four personas and completed (exit 0).
+- R3-4 (resume): `spawn_orchestrator` renames Dead/Stopped/Failed name holders to
+  `...-superseded-N` (live: after admin-kill, a re-run spawned under the original
+  name); the mem adapter enforces tenant-slug / (tenant,slug) / (workspace,name)
+  uniqueness in code with port-trait failure clauses (live: re-run reused the same
+  tenant/workspace/repo ids instead of duplicating the hierarchy); a live name
+  holder elsewhere was retried as `-orchestrator-2` and exited 0.
+- R3-5 (missing negative tests): `spawn_rejects_missing_persona` (404) and
+  `spawn_rejects_unapproved_persona` (Conflict) exist and pass; the duplicate-key
+  regression test scans all top-level wire keys.
+
+Focused suites: orchestrator 11/11, gyre-cli 131+1, gyre-server --lib 1262 passed /
+1 failed, adapters/domain/ports/common all green. Mechanical gates at the candidate
+head exit 0 (arch, mem-port-contracts, abac-route-registry, abac-exempt-handlers,
+mcp-write-tools, inert-enforcement, scope-literal-defaults,
+fabricated-scope-defaults, dead-message-kinds, no-em-dash, task-commit-attribution,
+forwarded-header-trust, lossy-secret-conversion); check-assertionless-tests (exit 2)
+and check-cli-spec-parity (exit 1) fail identically on the assigned base (verified
+in a base worktree) — pre-existing as claimed. Exemption-file changes only remove
+task-owned entries and lower frozen counts.
+
+Findings:
+
+- [ ] **F1 (major): the candidate breaks a test that passes on the assigned base,
+  and the Shipped section misreports it as pre-existing.**
+  `cargo test -p gyre-server --lib ws::tests::ws_activity_event_emits_to_telemetry`
+  FAILS on the candidate ("telemetry buffer should have at least one entry") and
+  PASSES on the assigned base 2f215b1e (verified in a fresh base worktree;
+  evidence: ws-test-base.log / ws-test-candidate.log). Full lib suite on the
+  candidate: 1262 passed, 1 failed — this is the only failure, so the acceptance
+  criterion "`cargo test --all` passes" is not met. Root cause: this candidate's
+  lib.rs change made `emit_telemetry` async and gated on `message_tenant_id`
+  (skip emission when the workspace record does not resolve). The ws ActivityEvent
+  handler addresses telemetry to `default-{tenant_id}` when the client has
+  subscribed to no workspace (ws.rs:300-303); that id is never a real workspace
+  row, so the emission is now skipped and the legacy activity path silently drops
+  events for subscription-less clients — the test asserts exactly this contract.
+  Sibling tests affected by the same gate were updated to seed workspaces
+  (admin.rs, dependencies.rs, constraint_check.rs, merge_processor.rs); this one
+  was not. The Shipped section claims the failure is "pre-existing ...
+  reproduced deterministically on the incoming base via git stash" — false for the
+  assigned base/candidate pair (a stash-based reproduction against a shared target
+  dir can silently test the wrong build, which is the likely mechanism of the
+  mistake). Fix: either resolve a real tenant-default workspace for the legacy
+  path, or make the skip-and-log behavior a deliberate, spec-documented change and
+  update the ws test to seed a workspace — and correct the verification record.
+
+Verdict: **needs-revision** (single finding F1; everything else in the round-4
+scope checked out under live probing).
+
+— Reviewer, round 4
