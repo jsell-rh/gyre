@@ -205,7 +205,13 @@
         assertionsLoading = true;
         api.checkSpecAssertions(selectedRepoId, specPath, content)
           .then(result => { specAssertionResults = result?.assertions ?? []; })
-          .catch(() => { specAssertionResults = []; })
+          .catch(() => {
+            // Live check unavailable — fall back to the results persisted by
+            // the last push's knowledge-graph check (§9).
+            api.getSpecAssertionResults(selectedRepoId, specPath)
+              .then(result => { specAssertionResults = result?.assertions ?? []; })
+              .catch(() => { specAssertionResults = []; });
+          })
           .finally(() => { assertionsLoading = false; });
       }
       // Auto-highlight governed code on canvas (spec→code navigation, Vision §3)
