@@ -464,6 +464,18 @@ export const api = {
   setWorkspaceBudget: (id, data) =>
     request(`/workspaces/${id}/budget`, { method: 'PUT', body: JSON.stringify(data) }),
   budgetSummary: () => request('/budget/summary'),
+  // Secrets admin (platform-model.md §7 Admin API). Values are write-only:
+  // create/rotate send them; list returns metadata only.
+  secretsList: (scope, scopeId) => {
+    const p = new URLSearchParams({ scope });
+    if (scopeId) p.set('scope_id', scopeId);
+    return request(`/secrets?${p.toString()}`);
+  },
+  secretCreate: (data) =>
+    request('/secrets', { method: 'POST', body: JSON.stringify(data) }),
+  secretDelete: (id) => request(`/secrets/${id}`, { method: 'DELETE' }),
+  secretRotate: (id, data) =>
+    request(`/secrets/${id}/rotate`, { method: 'POST', body: JSON.stringify(data) }),
   costSummary: (since, until) => {
     const params = new URLSearchParams();
     if (since != null) params.set('since', since);

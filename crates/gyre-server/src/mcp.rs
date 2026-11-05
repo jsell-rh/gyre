@@ -2739,7 +2739,6 @@ async fn collect_secret_metadata(
     repo_id: &str,
     task_id: Option<&str>,
 ) -> anyhow::Result<Vec<gyre_common::Secret>> {
-    use gyre_ports::SecretRepository as _;
     let mut targets: Vec<(gyre_common::SecretScope, String)> = vec![
         (gyre_common::SecretScope::Tenant, tenant_id.to_string()),
         (
@@ -5195,7 +5194,6 @@ mod tests {
     }
 
     async fn seed_secret_state() -> Arc<crate::AppState> {
-        use gyre_ports::SecretRepository as _;
         let state = test_state();
         let ws = gyre_domain::Workspace::new(
             Id::new("ws-mcp-sec"),
@@ -5259,7 +5257,6 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_secrets_status_reports_expiry() {
-        use gyre_ports::SecretRepository as _;
         let state = seed_secret_state().await;
         // A secret expiring within 1h of real wall-clock now → "expiring".
         let real_now = std::time::SystemTime::now()

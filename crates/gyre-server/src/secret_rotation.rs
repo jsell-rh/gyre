@@ -32,8 +32,6 @@ fn now_secs() -> u64 {
 
 /// Run one pass of the secret expiry check across all tenants.
 pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
-    use gyre_ports::SecretRepository as _;
-
     let now = now_secs();
     let tenants = state.tenants.list().await?;
     debug!(tenants = tenants.len(), "secret_rotation: scanning tenants");
@@ -215,11 +213,24 @@ mod tests {
     use super::*;
     use gyre_domain::{Workspace, WorkspaceMembership, WorkspaceRole};
 
-    /// Seed: tenant "default" (pre-seeded by test_state), workspace with an
-    /// Admin member, a Developer member, and secrets with controlled expiry.
+    /// Seed: tenant "default", workspace with an Admin member, a Developer
+    /// member, and secrets with controlled expiry. The tenant must be
+    /// created explicitly — the mem tenant store starts empty, and
+    /// `run_once` walks `tenants.list()`, so without it the scan finds
+    /// nothing (the seeded workspace would be orphaned from the scan).
     async fn seed(now: u64) -> Arc<AppState> {
-        use gyre_ports::SecretRepository as _;
         let state = crate::mem::test_state();
+
+        state
+            .tenants
+            .create(&gyre_domain::Tenant::new(
+                Id::new("default"),
+                "Default",
+                "default",
+                now,
+            ))
+            .await
+            .unwrap();
 
         let ws = Workspace::new(
             Id::new("ws-rot"),
@@ -235,7 +246,7 @@ mod tests {
             let m = WorkspaceMembership::new(
                 Id::new(format!("mem-{uid}")),
                 Id::new(uid),
-                ws.id,
+                ws.id.clone(),
                 role,
                 Id::new("inviter"),
                 now,
@@ -317,15 +328,15 @@ mod tests {
             2,
             "expiring + expired secrets must each notify, got: {admin_notifs:#?}"
         );
-        let names: Vec<&str> = secret_notifs
+        let names: Vec<String> = secret_notifs
             .iter()
             .map(|n| {
                 let body: serde_json::Value = serde_json::from_str(n.body.as_deref().unwrap()).unwrap();
-                body["name"].as_str().unwrap()
+                body["name"].as_str().unwrap().to_string()
             })
             .collect();
-        assert!(names.contains(&"OAUTH_TOKEN"));
-        assert!(names.contains(&"PAST_KEY"));
+        assert!(names.contains(&"OAUTH_TOKEN".to_string()));
+        assert!(names.contains(&"PAST_KEY".to_string()));
 
         // Developer member gets nothing.
         let dev_notifs = state
@@ -374,7 +385,6 @@ mod tests {
             now,
         );
         state.workspace_memberships.create(&m).await.unwrap();
-        use gyre_ports::SecretRepository as _;
         state
             .secrets
             .create(

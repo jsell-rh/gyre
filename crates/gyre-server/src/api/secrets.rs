@@ -256,7 +256,7 @@ pub async fn rotate_secret(
         ));
     }
 
-    let existing = state
+    state
         .secrets
         .find_by_id(&id, &tenant_id)
         .await?
@@ -551,7 +551,6 @@ mod tests {
 
         // The stored value round-trips through the port (proves it was
         // really stored, not just acknowledged).
-        use gyre_ports::SecretRepository as _;
         let value = state
             .secrets
             .get_value(&gyre_common::Id::new(secret_id.clone()), "default")
@@ -679,6 +678,7 @@ mod tests {
             "value": "x"
         });
         let resp = app
+            .clone()
             .oneshot(post_json("/api/v1/secrets", "test-token", body))
             .await
             .unwrap();

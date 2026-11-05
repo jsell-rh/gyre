@@ -251,6 +251,10 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/workspaces/{id}/budget` | Current `BudgetConfig` (limits) + `BudgetUsage` (real-time snapshot) for a project-scoped workspace; `id` is the project UUID (M22.2) |
 | `PUT` | `/api/v1/workspaces/{id}/budget` | Set workspace budget limits: `{max_tokens_per_day?, max_cost_per_day?, max_concurrent_agents?, max_agent_lifetime_secs?}`; returns 400 if any limit exceeds the tenant ceiling (cascade validation); **Admin only** (M22.2) |
 | `GET` | `/api/v1/budget/summary` | Tenant-wide `BudgetConfig` + `BudgetUsage` plus per-workspace breakdown; **Admin only** (M22.2) |
+| `POST` | `/api/v1/secrets` | Create a secret, or update the value of an existing secret with the same `(scope, scope_id, name)` in the tenant — body: `{name, scope: "tenant"\|"workspace"\|"repo"\|"task", scope_id?, secret_type: "static"\|"ephemeral"\|"rotated"\|"derived", value, expires_at?}`; **Admin only** (ABAC `secret` resource + in-handler role check); `scope_id` is validated against the caller's tenant (404 unknown, 403 cross-tenant); the plaintext `value` is accepted here and NEVER returned by any endpoint (values encrypted at rest, AES-256-GCM); returns metadata (platform-model.md §7, task-098) |
+| `GET` | `/api/v1/secrets` | List secret metadata by scope — `?scope=tenant\|workspace\|repo\|task&scope_id=<uuid>` (scope_id required for workspace/repo/task); **Admin only**; returns `[{id, name, scope, scope_id, secret_type, created_by, created_at, expires_at, last_rotated_at, tenant_id}]` — never values (platform-model.md §7, task-098) |
+| `DELETE` | `/api/v1/secrets/{id}` | Delete a secret — **Admin only**; 404 if absent (or in another tenant); 204 on success (platform-model.md §7, task-098) |
+| `POST` | `/api/v1/secrets/{id}/rotate` | Force rotation — body: `{new_value, expires_at?}`; replaces the value and updates `last_rotated_at`; **Admin only**; returns metadata, never the value (platform-model.md §7, task-098) |
 | `GET` | `/api/v1/search` | Full-text search (`?q=&entity_type=&workspace_id=&limit=20`); results: `[{entity_type, id, title, snippet, score}]` (M22.7) |
 | `POST` | `/api/v1/search/reindex` | Trigger full entity reindex; **Admin only** (H-14, M22.7) |
 | `POST/GET` | `/api/v1/policies` | Create / list declarative ABAC policies; 8 operators (Equals, NotEquals, In, NotIn, GreaterThan, LessThan, Contains, Exists); first-match-wins; default-deny (M22.6) |
@@ -444,6 +448,8 @@ Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discov
 | `briefing://` | `briefing://{workspace_id}` | Workspace briefing narrative: completed MRs, in-progress tasks, metrics (HSI §9). Optional `?since=<epoch>` query param. |
 | `notifications://` | `notifications://{workspace_id}` | Inbox notifications for authenticated user (HSI §11). Optional `?min_priority=&max_priority=` query params. |
 | `trace://` | `trace://{mr_id}` | SDLC system trace for a merge request: spans, root_spans (HSI §3a). |
+| `secrets://names` | `secrets://names` | Secret names available to the calling agent (names only — never values); scope resolved from the caller's agent identity/claims (platform-model.md §7, task-098). |
+| `secrets://status` | `secrets://status` | Expiry status of the caller's secrets: `[{name, scope, expires_at, last_rotated_at, status: "active"|"expiring"|"expired"}]` (values never included) (platform-model.md §7, task-098). |
 
 Example MCP `initialize` call:
 ```json
