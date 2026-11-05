@@ -51,3 +51,45 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 32 (2026-10-08) — attribution clobber reproduced at candidate 2792691b, not approved
+
+Independent review of candidate `2792691b` (base `60b3504c`, merged at `b96a77e2`).
+
+**Finding (the 31st occurrence of the rounds-2–31 class):** the tip commit
+`2792691b` ("process: record task-208 branch commits") has exactly one change —
+`git diff 4c023a25 2792691b` shows it rewrote the task's `commits:` frontmatter
+from the fully-attributed four-SHA list restored by the round-31 repair
+(`4c023a25`) back to `["a11cbf7e", "98fd096e"]`, dropping
+`ad1121c5093cd2f1f2b3824ed88352ac4e181fd9` (dist regeneration — the F1 fix that
+removed the forbidden my-stuff surface from the shipped `SKIP_WEB_BUILD=1`
+artifact) and `ea006d52bb42e96e6f176b02b5390b6cb56a3116` (`.gitattributes`
+whitespace-gate exemption). An unlisted commit is invisible to review scoping.
+The in-repo gate (`scripts/check-task-commit-attribution.sh`) passes because its
+product-surface path filter excludes `web/dist/` and root `.gitattributes` —
+verified by running it (exit 0). Both dropped SHAs and the assigned base are
+ancestors of the candidate, so the code content is intact; the defect is the
+attribution metadata. Mechanical repair: restore the four-SHA list at the tip.
+
+**Product surface verified intact at the candidate** (fresh probes; the finding
+above is the only defect):
+
+- Dead-code grep (`get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs`
+  over `crates/` + `web/src/`) → zero matches.
+- Routes and ABAC registrations for `/api/v1/users/me/{agents,tasks,mrs}` absent
+  from `api/mod.rs` / `abac_middleware.rs`; the only in-source URI references are
+  the `my_stuff_endpoints_are_removed` regression test asserting 404.
+- Committed dist (`index-CMDRzIOf.js`): zero forbidden identifiers
+  (`my-agents|my-tasks|my-mrs|users/me/agents|users/me/tasks|users/me/mrs`);
+  kept-surface `users/me/tokens` present.
+- Spec amendment and coverage matrices intact (`user-management.md`
+  supersession recorded; coverage row 22 `n/a`, row 23 `task-assigned`).
+
+Rust test execution remains for the verifier (crates.io transport-blocked in the
+review sandbox): `cargo test -p gyre-server my_stuff_endpoints_are_removed`,
+`cargo test --all`, `cd web && npm test`.
+
+Evidence: `/tmp/stage/review-evidence/task-208-round32-review.txt` (plus
+`-tip-diff.txt`, `-deadcode-grep.txt`, `-dist-forbidden-grep.txt`,
+`-attribution-gate.txt`). Verdict recorded at `/tmp/stage/verdict.json`:
+**not approved** — one finding, the attribution clobber.
