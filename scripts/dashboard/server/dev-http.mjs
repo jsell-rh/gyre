@@ -5,7 +5,7 @@ import { dirname, extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { attemptLog, attemptLogPath, collectController, controllerPaths, coverageHistory, coverageMetrics, retryAllTasks, retryTask, setSlots, taskPullRequests, taskTitles } from "./dev-controller.mjs";
+import { attemptLog, attemptLogPath, collectController, controllerPaths, coverageHistory, coverageMetrics, retryAllTasks, retryTask, setSlots, setPriority, taskPullRequests, taskTitles } from "./dev-controller.mjs";
 
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml" };
@@ -122,6 +122,12 @@ export function createDashboardServer({ root }) {
         await retryTask(paths, task);
         await refreshSnapshot();
         return json(200, { ok: true, task });
+      }
+      if (url.pathname === "/api/priority" && req.method === "POST") {
+        const { task, priority } = await body();
+        const value = await setPriority(paths, String(task || ""), priority);
+        await refreshSnapshot();
+        return json(200, { ok: true, priority: value });
       }
       if (url.pathname === "/api/retry-all" && req.method === "POST") {
         const retried = await retryAllTasks(paths);

@@ -38,7 +38,6 @@
 /api/v1/repos/:id/attestations/:commit_sha/chain
 /api/v1/repos/:id/attestations/:commit_sha/verification
 /api/v1/repos/:id/orchestrator/spawn
-/api/v1/repos/:id/spec-assertions/check
 /api/v1/repos/:id/unarchive
 /api/v1/repos/:id/views
 /api/v1/repos/:id/views/:view_id
