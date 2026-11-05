@@ -414,8 +414,7 @@ async fn explorer_ws_status_progression() {
             "text": "what is the blast radius of TaskPort?",
             "canvas_state": {}
         })
-        .to_string()
-        .into(),
+        .to_string(),
     ))
     .await
     .unwrap();
@@ -461,14 +460,18 @@ async fn explorer_ws_status_progression() {
         "Should receive at least one status message"
     );
     assert!(
-        observed_statuses
-            .iter()
-            .any(|s| s == "thinking"),
+        observed_statuses.iter().any(|s| s == "thinking"),
         "Should see thinking status while the agent works, got {observed_statuses:?}"
     );
-    assert!(saw_ready, "Should see terminal ready status, got {observed_statuses:?}");
+    assert!(
+        saw_ready,
+        "Should see terminal ready status, got {observed_statuses:?}"
+    );
     assert!(saw_text_done, "Should receive final text (done=true)");
-    assert!(saw_view_query, "Should receive a view_query for blast-radius question");
+    assert!(
+        saw_view_query,
+        "Should receive a view_query for blast-radius question"
+    );
 }
 
 #[tokio::test]
