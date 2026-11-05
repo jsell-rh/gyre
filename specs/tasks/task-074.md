@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "lsp-call-graph.md §5 Per-Language Implementation (Python)"
   - "lsp-call-graph.md §10 Implementation Phases (Phase 3)"
-commits: ["ee5673a8d16a6132543e9af650a4fc2b564806b1", "0cce4f05b002e95ae12b0d9733ae63de6ba79de0"]
+commits: ["0cce4f05b002e95ae12b0d9733ae63de6ba79de0", "ee5673a8d16a6132543e9af650a4fc2b564806b1"]
 ---
 
 ## Spec Excerpt
