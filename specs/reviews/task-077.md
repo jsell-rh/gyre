@@ -50,3 +50,33 @@ Test suites run: `cargo test -p gyre-server --lib api::workspaces` (12 passed), 
 ### Verdict
 
 needs-revision — F5 means the task's central deliverable (Supervised trust actually requiring human merge approval, per HSI §2 Mechanical Implementation) is not enforced end-to-end: the Deny policy is created but never consulted. F6 is the same silent-restriction-loss class R1 F1 established, surviving in an adjacent handler. F7/F8 are coverage gaps on fix-introduced branches and an explicit acceptance criterion.
+
+---
+
+## Round: R4
+
+**Reviewer:** Independent review (candidate `d52c2898`, base `0cb71015`)
+**Date:** 2026-11-05
+**Spec ref:** human-system-interface.md §9–13 (Trust Gradient), abac-policy-engine.md
+
+### F9 fix verification
+
+Candidate delta from the last reviewed candidate (`640c4a01`): F9 repair `dddcb3a4` (mem.rs, merge_processor.rs), CI-repair `4e17ffa5` (verification finding 6527cb44), docs/attribution commits only. The R3 record (F5–F8 verified resolved, F9 open) lived on the prior review checkpoint branch and was never in this line; no review history was destroyed.
+
+- [x] **F9 (resolved): the supervised-trust merge gate fails CLOSED on policy-store read failures.** `evaluate_merge_abac` (merge_processor.rs) now returns `anyhow::Result<EvalResult>` and propagates BOTH read errors — the policy `list()` failure (previously `unwrap_or_default()`, fail-open) and the sibling workspace `find_by_id` failure (previously `Err(_) => None`, silently dropping tenant context) — each with a `supervised trust gate: ... store read failed` context. `supervised_trust_hold` maps an evaluation error to a warn-logged hold reason ("policy store unavailable ... failing closed") that requeues (never Fails), so store recovery unblocks the merge and the human-approval escape (`mr.status == Approved`) still applies. All three gate call sites (selection loop, single-entry merge, atomic-group member merges) route through the fixed predicate, so fail-closed semantics hold everywhere.
+- **Tests are real, not self-confirming.** `MemPolicyRepository::fail_lists()` test hook + `test_state_failing_policy_lists()`; `policy_store_read_failure_holds_supervised_merge_fail_closed` and `policy_store_read_failure_holds_guided_merge_fail_closed` assert MR stays Open and the entry requeues with a reason naming the fail-closed hold. Live negative probe this round: reverting the `Err` arm to the old fail-open behavior (`Err(_) => return None`) makes BOTH tests fail with `left: Merged, right: Open` — the exact fail-open defect — before restoring the source (working tree restored clean at the candidate).
+
+### Probes (evidence: /tmp/stage/review-evidence/)
+
+- `cargo test -p gyre-server --lib merge_processor` — 60 passed (incl. both F9 tests, all F5 supervised-trust/guided/atomic-group/approved-escape tests).
+- `cargo test -p gyre-server --lib api::workspaces` — 16 passed (incl. 409 rollback, invalid trust_level 400, Custom directions).
+- `cargo test -p gyre-server --lib policy_engine` — 19 passed (incl. immutable-Deny-first vs p=1000 Allow).
+- `cargo test -p gyre-server --lib create_interrogation_policies` — 1 passed (F6 fail-closed).
+- `cargo test -p gyre-domain --lib policy::` — 4 passed (F8 field-level generator assertions).
+- Negative mutation probe (fail-open revert) — both F9 tests FAILED as required; source restored, `git status` clean.
+
+Sandbox note: repeated cargo invocations stalled in uninterruptible D-state for ~10 min each (infrastructure, not code); all suites eventually ran to completion with the results above.
+
+### Verdict
+
+approved — F9 is genuinely fixed with mutation-tested fail-closed semantics; F1–F8 were verified resolved in prior rounds (R2/R3 probes) and their tests still pass at this candidate. Full-workspace suites, all-target Clippy, and GitHub CI remain owned by verification/publication.
