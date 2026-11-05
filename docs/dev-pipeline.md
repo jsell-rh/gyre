@@ -69,13 +69,25 @@ compute. Changing reservation/priority lets existing workers finish naturally.
 The cockpit shows the reservation, class, and class source. These are host
 scheduling controls, not PriorityClass objects in the remote Kubernetes cluster.
 
+The adapter ledger owns cross-stage admission. The Go dispatcher preserves
+per-work backoff and deduplication, while the atomic claim permits CI observation
+alongside verification and cleanup alongside model work. Native item serialization
+must not suppress these independently safe operations.
+
 CI observation is a separate, sandbox-free stage bound to the recorded published
 head and its verified base. It can run alongside a verifier, but never races a
 branch publisher. A completed failing check is actionable even while sibling
 checks remain pending or main advances. Head and check state are rechecked after
 evidence collection. A confirmed candidate failure retains the failed head and
 logs, requests implementation, and fences any now-obsolete verifier. Pending CI
-waits; upstream failures and transient CI infrastructure retain their distinct
+waits. If an Actions check contradicts itself (pending status with a terminal
+conclusion and completion timestamp), the observer requires the exact job and
+completed current workflow attempt on the published head before treating it as
+terminal. Raw observations and reconciliation evidence are retained; missing,
+changed-head, or ambiguous evidence stays pending. GitHub still enforces all
+required checks at merge. A merged PR goes directly to confirmation of its
+original verified tree; its own merge must not start another verification.
+Upstream failures and transient CI infrastructure retain their distinct
 recovery paths. PR readiness is visible separately from a successful review run.
 
 A durable **integration lane** admits one candidate at a time to final
@@ -87,7 +99,13 @@ candidates pick up current main when admitted. This prevents the controller's
 own merges from repeatedly invalidating one another's full integration checks.
 If an external merge advances main, the current lane owner first observes its
 published CI and then refreshes integration once needed. Independent review is
-retained for the unchanged candidate. Checks on a different merge tree are
+retained for the unchanged candidate. An exact-head CI or policy wait lasting
+15 minutes (`integration_wait_timeout` seconds) yields the integration lane so
+other candidates can finish. Sandbox-free observation continues; that task may
+rejoin only after its external gate changes to ready or merged. Receipt changes
+reset the wait, but repeated polls do not. Yielding grants no merge permission
+and discards no candidate or review. The cockpit lists waiting tasks separately.
+Checks on a different merge tree are
 never reused as proof of the final tree; protected exact-head GitHub checks
 and authoritative upstream-tree comparison still gate delivery.
 

@@ -974,6 +974,7 @@ dependencies = [
  "gyre-ports",
  "hex",
  "libsqlite3-sys",
+ "parking_lot",
  "reqwest",
  "ring",
  "rusqlite",
