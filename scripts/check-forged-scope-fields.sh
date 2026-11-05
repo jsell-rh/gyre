@@ -43,7 +43,7 @@
 # frozen count). Fix by deriving the field from the authenticated
 # identity or validating it against the caller's scope; never add
 # entries.
-FROZEN_EXEMPTION_COUNT=2
+FROZEN_EXEMPTION_COUNT=0
 #
 # Run by pre-commit and CI.
 
