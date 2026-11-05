@@ -5,7 +5,7 @@ depends_on: [task-172]
 progress: ready-for-review
 coverage_sections:
   - "ui-layout.md §9. Meta-specs Preview Loop Layout"
-commits: ["eee86b3e66c5330eeee84e72a4a5fde76a19a87c"]
+commits: ["eee86b3e66c5330eeee84e72a4a5fde76a19a87c", "6e3bb1a7a474d6d333f9aa59a7924807770ead20"]
 ---
 
 ## Spec Excerpt
@@ -66,48 +66,46 @@ Read `ui-layout.md` §9 for the exact wireframes of all three states. Also read 
 ## Shipped
 
 The §9 preview loop runs through the shared EditorSplit (task-172) in
-`context="meta-spec"`, mounted by the MetaSpecs workspace view. Most of
-the loop (State 1 selector + Preview/Publish, State 2 lock + per-spec
-◐/✓ progress + Cancel, State 3 Architecture/Code Diff tabs + Iterate +
-Publish → approval reset) landed with task-172's review rounds
-(a4c8b6bd); this task closes the one §9 wireframe requirement that was
-still unimplemented: **State 2's left panel must show the diff of
-changes**, not the verbatim draft.
+`context="meta-spec"`, mounted by the MetaSpecs workspace view: State 1
+target-spec checkbox selector + Preview/Publish, State 2 locked editor
+showing the pending-changes diff vs the published registry prompt
+(LCS line diff, `+`/`-` markers, add/remove summary) + per-spec ◐/✓
+progress + Cancel Preview, State 3 Architecture/Code Diff tabs rendering
+the real PreviewResponse fields, Iterate returning to editing with
+results retained, and Publish → registry PUT resetting approval to
+Pending.
 
-### What eee86b3e adds
+### What shipped
 
-- `web/src/lib/lineDiff.js` — LCS line diff (prefix/suffix-trimmed DP,
-  block-diff degradation above 4M mid-section cells, trailing-newline
-  normalization) plus `diffSummary` row counts. Unit-tested for
-  add/remove/context correctness, minimal edit scripts on moved lines,
-  and exact round-trip reconstruction of both sides.
-- `EditorSplit.svelte` — new `baselineContent` prop. While a preview
-  runs, the locked left pane now renders the pending-changes diff
-  (draft vs. the published baseline) with `+`/`-` markers, green/red
-  line styling, and a `+N -M` summary header — the §9 State 2
-  wireframe's "+ Handle all errors with Result<T, E>..." display. No
-  baseline, or an unchanged draft, falls back to the verbatim draft.
-- `MetaSpecs.svelte` — tracks the selected meta-spec's stored registry
-  prompt as `selectedMsBaseline` (set on load and on persona switch)
-  and passes it to EditorSplit, so the locked diff is always against
-  the real published version.
-- Tests: four new EditorSplit tests (diff shown with markers and
-  summary, removed-line marking, no-baseline fallback, equal-draft
-  fallback), two new MetaSpecs workspace tests (edited persona shows
-  the "+" pending line vs. the published prompt; empty-prompt fallback),
-  and 13 lineDiff unit tests.
+- **eee86b3e** — `web/src/lib/lineDiff.js` (LCS line diff +
+  `diffSummary`), `EditorSplit.svelte`'s `baselineContent` prop (locked
+  left pane renders the draft-vs-published-baseline diff during a
+  preview, falling back to the verbatim draft when there is no baseline
+  or no change), and `MetaSpecs.svelte`'s `selectedMsBaseline` tracking
+  (set on load and on persona switch).
+- **6e3bb1a7 (review repair 8f06c912)** — `publish()` in
+  `MetaSpecs.svelte` now refreshes `selectedMsBaseline` (and the cached
+  `wsMetaSpecs` entry's prompt) after a successful publish, so the §9
+  publish → iterate → preview loop's locked pane never diffs against a
+  stale pre-publish baseline: a preview with no post-publish edits
+  shows the verbatim draft (no pending markers), and post-publish edits
+  mark only the newly added lines as pending. Also restored
+  `specs/coverage/system/ui-layout.md` row 37's Depth to 2 (H2 heading,
+  matching bootstrap-coverage.sh derivation) and the file header to
+  **Coverage: 2/38**.
 
 ### Test evidence
 
-`npm ci`, then `./node_modules/.bin/vitest run src/__tests__/lineDiff.test.js
-src/__tests__/EditorSplit.test.js src/__tests__/MetaSpecs.test.js` →
-**163/163 passed**. Full suite regression sweep: 1619 passed / 41
-skipped, with the only 2 failures in ExplorerCanvas-performance.test.js
-timing budgets — that file passes 15/15 in isolation both on the stashed
-base tree and on this tree, so the full-run failures are sandbox
-CPU-saturation flakiness, not a regression. `web/dist` rebuilt from this
-source (contains the new `locked-diff` code). Evidence retained at
-`/tmp/stage/review-evidence/task-176-test-evidence.md`.
+`npm ci`, then `./node_modules/.bin/vitest run src/__tests__/MetaSpecs.test.js
+src/__tests__/EditorSplit.test.js src/__tests__/lineDiff.test.js` →
+**165/165 passed** (163 prior + 2 new regression tests). Both new
+tests were verified to fail on the unfixed tree — reproducing the
+review's probe exactly: a publish-then-preview with no edits showed a
+phantom `'+1 -0'` pending line, and a single post-publish edit line
+showed `'+2 -0'` — and pass with the fix. `web/dist` rebuilt from this
+source. Evidence retained at
+`/tmp/stage/review-evidence/task-176-test-evidence.md` (repair-round
+evidence appended).
 
 ### Scope boundary
 
