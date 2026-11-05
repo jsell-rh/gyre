@@ -356,6 +356,15 @@ mod tests {
             "import { add } from \"./index\";\n\nexport function useViaBarrel(): number {\n  return add(3, 4);\n}\n",
         )
         .unwrap();
+        // Non-ASCII identifier: pins the UTF-8 byte-framing contract — the
+        // LSP Content-Length counts bytes, and both the didOpen text (with
+        // multi-byte characters) and the documentSymbol/references responses
+        // (raw UTF-8 bodies, percent-encoded URIs) must reassemble exactly.
+        std::fs::write(
+            root.join("src/café.ts"),
+            "import { add } from \"./math\";\n\nexport function résumé(): number {\n  return add(1, 2);\n}\n",
+        )
+        .unwrap();
     }
 
     /// The edge set the driver must emit for [`write_ts_fixture`], covering
@@ -367,6 +376,9 @@ mod tests {
     /// - barrel-file re-export resolved to the original symbol
     ///   (`useViaBarrel` imports `add` via `src/index.ts`)
     /// - JSX component usage (`renderBadge` → `Badge` in .tsx)
+    /// - non-ASCII identifier (`résumé` in `src/café.ts` → `add`) — the
+    ///   UTF-8 framing regression: a code-unit-based Content-Length gate
+    ///   silently dropped every edge for such files
     /// Top-level import/re-export references must NOT become edges (they
     /// are not calls), so e.g. there is no `src/app` → `src/math.add` edge
     /// and no edge to `mul` (only its re-export references it).
@@ -374,6 +386,7 @@ mod tests {
         [
             ("src/app.compute", "src/math.add"),
             ("src/app.greetTwice", "src/app.makeGreeting"),
+            ("src/café.résumé", "src/math.add"),
             ("src/consumer.useViaBarrel", "src/math.add"),
             ("src/handler.handler", "src/handler.serve"),
             ("src/widgets.renderBadge", "src/widgets.Badge"),

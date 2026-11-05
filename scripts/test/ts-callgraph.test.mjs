@@ -36,15 +36,19 @@ test("encodeMessage frames payload with byte length", () => {
 test("extractMessages returns complete messages and keeps partial tail", () => {
   const a = encodeMessage({ jsonrpc: "2.0", id: 1, result: "x" });
   const b = encodeMessage({ jsonrpc: "2.0", id: 2, result: "y" });
-  const { messages, rest } = extractMessages(a + b.slice(0, 10));
+  const wire = Buffer.concat([
+    Buffer.from(a, "utf8"),
+    Buffer.from(b, "utf8").subarray(0, 10),
+  ]);
+  const { messages, rest } = extractMessages(wire);
   assert.equal(messages.length, 1);
   assert.equal(messages[0].result, "x");
-  assert.equal(rest, b.slice(0, 10));
+  assert.equal(rest.toString("utf8"), b.slice(0, 10));
 });
 
 test("extractMessages skips malformed headers without losing later messages", () => {
   const good = encodeMessage({ jsonrpc: "2.0", id: 7, result: null });
-  const garbage = "not-a-header\r\n\r\n" + good;
+  const garbage = Buffer.from("not-a-header\r\n\r\n" + good, "utf8");
   const { messages } = extractMessages(garbage);
   assert.equal(messages.length, 1);
   assert.equal(messages[0].id, 7);
@@ -52,12 +56,65 @@ test("extractMessages skips malformed headers without losing later messages", ()
 
 test("extractMessages waits for the full body across chunk boundaries", () => {
   const msg = encodeMessage({ jsonrpc: "2.0", id: 3, result: "hello" });
-  const first = extractMessages(msg.slice(0, 25));
+  const wire = Buffer.from(msg, "utf8");
+  const first = extractMessages(wire.subarray(0, 25));
   assert.equal(first.messages.length, 0);
-  const second = extractMessages(first.rest + msg.slice(25));
+  const second = extractMessages(Buffer.concat([first.rest, wire.subarray(25)]));
   assert.equal(second.messages.length, 1);
   assert.equal(second.messages[0].result, "hello");
-  assert.equal(second.rest, "");
+  assert.equal(second.rest.length, 0);
+});
+
+test("extractMessages counts Content-Length in bytes, not UTF-16 code units", () => {
+  // Regression (task-075 review): response bodies with multi-byte UTF-8 —
+  // e.g. documentSymbol results for files with non-ASCII symbol names,
+  // which typescript-language-server emits as raw UTF-8 — never reassembled
+  // when the length gate ran on decoded-string code units: the body is
+  // longer in bytes than in code units, so the gate could never be
+  // satisfied and the request timed out, silently losing every Calls edge.
+  const msg = encodeMessage({ jsonrpc: "2.0", id: 5, result: "café ☕" });
+  const wire = Buffer.from(msg, "utf8");
+  const { messages, rest } = extractMessages(wire);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].result, "café ☕");
+  assert.equal(rest.length, 0);
+});
+
+test("extractMessages reassembles a body split inside a multi-byte sequence", () => {
+  // A TCP/pipe chunk boundary can land between the bytes of one character;
+  // the partial tail must be carried as bytes so reassembly is exact.
+  const msg = encodeMessage({ jsonrpc: "2.0", id: 6, result: "résumé" });
+  const wire = Buffer.from(msg, "utf8");
+  const bodyStart = wire.indexOf("\r\n\r\n") + 4;
+  // First 0xc3 byte inside the body: the lead byte of the é in "résumé".
+  const split = wire.indexOf(0xc3, bodyStart);
+  assert.ok(split > bodyStart, "fixture must contain a multi-byte character");
+  const first = extractMessages(wire.subarray(0, split));
+  assert.equal(first.messages.length, 0);
+  assert.ok(first.rest.length > 0);
+  const second = extractMessages(Buffer.concat([first.rest, wire.subarray(split)]));
+  assert.equal(second.messages.length, 1);
+  assert.equal(second.messages[0].result, "résumé");
+  assert.equal(second.rest.length, 0);
+});
+
+test("extractMessages does not swallow the frame after a non-ASCII body", () => {
+  // Regression (task-075 review): an over-long code-unit slice used to eat
+  // the next frame's header, dropping the message after any non-ASCII
+  // notification (window/logMessage with non-ASCII text precedes responses
+  // in the real server's stream).
+  const a = encodeMessage({
+    jsonrpc: "2.0",
+    method: "window/logMessage",
+    params: { message: "analyzing café ☕" },
+  });
+  const b = encodeMessage({ jsonrpc: "2.0", id: 9, result: "ok" });
+  const { messages } = extractMessages(
+    Buffer.concat([Buffer.from(a, "utf8"), Buffer.from(b, "utf8")])
+  );
+  assert.equal(messages.length, 2);
+  assert.equal(messages[0].params.message, "analyzing café ☕");
+  assert.equal(messages[1].result, "ok");
 });
 
 // ---------------------------------------------------------------------------

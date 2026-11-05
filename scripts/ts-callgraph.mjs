@@ -111,26 +111,47 @@ export function encodeMessage(msg) {
 }
 
 /**
- * Parse complete JSON-RPC messages out of a stdio buffer chunk stream.
- * Returns `{ messages, rest }` — `rest` is the unconsumed tail (a partial
- * message waiting for more data). Malformed headers are skipped.
+ * Parse complete JSON-RPC messages out of a stdio byte stream. `buffer`
+ * is a Buffer (or string, coerced to its UTF-8 bytes) of bytes received so
+ * far; returns `{ messages, rest }` — `rest` is a Buffer holding the
+ * unconsumed tail (a partial message waiting for more data). Malformed
+ * headers are skipped.
+ *
+ * Framing is strictly byte-based: the wire `Content-Length` counts UTF-8
+ * bytes, so the buffer must be accumulated and sliced in bytes, never as a
+ * JS string (UTF-16 code units). typescript-language-server emits raw UTF-8
+ * in response bodies — JSON.stringify does not escape non-ASCII — so any
+ * body containing multi-byte characters (non-ASCII symbol names, log
+ * messages, paths) is longer in bytes than in code units, and a code-unit
+ * length gate can never be satisfied: the request times out, the file is
+ * skipped, and the over-long slice desynchronizes the parser for everything
+ * that follows. Each body is decoded to a string only after byte-exact
+ * extraction.
  */
 export function extractMessages(buffer) {
   const messages = [];
-  let rest = buffer;
+  let rest = Buffer.isBuffer(buffer)
+    ? buffer
+    : Buffer.from(buffer, "utf8");
   while (true) {
     const headerEnd = rest.indexOf("\r\n\r\n");
     if (headerEnd === -1) break;
-    const match = rest.slice(0, headerEnd).match(/Content-Length:\s*(\d+)/i);
+    // Headers are ASCII; latin1 decoding preserves the bytes for the regex.
+    const match = rest
+      .subarray(0, headerEnd)
+      .toString("latin1")
+      .match(/Content-Length:\s*(\d+)/i);
     if (!match) {
-      rest = rest.slice(headerEnd + 4);
+      rest = rest.subarray(headerEnd + 4);
       continue;
     }
     const contentLen = parseInt(match[1], 10);
     const bodyStart = headerEnd + 4;
     if (rest.length < bodyStart + contentLen) break;
-    const body = rest.slice(bodyStart, bodyStart + contentLen);
-    rest = rest.slice(bodyStart + contentLen);
+    const body = rest
+      .subarray(bodyStart, bodyStart + contentLen)
+      .toString("utf8");
+    rest = rest.subarray(bodyStart + contentLen);
     try {
       messages.push(JSON.parse(body));
     } catch {
@@ -437,10 +458,16 @@ export class LspClient {
     this.proc = proc;
     this.nextId = 1;
     this.pending = new Map();
-    this.buffer = "";
+    // Accumulate raw bytes: Content-Length counts UTF-8 bytes, so the
+    // reassembly gate must run on byte counts, never on decoded-string
+    // code units (see extractMessages).
+    this.buffer = Buffer.alloc(0);
 
     proc.stdout.on("data", (chunk) => {
-      this.buffer += chunk.toString();
+      this.buffer = Buffer.concat([
+        this.buffer,
+        typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk,
+      ]);
       const { messages, rest } = extractMessages(this.buffer);
       this.buffer = rest;
       for (const msg of messages) this._dispatch(msg);

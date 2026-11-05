@@ -9,7 +9,13 @@
 // on 2026-09-30 with a one-off driver-module script (see
 // specs/tasks/task-075.md "Shipped" for the recording procedure). Location
 // URIs are rewritten from the recording root to the test run's rootUri so
-// the replay is portable across tempdirs.
+// the replay is portable across tempdirs. Map keys are the request URI's
+// path segment as the driver sends it (pathToFileURL percent-encodes
+// non-ASCII, so the café fixture keys as src/caf%C3%A9.ts). The café.ts
+// entries (non-ASCII identifier) were recorded 2026-11-05 against the real
+// typescript-language-server + tsserver 5.9.3 during the UTF-8 framing
+// repair (byte-based Content-Length reassembly); the pre-existing entries
+// are byte-identical to the 2026-09-30 recording (same tsserver version).
 //
 // The real-server behavior is additionally validated end-to-end whenever
 // TS_CALLGRAPH_SERVER points at a real install (the
@@ -98,6 +104,34 @@ const RECORDED = {
      "end": {
       "line": 6,
       "character": 25
+     }
+    },
+    "children": []
+   }
+  ],
+  "src/caf%C3%A9.ts": [
+   {
+    "name": "résumé",
+    "detail": "",
+    "kind": 12,
+    "range": {
+     "start": {
+      "line": 2,
+      "character": 0
+     },
+     "end": {
+      "line": 4,
+      "character": 1
+     }
+    },
+    "selectionRange": {
+     "start": {
+      "line": 2,
+      "character": 16
+     },
+     "end": {
+      "line": 2,
+      "character": 22
      }
     },
     "children": []
@@ -367,6 +401,7 @@ const RECORDED = {
     }
    }
   ],
+  "src/caf%C3%A9.ts:2:16": [],
   "src/consumer.ts:2:16": [],
   "src/handler.ts:0:24": [],
   "src/handler.ts:4:9": [
@@ -400,6 +435,32 @@ const RECORDED = {
    },
    {
     "uri": "file:///tmp/tsfixture/src/app.ts",
+    "range": {
+     "start": {
+      "line": 3,
+      "character": 9
+     },
+     "end": {
+      "line": 3,
+      "character": 12
+     }
+    }
+   },
+   {
+    "uri": "file:///tmp/tsfixture/src/caf%C3%A9.ts",
+    "range": {
+     "start": {
+      "line": 0,
+      "character": 9
+     },
+     "end": {
+      "line": 0,
+      "character": 12
+     }
+    }
+   },
+   {
+    "uri": "file:///tmp/tsfixture/src/caf%C3%A9.ts",
     "range": {
      "start": {
       "line": 3,
@@ -485,7 +546,13 @@ const RECORDED = {
  }
 };
 
-let buffer = "";
+// Byte-based LSP framing: Content-Length counts UTF-8 bytes, so the stream
+// is accumulated as a Buffer and bodies are sliced by byte offset, decoding
+// to a string only after extraction — the same rule the driver's
+// extractMessages follows (the real server frames by bytes; non-ASCII
+// didOpen texts, e.g. files with non-ASCII identifiers, are longer in bytes
+// than in UTF-16 code units).
+let buffer = Buffer.alloc(0);
 let rootUri = null;
 
 function write(msg) {
@@ -496,20 +563,26 @@ function write(msg) {
 }
 
 process.stdin.on("data", (chunk) => {
-  buffer += chunk.toString();
+  buffer = Buffer.concat([
+    buffer,
+    typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk,
+  ]);
   while (true) {
     const headerEnd = buffer.indexOf("\r\n\r\n");
     if (headerEnd === -1) break;
-    const m = buffer.slice(0, headerEnd).match(/Content-Length:\s*(\d+)/i);
+    const m = buffer
+      .subarray(0, headerEnd)
+      .toString("latin1")
+      .match(/Content-Length:\s*(\d+)/i);
     if (!m) {
-      buffer = buffer.slice(headerEnd + 4);
+      buffer = buffer.subarray(headerEnd + 4);
       continue;
     }
     const len = parseInt(m[1], 10);
     const bodyStart = headerEnd + 4;
     if (buffer.length < bodyStart + len) break;
-    const body = buffer.slice(bodyStart, bodyStart + len);
-    buffer = buffer.slice(bodyStart + len);
+    const body = buffer.subarray(bodyStart, bodyStart + len).toString("utf8");
+    buffer = buffer.subarray(bodyStart + len);
     try {
       handle(JSON.parse(body));
     } catch {
