@@ -6,7 +6,7 @@ progress: ready-for-review
 review: specs/reviews/task-107.md
 coverage_sections:
   - "identity-security.md §Layer 3: Sigstore/Fulcio"
-commits: ["fbee68cb9af60852f671ba898e58ac2a78f9168f", "607cb30f60deb08f8fdd41e8b84220f4443c6d05", "d4a6cc929782a9289829afd43e09522f7a0b1287"]
+commits: ["fbee68cb9af60852f671ba898e58ac2a78f9168f", "607cb30f60deb08f8fdd41e8b84220f4443c6d05", "d4a6cc929782a9289829afd43e09522f7a0b1287", "cd5de50983b605acd2c6ea90bed319fd5d5522e7"]
 ---
 
 ## Spec Excerpt
@@ -69,120 +69,103 @@ Read `specs/system/identity-security.md` §Layer 3. The current signing implemen
 
 ## Shipped
 
-Fulcio keyless commit signing with Rekor transparency-log recording
-(`d4a6cc92`, already in this task's `commits:` list) implements every
-plan item and every review finding F1–F11 from the six prior review
-rounds:
+Fulcio keyless commit signing with Rekor transparency-log recording,
+implementing every plan item and every review finding from the prior
+rounds (F1-F14).
+
+### Behavior
 
 - **Fulcio issuance** (`sigstore.rs::sign_commit_keyless`): ephemeral
   rcgen P-256 key pair per squash, proof-of-possession (base64 DER
   ECDSA over the JWT `sub`) verified by the receiving Fulcio, and
-  `publicKey.content` sent as **PEM text** — the encoding upstream
-  Fulcio's `challenges.ParsePublicKey` accepts (F1: base64(DER) is
-  rejected by every real instance). The caller's validated agent JWT
-  (`AuthenticatedAgent.bearer_token`) is presented to Fulcio; the
-  response's `signedCertificateEmbeddedSct`/`DetachedSct` chain is
-  decoded and stored leaf-first.
+  `publicKey.content` sent as PEM text - the encoding upstream
+  Fulcio's `challenges.ParsePublicKey` accepts. The caller's validated
+  agent JWT (`AuthenticatedAgent.bearer_token`) is presented to
+  Fulcio; the response's `signedCertificateEmbeddedSct`/`DetachedSct`
+  chain is decoded (PEM text, raw DER, then base64(DER) - mutually
+  unambiguous) and stored leaf-first.
 - **Attribution** (F2): `SigningAttribution::from_auth` threads the
   caller's validated JWT claims (`task_id`, `spawned_by`, agent id)
-  into the record — no placeholder literals; non-JWT callers get the
-  resolved agent id with empty (not fabricated) task/user fields.
+  into the record; non-JWT callers get the resolved agent id with
+  empty (not fabricated) task/user fields.
 - **Verification** (`verify_signature_fulcio`, exposed at
   `GET /api/v1/repos/:id/commits/:sha/signature/verification` and as
-  Phase 6 of the provenance chain verification — F6): four phases with
+  Phase 6 of the provenance chain verification - F6): four phases with
   trust anchors resolved ONLY from server `SigningConfig` (F3), chain
   validation against EVERY chain in the Fulcio trust bundle (F11) with
   `not_before`/`not_after` enforcement on every stored certificate
-  (F5), SAN/CN subject match (c), and a Rekor check that fetches the
-  entry and compares its hashedrekord body's digest, signature, and
-  certificate against THIS record (F4 — content match, not existence).
+  (F5), SAN/CN subject match, and a Rekor check that fetches the entry
+  and compares its hashedrekord body's digest, signature, and
+  certificate against THIS record (F4 - content match, not existence).
 - **Rekor recording**: hashedrekord entry (commit digest, base64 DER
   signature, base64 PEM leaf certificate) POSTed at sign time; the
   returned entry UUID is stored with the record.
 - **Persistence** (F9): `CommitSignatureRepository` port with SQLite
   and PostgreSQL adapters (migration `2026-10-09-000056`), keyed by
-  `(repo_id, commit_sha)` — repo-scoped lookups, restart-surviving
-  records, wired through `store!` in `build_state`.
+  `(repo_id, commit_sha)`, wired through `store!` in `build_state`.
 - **Latency bound** (F10): every outbound Fulcio/Rekor call is wrapped
-  in `tokio::time::timeout(SIGNING_HTTP_TIMEOUT_SECS = 10)` — the
-  fall-back-to-local guarantee holds for hung stacks, not just refused
-  connections.
+  in `tokio::time::timeout(SIGNING_HTTP_TIMEOUT_SECS = 10)`.
 - **ABAC** (F8): the verification route is registered in
   `ResourceResolver::routes` (`repo`/read).
 - **Configuration**: `GYRE_SIGNING_MODE` (`local`/`fulcio`/`none`),
   `GYRE_FULCIO_URL`, `GYRE_REKOR_URL`, via `SigningConfig::from_env`.
+- **Operator key provisioning** (F12 + this round): the forge Ed25519
+  key is persisted in the durable KV store across restarts, and
+  `GYRE_AGENT_SIGNING_KEY` (base64 PKCS#8 DER, **v1 or v2** -
+  `docs/server-config.md` documents the row and a working generation
+  command) explicitly provisions/rotates it. Invalid material is a
+  hard startup error.
 - **Tests** (F7): the mock stack encodes the upstream wire contract
   (rejects base64(DER) keys like real Fulcio, verifies PoP for real,
   serves a two-chain trust bundle, echoes stored Rekor entries) with
-  failure knobs per phase; negative coverage exists for all four
-  phases (tampered signature, untrusted CA, expired leaf, mismatched
-  SAN, dropped Rekor entry, swapped Rekor entry, foreign trust anchor,
-  wire-format rejection, wrong-preimage PoP) plus handler-level
-  fallback/attribution/none-mode tests through the real router.
+  failure knobs per phase; negative coverage for all four verification
+  phases; handler-level fallback/attribution/none-mode tests through
+  the real router; an independent upstream-conformance probe
+  (`tests/task107_upstream_conformance.rs`) drives the production
+  sign/verify paths against a Fulcio built from upstream proto
+  documentation.
 
-Verification evidence (this round, on branch head `1b55d097` =
- checkpoint `d4a6cc92` + upstream base merge): sigstore unit suite,
- jj API handler suite, ports/adapters commit_signature suites, and the
- task-107-relevant mechanical gates (ABAC route registry, in-memory
-  state stores, unbounded external HTTP, migration versions and SQL
-  portability, mem port contracts, arch) all pass — outputs retained
-under `/tmp/stage/review-evidence/`. Full `cargo test --all` and
-GitHub CI are owned by the verification/publication stages.
+### This round (F13/F14 repair, head `cd5de509`)
 
-Follow-up repair round (head `fee16d55`): the earlier ready-for-review
-process commit `b97aa290` consumed the frontmatter's closing `---`
-delimiter without restoring it, so `scripts/pipeline/catalog.py::
-metadata()` raised `task must have frontmatter` on this file and the
-pipeline could not read `progress`. Repaired via
-`scripts/dev-attribution.py task-107` (which also regenerated the
-scoped `commits:` list — the implementation checkpoint only; process
-commits touch no product surface and are outside the attribution scan)
-and committed as `fee16d55`. All suites and mechanical gates re-run
-green on `fee16d55` (sigstore 15, jj 14, provenance 5,
-commit_signatures 6, adapters commit_signature 5; 10 mechanical gates
-including task-commit-attribution, ABAC route registry, in-memory
-state stores, unbounded external HTTP, migration versions/portability,
-mem port contracts, arch) — outputs retained under
-`/tmp/stage/review-evidence/`.
+- **F13**: the F12 auth.rs insertions had moved the exempted legacy
+  `claims.tenant_id` fallback site past the frozen exemption line
+  (auth.rs:786), so `scripts/check-fabricated-scope-defaults.sh`
+  exited 1 on the candidate head and every Rust-touching commit failed
+  pre-commit. The exemption line now tracks the current site
+  (auth.rs:838); the entry count stays at the frozen baseline of 5.
+- **F14**: `GYRE_AGENT_SIGNING_KEY` documented in
+  `docs/server-config.md` next to `GYRE_SIGNING_MODE`. While writing
+  the row, an empirical probe against the production loader showed the
+  natural generation command (`openssl genpkey -algorithm ed25519
+  -outform DER | base64 -w0`) produces PKCS#8 **v1**, which ring's
+  strict `Ed25519KeyPair::from_pkcs8` rejects with
+  `VersionNotSupported` - every common tool (openssl, Node, Python
+  `cryptography`) emits v1. `AgentSigningKey::from_pkcs8` and
+  `sign_bytes` now use ring's `from_pkcs8_maybe_unchecked`, the entry
+  point ring's own docs direct v1 callers to: v2 parsing is
+  byte-for-byte identical to the strict form (including the embedded
+  public-key/seed consistency check), and for v1 the public key is
+  derived from the operator's own private seed (jsonwebtoken's EdDSA
+  signing path uses the same entry point). A permanent regression test
+  with a fixed openssl-generated v1 key and precomputed expected kid
+  was added to `tests/task107_signing_key_env.rs` (leg 0 of the
+  provisioning/rotation test); it fails with
+  `VersionNotSupported` against the previous loader.
+- The pending merge of base `2f215b1e` (task-180) was resolved: both
+  sides' new diesel tables kept, `web/dist` rebuilt from the merged
+  `web/src` sources.
 
-This round additionally repaired a pre-existing gate failure inherited
-from the upstream base: task-210's main-merge commit `a781ede2`
-(`crates/gyre-server/src/api/admin.rs`) was absent from
-`specs/tasks/task-210.md`'s `commits:` frontmatter; recorded via a
-specs-only `process(task-107)` commit per the check's prescribed fix
-(`scripts/check-task-commit-attribution.sh` now passes).
+### Verification evidence (head `cd5de509`, under /tmp/stage/review-evidence/)
 
-Wire-format repair round (checkpoint `607cb30f` merged onto base
-`a11ba8d3`, head `30de515b`): the review-5 finding that both production
-decoders treated Fulcio's `chain.certificates` and the v2 trust bundle
-as base64(DER) while upstream serves PEM STRINGS is fixed.
-`chain_element_der` (sigstore.rs) now tries PEM text, raw DER, then
-base64(DER) — mutually unambiguous encodings — in the sign path, the
-trust-bundle root match, and the mock stack; the in-module mock was
-converted to the upstream PEM contract, and an INDEPENDENT
-upstream-conformance probe
-(`crates/gyre-server/tests/task107_upstream_conformance.rs`) builds its
-own Fulcio from the upstream proto documentation (PEM chains, PEM
-bundle, real PoP verification, real PEM-only publicKey rejection) and
-drives the real production `sign_commit_keyless` and
-`verify_signature_fulcio`, so a regression to base64-only decoding
-fails even when the in-module unit suite stays green.
-
-Verification evidence this round (head `30de515b`, outputs under
-`/tmp/stage/review-evidence/`): upstream-conformance probe 3/3 passed
-(`probe-upstream-conformance.txt`; before the fix the sign leg failed
-with "fulcio chain element is not base64 DER: Invalid symbol 45"),
-gyre-server focused suites 40 passed / 0 failed — sigstore 15,
-api::jj 14, api::provenance 6, commit_signatures 5
-(`gyre-server-focused-suites.txt`), adapters commit_signature 5/5
-(`adapters-commit-signature.txt`), and mechanical gates arch, ABAC
-route registry, in-memory state stores, unbounded external HTTP,
-migration versions, migration SQL portability, mem port contracts all
-pass; task-commit-attribution was repaired to pass by recording base
-merge commit `a11ba8d3` in `specs/tasks/task-068.md`'s `commits:`
-frontmatter (a pre-existing gap inherited from the upstream base, same
-class as the prior round's task-210 repair; specs-only
-`process(task-107)` commit). Live Fulcio interop remains blocked by
-sandbox network policy (fulcio.sigstore.dev:443 connect refused,
-`live-fulcio-check.txt` records the restriction and the exact host
-verification steps); exact-head GitHub CI is mandatory after review.
+gyre-server lib suite 1273 passed / 0 failed
+(`f13-gyre-server-lib-full.txt`), including the sigstore,
+commit_signatures, api::jj, api::provenance, and auth suites;
+`task107_signing_key_env` 1/1 (`f13-signing-key-env.txt`);
+`task107_upstream_conformance` 3/3 (`f13-upstream-conformance.txt`);
+adapters commit_signature 5/5
+(`f13-adapters-commit-signature.txt`). All 19 mechanical gates pass
+(`f13-mechanical-gates.txt`), including fabricated-scope-defaults
+(exit 0, was exit 1 on the incoming candidate head) and
+task-commit-attribution. Live Fulcio interop remains blocked by
+sandbox network policy (fulcio.sigstore.dev:443 connect refused);
+exact-head GitHub CI is mandatory after review.
