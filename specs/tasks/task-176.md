@@ -5,7 +5,7 @@ depends_on: [task-172]
 progress: ready-for-review
 coverage_sections:
   - "ui-layout.md §9. Meta-specs Preview Loop Layout"
-commits: ["eee86b3e"]
+commits: ["eee86b3e66c5330eeee84e72a4a5fde76a19a87c"]
 ---
 
 ## Spec Excerpt
