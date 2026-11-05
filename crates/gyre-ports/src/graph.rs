@@ -8,6 +8,11 @@ use gyre_common::{
 };
 
 /// Storage port for the knowledge graph (realized model).
+///
+/// Edge persistence upserts on `id`: re-persisting an existing edge via
+/// `create_edge` updates mutable fields (edge_type, metadata, last_seen_at,
+/// deleted_at) but preserves the immutable `first_seen_at` from the original
+/// insert.
 #[async_trait]
 pub trait GraphPort: Send + Sync {
     /// Persist a new graph node.
