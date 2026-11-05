@@ -110,32 +110,42 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
     // Emit GateFailure event so the MR's author agent can react immediately.
     if status == GateStatus::Failed {
         let gate_type_str = format!("{:?}", gate.gate_type);
-        let (spec_ref, workspace_id) = state
+        match state
             .merge_requests
             .find_by_id(&mr_id)
             .await
             .ok()
             .flatten()
-            .map(|mr| (mr.spec_ref, Some(mr.workspace_id)))
-            .unwrap_or((None, None));
-        let gate_agent_id = format!("gate-agent:{}", gate.id);
-        let ws_id = workspace_id.unwrap_or_else(|| gyre_common::Id::new("default"));
-        state
-            .emit_event(
-                Some(ws_id.clone()),
-                gyre_common::message::Destination::Workspace(ws_id),
-                gyre_common::message::MessageKind::GateFailure,
-                Some(serde_json::json!({
-                    "mr_id": mr_id.to_string(),
-                    "gate_name": gate.name,
-                    "gate_type": gate_type_str,
-                    "status": "Failed",
-                    "output": output,
-                    "spec_ref": spec_ref,
-                    "gate_agent_id": gate_agent_id,
-                })),
-            )
-            .await;
+            .map(|mr| (mr.spec_ref, mr.workspace_id))
+        {
+            Some((spec_ref, ws_id)) => {
+                let gate_agent_id = format!("gate-agent:{}", gate.id);
+                state
+                    .emit_event(
+                        Some(ws_id.clone()),
+                        gyre_common::message::Destination::Workspace(ws_id),
+                        gyre_common::message::MessageKind::GateFailure,
+                        Some(serde_json::json!({
+                            "mr_id": mr_id.to_string(),
+                            "gate_name": gate.name,
+                            "gate_type": gate_type_str,
+                            "status": "Failed",
+                            "output": output,
+                            "spec_ref": spec_ref,
+                            "gate_agent_id": gate_agent_id,
+                        })),
+                    )
+                    .await;
+            }
+            None => {
+                // The MR's workspace scope cannot be determined — skip the
+                // scope-scoped event emission rather than fabricating a
+                // "default" workspace identity (task-097 F3).
+                tracing::warn!(
+                    "gate_executor: merge request {mr_id} not found; skipping GateFailure event emission"
+                );
+            }
+        }
     }
 
     // Notify MR author when gate fails (HSI §2).
