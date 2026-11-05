@@ -8,6 +8,8 @@ from .store import STAGES
 
 def snapshot(store):
     from .repairs import satisfied
+    from .priority import task_priority, classes, PriorityError
+    from .execution import gateway
     records = store.tasks()
     work = [dict(row) for row in store.db.execute('SELECT * FROM work ORDER BY created DESC')]
     tasks, attempts, counts = [], [], {}
@@ -16,6 +18,10 @@ def snapshot(store):
     delivered = {task['name'] for task in records if satisfied(task['data'])}
     for task in records:
         data = task['data']
+        try:
+            priority=task_priority(store,task)
+        except PriorityError as exc:
+            priority={'class':'invalid','error':str(exc),'source':'invalid'}
         related = [item for item in work if item['task'] == task['name'] and item['generation'] == task['generation']]
         active = next((item for item in related if item['stage'] != 'observe' and item['state'] == 'claimed' and item['expires'] > time.time()), None)
         retry = next((item for item in related if item['stage'] != 'observe' and item['state'] == 'retry'), None)
@@ -25,14 +31,14 @@ def snapshot(store):
                  'blocked' if task['name'] in errors or not set(graph[task['name']]) <= delivered else
                  'ready' if data.get('repair') or not data.get('candidate') else
                  'published' if data.get('pr') else 'candidate')
-        condition = (data.get('resolved') or {}).get('reason') or errors.get(task['name']) or (json.loads((attention or retry)['result']).get('message') if attention or retry else None)
+        condition = priority.get('error') or (data.get('resolved') or {}).get('reason') or errors.get(task['name']) or (json.loads((attention or retry)['result']).get('message') if attention or retry else None)
         tasks.append({'name': task['name'], 'title': data.get('title'), 'spec_ref': data.get('spec_ref'),
                       'deps': graph[task['name']], 'state': state, 'stage': active['stage'] if active else None,
                       'progress': data.get('progress'), 'candidate': data.get('candidate'),
                       'seed': data.get('candidate'), 'generation': task['generation'],
                       'observed_generation': task['generation'] if data.get('delivered') else None,
                       'merge_sha': (data.get('delivered') or {}).get('sha'), 'pr': data.get('pr'),
-                      'condition': condition, 'feedback': data.get('repair'), 'ci':data.get('ci'),
+                      'condition': condition, 'feedback': data.get('repair'), 'ci':data.get('ci'),'priority':priority,
                       'retry_at': retry['retry_at'] if retry else None, 'attempts': len(related)})
         counts[state] = counts.get(state, 0) + 1
     by_id = {item['id']: item for item in work}
@@ -70,5 +76,8 @@ def snapshot(store):
             'confirmed_merges': sum(bool(task['merge_sha']) for task in tasks),
             'resources': {'used': sum(row[1] for row in resources), 'deletion_pending': dict(resources).get('deleting', 0),
                           'inventory_ready': bool(inventory and time.time() - inventory['at'] < 180)},
-            'health': {'condition': 'Paused' if store.setting('admission_paused', False) else store.setting('admission_condition', 'Reconciling'), 'effective_slots': 0 if store.setting('admission_paused', False) else store.setting('slots', 8)},
-            'dispatch': {'only_task': store.setting('only_task'), 'integration':store.integration_lane()}}
+            'health': {'condition': 'Paused' if store.setting('admission_paused', False) else store.setting('admission_condition', 'Reconciling'),
+                       'gateway_auth':gateway.auth_status(store.directory,store.setting('gateway','gyre-gyre')),
+                       'effective_slots': 0 if store.setting('admission_paused', False) else store.setting('slots', 8)},
+            'dispatch': {'only_task': store.setting('only_task'), 'integration':store.integration_lane(),
+                         'verification_reserved':store.verification_reserve(),'priority_classes':classes(store)}}
