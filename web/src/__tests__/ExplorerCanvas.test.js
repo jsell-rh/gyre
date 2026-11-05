@@ -162,6 +162,26 @@ describe('ExplorerCanvas', () => {
     expect(annotation?.textContent).toContain('Test View');
   });
 
+  it('all scope: {{count}} resolves to total node count, not "?"', () => {
+    // spec view-query-grammar.md §2 "all" = show everything — the result set
+    // is every node, so the annotation templates resolve against the full
+    // graph. Regresses if the all branch falls through to null (count '?',
+    // group_count '0').
+    const query = {
+      scope: { type: 'all' },
+      annotation: { title: 'Graph: {{count}} nodes', description: 'across {{group_count}} groups' },
+    };
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: NODES, edges: EDGES, activeQuery: query },
+    });
+    // 7 nodes across api / api.handlers / domain / tests (qualified names:
+    // api, api.handlers.create_user, api.handlers.get_user, domain,
+    // domain.User, tests.test_create_user → 4 distinct parents + 'api' itself
+    // as a root added to the parents set)
+    expect(container.querySelector('.annotation-title')?.textContent).toContain('Graph: 7 nodes');
+    expect(container.querySelector('.annotation-desc')?.textContent).toContain('4 groups');
+  });
+
   it('calls canvas getContext on render', () => {
     render(ExplorerCanvas, {
       props: { nodes: NODES, edges: EDGES },
@@ -240,6 +260,73 @@ describe('ExplorerCanvas — view queries', () => {
     expect(container.querySelector('.annotation-title')?.textContent).toContain('Test coverage gaps');
   });
 
+  it('draws highlight.matched.label on matched nodes with the matched color', () => {
+    // spec view-query-grammar.md §3: highlight.matched = color + label for
+    // nodes in the result set. Flat fixture: one package directly containing
+    // the untested function, so the matched leaf is drawn at initial fit zoom
+    // (a deeper tree keeps the parent group in summary mode at test zoom).
+    const flatNodes = [
+      { id: 'pkg1', node_type: 'package', name: 'api', qualified_name: 'api', file_path: '', line_start: 0, line_end: 0, visibility: 'public', spec_confidence: 'none', test_node: false },
+      { id: 'fn2', node_type: 'function', name: 'get_user', qualified_name: 'api.get_user', file_path: 'api/handlers.py', line_start: 32, line_end: 45, visibility: 'public', spec_confidence: 'medium', test_node: false },
+    ];
+    const flatEdges = [
+      { id: 'e1', source_id: 'pkg1', target_id: 'fn2', edge_type: 'contains' },
+    ];
+    const query = {
+      scope: { type: 'test_gaps' },
+      emphasis: { highlight: { matched: { color: '#ef4444', label: 'Untested' } }, dim_unmatched: 0.3 },
+    };
+    // Capture fillStyle at each fillText call — asserting mockCtx.fillStyle
+    // after render would only see the LAST assignment (tautological).
+    const drawn = [];
+    mockCtx.fillText.mockImplementation((text) => {
+      drawn.push({ text, fillStyle: mockCtx.fillStyle });
+    });
+    render(ExplorerCanvas, {
+      props: { nodes: flatNodes, edges: flatEdges, activeQuery: query },
+    });
+    // The matched leaf itself is drawn (same LOD guards as the label branch):
+    // proves this fixture exercises the draw path, unlike a deep tree whose
+    // matched leaf stays collapsed inside a tree-group summary.
+    expect(drawn.some(d => d.text === 'get_user')).toBe(true);
+    // The label is drawn with fillStyle set to the configured matched color
+    const labelCalls = drawn.filter(d => d.text === 'Untested');
+    expect(labelCalls.length).toBeGreaterThan(0);
+    expect(labelCalls.every(d => d.fillStyle === '#ef4444')).toBe(true);
+  });
+
+  it('does not draw highlight label when emphasis has no label', () => {
+    // Same flat fixture as the positive test: the matched leaf IS drawn
+    // (asserted below), so the label branch's guards are exercised — the
+    // absence of the label is meaningful, not a fixture artifact.
+    const flatNodes = [
+      { id: 'pkg1', node_type: 'package', name: 'api', qualified_name: 'api', file_path: '', line_start: 0, line_end: 0, visibility: 'public', spec_confidence: 'none', test_node: false },
+      { id: 'fn2', node_type: 'function', name: 'get_user', qualified_name: 'api.get_user', file_path: 'api/handlers.py', line_start: 32, line_end: 45, visibility: 'public', spec_confidence: 'medium', test_node: false },
+    ];
+    const flatEdges = [
+      { id: 'e1', source_id: 'pkg1', target_id: 'fn2', edge_type: 'contains' },
+    ];
+    const query = {
+      scope: { type: 'test_gaps' },
+      emphasis: { highlight: { matched: { color: '#ef4444' } }, dim_unmatched: 0.3 },
+    };
+    const texts = [];
+    mockCtx.fillText.mockImplementation((text) => {
+      texts.push(text);
+    });
+    render(ExplorerCanvas, {
+      props: { nodes: flatNodes, edges: flatEdges, activeQuery: query },
+    });
+    // The matched leaf is drawn: the draw path (and its LOD guards) executed.
+    expect(texts.includes('get_user')).toBe(true);
+    // No label is drawn without emphasis.highlight.matched.label — and no
+    // fallback label sneaks in: every drawn text is a real string (deleting
+    // the hlLabel guard would draw `undefined` here and fail this).
+    expect(texts.includes('Untested')).toBe(false);
+    expect(texts.every(t => typeof t === 'string')).toBe(true);
+  });
+
+
   it('renders filter scope with node_types', () => {
     const query = {
       scope: { type: 'filter', node_types: ['endpoint'] },
@@ -273,6 +360,30 @@ describe('ExplorerCanvas — view queries', () => {
       props: { nodes: NODES, edges: EDGES, activeQuery: query },
     });
     expect(container.querySelector('.annotation-title')?.textContent).toContain('Hot paths');
+  });
+
+  it('diff scope: {{count}} resolves against real commit fields in the component', () => {
+    // Behavioral test of the component's own diff resolution (not the mirror
+    // helper): reads created_sha/last_modified_sha — the fields
+    // GraphNodeResponse actually serializes. If the component reverts to the
+    // old dead field (last_commit_sha), the result set is null and the count
+    // renders as '?'.
+    const nodesWithSha = NODES.map(n => {
+      if (n.id === 'fn1') return { ...n, created_sha: '1111111111111111', last_modified_sha: 'abcdef1234567890' };
+      if (n.id === 'fn2') return { ...n, created_sha: 'abcdef1234567890', last_modified_sha: 'abcdef1999999999' };
+      return { ...n, created_sha: '0000000aaaaaaaa', last_modified_sha: '0000000bbbbbbbb' };
+    });
+    const query = {
+      scope: { type: 'diff', from_commit: 'abcdef1', to_commit: 'abcdef12' },
+      annotation: { title: '{{count}} changed' },
+    };
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: nodesWithSha, edges: EDGES, activeQuery: query },
+    });
+    // fn1 matches to_commit via last_modified_sha and is not unchanged at
+    // from_commit; fn2 is unchanged at from_commit (both shas prefix-match);
+    // every other node never matches to_commit.
+    expect(container.querySelector('.annotation-title')?.textContent).toContain('1 changed');
   });
 
   it('renders diff scope query', () => {
@@ -400,9 +511,43 @@ describe('ExplorerCanvas — view query opacity resolution', () => {
     }
 
     if (scope.type === 'diff') {
+      // Mirrors ExplorerCanvas.svelte diff scope, which mirrors the server
+      // resolver (gyre-domain view_query_resolver.rs Scope::Diff). Reads the
+      // fields GraphNodeResponse actually serializes: created_sha,
+      // last_modified_sha, created_at, last_modified_at. There is no
+      // last_commit_sha field in production data.
+      const fromCommit = (scope.from_commit ?? '').toLowerCase();
+      const toCommit = (scope.to_commit ?? '').toLowerCase();
+      if (!fromCommit || !toCommit) return new Set();
+      const epochRef = (s) => {
+        const m = /^~(\d+)$/.exec(s);
+        return m ? Number(m[1]) : null;
+      };
+      const fromTs = epochRef(fromCommit);
+      const toTs = epochRef(toCommit);
       const matched = new Set();
-      for (const n of nodes) {
-        if (n.last_commit_sha && n.last_commit_sha !== scope.from_commit) matched.add(n.id);
+      if (fromTs !== null && toTs !== null) {
+        // Temporal diff: created or modified within (fromTs, toTs]
+        for (const n of nodes) {
+          const created = n.created_at ?? 0;
+          const modified = n.last_modified_at ?? 0;
+          if ((created > fromTs && created <= toTs) || (modified > fromTs && modified <= toTs)) {
+            matched.add(n.id);
+          }
+        }
+      } else {
+        // SHA diff: to_commit must be a >=7-char prefix of created_sha or
+        // last_modified_sha; nodes unchanged at from_commit (BOTH shas match
+        // from) are excluded.
+        const shaMatches = (sha, target) => {
+          if (!sha || target.length < 7) return false;
+          return String(sha).toLowerCase().startsWith(target);
+        };
+        for (const n of nodes) {
+          const matchesTo = shaMatches(n.created_sha, toCommit) || shaMatches(n.last_modified_sha, toCommit);
+          const unchangedAtFrom = shaMatches(n.created_sha, fromCommit) && shaMatches(n.last_modified_sha, fromCommit);
+          if (matchesTo && !unchangedAtFrom) matched.add(n.id);
+        }
       }
       return matched;
     }
@@ -509,14 +654,60 @@ describe('ExplorerCanvas — view query opacity resolution', () => {
     expect(matched.has('fn2')).toBe(false); // no call connection to User
   });
 
-  it('diff scope: highlights nodes with different commit SHA', () => {
-    const nodesWithCommit = [
-      ...NODES.map(n => ({ ...n, last_commit_sha: n.id === 'fn1' ? 'newsha' : 'abc123' })),
-    ];
-    const matched = resolveQueryMatch(nodesWithCommit, EDGES, { type: 'diff', from_commit: 'abc123' });
+  it('diff scope (SHA): nodes modified at to_commit, excluding unchanged at from_commit', () => {
+    // Fields GraphNodeResponse actually serializes: created_sha/last_modified_sha
+    const nodesWithSha = NODES.map(n => {
+      // fn1: modified at to_commit, created elsewhere -> included
+      if (n.id === 'fn1') return { ...n, created_sha: '1111111111111111', last_modified_sha: 'abcdef1234567890' };
+      // fn2: created AND last-modified at from_commit (both shas prefix-match
+      // from) -> excluded even though created_sha also matches to_commit
+      if (n.id === 'fn2') return { ...n, created_sha: 'abcdef1234567890', last_modified_sha: 'abcdef1999999999' };
+      return { ...n, created_sha: '0000000aaaaaaaa', last_modified_sha: '0000000bbbbbbbb' };
+    });
+    const matched = resolveQueryMatch(nodesWithSha, EDGES, { type: 'diff', from_commit: 'abcdef1', to_commit: 'abcdef12' });
 
-    expect(matched.has('fn1')).toBe(true); // different SHA
-    expect(matched.has('fn2')).toBe(false); // same SHA
+    expect(matched.has('fn1')).toBe(true); // last_modified_sha matches to_commit prefix
+    expect(matched.has('fn2')).toBe(false); // unchanged at from_commit -> excluded
+    expect(matched.has('type1')).toBe(false); // never matched to_commit
+  });
+
+  it('diff scope (SHA): requires >=7-char to_commit prefix', () => {
+    // 'c0ffee' is only 6 chars: below the false-positive guard, so no match
+    const nodesWithSha = NODES.map(n => ({
+      ...n,
+      created_sha: 'aaaaaa1aaaaaa',
+      last_modified_sha: 'c0ffee000000',
+    }));
+    const matched = resolveQueryMatch(nodesWithSha, EDGES, { type: 'diff', from_commit: 'aaaaaa1aaaaaa', to_commit: 'c0ffee' });
+    expect(matched.size).toBe(0);
+  });
+
+  it('diff scope (temporal): nodes created or modified within (from, to]', () => {
+    const nodesWithTs = [
+      ...NODES.map(n => ({ ...n, created_at: 100, last_modified_at: 100 })),
+      { ...NODES[2], created_at: 100, last_modified_at: 150 }, // fn1 modified inside (100,200]
+      { ...NODES[3], created_at: 150, last_modified_at: 100 }, // fn2 created inside range
+      { ...NODES[5], created_at: 100, last_modified_at: 250 }, // type1 modified after to
+    ];
+    const matched = resolveQueryMatch(nodesWithTs, EDGES, { type: 'diff', from_commit: '~100', to_commit: '~200' });
+    expect(matched.has('fn1')).toBe(true);
+    expect(matched.has('fn2')).toBe(true);
+    expect(matched.has('type1')).toBe(false);
+    expect(matched.has('pkg1')).toBe(false); // created_at = 100 is NOT > fromTs (half-open)
+    expect(matched.has('test1')).toBe(false);
+  });
+
+  it('diff scope: missing to_commit resolves to no nodes', () => {
+    // The old client implementation read a nonexistent field (last_commit_sha)
+    // and ignored to_commit; with real data it matched nothing. The component
+    // requires both commits, mirroring the server resolver.
+    const nodesWithSha = NODES.map(n => ({
+      ...n,
+      created_sha: 'aaaaaa1aaaaaa',
+      last_modified_sha: 'c0ffee000000',
+    }));
+    const matched = resolveQueryMatch(nodesWithSha, EDGES, { type: 'diff', from_commit: 'aaaaaa1aaaaaa' });
+    expect(matched.size).toBe(0);
   });
 
   it('returns empty set for focus scope with non-existent node', () => {
