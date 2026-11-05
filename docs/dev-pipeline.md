@@ -414,10 +414,19 @@ can bound verification concurrency independently without changing desired slots.
 The verifier checks the exact assigned head and tree, runs unchanged upstream
 and candidate guards, all-target Clippy, the web build, all Rust tests, and frontend
 tests. GitHub's required checks (including browser E2E) still gate merging. A
-complete source-bound receipt is mandatory; transport loss, missing receipts,
-and timeouts retry as infrastructure. Concrete check failures become durable
-implementation findings. Git retries reuse the allocation. Logs stream to the
-cockpit and remain locally; compute is immediately requested for deletion, with
+complete source-bound receipt is mandatory. Every received receipt is saved
+privately as `remote-verification-raw.json` before validation and sandbox deletion;
+only accepted receipts become `remote-verification.json`. Source-integrity
+failures report changed paths and observed HEAD/tree, stop in Needs attention,
+and release integration for other candidates. A new base cannot bypass that
+hold; operator retry resumes it after inspection. Ordinary transport loss,
+missing receipts, and timeouts retry as infrastructure. Concrete check failures become durable
+implementation findings. When testing upstream's scripts against the candidate,
+the verifier records which upstream-only files it introduces. Restoration removes
+only those unchanged files, leaving candidate deletions intact; modified or
+pre-existing files are never blindly cleaned. This prevents the verifier itself
+from contaminating the exact checkout it later checks. Git retries reuse the
+allocation. Logs stream to the cockpit and remain locally; compute is immediately requested for deletion, with
 unconfirmed deletion charged until authoritative absence. Slots zero drains
 verification too. SQLite, gateway authentication, Git publication, and GitHub
 observation remain in the lightweight local control plane.
