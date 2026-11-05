@@ -99,15 +99,27 @@ pub enum InvitationStatus { Pending, Accepted, Declined, Expired, Revoked }
 Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §Invitation Expiry for full requirements. The existing workspace member endpoints are in `gyre-server/src/api/workspaces.rs` (or grep for `POST /api/v1/workspaces`). User creation is in `gyre-domain/src/user.rs`. Auth handling is in `gyre-server/src/auth.rs`. Route registration is in `gyre-server/src/api/mod.rs`. ABAC route mappings are in `gyre-server/src/abac_middleware.rs`. Check migration numbering with `ls crates/gyre-adapters/src/sqlite/migrations/ | tail -5`.
 ## Shipped
 
-**Repair round for review findings b646524c (F1-F4), on top of the
-recovered task-110 lineage.** The branch started with an interrupted
-upstream merge (unmerged `mem.rs`); commit `1a51b48c` resolved it by
-keeping both sides (the task-110 invitation repositories and the
-upstream secret/trace test modules), and commit `8cf7e5bc` implements
-the four review fixes. Evidence log with commands, exit codes, and
-source SHAs: `/tmp/stage/review-evidence/task-110-repair-round.md`.
+**Rebase-resolution round at head `1b0cc30b`.** The branch arrived with
+an interrupted merge of upstream `3c39ab1f`; the unmerged paths were
+confined to `web/dist` build artifacts (a rename/rename on
+`elk.bundled-*.js` and an `index.html` content conflict). Since our
+branch never touched `web/src` (empty diff vs `3c39ab1f`; every web
+source change in the merge comes from upstream), the merge was resolved
+by taking upstream's committed `web/dist` — verified byte-identical to
+upstream's tree — and committed as merge `1b0cc30b`. The merge touches
+zero Rust code (`git diff 027732bd..1b0cc30b -- crates/` is empty), so
+the task-110 invitation implementation is unchanged. Evidence log with
+commands, exit codes, and SHAs:
+`/tmp/stage/review-evidence/task-110-rebase-round.md`.
 
-### Shipped behavior (this round)
+Below is the prior repair round for review findings b646524c (F1-F4),
+on top of the recovered task-110 lineage: the earlier interrupted
+upstream merge (unmerged `mem.rs`) was resolved by `1a51b48c` keeping
+both sides (the task-110 invitation repositories and the upstream
+secret/trace test modules), and `8cf7e5bc` implements the four review
+fixes.
+
+### Shipped behavior (prior rounds)
 
 - **F1/F2 — invitee-side reachability + the specced route:** the
   authenticated invitee surface from user-management.md §API >
@@ -162,19 +174,24 @@ accept/decline, the hourly expiry job
 per-tenant `InvitationPolicy` endpoints, ABAC route mappings with
 per-handler enforcement.
 
-### Test evidence (this round; head 8cf7e5bc, this sandbox)
+### Test evidence (re-verified at merge head `1b0cc30b`, this sandbox)
 
 - `cargo test -p gyre-server --lib api::invitations` — 18 passed /
   0 failed, exit 0: the full prior lifecycle suite plus the new
   invitee-surface tests (list+accept lifecycle, wrong-user 404,
   authenticated decline, invite by username and by email,
   notification accept-path content), HTTP 403 negative-authz tests,
-  and the concurrent-claim exactly-one-winner test.
+  and the concurrent-claim exactly-one-winner test. Re-run green at
+  merge head `1b0cc30b` after the rebase resolution.
 - `cargo test -p gyre-adapters invitation` — 3 passed / 0 failed,
   exit 0 (temp-file SQLite; the round-trip tests now assert the
   single-use claim at the adapter, and
   `transition_status_rejects_wrong_source_status` proves a Revoked row
-  is not overwritten by a late expiry transition).
+  is not overwritten by a late expiry transition). Re-run green at
+  merge head `1b0cc30b`.
+- `bash scripts/check-task-commit-attribution.sh` — exit 0, OK at
+  merge head `1b0cc30b` (the merge commit is out of the check's scope
+  by design; no new frontmatter entries needed).
 - `cargo test -p gyre-server --lib abac_middleware` — 9 passed /
   0 failed, exit 0 (resolver covers the new routes).
 - `cargo test -p gyre-server --lib mem::` — 10 passed / 0 failed,
