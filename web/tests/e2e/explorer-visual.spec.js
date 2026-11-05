@@ -95,7 +95,7 @@ async function setupGraphIntercept(page) {
   await page.route('**/test-assets/fonts/**', (route) => {
     const name = route.request().url().split('/test-assets/fonts/')[1].split(/[?#]/)[0];
     try {
-      const body = readFileSync(new URL(`fonts/${name}`, FONTS_DIR));
+      const body = readFileSync(new URL(name, FONTS_DIR));
       route.fulfill({
         status: 200,
         contentType: 'font/woff2',
