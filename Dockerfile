@@ -63,6 +63,14 @@ COPY --from=builder /build/target/release/gyre         /usr/local/bin/gyre
 # Copy SPA assets if present (build separately with npm/vite)
 # COPY web/dist /app/web/dist
 
+# Pass 2 semantic extraction prerequisites (specs/system/lsp-call-graph.md §11):
+# the Go toolchain (packages.Load shells out to `go list`) and the committed
+# go-callgraph CHA binary. Rust/Python/TS toolchains are task-073..075 scope.
+COPY --from=golang:1.24-bookworm-slim /usr/local/go /usr/local/go
+ENV PATH="/usr/local/go/bin:${PATH}"
+COPY scripts/go-callgraph/go-callgraph /usr/local/bin/gyre-go-callgraph
+ENV GO_CALLGRAPH_BIN=/usr/local/bin/gyre-go-callgraph
+
 # Default data directory
 RUN mkdir -p /data && chown gyre:gyre /data
 
