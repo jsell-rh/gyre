@@ -51,3 +51,39 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 24 (2026-11-05) — clobber 23 reproduced at assigned candidate `de570b8d`
+
+Candidate: `de570b8dda561271ca263a2a3fe81e693c6680fd` (assigned base `2f215b1e`, merged at `29c72ada`).
+
+**Finding (process, recurring class):** the tip commit `de570b8d` ("process: record task-208
+branch commits") rewrote `commits:` from the fully-attributed four-SHA list restored at parent
+`8d3a1f1c` back to `["a11cbf7e", "98fd096e"]`, dropping `ad1121c5` (dist regeneration that
+removed the forbidden my-stuff surface from the RustEmbed'd `SKIP_WEB_BUILD=1` artifact — the
+round-1 F1 fix) and `ea006d52` (`.gitattributes` whitespace-gate exemption). Same documented
+class as clobbers 2–22 and round 23's finding `725ca071`: the checkpoint attribution pass's
+regex `^(crates/|web/src|web/tests)` excludes `web/dist/` and root `.gitattributes`;
+`scripts/check-task-commit-attribution.sh:114` shares the blind spot. Both dropped SHAs are
+verified ancestors of the candidate, so the repair is mechanical (restore the four-SHA list).
+
+**Product surface re-verified intact at the candidate** (fresh probes, evidence:
+`/tmp/stage/review-evidence/task-208-round24-review.txt`):
+
+- Dead-code grep (`get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs` over
+  `crates/` + `web/src/`) → zero matches.
+- Routes and ABAC registrations for `/api/v1/users/me/{agents,tasks,mrs}` absent from
+  `api/mod.rs` / `abac_middleware.rs`; router 404 regression test `my_stuff_endpoints_are_removed`
+  present (`users.rs:948`), drives the real router via `app().oneshot(...)`.
+- Committed-dist forbidden-identifier grep → zero matches; kept-surface identifiers present.
+- `UserProfile.test.js` → 23/23 passed after fresh `npm ci`, including the exact-six-tab
+  guard (`toEqual(['info','tokens','memberships','ledger','notif-prefs','notifications'])`).
+- Spec amendments and coverage matrices (user-management row 22 `n/a`; HSI row 54
+  `implemented`) intact at the candidate.
+- Rust test execution blocked by transport in this sandbox (crates.io connection refused,
+  no registry cache) — verifier must run `cargo test -p gyre-server my_stuff_endpoints_are_removed`
+  and `cargo test --all`.
+
+Verdict: **not approved** — one process finding (attribution clobber 23 at the candidate tip).
+Residual (23rd occurrence, unchanged): the checkpoint attribution pass will likely re-drop the
+`web/dist/`/`.gitattributes` commits at the next checkpoint until the gate's regex is extended;
+flagged for the process owner, out of this task's product scope.
