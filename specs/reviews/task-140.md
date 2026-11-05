@@ -109,3 +109,63 @@ asymmetry each fail at least one test.
 
 R1: no findings — task meets platform-model.md §2 Built-In Personas. Progress set to
 complete.
+
+---
+
+# R2 Review — candidate 39598b53 (base 110180fb)
+
+Independent re-review at the exact assigned candidate. Static diff review plus focused
+probes run at this tree (evidence: /tmp/stage/review-evidence/, logs + notes.md).
+
+## Verified
+
+- Persona seeding implementation unchanged in substance from R1 and still correct:
+  `BUILTIN_PERSONA_DEFS` (four spec-table personas, prompts `include_str!`-embedded
+  from `specs/personas/*.md`), `builtin_personas()` stamps Tenant scope / Approved /
+  system approver / SHA-256 content hash; `seed_builtin_personas[_for_tenant]`
+  check-before-insert via `find_by_slug_and_scope` (never overwrites); wired at
+  main.rs:55, tenants.rs:80, admin.rs:517; CLI bootstrap single-sourced from the
+  domain defs (private prompt copies deleted, pointer-equality test).
+- Probes at 39598b53: `gyre-domain --lib builtin` 2 passed; `gyre-adapters --lib
+  sqlite::workspace::persona` 2 passed; `gyre-cli --bin gyre bootstrap` 15 passed;
+  check-arch.sh / check-task-commit-attribution.sh / check-mem-port-contracts.sh
+  all exit 0. Task file matches the assigned contract; no scripts/, exemptions,
+  or web/dist changes in the candidate diff.
+
+## Finding R2-F1 (blocking) — test target does not compile
+
+Commit 646684f4, the verification repair for durable finding 1aa47b6a (flaky
+`rate_limit_exhaustion_returns_429`), adds
+`rate_limit::tests::refills_to_full_rate_on_new_second`, which does not compile:
+
+```rust
+let tick = AtomicU64::new(1_700_000_000);            // rate_limit.rs:118
+let rl = RateLimiter::with_clock(1, {
+    Box::new(move || tick.load(Ordering::Relaxed))    // :120 — tick moved into closure
+});
+...
+tick.store(1_700_000_001, Ordering::Relaxed);         // :127 — error[E0382]
+```
+
+`cargo test -p gyre-server --lib <any filter>` exits 101 at this candidate
+(/tmp/stage/review-evidence/test-server-seed.log). Consequences:
+
+- The whole gyre-server lib suite — including this task's own
+  `seed_builtin_personas_*` and `create_tenant_seeds_builtin_personas` tests —
+  cannot run at the candidate.
+- CI `cargo test --all` fails → the task's "Tests pass" acceptance criterion is
+  not met at the assigned candidate.
+- The repair was shipped without being compiled: every green run cited in the
+  shipped notes predates 646684f4 (latest cited trees 5f5ab82a / 6fd54cc0).
+
+Fix: share the clock state between closure and test body (e.g.
+`Arc<AtomicU64>` with a clone captured by the closure), then re-run
+`cargo test -p gyre-server --lib rate_limit seed_builtin_personas create_tenant_seeds`
+and the workspace suite at the repaired tree.
+
+## Verdict
+
+R2: NOT approved — one blocking code finding (R2-F1). The persona seeding work
+itself is sound and its independently compilable suites pass at this candidate;
+approval is withheld solely because the candidate's gyre-server test target does
+not compile, so the task's own server-side acceptance tests cannot execute.
