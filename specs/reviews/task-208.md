@@ -51,3 +51,14 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 30 — clobber 29 at the assigned candidate `f86dda2a` (needs-revision)
+
+Assigned base `5df14f34`, candidate `f86dda2a` (= tip, "process: record task-208 branch commits", child of the round-29 repair `06e58c14`). Fresh probes at the candidate (evidence: `/tmp/stage/review-evidence/task-208-round30-review.txt` and `s1`–`s6`):
+
+- **F1 reproduced — the candidate commit itself is the 29th attribution clobber.** Its only change (`git diff 06e58c14 f86dda2a`) rewrites `commits:` from the four-SHA list restored at `06e58c14` back to `["a11cbf7e", "98fd096e"]`, dropping `ad1121c5` (dist regen — the round-1 F1 fix) and `ea006d52` (`.gitattributes` whitespace-gate exemption). Both SHAs verified ancestors of the candidate (`git merge-base --is-ancestor` exit 0 each), so the dropped work is real and in-branch but invisible to review scoping (AGENTS.md invariant). In-repo gate blind spot demonstrated empirically: `bash scripts/check-task-commit-attribution.sh` exits 0 at the candidate because its product-surface regex (`scripts/check-task-commit-attribution.sh:114`, `^(crates/|web/src/|web/tests)`) does not count `web/dist/`-only or `.gitattributes`-only commits.
+- **No product drift; every product surface re-verified clean at the candidate:** dead-code grep (`get_my_*`/`myAgents|myTasks|myMrs` over `crates/` + `web/src/`) → zero; routes/ABAC registrations for `/users/me/{agents,tasks,mrs}` → zero (remaining `users/me/*` routes and their per-handler-auth ABAC-exempt model unchanged); `UserProfile.svelte` tabs array = exactly the six permitted tabs; router 404 regression test `my_stuff_endpoints_are_removed` present (`users.rs:948`, real `app().oneshot()` route-table exercise); committed dist free of forbidden identifiers; spec amendments and both coverage matrices intact; `.gitattributes` exemption present.
+- **Probes run:** `cd web && npm ci`; focused `npx vitest run src/__tests__/UserProfile.test.js` → **23/23 passed**; full `cd web && npm test` → **65 files, 1624 passed / 41 skipped, exit 0**.
+- **Transport-blocked (verifier must run):** crates.io unreachable from this sandbox (connection refused to index + static CDN; no registry cache) — `cargo test -p gyre-server my_stuff_endpoints_are_removed` and `cargo test --all` could not execute. Restriction, not a code defect.
+
+Verdict: **needs-revision** — one finding (F1, `specs/tasks/task-208.md` `commits:` frontmatter). Repair is mechanical and product-untouched: restore the full four-SHA list at a new tip. Residual (29th occurrence, process owner): the checkpoint attribution pass and the in-repo gate share the `web/dist/` + `.gitattributes` path-filter blind spot.
