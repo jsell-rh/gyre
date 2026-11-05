@@ -1533,33 +1533,9 @@ async fn process_spec_lifecycle(
                 Err(e) => warn!(title, "spec-lifecycle: failed to create task: {e}"),
                 Ok(()) => {
                     info!(title, "spec-lifecycle: created task for spec change");
-<<<<<<< HEAD
                     // ws_id resolved once per push above; None when the repo
                     // row is unresolvable — skip workspace-scoped events
                     // rather than emitting under a fabricated scope.
-=======
-                    // Look up workspace_id from repo for proper scoping.
-                    // A lookup failure means the scope cannot be determined —
-                    // skip the workspace-scoped emission rather than
-                    // fabricating a "default" identity (task-097 F3 class).
-                    let ws_id = match state.repos.find_by_id(&gyre_common::Id::new(repo_id)).await {
-                        Ok(Some(repo)) => repo.workspace_id,
-                        Ok(None) => {
-                            warn!(
-                                repo_id,
-                                "spec-lifecycle: repo not found; skipping task events"
-                            );
-                            continue;
-                        }
-                        Err(e) => {
-                            warn!(
-                                repo_id,
-                                "spec-lifecycle: failed to resolve repo workspace: {e}"
-                            );
-                            continue;
-                        }
-                    };
->>>>>>> 2f215b1e58d633e666852bb1fc42f842d89ae68c
                     let change_kind = match status_char {
                         'A' => "added",
                         'M' => "modified",

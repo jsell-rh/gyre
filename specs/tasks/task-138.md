@@ -120,7 +120,8 @@ lifecycle transitions, plus the repair for the contract finding.
   create (fails on duplicate id), find_by_id, list_by_path,
   **find_by_spec_sha** (exact (path, sha) version query — plan step 2/6),
   list_active_by_path, list_all, transition methods, revoke_all_for_path.
-- **Migration** `2026-10-08-000056_spec_approval_ledger`: nullable
+- **Migration** `2026-10-08-000057_spec_approval_ledger` (renumbered from
+  000056 after the task-180 landing claimed that version on main): nullable
   `approved_at` (NULL while Pending), dual-dialect SQLite rebuild + PG
   portability, indexes on (spec_path, spec_sha) and approver_id.
 - **Adapters**: SQLite, Postgres, and mem implement the port with identical
