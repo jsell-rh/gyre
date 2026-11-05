@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "observability.md §Audit Event Schema"
-commits: ["4fe453dfb18c84a8a00ae02faae99043785bd699", "99de714b08938493b1a60d1e2217baabbf665275", "9e70fa7f78e58979f79aef505e9120c10460e280"]
+commits: ["4fe453dfb18c84a8a00ae02faae99043785bd699", "99de714b08938493b1a60d1e2217baabbf665275", "9e70fa7f78e58979f79aef505e9120c10460e280", "7cc1a7a51e0c1248ed55e5321b76494340aa9d76", "67bbe6835e3c5d332e23df5cba1255ed86bbe767"]
 review: specs/reviews/task-102.md
 ---
 
@@ -125,3 +125,16 @@ Focused suites run on this branch head (logs in `/tmp/stage/review-evidence/`):
 - Mechanical checks all green: `check-migration-sql-portability`, `check-migration-versions`, `check-arch`, `check-forwarded-header-trust`, `check-forged-scope-fields`, `check-mem-port-contracts`, `check-abac-route-registry`, `check-task-commit-attribution`, `check-inert-enforcement`, `check-scope-literal-defaults`.
 
 Implementation commits: `9e70fa7f` (F2/F3/F4 handler + trusted-proxy layer), `99de714b` (F1 portable migration rewrite + portability-exemption shrink + fold regression test).
+
+### Round-3 repair (review 1e921d5f)
+
+- **Committed merge-conflict artifact (R1):** merge d93eaf20 had committed `web/dist/assets/elk.bundled-C7RdDx88.js` with unresolved conflict markers and both sides' content (HEAD side importing `index-DauSjDxg.js`, absent from the tree). Fixed by rebuilding `web/dist` from the committed web sources (`npm ci --no-audit && npm run build`; sources identical to base `2f215b1e` outside `web/dist`). The committed set is now internally consistent — `index.html` → `index-9ZNGTuNm.js` + `index-GeLbLKhg.css`, `index-9ZNGTuNm.js` lazy-imports `./elk.bundled-BEFJVH3L.js`, which imports back `./index-9ZNGTuNm.js` — with zero conflict markers and both bundles parsing cleanly under `node --check` (the exact SyntaxError-at-parse-time failure mode the review flagged for the RustEmbed/SKIP_WEB_BUILD=1 shipping path). Commit `7cc1a7a5`.
+- **Stale exemption debt (R2):** the F2/F3 product fixes had landed but `scripts/forwarded-header-trust-exemptions.txt` and `scripts/forged-scope-fields-exemptions.txt` still carried their 2 grandfather entries each. Deleted the stale lines and lowered `FROZEN_EXEMPTION_COUNT` 2 → 0 in both `check-forwarded-header-trust.sh` and `check-forged-scope-fields.sh`, per the exemption files' own shrink-only protocol. Both checks pass against the tree with the now-empty exemption files. Commit `67bbe683`.
+
+### Round-3 evidence
+
+- `bash scripts/check-forwarded-header-trust.sh` → OK (0 exemptions)
+- `bash scripts/check-forged-scope-fields.sh` → OK (0 exemptions)
+- `bash scripts/check-arch.sh`, `check-migration-sql-portability`, `check-migration-versions`, `check-mem-port-contracts`, `check-abac-route-registry`, `check-inert-enforcement`, `check-scope-literal-defaults` → all OK
+- `node --check` on both rebuilt bundles → parse OK; `grep -c '<<<<<<<\|>>>>>>>'` across `web/dist` → 0
+- Note: `npm ci` requires `--no-audit` in this sandbox (the registry's bulk security-advisories endpoint returns 403 policy_denied, which aborts the install); package installation itself is unaffected.
