@@ -8,7 +8,7 @@ coverage_sections:
   - "ui-navigation.md §2 Workspace Home"
   - "ui-navigation.md §3 Repo Mode"
   - "ui-navigation.md §10 Cross-Workspace View"
-commits: ["f46b2f8f9ad32fb65f0731c37b58ba8f85987023", "38134ff8290ccc0e6b6112fdff9caa45109ad897"]
+commits: ["3eff386beabdf30095bf5b0f9569b1df4ef3ab33", "f46b2f8f9ad32fb65f0731c37b58ba8f85987023"]
 ---
 
 ## Authority and Scope
