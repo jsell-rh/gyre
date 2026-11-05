@@ -729,6 +729,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     key_bindings,
     chain_attestations,
     secrets,
+    spec_assertion_results,
 );
 
 diesel::table! {
@@ -974,5 +975,21 @@ diesel::table! {
         expires_at -> Nullable<BigInt>,
         last_rotated_at -> Nullable<BigInt>,
         tenant_id -> Text,
+    }
+}
+
+diesel::table! {
+    spec_assertion_results (id) {
+        id -> Text,
+        repo_id -> Text,
+        spec_path -> Text,
+        line -> Integer,
+        assertion_type -> Text,
+        assertion_text -> Text,
+        params_json -> Text,
+        passed -> Bool,
+        explanation -> Text,
+        commit_sha -> Text,
+        checked_at -> BigInt,
     }
 }
