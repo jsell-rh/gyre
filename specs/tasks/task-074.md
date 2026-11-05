@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "lsp-call-graph.md §5 Per-Language Implementation (Python)"
   - "lsp-call-graph.md §10 Implementation Phases (Phase 3)"
-commits: ["ee5673a8d16a6132543e9af650a4fc2b564806b1"]
+commits: ["ee5673a8d16a6132543e9af650a4fc2b564806b1", "0cce4f05b002e95ae12b0d9733ae63de6ba79de0"]
 ---
 
 ## Spec Excerpt
@@ -47,13 +47,13 @@ Use `pyright` as an LSP subprocess to extract complete `Calls` edges for Python 
 
 ## Acceptance Criteria
 
-- [x] Python adapter for `CallGraphExtractor` implemented in `gyre-adapters` — Python arm of `SubprocessCallGraphExtractor` dispatches `scripts/python-callgraph.sh` (crates/gyre-adapters/src/call_graph.rs)
-- [x] Spawns `pyright-langserver` as LSP subprocess — `scripts/python-callgraph-pyright.mjs` (stdio JSON-RPC, initialize + didOpen + references + shutdown)
-- [x] Correctly maps reference results to `Calls` edges — import-site references filtered; module-level references attribute to the module node; decorator applications attribute to the decorated function; method dispatch through typed receivers and cross-module calls resolve via pyright; qualified names match Pass 1 exactly (proven by `resolve_pyright_edges_against_pass1_python_nodes` resolving the verified pyright output against real PythonExtractor nodes)
-- [x] Handles missing `pyright` binary gracefully (warning, skip) — wrapper warns on stderr and prints `[]`; `missing_pyright_langserver_degrades_to_empty` test
-- [x] Pipeline selects Python extractor for repos with Python project markers — `detect_all_languages` (pyproject.toml / setup.py / requirements.txt, root + depth 1); `detect_all_languages_python_project_markers` test
-- [x] Integration test with a Python test fixture — real-pyright adapter test `pyright_references_map_to_call_edges` (runs wherever pyright-langserver is installed, re-verified against pyright 1.1.414) + deterministic stub-langserver replay `scripts/dashboard/test/python-callgraph.test.mjs` (runs in CI via `node --test`)
-- [x] `cargo test --all` passes, `cargo fmt --all` clean — focused suites green (gyre-adapters call_graph 4/4, gyre-domain call_graph_resolve 18/18, gyre-server graph_extraction 25/25, node dashboard tests 7/7); task-changed files rustfmt-clean
+- [ ] Python adapter for `CallGraphExtractor` implemented in `gyre-adapters`
+- [ ] Spawns `pyright-langserver` as LSP subprocess
+- [ ] Correctly maps reference results to `Calls` edges
+- [ ] Handles missing `pyright` binary gracefully (warning, skip)
+- [ ] Pipeline selects Python extractor for repos with Python project markers
+- [ ] Integration test with a Python test fixture
+- [ ] `cargo test --all` passes, `cargo fmt --all` clean
 
 ## Agent Instructions
 
@@ -61,7 +61,7 @@ Read `specs/system/lsp-call-graph.md` §5 "Python: pyright" for the full spec. T
 
 ## Shipped
 
-The Python Pass 2 driver is the specced pyright type checker instead of the stdlib-ast body-walking script, closing the pyright-vs-ast divergence flagged in the coverage matrix (rows 2/4/5/10/11 updated).
+The Python Pass 2 driver is the specced pyright type checker instead of the stdlib-ast body-walking script, closing the pyright-vs-ast divergence flagged in the coverage matrix (rows 2/4/5/10/11 updated). The assigned contract above is preserved verbatim; per the repair finding, acceptance-criteria status lives here rather than in edited checkbox text.
 
 ### What runs
 
@@ -71,12 +71,16 @@ The Python Pass 2 driver is the specced pyright type checker instead of the stdl
 - Documented pyright semantics (driver header): class instantiation is reported as a reference to the class symbol, never to `__init__`, so instantiation edges land on the class node (which Pass 1 extracts); dynamic `importlib` imports produce no references. Dynamic dispatch through typed receivers DOES resolve (`s.handle()` on `Service`-typed `s` yields the `Service.handle` edge).
 - Docker runtime stage ships node, pinned `pyright@1.1.414`, python3, and the driver scripts under `/app/scripts` with `PYRIGHT_LANGSERVER_BIN` set (mirrors the task-072 Go wiring); `docs/server-config.md` documents the variable.
 
-### Test evidence
+### This repair round (contract restore + determinism fix)
 
-- Real pyright 1.1.414, full adapter chain (`pyright_references_map_to_call_edges`, gyre-adapters): fixture with cross-module call, method dispatch, instantiation, decorator, module-level call produces exactly the 7 expected edges; re-verified this round with pyright 1.1.414 installed from npm and `PYRIGHT_LANGSERVER_BIN` set — 4/4 adapter call_graph tests pass (evidence: /tmp/stage/review-evidence/adapters-call-graph-test.txt, real-pyright-fixture-edges.json, real-pyright-driver-stderr.txt).
-- Deterministic CI coverage (`scripts/dashboard/test/python-callgraph.test.mjs`, `node --test`): a stub langserver replays the real-pyright reference locations for the same fixture and asserts the same 7 edges, so the driver contract (framing, handshake, positions, filtering, resolution, naming, dedup) is pinned without pyright installed (evidence: node-python-callgraph-test.txt).
-- Name contract (`resolve_pyright_edges_against_pass1_python_nodes`, gyre-domain): the verified pyright edges resolve against real `PythonExtractor` nodes to exactly 7 `Calls` graph edges — 18/18 gyre-domain call_graph_resolve tests pass (evidence: domain-call-graph-resolve-test.txt).
-- Server pipeline (`graph_extraction`, gyre-server): 25/25 tests pass including Pass 2 reconciliation, dedup, and sweep coverage (evidence: server-graph-extraction-test.txt).
-- Degradation: `missing_pyright_langserver_degrades_to_empty` (adapter) and the wrapper's warning+`[]` path re-verified against a PATH without pyright (evidence: missing-pyright-degradation.txt).
-- Marker selection: `detect_all_languages_python_project_markers` covers all three markers at depth 1 (runs in the gyre-domain suite above).
-- rustfmt: the task's changed Rust files (`call_graph.rs`, `call_graph_resolve.rs`) are `rustfmt --check` clean (evidence: rustfmt-task-files.txt); a formatting diff exists in `git2_ops.rs`, which this task never touched (pre-existing, last modified by the task-095 merge fix), so it is left for the owning gate.
+- The production fix from `ee5673a8` is unchanged; the executor restored the assigned task document and this round re-records progress under `## Shipped` only, without editing the protected contract text.
+- `0cce4f05` fixes a real test-ordering defect found by probing this round: `missing_pyright_langserver_degrades_to_empty` deleted `PYRIGHT_LANGSERVER_BIN` process-wide after asserting degradation, so whenever it grabbed `ENV_LOCK` first, `pyright_references_map_to_call_edges` silently skipped the real server chain even on hosts that configured the binary explicitly (observed as a 0.02s suite run where the wrapper alone takes ~1.6s). The ambient override is now saved and restored around the `/nonexistent` stub, so test order no longer decides whether the real chain runs; the configured-binary skip path is unchanged.
+
+### Test evidence (fresh runs at this tree, pyright 1.1.414 installed from npm; evidence under /tmp/stage/review-evidence/)
+
+- Real pyright full chain (`pyright_references_map_to_call_edges`, gyre-adapters): fixture with cross-module call, method dispatch, instantiation, decorator, module-level call produces exactly the 7 expected edges. Suite run 4/4 in every scheduling order with `PYRIGHT_LANGSERVER_BIN` set (four consecutive runs, 1.47–2.37s each, no skip — `adapters-call-graph-order-robust.txt`); isolated run 1/1 in 1.69s (`adapters-call-graph-real-pyright-nocapture.txt`). Without the variable and no pyright on PATH the suite still passes 4/4 with the documented skip warning (`adapters-call-graph-no-pyright.txt`). Wrapper-level probe on the same fixture emits the same 7 edges (`real-pyright-fixture-edges.json`, `real-pyright-driver-stderr.txt`).
+- Deterministic CI coverage (`node --test scripts/dashboard/test/python-callgraph.test.mjs`): stub langserver replays the real-pyright reference locations for the same fixture and asserts the same 7 edges — pass (`node-python-callgraph-test.txt`).
+- Name contract and marker selection (gyre-domain): `call_graph_resolve` 18/18 including `resolve_pyright_edges_against_pass1_python_nodes` and `detect_all_languages` 3/3 including `detect_all_languages_python_project_markers` (`domain-call-graph-resolve-test.txt`, `domain-detect-all-languages-test.txt`).
+- Server pipeline (gyre-server): `graph_extraction` 25/25 including Pass 2 reconciliation, dedup, and sweep coverage (`server-graph-extraction-test.txt`).
+- rustfmt: `crates/gyre-adapters/src/call_graph.rs` (the only gyre-adapters file this branch touches, per `git diff --stat` against the assigned base) is `rustfmt --check` clean (`rustfmt-task-files.txt`). Pre-existing formatting drift in `git2_ops.rs`, `sqlite/audit.rs`, and `sqlite/notification.rs` is untouched by this branch and left to the owning gate.
+- Known limitation: the real-pyright adapter test needs pyright-langserver on the host (CI does not install it); the stub replay and name-contract tests run everywhere, and the Docker runtime image ships pinned pyright with `PYRIGHT_LANGSERVER_BIN` set.
