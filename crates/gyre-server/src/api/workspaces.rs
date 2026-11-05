@@ -866,7 +866,7 @@ mod tests {
         assert!(
             !policies_after
                 .iter()
-                .any(|p| p.name.starts_with("trust:") && p.scope_id.as_deref() == Some("ws-fail-1")),
+                .any(|p| p.name.starts_with("trust:") && p.scope_id.as_ref().map(|i| i.as_str()) == Some("ws-fail-1")),
             "failed transition must not partially apply trust: policies"
         );
     }
