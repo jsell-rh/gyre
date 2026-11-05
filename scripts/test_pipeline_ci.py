@@ -83,6 +83,37 @@ class CIReconciliationTests(unittest.TestCase):
         self.assertEqual(data['ci']['status'],'pending')
         self.assertEqual(discover(self.store,'verify','new-main'),[])
 
+    def test_merged_pr_fences_reverification_and_only_confirms_original_receipt(self):
+        self.pr.update(state='MERGED',mergeCommit={'oid':'merged-sha'})
+        verifier=self.store.enqueue('verify','task-001','g',{'candidate':self.candidate,'base':'merged-sha'})
+        claim=self.store.claim('verify','redundant-verifier')
+        observer=self.observer()
+        with patch.object(observer,'command',side_effect=self.command):
+            result,updates,findings=observe(observer,self.store.task('task-001'))
+        self.assertEqual(updates['verified'],self.receipt)
+        self.store.finish(observer.claim['id'],observer.claim['token'],result,updates,findings)
+        self.assertEqual(self.store.db.execute('SELECT state FROM work WHERE id=?',(verifier,)).fetchone()[0],'obsolete')
+        self.assertEqual(discover(self.store,'verify','merged-sha'),[])
+        publisher=discover(self.store,'publish','merged-sha')
+        self.assertEqual(len(publisher),1)
+        with self.assertRaises(StaleClaim):self.store.finish(verifier,claim['token'],{})
+
+    def test_pending_observations_preserve_wait_age_for_the_same_head(self):
+        self.pr['statusCheckRollup']=self.checks[1:]
+        observer=self.observer()
+        first=None
+        for _ in range(2):
+            with patch.object(observer,'command',side_effect=self.command),self.assertRaises(Wait):
+                observe(observer,self.store.task('task-001'))
+            current=self.store.task('task-001')['data']['ci']
+            if first is None:first=current['waiting_since']
+            self.assertEqual(current['waiting_since'],first)
+        self.pr['statusCheckRollup']=[dict(self.checks[0],conclusion='SUCCESS')]
+        self.pr['mergeStateStatus']='CLEAN'
+        with patch.object(observer,'command',side_effect=self.command),self.assertRaises(Wait):
+            observe(observer,self.store.task('task-001'))
+        self.assertNotIn('waiting_since',self.store.task('task-001')['data']['ci'])
+
     def test_upstream_failure_keeps_original_reviewed_source_for_reverification(self):
         from pipeline.ci import failure
         observer=self.observer()

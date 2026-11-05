@@ -43,6 +43,7 @@ def read(execution, task, receipt):
                        'headRefOid,statusCheckRollup,state',timeout=30).stdout)
     if latest['headRefOid'] != receipt['head']:
         raise Wait('PR changed during CI observation; discard the stale observation')
+    latest, reconciled = module.reconcile_checks(execution.command,task['data']['pr'],receipt['head'],latest)
     pending, failed, infrastructure = module.check_sets(latest)
     if observation['status'] in ('candidate_failed','baseline_failed') and (not failed or latest['state'] != 'OPEN'):
         raise Wait('Failed CI changed while evidence was collected; observe again before requesting implementation')
@@ -61,6 +62,10 @@ def read(execution, task, receipt):
             raise StaleClaim('published candidate changed during CI observation')
         data = current['data']
         old = data.get('ci') or {}
+        if snapshot['status'] in ('pending','policy_pending','infrastructure'):
+            snapshot['waiting_since'] = (old.get('waiting_since') if old.get('head') == snapshot['head'] else None) or snapshot['checked_at']
+        if reconciled:
+            snapshot['reconciled_checks'] = reconciled
         data['ci'] = snapshot
         execution.store.db.execute('UPDATE tasks SET data=? WHERE name=?',(json.dumps(data),task['name']))
         if old.get('head') != snapshot['head'] or old.get('status') != snapshot['status']:
