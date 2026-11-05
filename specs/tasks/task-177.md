@@ -8,7 +8,7 @@ coverage_sections:
   - "ui-layout.md §Canvas Rendering"
   - "ui-layout.md §Layout Engines"
   - "ui-layout.md §Interaction Events"
-commits: ["41e31138e5f8b42d3e55d43866297551c81afd3a", "e1a8686b47ea112f3639e6dabe015dd0a813f060", "825b4145e0f856d30b577bfe76d4247f1fc151dc"]
+commits: ["41e31138e5f8b42d3e55d43866297551c81afd3a", "e1a8686b47ea112f3639e6dabe015dd0a813f060", "825b4145e0f856d30b577bfe76d4247f1fc151dc", "4aec0fd467b2b76a6f7e7d38d5131eb9171c004f"]
 ---
 
 ## Spec Excerpt
@@ -87,30 +87,30 @@ Read `ui-layout.md` §10 for the full rendering technology stack. The existing `
 
 ## Shipped
 
-Rendering technology per ui-layout.md §10, building on the 825b4145 checkpoint (components + tests) and finishing it: the checkpoint's `SvgGraphCanvas.test.js` failed 8/8 at assignment end; this assignment diagnosed and fixed the remaining defects so the full suite is green.
+Rendering technology per ui-layout.md §10. Components and tests landed in the
+earlier checkpoint commits (825b4145, e1a8686b, 41e31138); this round repaired
+the two verification findings against candidate 47481f0c.
 
 ### Behavior
 
 - **SVG canvas** (`web/src/lib/SvgGraphCanvas.svelte`): SVG rendering for `graph`/`hierarchical`/`layered` views with individually addressable node `<g>`s and edge `<line>`s, pan (background drag, window-level pointer tracking) and zoom (wheel around cursor + toolbar buttons + fit), CSS-transitioned hover/selection state, and keyboard access (tabindex 0 + Enter/Space activation on nodes and edges).
-- **Density policy** (`web/src/lib/canvas-density.js`, pure): ≤500 nodes render fully; >500 auto-filter to public-only with a banner + [Show All]; >1000 even after filtering switch to the virtualized list (`VirtualNodeList.svelte`, windowed rows via scroll offset + overscan) with a warning.
-- **Layout engines** (`web/src/lib/layout-engines.js`): `graph` → d3-force (sync 300-tick simulation), `hierarchical` → ELK layered DOWN, `layered` → ELK layered RIGHT (real elkjs `elk.bundled.js`, verified to produce genuine layered positions in plain JS — no mocks), `list` → Svelte `{#each}` + virtual scroll, `timeline` → d3-scale time axis (`MoldableView.svelte`), `side-by-side` → CSS Grid, `diff` → custom `DiffView.svelte`, all eight registered in `layoutRegistry.js` (view spec `layout` selects the renderer).
-- **ViewEvents** (`web/src/lib/viewEvents.js`): every interactive element (SVG nodes, edges, list rows) emits the standardized `ViewEvent` (type/entity_type/entity_id/position); the Explorer shell (`ExplorerView.svelte`) handles all four uniformly — click → detail panel, dblclick → drill into the entity's repo graph, hover → positioned tooltip, context-menu → actions menu (Escape closes).
+- **Density policy** (`web/src/lib/canvas-density.js`, pure): <=500 nodes render fully; >500 auto-filter to public-only with a banner + [Show All]; >1000 even after filtering switch to the virtualized list (`VirtualNodeList.svelte`, windowed rows via scroll offset + overscan) with a warning.
+- **Layout engines** (`web/src/lib/layout-engines.js`): `graph` -> d3-force (sync 300-tick simulation), `hierarchical` -> ELK layered DOWN, `layered` -> ELK layered RIGHT (real elkjs `elk.bundled.js`, verified to produce genuine layered positions in plain JS — no mocks), `list` -> Svelte `{#each}` + virtual scroll, `timeline` -> d3-scale time axis (`MoldableView.svelte`), `side-by-side` -> CSS Grid, `diff` -> custom `DiffView.svelte`, all eight registered in `layoutRegistry.js` (view spec `layout` selects the renderer).
+- **ViewEvents** (`web/src/lib/viewEvents.js`): every interactive element (SVG nodes, edges, list rows) emits the standardized `ViewEvent` (type/entity_type/entity_id/position); the Explorer shell (`ExplorerView.svelte`) handles all four uniformly — click -> detail panel, dblclick -> drill into the entity's repo graph, hover -> positioned tooltip, context-menu -> actions menu (Escape closes).
 
-### Defects fixed in this assignment (checkpoint had left these failing)
+### Verification-repair round (commit 4aec0fd4)
 
-1. `SvgGraphCanvas.svelte` `$effect` state loop — `++layoutVersion` read+wrote `$state` inside the same effect; Svelte 5 threw at the write site (the checkpoint's 8/8 failure). Fixed with a plain non-reactive invalidation token; reproduced via a minimal component before fixing.
-2. List-fallback CPU waste — in `list` density mode the layout effect still ran a 300-tick d3-force simulation over 1200 nodes whose positions were never rendered (cause of cleanup-hook timeouts under load). Layout is now skipped when `density.mode === 'list'`.
-3. `ExplorerViewViewEvents.test.js` `vi.mock` hoisting bug (`apiMocks` referenced before initialization) — fixed with `vi.hoisted()`; `afterEach(vi.restoreAllMocks)` replaced with `vi.clearAllMocks()` (restore would strip the `mockResolvedValue` implementations plain `vi.fn()` mocks rely on between tests).
-4. Test-fixture bugs: duplicate node ids in the density fixture (`each_key_duplicate` crash) and a banner assertion not whitespace-normalized across template line breaks.
-5. Strengthened the ELK test to assert real ELK layered output (3 distinct y layers for the c→a→b chain) instead of just node count; mutation-verified — forcing the column fallback makes it fail (`expected 1 to be 3`). Heavyweight density tests (450–1200 nodes) got explicit 60s test timeouts for slow environments; assertions unchanged.
+1. **clippy `useless_conversion` on a candidate-added line** (`crates/gyre-server/src/explorer_ws.rs:857`): the `message_during_run` error reply passed an already-`String` `serialize_msg(...).unwrap_or_default()` through `.into()`. tungstenite 0.24's `Message::Text` takes `String` directly (verified in the pinned dependency source, `tungstenite-0.24.0/src/protocol/message.rs:160`), so the conversion was a no-op String->String. Dropped it; the edited region is rustfmt-normalized and `check-rustfmt-diff.py` passes against the base.
+2. **Stale committed `web/dist`**: the candidate's web/src changes were never rebuilt into `web/dist`, so `SKIP_WEB_BUILD=1` deployments would serve a bundle without the task-177 rendering stack (the verifier's fresh build produced `index-CsLSrMej.js`/`elk.bundled-BhZ2TZHN.js`/`index-p0Qxxssq.css` vs the committed `index-BJNYc09Z.js`/`elk.bundled-BsE3YpI5.js`/`index-GeLbLKhg.css`). Rebuilt with the locked toolchain (`npm ci` + `vite build`) and committed; the local rebuild reproduces the verifier's fresh-build asset hashes and sizes exactly, confirming determinism.
 
 ### Test evidence
 
 Logs and probe outputs in `/tmp/stage/review-evidence/` (README.md itemizes commands and exit codes):
 
-- Task-177 suite (7 files): 43/43 pass, two consecutive runs under full batch load.
-- Regression: 16 existing suites covering components touched by the checkpoint (ExplorerView/ExplorerCanvas/MoldableView/…) — 359 passed, 41 pre-existing skips.
-- Real ELK probe: `node elk-probe.mjs` → genuine layered positions (`a 32 12`, `b 12 72`, `c 152 72`), exit 0.
-- ELK mutation proof: forcing the column fallback fails the strengthened test, exit 1.
+- Task-177 suites (15 files: SvgGraphCanvas, canvas-density, VirtualNodeList, layout-engines, layoutRegistry-engines, viewEvents, ExplorerViewViewEvents, ExplorerCanvas, ExplorerCanvas-performance, DiffView, MoldableView NodeTypeFilter/ListView, SideBySideView, TimelineScrubber, timeline-utils): 269/269 pass on the repaired tree.
+- Web production build: exit 0, asset hashes byte-identical to the verifier's fresh build.
+- `check-rustfmt-diff.py` vs base: clean.
+- Rust compile/clippy could not be run in this sandbox (crates.io unreachable; only 43 of the required crates cached locally) — infrastructure restriction recorded for remote verification. The removed `.into()` is proven a no-op from the pinned dependency source and clippy's own diagnostic in the retained verification log; earlier rounds ran the full cargo gates green on this tree's Rust code, and the only Rust change here is the removed no-op conversion.
+- Earlier-round evidence (retained from the prior assignment): real-ELK probe (`node elk-probe.mjs` -> genuine layered positions, exit 0) and ELK mutation proof (forcing the column fallback fails the strengthened test, exit 1).
 
 No exemptions added, no verifiers weakened, no coverage-matrix statuses changed (auditor-owned).
