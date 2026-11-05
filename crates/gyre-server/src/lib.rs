@@ -1686,8 +1686,8 @@ mod tests {
         // BudgetConfig has no PartialEq — compare serialized form against
         // Some(BudgetConfig::default()) (all limits unset = unlimited).
         assert_eq!(
-            serde_json::to_value(&tenant.budget).unwrap(),
-            serde_json::to_value(&Some(BudgetConfig::default())).unwrap()
+            serde_json::to_value(tenant.budget).unwrap(),
+            serde_json::to_value(Some(BudgetConfig::default())).unwrap()
         );
 
         // Restart against the populated DB: exactly one default tenant remains.
