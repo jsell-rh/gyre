@@ -801,6 +801,48 @@ pub async fn save_spec(
         .into_response())
 }
 
+/// Validate that `prompt_path` is a safe relative file path strictly inside
+/// `specs/prompts/`.
+///
+/// The MR-review bypass in `save_prompt` (direct default-branch commit, no
+/// MR, no approval notification) is justified ONLY by spec-lifecycle's
+/// `ignored_paths` entry for `specs/prompts/`. An unvalidated caller-supplied
+/// path would extend that bypass to every tracked file (specs, scripts, CI
+/// config), so the handler must reject anything outside that directory.
+fn validate_prompt_path(path: &str) -> Result<(), ApiError> {
+    use std::path::{Component, Path};
+
+    let invalid = || {
+        ApiError::BadRequest(format!(
+            "prompt_path must be a relative file path under specs/prompts/, got {path:?}"
+        ))
+    };
+
+    let p = Path::new(path);
+    if p.is_absolute() {
+        return Err(invalid());
+    }
+    let mut segs: Vec<&str> = Vec::new();
+    for comp in p.components() {
+        match comp {
+            // Only plain segments are accepted: this rejects `..` traversal,
+            // root, and prefix (e.g. `C:\`) components in a single branch.
+            // A leading `.` also arrives as CurDir and is rejected; `.` in the
+            // middle is normalized away by `components()` and is harmless.
+            Component::Normal(seg) => segs.push(seg.to_str().ok_or_else(invalid)?),
+            _ => return Err(invalid()),
+        }
+    }
+    // Strictly inside `specs/prompts/` — at least one file component beyond
+    // the directory pair itself, and the first two segments must match it.
+    // Backslash-separated or otherwise odd inputs collapse to a single
+    // component on Unix and fail this check.
+    if segs.len() < 3 || segs[0] != "specs" || segs[1] != "prompts" {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 /// POST /api/v1/repos/:id/prompts/save
 ///
 /// Direct commit of a prompt template to the default branch — no MR, no
@@ -816,6 +858,10 @@ pub async fn save_prompt(
     Path(repo_id): Path<String>,
     Json(req): Json<PromptSaveRequest>,
 ) -> Result<(StatusCode, Json<PromptSaveResponse>), ApiError> {
+    // Constrain the review-gate bypass to specs/prompts/ before anything
+    // touches git — see `validate_prompt_path`.
+    validate_prompt_path(&req.prompt_path)?;
+
     let repo_id_typed = Id::new(&repo_id);
     let repo = state
         .repos
@@ -1167,6 +1213,101 @@ mod tests {
         // SHA should be a valid 40-char hex string
         assert_eq!(sha.len(), 40);
         assert!(sha.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[tokio::test]
+    async fn save_prompt_rejects_paths_outside_specs_prompts() {
+        let app = app();
+        let repo_id = create_repo(&app, "prompt-path-guard", "ws-1").await;
+
+        // Every path outside specs/prompts/ must be rejected with 400 — the
+        // direct-to-default-branch review bypass only covers specs/prompts/.
+        let bad_paths = [
+            // Tracked files the bypass must never reach.
+            "specs/system/vision.md",
+            "scripts/check-arch.sh",
+            ".github/workflows/ci.yml",
+            // Traversal, absolute, and home-relative forms.
+            "../../etc/passwd",
+            "specs/prompts/../../../etc/passwd",
+            "/etc/passwd",
+            "~/specs/prompts/x.md",
+            // Inside-adjacent but wrong directory / directory itself / empty.
+            "specs/prompt/x.md",
+            "specs/prompts",
+            "specs/prompts/",
+            "",
+        ];
+        for path in bad_paths {
+            let save_body = serde_json::json!({
+                "prompt_path": path,
+                "content": "# evil",
+                "message": "overwrite something sensitive",
+            });
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/v1/repos/{}/prompts/save", repo_id))
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&save_body).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "prompt_path {path:?} must be rejected with 400"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn save_prompt_rejects_traversal_but_allows_normalized_subdirs() {
+        let app = app();
+        let repo_id = create_repo(&app, "prompt-path-guard-2", "ws-1").await;
+
+        // A traversal form of a legitimately-shaped path is still rejected:
+        // '..' components never reach write_file.
+        let save_body = serde_json::json!({
+            "prompt_path": "specs/prompts/../prompts/x.md",
+            "content": "# x",
+            "message": "traversal probe",
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{}/prompts/save", repo_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&save_body).unwrap()))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Nested subdirectories inside specs/prompts/ remain allowed.
+        let save_body = serde_json::json!({
+            "prompt_path": "specs/prompts/briefing/ask.md",
+            "content": "# ask",
+            "message": "add nested template",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{}/prompts/save", repo_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&save_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
     }
 
     #[test]
