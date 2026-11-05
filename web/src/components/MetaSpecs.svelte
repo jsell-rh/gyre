@@ -394,6 +394,13 @@
     publishSaving = true;
     try {
       await api.publishPersona(workspaceId, selectedMsId, { content: selectedMsContent });
+      // The draft is now the published registry prompt — refresh the
+      // baseline (and the cached registry entry) so the next preview's
+      // locked diff is computed against the post-publish version, not
+      // the pre-publish one (§9 State 2 after an in-session publish).
+      selectedMsBaseline = selectedMsContent;
+      const published = wsMetaSpecs.find(m => m.id === selectedMsId);
+      if (published) published.prompt = selectedMsContent;
       toastSuccess($t('meta_specs.toast.published'));
     } catch (e) {
       toastError($t('meta_specs.toast.publish_failed', { values: { error: e?.message ?? 'unknown error' } }));

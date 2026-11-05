@@ -1255,6 +1255,84 @@ describe('MetaSpecs -- workspace scope', () => {
     expect(queryByTestId('locked-diff')).toBeNull();
     expect(locked.textContent).toContain('Draft with no baseline.');
   });
+
+  it('refreshes the diff baseline after an in-session publish — no pending diff without further edits (§9 publish → preview)', async () => {
+    vi.useFakeTimers();
+    api.publishPersona.mockResolvedValue({});
+    api.previewPersona.mockResolvedValue(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
+    api.previewPersonaStatus.mockResolvedValue(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
+
+    const { findByText, findByTestId, queryByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+
+    // Edit the draft beyond the published registry prompt (persona-1).
+    const textarea = await findByTestId('editor-split-textarea');
+    await fireEvent.input(textarea, {
+      target: { value: 'You are a backend developer focused on Rust.\nHandle all errors with Result<T, E>.' },
+    });
+
+    // Publish the draft — it becomes the new published registry prompt.
+    await fireEvent.click(await findByText('Publish'));
+    await waitFor(() => {
+      expect(api.publishPersona).toHaveBeenCalledWith(
+        'ws-1',
+        'persona-1',
+        { content: 'You are a backend developer focused on Rust.\nHandle all errors with Result<T, E>.' },
+      );
+    });
+
+    // Preview with no further edits: the draft equals the just-published
+    // baseline, so the locked pane must show the verbatim draft with NO
+    // pending-changes markers (regression: stale pre-publish baseline
+    // rendered the already-published line as pending '+1 -0').
+    await fireEvent.click(await findByText('Select All'));
+    await fireEvent.click(await findByTestId('preview-btn'));
+
+    const locked = await findByTestId('editor-locked');
+    expect(locked).toBeTruthy();
+    expect(queryByTestId('locked-diff')).toBeNull();
+    expect(locked.textContent).toContain('Handle all errors with Result<T, E>.');
+  });
+
+  it('diffs post-publish edits against the new baseline — only the newly added line is pending', async () => {
+    vi.useFakeTimers();
+    api.publishPersona.mockResolvedValue({});
+    api.previewPersona.mockResolvedValue(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
+    api.previewPersonaStatus.mockResolvedValue(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
+
+    const { findByText, findByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+
+    const textarea = await findByTestId('editor-split-textarea');
+    await fireEvent.input(textarea, {
+      target: { value: 'You are a backend developer focused on Rust.\nHandle all errors with Result<T, E>.' },
+    });
+
+    // Publish, then keep editing beyond the just-published version.
+    await fireEvent.click(await findByText('Publish'));
+    await waitFor(() => expect(api.publishPersona).toHaveBeenCalled());
+    await fireEvent.input(await findByTestId('editor-split-textarea'), {
+      target: { value: 'You are a backend developer focused on Rust.\nHandle all errors with Result<T, E>.\nPrefer explicit types in public APIs.' },
+    });
+
+    await fireEvent.click(await findByText('Select All'));
+    await fireEvent.click(await findByTestId('preview-btn'));
+
+    // Only the post-publish line is pending; both just-published lines are
+    // context (regression: stale baseline marked them pending too).
+    const diff = await findByTestId('locked-diff');
+    expect(screen.getByTestId('locked-diff-summary').textContent).toBe('+1 -0');
+    const addLine = diff.querySelector('.locked-diff-add .locked-diff-text');
+    expect(addLine.textContent).toBe('Prefer explicit types in public APIs.');
+    expect(diff.querySelectorAll('.locked-diff-add')).toHaveLength(1);
+    expect(diff.querySelectorAll('.locked-diff-remove')).toHaveLength(0);
+  });
 });
 
 // ─── Repo scope ───────────────────────────────────────────────────────────────
