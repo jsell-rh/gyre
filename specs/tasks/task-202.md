@@ -5,7 +5,7 @@ depends_on: [task-201]
 progress: ready-for-review
 coverage_sections:
   - "search.md §Searchable Entities"
-commits: ["3e223c8a1d632e2475d0a690a9cab77f3f4ced2c", "e2583917beb41b812d6f5799149f23e30ff332d7", "80f13a7059e1458ce3f10551909461a4a5677342", "309fc7dd426b346fdfa576a5770c49d65fc2aced"]
+commits: ["3e223c8a1d632e2475d0a690a9cab77f3f4ced2c", "e2583917beb41b812d6f5799149f23e30ff332d7", "80f13a7059e1458ce3f10551909461a4a5677342", "309fc7dd426b346fdfa576a5770c49d65fc2aced", "3dc6cdcc5413b4eabd004920fcf13090dd658708"]
 ---
 
 ## Spec Excerpt
@@ -66,9 +66,10 @@ Depends on task-201 (real FTS backend + `SearchPort` semantics). Populate every 
 
 All 10 searchable entity types from search.md §Searchable Entities are
 indexed with real content and the specced facets, and the admin reindex
-endpoint performs a true full rebuild from domain storage. Production code
-lives in commits `80f13a70` and `309fc7dd`; this round re-verified it
-unchanged after the executor restored the assigned task contract.
+endpoint performs a true full rebuild from domain storage. Original
+production code lives in commits `80f13a70`/`309fc7dd`; commit `3dc6cdcc`
+repairs the round-2 review findings (activity-event scope facets on write
+paths, Postgres search_index PK reconciliation).
 
 ### Behavior
 
@@ -85,8 +86,17 @@ unchanged after the executor restored the assigned task contract.
   spawn (`api/agents.rs`, `api/spawn.rs`), persona create/update
   (`api/personas.rs`, delete also de-indexes), activity events at every
   analytics emit path (`api/analytics.rs`, `api/tasks.rs`,
-  `api/merge_requests.rs`, `api/spawn.rs`, `api/orchestrator.rs`), and
-  audit events (`api/audit.rs`, `container_audit.rs`, `procfs_monitor.rs`).
+  `api/merge_requests.rs`, `api/spawn.rs`, `api/orchestrator.rs`,
+  `merge_processor.rs`), and audit events (`api/audit.rs`,
+  `container_audit.rs`, `procfs_monitor.rs`).
+- **Activity-event scope facets (round-3 repair)**: every production emit
+  site now includes `workspace_id`/`repo_id` in the analytics properties,
+  derived from the entity in hand (task/mr/agent/repo) —
+  `task.status_changed`, `mr.merged`, `agent.spawned`, `agent.completed`,
+  `mr.created`, and both `merge_queue.processed` sites (which previously
+  recorded without indexing at all and now index like every other emit
+  path). Write-path-indexed activity events are therefore filterable by
+  workspace/repo exactly like reindexed ones.
 - **Spec pushes** (`git_http.rs`): after the ledger sync, spec content is
   extracted from the pushed git blob and indexed as `body` with
   `approval_status`/`scope`/`owner` facets.
@@ -103,20 +113,44 @@ unchanged after the executor restored the assigned task contract.
   tasks, MRs + reviews, agents, personas, activity events, audit events,
   agent-commit mappings, repo file trees), returning the true document
   count. The count is idempotent across runs and drops stale docs.
+- **Postgres schema reconciliation (round-3 repair)**: the widened 4-column
+  upsert conflict target is now backed by an idempotent init-path upgrade
+  (`upgrade_search_index_pk` in `postgres/search.rs`) that reads the live
+  PK from `information_schema` and `ALTER TABLE ... DROP CONSTRAINT, ADD
+  PRIMARY KEY (entity_type, entity_id, workspace_id, repo_id)` when it
+  doesn't match — a deployment initialized under task-201 no longer hits
+  SQLSTATE 42P10 on every upsert (which silently stopped all PG search
+  indexing). The pure decision logic (`pk_upgrade_sql`) is unit-tested
+  without a live PG instance.
 
 ### Test evidence
 
-Re-verified this round at branch head `ce656789` (no code changes needed;
-evidence in `/tmp/stage/review-evidence/task-202-repair.txt`):
+Verified at branch head `3dc6cdcc` (evidence in
+`/tmp/stage/review-evidence/task-202-repair-round3.txt`):
 `cargo test -p gyre-server --lib search_indexer` — 6 passed, including
 `full_reindex_rebuilds_all_entity_types_from_real_storage`, which seeds all
 10 entity types plus a poisoned stale doc against a real SQLite FTS5
 backend, asserts the true count, idempotency, stale-doc removal, and
 per-type retrieval including spec-by-body-content and commit-by-message.
-`cargo test -p gyre-adapters --lib search` — 13 passed (FTS5 schema,
-stemming, upsert/delete, filters, `reindex_all_clears_and_reports_count`).
-`cargo test -p gyre-server --lib orchestrator` — 10 passed.
-`bash scripts/check-arch.sh` passed.
+`cargo test -p gyre-server --lib api::tasks` — 7 passed, including the new
+regression test `task_transition_activity_event_is_workspace_scoped`, which
+drives the real HTTP router against a real SQLite FTS5 backend and asserts
+the write-path-indexed activity event is findable via the workspace filter
+with populated workspace/repo facets; verified to FAIL (0 results) with the
+scope fix reverted.
+`cargo test -p gyre-server --lib api::spawn` (34), `api::merge_requests`
+(21), `merge_processor` (49), `orchestrator` (10) — all passed.
+`cargo test -p gyre-adapters --lib postgres::search` — 5 passed (new
+`pk_upgrade_sql` decision tests); `--lib search` — 18 passed.
+`bash scripts/check-arch.sh` and all other `scripts/check-*.sh` gates
+passed (the two pre-existing task-077 F5 exemption pins were re-pinned
+1457/1479 → 1467/1489 — same sites, moved by line insertions, no new
+exemptions). `cargo clippy` on the changed crates: 0 errors from these
+changes.
 
-Full-workspace `cargo test --all` and GitHub CI are deferred to
-verification per assignment scope.
+Full-workspace `cargo test --all`, all-target Clippy, and GitHub CI are
+deferred to verification per assignment scope. Note for verification: a
+pre-existing deny-level `clippy::never_loop` error in
+`crates/gyre-domain/src/rust_extractor.rs:1071` (upstream commit `d7940e85`,
+present at this branch's base) fails any workspace clippy run regardless
+of this task; it is untouched here and owned by that code's task.
