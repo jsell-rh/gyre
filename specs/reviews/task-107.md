@@ -113,3 +113,122 @@
 - **Test assertions on the mock stack** — the five task-107 tests and the mock (`spawn_mock_signing_stack`) were re-read in full: the mock's single-chain trustBundle and body-discarding rekor_post remain the test-side enablers of F11 and F4 respectively; the JWT-payload decode without signature verification remains subsumed by F7. No new gaps beyond the recorded findings.
 
 **Verdict: needs-revision** (unchanged). The implementation cannot issue a certificate from any real Fulcio instance (F1), does not bind the task/user attribution the spec's Layer 3 sentence requires (F2), and its verification path is subvertible (F3, F4, F5, F11), non-durable (F9), unregistered with ABAC (F8), un-integrated with the provenance API (F6), unbounded in external-call latency (F10), and negatively tested only on one of four verification legs (F7).
+---
+
+## R8 — 2026-11-05 (independent review of candidate `99d1caa9`, base `5df14f34`)
+
+**Status:** the exact assigned candidate is the merge of base `5df14f34`
+into the pipeline branch (first parent `edb65637`, implementation
+checkpoint `ec3e247e` — the frontmatter-listed commit). All task-107
+source files are byte-identical between `edb65637` and the candidate; the
+only code difference vs the older `cd5de509` head is the leaf-binding
+hardening in `check_chain_all_bundles` (the signing leaf must BE the
+stored chain's leaf, DER-compared, and within its validity window) plus
+its adversarial regression test
+(`verification_fails_on_rogue_leaf_paired_with_genuine_chain`).
+
+**Verification performed this round** (evidence under
+`/tmp/stage/review-evidence/`, index in `summary.md`): full base→candidate
+diff read; independent spot-checks of the security-critical paths
+(`verify_signature_fulcio` four-phase structure, `check_rekor_entry`
+content match on digest+signature+certificate, `check_chain_all_bundles`
+leaf binding and per-cert validity windows, `SigningAttribution::from_auth`
+reading only server-validated `jwt_claims`, handler fallback-to-local on
+any Fulcio error, ABAC registration of the verification route,
+`CommitSignatureRepository` port keyed `(repo_id, commit_sha)` with both
+SQLite and PostgreSQL adapters, migration `2026-10-09-000056`, key
+provisioning via `from_pkcs8_maybe_unchecked` v1/v2); `cargo test -p
+gyre-server --lib` **1289 passed / 0 failed** on the exact candidate;
+focused suites all pass (sigstore 16/16, commit_signatures 6/6, api::jj
+14/14, api::provenance 5/5, task107_upstream_conformance 3/3,
+task107_signing_key_env 1/1, task107_signing_key_persistence 1/1,
+adapters commit_signature 5/5); every `scripts/check-*.sh` run on both
+the candidate and the assigned base — the failing set is identical
+(no candidate-caused gate failures; fabricated-scope-defaults,
+abac-route-registry, migration-versions, in-memory-state-stores,
+unbounded-external-http, task-commit-attribution all exit 0).
+
+**F1–F14 fix status:** all confirmed fixed in the candidate code by this
+round's independent spot-checks (details in the R7 record at
+`5f6e1355`, re-verified at the evidence lines cited above); the merge
+with the newer base did not regress any of them and both sides' diesel
+tables (`commit_signatures`, `spec_assertion_results`) are present in
+`schema.rs` with distinct migration versions.
+
+**Findings (all carried from R7 at `5f6e1355`, independently reproduced
+on the exact candidate head — none was fixed by the base merge):**
+
+- [-] **F15 (blocking): CI fmt job fails on the exact candidate.**
+  `python3 scripts/check-rustfmt-diff.py 5df14f34` (the assigned base;
+  CI's PR-context `HEAD^1` = main computes the same changed-lines set)
+  exits 1 with rustfmt violations on changed lines in 11
+  candidate-touched files (`gyre-ports/src/lib.rs:14`,
+  `gyre-ports/src/commit_signature_repo.rs:84-88`,
+  `gyre-adapters/src/postgres/mod.rs:18`,
+  `gyre-adapters/src/sqlite/mod.rs:20`,
+  `gyre-adapters/src/sqlite/commit_signature.rs:229`,
+  `gyre-server/src/lib.rs:11,816,817,835,873,875`,
+  `gyre-server/src/mem.rs:4401-4411`,
+  `gyre-server/src/api/provenance.rs:324-335`,
+  `gyre-server/src/sigstore.rs:588-592,1577,1805`,
+  `tests/task107_signing_key_env.rs:18,19,89,106`,
+  `tests/task107_upstream_conformance.rs:31,35-38,111-114,228,254-255`).
+  Evidence: `r8-rustfmt-base-diff.txt`. Purely mechanical: `cargo fmt
+  --all` and re-commit.
+
+- [-] **F16 (blocking): CI clippy job fails on the exact candidate** —
+  three warnings on candidate-changed lines under CI's exact flag set,
+  reproduced with real per-package clippy runs (workspace-wide runs are
+  rejected by the executor wrapper; the
+  `--test task107_signing_key_env` leg compiled lib+deps and carries the
+  full warning set, JSON retained):
+  1. `crates/gyre-server/tests/task107_signing_key_env.rs:14` — unused
+     import `gyre_ports::KvJsonStore` (the `as _` import is genuinely
+     unused; trait methods resolve without it).
+  2. `crates/gyre-ports/src/commit_signature_repo.rs:78` —
+     `clippy::double_must_use` on the new `#[async_trait] pub trait
+     CommitSignatureRepository`, missing the
+     `#[allow(clippy::double_must_use)]` this repo's convention requires
+     on new port traits (cf. `spec_assertion_result_repo.rs:13`).
+  3. `crates/gyre-server/src/sigstore.rs:225` — same
+     `clippy::double_must_use` on the new `#[async_trait] pub trait
+     SigningHttpTransport`.
+
+- [ ] **F17 (minor, advisory): `scripts/check-warn-continue-creation.sh`
+  exits 1 on the candidate head** — the exemption line was moved 728→733
+  but the site actually sits at 735. Non-blocking: advisory in CI
+  (`|| true`) and fails identically on the assigned base. Fix the line to
+  735 while touching the tree for F15/F16.
+
+**Areas examined and cleared this round:**
+- The merge itself — task-107 files unchanged from `edb65637`; both
+  sides' schema tables and migrations kept; full gyre-server lib suite
+  green on the merge head (1289/0), so the base merge introduced no
+  regression in the signing, provenance, auth, or adapter paths.
+- Leaf-binding hardening — correct and adversarially tested (rogue
+  self-signed leaf with forged SAN, fresh content-matched Rekor entry,
+  and genuine Fulcio chain fails phase (b); every other phase passing is
+  asserted so the test cannot pass vacuously).
+- `pem_equal_mod_whitespace` in the Rekor cert comparison — canonical
+  whitespace-insensitive base64 equality; no weakening.
+- `bearer_token.clone().unwrap_or_default()` in `jj_squash` — an empty
+  JWT for non-JWT callers is rejected by Fulcio and falls back to local
+  signing (handler-tested); not a fabricated identity.
+- Sandbox restrictions recorded, not counted as defects: workspace-wide
+  clippy/cargo runs rejected by the executor wrapper;
+  `cargo clippy -p gyre-server --lib --all-features` leg hit the sandbox
+  network block downloading `rustls-webpki 0.103.9` (the test-target leg
+  compiled the same code and supplied the warning set); live
+  Fulcio/Rekor interop still blocked by network policy. Exact-head
+  GitHub CI is mandatory after review and will fail on F15/F16 until
+  fixed.
+
+**Verdict: needs-revision.** The Sigstore/Fulcio implementation substance
+is real, wire-correct, adversarially tested, and fully functional on the
+exact candidate (every focused suite and the full lib suite pass; every
+mechanical gate that fails does so identically on the assigned base).
+What blocks approval is unchanged from R7: the exact candidate head
+fails the two blocking CI jobs (fmt, clippy) — pure mechanics, fixable
+with `cargo fmt --all`, removing one unused import, and adding two
+`#[allow(clippy::double_must_use)]` attributes per repo convention (plus
+optionally the F17 exemption line). Fix and re-submit.
