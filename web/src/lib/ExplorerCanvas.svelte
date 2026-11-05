@@ -16,6 +16,7 @@
     computeTestUnreachable as computeTestUnreachableSet,
   } from './test-reachability.js';
   import { edgePassesFilter } from './canvas-filters.js';
+  import { recordZoomInteraction } from './canvas-state.js';
 
   /** @type {{ repoId: string, nodes: any[], edges: any[], activeQuery: import('./types/view-query.ts').ViewQuery | null }} */
   let {
@@ -247,6 +248,38 @@
   let recentInteractions = $state([]);
   function trackInteraction(action) {
     recentInteractions = [...recentInteractions.slice(-9), action];
+  }
+
+  // §10 Interaction Context: significant zoom changes are recorded as
+  // { action: "zoom_in"|"zoom_out", to_level } interactions. The baseline is
+  // the last recorded level; gestures coalesce into one trailing entry.
+  // Only user-initiated zoom (wheel, keyboard, pinch) is recorded - the
+  // initial auto-fit, drill transitions and query-driven zoom are not user
+  // interactions and are represented by their own interaction records.
+  let zoomTrackLevel = null;
+  let zoomTrackArmed = false;
+  function armZoomTracking() {
+    zoomTrackArmed = true;
+  }
+  function trackZoomChange() {
+    const rounded = Math.round(cam.zoom * 100) / 100;
+    if (!zoomTrackArmed) {
+      // Keep the baseline fresh so the first armed gesture compares correctly.
+      zoomTrackLevel = rounded;
+      return;
+    }
+    const { interactions, lastRecordedLevel } = recordZoomInteraction(
+      recentInteractions,
+      cam.zoom,
+      { lastRecordedLevel: zoomTrackLevel },
+    );
+    zoomTrackLevel = lastRecordedLevel;
+    if (interactions !== recentInteractions) {
+      recentInteractions = interactions;
+      try {
+        canvasState = { ...canvasState, recent_interactions: recentInteractions };
+      } catch { /* ignore during init */ }
+    }
   }
 
   let tooltipNode = $state(null);
@@ -3836,6 +3869,8 @@
     if (Math.abs(cam.zoom - targetCam.zoom) < 0.0005) cam.zoom = targetCam.zoom;
     // Clamp zoom to prevent NaN/Infinity in screenToWorld calculations
     cam.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, cam.zoom));
+    // Track significant zoom changes for the interaction context (§10)
+    trackZoomChange();
   }
 
   let lastAnimTime = 0;
@@ -4001,6 +4036,7 @@
   function onWheel(e) {
     e.preventDefault();
     if (drillTransitioning) return;
+    armZoomTracking();
 
     // Accumulate velocity for inertial zoom
     const impulse = e.deltaY > 0 ? -0.08 : 0.08;
@@ -4620,12 +4656,14 @@
     // Keyboard zoom (+/- or =/-)
     if (e.key === '=' || e.key === '+') {
       e.preventDefault();
+      armZoomTracking();
       targetCam.zoom = Math.min(MAX_ZOOM, targetCam.zoom * 1.2);
       scheduleRedraw();
       return;
     }
     if (e.key === '-') {
       e.preventDefault();
+      armZoomTracking();
       targetCam.zoom = Math.max(MIN_ZOOM, targetCam.zoom / 1.2);
       scheduleRedraw();
       return;
@@ -4738,6 +4776,7 @@
       scheduleRedraw();
     } else if (e.touches.length === 2) {
       e.preventDefault();
+      armZoomTracking();
       const dx = e.touches[0].clientX - e.touches[1].clientX;
       const dy = e.touches[0].clientY - e.touches[1].clientY;
       const dist = Math.hypot(dx, dy);

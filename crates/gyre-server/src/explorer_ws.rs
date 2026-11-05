@@ -2653,6 +2653,12 @@ async fn run_explorer_agent(
                     if let Some(ref detail) = i.detail {
                         m.insert("detail".to_string(), json!(detail));
                     }
+                    if let Some(to_level) = i.to_level {
+                        m.insert("to_level".to_string(), json!(to_level));
+                    }
+                    if let Some(ref preset) = i.preset {
+                        m.insert("preset".to_string(), json!(preset));
+                    }
                     serde_json::Value::Object(m)
                 })
                 .collect();
@@ -3475,7 +3481,7 @@ User messages may include a <canvas_state> JSON block showing what's currently s
 - "selected_node": { name, type, id } — the user clicked on this node, $selected resolves to it
 - "visible_groups": [...] — tree groups currently expanded on screen
 - "active_lens": "structural"|"evaluative" — current analysis mode
-- "recent_interactions": [{ action, node?, detail? }, ...] — the user's recent click/zoom/query history (up to 10 entries, newest last)
+- "recent_interactions": [{ action, node?, detail?, to_level?, preset? }, ...] - the user's recent click/zoom/query history (up to 10 entries, newest last). zoom_in/zoom_out carry to_level; query actions carry the preset name when one was used
 - "active_query": {...} — the currently applied view query
 
 ## $clicked vs $selected
@@ -3761,6 +3767,68 @@ This shows all callers of TaskPort."#;
     }
 
     #[test]
+    fn test_canvas_state_section_10_full_deserialization() {
+        // The exact interaction-context shape from view-query-grammar.md §10:
+        // every field the frontend must send with each user message.
+        let msg_json = r#"{"type":"message","text":"what about this one?","canvas_state":{
+            "selected_node": {"id": "uuid-1", "name": "TaskPort", "node_type": "interface"},
+            "zoom_level": 2.3,
+            "visible_tree_groups": ["gyre-server", "gyre-domain"],
+            "active_filter": "calls",
+            "active_lens": "structural",
+            "active_query": {"type": "blast_radius", "node": "TaskPort"},
+            "recent_interactions": [
+                {"action": "click", "node": "TaskPort::find_by_id"},
+                {"action": "zoom_in", "to_level": 2.3},
+                {"action": "query", "preset": "blast_radius"}
+            ]
+        }}"#;
+        let msg: ExplorerClientMessage = serde_json::from_str(msg_json).unwrap();
+        match msg {
+            ExplorerClientMessage::Message { canvas_state, .. } => {
+                let sel = canvas_state
+                    .selected_node
+                    .expect("selected_node must deserialize");
+                assert_eq!(sel.id, "uuid-1");
+                assert_eq!(sel.name, "TaskPort");
+                assert_eq!(sel.node_type, "interface");
+                assert!((canvas_state.zoom_level - 2.3).abs() < f64::EPSILON);
+                assert_eq!(
+                    canvas_state.visible_tree_groups,
+                    vec!["gyre-server", "gyre-domain"]
+                );
+                assert_eq!(canvas_state.active_filter.as_deref(), Some("calls"));
+                assert_eq!(canvas_state.active_lens.as_deref(), Some("structural"));
+                assert_eq!(
+                    canvas_state.active_query.as_ref().unwrap()["type"],
+                    "blast_radius"
+                );
+                assert_eq!(
+                    canvas_state.active_query.as_ref().unwrap()["node"],
+                    "TaskPort"
+                );
+                assert_eq!(canvas_state.recent_interactions.len(), 3);
+
+                let click = &canvas_state.recent_interactions[0];
+                assert_eq!(click.action, "click");
+                assert_eq!(click.node.as_deref(), Some("TaskPort::find_by_id"));
+                assert!(click.to_level.is_none() && click.preset.is_none());
+
+                let zoom = &canvas_state.recent_interactions[1];
+                assert_eq!(zoom.action, "zoom_in");
+                assert!((zoom.to_level.unwrap() - 2.3).abs() < f64::EPSILON);
+                assert!(zoom.node.is_none());
+
+                let query = &canvas_state.recent_interactions[2];
+                assert_eq!(query.action, "query");
+                assert_eq!(query.preset.as_deref(), Some("blast_radius"));
+                assert!(query.node.is_none());
+            }
+            _ => panic!("Expected Message variant"),
+        }
+    }
+
+    #[test]
     fn test_save_view_message_with_all_fields() {
         let msg_json = r#"{"type":"save_view","name":"My View","description":"A test view","query":{"scope":{"type":"all"}}}"#;
         let msg: ExplorerClientMessage = serde_json::from_str(msg_json).unwrap();
@@ -3963,11 +4031,12 @@ Done."#;
     #[test]
     fn test_system_default_views_are_valid() {
         let defaults = system_default_views();
-        assert_eq!(defaults.len(), 6, "Should have 6 system default views");
+        assert_eq!(defaults.len(), 7, "Should have 7 system default views");
 
         let expected_names = [
             "Architecture Overview",
             "Test Coverage Gaps",
+            "High-Risk Untested Code",
             "Hot Paths",
             "Blast Radius (click)",
             "Spec Coverage",
