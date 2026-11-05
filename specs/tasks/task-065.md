@@ -145,63 +145,62 @@ Key question: Does the current ExplorerView still have separate Graph/Flow tabs,
   forced-font stylesheet so sandbox and CI rasterize identical glyph
   outlines; 15 explorer-visual.spec.js baselines.
 
-### CI-repair round (2026-11-05, run 41905243500 at head 47f40c00) — current head
+### Rebase-repair round (2026-11-05, upstream d81b0fe4 — current head)
 
-Two repairs landed on top of the previously approved lineage:
+Merged upstream task-092 (HSI Conflict Prevention) + task-063 (View
+Query Grammar) lineage into the branch (merge commit 9502ab9f).
+Conflict resolutions:
 
-1. **Merge resolution (2f215b1e, upstream task-180 Executable Spec
-   Assertions)**: `web/src/locales/en.json` both-modified conflicts resolved
-   as unions (ours' meta-specs edit keys are a superset; upstream's
-   spec-editor preview/impact keys adopted alongside our unique
-   `architecture_preview`); `web/dist` conflicts resolved by rebuilding from
-   the merged sources (vite build) — the conflicted index.html had left
-   conflict markers that booted two bundles.
+1. **web/dist** (rename/rename on `elk.bundled-*.js`, both-modified
+   `index.html`): resolved by rebuilding dist from the merged sources
+   (vite build) — the same method as the prior task-180 merge round;
+   dist is generated output and the conflicted index.html referenced
+   divergent bundle hashes from both sides.
 
-2. **Font-route repair (the toolbar-default CI failure)**: the failing
-   comparison was 1858 px (3.0% > 2%) — pixel forensics on the staged CI
-   artifacts showed toolbar line 2 uniformly shifted 15px, fully accounted
-   for by the two mono-font elements (zoom pill 46px→52px, "34 nodes"
-   40px→49px). Root cause: `setupGraphIntercept` resolved the woff2 fixture
-   path as `fonts/<name>` against a `FONTS_DIR` that already ends in
-   `/fonts/` — every woff2 fixture 404'd, every @font-face errored, and the
-   forced-font environment from b5fd081f never actually engaged. Both
-   environments rendered fontconfig fallbacks; the sans fallback matched
-   between sandbox and CI, but the mono fallback did not (this sandbox's
-   default monospace advances 0.5em; CI's ubuntu-latest DejaVu Sans Mono
-   advances 0.6em — 15px across "0.50x"+"34 nodes"). Fixed the path
-   resolution so the committed @fontsource binaries load (verified live:
-   all faces `loaded`, resources 200, zoom pill 51px = true Red Hat Mono
-   advance), then regenerated all 15 explorer-visual baselines under the
-   fixed environment (14 change; blast-radius-tiered is text-free and
-   byte-identical). Chromium revision 1208 (pinned by playwright-core
-   1.58.2) is the same binary family this sandbox's chrome-headless-shell
-   and CI's `npx playwright install chromium` use.
+2. **`view-query-container-linux.png`** (binary, both-modified): neither
+   side's pin matches the merged tree — ours (3ad887b9) has the
+   forced-font environment but not task-063's canvas changes; theirs
+   (32291080) has task-063's rendering but was pinned in a different
+   font environment. Re-pinned to the merged tree's actual rendering
+   under the committed forced-font environment: the merged scope-`all`
+   client-side resolution (upstream task-063; `VIEW_QUERY_WITH_ANNOTATIONS`
+   uses `scope: {type: 'all'}` + `highlight.matched.label` + `zoom: 'fit'`)
+   deterministically changes the canvas region — pixelmatch 2865 px
+   (1.05%, under the 2% threshold but real and settled; verified
+   byte-identical at +1s/+3s/+6s captures, so not animation).
+   `view-query-annotated-linux.png` re-pinned for the same reason (same
+   fixture, same change); both re-pins verified pixel-exact against the
+   merged rendering at a 0.0001 threshold. The other 13 baselines are
+   byte-identical under the merged tree.
 
-### Test evidence (CI-repair round, sandbox, at head 3ad887b9)
+### Test evidence (rebase-repair round, sandbox, at merge head 9502ab9f)
 
 - `cd web && npm ci` → locked versions; `npm run build` → dist rebuilt
-  cleanly from merged sources.
-- explorer-visual.spec.js (static bootstrap server on :2222 + route
-  interception): **15 passed** (regenerate), **15 passed** (clean compare),
-  **30 passed** (`--repeat-each=2`).
-- gyre-dom-probe.spec.js: **7 passed**.
-- `cd web && npm test`: **62 files, 1581 passed | 41 skipped, 0 failed**
-  (grew from 1564: the task-180 merge adopts upstream suites).
-- Evidence: /tmp/stage/review-evidence/task-065-font-route-repair.txt.
+  cleanly from merged sources (index-BTVoRmpO.js / elk.bundled-B1BOOF3L.js).
+- explorer-visual.spec.js: **15 passed** (clean compare against the
+  re-pinned baselines), via a static bootstrap server on :2222 + the
+  spec's route interception; chromium launched with `--no-zygote`
+  (this sandbox forbids chromium zygote forks — rendering unaffected).
+- `cd web && npm test`: **62 files, 1602 passed | 41 skipped, 0 failed**
+  (grew from 1581: the merge adopts upstream task-063/task-092 suites).
+- `scripts/check-task-commit-attribution.sh` and
+  `scripts/check-sandbox-sweep-artifacts.sh`: OK at the merge head.
+- Evidence: /tmp/stage/review-evidence/task-065-rebase-repair.txt.
 
 ### Verification notes for the reviewer
 
-- app.spec.js (49 tests) requires the real release gyre-server — owned by
-  exact-head GitHub CI (e2e.yml), not runnable in this sandbox (TCP
-  listener probes unsupported for python; node http servers bind fine on
-  localhost:2222 — chromium reaches them, node-loopback fetch does not).
+- app.spec.js requires the real release gyre-server — owned by exact-head
+  GitHub CI (e2e.yml), not runnable in this sandbox. The Rust-side merge
+  content (gyre-server lib.rs/ws.rs presence features) is pure upstream
+  code that auto-merged without conflict and was verified on main.
 - Glyphs outside the forced fonts' latin subsets (canvas arrow/check
   badges, 🔒) still resolve through system fallback; they matched across
   environments in every baseline generation to date and sit well under the
   2% budget.
 - Prior rounds' durable findings remain addressed in the lineage: font-truth
-  visual repair (b5fd081f), whitespace-gate exemption for generated dist
-  (d14fa446), F1 filter-dimming repair with mutation-proof evidence
-  (6110fe43), rebase repair of upstream e608ac78 (3c22aeaf).
+  visual repair (b5fd081f), font-route fix (3ad887b9), whitespace-gate
+  exemption for generated dist (d14fa446), F1 filter-dimming repair with
+  mutation-proof evidence (6110fe43), task-180 merge resolution (2f215b1e),
+  rebase repair of upstream e608ac78 (3c22aeaf).
 
-Progress: ready-for-review at head 3ad887b9.
+Progress: ready-for-review at head 9502ab9f.
