@@ -263,6 +263,10 @@ class Store:
         ci = data.get('ci') or {}
         if self.integration_waiting(data):
             return False
+        # A new base must not silently bypass an unresolved source safety hold.
+        for row in self.db.execute("SELECT input FROM work WHERE task=? AND generation=? AND stage='verify' AND state='attention'", (work['task'],work['generation'])):
+            if json.loads(row['input']).get('candidate') == data.get('candidate'):
+                return False
         if ci.get('status') == 'closed' and ci.get('head') == data.get('published_head'):
             return False
         lane = self.integration_lane()
@@ -317,15 +321,20 @@ class Store:
                                 ((updates or {})['review']['candidate'], row['task'], row['generation']))
             self.event('completed', result, row['task'], ident)
 
-    def retry(self, ident, token, reason, delay=None, count_failure=True):
+    def retry(self, ident, token, reason, delay=None, count_failure=True, attention=False):
         with self.transaction():
             row = self._current(ident, token)
             failures = row['failures'] + 1 if count_failure else 0
             delay = min(900, 5 * 2 ** min(failures - 1, 8) * random.uniform(.8, 1.2)) if delay is None else delay
             retry_at=time.time()+delay
-            self.db.execute("UPDATE work SET state='retry',failures=?,retry_at=?,ready_since=?,result=?,owner=NULL,expires=NULL,updated=? WHERE id=?",
-                            (failures, retry_at,retry_at, json.dumps(reason), time.time(), ident))
-            self.event('retry_scheduled', {'reason': reason, 'delay': delay}, row['task'], ident)
+            self.db.execute("UPDATE work SET state=?,failures=?,retry_at=?,ready_since=?,result=?,owner=NULL,expires=NULL,updated=? WHERE id=?",
+                            ('attention' if attention else 'retry', failures, retry_at,retry_at, json.dumps(reason), time.time(), ident))
+            self.event('needs_attention' if attention else 'retry_scheduled', {'reason': reason, 'delay': delay}, row['task'], ident)
+            if attention and row['stage'] == 'verify':
+                lane=self.setting('integration_lane')
+                if lane and lane['task'] == row['task']:
+                    self.db.execute("DELETE FROM settings WHERE key='integration_lane'")
+                    self.event('integration_released',{'reason':'verification safety failure needs attention'},row['task'],ident)
 
     def reserve(self, name, ident, token, kind, limit, data=None):
         with self.transaction():
