@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "spec-links.md §Forge-Maintained Spec Graph"
-commits: ["2736e818c1980de61c89cdfe33a5e0a44b8024a2", "89769485d0cdecf5471678a78c2423ca6264bff0", "57f548f620b71856726e7bada6b61ebaad39cc54", "12d95108b029812a4c8fcd863816304a4890f0f5", "17e4b4cb9f0f1d104ca58dc1470ae681163adee1", "e1466abbc4969b239fcb39c5366af4c048526d1e", "b869f5a9e91f06c4838fe3fab41197ff5360b830", "5f33847d5db78436ee063a34210ac6db96a58775", "7a1508bbeab83977ad4361f958d9f71a9bda88ba", "673fce33a1eb4e9273e1ecfff16da1d5bbab56a4", "2bc9b5bdc6a7e24aa0907af934469cd6f9fb3232", "071fd3b7e5aa81a7731cc1af67ffc1555d767d07", "9fb8d851175c88e4485215aa952da2bde6c32a16"]
+commits: ["2736e818c1980de61c89cdfe33a5e0a44b8024a2", "89769485d0cdecf5471678a78c2423ca6264bff0", "57f548f620b71856726e7bada6b61ebaad39cc54", "12d95108b029812a4c8fcd863816304a4890f0f5", "17e4b4cb9f0f1d104ca58dc1470ae681163adee1", "e1466abbc4969b239fcb39c5366af4c048526d1e", "b869f5a9e91f06c4838fe3fab41197ff5360b830", "5f33847d5db78436ee063a34210ac6db96a58775", "7a1508bbeab83977ad4361f958d9f71a9bda88ba", "673fce33a1eb4e9273e1ecfff16da1d5bbab56a4", "2bc9b5bdc6a7e24aa0907af934469cd6f9fb3232", "071fd3b7e5aa81a7731cc1af67ffc1555d767d07", "9fb8d851175c88e4485215aa952da2bde6c32a16", "053d36d83fe93b3fb70f01904eb3ddd5f3b1b746"]
 ---
 
 ## Spec Excerpt
@@ -155,62 +155,78 @@ graph queries, and the accountability patrol.
   so PG is compile-verified — same convention as every other PG adapter.
 - `migrations_create_tables` extended with `spec_links`.
 
-**Verification evidence (repair session, HEAD 2736e818, base 5196f444):**
+**Verification evidence (verification-repair round, HEAD 053d36d8, base 110180fb):**
 
-- Review finding fixed: the section-closing restart-durability test
-  `staleness_query_parity_after_restart` was dead code — it lacked the
-  `#[tokio::test]` attribute, so it was never registered in the test
-  binary. The missing attribute was restored (commit 2736e818); the test
-  body was already sound.
-- `cargo test -p gyre-server --lib staleness_query_parity_after_restart`
-  — ok. 1 passed; 0 failed (test is now genuinely registered and passing;
-  evidence `/tmp/stage/review-evidence/03-parity-test-registered.txt`).
-- `cargo test -p gyre-server --lib spec_registry::tests` — ok. 46 passed;
-  0 failed (all four section-closing tests included: graph rebuild,
-  staleness parity, cross-repo scoping, manifest-removal cleanup).
+The verification gate (`checks.sh` at source b78aec96) failed with exit 1 on
+four findings; all are repaired at the root (commit 053d36d8, evidence under
+`/tmp/stage/review-evidence`):
 
-**Prior verification evidence (repair session, HEAD 733ba170, base 18c44f1a):**
+- **Fabricated-scope exemption flagged as new:** the gate forbids any
+  exemption entry not present at base, and the task's line-drift renumber
+  (`git_http.rs:1495` -> `1496`) read as a new exemption. Fixed for real
+  instead: `process_spec_lifecycle` no longer fabricates a `"default"`
+  workspace on repo-lookup failure — the workspace-scoped SpecChanged /
+  TaskCreated emissions are skipped with a `warn!` log (the
+  `emit_reconciliation_completed` pattern), the exemption entry is deleted,
+  and `FROZEN_EXEMPTION_COUNT` is lowered 5 -> 4. The normal path (repo
+  exists — it was just pushed to) is unchanged.
+- **rustfmt / clippy changed-line failures:** rustfmt applied to the eight
+  task-touched files with flagged lines; `#[allow(clippy::double_must_use)]`
+  added to `SpecLinkRepository` (established `storage.rs` convention for
+  async_trait ports). `check-rustfmt-diff.py` and `check-clippy-diff.py`
+  against base 110180fb: both clean.
+- **otlp tuple-carrier marker could not survive rustfmt:** rustfmt always
+  moves a comment after `Result<(` off the declaration line, so the frozen
+  inline `tuple-carrier:ok` marker broke under rustfmt compliance. Replaced
+  the positional 3-field tuple with a named `ReceiverHandle` struct
+  (addr / shutdown_tx / server) — the check's own recommended remediation;
+  both callers updated, `grpc_receiver_accepts_export` and the
+  `run_trace_capture` lifecycle tests pass.
+- Line-keyed exemption entries in `in-memory-state-stores` and
+  `unnamed-tuple-carriers` renumbered to the drifted lines (same frozen
+  entries, count unchanged, no additions).
 
-- Focused probes, all PASS (records under /tmp/stage/review-evidence):
-  - `cargo test -p gyre-server --lib spec_registry::tests -- restart_rebuilds_spec_link_graph_from_persisted_table staleness_query_parity_after_restart sync_replaces_links_scoped_to_source_repo sync_clears_durable_rows_when_links_removed_from_manifest`
-    — ok. 46 passed; 0 failed (includes all four section-closing tests).
-  - `cargo test -p gyre-adapters --lib sqlite::spec_links` — ok. 4 passed;
-    0 failed (round-trip, replace scoping, reopened-database durability,
-    repo-scoped delete).
-  - `cargo test -p gyre-server --lib mem::spec_link_contract_tests` — ok.
-    3 passed; 0 failed.
-  - Reader modules with the new field/persistence: `spec_link_staleness` +
-    `spec_patrol` (25 passed), `api::specs` (72), `api::graph` (23),
-    `merge_processor` (49), `migrations_create_tables` (1) — all 0 failed.
-  - `scripts/check-arch.sh` PASS; `check-migration-sql-portability.sh`,
-    `check-mem-port-contracts.sh`, `check-in-memory-state-stores.sh`,
-    `check-unnamed-tuple-carriers.sh`, `check-task-commit-attribution.sh`
-    all PASS at HEAD.
+Focused probes at HEAD 053d36d8, all PASS (records under
+`/tmp/stage/review-evidence`):
+
+- `cargo test -p gyre-server --lib` filtered to `git_http::`, `mem::`,
+  `spec_registry::tests`, `spec_link_staleness`, `spec_patrol`,
+  `api::specs`, `api::graph`, `merge_processor`, `otlp`, `api::repos::tests`
+  — ok. 290 passed; 0 failed (includes all four section-closing tests:
+  graph rebuild, staleness parity, cross-repo scoping, manifest-removal
+  cleanup — each individually confirmed passing).
+- `cargo test -p gyre-adapters --lib sqlite::spec_links` — ok. 4 passed;
+  0 failed (round-trip, replace scoping, reopened-database durability,
+  repo-scoped delete).
+- Full `scripts/check-*.sh` battery: every gate that the verification run
+  executes (arch, hierarchy, ABAC registry + exempt handlers, MCP write
+  tools, migration versions + SQL portability, dead message kinds, byte-slice
+  truncation, relative path defaults, fail-open ref resolution, task commit
+  attribution, mem port contracts, fabricated scope defaults, lossy secret
+  conversion, scope literal defaults, inert enforcement, forged scope
+  fields, forwarded header trust, in-memory state stores, unbounded external
+  HTTP, unnamed tuple carriers) PASSES. The remaining failing scripts fail
+  identically at base 110180fb (verified by output diff in a base worktree —
+  differences are line drift only, no new findings).
+
+**Prior repair history (condensed):**
+
+- 2736e818 (base 5196f444): restored the missing `#[tokio::test]` on
+  `staleness_query_parity_after_restart` — the section-closing
+  restart-durability test was dead code, never registered in the test
+  binary.
+- 733ba170 (base 18c44f1a): renumbered frozen line-keyed exemptions after
+  line drift and removed an accidental `web/dist` rebuild captured by a
+  pipeline checkpoint.
 - `cargo test --all` (full workspace suite) remains owned by verification
-  and publication per the assignment; the previous assignment's full-suite
-  run was interrupted by an infrastructure timeout mid-compile, not a test
-  failure.
-- Postgres adapter is compile-verified: `postgres` is unconditionally
-  compiled in gyre-adapters (no feature gate; workspace diesel includes the
-  postgres backend), so the sqlite adapter test build compiled
-  `postgres::spec_links` in the same crate.
+  and publication per the assignment. The Postgres adapter is
+  compile-verified (no feature gate; no PG test infrastructure exists in the
+  repo) — same convention as every other PG adapter.
 
 **Sandbox/gate notes:**
 
-- `check-task-commit-attribution.sh` previously failed on task-196 commit
-  `05709c24` missing from that task's frontmatter — fixed on main by the
-  task-227 repair (base commit 18c44f1a); the check now passes at HEAD.
-- `check-unnamed-tuple-carriers.sh` was failing on base (stale line-keyed
-  exemptions after line drift: git_http/mem entries off by their shift, plus
-  a trailing-comma arity miscount on `otlp_receiver.rs`'s 3-field tuple).
-  Renumbered the same frozen 9 entries to the actual carrier lines and
-  corrected the otlp inline `tuple-carrier:ok` marker's reason to name the
-  real cause (trailing-comma false positive). No entries added; check now
-  passes.
-- Removed the accidental `web/dist` rebuild a pipeline checkpoint
-  re-captured after bd5e586d had dropped it (commits caa0f93b + 733ba170;
-  web sources are byte-identical to base — `web/dist` now matches the base
-  tree exactly, verified `git diff 18c44f1a..HEAD -- web/dist` is empty).
-  The gyre-server build script re-runs `npm ci && npm run build` whenever
+- The gyre-server build script re-runs `npm ci && npm run build` whenever
   `web/node_modules` is absent (fresh sandbox), so any full-build gate will
   re-dirty `web/dist`; that rebuild is environmental, not a source change.
+  At HEAD 053d36d8 the tree's `web/dist` is byte-identical to base
+  (`git diff 110180fb..HEAD -- web/dist` is empty).
