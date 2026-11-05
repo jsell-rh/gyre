@@ -105,7 +105,58 @@ asymmetry each fail at least one test.
   server restart. Defensible reading of "ships with Gyre" (built-ins are platform
   furniture, not user data); documented behavior of the seed loop.
 
+## R2 — Independent review (candidate acbdab6e, base d81b0fe4)
+
+Range includes the two durable-finding repairs: 646684f4 (frozen-clock fix for
+1aa47b6a) and 1319006b (E0382 fix for cdd23225). Full diff reviewed: domain defs,
+server seeding + wiring, SQLite adapter tests, CLI single-sourcing, rate-limit
+clock injection, coverage/task-file updates. No exemption files touched, no
+scripts/ changes, no deleted tests.
+
+### Findings
+
+None material.
+
+### Independent evidence (this sandbox, tree acbdab6e)
+
+- `cargo test -p gyre-server --lib rate_limit` → **18 passed**, including
+  `rate_limit::tests::refills_to_full_rate_on_new_second` and
+  `middleware::tests::rate_limit_exhaustion_returns_429` — the gyre-server lib
+  test target **compiles** at the candidate (durable finding cdd23225's E0382 is
+  fixed via `Arc<AtomicU64>` shared tick) and both prior failures now pass
+  deterministically under the frozen clock (durable finding 1aa47b6a).
+  (r2-server-rate-limit.log)
+- `cargo test -p gyre-server --lib seed_builtin_personas` → 3 passed;
+  `create_tenant_seeds` → 1 passed. (r2-server-seed.log, r2-server-tenant-create.log)
+- `cargo test -p gyre-domain --lib builtin` → 2 passed.
+  `cargo test -p gyre-adapters --lib sqlite::workspace::persona` → 2 passed.
+  `cargo test -p gyre-cli --bin gyre bootstrap` → 15 passed.
+- Mechanical gates: check-arch.sh, check-task-commit-attribution.sh,
+  check-mem-port-contracts.sh → all exit 0. All 7 frontmatter commits are in the
+d81b0fe4..acbdab6e range.
+- **Mutation probe** (r2-mutation-probe.md): replacing the tenants.rs production
+  hook `seed_builtin_personas_for_tenant(...)` with a no-op makes
+  `create_tenant_seeds_builtin_personas` fail (`left: []` vs the four expected
+  slugs) — the router-level test kills the bug class, so it is not
+  self-confirming. File restored byte-identical; tree clean at acbdab6e.
+
+### Notes (non-blocking, concur with R1)
+
+- Idempotency is check-then-insert in code (no UNIQUE(slug, scope) constraint) —
+  same pattern as `seed_builtin_meta_specs`; startup seeding finishes before
+  `TcpListener::bind`, and the tenant-create hook cannot race itself.
+- The domain hash test recomputes SHA-256 over prompt+capabilities directly with
+  `Sha256::digest` (not by calling `hash_content`), so a wrong digest algorithm
+  or a constant hash fails it; the SQLite round-trip test additionally proves
+  the hash persists through real rows.
+- Live HTTP startup path untestable here (no TCP listeners in sandbox); verified
+  via main.rs:53 wiring (before listener bind) + router-level tests, consistent
+  with R1. Belongs to host verification/CI.
+
 ## Verdict
 
 R1: no findings — task meets platform-model.md §2 Built-In Personas. Progress set to
 complete.
+
+R2: no findings — candidate acbdab6e independently re-verified, including both
+durable-finding repairs; approved.
