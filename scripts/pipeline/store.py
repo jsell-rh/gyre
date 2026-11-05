@@ -230,6 +230,11 @@ class Store:
     def integration_waiting(self, data):
         """A long external wait yields the lane, never the merge/check gates."""
         ci = data.get('ci') or {}
+        # Green CI on an outdated branch needs our own base refresh. Parking
+        # it until GitHub becomes CLEAN deadlocks: only integration can do that.
+        if (ci.get('checks') == 'green' and ci.get('status') == 'policy_pending'
+                and ci.get('merge_state') == 'BEHIND'):
+            return False
         return (ci.get('head') == data.get('published_head') and bool(ci.get('waiting_since'))
                 and ci.get('status') in ('pending','policy_pending','infrastructure')
                 and time.time()-ci['waiting_since'] >= self.setting('integration_wait_timeout',900))
