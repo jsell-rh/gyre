@@ -52,7 +52,7 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
             });
         for secret in expiring(&tenant_secrets, now) {
             for ws in &workspaces {
-                notify_workspace_admins(state, ws.id.clone(), &secret, now).await;
+                notify_workspace_admins(state, ws.id.clone(), secret, now).await;
             }
         }
 
@@ -61,18 +61,14 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
             // Workspace-scoped secrets.
             let ws_secrets = state
                 .secrets
-                .list_by_scope(
-                    gyre_common::SecretScope::Workspace,
-                    &ws_id,
-                    &tenant_id,
-                )
+                .list_by_scope(gyre_common::SecretScope::Workspace, &ws_id, &tenant_id)
                 .await
                 .unwrap_or_else(|e| {
                     warn!("secret_rotation: workspace-scope list failed for {ws_id}: {e:#}");
                     Vec::new()
                 });
             for secret in expiring(&ws_secrets, now) {
-                notify_workspace_admins(state, ws.id.clone(), &secret, now).await;
+                notify_workspace_admins(state, ws.id.clone(), secret, now).await;
             }
 
             // Repo-scoped secrets.
@@ -88,7 +84,7 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
                         Vec::new()
                     });
                 for secret in expiring(&repo_secrets, now) {
-                    notify_workspace_admins(state, ws.id.clone(), &secret, now).await;
+                    notify_workspace_admins(state, ws.id.clone(), secret, now).await;
                 }
             }
         }
@@ -101,20 +97,34 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
 fn expiring(secrets: &[gyre_common::Secret], now: u64) -> Vec<&gyre_common::Secret> {
     secrets
         .iter()
-        .filter(|s| s.expires_at.map(|e| e <= now + EXPIRY_WINDOW_SECS).unwrap_or(false))
+        .filter(|s| {
+            s.expires_at
+                .map(|e| e <= now + EXPIRY_WINDOW_SECS)
+                .unwrap_or(false)
+        })
         .collect()
 }
 
 /// Create a SecretExpiring notification for each Admin/Owner member of the
 /// workspace, suppressing duplicates (active notification exists or a recent
 /// dismissal).
+///
+/// `workspace_id` is the workspace that OWNS the secret (resolved by the
+/// caller from the secret's own scope), and every notification is created
+/// for a member of that same workspace — not a caller-propagated scope.
 async fn notify_workspace_admins(
     state: &Arc<AppState>,
     workspace_id: Id,
     secret: &gyre_common::Secret,
     now: u64,
 ) {
-    let members = match state.workspace_memberships.list_by_workspace(&workspace_id).await {
+    // caller-scope:ok — workspace_id is the secret's own governing workspace;
+    // members and notifications are resolved from it directly by design.
+    let members = match state
+        .workspace_memberships
+        .list_by_workspace(&workspace_id)
+        .await
+    {
         Ok(m) => m,
         Err(e) => {
             warn!(
@@ -161,7 +171,11 @@ async fn notify_workspace_admins(
             continue;
         }
 
-        let status = if secret.is_expired(now) { "expired" } else { "expiring" };
+        let status = if secret.is_expired(now) {
+            "expired"
+        } else {
+            "expiring"
+        };
         let notif = Notification::new(
             Id::new(uuid::Uuid::new_v4().to_string()),
             workspace_id.clone(),
@@ -242,7 +256,10 @@ mod tests {
         state.workspaces.create(&ws).await.unwrap();
 
         // Admin member + developer member.
-        for (uid, role) in [("user-admin", WorkspaceRole::Admin), ("user-dev", WorkspaceRole::Developer)] {
+        for (uid, role) in [
+            ("user-admin", WorkspaceRole::Admin),
+            ("user-dev", WorkspaceRole::Developer),
+        ] {
             let m = WorkspaceMembership::new(
                 Id::new(format!("mem-{uid}")),
                 Id::new(uid),
@@ -254,7 +271,10 @@ mod tests {
             state.workspace_memberships.create(&m).await.unwrap();
         }
 
-        let mk = |id: &str, name: &str, scope: gyre_common::SecretScope, scope_id: &str,
+        let mk = |id: &str,
+                  name: &str,
+                  scope: gyre_common::SecretScope,
+                  scope_id: &str,
                   expires_at: Option<u64>| gyre_common::Secret {
             id: Id::new(id),
             name: name.to_string(),
@@ -271,7 +291,13 @@ mod tests {
         state
             .secrets
             .create(
-                &mk("sec-exp", "OAUTH_TOKEN", gyre_common::SecretScope::Workspace, "ws-rot", Some(now + 1800)),
+                &mk(
+                    "sec-exp",
+                    "OAUTH_TOKEN",
+                    gyre_common::SecretScope::Workspace,
+                    "ws-rot",
+                    Some(now + 1800),
+                ),
                 b"v",
             )
             .await
@@ -280,7 +306,13 @@ mod tests {
         state
             .secrets
             .create(
-                &mk("sec-static", "DATABASE_URL", gyre_common::SecretScope::Workspace, "ws-rot", None),
+                &mk(
+                    "sec-static",
+                    "DATABASE_URL",
+                    gyre_common::SecretScope::Workspace,
+                    "ws-rot",
+                    None,
+                ),
                 b"v",
             )
             .await
@@ -289,7 +321,13 @@ mod tests {
         state
             .secrets
             .create(
-                &mk("sec-later", "LATER_KEY", gyre_common::SecretScope::Workspace, "ws-rot", Some(now + 7200)),
+                &mk(
+                    "sec-later",
+                    "LATER_KEY",
+                    gyre_common::SecretScope::Workspace,
+                    "ws-rot",
+                    Some(now + 7200),
+                ),
                 b"v",
             )
             .await
@@ -298,7 +336,13 @@ mod tests {
         state
             .secrets
             .create(
-                &mk("sec-past", "PAST_KEY", gyre_common::SecretScope::Workspace, "ws-rot", Some(now - 60)),
+                &mk(
+                    "sec-past",
+                    "PAST_KEY",
+                    gyre_common::SecretScope::Workspace,
+                    "ws-rot",
+                    Some(now - 60),
+                ),
                 b"v",
             )
             .await
@@ -331,7 +375,8 @@ mod tests {
         let names: Vec<String> = secret_notifs
             .iter()
             .map(|n| {
-                let body: serde_json::Value = serde_json::from_str(n.body.as_deref().unwrap()).unwrap();
+                let body: serde_json::Value =
+                    serde_json::from_str(n.body.as_deref().unwrap()).unwrap();
                 body["name"].as_str().unwrap().to_string()
             })
             .collect();
@@ -358,7 +403,15 @@ mod tests {
 
         let admin_notifs = state
             .notifications
-            .list_for_user(&Id::new("user-admin"), None, None, None, Some("SecretExpiring"), 50, 0)
+            .list_for_user(
+                &Id::new("user-admin"),
+                None,
+                None,
+                None,
+                Some("SecretExpiring"),
+                50,
+                0,
+            )
             .await
             .unwrap();
         assert_eq!(admin_notifs.len(), 2, "second pass must not re-notify");
@@ -408,7 +461,15 @@ mod tests {
         run_once(&state).await.unwrap();
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-h-admin"), None, None, None, Some("SecretExpiring"), 50, 0)
+            .list_for_user(
+                &Id::new("user-h-admin"),
+                None,
+                None,
+                None,
+                Some("SecretExpiring"),
+                50,
+                0,
+            )
             .await
             .unwrap();
         assert!(notifs.is_empty(), "healthy secret must not notify");

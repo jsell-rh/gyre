@@ -2664,6 +2664,14 @@ async fn handle_spec_assist(state: &AppState, args: &Value, auth: &Authenticated
 
 // ── MCP Resources ─────────────────────────────────────────────────────────────
 
+/// The resolved secret scope of an agent caller (platform-model.md §7).
+struct AgentSecretScope {
+    tenant_id: String,
+    workspace_id: String,
+    repo_id: String,
+    task_id: Option<String>,
+}
+
 /// Resolve the caller's secret scope for `secrets://` resources
 /// (platform-model.md §7).
 ///
@@ -2675,7 +2683,7 @@ async fn handle_spec_assist(state: &AppState, args: &Value, auth: &Authenticated
 async fn agent_secret_scope(
     state: &AppState,
     auth: &AuthenticatedAgent,
-) -> Option<(String, String, String, Option<String>)> {
+) -> Option<AgentSecretScope> {
     // Only Gyre-minted agent JWTs (or a resolvable agent record) carry an
     // agent scope. User/Keycloak JWTs and global tokens have none.
     let claims = auth.jwt_claims.as_ref().filter(|_| is_agent_jwt(auth));
@@ -2697,7 +2705,11 @@ async fn agent_secret_scope(
     // only task_id: the governing workspace comes from the record, the repo
     // from the task).
     if workspace_id.is_none() || repo_id.is_none() {
-        if let Ok(Some(agent)) = state.agents.find_by_id(&Id::new(auth.agent_id.clone())).await {
+        if let Ok(Some(agent)) = state
+            .agents
+            .find_by_id(&Id::new(auth.agent_id.clone()))
+            .await
+        {
             workspace_id = workspace_id.or(Some(agent.workspace_id.to_string()));
             repo_id = repo_id.or_else(|| agent.repo_id.map(|r| r.to_string()));
         }
@@ -2721,12 +2733,12 @@ async fn agent_secret_scope(
         .await
         .ok()
         .flatten()?;
-    Some((
-        ws.tenant_id.to_string(),
+    Some(AgentSecretScope {
+        tenant_id: ws.tenant_id.to_string(),
         workspace_id,
-        repo_id.unwrap_or_default(),
+        repo_id: repo_id.unwrap_or_default(),
         task_id,
-    ))
+    })
 }
 
 /// Collect secret METADATA (never values) across the scope cascade,
@@ -2756,7 +2768,11 @@ async fn collect_secret_metadata(
     let mut by_name: std::collections::HashMap<String, gyre_common::Secret> =
         std::collections::HashMap::new();
     for (scope, scope_id) in targets {
-        for s in state.secrets.list_by_scope(scope, &scope_id, tenant_id).await? {
+        for s in state
+            .secrets
+            .list_by_scope(scope, &scope_id, tenant_id)
+            .await?
+        {
             by_name.insert(s.name.clone(), s);
         }
     }
@@ -3078,16 +3094,16 @@ async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: 
         // platform-model.md §7 MCP Integration: agents discover which secret
         // NAMES they hold (values arrive as env vars at spawn, never via MCP).
         match agent_secret_scope(state, auth).await {
-            Some((tenant_id, workspace_id, repo_id, task_id)) => {
+            Some(scope) => {
                 // Metadata-only cascade (tenant → workspace → repo → task,
                 // nearest scope wins) — mirrors resolve_for_agent's scoping
                 // but never touches secret values.
                 match collect_secret_metadata(
                     state,
-                    &tenant_id,
-                    &workspace_id,
-                    &repo_id,
-                    task_id.as_deref(),
+                    &scope.tenant_id,
+                    &scope.workspace_id,
+                    &scope.repo_id,
+                    scope.task_id.as_deref(),
                 )
                 .await
                 {
@@ -3134,7 +3150,9 @@ async fn handle_resource_read(state: &AppState, auth: &AuthenticatedAgent, uri: 
                     Err(e) => json!({"error": format!("failed to list secrets: {e}")}),
                 }
             }
-            None => json!({"error": "secrets:// resources resolve scope from the caller's agent identity — no agent record or scope claims found"}),
+            None => {
+                json!({"error": "secrets:// resources resolve scope from the caller's agent identity — no agent record or scope claims found"})
+            }
         }
     } else {
         json!({"error": format!("unknown resource URI scheme: {uri}")})
@@ -5168,7 +5186,10 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let resources = json["result"]["resources"].as_array().unwrap();
-        let uris: Vec<&str> = resources.iter().map(|r| r["uri"].as_str().unwrap()).collect();
+        let uris: Vec<&str> = resources
+            .iter()
+            .map(|r| r["uri"].as_str().unwrap())
+            .collect();
         assert!(uris.contains(&"secrets://names"));
         assert!(uris.contains(&"secrets://status"));
     }
@@ -5205,7 +5226,10 @@ mod tests {
         state.workspaces.create(&ws).await.unwrap();
 
         let now = 1_700_000_000u64;
-        let mk = |id: &str, name: &str, scope: gyre_common::SecretScope, scope_id: &str,
+        let mk = |id: &str,
+                  name: &str,
+                  scope: gyre_common::SecretScope,
+                  scope_id: &str,
                   expires_at: Option<u64>| gyre_common::Secret {
             id: Id::new(id),
             name: name.to_string(),
@@ -5219,13 +5243,65 @@ mod tests {
             tenant_id: "default".to_string(),
         };
         // Tenant-wide secret.
-        state.secrets.create(&mk("sec-t", "API_KEY", gyre_common::SecretScope::Tenant, "default", None), b"tenant-value").await.unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-t",
+                    "API_KEY",
+                    gyre_common::SecretScope::Tenant,
+                    "default",
+                    None,
+                ),
+                b"tenant-value",
+            )
+            .await
+            .unwrap();
         // Workspace secret — same name as the repo one, so nearest-scope-wins
         // is observable.
-        state.secrets.create(&mk("sec-w", "DATABASE_URL", gyre_common::SecretScope::Workspace, "ws-mcp-sec", None), b"ws-value").await.unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-w",
+                    "DATABASE_URL",
+                    gyre_common::SecretScope::Workspace,
+                    "ws-mcp-sec",
+                    None,
+                ),
+                b"ws-value",
+            )
+            .await
+            .unwrap();
         // Repo secret overriding the workspace name + an expiring one.
-        state.secrets.create(&mk("sec-r", "DATABASE_URL", gyre_common::SecretScope::Repo, "repo-mcp-sec", None), b"repo-value").await.unwrap();
-        state.secrets.create(&mk("sec-e", "OAUTH_REFRESH", gyre_common::SecretScope::Workspace, "ws-mcp-sec", Some(now + 1800)), b"expiring-value").await.unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-r",
+                    "DATABASE_URL",
+                    gyre_common::SecretScope::Repo,
+                    "repo-mcp-sec",
+                    None,
+                ),
+                b"repo-value",
+            )
+            .await
+            .unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-e",
+                    "OAUTH_REFRESH",
+                    gyre_common::SecretScope::Workspace,
+                    "ws-mcp-sec",
+                    Some(now + 1800),
+                ),
+                b"expiring-value",
+            )
+            .await
+            .unwrap();
         // Another workspace's secret — must be invisible.
         let ws2 = gyre_domain::Workspace::new(
             Id::new("ws-mcp-other"),
@@ -5235,7 +5311,20 @@ mod tests {
             now,
         );
         state.workspaces.create(&ws2).await.unwrap();
-        state.secrets.create(&mk("sec-x", "HIDDEN", gyre_common::SecretScope::Workspace, "ws-mcp-other", None), b"other-value").await.unwrap();
+        state
+            .secrets
+            .create(
+                &mk(
+                    "sec-x",
+                    "HIDDEN",
+                    gyre_common::SecretScope::Workspace,
+                    "ws-mcp-other",
+                    None,
+                ),
+                b"other-value",
+            )
+            .await
+            .unwrap();
         state
     }
 
@@ -5294,7 +5383,10 @@ mod tests {
         // OAUTH_REFRESH's seeded expiry (2023) is far in the past → "expired".
         assert_eq!(by_name["OAUTH_REFRESH"]["status"], "expired");
         assert_eq!(by_name["SOON_TOKEN"]["status"], "expiring");
-        assert_eq!(by_name["SOON_TOKEN"]["last_rotated_at"].as_u64(), Some(real_now - 60));
+        assert_eq!(
+            by_name["SOON_TOKEN"]["last_rotated_at"].as_u64(),
+            Some(real_now - 60)
+        );
         assert_eq!(by_name["API_KEY"]["status"], "active");
         assert_eq!(by_name["DATABASE_URL"]["status"], "active");
         assert!(by_name["OAUTH_REFRESH"]["expires_at"].is_u64());

@@ -363,11 +363,7 @@ impl ResourceResolver {
                 // are allowed by builtin-admin-all-operations (900) first.
                 RouteResourceMapping::api("/api/v1/secrets", "secret", None),
                 RouteResourceMapping::api("/api/v1/secrets/:id", "secret", None),
-                RouteResourceMapping::api(
-                    "/api/v1/secrets/:id/rotate",
-                    "secret",
-                    Some("write"),
-                ),
+                RouteResourceMapping::api("/api/v1/secrets/:id/rotate", "secret", Some("write")),
                 // ── Network ────────────────────────────────────────────────
                 RouteResourceMapping::api("/api/v1/network/peers", "network_peer", None),
                 RouteResourceMapping::api(
@@ -1178,10 +1174,7 @@ pub mod tests {
             StatusCode::OK
         }
         let app = Router::new()
-            .route(
-                "/api/v1/secrets",
-                get(ok_handler).post(ok_handler),
-            )
+            .route("/api/v1/secrets", get(ok_handler).post(ok_handler))
             .route("/api/v1/secrets/:id", delete(ok_handler))
             .route("/api/v1/secrets/:id/rotate", post(ok_handler))
             .layer(axum::middleware::from_fn_with_state(

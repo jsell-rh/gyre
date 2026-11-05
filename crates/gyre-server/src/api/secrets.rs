@@ -211,7 +211,10 @@ pub async fn list_secrets(
     let scope = parse_scope(&q.scope)?;
     let scope_id = validate_scope_target(&state, &auth, scope, q.scope_id.as_deref()).await?;
 
-    let secrets = state.secrets.list_by_scope(scope, &scope_id, &tenant_id).await?;
+    let secrets = state
+        .secrets
+        .list_by_scope(scope, &scope_id, &tenant_id)
+        .await?;
     Ok(Json(secrets.into_iter().map(Into::into).collect()))
 }
 
@@ -446,7 +449,10 @@ mod tests {
                 "/api/v1/secrets",
                 get(super::list_secrets).post(super::create_secret),
             )
-            .route("/api/v1/secrets/:id", axum::routing::delete(super::delete_secret))
+            .route(
+                "/api/v1/secrets/:id",
+                axum::routing::delete(super::delete_secret),
+            )
             .route(
                 "/api/v1/secrets/:id/rotate",
                 axum::routing::post(super::rotate_secret),
@@ -463,7 +469,10 @@ mod tests {
                 "/api/v1/secrets",
                 get(super::list_secrets).post(super::create_secret),
             )
-            .route("/api/v1/secrets/:id", axum::routing::delete(super::delete_secret))
+            .route(
+                "/api/v1/secrets/:id",
+                axum::routing::delete(super::delete_secret),
+            )
             .route(
                 "/api/v1/secrets/:id/rotate",
                 axum::routing::post(super::rotate_secret),
@@ -572,7 +581,10 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert!(json["last_rotated_at"].as_u64().unwrap() > 0, "rotation must set last_rotated_at");
+        assert!(
+            json["last_rotated_at"].as_u64().unwrap() > 0,
+            "rotation must set last_rotated_at"
+        );
         assert!(!json.to_string().contains("postgres://rotated"));
 
         let value = state
@@ -603,11 +615,7 @@ mod tests {
 
         let listed = state
             .secrets
-            .list_by_scope(
-                gyre_common::SecretScope::Workspace,
-                &ws_id,
-                "default",
-            )
+            .list_by_scope(gyre_common::SecretScope::Workspace, &ws_id, "default")
             .await
             .unwrap();
         assert_eq!(listed.len(), 1, "update must not duplicate the secret");
@@ -801,11 +809,7 @@ mod tests {
 
         let ws_id = seed_workspace(&state).await;
         let now = 1_700_000_100u64;
-        let mut task = gyre_domain::Task::new(
-            gyre_common::Id::new("task-sec-1"),
-            "Some task",
-            now,
-        );
+        let mut task = gyre_domain::Task::new(gyre_common::Id::new("task-sec-1"), "Some task", now);
         task.workspace_id = gyre_common::Id::new(ws_id.clone());
         state.tasks.create(&task).await.unwrap();
 

@@ -720,10 +720,7 @@ pub fn api_router() -> Router<Arc<AppState>> {
             post(secrets::create_secret).get(secrets::list_secrets),
         )
         .route("/api/v1/secrets/:id", delete(secrets::delete_secret))
-        .route(
-            "/api/v1/secrets/:id/rotate",
-            post(secrets::rotate_secret),
-        )
+        .route("/api/v1/secrets/:id/rotate", post(secrets::rotate_secret))
         // LLM prompt templates (Slice 2)
         .route(
             "/api/v1/workspaces/:id/llm/prompts",
