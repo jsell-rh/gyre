@@ -87,3 +87,34 @@ The rejected integration's only preserved item was `specs/coverage/SUMMARY.md`. 
 All three findings repaired with real implementations and regression tests that fail on the original failure classes. No new exemptions, no gate weakening, no deleted tests, no unrelated changes — the round-2 diff beyond the F1/F2/F3 product repairs is spec/coverage bookkeeping and this task file. **progress: complete.**
 
 — Reviewer, 2026-10-09
+
+## Round 3 (2026-11-05) — rebase-repair round, verdict PASS
+
+Candidate `f74792ef` = docs commit on merge `ab7a779b` (parents: reviewed round-2+ head `4bd6c4c1` and assignment base `3c39ab1f`). The task-120 product surface is unchanged this round; the only substantive change is the SUMMARY.md merge resolution.
+
+### Merge resolution (the round's only conflict)
+
+- `git diff ab7a779b^2 ab7a779b` (merge vs base) touches exactly the task-120 product files + `specs/` bookkeeping — nothing unexpected entered the branch.
+- The SUMMARY.md TOTAL row is arithmetically consistent with both parents: vs parent 1 it takes main's ui-layout 37/1 (task-172 landed); vs parent 2 it applies this branch's user-management 23/3; both give TOTAL 802/219/0/307/113/163/47%.
+- Canonicality: running `scripts/update-coverage-summary.sh` on the merged tree reproduces `SUMMARY.md` **byte-identically** except the `Last updated:` date stamp (2026-11-04 committed vs 2026-11-05 today — pure stamp drift, table content identical). Worktree restored after the probe.
+- The docs commit `f74792ef` touches only `specs/tasks/task-120.md` Shipped notes (frontmatter/contract untouched, diff starts at line 102).
+
+### Product surface identity
+
+- `git diff 4bd6c4c1 f74792ef -- crates/` → **0 lines**. All Cargo build inputs (`Cargo.toml`, `Cargo.lock`, `rust-toolchain`, per-crate manifests, `build.rs`) → **0-line diff**. The Rust tree at the candidate is byte-identical to the tree validated in Round 2 and the verification-repair rounds (rustfmt `7d53b6d2`, clippy scoping `7752dd2e`, PG BIGINT `93913405`, collision-walk `cf32398a` — all recorded in the frontmatter; attribution gate green).
+
+### Fresh independent probes (evidence: `/tmp/stage/review-evidence/task-120-round3/`)
+
+- **Migration 000056 on real SQLite** (`migration_probe.py` / `migration-probe-output.txt`, python 3.14 system sqlite3): all **57 statements apply with no parser overflow** (F1 repair independently re-confirmed on the exact shipped file); on a fixture replicating the pre-000056 chain shape (000001 users + 000036 profile columns) with legacy rows (`Alice Smith`×2, `jörg`, `!!!`, `jsell`×2 + pre-existing distinct `jsell-2`, empty name, 65-char name, edge separators): every resulting username **unique and URL-safe**, dedup collision resolved per the documented earliest-created-wins rule (`jsell-2` kept by the pre-existing row, dedup-suffixed row renamed `jsell-2-u-jsell-2`) without aborting `CREATE UNIQUE INDEX` (F3), timezone/locale/global_role defaults and the default preferences JSON backfilled.
+- **Mechanical gates** (`mechanical-gates/`): commit attribution, migration versions, SQL portability, arch, mem-port contracts, ABAC route registry — all exit 0.
+- **Coverage**: `user-management.md` not-started count **0**; rows 2/3/11 `implemented`.
+
+### Transport note
+
+`cargo test` cannot execute in this sandbox — no crates.io network access, an empty cargo registry cache (26 MB index only), and no prebuilt `target/`. This is an infrastructure restriction, not a code defect. Mitigation: the candidate's Rust build inputs are byte-identical (verified by git diff, not by label) to the tree where the suites ran green in Round 2 (adapters 349/349, users 14/14, scim 9/9, auth 39/39, domain 11/11) and in the verification-repair rounds. The verifier should run `cargo test --all` on this exact head as its normal host-side check.
+
+### Verdict
+
+The merge introduced no product changes, the single conflict was resolved by canonical regeneration, the migration is independently proven runnable and correct on SQLite, and every mechanical gate passes. **approved**.
+
+— Reviewer, 2026-11-05
