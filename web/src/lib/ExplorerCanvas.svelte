@@ -16,6 +16,8 @@
     computeTestUnreachable as computeTestUnreachableSet,
   } from './test-reachability.js';
   import { edgePassesFilter } from './canvas-filters.js';
+  import { applyDensityPolicy } from './canvas-density.js';
+  import { dispatchViewEvent, viewEventFromDom } from './viewEvents.js';
 
   /** @type {{ repoId: string, nodes: any[], edges: any[], activeQuery: import('./types/view-query.ts').ViewQuery | null }} */
   let {
@@ -1182,11 +1184,20 @@
   let prevNodeCount = 0;
   let prevBreadcrumbLen = -1;
 
+  // Rendering density policy (ui-layout.md §10 Canvas Rendering): >500
+  // nodes auto-filter to public-only with a banner + [Show All]; the >1000
+  // list fallback is owned by the Explorer shell (ExplorerView).
+  let densityShowAll = $state(false);
+  let densityMode = $state('full');
+  let densityHiddenCount = $state(0);
+  let densityVisibleCount = $state(0);
+
   $effect(() => {
     const { childToParent, parentToChildren, nodeById } = treeData;
     const _bc = breadcrumb;
     const _f = filter;
     const _n = nodes.length;
+    const _d = densityShowAll;
 
     const isDataChange = _n !== prevNodeCount || breadcrumb.length !== prevBreadcrumbLen;
     prevNodeCount = _n;
@@ -1195,6 +1206,9 @@
     if (nodes.length === 0) {
       layoutNodes = [];
       layoutNodeMap = new Map();
+      densityMode = 'full';
+      densityHiddenCount = 0;
+      densityVisibleCount = 0;
       return;
     }
 
@@ -1217,6 +1231,15 @@
     } else {
       visibleNodes = nodes;
     }
+
+    // ui-layout.md §10 — auto-filter: >500 nodes render public-only (with a
+    // banner and a [Show All] override). The >1000 list fallback is a shell
+    // concern (ExplorerView swaps the canvas for a virtualized list).
+    const density = applyDensityPolicy(visibleNodes, { showAll: _d });
+    densityMode = density.mode;
+    densityHiddenCount = density.hiddenCount;
+    densityVisibleCount = density.nodes.length;
+    visibleNodes = density.nodes;
 
     // Get root nodes (no Contains parent within the visible set)
     const visibleSet = new Set(visibleNodes.map(n => n.id));
@@ -3950,6 +3973,7 @@
       if (hit) {
         tooltipNode = hit.node;
         tooltipPos = { x: e.clientX, y: e.clientY };
+        emitCanvasViewEvent(e, 'node', hit.node.id, hit.node);
       } else {
         tooltipNode = null;
       }
@@ -3964,6 +3988,7 @@
       const newEdgeHover = edgeHover ? `${edgeSrc(edgeHover.edge)}->${edgeTgt(edgeHover.edge)}` : null;
       if (newEdgeHover !== hoveredEdgeId) {
         hoveredEdgeId = newEdgeHover;
+        if (edgeHover) emitCanvasViewEvent(e, 'edge', newEdgeHover, edgeHover.edge);
         scheduleRedraw();
       }
     } else if (hoveredEdgeId) {
@@ -4107,6 +4132,19 @@
     return best;
   }
 
+  // ── ViewEvent emission (ui-layout.md §10 Interaction Events) ──────────────
+  // Every canvas interaction dispatches a standardized ViewEvent so global
+  // listeners (chat context, analytics) observe clicks/drills/hovers/menus
+  // uniformly. The canvas performs the shell actions for its own interactions
+  // directly (onNodeDetail / drillInto / tooltip / context menu), so its
+  // events carry `handled: true` — the Explorer shell's uniform handler skips
+  // re-performing actions an integrated emitter already serviced.
+  function emitCanvasViewEvent(domEvent, entityType, entityId, data) {
+    const ev = viewEventFromDom(domEvent, entityType, entityId, data);
+    ev.handled = true;
+    dispatchViewEvent(canvasEl, ev);
+  }
+
   function onClick(e) {
     if (drillTransitioning) return;
     if (Math.abs(e.clientX - panStart.x) > 4 || Math.abs(e.clientY - panStart.y) > 4) return;
@@ -4157,6 +4195,7 @@
         }
       }
       onNodeDetail(enrichedNode);
+      emitCanvasViewEvent(e, 'node', hit.node.id, enrichedNode);
 
       // Interactive $clicked mode: re-evaluate query template with the clicked node
       if (interactiveQueryTemplate) {
@@ -4189,6 +4228,7 @@
           output_summary: span.output_summary,
           graph_node_id: span.graph_node_id,
         });
+        emitCanvasViewEvent(e, 'node', `span-${span.span_id}`, particleHit.span);
         scheduleRedraw();
         return;
       }
@@ -4207,6 +4247,7 @@
           doc_comment: `${edgeHit.edgeType.replace('_', ' ')} relationship from ${edgeHit.source?.qualified_name ?? edgeHit.source?.name ?? '?'} to ${edgeHit.target?.qualified_name ?? edgeHit.target?.name ?? '?'}`,
         };
         onNodeDetail(edgeInfo);
+        emitCanvasViewEvent(e, 'edge', `${edgeHit.source?.id ?? '?'}->${edgeHit.target?.id ?? '?'}`, edgeInfo);
         selectedEdgeId = `${edgeSrc(edgeHit.edge)}->${edgeTgt(edgeHit.edge)}`;
         // Compute midpoint screen position for the floating edge detail panel
         const srcLn = layoutNodeMap.get(edgeSrc(edgeHit.edge));
@@ -4280,6 +4321,7 @@
     if (drillTransitioning) return;
     const hit = hitTest(e.clientX, e.clientY);
     if (!hit) return;
+    emitCanvasViewEvent(e, 'node', hit.node?.id ?? hit.id, hit.node);
 
     const node = hit.node;
 
@@ -4333,6 +4375,7 @@
       contextMenu = null;
       return;
     }
+    emitCanvasViewEvent(e, 'node', hit.node?.id ?? hit.id, hit.node);
     const rect = containerEl?.getBoundingClientRect();
     let menuX = e.clientX - (rect?.left ?? 0);
     let menuY = e.clientY - (rect?.top ?? 0);
@@ -5116,11 +5159,18 @@
     {/if}
 
     <span class="zoom-ind">{cam.zoom.toFixed(2)}x</span>
-    <span class="treemap-stats">{nodes.length} nodes</span>
+    <span class="treemap-stats">{densityMode === 'public-only' ? densityVisibleCount : nodes.length} nodes</span>
   </div>
 
   <!-- Canvas -->
   <div class="treemap-canvas-area" bind:this={containerEl}>
+    {#if densityMode === 'public-only'}
+      <!-- ui-layout.md §10: >500 nodes → public-only with banner + [Show All] -->
+      <div class="density-banner" role="status">
+        <span>Showing public API only — {densityHiddenCount} private nodes hidden.</span>
+        <button type="button" class="density-show-all" onclick={() => { densityShowAll = true; }}>Show All</button>
+      </div>
+    {/if}
     {#if nodes.length === 0}
       <EmptyState
         title={$t('explorer_treemap.empty_title')}
@@ -5622,6 +5672,20 @@
   .treemap-canvas-area { flex: 1; position: relative; overflow: hidden; min-height: 200px; }
   .treemap-canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
   .treemap-canvas:focus-visible { outline: 2px solid #3b82f6; outline-offset: -2px; }
+
+  /* Density banner (ui-layout.md §10: >500 nodes → public-only + banner) */
+  .density-banner {
+    position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+    z-index: 60; display: flex; align-items: center; gap: 12px;
+    background: rgba(30,41,59,0.95); border: 1px solid #fbbf24; border-radius: 8px;
+    padding: 6px 14px; font-size: 12.5px; color: #fbbf24;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5); white-space: nowrap;
+  }
+  .density-show-all {
+    background: transparent; border: 1px solid #fbbf24; color: #fbbf24;
+    border-radius: 6px; padding: 2px 10px; font-size: 12px; cursor: pointer;
+  }
+  .density-show-all:hover { background: rgba(251,191,36,0.15); }
 
   .treemap-tooltip {
     position: fixed; z-index: 100; background: rgba(15,15,26,0.95); border: 1px solid #334155;
