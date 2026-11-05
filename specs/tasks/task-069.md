@@ -10,7 +10,7 @@ coverage_sections:
   - "explorer-implementation.md §6 Messages: Server → Client"
   - "explorer-implementation.md §20 Server Implementation"
   - "explorer-implementation.md §21 Explorer WebSocket Handler"
-commits: ["30dc28260cce7cede699be712d0f1773de3994be"]
+commits: ["30dc28260cce7cede699be712d0f1773de3994be", "dc85eb6a76a848c81d3ef81d8a96dcf986f8ed32"]
 ---
 
 ## Spec Excerpt
@@ -178,3 +178,14 @@ base `75ada1c4`, 2026-10-10):
   (`ExplorerSessionRegistry`); auto-merged cleanly, status-protocol work
   unaffected. All probes re-run green at the merged HEAD: 39 lib tests,
   integration binary `--no-run` EXIT=0, and every static gate listed above.
+- Verification repair at base `722179f0` (merged HEAD, commit
+  `dc85eb6a`): the changed-lines gates flagged two defects in the new
+  `explorer_ws_status_progression` test — rustfmt on the closing
+  assertions, and a `clippy::useless_conversion` (`.to_string().into()`
+  into `Message::Text`, which takes `String` directly). Both fixed with
+  no behavior change. Re-verified locally:
+  `scripts/check-rustfmt-diff.py 722179f0` → EXIT=0 (changed lines
+  clean), and `cargo check -p gyre-server --test
+  explorer_ws_integration` → Finished. All-target clippy is a full gate
+  owned by verification; the flagged `.into()` site no longer exists in
+  the changed lines, so the lint cannot fire.
