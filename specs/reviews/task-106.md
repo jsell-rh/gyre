@@ -47,3 +47,94 @@ Notes (not findings):
 - `jj_squash_into_parent` flaked twice early in the review run (vim editor killed with signal 15 under harness load), then passed 6+ consecutive times standalone and batched, on both `c1c6dd9e` and `c1c6dd9e^`. Environmental, not a regression.
 
 Verdict: **needs-revision** — F1-F5 are genuinely resolved, but F6-F7 break jj provisioning in the default configuration and on every post-first new-branch spawn respectively, F8 undermines the deferral guarantee this round added, and all three fail silently.
+
+## Round 10 (independent review of candidate `7e724b3a`, base `701cb1ad`)
+
+Assignment: exact candidate `7e724b3af24a6f44654713e62656c7a3bccf2961` on
+`pipeline/task-106/f84202925fbe4832925f690c6b4d45ed-1` (branch HEAD = candidate:
+`0a694867` merge of base + task branch, `7b11ab82` implementation checkpoint,
+`6476bf5c`/`676e5196` fix rounds, `8852fa9c`/`7e724b3a` docs/process).
+
+### Prior durable findings — all verified resolved
+
+- **F9 (new-branch spawn can never provision jj)** — RESOLVED. `spawn_agent_core`
+  now runs `git_ops.branch_exists` and, when missing, `create_branch(..., "HEAD")`
+  BEFORE jj provisioning (crates/gyre-server/src/api/spawn.rs, F9 comment block);
+  failure is non-fatal and falls back to plain git. Pinned by
+  `spawn_creates_missing_branch_before_jj_workspace_add`, which drives the REAL
+  `Git2OpsAdapter` against a real bare repo: asserts the workspace-add revision
+  is the spawn branch, the branch exists in the bare repo based on HEAD, and the
+  recorded worktree is the jj workspace (no plain-git degradation). Passing in
+  the full lib run.
+- **R8 (test target did not compile — 4× E0599, missing `GitOpsPort` import)** —
+  RESOLVED. `use gyre_ports::GitOpsPort;` present at spawn.rs:2050 (test module).
+  Full `cargo test -p gyre-server --lib` at the candidate: **1279 passed,
+  0 failed, EXIT 0** — the previously-uncompilable F9 test compiles and passes.
+- **F10 (conflict flag not repo-scoped)** — RESOLVED.
+  `find_mr_by_author_branch` filters `m.repository_id == *repo_id`; pinned by
+  `rebase_conflict_does_not_flag_other_repo_mr` (same-named source branch in a
+  second repo stays unflagged, plus a direct determinism pin of the lookup).
+- **F11 (`jj_workspace_forget` ignored its idempotence contract)** — RESOLVED.
+  The adapter now verifies absence via `jj workspace list` before propagating a
+  forget failure (still-listed → Err, absent → Ok per the port doc). The
+  in-repo test `jj_workspace_forget_absent_workspace_is_ok` guard-skips without
+  the jj binary; this review additionally drove the REAL adapter against a
+  contract-faithful fake jj via `GYRE_JJ_PATH` — both branches verified
+  (absent → Ok, still-listed → Err). Evidence:
+  `/tmp/stage/review-evidence/task-106-r10/probe-fake-jj-contract.md`.
+- **F12 (replay starved under sustained queue load)** — RESOLVED.
+  `replay_pending_rebases` now runs at the top of EVERY `process_next` cycle,
+  before queue handling (rate limit = the per-agent backoff window checked
+  inside the replay); pinned by `replay_pending_rebase_runs_under_sustained_queue_load`
+  (a permanently-blocked queue entry keeps the queue busy; the expired
+  deferral still replays).
+
+### Independent probes (this round)
+
+- `cargo test -p gyre-server --lib` → **1279 passed / 0 failed / EXIT 0**,
+  including all ten task-106 rebase tests and the F9 real-adapter spawn test.
+- `cargo test -p gyre-adapters jj` → 15/15 EXIT 0 in 0.01s — guard-skip (jj
+  binary not installable: `which jj` → 127, static.crates.io → connection
+  refused; transport restriction, not a code defect). Round-5 real-jj evidence
+  (jj 0.39.0 built from crates.io) stands for the rebase core, whose production
+  code is unchanged since; the F11 forget change is covered by the fake-jj
+  contract probe above.
+- Fake-jj contract probes against the REAL `JjOpsAdapter` (5 + 2 tests, all
+  pass, EXIT 0): argv construction pinned exactly — `git import`, then
+  `rebase -b @ -d <moved branch>` (whole in-flight stack onto the branch that
+  moved), then `resolve --list -r @`, all with cwd = the agent workspace; exit-
+  code classification pinned — resolve exit 2 → Success (count parsed from
+  stderr), resolve exit 0 + files → Conflict, rebase non-zero → Err, resolve
+  exit 1 → Err.
+- Mechanical checks all EXIT 0: check-arch, check-ignored-tool-tests,
+  check-assertionless-tests (exemptions reduced, not grown),
+  check-relative-path-defaults (2 exemption entries removed),
+  check-mem-port-contracts, check-dead-message-kinds.
+- Production wiring confirmed: `AppState::jj_ops` is the real
+  `gyre_adapters::JjOpsAdapter` (lib.rs:875); `ConfigurableJjOps` is a
+  test-only double used solely via `test_state_with_jj_ops`.
+
+### Notes (not findings)
+
+- `find_rebase_targets`/`replay_pending_rebases` select the agent's worktree
+  with `.find(repo+branch match).or_else(|| worktrees.first())` — the
+  `first()` fallback can, in a narrow multi-repo scenario (agent with an Open
+  MR in repo A but no worktree row for repo A), run the rebase in the agent's
+  repo-B workspace with repo A's target-branch name. The destination resolves
+  in that workspace's own repo, so it rebases the agent's own other-repo work —
+  a misfire, not a cross-tenant leak. Heuristic best-effort, unchanged across
+  six review rounds; noted for future hardening (prefer no fallback, or
+  repo-scoped fallback only).
+- For remote verification: re-run `cargo test -p gyre-adapters jj` with a real
+  jj binary (the F11 test has so far only run guard-skipped against real jj)
+  and the full `cargo test --all` (workspace-wide cargo invocations are
+  rejected by this sandbox's executor wrapper).
+
+### Verdict
+
+**Approve.** All durable findings from prior rounds (F9, F10, F11, F12, R8
+compile) are resolved with production code and hard tests; the §4 behavior —
+post-merge rebase of every other in-flight agent on the moved branch, whole
+stack onto the branch that moved, conflict-as-state, WS notifications,
+dead-agent/worktree safeguards, audit trail, batched deferral with never-dropped
+replay — is implemented and independently probed at the exact candidate.
