@@ -10,7 +10,7 @@ coverage_sections:
   - "human-system-interface.md §11 Trust Levels"
   - "human-system-interface.md §12 What Each Level Controls"
   - "human-system-interface.md §13 Mechanical Implementation"
-commits: ["5b5e7c65957c79b12111ae987d71f7752abac702", "3372f2c3e498d1968bd3ef97cd05853280807ccb", "1b07c83be8904c63ad97e8b5d59abf50b8f59878", "ed36c1b6832b0242340a5de9a623d49fcb5a50d5", "545e986f231d1ceed0a5e537ec156c78a9d48d79", "7d0019ae23a5fbe336b29b2cbe4c317be4cb394c", "4cd20f3b4c25b260443ad5a3814e974c038d2e4a", "85830fa44abb6bb2305318f46a4cad4c20e00e33", "2db3f1efe11140eadb6dbe704eda86ba94d2e1b0"]
+commits: ["5b5e7c65957c79b12111ae987d71f7752abac702", "3372f2c3e498d1968bd3ef97cd05853280807ccb", "1b07c83be8904c63ad97e8b5d59abf50b8f59878", "ed36c1b6832b0242340a5de9a623d49fcb5a50d5", "545e986f231d1ceed0a5e537ec156c78a9d48d79", "7d0019ae23a5fbe336b29b2cbe4c317be4cb394c", "4cd20f3b4c25b260443ad5a3814e974c038d2e4a", "85830fa44abb6bb2305318f46a4cad4c20e00e33", "2db3f1efe11140eadb6dbe704eda86ba94d2e1b0", "4e17ffa5c94b84b1b8c9f2890a94997424932a58"]
 ---
 
 ## Spec Excerpt
@@ -88,6 +88,17 @@ Trust is a **workspace-level setting** (`trust_level: TrustLevel` enum: `Supervi
 Read `specs/system/human-system-interface.md` §9–13 (Trust Gradient) carefully — the mechanical implementation section has precise details about policy naming, priorities, and transaction behavior. Also read `specs/system/abac-policy-engine.md` for the existing ABAC engine design. The key amendment is adding `immutable` flag support to the ABAC evaluation engine. Check `crates/gyre-domain/src/` for existing ABAC evaluation code and `crates/gyre-adapters/migrations/` for migration numbering (currently at 000046+). The workspace entity is in `gyre-common` — grep for `Workspace` struct.
 
 ## Shipped
+
+### CI repair round (verification finding 6527cb44, commit `4e17ffa5`)
+
+Repaired the retained verification failure (`checks.sh` exit 1: changed-lines clippy flagged `spawn.rs:494` needless_borrow (two spans) and `spawn.rs:3021` to_string_in_format_args) on the post-merge HEAD (`5285ef1c`, candidate `231c3bf4` + base `0cb71015`):
+
+- **spawn.rs:494:** `create_interrogation_policies(&state, &agent.id.to_string())` → `create_interrogation_policies(state, agent.id.as_str())` — `&Arc<AppState>` coerces to the `&AppState` parameter without the extra borrow, and `Id::as_str()` removes the `&String`→`&str` coercion entirely, so no clippy version has a borrow left to flag at that site.
+- **spawn.rs:3021 (F6 test):** dropped `.to_string()` on the `Display`-implementing `Id` inside `bail!`.
+- **rust_extractor.rs:1071:** replaced `for candidate in candidates.iter().flatten() { …; break; }` with `if let Some(candidate) = … .next()` — clippy 1.99's deny-by-default `never_loop` was a hard error on this inherited upstream site that blocked every clippy run in the current toolchain; behavior preserved (at most one DependsOn edge from the first matching candidate, either way).
+- **non-atomic-creation-exemptions.txt:** re-anchored the existing `process_breaking_changes` entry 2789→2809 — main `0cb71015` inserted lines above the function and staled the line anchor (same precedent as the `admin_seed` 409→419 re-anchor); baseline count unchanged at 5, no new entry. Negative probe: de-anchoring the entry turns the gate red (rc=1), re-anchoring green (rc=0).
+
+Probes (evidence: `/tmp/stage/review-evidence/ci-repair-round.md`): `cargo clippy --workspace --all-targets` exit 0 (previously a hard error); the intersection of all 365 clippy diagnostic locations with the 2622 branch-added lines of `git diff 0cb71015...HEAD` is EMPTY — nothing the changed-lines check can flag; `api::spawn` 35, `api::workspaces` 16, `merge_processor` 58, `policy_engine` 19, `gyre-domain --lib` 406 (incl. 16 `rust_extractor`) — all passed; `cargo fmt --all --check` clean; full `scripts/check-*.sh` sweep matches the clean main-baseline worktree at `0cb71015` exactly (one non-reproducible `check-nested-time-scope` blip in the first sweep — four consecutive re-runs pass on byte-identical inputs, and the reported line itself contains the OK pattern; no code change made).
 
 ### Rebase resolution (merge commit `f6a3600c`)
 
