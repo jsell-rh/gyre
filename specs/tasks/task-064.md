@@ -112,9 +112,9 @@ Each round that changed `web/src` rebuilt the committed `web/dist` in the same s
 
 ### Test evidence (re-verified this round; logs in /tmp/stage/review-evidence/task-064-round5)
 
-- Rust: `cargo test -p gyre-server --lib -- explorer_ws::` — 38 passed, 0 failed (includes the LLM-boundary §10 tests: canvas-context JSON surfacing zoom_level/active_filter, system-prompt documentation, plus §10 deserialization). Unchanged this round (frontend-only repair); last run in round 3.
-- Rust: `cargo test -p gyre-server --test explorer_ws_integration` — 8 passed, 0 failed. Unchanged this round; last run in round 3.
-- Rust: `cargo test -p gyre-domain --test view_query_composition` — 8 passed, 0 failed. Unchanged this round; last run in round 3.
+- Rust: `cargo test -p gyre-server --lib -- explorer_ws::` — 38 passed, 0 failed (includes the LLM-boundary §10 tests: canvas-context JSON surfacing zoom_level/active_filter, system-prompt documentation, plus §10 deserialization).
+- Rust: `cargo test -p gyre-server --test explorer_ws_integration` — 8 passed, 0 failed.
+- Rust: `cargo test -p gyre-domain --test view_query_composition` — 8 passed, 0 failed.
 - Web: `npx vitest run src/__tests__/canvas-state.test.js` — 21 passed, 0 failed (wire normalization with live-zoom preference and the round-4 staleness regression — wire zoom must agree with the interaction trail — zoom/query recording, coalescing, ZoomInteractionTracker cases).
 - Web: `npx vitest run` on ExplorerCanvas/ExplorerCanvas-performance/ExplorerChat/ExplorerViewScope/ExplorerViewDrillUrl — 275 passed, 0 failed (component suites touching the changed canvas state plumbing).
 - Node probe (`wire-staleness-probe.mjs`, real module): the round-4 review scenario — stale `zoom_level: 1.0` snapshot alongside live `zoom: 3.0` — serializes `zoom_level: 3` matching the trail's `to_level: 3.0`; PASS.
