@@ -83,6 +83,13 @@ pub async fn record_event(
         now_secs(),
     );
     state.analytics.record(&event).await?;
+    // search.md §Searchable Entities: activity events are indexed on write
+    // (description, event_type, agent_id facets).
+    crate::search_indexer::index(
+        &state,
+        crate::search_indexer::activity_event_document(&event),
+    )
+    .await;
     Ok((
         StatusCode::CREATED,
         Json(AnalyticsEventResponse::from(event)),

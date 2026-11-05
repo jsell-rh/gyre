@@ -8,9 +8,8 @@ use gyre_domain::{
     AnalyticsEvent, DependencySource, MergeRequest, MergeRequestDependency, MrStatus, Review,
     ReviewComment, ReviewDecision,
 };
-use gyre_ports::search::SearchDocument;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 use tracing::{info, instrument};
 
 use crate::AppState;
@@ -374,22 +373,9 @@ pub async fn create_mr(
     }
 
     state.merge_requests.create(&mr).await?;
-    // Index for search.
-    let mut facets = HashMap::new();
-    facets.insert("status".to_string(), "open".to_string());
-    facets.insert("repo_id".to_string(), mr.repository_id.to_string());
-    let _ = state
-        .search
-        .index(SearchDocument {
-            entity_type: "mr".to_string(),
-            entity_id: mr.id.to_string(),
-            title: mr.title.clone(),
-            body: format!("{} -> {}", mr.source_branch, mr.target_branch),
-            workspace_id: None,
-            repo_id: Some(mr.repository_id.to_string()),
-            facets,
-        })
-        .await;
+    // Index for search (search.md §Searchable Entities: mr facets
+    // status/has_conflicts/author, workspace/repo scope).
+    crate::search_indexer::index(&state, crate::search_indexer::mr_document(&mr)).await;
     state
         .emit_event(
             Some(mr.workspace_id.clone()),
@@ -605,6 +591,8 @@ pub async fn transition_mr_status(
     let ts = now_secs();
     mr.updated_at = ts;
     state.merge_requests.update(&mr).await?;
+    // search.md §Index Updates: MR reviewed/status changed -> index updated.
+    crate::search_indexer::index(&state, crate::search_indexer::mr_document(&mr)).await;
 
     // HSI §3a trace lifecycle: on merge the gate trace is promoted to
     // attestation (permanent); on close-without-merge it is deleted.
@@ -650,6 +638,12 @@ pub async fn transition_mr_status(
             ts,
         );
         let _ = state.analytics.record(&ev).await;
+        // search.md §Searchable Entities: activity events are indexed on write.
+        crate::search_indexer::index(
+            &state,
+            crate::search_indexer::activity_event_document(&ev),
+        )
+        .await;
     }
 
     Ok(Json(MrResponse::from(mr)))
@@ -705,7 +699,7 @@ pub async fn submit_review(
     Json(req): Json<SubmitReviewRequest>,
 ) -> Result<(StatusCode, Json<ReviewResponse>), ApiError> {
     let mr_id = Id::new(&id);
-    state
+    let mr = state
         .merge_requests
         .find_by_id(&mr_id)
         .await?
@@ -716,6 +710,13 @@ pub async fn submit_review(
     review.body = req.body;
 
     state.reviews.submit_review(&review).await?;
+    // search.md §Searchable Entities + §Index Updates ("MR created/reviewed ->
+    // index updated"): reviews are indexed on submission.
+    crate::search_indexer::index(
+        &state,
+        crate::search_indexer::review_document(&review, &mr),
+    )
+    .await;
     Ok((StatusCode::CREATED, Json(ReviewResponse::from(review))))
 }
 

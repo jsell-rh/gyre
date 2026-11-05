@@ -804,6 +804,7 @@ pub(crate) async fn spawn_agent_core(
                             let ctx = crate::container_audit::AuditCtx {
                                 audit: state.audit.as_ref(),
                                 broadcast_tx: &state.audit_broadcast_tx,
+                                search: state.search.as_ref(),
                             };
                             crate::container_audit::emit_started(
                                 &ctx,
@@ -855,6 +856,7 @@ pub(crate) async fn spawn_agent_core(
                                         let ctx = crate::container_audit::AuditCtx {
                                             audit: state_mon.audit.as_ref(),
                                             broadcast_tx: &state_mon.audit_broadcast_tx,
+                                            search: state_mon.search.as_ref(),
                                         };
                                         let container_id_for_evt =
                                             audit_rec.map(|r| r.container_id).unwrap_or_default();
@@ -1112,6 +1114,12 @@ pub(crate) async fn spawn_agent_core(
         now,
     );
     let _ = state.analytics.record(&ev).await;
+    // search.md §Searchable Entities: activity events are indexed on write.
+    crate::search_indexer::index(
+        &state,
+        crate::search_indexer::activity_event_document(&ev),
+    )
+    .await;
 
     // M22.2: Increment budget active-agent counter for the workspace.
     super::budget::increment_active_agents(&state, &repo.workspace_id.to_string()).await;
@@ -1338,6 +1346,12 @@ pub async fn complete_agent(
         now,
     );
     let _ = state.analytics.record(&ev).await;
+    // search.md §Searchable Entities: activity events are indexed on write.
+    crate::search_indexer::index(
+        &state,
+        crate::search_indexer::activity_event_document(&ev),
+    )
+    .await;
 
     // Auto-track MR creation
     let ev = AnalyticsEvent::new(
@@ -1348,6 +1362,12 @@ pub async fn complete_agent(
         now,
     );
     let _ = state.analytics.record(&ev).await;
+    // search.md §Searchable Entities: activity events are indexed on write.
+    crate::search_indexer::index(
+        &state,
+        crate::search_indexer::activity_event_document(&ev),
+    )
+    .await;
 
     // M22.2: Decrement budget active-agent counter when agent completes.
     if let Ok(Some(repo)) = state.repos.find_by_id(&mr.repository_id).await {

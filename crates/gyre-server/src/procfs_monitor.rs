@@ -107,6 +107,12 @@ async fn poll_agents(
                 now,
             );
             let _ = state.audit.record(&event).await;
+            // search.md §Searchable Entities: audit events are indexed on write.
+            crate::search_indexer::index(
+                state,
+                crate::search_indexer::audit_event_document(&event),
+            )
+            .await;
             broadcast(state, &event);
         }
 
@@ -134,6 +140,12 @@ async fn poll_agents(
                 now,
             );
             let _ = state.audit.record(&event).await;
+            // search.md §Searchable Entities: audit events are indexed on write.
+            crate::search_indexer::index(
+                state,
+                crate::search_indexer::audit_event_document(&event),
+            )
+            .await;
             broadcast(state, &event);
         }
     }

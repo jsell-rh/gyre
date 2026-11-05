@@ -505,6 +505,23 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         )
         .await;
 
+    // Register code-search file indexing (search.md §Index Updates: file
+    // content is indexed asynchronously on push; also runs on a fixed interval
+    // so the index stays consistent after restarts without a manual reindex).
+    registry
+        .register(
+            JobDefinition {
+                name: "search_code_index".to_string(),
+                description: "Indexes repo file content for code search (search.md)"
+                    .to_string(),
+                interval_secs: 3600,
+                enabled: true,
+                run_at_utc_hour: None,
+            },
+            |state| async move { crate::search_indexer::run_code_index_job(&state).await },
+        )
+        .await;
+
     // Schedulers are NOT spawned here — existing background tasks in main.rs handle
     // periodic execution. Handlers registered above enable on-demand triggering and
     // status tracking via POST /admin/jobs/{name}/run and GET /admin/jobs.

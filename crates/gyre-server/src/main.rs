@@ -67,6 +67,15 @@ async fn main() -> Result<()> {
         Arc::clone(&state),
     );
 
+    // Hourly code-search file reindex (search.md §Index Updates — file
+    // content is eventually consistent; pushes also trigger the job on
+    // demand via the job registry).
+    jobs::spawn_job(
+        Arc::clone(&state.job_registry),
+        "search_code_index".to_string(),
+        Arc::clone(&state),
+    );
+
     // Background tasks.
     spawn_stale_agent_detector(state.clone());
     spawn_stale_peer_detector(state.clone());

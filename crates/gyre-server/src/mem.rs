@@ -3190,7 +3190,7 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None)
+    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None, None)
 }
 
 /// Build a test AppState backed by a real `StoragePort` (e.g. a temp-file
@@ -3205,6 +3205,22 @@ pub fn test_state_with_storage(
         workspaces,
         policies,
         Some(storage),
+        None,
+        None,
+    )
+}
+
+/// Build a test AppState whose search port is the given adapter — used to
+/// exercise the reindex coordinator against a real SQLite FTS5 backend.
+#[cfg(test)]
+pub fn test_state_with_search(search: Arc<dyn gyre_ports::SearchPort>) -> Arc<crate::AppState> {
+    let (workspaces, policies) = shared_workspace_policy_pair(false);
+    test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        None,
+        Some(search),
         None,
     )
 }
@@ -3222,6 +3238,7 @@ pub fn test_state_with_secrets(
         workspaces,
         policies,
         None,
+        None,
         Some(secrets),
     )
 }
@@ -3231,7 +3248,7 @@ pub fn test_state_with_secrets(
 #[cfg(test)]
 pub fn test_state_failing_trust() -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(true);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None)
+    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None, None)
 }
 
 /// Construct a paired workspace + policy repo that share a single in-memory
@@ -3259,7 +3276,7 @@ fn shared_workspace_policy_pair(
 #[cfg(test)]
 pub fn test_state_with_git_ops(git_ops: Arc<dyn gyre_ports::GitOpsPort>) -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(git_ops, workspaces, policies, None, None)
+    test_state_inner(git_ops, workspaces, policies, None, None, None)
 }
 
 /// Shared builder for all in-memory test states. Callers supply the git ops
@@ -3271,6 +3288,7 @@ fn test_state_inner(
     workspaces: Arc<dyn WorkspaceRepository>,
     policies: Arc<dyn gyre_ports::PolicyRepository>,
     storage: Option<Arc<dyn gyre_ports::storage::StoragePort>>,
+    search: Option<Arc<dyn gyre_ports::SearchPort>>,
     secrets: Option<Arc<dyn gyre_ports::SecretRepository>>,
 ) -> Arc<crate::AppState> {
     use std::collections::HashMap;
@@ -3344,7 +3362,7 @@ fn test_state_inner(
         spec_links_store: Arc::new(Mutex::new(Vec::new())),
         budget_configs: Arc::new(MemBudgetConfigRepository::default()),
         budget_usages: Arc::new(MemBudgetUsageRepository::default()),
-        search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
+        search: search.unwrap_or_else(|| Arc::new(gyre_adapters::MemSearchAdapter::new())),
         tenants: Arc::new(MemTenantRepository::default()),
         workspaces,
         personas: Arc::new(MemPersonaRepository::default()),

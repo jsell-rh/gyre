@@ -145,6 +145,12 @@ async fn spawn_orchestrator(
         now,
     );
     let _ = state.analytics.record(&ev).await;
+    // search.md §Searchable Entities: activity events are indexed on write.
+    crate::search_indexer::index(
+        state,
+        crate::search_indexer::activity_event_document(&ev),
+    )
+    .await;
 
     budget::increment_active_agents(state, &workspace_id.to_string()).await;
 

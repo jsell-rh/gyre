@@ -5,9 +5,8 @@ use axum::{
 };
 use gyre_common::Id;
 use gyre_domain::{AnalyticsEvent, Task, TaskPriority, TaskStatus, TaskType};
-use gyre_ports::search::SearchDocument;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 use tracing::instrument;
 
 use crate::AppState;
@@ -204,22 +203,9 @@ pub async fn create_task(
         task.repo_id = Id::new(repo_id);
     }
     state.tasks.create(&task).await?;
-    // Index for search.
-    let mut facets = HashMap::new();
-    facets.insert("status".to_string(), "backlog".to_string());
-    facets.insert("priority".to_string(), task_priority_str(&task.priority));
-    let _ = state
-        .search
-        .index(SearchDocument {
-            entity_type: "task".to_string(),
-            entity_id: task.id.to_string(),
-            title: task.title.clone(),
-            body: task.description.clone().unwrap_or_default(),
-            workspace_id: None,
-            repo_id: None,
-            facets,
-        })
-        .await;
+    // Index for search (search.md §Searchable Entities: task facets
+    // status/priority/assigned_to, workspace/repo scope).
+    crate::search_indexer::index(&state, crate::search_indexer::task_document(&task)).await;
     state
         .emit_event(
             Some(task.workspace_id.clone()),
@@ -311,6 +297,9 @@ pub async fn update_task(
     }
     task.updated_at = now_secs();
     state.tasks.update(&task).await?;
+    // search.md §Index Updates: task updated -> index updated (status/priority
+    // facets must reflect current values, not create-time ones).
+    crate::search_indexer::index(&state, crate::search_indexer::task_document(&task)).await;
     Ok(Json(TaskResponse::from(task)))
 }
 
@@ -331,6 +320,8 @@ pub async fn transition_task_status(
     let ts = now_secs();
     task.updated_at = ts;
     state.tasks.update(&task).await?;
+    // search.md §Index Updates: status change -> index updated.
+    crate::search_indexer::index(&state, crate::search_indexer::task_document(&task)).await;
     state
         .emit_event(
             Some(task.workspace_id.clone()),
@@ -352,6 +343,12 @@ pub async fn transition_task_status(
         ts,
     );
     let _ = state.analytics.record(&event).await;
+    // search.md §Searchable Entities: activity events are indexed on write.
+    crate::search_indexer::index(
+        &state,
+        crate::search_indexer::activity_event_document(&event),
+    )
+    .await;
 
     Ok(Json(TaskResponse::from(task)))
 }

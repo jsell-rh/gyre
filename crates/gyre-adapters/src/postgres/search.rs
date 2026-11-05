@@ -40,7 +40,9 @@ CREATE TABLE IF NOT EXISTS search_index (
     body TEXT NOT NULL DEFAULT '',
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', title || ' ' || body)) STORED,
-    PRIMARY KEY (entity_type, entity_id)
+    -- Scope is part of the identity: a spec/file path is only unique within
+    -- its repo, so same-path documents in different repos must coexist.
+    PRIMARY KEY (entity_type, entity_id, workspace_id, repo_id)
 );
 CREATE INDEX IF NOT EXISTS idx_search_index_tsv ON search_index USING gin (tsv);
 ";
@@ -91,7 +93,7 @@ struct TenantRow {
 const INSERT_SQL: &str = "
 INSERT INTO search_index (entity_type, entity_id, tenant_id, workspace_id, repo_id, title, body, metadata)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
-ON CONFLICT (entity_type, entity_id) DO UPDATE SET
+ON CONFLICT (entity_type, entity_id, workspace_id, repo_id) DO UPDATE SET
     tenant_id  = EXCLUDED.tenant_id,
     workspace_id = EXCLUDED.workspace_id,
     repo_id    = EXCLUDED.repo_id,
