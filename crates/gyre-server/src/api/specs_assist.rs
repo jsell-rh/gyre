@@ -1197,10 +1197,15 @@ mod tests {
 
     /// Create a test app with a mock LLM that returns a fixed response string.
     fn app_with_llm_response(response: &str) -> Router {
+        app_with_llm_adapter(Arc::new(gyre_adapters::MockLlmAdapter::new(response)))
+    }
+
+    /// Create a test app with an arbitrary `MockLlmAdapter` — including the
+    /// error-injection constructors `failing()` and `stream_error_after()`,
+    /// which have no LLM-connection failure otherwise testable here.
+    fn app_with_llm_adapter(inner: Arc<gyre_adapters::MockLlmAdapter>) -> Router {
         let mut s = (*crate::mem::test_state()).clone();
-        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
-            inner: Arc::new(gyre_adapters::MockLlmAdapter::new(response)),
-        }));
+        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory { inner }));
         crate::api::api_router().with_state(Arc::new(s))
     }
 
@@ -1443,6 +1448,110 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("missing required"));
+    }
+
+    #[tokio::test]
+    async fn assist_spec_llm_connection_failure_sends_error_event() {
+        // ui-layout.md §2: an LLM connection failure is an SSE `error` event,
+        // not an HTTP 500 — and never a `complete` event. Regression for the
+        // silent-drop bug: the old code errored the whole request instead of
+        // streaming `event: error`.
+        let app = app_with_llm_adapter(Arc::new(gyre_adapters::MockLlmAdapter::failing(
+            "connection refused by mock",
+        )));
+        let repo_id = create_repo(&app, "assist-connfail-repo", "ws-assist-connfail").await;
+
+        let assist_body = serde_json::json!({
+            "spec_path": "specs/system/vision.md",
+            "instruction": "Add something",
+            "draft_content": "# Vision",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/specs/assist"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&assist_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp.headers().get("content-type").unwrap();
+        assert!(ct.to_str().unwrap().contains("text/event-stream"));
+
+        let body = body_text(resp).await;
+        let events = parse_sse_events(&body);
+
+        let error_events: Vec<_> = events.iter().filter(|(t, _)| t == "error").collect();
+        let complete_events: Vec<_> = events.iter().filter(|(t, _)| t == "complete").collect();
+        assert_eq!(error_events.len(), 1, "should have one error event");
+        assert_eq!(
+            complete_events.len(),
+            0,
+            "a connection failure must never masquerade as a complete event"
+        );
+        let error_data: serde_json::Value = serde_json::from_str(&error_events[0].1).unwrap();
+        let msg = error_data["error"].as_str().unwrap();
+        assert!(
+            msg.contains("connection refused by mock"),
+            "error event must carry the failure cause, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn assist_spec_llm_mid_stream_failure_sends_error_event() {
+        // A connection that drops mid-generation: partial chunks arrive, then
+        // the stream errors. The truncated response must surface as
+        // `event: error` — never a `complete` event built from the partial
+        // text. Regression for the old `filter_map(|r| r.ok())` that silently
+        // dropped the stream error and completed on the truncated text.
+        let app = app_with_llm_adapter(Arc::new(
+            gyre_adapters::MockLlmAdapter::stream_error_after(
+                vec!["Good ".into(), "enough ".into(), "to look ".into()],
+                "dropped mid-generation by mock",
+            ),
+        ));
+        let repo_id = create_repo(&app, "assist-midfail-repo", "ws-assist-midfail").await;
+
+        let assist_body = serde_json::json!({
+            "spec_path": "specs/system/vision.md",
+            "instruction": "Add something",
+            "draft_content": "# Vision",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/repos/{repo_id}/specs/assist"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&assist_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = body_text(resp).await;
+        let events = parse_sse_events(&body);
+
+        let error_events: Vec<_> = events.iter().filter(|(t, _)| t == "error").collect();
+        let complete_events: Vec<_> = events.iter().filter(|(t, _)| t == "complete").collect();
+        assert_eq!(error_events.len(), 1, "should have one error event");
+        assert_eq!(
+            complete_events.len(),
+            0,
+            "a truncated (mid-stream failed) response must never be completed"
+        );
+        let error_data: serde_json::Value = serde_json::from_str(&error_events[0].1).unwrap();
+        let msg = error_data["error"].as_str().unwrap();
+        assert!(
+            msg.contains("dropped mid-generation by mock"),
+            "error event must carry the mid-stream failure cause, got: {msg}"
+        );
     }
 
     #[tokio::test]

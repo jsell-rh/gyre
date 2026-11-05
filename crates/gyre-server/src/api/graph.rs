@@ -2230,6 +2230,172 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn briefing_ask_llm_connection_failure_sends_error_event() {
+        // ui-layout.md §2: an LLM connection failure is an SSE `error` event,
+        // not an HTTP 500 — and never a `complete` event.
+        let mut s = (*test_state()).clone();
+        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
+            inner: Arc::new(gyre_adapters::MockLlmAdapter::failing(
+                "connection refused by mock",
+            )),
+        }) as Arc<dyn gyre_ports::LlmPortFactory>);
+        let app = crate::api::api_router().with_state(Arc::new(s));
+
+        let ws_body = serde_json::json!({"name": "llm-connfail-ws", "tenant_id": "tenant-1"});
+        let ws_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ws_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_json = body_json(ws_resp).await;
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+
+        let ask_body = serde_json::json!({"question": "Tell me more"});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/briefing/ask"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ask_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp.headers().get("content-type").unwrap();
+        assert!(ct.to_str().unwrap().contains("text/event-stream"));
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let mut error_msgs: Vec<String> = Vec::new();
+        let mut complete_count = 0usize;
+        let mut current_event: Option<String> = None;
+        for line in text.lines() {
+            if let Some(kind) = line.strip_prefix("event: ") {
+                current_event = Some(kind.trim().to_string());
+            } else if let Some(data) = line.strip_prefix("data: ") {
+                let kind = match current_event.take() {
+                    Some(k) => k,
+                    None => continue,
+                };
+                if kind == "error" {
+                    let v: serde_json::Value = serde_json::from_str(data).unwrap();
+                    error_msgs.push(v["error"].as_str().unwrap_or("").to_string());
+                } else if kind == "complete" {
+                    complete_count += 1;
+                }
+            }
+        }
+        assert_eq!(error_msgs.len(), 1, "expected exactly one error event");
+        assert_eq!(
+            complete_count, 0,
+            "a connection failure must never masquerade as a complete event"
+        );
+        assert!(
+            error_msgs[0].contains("connection refused by mock"),
+            "error event must carry the failure cause, got: {}",
+            error_msgs[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn briefing_ask_llm_mid_stream_failure_sends_error_event() {
+        // A connection that drops mid-generation: partial chunks arrive, then
+        // the stream errors. The truncated response must surface as
+        // `event: error` — never a `complete` event built from the partial
+        // text. Regression for the old `filter_map(|r| r.ok())` that silently
+        // dropped the stream error and completed on the truncated text.
+        let mut s = (*test_state()).clone();
+        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
+            inner: Arc::new(gyre_adapters::MockLlmAdapter::stream_error_after(
+                vec!["The workspace ".into(), "has three ".into()],
+                "dropped mid-generation by mock",
+            )),
+        }) as Arc<dyn gyre_ports::LlmPortFactory>);
+        let app = crate::api::api_router().with_state(Arc::new(s));
+
+        let ws_body = serde_json::json!({"name": "llm-midfail-ws", "tenant_id": "tenant-1"});
+        let ws_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ws_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ws_json = body_json(ws_resp).await;
+        let ws_id = ws_json["id"].as_str().unwrap().to_string();
+
+        let ask_body = serde_json::json!({"question": "Tell me more"});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{ws_id}/briefing/ask"))
+                    .header("Authorization", auth())
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&ask_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let mut error_msgs: Vec<String> = Vec::new();
+        let mut complete_count = 0usize;
+        let mut current_event: Option<String> = None;
+        for line in text.lines() {
+            if let Some(kind) = line.strip_prefix("event: ") {
+                current_event = Some(kind.trim().to_string());
+            } else if let Some(data) = line.strip_prefix("data: ") {
+                let kind = match current_event.take() {
+                    Some(k) => k,
+                    None => continue,
+                };
+                if kind == "error" {
+                    let v: serde_json::Value = serde_json::from_str(data).unwrap();
+                    error_msgs.push(v["error"].as_str().unwrap_or("").to_string());
+                } else if kind == "complete" {
+                    complete_count += 1;
+                }
+            }
+        }
+        assert_eq!(error_msgs.len(), 1, "expected exactly one error event");
+        assert_eq!(
+            complete_count, 0,
+            "a truncated (mid-stream failed) response must never be completed"
+        );
+        assert!(
+            error_msgs[0].contains("dropped mid-generation by mock"),
+            "error event must carry the mid-stream failure cause, got: {}",
+            error_msgs[0]
+        );
+    }
+
     /// Prompt-capturing LLM factory for the grounding test: records the
     /// system prompt of each stream_complete call and streams it back so the
     /// caller can assert on the exact prompt text the production code built.

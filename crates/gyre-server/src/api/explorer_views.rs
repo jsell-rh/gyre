@@ -1156,6 +1156,90 @@ mod tests {
         assert!(payload.get("fallback").map(|f| f.is_null()).unwrap_or(true));
     }
 
+    /// Like `app_with_llm_and_ws`, but the LLM always fails — for testing
+    /// the `event: error` branch of view generation (predict_json errors on
+    /// connection failure; there is no mid-stream mode on this endpoint).
+    async fn app_with_failing_llm_and_ws() -> (axum::Router, String) {
+        let state = crate::mem::test_state();
+        let ws_id = "ws-gen-connfail".to_string();
+        state
+            .workspaces
+            .create(&gyre_domain::Workspace::new(
+                gyre_common::Id::new(&ws_id),
+                gyre_common::Id::new("default"),
+                "gen-connfail-ws",
+                "gen-connfail-ws",
+                0,
+            ))
+            .await
+            .unwrap();
+        let mut s = (*state).clone();
+        s.llm = Some(Arc::new(gyre_adapters::MockLlmPortFactory {
+            inner: Arc::new(gyre_adapters::MockLlmAdapter::failing(
+                "connection refused by mock",
+            )),
+        }));
+        (crate::build_router(Arc::new(s)), ws_id)
+    }
+
+    #[tokio::test]
+    async fn generate_explorer_view_llm_connection_failure_sends_error_event() {
+        // ui-layout.md §2: an LLM connection failure is an SSE `error` event,
+        // not an HTTP 500 — and never a `complete` event with a view_spec.
+        let (app, ws_id) = app_with_failing_llm_and_ws().await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/explorer-views/generate"
+                    ))
+                    .header("Authorization", auth())
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"question":"How does auth work?"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp.headers().get("content-type").unwrap();
+        assert!(ct.to_str().unwrap().contains("text/event-stream"));
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+
+        let mut error_msgs: Vec<String> = Vec::new();
+        let mut complete_count = 0usize;
+        let mut current_event = String::new();
+        for line in body.lines() {
+            if let Some(evt) = line.strip_prefix("event:") {
+                current_event = evt.trim().to_string();
+            } else if let Some(data) = line.strip_prefix("data:") {
+                if current_event == "error" {
+                    let v: serde_json::Value =
+                        serde_json::from_str(data.trim()).unwrap();
+                    error_msgs.push(v["error"].as_str().unwrap_or("").to_string());
+                } else if current_event == "complete" {
+                    complete_count += 1;
+                }
+                current_event.clear();
+            }
+        }
+        assert_eq!(error_msgs.len(), 1, "expected exactly one error event");
+        assert_eq!(
+            complete_count, 0,
+            "a connection failure must never masquerade as a complete event"
+        );
+        assert!(
+            error_msgs[0].contains("connection refused by mock"),
+            "error event must carry the failure cause, got: {}",
+            error_msgs[0]
+        );
+    }
+
     #[tokio::test]
     async fn generate_explorer_view_charges_llm_query_budget_record() {
         // ui-layout.md §2: every generate call appends an `llm_query`
