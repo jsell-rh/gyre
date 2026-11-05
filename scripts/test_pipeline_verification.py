@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent))
-from pipeline.execution import Execution, Retry, Wait
+from pipeline.execution import Execution, Retry, Wait, Attention
 from pipeline.store import Store
 from pipeline.verification import COMMANDS, decode_poll, run, retire, validate_receipt
 
@@ -39,6 +39,46 @@ class VerificationTests(unittest.TestCase):
                 validate_receipt(invalid, identity)
         failure = identity | {'passed': False, 'checks': [{'command': COMMANDS[0], 'exit_code': 1}]}
         validate_receipt(failure, identity)
+
+    def test_rejected_receipt_survives_cleanup_with_specific_source_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            s=Store(directory);self.addCleanup(s.close)
+            s.put_task('task-001','g','body',{})
+            work=s.enqueue('verify','task-001','g',{})
+            execution=Execution(s,s.claim('verify','verifier'))
+            identity={'candidate':'candidate','head':'head','base':'head','tree':'tree'}
+            receipt=identity | {'passed':False,'infrastructure':True,'error_kind':'source_integrity',
+                'dirty_paths':['scripts/python-callgraph.py'],'checks':[{'command':c,'exit_code':0} for c in COMMANDS]}
+            def transport(name,*args,**kwargs):
+                output=''
+                if 'poll' in args:
+                    output='GYRE_VERIFY_POLL '+json.dumps({'offset':0,'log':'','receipt':receipt,'alive':False})
+                return subprocess.CompletedProcess([],0,output,'')
+            with patch.object(execution,'login'),patch.object(execution,'wait_ready'),patch.object(execution,'remote',side_effect=transport),patch.object(execution,'os',return_value=subprocess.CompletedProcess([],0,'','')) as commands,patch('pipeline.verification.gateway.inventory',return_value=[]):
+                with self.assertRaisesRegex(Attention,'python-callgraph.py'):
+                    run(execution,Path(directory),identity)
+            raw=execution.directory/'remote-verification-raw.json'
+            self.assertEqual(json.loads(raw.read_text()),receipt)
+            self.assertEqual(raw.stat().st_mode & 0o777,0o600)
+            self.assertFalse((execution.directory/'remote-verification.json').exists())
+            self.assertTrue(any(c.args[:2]==('sandbox','delete') for c in commands.call_args_list))
+
+    def test_source_guard_uses_actual_paths_not_substring_whitelists(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            def git(*args):return subprocess.check_output(['git',*args],cwd=root,text=True).strip()
+            git('init','-q');git('config','user.name','Test');git('config','user.email','test@example.com')
+            git('-c','core.hooksPath=/dev/null','-c','commit.gpgsign=false','commit','--allow-empty','-qm','source')
+            identity={'head':git('rev-parse','HEAD'),'tree':git('rev-parse','HEAD^{tree}')}
+            (root/'web/dist').mkdir(parents=True);(root/'web/dist/generated.js').write_text('build output')
+            with patch.object(remote,'CHECKOUT',root):
+                self.assertIsNone(remote.source_integrity(identity))
+                (root/'nested/web/dist').mkdir(parents=True)
+                (root/'nested/web/dist/source.js').write_text('unexpected source')
+                (root/'scripts').mkdir();(root/'scripts/python-callgraph.py').write_text('leftover script')
+                failure=remote.source_integrity(identity)
+                self.assertEqual(failure['dirty_paths'],['nested/web/dist/source.js','scripts/python-callgraph.py'])
+                self.assertEqual(failure['observed_head'],identity['head'])
 
     def test_real_failure_stops_later_steps_and_keeps_identity(self):
         with tempfile.TemporaryDirectory() as directory:
