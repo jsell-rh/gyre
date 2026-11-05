@@ -9,8 +9,10 @@
 #
 # What is pinned:
 #   - Node.js, git, curl, bash, util-linux, CA certs: from the nixpkgs
-#     release channel below (exact revision recorded in flake.lock, which
-#     `nix build` creates on first run).
+#     release channel below — the exact revision (the head of
+#     nixos-24.11 when the lock was written) and its NAR hash are
+#     pinned in the committed flake.lock, so two `nix build` runs at
+#     different times resolve the identical nixpkgs tree.
 #   - Claude Agent SDK + transitive deps: `npm ci` from the committed
 #     package-lock.json — every version and integrity hash is in the
 #     lockfile, no version resolution happens at build time.

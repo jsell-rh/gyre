@@ -1029,7 +1029,18 @@ pub(crate) async fn spawn_agent_core(
                 let k8s =
                     gyre_adapters::compute::kubernetes::kubernetes_target_from_config(&cfg.config);
 
-                match gyre_ports::ComputeTarget::spawn_process(&k8s, &spawn_config).await {
+                // The Pod mounts no volume for the server-local worktree
+                // (build_pod_manifest emits no volumes), and the agent
+                // image clones its own checkout into /workspace
+                // (entrypoint.sh) — the image WorkingDir is /workspace, so
+                // a server-local absolute path as workingDir makes the
+                // container fail to start under CRI (runc chdir ENOENT).
+                // Mirror the SSH container arm: /workspace is the workdir.
+                let k8s_spawn_config = gyre_ports::SpawnConfig {
+                    work_dir: "/workspace".to_string(),
+                    ..spawn_config.clone()
+                };
+                match gyre_ports::ComputeTarget::spawn_process(&k8s, &k8s_spawn_config).await {
                     Ok(handle) => {
                         spawned_pid = handle.pid;
                         spawned_container_id = Some(handle.id.clone());
@@ -3770,6 +3781,61 @@ exit 1\n"
             env.get("GYRE_CRED_SHARED").map(String::as_str),
             Some("from-repo"),
             "repo (nearer) scope must win over tenant for the same name:\n{dump}"
+        );
+    }
+
+    #[tokio::test]
+    async fn kubernetes_pod_working_dir_is_workspace_not_local_worktree() {
+        // agent-runtime.md §3: the Kubernetes backend applies a Pod with no
+        // volumes; the agent image entrypoint clones its own checkout into
+        // /workspace. The spawn path canonicalizes the SERVER-LOCAL
+        // worktree into SpawnConfig.work_dir — forwarding it as the Pod's
+        // workingDir makes the container fail to start under CRI (runc
+        // chdir ENOENT on a path the image does not contain), so the
+        // kubernetes arm must override work_dir to /workspace (mirroring
+        // the SSH container arm).
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dump_path = temp.path().join("wd-dump").to_string_lossy().into_owned();
+
+        let (app, ws_id) = create_workspace(app, "k8s-wd-ws").await;
+        let (app, repo_id) = create_repo_in_workspace(app, &ws_id).await;
+        let (app, task_id) = create_task(app, "k8s workingDir task").await;
+        let (app, ct_id) = create_env_dump_compute_target(app, "wd-dump", &dump_path).await;
+
+        // A real on-disk worktree: without the override this path (not
+        // present in the agent image, and mounted by no volume) is what
+        // the manifest would carry as workingDir.
+        create_worktree_dir(&state, &ws_id, "wt-repo", "feat/k8s-wd");
+        let (_, json) = do_spawn_with_target(app, &repo_id, &task_id, "feat/k8s-wd", &ct_id).await;
+        assert_eq!(json["agent"]["status"], "active");
+
+        let dump = wait_for_dump(&dump_path)
+            .await
+            .expect("stub kubectl should have captured the applied Pod manifest");
+        let manifest: serde_json::Value =
+            serde_json::from_str(&dump).expect("captured dump must be the Pod manifest JSON");
+        let working_dir = manifest["spec"]["containers"][0]["workingDir"]
+            .as_str()
+            .unwrap_or("");
+        assert_eq!(
+            working_dir, "/workspace",
+            "Pod workingDir must be /workspace (entrypoint checkout), not the \
+             server-local worktree:
+{dump}"
+        );
+        // No volume may reference the server-local worktree either — the
+        // manifest as applied must not depend on server-local paths.
+        let volumes = manifest["spec"]
+            .get("volumes")
+            .and_then(|v| v.as_array())
+            .map(|a| a.is_empty())
+            .unwrap_or(true);
+        assert!(
+            volumes,
+            "Pod manifest must not mount server-local volumes:
+{dump}"
         );
     }
 

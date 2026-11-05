@@ -273,18 +273,6 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/admin/compute-targets/{id}/tunnel` | List active SSH tunnels for a compute target (G12, Admin only) |
 | `DELETE` | `/api/v1/admin/compute-targets/{id}/tunnel/{tid}` | Close an SSH tunnel — sends SIGTERM to the `ssh -N` process (G12, Admin only) |
 | `POST` | `/api/v1/admin/seed` | Idempotent demo data seed: 2 projects, 3 repos, 4 agents, 6 tasks, 2 MRs, 1 queue entry, 5 activity events. Returns `{already_seeded:true}` on repeat. AdminOnly. (M9.1) |
-
-**Tenant-scoped compute targets (agent-runtime.md §3):** full CRUD for the authenticated user's tenant. `target_type` is one of `"Container"`, `"Ssh"`, `"Kubernetes"`.
-
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` | `/api/v1/compute-targets` | List compute targets for the caller's tenant (any authenticated member) |
-| `POST` | `/api/v1/compute-targets` | Register a compute target: `{name, target_type, config?, is_default?}` (Tenant Admin only; duplicate names in the tenant return 409) |
-| `GET` | `/api/v1/compute-targets/{id}` | Get compute target details (tenant-scoped — another tenant's target is 404) |
-| `PUT` | `/api/v1/compute-targets/{id}` | Update `name`/`config`/`is_default` (Tenant Admin only) |
-| `DELETE` | `/api/v1/compute-targets/{id}` | Remove a compute target — 409 if any workspace references it (Tenant Admin only) |
-
-Workspace selection (same spec section): `PUT /api/v1/workspaces/{id}` accepts `compute_target_id` (a target in the same tenant, or JSON `null` to clear; cross-tenant or unknown IDs are rejected with 400). At spawn time the effective target resolves as: request `compute_target_id` → workspace assignment → tenant default (`is_default`) → local container auto-detection (Docker, then Podman; bare local process only when no container runtime exists). |
 | `GET` | `/api/v1/admin/bcp/targets` | BCP targets: reads `GYRE_RTO` and `GYRE_RPO` env vars; returns recovery time/point objectives in seconds (Admin only) (M23) |
 | `POST` | `/api/v1/admin/bcp/drill` | BCP drill: triggers a real snapshot + verify cycle; returns `{snapshot_id, verified, duration_ms}` (Admin only) (M23) |
 | `GET` | `/scim/v2/ServiceProviderConfig` | SCIM 2.0 discovery — supported features, auth schemes (no gyre auth required for discovery) (M23) |
@@ -304,6 +292,19 @@ Workspace selection (same spec section): `PUT /api/v1/workspaces/{id}` accepts `
 | `PUT` | `/api/v1/network/peers/{id}` | Update peer endpoint (roaming): `{endpoint: "host:port"}` — JWT caller must own the peer (agent_id match); updates `last_seen` (M26.2) |
 | `DELETE` | `/api/v1/network/peers/{id}` | Remove a peer from the mesh |
 | `GET` | `/api/v1/network/derp-map` | Get DERP relay map for WireGuard coordination |
+
+
+**Tenant-scoped compute targets (agent-runtime.md §3):** full CRUD for the authenticated user's tenant. `target_type` is one of `"Container"`, `"Ssh"`, `"Kubernetes"`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/v1/compute-targets` | List compute targets for the caller's tenant (any authenticated member) |
+| `POST` | `/api/v1/compute-targets` | Register a compute target: `{name, target_type, config?, is_default?}` (Tenant Admin only; duplicate names in the tenant return 409) |
+| `GET` | `/api/v1/compute-targets/{id}` | Get compute target details (tenant-scoped — another tenant's target is 404) |
+| `PUT` | `/api/v1/compute-targets/{id}` | Update `name`/`config`/`is_default` (Tenant Admin only) |
+| `DELETE` | `/api/v1/compute-targets/{id}` | Remove a compute target — 409 if any workspace references it (Tenant Admin only) |
+
+Workspace selection (same spec section): `PUT /api/v1/workspaces/{id}` accepts `compute_target_id` (a target in the same tenant, or JSON `null` to clear; cross-tenant or unknown IDs are rejected with 400). At spawn time the effective target resolves as: request `compute_target_id` → workspace assignment → tenant default (`is_default`) → local container auto-detection (Docker, then Podman; bare local process only when no container runtime exists).
 
 ---
 
