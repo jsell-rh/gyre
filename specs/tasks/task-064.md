@@ -12,7 +12,7 @@ coverage_sections:
   - "view-query-grammar.md §14 High-risk untested code"
   - "view-query-grammar.md §15 Authentication concept"
   - "view-query-grammar.md §16 Relationship to Other Specs"
-commits: ["8f65014884ec0a5173d695f1d4610c7e35a1c65e", "7a18a289c5647d0e0e0c53c4206b5b2f924c03c2"]
+commits: ["8f65014884ec0a5173d695f1d4610c7e35a1c65e", "7a18a289c5647d0e0e0c53c4206b5b2f924c03c2", "ffc6e645ce9bc915eaa0fa08d0e39f0f5aa73c78"]
 ---
 
 ## Spec Excerpt
