@@ -8,7 +8,7 @@ coverage_sections:
   - "supply-chain.md §Attestation Levels"
   - "supply-chain.md §Level 3: Gyre-Managed Runtime (Highest)"
   - "supply-chain.md §Policy per Level"
-commits: ["19a3d5af84c00a6e3e1db1d1b2429f4c202df6e0", "96dfd8b805aa7e5dc53dc275c133697945d5766c"]
+commits: ["19a3d5af84c00a6e3e1db1d1b2429f4c202df6e0", "96dfd8b805aa7e5dc53dc275c133697945d5766c", "12a0d0e9b582c0370a55b9bd03bdbf107443086f"]
 ---
 
 ## Spec Excerpt
@@ -61,39 +61,25 @@ Read `specs/system/supply-chain.md` §"gyre-stack.lock", §"Attestation Levels",
 
 ## Shipped
 
-Repair round (review findings 4492822e, two items, both resolved at HEAD
-`68c0be4e` without changing task-165 production behavior; repair commit
-`b3c18c84`, follow-ups `5777ed4e` frontmatter record and `892af8ff`
-mechanical SUMMARY sync — see below):
+Repair round (review findings ccc54b26, one item, resolved at HEAD with
+commit `12a0d0e9` — no production code change, task-165 behavior is
+untouched):
 
-- **Invariant gate `check-fabricated-scope-defaults.sh`**: the finding's
-  stale line-anchored exemption (`git_http.rs:1495`, drifted to 1727 by
-  task-165 insertions) is now moot — the exempted ws_id push-event
-  fallback site was fixed upstream with the skip-and-log pattern
-  (git_http.rs:1730-1737: repo lookup failure now skips the
-  workspace-scoped emission instead of fabricating "default"). Per the
-  exemption file's own instructions, the dead entry was deleted and
-  FROZEN_EXEMPTION_COUNT lowered 5→4; the remaining 4 entries still match
-  their live sites exactly (auth.rs:773, specs.rs:959,
-  speculative_merge.rs:372, gate_executor.rs:111). Gate passes at HEAD.
-- **L3 record accuracy (coverage rows 8/9)**: corrected the sub-bullet
-  that presented JWT `wl_container_id`/`wl_image_hash` claims as a live
-  Level-3 detection signal. The claims are defined (auth.rs:93-96) and
-  `mint_with_workload` (auth.rs:189) can mint them, but no production
-  minting site populates them — spawn.rs:429-443 pre-mints with `mint()`
-  (no workload claims) and is `mint_with_workload`'s only caller — so the
-  JWT branch of `resolve_push_attestation_level` is unreachable in
-  production today and is recorded as defense-in-depth, not a live
-  signal. Production L3 detection runs via the KV workload-attestation
-  path (spawn.rs `attest_agent_with_container` writes container_id +
-  image_hash for M19.4 container targets), which the
-  `level3_detected_from_workload_attestation` test exercises.
-- **SUMMARY sync (side fix, commit `892af8ff`)**: re-ran
-  `scripts/update-coverage-summary.sh` — the committed SUMMARY.md was
-  stale relative to the merged coverage files (upstream task-063 moved 6
-  view-query-grammar rows to implemented; totals now 300 assigned / 120
-  implemented / 48%). Mechanical only; no coverage-row status changed by
-  hand.
+- **Dead exemption entry in `relative-path-defaults-exemptions.txt`**:
+  the task-099 F6 entry `crates/gyre-cli/src/main.rs:1793` was orphaned
+  by the merge with the assigned base — upstream replaced the
+  starter-kit relative fallback with
+  `args.repo_path.as_deref().map(PathBuf::from)` (main.rs:1869), so
+  the hazard is fixed upstream and the entry anchored a closing brace.
+  Per the file's own header ("When you fix one, DELETE its exemption
+  line"), the entry and its now-orphaned task-099 section header were
+  deleted; the remaining 3 entries were re-verified to anchor live
+  sites (conversation.rs:191, spawn.rs:597, snapshot.rs:9). Gate passes
+  at HEAD before and after; this file has no frozen count. Same flaw
+  class the round-6 repair fixed for the sibling fabricated-scope file.
+- Earlier repair rounds (4492822e: fabricated-scope dead-entry cleanup
+  + L3 record accuracy; SUMMARY sync) remain resolved in history and
+  are not re-ledgered here.
 
 ### Actual behavior
 
@@ -131,19 +117,20 @@ mechanical SUMMARY sync — see below):
 
 ### Test evidence
 
-This repair round changed no Rust code, so the focused probe set is the
-affected gates plus the task-165 suites from the prior round (logs under
+This repair round changed no Rust code (one exemptions text file), so
+the focused probe set is the affected gates (logs under
 `/tmp/stage/review-evidence/`):
 
-- `bash scripts/check-fabricated-scope-defaults.sh` → OK, exit 0, at HEAD
-  with the lowered count (log: `task165-repair-fabscope.log`).
-- Repo-wide raw detector output re-verified by hand: exactly 4 live
-  violations, each at its exempted line; the git_http.rs site is gone.
-- `bash scripts/check-task-commit-attribution.sh` → OK (log:
-  `task165-repair-attribution.log`).
-- Prior-round suites at merge HEAD `6b2a84a7` (implementation unchanged
-  since — no Rust file touched this round): gyre-domain `stack` 9,
-  gyre-server `api::stack_attest` 14, git_http task-165 push tests 7
+- `bash scripts/check-relative-path-defaults.sh` → OK, exit 0, at HEAD
+  with the entry deleted (log: `task165-repair2-relpath.log`).
+- `bash scripts/check-fabricated-scope-defaults.sh` → OK, exit 0, at
+  the same HEAD (log: `task165-repair2-fabscope.log`) — confirming the
+  sibling gate from the prior round still passes after the base merge.
+- Remaining 3 exemption entries hand-verified live at their anchored
+  lines (see above).
+- Prior-round suites (implementation unchanged — no Rust file touched
+  this round): gyre-domain `stack` 9, gyre-server `api::stack_attest`
+  14, git_http task-165 push tests 7
   (push_below_min_attestation_level_blocked,
   push_below_min_level_warn_mode_flagged_and_accepted,
   push_meeting_min_level_accepted_and_level_stored,
