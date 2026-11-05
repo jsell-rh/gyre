@@ -149,7 +149,11 @@ pub fn resolve_call_edges(
             source_id: from.id.clone(),
             target_id: to.id.clone(),
             edge_type: EdgeType::Calls,
-            metadata: None,
+            // Provenance tag (lsp-call-graph.md §7): distinguishes Pass 2
+            // (semantic, type-checker) `Calls` edges from Pass 1 (syntax)
+            // ones so `graph_summary` can report per-pass counts. Both passes
+            // emit the same `EdgeType::Calls` variant — only provenance differs.
+            metadata: Some(gyre_common::call_graph::PASS2_EDGE_METADATA.to_string()),
             first_seen_at: now,
             last_seen_at: now,
             deleted_at: None,

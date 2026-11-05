@@ -17,6 +17,10 @@ pub struct Metrics {
     pub active_agents: Gauge,
     /// Number of entries currently in the merge queue.
     pub merge_queue_depth: Gauge,
+    /// Pass 2 (semantic call graph) extraction duration in seconds, labelled
+    /// by language (specs/system/lsp-call-graph.md §9 performance targets:
+    /// go ~2–5s, rust ~20s, python ~30s, typescript ~30s).
+    pub graph_pass2_duration_seconds: HistogramVec,
 }
 
 impl Metrics {
@@ -51,12 +55,23 @@ impl Metrics {
         )?;
         registry.register(Box::new(merge_queue_depth.clone()))?;
 
+        let graph_pass2_duration_seconds = HistogramVec::new(
+            prometheus::HistogramOpts::new(
+                "gyre_graph_pass2_duration_seconds",
+                "Pass 2 (semantic) call graph extraction duration in seconds, by language",
+            )
+            .buckets(vec![0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0]),
+            &["language"],
+        )?;
+        registry.register(Box::new(graph_pass2_duration_seconds.clone()))?;
+
         Ok(Self {
             registry,
             http_requests_total,
             http_request_duration_seconds,
             active_agents,
             merge_queue_depth,
+            graph_pass2_duration_seconds,
         })
     }
 
@@ -65,6 +80,14 @@ impl Metrics {
         let encoder = prometheus::TextEncoder::new();
         let families = self.registry.gather();
         encoder.encode_to_string(&families).unwrap_or_default()
+    }
+
+    /// Observe a Pass 2 (semantic call graph) extraction duration for a
+    /// language (specs/system/lsp-call-graph.md §9).
+    pub fn observe_pass2_duration(&self, language: &str, seconds: f64) {
+        self.graph_pass2_duration_seconds
+            .with_label_values(&[language])
+            .observe(seconds);
     }
 }
 

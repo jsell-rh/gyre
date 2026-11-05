@@ -2580,13 +2580,41 @@ async fn run_explorer_agent(
             .iter()
             .map(|(k, v)| format!("{}: {}", k, v))
             .collect();
+        // lsp-call-graph.md §8 (LLM Integration): tell the agent whether the
+        // call graph is complete so it knows when blast-radius, coupling, and
+        // dead-code questions can be answered confidently from `calls` edges.
+        let call_graph_complete = crate::graph_extraction::call_graph_complete_for_repo(
+            state.kv_store.as_ref(),
+            &gyre_common::Id::new(repo_id),
+            nodes,
+        )
+        .await;
+        let pass2_call_edges = edges
+            .iter()
+            .filter(|e| gyre_common::call_graph::is_pass2_calls_edge(e))
+            .count();
+        let call_graph_note = if call_graph_complete {
+            format!(
+                "Call graph: COMPLETE — Pass 2 (semantic) extraction has finished, {pass2_call_edges} \
+                 resolved call edges. You can confidently answer blast-radius (\"what breaks if I \
+                 change X?\"), coupling (incoming/outgoing calls per module), and dead-code \
+                 (zero incoming calls, excluding RoutesTo entry points) questions from `calls` edges."
+            )
+        } else {
+            "Call graph: INCOMPLETE — Pass 2 (semantic) extraction has not completed for the \
+             current graph; `calls` edges are partial (syntax-only). Blast-radius and coupling \
+             answers may underreport: qualify them accordingly and prefer structural edges \
+             (implements, contains, governed_by) where possible."
+                .to_string()
+        };
         system_prompt.push_str(&format!(
-            "\n\n## Current Repository Context\nRepo ID: {}\nGraph: {} nodes, {} edges\nNode types: {}\nEdge types: {}",
+            "\n\n## Current Repository Context\nRepo ID: {}\nGraph: {} nodes, {} edges\nNode types: {}\nEdge types: {}\n{}",
             repo_id,
             nodes.len(),
             edges.len(),
             type_str.join(", "),
             edge_str.join(", "),
+            call_graph_note,
         ));
     }
     let tools = explorer_tool_definitions();
@@ -3228,23 +3256,43 @@ async fn execute_tool(
     nodes: &[gyre_common::graph::GraphNode],
     edges: &[gyre_common::graph::GraphEdge],
     selected_node_id: Option<&str>,
-    _state: &AppState,
+    state: &AppState,
 ) -> String {
     match tool_call.name.as_str() {
         "graph_summary" => {
-            let summary =
-                gyre_domain::view_query_resolver::compute_graph_summary(repo_id, nodes, edges);
+            // lsp-call-graph.md §8: completeness comes from the durable Pass 2
+            // marker so the agent knows whether call data is trustworthy.
+            let call_graph_complete = crate::graph_extraction::call_graph_complete_for_repo(
+                state.kv_store.as_ref(),
+                &gyre_common::Id::new(repo_id),
+                nodes,
+            )
+            .await;
+            let summary = gyre_domain::view_query_resolver::compute_graph_summary(
+                repo_id,
+                nodes,
+                edges,
+                call_graph_complete,
+            );
             serde_json::to_string_pretty(&summary).unwrap_or_else(|e| format!("Error: {e}"))
         }
         "graph_query_dryrun" => {
             let query_value = tool_call.input.get("query").cloned().unwrap_or_default();
             match serde_json::from_value::<gyre_common::view_query::ViewQuery>(query_value) {
                 Ok(query) => {
-                    let result = gyre_domain::view_query_resolver::dry_run(
+                    let call_graph_complete =
+                        crate::graph_extraction::call_graph_complete_for_repo(
+                            state.kv_store.as_ref(),
+                            &gyre_common::Id::new(repo_id),
+                            nodes,
+                        )
+                        .await;
+                    let result = gyre_domain::view_query_resolver::dry_run_with_call_graph(
                         &query,
                         nodes,
                         edges,
                         selected_node_id,
+                        Some(call_graph_complete),
                     );
                     serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {e}"))
                 }
@@ -3484,8 +3532,8 @@ User messages may include a <canvas_state> JSON block showing what's currently s
 - In practice, both resolve to the same node ID at query time. The difference is intent: $clicked implies the query should be re-evaluated on future clicks.
 
 ## Available Tools
-- graph_summary: Returns a condensed summary of the repo's knowledge graph including node/edge counts, top types, top functions, modules, test/spec coverage, and risk indicators.
-- graph_query_dryrun: Dry-run a view query against the knowledge graph. Returns matched node count, names, and warnings. Always validate queries before sending.
+- graph_summary: Returns a condensed summary of the repo's knowledge graph including node/edge counts, top types, top functions, modules, test/spec coverage, risk indicators, and call_graph metrics (call_edges_pass1, call_edges_pass2, call_graph_complete — whether semantic call extraction has completed).
+- graph_query_dryrun: Dry-run a view query against the knowledge graph. Returns matched node count, names, and warnings. Warns "Call graph incomplete — blast radius may be underreported" when the query traverses calls edges before semantic extraction completes. Always validate queries before sending.
 - graph_nodes: Query graph nodes by ID, name pattern, or node type. Returns up to 50 nodes with details.
 - graph_edges: Query graph edges by source/target node ID or edge type. Returns up to 100 edges.
 - node_provenance: Returns creation and modification history for a specific node, including commit SHAs, authors, and timestamps. Use this to answer questions about who created/modified code and when.
@@ -3507,6 +3555,7 @@ User messages may include a <canvas_state> JSON block showing what's currently s
 - Never invent node names — always verify via graph_nodes or search first
 - When explaining structure, cite the specific edge types connecting nodes
 - If you're unsure whether a node exists, search for it before referencing it
+- Check graph_summary's call_graph.call_graph_complete (and the Call graph note in the repo context) before answering call-dependent questions: blast radius ("what breaks if I change X?" — follow implements to implementors, then calls to all callers, then governed_by to affected specs), coupling (incoming/outgoing calls per module), and dead code (functions with zero incoming calls, excluding RoutesTo entry points). When the call graph is incomplete, qualify blast-radius/coupling answers as partial.
 - For provenance questions (who created/modified what, when), use node_provenance to get creation and modification history
 
 ## View Query Grammar
@@ -3731,6 +3780,26 @@ This shows all callers of TaskPort."#;
         assert!(prompt.contains("Scope"), "missing Scope");
         assert!(prompt.contains("Emphasis"), "missing Emphasis");
         assert!(prompt.contains("ALWAYS dry-run"), "missing ALWAYS dry-run");
+    }
+
+    /// task-076 (lsp-call-graph.md §8): the explorer system prompt must
+    /// reference call graph availability so the agent knows when
+    /// blast-radius / coupling / dead-code questions are answerable.
+    #[test]
+    fn test_system_prompt_references_call_graph_availability() {
+        let prompt = build_system_prompt();
+        assert!(
+            prompt.contains("call_graph_complete"),
+            "prompt must point at graph_summary's call_graph.call_graph_complete field"
+        );
+        assert!(
+            prompt.contains("blast radius"),
+            "prompt must explain blast-radius use of the call graph"
+        );
+        assert!(
+            prompt.contains("Call graph incomplete"),
+            "prompt must document the dry-run incompleteness warning"
+        );
     }
 
     #[test]
