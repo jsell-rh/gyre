@@ -13,7 +13,7 @@ coverage_sections:
   - "explorer-implementation.md §16 Frontend Components"
   - "explorer-implementation.md §17 ExplorerCanvas (Svelte)"
   - "explorer-implementation.md §25 Phase 1: Canvas + Filters"
-commits: ["3ad887b9849093fdcfc9e3708b1b407c43e03f8c", "b5fd081f626e0f47b06d6b520c9b2049fb54047a", "d4bbe5769a504cb177aa8bf5f7aae0dd0b4ed22f", "db9f944bd9631a742f93a0512e87f4eb450931dd", "240aab15ab9b5b67a013a204be74b2864dc68000", "3fb05db28561b78c30f12bbc9e8450fe79a9f89d", "6110fe43dbbf19aee4ef9dbf5cab751d89007e90", "58dddc244728efcb163cf07c3f0109a6937d93fc", "d82a5a560e2d6e9b1420da503951b75a97763a16"]
+commits: ["3ad887b9849093fdcfc9e3708b1b407c43e03f8c", "b5fd081f626e0f47b06d6b520c9b2049fb54047a", "d4bbe5769a504cb177aa8bf5f7aae0dd0b4ed22f", "db9f944bd9631a742f93a0512e87f4eb450931dd", "240aab15ab9b5b67a013a204be74b2864dc68000", "3fb05db28561b78c30f12bbc9e8450fe79a9f89d", "6110fe43dbbf19aee4ef9dbf5cab751d89007e90", "58dddc244728efcb163cf07c3f0109a6937d93fc", "d82a5a560e2d6e9b1420da503951b75a97763a16", "bcfe713b9ecdafc64e5938090b8d2e413bcfb272"]
 ---
 
 ## Spec Excerpt
@@ -145,62 +145,74 @@ Key question: Does the current ExplorerView still have separate Graph/Flow tabs,
   forced-font stylesheet so sandbox and CI rasterize identical glyph
   outlines; 15 explorer-visual.spec.js baselines.
 
-### Rebase-repair round (2026-11-05, upstream d81b0fe4 — current head)
+### Merge-repair round (main 2115ae23 — current head bcfe713b)
 
-Merged upstream task-092 (HSI Conflict Prevention) + task-063 (View
-Query Grammar) lineage into the branch (merge commit 9502ab9f).
-Conflict resolutions:
+Merged current main (2115ae23 — task-064 View Query Grammar §10
+Interaction Context + fix/verifier-script-overlay) into the published
+candidate 968d4005 (merge commit bcfe713b). Conflict resolutions:
 
-1. **web/dist** (rename/rename on `elk.bundled-*.js`, both-modified
+1. **ExplorerCanvas.svelte** (single conflict block, the import list):
+   resolved as the union of both sides — ours' canvas-filters.js imports
+   (`collectEdgeParticipants`, `nodeFilterOpacity`: the unit-tested F1
+   filter dimming) plus main's `ZoomInteractionTracker` from the new
+   canvas-state.js. Main's §10 zoom-interaction tracking (arm/disarm
+   camera-control wiring across drill/breadcrumb/query-fit/auto-fit,
+   `trackZoomChange()` in the animation loop) is adopted wholesale
+   alongside our filter implementation. Main's unused `NodeBadge` import
+   stays dropped with our deleted duplicate component (verified zero
+   `<NodeBadge` usages in main's version).
+
+2. **web/dist** (rename/rename on `elk.bundled-*.js`, both-modified
    `index.html`): resolved by rebuilding dist from the merged sources
-   (vite build) — the same method as the prior task-180 merge round;
-   dist is generated output and the conflicted index.html referenced
-   divergent bundle hashes from both sides.
+   (vite build) — the same method as every prior merge round; dist is
+   generated output and the conflicted index.html referenced divergent
+   bundle hashes. New bundles: index-DtVmBKEH.js /
+   elk.bundled-BeoNa-iK.js; CSS hash unchanged (index-GeLbLKhg.css).
 
-2. **`view-query-container-linux.png`** (binary, both-modified): neither
-   side's pin matches the merged tree — ours (3ad887b9) has the
-   forced-font environment but not task-063's canvas changes; theirs
-   (32291080) has task-063's rendering but was pinned in a different
-   font environment. Re-pinned to the merged tree's actual rendering
-   under the committed forced-font environment: the merged scope-`all`
-   client-side resolution (upstream task-063; `VIEW_QUERY_WITH_ANNOTATIONS`
-   uses `scope: {type: 'all'}` + `highlight.matched.label` + `zoom: 'fit'`)
-   deterministically changes the canvas region — pixelmatch 2865 px
-   (1.05%, under the 2% threshold but real and settled; verified
-   byte-identical at +1s/+3s/+6s captures, so not animation).
-   `view-query-annotated-linux.png` re-pinned for the same reason (same
-   fixture, same change); both re-pins verified pixel-exact against the
-   merged rendering at a 0.0001 threshold. The other 13 baselines are
-   byte-identical under the merged tree.
+Retained from our side (auto-merge verified in the merged tree):
+`$bindable` filter/lens props, FILTER_PRESETS toolbar,
+nodeFilterOpacity/edgePassesFilter delegation to canvas-filters.js,
+structural-lens ghost-animation gating. Adopted from main alongside the
+zoom tracker: canvas-state.js wire format (`toWireCanvasState` in
+ExplorerChat), ExplorerView §10 interaction records (structured
+`{action, detail}` entries, `active_query` in canvas state, `onLoadView`
+interaction, zoom_level/visible_tree_groups owned by reactive sync
+effects instead of stale syncCanvasState snapshots).
 
-### Test evidence (rebase-repair round, sandbox, at merge head 9502ab9f)
+### Test evidence (merge-repair round, sandbox, at merge head bcfe713b)
 
 - `cd web && npm ci` → locked versions; `npm run build` → dist rebuilt
-  cleanly from merged sources (index-BTVoRmpO.js / elk.bundled-B1BOOF3L.js).
-- explorer-visual.spec.js: **15 passed** (clean compare against the
-  re-pinned baselines), via a static bootstrap server on :2222 + the
-  spec's route interception; chromium launched with `--no-zygote`
-  (this sandbox forbids chromium zygote forks — rendering unaffected).
-- `cd web && npm test`: **62 files, 1602 passed | 41 skipped, 0 failed**
-  (grew from 1581: the merge adopts upstream task-063/task-092 suites).
+  cleanly from merged sources.
+- `cd web && npm test`: **63 files, 1623 passed | 41 skipped, 0 failed**
+  (grew from 62/1602: the merge adopts main's canvas-state.test.js).
+- explorer-visual.spec.js: **15 passed** via the sandbox Playwright
+  config (chromium `--no-zygote`, static bootstrap server on :2222 + the
+  spec's route interception) — every baseline compares clean against the
+  merged tree, no re-pinning needed (main's task-064 canvas changes are
+  non-visual: interaction tracking only).
 - `scripts/check-task-commit-attribution.sh` and
   `scripts/check-sandbox-sweep-artifacts.sh`: OK at the merge head.
-- Evidence: /tmp/stage/review-evidence/task-065-rebase-repair.txt.
+- Evidence: /tmp/stage/review-evidence/task-065-merge-repair.txt.
 
 ### Verification notes for the reviewer
 
+- Rust-side merge content (gyre-common view_query.rs, gyre-server
+  explorer_views/saved_views/explorer_ws, gyre-domain
+  view_query_composition.rs) is pure upstream code from main; our
+  candidate made zero crates/ changes relative to the merge base
+  (701cb1ad), so the textual auto-merge carries no semantic-merge risk
+  from our side. Exact-head gates remain owned by GitHub CI.
 - app.spec.js requires the real release gyre-server — owned by exact-head
-  GitHub CI (e2e.yml), not runnable in this sandbox. The Rust-side merge
-  content (gyre-server lib.rs/ws.rs presence features) is pure upstream
-  code that auto-merged without conflict and was verified on main.
+  GitHub CI (e2e.yml), not runnable in this sandbox.
 - Glyphs outside the forced fonts' latin subsets (canvas arrow/check
   badges, 🔒) still resolve through system fallback; they matched across
-  environments in every baseline generation to date and sit well under the
-  2% budget.
-- Prior rounds' durable findings remain addressed in the lineage: font-truth
-  visual repair (b5fd081f), font-route fix (3ad887b9), whitespace-gate
-  exemption for generated dist (d14fa446), F1 filter-dimming repair with
-  mutation-proof evidence (6110fe43), task-180 merge resolution (2f215b1e),
-  rebase repair of upstream e608ac78 (3c22aeaf).
+  environments in every baseline generation to date and sit well under
+  the 2% budget.
+- Prior rounds' durable findings remain addressed in the lineage:
+  font-truth visual repair (b5fd081f), font-route fix (3ad887b9),
+  whitespace-gate exemption for generated dist (d14fa446), F1
+  filter-dimming repair with mutation-proof evidence (6110fe43),
+  task-180 merge resolution (2f215b1e), task-063/task-092 rebase repair
+  with re-pinned view-query baselines (9502ab9f lineage).
 
-Progress: ready-for-review at head 9502ab9f.
+Progress: ready-for-review at head bcfe713b.
