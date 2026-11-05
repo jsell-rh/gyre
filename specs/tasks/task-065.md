@@ -2,7 +2,7 @@
 title: "ExplorerCanvas — Unified Canvas with Semantic Zoom Treemap"
 spec_ref: "explorer-canvas.md §1–3, §8; explorer-implementation.md §1–2, §17, §25"
 depends_on: [task-062, task-212]
-progress: complete
+progress: ready-for-review
 coverage_sections:
   - "explorer-canvas.md §1 Problem"
   - "explorer-canvas.md §2 Design"
@@ -13,7 +13,7 @@ coverage_sections:
   - "explorer-implementation.md §16 Frontend Components"
   - "explorer-implementation.md §17 ExplorerCanvas (Svelte)"
   - "explorer-implementation.md §25 Phase 1: Canvas + Filters"
-commits: ["b5fd081f626e0f47b06d6b520c9b2049fb54047a", "d4bbe5769a504cb177aa8bf5f7aae0dd0b4ed22f", "db9f944bd9631a742f93a0512e87f4eb450931dd", "240aab15ab9b5b67a013a204be74b2864dc68000", "3fb05db28561b78c30f12bbc9e8450fe79a9f89d", "6110fe43dbbf19aee4ef9dbf5cab751d89007e90", "58dddc244728efcb163cf07c3f0109a6937d93fc", "d82a5a560e2d6e9b1420da503951b75a97763a16"]
+commits: ["b5fd081f626e0f47b06d6b520c9b2049fb54047a", "d4bbe5769a504cb177aa8bf5f7aae0dd0b4ed22f", "db9f944bd9631a742f93a0512e87f4eb450931dd", "240aab15ab9b5b67a013a204be74b2864dc68000", "3fb05db28561b78c30f12bbc9e8450fe79a9f89d", "6110fe43dbbf19aee4ef9dbf5cab751d89007e90", "58dddc244728efcb163cf07c3f0109a6937d93fc", "d82a5a560e2d6e9b1420da503951b75a97763a16", "3ad887b9849093fdcfc9e3708b1b407c43e03f8c"]
 ---
 
 ## Spec Excerpt
@@ -131,8 +131,7 @@ Key question: Does the current ExplorerView still have separate Graph/Flow tabs,
 - **Semantic zoom treemap**: path-tree hierarchy, LOD rules per zoom band,
   double-click drill-down via Contains edges with breadcrumb update and
   eased camera transition; workspace-scope `onScopeDrill` on repo_id leaves
-  without Contains children (adopted from upstream task-173 in the rebase
-  repair below).
+  without Contains children (adopted from upstream task-173).
 - **View query rendering**: scope resolution (focus/filter/concept/
   test_gaps/diff/all + $clicked/$selected), emphasis (highlight, dim,
   tiered_colors, heat, badges), groups as labeled dashed clusters, callouts
@@ -146,63 +145,63 @@ Key question: Does the current ExplorerView still have separate Graph/Flow tabs,
   forced-font stylesheet so sandbox and CI rasterize identical glyph
   outlines; 15 explorer-visual.spec.js baselines.
 
-### Rebase-repair round (2026-10-10, finding acdb29ed) — current head
+### CI-repair round (2026-11-05, run 41905243500 at head 47f40c00) — current head
 
-Resolved the merge of upstream base e608ac78 (task-173/task-207 lineage)
-into candidate 8af68f80 (merge commit 3c22aeaf, merge-base db37fd02):
+Two repairs landed on top of the previously approved lineage:
 
-- **ExplorerCanvas.test.js**: both sides appended different describe blocks
-  at EOF — kept both (ours: task-065 F1 filter-dimming draw-path tests;
-  theirs: upstream task-173 scope drill-down tests). Upstream's
-  ghost-overlay rAF-suspension hunk auto-merged.
-- **ExplorerCanvas-performance.test.js**: took the candidate side for all
-  three conflict blocks — the CPU-time timing guard (upstream's side still
-  referenced the pre-refactor `elapsed` variable, undefined in the merged
-  context) and the single text-width-cache test at the candidate's
-  position; upstream's `, 30000` timeout additions outside the conflicts
-  are preserved.
-- **MoldableView.svelte** (deleted by us / modified by them): resolved
-  deleted — this branch's reviewed cutover removed it and nothing in app
-  code imports it even on upstream. Upstream's MoldableViewListView.test.js
-  (renders the deleted component) removed with it; the registry-driven tab
-  refactor of that dead component does not apply to this branch's surface.
-- **layoutRegistry.js** (upstream-new): repaired its import of the deleted
-  FlowRenderer — the 'flow' ViewSpec layout now maps to ExplorerCanvas (the
-  unified canvas renders flow/trace data via its evaluative lens). The
-  registry mechanism and view-spec.test.js extensibility coverage are
-  preserved unchanged.
-- **web/dist** (rename/rename elk bundle + index.html): rebuilt from the
-  merged sources (vite build); the d14fa446 `.gitattributes`
-  `web/dist/** -whitespace` covers regenerated bundles for the whitespace
-  gate.
+1. **Merge resolution (2f215b1e, upstream task-180 Executable Spec
+   Assertions)**: `web/src/locales/en.json` both-modified conflicts resolved
+   as unions (ours' meta-specs edit keys are a superset; upstream's
+   spec-editor preview/impact keys adopted alongside our unique
+   `architecture_preview`); `web/dist` conflicts resolved by rebuilding from
+   the merged sources (vite build) — the conflicted index.html had left
+   conflict markers that booted two bundles.
 
-### Test evidence (rebase-repair round, sandbox, at merge head 3c22aeaf)
+2. **Font-route repair (the toolbar-default CI failure)**: the failing
+   comparison was 1858 px (3.0% > 2%) — pixel forensics on the staged CI
+   artifacts showed toolbar line 2 uniformly shifted 15px, fully accounted
+   for by the two mono-font elements (zoom pill 46px→52px, "34 nodes"
+   40px→49px). Root cause: `setupGraphIntercept` resolved the woff2 fixture
+   path as `fonts/<name>` against a `FONTS_DIR` that already ends in
+   `/fonts/` — every woff2 fixture 404'd, every @font-face errored, and the
+   forced-font environment from b5fd081f never actually engaged. Both
+   environments rendered fontconfig fallbacks; the sans fallback matched
+   between sandbox and CI, but the mono fallback did not (this sandbox's
+   default monospace advances 0.5em; CI's ubuntu-latest DejaVu Sans Mono
+   advances 0.6em — 15px across "0.50x"+"34 nodes"). Fixed the path
+   resolution so the committed @fontsource binaries load (verified live:
+   all faces `loaded`, resources 200, zoom pill 51px = true Red Hat Mono
+   advance), then regenerated all 15 explorer-visual baselines under the
+   fixed environment (14 change; blast-radius-tiered is text-free and
+   byte-identical). Chromium revision 1208 (pinned by playwright-core
+   1.58.2) is the same binary family this sandbox's chrome-headless-shell
+   and CI's `npx playwright install chromium` use.
 
-- `cd web && npm ci` → locked versions; `cd web && npm test` → **62 files,
-  1564 passed | 41 skipped, 0 failed** (suite grew from 56/1513 pre-merge:
-  the merge adopts upstream's new suites and both sides' ExplorerCanvas
-  test blocks are kept).
-- explorer-visual.spec.js against the rebuilt dist (static bootstrap server
-  on :2222, forced-font fixtures, committed baselines): **15 passed** —
-  the merged Explorer surface is pixel-identical to the baselines;
-  upstream's ExplorerView/ExplorerCanvas changes shift no pinned pixels.
-- Controller gates at the merge head: `git diff --check HEAD^1 HEAD` exit 0;
-  check-task-commit-attribution.sh OK; all 18 fast static tree-scan gates
-  (arch, abac route registry, mcp write tools, migrations, byte-slice,
-  relative-path, fail-open refs, mem port contracts, fabricated scopes,
-  lossy secrets, scope literals, inert enforcement, forwarded headers,
-  in-memory stores, unbounded http, exempt handlers, sql portability,
-  dead message kinds) pass.
-- Evidence: /tmp/stage/review-evidence/task-065-rebase-repair.txt.
+### Test evidence (CI-repair round, sandbox, at head 3ad887b9)
+
+- `cd web && npm ci` → locked versions; `npm run build` → dist rebuilt
+  cleanly from merged sources.
+- explorer-visual.spec.js (static bootstrap server on :2222 + route
+  interception): **15 passed** (regenerate), **15 passed** (clean compare),
+  **30 passed** (`--repeat-each=2`).
+- gyre-dom-probe.spec.js: **7 passed**.
+- `cd web && npm test`: **62 files, 1581 passed | 41 skipped, 0 failed**
+  (grew from 1564: the task-180 merge adopts upstream suites).
+- Evidence: /tmp/stage/review-evidence/task-065-font-route-repair.txt.
 
 ### Verification notes for the reviewer
 
 - app.spec.js (49 tests) requires the real release gyre-server — owned by
-  exact-head GitHub CI (e2e.yml), not runnable in this sandbox (python TCP
-  listener probe errno 95; node http servers bind fine on localhost:2222).
+  exact-head GitHub CI (e2e.yml), not runnable in this sandbox (TCP
+  listener probes unsupported for python; node http servers bind fine on
+  localhost:2222 — chromium reaches them, node-loopback fetch does not).
+- Glyphs outside the forced fonts' latin subsets (canvas arrow/check
+  badges, 🔒) still resolve through system fallback; they matched across
+  environments in every baseline generation to date and sit well under the
+  2% budget.
 - Prior rounds' durable findings remain addressed in the lineage: font-truth
   visual repair (b5fd081f), whitespace-gate exemption for generated dist
   (d14fa446), F1 filter-dimming repair with mutation-proof evidence
-  (6110fe43).
+  (6110fe43), rebase repair of upstream e608ac78 (3c22aeaf).
 
-Progress: ready-for-review at merge head 3c22aeaf.
+Progress: ready-for-review at head 3ad887b9.
