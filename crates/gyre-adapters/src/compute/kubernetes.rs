@@ -27,6 +27,10 @@ pub struct KubernetesTarget {
     pub image_pull_policy: Option<String>,
     /// Kubernetes context override (kubectl --context). `None` = current.
     pub context: Option<String>,
+    /// Explicit kubectl binary path. `None` = `kubectl` from PATH.
+    /// Lets a deployment pin a cluster-specific CLI (e.g. OpenShift `oc`,
+    /// a version-pinned kubectl) instead of relying on PATH resolution.
+    pub kubectl_path: Option<String>,
 }
 
 impl KubernetesTarget {
@@ -39,6 +43,7 @@ impl KubernetesTarget {
             cpu_limit: None,
             image_pull_policy: None,
             context: None,
+            kubectl_path: None,
         }
     }
 
@@ -72,9 +77,15 @@ impl KubernetesTarget {
         self
     }
 
+    /// Use an explicit kubectl binary instead of `kubectl` from PATH.
+    pub fn with_kubectl_path(mut self, path: impl Into<String>) -> Self {
+        self.kubectl_path = Some(path.into());
+        self
+    }
+
     /// Prefix every kubectl invocation with context/namespace flags.
     fn kubectl(&self) -> Command {
-        let mut cmd = Command::new("kubectl");
+        let mut cmd = Command::new(self.kubectl_path.as_deref().unwrap_or("kubectl"));
         if let Some(ctx) = &self.context {
             cmd.arg("--context").arg(ctx);
         }
@@ -104,21 +115,15 @@ impl KubernetesTarget {
             .with_context(|| format!("kubectl get pod {pod} (imageID) failed"))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!(
-                "kubectl get pod {pod} imageID failed: {}",
-                stderr
-            ));
+            return Err(anyhow!("kubectl get pod {pod} imageID failed: {}", stderr));
         }
         let digest = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if digest.is_empty() {
-            return Err(anyhow!(
-                "pod {pod} has no imageID yet (not scheduled)"
-            ));
+            return Err(anyhow!("pod {pod} has no imageID yet (not scheduled)"));
         }
         Ok(digest)
     }
 }
-
 
 /// Build the Pod manifest passed to `kubectl apply`. Kept as a separate
 /// function so tests can assert the generated security defaults.
@@ -133,10 +138,7 @@ fn build_pod_manifest(target: &KubernetesTarget, config: &SpawnConfig) -> serde_
     // field; it is enforced via the pod-level `pids` cgroup limit which
     // kubelet derives from --pod-max-pids / container runtime defaults —
     // the memory limit is what we can set per-Pod here.
-    let memory = target
-        .memory_limit
-        .as_deref()
-        .unwrap_or("2Gi");
+    let memory = target.memory_limit.as_deref().unwrap_or("2Gi");
     let cpu = target.cpu_limit.as_deref().unwrap_or("2");
 
     let mut container = serde_json::json!({
@@ -252,8 +254,7 @@ impl ComputeTarget for KubernetesTarget {
 
         // Apply via stdin: `kubectl apply -f -`. Args are separate argv
         // entries — no shell interpolation of user-controlled strings.
-        let manifest_str =
-            serde_json::to_string(&manifest).context("serializing Pod manifest")?;
+        let manifest_str = serde_json::to_string(&manifest).context("serializing Pod manifest")?;
         let mut cmd = self.kubectl();
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
@@ -269,10 +270,7 @@ impl ComputeTarget for KubernetesTarget {
                 .write_all(manifest_str.as_bytes())
                 .await
                 .context("writing Pod manifest to kubectl stdin")?;
-            stdin
-                .shutdown()
-                .await
-                .context("closing kubectl stdin")?;
+            stdin.shutdown().await.context("closing kubectl stdin")?;
         }
         let output = child
             .wait_with_output()
@@ -387,6 +385,9 @@ pub fn kubernetes_target_from_config(config: &serde_json::Value) -> KubernetesTa
     if let Some(c) = config.get("context").and_then(|v| v.as_str()) {
         t = t.with_context(c);
     }
+    if let Some(p) = config.get("kubectl_path").and_then(|v| v.as_str()) {
+        t = t.with_kubectl_path(p);
+    }
     t
 }
 
@@ -449,13 +450,21 @@ mod tests {
             .with_cpu_limit("4");
         let m = build_pod_manifest(&t, &spawn_config("agent-2"));
         assert_eq!(m["spec"]["serviceAccountName"], "gyre-agent");
-        assert_eq!(m["spec"]["containers"][0]["resources"]["limits"]["memory"], "4Gi");
-        assert_eq!(m["spec"]["containers"][0]["resources"]["limits"]["cpu"], "4");
+        assert_eq!(
+            m["spec"]["containers"][0]["resources"]["limits"]["memory"],
+            "4Gi"
+        );
+        assert_eq!(
+            m["spec"]["containers"][0]["resources"]["limits"]["cpu"],
+            "4"
+        );
         // serviceAccountName must NOT appear at the container level —
         // strict server-side validation rejects unknown container fields,
         // which would fail the whole apply.
         assert!(
-            m["spec"]["containers"][0].get("serviceAccountName").is_none(),
+            m["spec"]["containers"][0]
+                .get("serviceAccountName")
+                .is_none(),
             "serviceAccountName leaked into container spec"
         );
     }
@@ -483,7 +492,8 @@ mod tests {
             "service_account": "agent-sa",
             "memory_limit": "1Gi",
             "cpu_limit": "1",
-            "context": "prod"
+            "context": "prod",
+            "kubectl_path": "/opt/bin/kubectl"
         });
         let t = kubernetes_target_from_config(&cfg);
         assert_eq!(t.image, "reg.example/gyre-agent@sha256:abc");
@@ -492,6 +502,7 @@ mod tests {
         assert_eq!(t.memory_limit.as_deref(), Some("1Gi"));
         assert_eq!(t.cpu_limit.as_deref(), Some("1"));
         assert_eq!(t.context.as_deref(), Some("prod"));
+        assert_eq!(t.kubectl_path.as_deref(), Some("/opt/bin/kubectl"));
     }
 
     #[test]
@@ -500,6 +511,53 @@ mod tests {
         assert_eq!(t.image, "gyre-agent:latest");
         assert!(t.namespace.is_none());
         assert!(t.memory_limit.is_none());
+        assert!(
+            t.kubectl_path.is_none(),
+            "no config kubectl_path must fall back to kubectl from PATH"
+        );
+    }
+
+    /// `kubectl_path` must drive the actual binary spawn_process invokes —
+    /// a stub kubectl that records the applied manifest proves the config
+    /// override reaches the Command invocation (and that the manifest is
+    /// really applied via stdin).
+    #[tokio::test]
+    async fn spawn_uses_configured_kubectl_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let dump = dir
+            .path()
+            .join("manifest.json")
+            .to_string_lossy()
+            .into_owned();
+        let stub = dir
+            .path()
+            .join("kubectl-stub")
+            .to_string_lossy()
+            .into_owned();
+        std::fs::write(
+            &stub,
+            format!("#!/bin/sh\nif [ \"$1\" = \"apply\" ]; then {{ cat; echo; }} > {dump}; exit 0; fi\nexit 1\n"),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let t = kubernetes_target_from_config(&serde_json::json!({
+            "kubectl_path": stub
+        }));
+        let handle = gyre_ports::ComputeTarget::spawn_process(&t, &spawn_config("path-agent"))
+            .await
+            .expect("spawn via stub kubectl must succeed");
+        assert_eq!(handle.id, pod_name("path-agent"));
+
+        let manifest = std::fs::read_to_string(&dump).expect("stub must capture the manifest");
+        let m: serde_json::Value =
+            serde_json::from_str(manifest.trim_end()).expect("captured stdin is the Pod manifest");
+        assert_eq!(m["kind"], "Pod");
+        assert_eq!(m["metadata"]["name"], pod_name("path-agent"));
     }
 
     /// spawn_process must fail fast when kubectl is absent — proves the
@@ -519,9 +577,7 @@ mod tests {
 
     fn which_exists(bin: &str) -> bool {
         std::env::var_os("PATH")
-            .map(|paths| {
-                std::env::split_paths(&paths).any(|dir| dir.join(bin).exists())
-            })
+            .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).exists()))
             .unwrap_or(false)
     }
 }
