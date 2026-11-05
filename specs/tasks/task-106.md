@@ -6,7 +6,7 @@ progress: ready-for-review
 review: specs/reviews/task-106.md
 coverage_sections:
   - "source-control.md §4 Automatic Rebasing"
-commits: ["7b11ab828ffcdcbc2e533d1a6d6a1dd921d40f74"]
+commits: ["7b11ab828ffcdcbc2e533d1a6d6a1dd921d40f74", "676e519647de367e7e95087bab596d449b9a4ada"]
 ---
 
 ## Spec Excerpt
@@ -73,12 +73,23 @@ Read `specs/system/source-control.md` §4 for the full spec. The jj adapter is i
 ## Shipped
 
 Automatic jj rebase on target branch movement (source-control.md §4),
-including the R2 review findings F6/F7/F8. Behavior unchanged since
-round 5; round 6 verified the merge of base `110180fb` (created by the
-prior run, which died at the controller's pre-flight GitHub connectivity
-check before building it) — all task source is byte-identical to the
-round-5 verified HEAD `d25adcd1`, and the merged tree passes every
-focused probe.
+including review findings F6/F7/F8 (R2) and the R9 test-compile
+repair. Production behavior is unchanged since round 5.
+
+### R9 repair (test-target compile)
+
+The R8 review found the candidate did not compile its own test suite:
+the F9-fix test `spawn_creates_missing_branch_before_jj_workspace_add`
+drives the real `Git2OpsAdapter` through `GitOpsPort` trait methods
+(`init_bare`, `create_initial_commit`, `branch_exists`, `list_branches`),
+but the `mod tests` block in `crates/gyre-server/src/api/spawn.rs` never
+imported the trait — 4× rustc E0599, the entire gyre-server lib test
+target failed to build, so every task-106 rebase test was unrunnable at
+the candidate. Fixed by adding `use gyre_ports::GitOpsPort;` to the test
+module (test-only; no production code touched) in commit `676e5196`,
+verified at HEAD `676e5196` on top of the merged base `701cb1ad`:
+the full gyre-server lib suite now builds and passes 1279/1279,
+including the previously-uncompilable F9 test.
 
 ### Behavior
 
@@ -121,44 +132,48 @@ focused probe.
 
 ### Test evidence
 
-Round 6 (merge verification) at HEAD `e2ab1893` — merge of base
-`110180fb` unioned with the task branch; the only overlapping file was
-`gyre-server/src/lib.rs` (upstream `store!` conversions for the search /
-dependency repositories), resolved as a union with the task's `jj_ops`
-wiring. All seven task-106 source files verified byte-identical to the
-round-5 real-jj-verified HEAD `d25adcd1`. Logs + exit codes in
-`/tmp/stage/review-evidence/task-106-r6/`:
+Round 9 (compile repair) at HEAD `676e5196` — the merge commit
+`0a694867` (base `701cb1ad` unioned with the task branch; the only
+overlapping file was `gyre-server/src/lib.rs`, resolved as a union)
+plus the one-line import fix. Logs + exit codes in
+`/tmp/stage/review-evidence/task-106-r9/`:
 
-- `cargo check -p gyre-server --tests` → EXIT 0.
-- `cargo test -p gyre-server --lib merge_processor` → 57/57 EXIT 0, incl.
-  `merge_triggers_rebase_of_inflight_agents`,
+- `cargo test -p gyre-server --lib` → **1279/1279 EXIT 0** (up from
+  1254 at round 6: the merged base and the F9/F11 rounds added tests).
+  Includes all eight task-106 rebase tests
+  (`merge_triggers_rebase_of_inflight_agents`,
   `rebase_destination_is_moved_target_branch_not_default`,
   `rebase_conflict_surfaces_as_state`, `rebase_skips_dead_agents`,
   `rebase_failure_does_not_consume_backoff_window`,
   `rebase_window_hit_defers_then_replays_after_expiry`,
   `replay_failure_keeps_pending_rebase`,
-  `post_merge_gate_failure_skips_inflight_rebase`.
-- `cargo test -p gyre-server --lib spawn` → 42/42 EXIT 0, incl.
-  `spawn_absolutizes_legacy_relative_repo_path_for_jj_children`.
-- `cargo test -p gyre-server --lib` → 1254/1254 EXIT 0 (post-merge
-  sanity; same count as round 5).
-- `cargo test -p gyre-server --test search_wiring --test
-  dependency_persistence` → 2/2 EXIT 0 (upstream tests the merge
-  brought in).
-- `cargo test -p gyre-adapters jj` → 14/14 EXIT 0 in 0.02s — **guard-
-  skip**: jj-cli could not be reinstalled this round
-  (static.crates.io/index.crates.io connection refused from the sandbox),
-  so these ran without the jj binary. The round-5 real-jj evidence
-  stands for the byte-identical adapter code: 14/14 against real
-  jj 0.39.0 (built from crates.io `jj-cli --locked` in that round),
-  incl. `jj_rebase_clean_after_target_moves`,
+  `post_merge_gate_failure_skips_inflight_rebase`) and the F9 test
+  `spawn_creates_missing_branch_before_jj_workspace_add`, which now
+  compiles AND passes against the real `Git2OpsAdapter`.
+- `cargo test -p gyre-adapters jj` → 15/15 EXIT 0 in 0.02s — **guard-
+  skip**: jj-cli could not be installed this round (static.crates.io
+  connection refused from the sandbox; `which jj` → exit 127), so these
+  ran without the jj binary. The adapter production code is unchanged
+  from the reviewed candidate except the F11 `jj_workspace_forget`
+  idempotence fix (checkpoint `7b11ab82`); the round-5 real-jj evidence
+  (14/14 against real jj 0.39.0, built from crates.io `jj-cli --locked`)
+  stands for the rebase core — `jj_rebase_clean_after_target_moves`,
   `jj_rebase_conflict_surfaces_files`, `jj_rebase_b_moves_whole_stack`,
   `jj_resolve_list_exit_code_contract`,
   `jj_workspace_add_resolves_branch_created_after_init`,
-  `jj_workspace_add_failure_cleans_half_created_dir`; guard-skip
-  disambiguation recorded then (with jj: 2.60s; without: 0.03s).
+  `jj_workspace_add_failure_cleans_half_created_dir`. The F11 test
+  `jj_workspace_forget_absent_workspace_is_ok` is new since round 5 and
+  has so far only run guard-skipped; it needs a real-jj re-run during
+  remote verification.
+- Pre-fix state (for the before/after pair): at `0a694867` (HEAD before
+  the fix) the `mod tests` block in spawn.rs has no `GitOpsPort` import
+  while the F9 test calls the four trait methods — the R8 review log
+  documents the resulting 4× E0599 and failed build at the candidate;
+  the identical source state is inspectable at `git show 0a694867`.
 
 All builds used `SKIP_WEB_BUILD=1` (documented Rust-only path, committed
 `web/dist/`): npm registry tarball fetches are blocked from this sandbox
 (EACCES), so build.rs `npm ci` cannot run here. Recorded as transport
-restrictions for remote verification, not code defects.
+restrictions for remote verification, not code defects. The sandbox was
+also heavily I/O-contended during round 9 (load ~19 on 4 cores,
+92% iowait), which slowed compilation but did not affect results.
