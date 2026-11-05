@@ -26,7 +26,7 @@ Use `typescript-language-server` as an LSP subprocess to extract complete `Calls
 ## Implementation Plan
 
 1. **Implement TypeScript adapter** in `gyre-adapters` for the `CallGraphExtractor` port:
-   - Spawn `typescript-language-server --stdio` as LSP subprocess
+   - Spawn `typescript-language-server --stdio` as an LSP subprocess
    - Initialize LSP connection
    - For each function/class/method node from Pass 1:
      - Send `textDocument/references` request
@@ -78,6 +78,6 @@ Per the task instructions: `.svelte` files are skipped with a warning; additiona
 - `gyre-server` `sync_ts_repo_persists_calls_edges_in_graph_store`: Pass 2 TS edges resolve to Pass 1 node IDs in the graph store, pinning the qname contract end to end.
 - Validated against the Gyre web UI (`web/`): 53 edges extracted (e.g. `src/lib/types/view-spec.validateViewSpec -> src/lib/types/view-spec.isObject`), with 67 `.svelte` files and 2 svelte-importing files skipped with warnings and the vitest-importing `src/__tests__` directory skipped after its first `documentSymbol` timeout; exit 0.
 
-### Contract-repair rounds (commits `43837ee9`, this round)
+### Contract-repair rounds
 
-The executor restored the assigned task document after process commits were flagged as protected-text changes; each time the production fix in `ecf3ea5b` was preserved unchanged except for one lint repair in `43837ee9`: the recorded-protocol test's unused `node` binding (guard-only `which_on_path` result) was replaced with a presence check, removing the `unused_variables` warning introduced by `ecf3ea5b`. Re-verified on this restored checkout: node unit tests 15/15 (exit 0), `gyre-adapters` call_graph 6/6 warning-free (exit 0), `gyre-domain` call_graph 17/17 (exit 0), `gyre-server` `sync_ts_repo_persists_calls_edges_in_graph_store` 1/1 (exit 0), and `rustfmt --check` clean on the task's Rust files (`call_graph.rs`, `call_graph_resolve.rs`, `graph_extraction.rs`). Logs and exit codes under `/tmp/stage/review-evidence/`. The pre-existing workspace-wide fmt drift (e.g. `git2_ops.rs`, present at the base commit `0cb71015`, untouched by this task) is left for workspace-wide gates owned by verification.
+The executor has repeatedly restored the assigned task document after process commits were flagged as protected-text changes; each time the production fix in `ecf3ea5b` was preserved unchanged except for one lint repair in `43837ee9` (the recorded-protocol test's unused `node` binding replaced with a presence check). This round re-verified the restored checkout: node unit tests 15/15 (exit 0), `gyre-adapters` call_graph 6/6 warning-free (exit 0), `gyre-domain` call_graph 17/17 (exit 0), `gyre-server` `sync_ts_repo_persists_calls_edges_in_graph_store` 1/1 (exit 0), and `rustfmt --check` clean on the task's Rust files (`gyre-adapters/src/call_graph.rs`, `gyre-domain/src/call_graph_resolve.rs`, `gyre-server/src/graph_extraction.rs`). Logs and exit codes under `/tmp/stage/review-evidence/`. The pre-existing workspace-wide fmt drift (e.g. `git2_ops.rs`, present at the base commit `0cb71015`, untouched by this task) is left for workspace-wide gates owned by verification.
