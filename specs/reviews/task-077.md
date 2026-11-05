@@ -50,3 +50,33 @@ Test suites run: `cargo test -p gyre-server --lib api::workspaces` (12 passed), 
 ### Verdict
 
 needs-revision — F5 means the task's central deliverable (Supervised trust actually requiring human merge approval, per HSI §2 Mechanical Implementation) is not enforced end-to-end: the Deny policy is created but never consulted. F6 is the same silent-restriction-loss class R1 F1 established, surviving in an adjacent handler. F7/F8 are coverage gaps on fix-introduced branches and an explicit acceptance criterion.
+
+---
+
+## Round: R3 (starvation repair 6425cc46)
+
+**Reviewer:** Independent review
+**Date:** 2026-11-05
+**Candidate:** 231c3bf4b2f3306445fe9f46718ca8eb3a5d2323 (base 3c39ab1f)
+**Spec ref:** human-system-interface.md §2/§12/§13 (Trust Gradient merge behavior)
+
+### Prior finding verification
+
+- [-] [process-revision-complete] **F9 (durable finding 6425cc46, resolved): F5 trust hold starved the shared merge queue.** The repair moves the supervised-trust hold INTO the candidate-selection loop (merge_processor.rs Step 4c', `selection_trust_hold`): a held candidate is skipped with `continue` exactly like gates-pending / repo-paused / group-not-ready, so the processor tries the next candidate in the same cycle. Atomic groups are checked as a unit (a held member skips the whole group, matching `merge_atomic_group`'s rollback semantics). The post-selection gate and the per-member group gate remain as TOCTOU defense-in-depth via the shared `supervised_trust_hold` predicate (human-approval escape: `mr.status == Approved`). Two regression tests cover the finding's exact scenarios: `trust_hold_does_not_starve_later_autonomous_entry` (cross-workspace Guided MR merges past a Supervised hold; HSI §12) and `trust_hold_does_not_starve_later_human_approved_entry` (same-workspace human-approved MR merges past an older unapproved one; HSI §2/§13).
+
+### Probes (evidence: /tmp/stage/review-evidence/)
+
+- Clean candidate `cargo test -p gyre-server --lib merge_processor`: **58 passed, 0 failed**, including both starvation regression tests, the Supervised hold/escape/atomic-group tests, and Guided merge tests.
+- Negative probe (selection gate env-gated off, simulating the pre-repair post-selection-only hold): **both starvation tests FAIL** with the exact finding symptoms (Guided MR left Open; human-approved MR left Approved, never merged) — the tests are load-bearing, not self-confirming. Source restored and verified clean afterward.
+- All AGENTS.md invariant gates rc=0 on the candidate; every rc=1/rc=2 failure (awk/mawk host aborts, pre-existing parity/legacy findings) verified identical on base 3c39ab1f — no gate regressed.
+- `cargo fmt -p gyre-server -p gyre-domain --check` clean (workspace-wide `--all` form rejected by the review-stage cargo wrapper; deferred to verification).
+
+### Static verification
+
+Since the previously reviewed source 01d038ff, the candidate's only crate changes are merge_processor.rs (this repair) and main-merged task-199 wiring (lib.rs `store!` DependencyRepository + its persistence test — published main content). api/workspaces.rs, api/spawn.rs, gyre-domain, and migrations are byte-identical to the round that already verified F1–F8, so those suites' prior results carry over; the merge_processor suite exercises the merged-main compile surface of the same test binary.
+
+Non-blocking observation (pre-existing, not a regression): `policy_engine::evaluate` performs no tenant filtering, so a Tenant-scoped user-created Deny on merge/mr would apply cross-tenant — the same shape as the HTTP middleware's `policies.list()` + evaluate. Trust presets are Workspace-scoped and correctly filtered by scope_id in `evaluate_merge_abac`.
+
+### Verdict
+
+approved — the starvation repair is real and proven by a negative probe; F1–F8 remain resolved on unchanged code; all mechanical invariant gates pass with no candidate-owned regressions. Deferred to verification: workspace-wide suites, `cargo fmt --all`, and CI.
