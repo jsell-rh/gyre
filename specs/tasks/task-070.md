@@ -10,7 +10,7 @@ coverage_sections:
   - "explorer-implementation.md §8 Agent Configuration"
   - "explorer-implementation.md §10 Agent System Prompt"
   - "explorer-implementation.md §11 Self-Check Loop"
-commits: ["a58467b4ca6bc60ff14a4559cf95c630f6b33bf6", "a885c918cb40730343494ff750ea4b68fa6dd455", "4df679bc1f9e3a20b9d79dd29b0df58a28e20c3"]
+commits: ["a58467b4ca6bc60ff14a4559cf95c630f6b33bf6", "a885c918cb40730343494ff750ea4b68fa6dd455"]
 ---
 
 ## Spec Excerpt
