@@ -6,7 +6,7 @@ progress: not-started
 coverage_sections:
   - "search.md §API"
   - "search.md §Response Format"
-commits: ["774499be5a1b4438739e0733f2e6b333141bd803"]
+commits: ["2750325700f93b1cd1aa5c43890ebb92e84bc469", "774499be5a1b4438739e0733f2e6b333141bd803"]
 ---
 
 ## Spec Excerpt
