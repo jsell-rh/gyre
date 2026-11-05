@@ -52,3 +52,64 @@ Non-findings (checked, judged out of scope or acceptable):
 Summary: the envelope work itself is thorough and correct — all 14 fields flow end-to-end (domain → port → all three adapters → migration → API → SIEM → web) with genuine filter parity and real tests, and the migration's legacy-data fold is verified correct on real SQLite. But the migration breaks the PostgreSQL deployment path outright (F1), and the two new provenance attributes the spec added for forensic value (`source_ip`, plus workspace/repo attribution) are caller-forgeable in exactly the way the neighboring NEW-31 binding exists to prevent (F2, F3). Revision required.
 
 — Verifier, 2026-09-30
+
+## Round 4 (candidate ca40a808, base 2f215b1e)
+
+Independent review of the F1–F4 revision fixes plus the round-3 repairs. The
+envelope implementation itself (commit `defec35a`) is already in main through
+the assignment base; this round's delta is `crates/gyre-server/src/api/audit.rs`
+(F2/F4), `crates/gyre-server/src/trusted_proxy.rs` (F3, new),
+`main.rs`/`lib.rs`/`mem.rs`/`middleware.rs` wiring, migration 000054's portable
+rewrite (F1), the exemption shrinks, and the rebuilt `web/dist`.
+
+Verdict: **approved**.
+
+Independent evidence (logs under `/tmp/stage/review-evidence/`):
+
+- `cargo test -p gyre-server --lib api::audit` → 12 passed, 0 failed (includes
+  F2 cross-tenant workspace/repo Forbidden + mismatched pair Forbidden +
+  unknown-scope NotFound, F3 socket-peer source_ip with forged XFF ignored and
+  trusted-proxy XFF honored rightmost-untrusted, F4 ApiError shape).
+- `cargo test -p gyre-server --lib trusted_proxy` → 9 passed, 0 failed.
+- `cargo test -p gyre-server --lib siem::` → 7 passed, 0 failed.
+- `cargo test -p gyre-adapters --lib migration_000054` → 1 passed, 0 failed.
+- `cargo test -p gyre-domain --lib audit` → 8 passed, 0 failed.
+- Independent of the Rust harness: the real embedded up.sql/down.sql driven
+  through the sqlite3 CLI against seeded legacy rows (quote/backslash/newline/
+  tab path, pre-existing `path` key, non-object details) — fold output is
+  JSON-valid with exact merge-patch semantics; down restores the legacy shape
+  keeping `details` verbatim.
+- Mechanical checks all OK: check-forwarded-header-trust (0 exemptions),
+  check-forged-scope-fields (0 exemptions), check-migration-sql-portability
+  (1 pre-existing exemption, 000013), check-migration-versions, check-arch,
+  check-mem-port-contracts, check-abac-route-registry, check-inert-enforcement,
+  check-task-commit-attribution.
+- Round-3 repair R1 verified: `web/dist` has zero conflict markers, both
+  bundles parse under `node --check`, the import graph is closed
+  (index.html → index-9ZNGTuNm.js + index-GeLbLKhg.css; index → elk.bundled-
+  BEFJVH3L.js → back to index-9ZNGTuNm.js), `web/src` is byte-identical to
+  base, and a fresh `npm ci && npm run build` in this environment reproduces
+  the committed `web/dist` byte-for-byte (`git status --porcelain web/dist`
+  empty after rebuild).
+- Round-3 repair R2 verified: both exemption files emptied with
+  FROZEN_EXEMPTION_COUNT lowered to 0, per the shrink-only protocol.
+
+Notes (non-blocking):
+
+- PostgreSQL runtime probe is not possible in this sandbox (no postgres
+  tooling). Static evidence supports F1: the portability scan passes and the
+  rewritten SQL uses only `substr`/`length`/`replace`/`||`/`CAST` with
+  standard_conforming_strings-compatible literals. Verifier with a PG instance
+  should start the server with `GYRE_DATABASE_URL=postgres://...` and confirm
+  migration 000054 applies.
+- Legacy `path` values containing C0 control characters other than the five
+  escaped ones would fold to invalid JSON for that row, degrading to the
+  adapters' existing corrupt-JSON fallback (`{}` detail) — documented in the
+  migration comment, unreachable from in-repo writers, self-limiting to one
+  row's detail payload.
+- coverage row 4 (`observability.md §Audit Event Schema`) remains
+  `task-assigned` pending the auditor-stage reconciliation, consistent with
+  the process precedent that coverage flips come from audit commits, not
+  implementation commits.
+
+— Reviewer, round 4
