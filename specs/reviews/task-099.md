@@ -43,3 +43,18 @@ Findings:
 Summary: the happy path is genuinely good — a real 9-step REST orchestration with thoughtful resumability, a correct admin-gated user-creation endpoint with hashed keys, both fix commits legitimate and regression-tested, and 23 relevant tests green under this review. But the spec's bootstrap promise is undermined at its load-bearing points: the admin identity has no tenant (F1), the spawned orchestrator has neither its persona nor a running process (F2, F3), and the spec-registry step both skips its specced behavior (F4) and ships a starter manifest the server cannot parse (F5) — with the acceptance criterion checked regardless. Revision required.
 
 — Verifier, 2026-09-30
+
+## Round 5
+
+Candidate: `a4518c373bb558aa837f336141bfdee35038c57f` (base `d81b0fe4`) — round-4 branch merged onto the new assigned base, plus the round-5 repair of finding `80ce5b90` (commit `5d487f44`, ws.rs only) and records.
+
+Verified (evidence under `/tmp/stage/review-evidence/`, see its README.md):
+
+- **Round-5 fix is real and test-pinned.** The ws.rs ActivityEvent/ActivityQuery handlers no longer fabricate a `default-{tenant_id}` workspace id for subscription-less clients; `tenant_default_workspace()` resolves the caller's tenant's earliest-created workspace via `WorkspaceRepository::list_by_tenant`, with skip-and-log (`None`) when the tenant has none — the check-fabricated-scope-defaults pattern, correctly applied. Mutation probe: reintroducing the fabricated id makes `ws_activity_event_emits_to_telemetry` FAIL (event dropped, left: 0 / right: 1) while the new `ws_activity_event_without_tenant_workspace_skips_emission` pins the skip contract — the strengthened test kills the defect class rather than confirming the implementation. The merge-induced fixture regression (`seed_api_key_user` creating tenant-less users that fail-closed API-key auth rejects) is repaired by binding fixture users to the seeded workspace's tenant, matching production user creation.
+- **All prior durable findings fixed at this head**, verified in code and by focused suites: (1) orchestrator spawn wire has no duplicate `persona_id`/`repo_id` keys — `OrchestratorAgentResponse` declares neither, `orchestrator_response` neutralizes the flattened inner `repo_id`, and `repo_orchestrator_response_serializes_no_key_twice` scans the raw serialized string for ANY duplicated key; (2) the spec-ledger first push uses `--force` (non-FF against the server's seed commit); (3) persona resume lookup is tenant-scoped (`find_persona_by_slug_in_tenant` with mandatory `scope=tenant&scope_id`); (4) a stopped predecessor's name is released via `-superseded-N` renaming instead of 400-rejecting the re-run, while live agents still conflict; (5) `spawn_rejects_missing_persona` (404, no orphan agent row) and `spawn_rejects_unapproved_persona` (Conflict) close the round-2 negative-test gap.
+- **Test results at the candidate:** server lib 1270 passed / 0 failed; `ws::` module 74/0; `orchestrator:: + users:: + spec_registry::` 66/0; `gyre-cli` 132/0. Mechanical gates exit 0: arch, fabricated-scope-defaults, scope-literal-defaults, migration-versions, mem-port-contracts, inert-enforcement.
+- **E2e non-re-run is justified:** diff `92c383e3..a4518c37` touches only `lib.rs` and `ws.rs` (merge + round-5 fix); no bootstrap orchestration file changed since round-4's live e2e, and the changed files are covered at this head by the full lib suite plus the mutation probe.
+
+Findings: none. The round-5 record's correction of the round-4 misreport (the `ws_activity_event_emits_to_telemetry` failure was candidate-introduced, not pre-existing) is accurate — reproduced pre-fix this round per the implementation notes, and the repair is verified above.
+
+— Reviewer, round 5
