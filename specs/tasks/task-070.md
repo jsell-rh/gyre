@@ -10,7 +10,7 @@ coverage_sections:
   - "explorer-implementation.md §8 Agent Configuration"
   - "explorer-implementation.md §10 Agent System Prompt"
   - "explorer-implementation.md §11 Self-Check Loop"
-commits: ["a58467b4ca6bc60ff14a4559cf95c630f6b33bf6", "a885c918cb40730343494ff750ea4b68fa6dd455"]
+commits: ["a58467b4ca6bc60ff14a4559cf95c630f6b33bf6", "a885c918cb40730343494ff750ea4b68fa6dd455", "4df679bc1f9e3a20b9d79dd29b0df58a28e20c3"]
 ---
 
 ## Spec Excerpt
@@ -162,7 +162,7 @@ session in both paths (native: full tool-use blocks; SDK: serialized
 into a `<conversation_history>` transcript prefix because `query()`
 has no multi-turn `messages` parameter).
 
-### Defect fixed this round
+### Defect fixed (round 2)
 
 `run_sdk_subprocess_once` re-resolved `GYRE_EXPLORER_SDK_PATH` with a
 relative default (`"scripts/explorer-agent.mjs"`) that the child node
@@ -173,16 +173,37 @@ threaded through `run_explorer_agent_sdk` into the spawn, so execution
 cannot diverge from validation. Also removed the unused `state`
 parameter (fixes the build warning).
 
+### Rebase repair (round 3)
+
+Rebased onto upstream base `ba5ebe10` (task-064 view-query-grammar
+work). The merge auto-merged all Rust and web/src changes cleanly
+(verified: the a58467b4 script-path threading survived); conflicts were
+confined to committed `web/dist` build artifacts (rename/rename on the
+elk chunk, index.html bundle reference). Resolution: our branch never
+touched `web/src`, so the merged sources equal the incoming base's
+sources, and `web/dist` was taken wholesale from the incoming base's
+committed build (restoring MERGE_HEAD's elk chunk content, which the
+rename/rename conflict had left as our side's bytes under the incoming
+filename). Independently confirmed correct: a fresh `npm ci && npm run
+build` of the merged sources (run by build.rs during the test probe)
+reproduced the committed `web/dist` byte-for-byte — `git status` on
+`web/dist` is clean after the build.
+
 ### Test evidence
 
-- `cargo test -p gyre-server --lib explorer` — 55 passed (view-query
+- `cargo test -p gyre-server --lib explorer` — 58 passed at merge
+  resolution `4df679bc` (55 in the prior round; the rebase brought 3
+  more passing explorer tests from task-068/069/064 lineage): view-query
   parsing incl. malformed/unclosed/multiple-blocks/last-wins, system
-  prompt content, status protocol values, turn budgets, default views).
-- `cargo test -p gyre-server --test explorer_ws_integration` — 9
-  passed (session lifecycle, view CRUD + validation, rate/session
+  prompt content, status protocol values, turn budgets, default views.
+- `cargo test -p gyre-server --test explorer_ws_integration` — 9 passed
+  at `4df679bc` (session lifecycle, view CRUD + validation, rate/session
   limits, status progression asserting on-wire statuses are exactly
   `thinking|refining|ready` and that a view_query arrives).
-- `scripts/check-relative-path-defaults.sh` — OK after the path fix.
-- Probes run at `a58467b4` (branch
-  `pipeline/task-070/5e045ef94aba42a689e24e863180894d-2`); outputs
+- `scripts/check-relative-path-defaults.sh` — OK after the round-2
+  path fix.
+- Round-2 probes run at `a58467b4` (branch
+  `pipeline/task-070/5e045ef94aba42a689e24e863180894d-2`); round-3
+  probes run at `4df679bc` (branch
+  `pipeline/task-070/9af15799592b44b5baef95ec98dbf0d7-2`); outputs
   retained under `/tmp/stage/review-evidence/`.
