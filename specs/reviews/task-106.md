@@ -47,3 +47,26 @@ Notes (not findings):
 - `jj_squash_into_parent` flaked twice early in the review run (vim editor killed with signal 15 under harness load), then passed 6+ consecutive times standalone and batched, on both `c1c6dd9e` and `c1c6dd9e^`. Environmental, not a regression.
 
 Verdict: **needs-revision** — F1-F5 are genuinely resolved, but F6-F7 break jj provisioning in the default configuration and on every post-first new-branch spawn respectively, F8 undermines the deferral guarantee this round added, and all three fail silently.
+
+## Round 8
+
+Candidate under review: `6476bf5c` (branch `pipeline/task-106/26aec3d3fa6546999df02f5680314051-10`, base `d81b0fe4`). Rounds 3-7 records live in the pipeline attempt artifacts; this round re-reviewed the exact candidate from scratch (an interrupted round-7 attempt left only a partial cargo check log, reused for nothing).
+
+Prior-round durable findings (F9-F12) — source-level status at this candidate, all four fixes present:
+
+- F9 (new-branch jj provisioning): FIXED in source — `spawn_agent_core` now runs `git_ops.branch_exists` / `create_branch(from HEAD)` BEFORE `jj_workspace_add` (spawn.rs:555-594), non-fatally. The pinning test drives the REAL Git2OpsAdapter against a real bare repo.
+- F10 (`find_mr_by_author_branch` cross-repo MR flagging): FIXED — the helper now takes `repo_id` and filters `m.repository_id == *repo_id` (merge_processor.rs:388-403).
+- F11 (`jj_workspace_forget` idempotence contract): FIXED — on non-zero forget exit, absence is confirmed via `jj workspace list` and returns Ok (jj_ops.rs:337-372), pinned by `jj_workspace_forget_absent_workspace_is_ok`.
+- F12 (replay starvation under sustained queue load): FIXED — `replay_pending_rebases` now runs on EVERY `process_next` cycle, not only idle ones (merge_processor.rs:1491-1499).
+
+New finding:
+
+- **F13 (major): the candidate does not compile its own test suite.** The F9-fix test `spawn_creates_missing_branch_before_jj_workspace_add` (crates/gyre-server/src/api/spawn.rs:2246) calls `git.init_bare` (:2269), `git.create_initial_commit` (:2270), `git.branch_exists` (:2323), `git.list_branches` (:2328) on `Arc<Git2OpsAdapter>` — all `GitOpsPort` trait methods — but the `mod tests` block (spawn.rs:2045) lacks `use gyre_ports::GitOpsPort;`. rustc rejects with E0599 ×4 ("trait `GitOpsPort` which provides `init_bare` is implemented but not in scope"), the entire gyre-server lib test target fails to build, and the acceptance criterion `cargo test --all passes` is false at `6476bf5c`. Every gyre-server test (~1250, including all task-106 rebase tests) is unrunnable. Production code is unaffected (`cargo check -p gyre-server` → exit 0); only the test target is broken. The shipped notes' test evidence (rounds 5/6 at `d25adcd1`/`e2ab1893`) predates the F9 fix and no longer describes this tree — the F9 fix was committed without ever compiling the test that pins it. Fix: add the trait import to the test module and re-run the focused suites.
+
+Probe evidence (`/tmp/stage/review-evidence/task-106-r8/`):
+
+- `cargo-test-merge_processor.log` — `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib merge_processor` at `6476bf5c` → **EXIT 101**, E0599 ×4 (the finding above).
+- `cargo-check-server-nontest.log` — `SKIP_WEB_BUILD=1 cargo check -p gyre-server` → EXIT 0 (production code compiles; defect is test-target-only).
+- `jj-install.log` — `cargo install jj-cli --version 0.39.0 --locked` fails: `Could not connect to server (Failed to connect to index.crates.io:443)` — same sandbox transport restriction as round 6; the adapter's real-jj tests guard-skip here. Not a code defect; remote verification should run `cargo test -p gyre-adapters jj` where the jj binary exists (round-5 real-jj evidence covers the byte-identical-to-round-5 adapter code paths, though the F13 fix commit must be re-proven once compiling).
+
+Verdict: **needs-revision** — F9-F12 fixes are all present and well-shaped in source, but the candidate fails its own build for tests, so nothing (including the F9 fix itself) is verified at this exact tree.
