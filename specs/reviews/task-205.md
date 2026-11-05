@@ -150,3 +150,63 @@ exemptions. Coverage row realized-model.md §4 re-audited to `implemented`.
   `ConceptView::project`); no new crate dependencies; 16 new tests including
   integration tests that a mutation probe confirms fail under substring
   revert.
+
+---
+
+## R2 review — candidate b30d1bf78e736935bd8785f2b4a34aa447cc8fc0
+
+**Reviewer:** Independent review (fresh round)
+**Base:** 3c39ab1f796bcf52ac0b95d60a4101e27aa69fe8
+**Status:** approved
+**Evidence:** /tmp/stage/review-evidence/task205-r2-*.txt
+
+### Decisive change this round
+
+The sandbox TCP accept(2) restriction that blocked every prior round's
+`graph_integration` run is lifted (probe: "ACCEPT OK"). The previously-deferred
+integration binary was therefore executed this round for the first time:
+**37/37 pass**, including `test_graph_concept`,
+`test_workspace_graph_concept`, and `test_full_graph_concept_query_param`
+(the `?concept=` substring surface, preserved). This also confirms the repair
+round's root-cause claim: the earlier 35/35 failure was infrastructure, not
+code — same tests, working listener, all green.
+
+### Acceptance criteria re-verified
+
+- **Manifest parse / ConceptView alive:** `SpecManifest.concepts` +
+  `From<&ConceptDef>` (spec_registry.rs:63); production instantiation via
+  `resolve_concept_view` → `ConceptView::from` (api/graph.rs:697). Spec-example
+  concepts, no-concepts manifest, and repeated-key aggregation all unit-tested
+  (152 lib tests pass).
+- **Projection, not substring:** REST repo + workspace endpoints and both MCP
+  scopes flow through `ConceptView::project`; 404 / no-contribution for
+  undefined concept names. **Mutation probe (own run):** reverting
+  `matches_node` to the old substring-on-concept-name behavior makes
+  `test_graph_concept`, `test_workspace_graph_concept`, and the three lib
+  projection tests FAIL (integration mutant returns the `AuthService` decoy
+  instead of `JwtProvider`), while resolution-path tests (404/undefined/
+  unknown-repo) still pass — the guards discriminate in exactly the required
+  direction.
+- **Glob anchoring:** `glob_match_anchoring` covers `Gate*`/`LateGate`,
+  `MergeRequest`/`MergeRequestDependency`, case sensitivity.
+- **Boundaries/gates:** check-arch, check-abac-route-registry,
+  check-task-commit-attribution all pass. Exemption-file diffs are pure line
+  re-anchoring (counts unchanged, no new entries). Both concept routes remain
+  in the ABAC resolver; the `require_repo` → `find_by_id` swap in
+  `get_graph_concept` preserves existence-check semantics (the old helper did
+  no scoping; authorization is middleware ABAC).
+- **Build:** `cargo build --all` is executor-rejected (workspace-wide builds
+  reserved for verification); every crate in the gyre-server/gyre-cli
+  dependency graph compiled clean via focused probes (`-p gyre-cli` build OK;
+  test profiles for common/server). Deferred as a verifier check, recorded in
+  evidence.
+
+### Notes
+
+- Coverage row realized-model.md §4 is intentionally untouched at this
+  candidate (prior round's reviewer-edit revert); flipping it to
+  `implemented` belongs to the verifier/controller per pipeline role
+  separation, supported by this approval.
+
+**Verdict: approved** — production manifest-driven projection verified
+end-to-end with a real listener; regression guards proven by mutation.
