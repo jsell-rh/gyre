@@ -47,3 +47,60 @@ Notes (not findings):
 - `jj_squash_into_parent` flaked twice early in the review run (vim editor killed with signal 15 under harness load), then passed 6+ consecutive times standalone and batched, on both `c1c6dd9e` and `c1c6dd9e^`. Environmental, not a regression.
 
 Verdict: **needs-revision** — F1-F5 are genuinely resolved, but F6-F7 break jj provisioning in the default configuration and on every post-first new-branch spawn respectively, F8 undermines the deferral guarantee this round added, and all three fail silently.
+
+## Round 7 — independent review (candidate `7fc1c4bf`, base `110180fb`)
+
+Resumed review of the interrupted r7 (candidate re-validated from scratch; r7b
+artifacts under `/tmp/stage/review-evidence/task-106-r7b/`). The candidate is
+HEAD of `pipeline/task-106/c5077844460a4be687e0807e5a33c7c4-11`; task source
+is byte-identical to the round-5 real-jj-verified `d25adcd1` (only
+`gyre-server/src/lib.rs` differs — the documented merge-union of upstream
+`store!` wiring with the task's jj_ops wiring, no behavior change). The r6
+findings F9-F12 are therefore expected to persist and were all re-verified by
+direct code reading in the exact candidate; jj was unobtainable this round
+(jj not on PATH, crates.io connection-refused — transport restriction, not a
+code defect), so the single empirical jj link of F9 rests on the r5/r6
+real-jj 0.39.0 probes on byte-identical code.
+
+Probes: `cargo test -p gyre-server --lib merge_processor` → 57/57 EXIT 0;
+`--lib spawn` → 42/42 EXIT 0; `cargo test -p gyre-adapters jj` → 14/14 in
+0.02s (guard-skip, jj absent — r5 real-jj evidence stands for the identical
+adapter). The passing suite cannot catch F9: every merge_processor/spawn test
+injects `ConfigurableJjOps` (mem.rs:501) whose `jj_workspace_add`
+unconditionally returns Ok, and the adapter's own tests only use branches
+pushed to the bare repo before the workspace add (jj_ops.rs:858-886).
+
+Findings (F9 unchanged in substance from r6; code untouched by the merge):
+
+- **F9 (major, unresolved): new-branch spawns can never provision a jj
+  workspace, so §4's automatic rebase silently does not apply to them.**
+  `spawn_agent_core` provisions jj before anything creates the spawn branch
+  (no git_ops/write_ref/create_worktree call between fn start :339 and the jj
+  block :548-563); `jj workspace add -r <branch>` fails for a branch absent
+  from the bare repo (r5/r6 empirical: `Error: Revision 'feat/brand-new'
+  doesn't exist`); the git-worktree fallback (spawn.rs:609-616 →
+  git2_ops.rs:348-364 `git worktree add -b`) is plain git with no jj. On every
+  target-branch movement, `find_rebase_targets` (:92-140) picks the recorded
+  worktree with a bare `Path::exists()` check, `jj_rebase`'s `jj git import`
+  errors in the jj-less worktree, and `run_rebase`'s Err arm (:382-388)
+  records an audit failure only — no rebase, no `baseline_moved`. New-branch
+  spawns are the designed-for common case (entrypoint.sh:70 `git checkout -b`
+  fallback; base create_worktree created missing branches; MCP
+  `gyre_spawn_worker` takes an arbitrary branch). Fix: create or resolve a
+  base for the spawn branch in the bare repo before `jj_workspace_add`.
+- **F10 (minor, unresolved): `find_mr_by_author_branch` (:389-407) lacks a
+  `repository_id` filter** — a rebase conflict in repo A flags the same
+  agent's same-named-branch MR in repo B (`has_conflicts = Some(true)`).
+- **F11 (minor, unresolved): `jj_workspace_forget` (:337-352) violates its
+  port contract** — doc promises idempotence on absent workspace; the body is
+  an identity `match` returning Err in exactly that case (dead code + warn
+  noise on every git-fallback agent cleanup).
+- **F12 (minor, unresolved): `replay_pending_rebases` runs only on idle queue
+  cycles (:1500-1505)** — under sustained merge load (the spec's 20+-agent
+  scenario) expired deferrals are starved; marker not lost, but the
+  retry-after-expiry claim is best-effort under load.
+
+Verdict: **needs-revision** — the mechanism, contracts, and tests remain real
+and the R2 findings stay closed, but F9 still leaves the headline behavior
+(automatic rebase of in-flight agents) inapplicable to agents spawned onto
+new branches — the common case — and the test double still hides it.
