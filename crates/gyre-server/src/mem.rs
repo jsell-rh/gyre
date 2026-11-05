@@ -481,10 +481,24 @@ pub struct MemRepoRepository {
 #[async_trait]
 impl RepoRepository for MemRepoRepository {
     async fn create(&self, repo: &Repository) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(repo.id.to_string(), repo.clone());
+        let mut store = self.store.lock().await;
+        // Port contract: (workspace_id, name) is unique — the pair maps to
+        // one bare-repo path, so a duplicate row would alias another repo's
+        // storage. Guarded in code because the mem adapter has no schema to
+        // enforce SQLite's idx_repos_workspace_name unique index.
+        if let Some(existing) = store
+            .values()
+            .find(|r| r.workspace_id == repo.workspace_id && r.name == repo.name)
+        {
+            if existing.id != repo.id {
+                anyhow::bail!(
+                    "repo '{}' already exists in workspace {}",
+                    repo.name,
+                    repo.workspace_id
+                );
+            }
+        }
+        store.insert(repo.id.to_string(), repo.clone());
         Ok(())
     }
 
@@ -1530,10 +1544,23 @@ pub struct MemTenantRepository {
 #[async_trait]
 impl TenantRepository for MemTenantRepository {
     async fn create(&self, tenant: &Tenant) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(tenant.id.to_string(), tenant.clone());
+        let mut store = self.store.lock().await;
+        // Port contract: slug is unique. The mem adapter has no schema, so
+        // the SQLite `tenants.slug UNIQUE` constraint is guarded in code —
+        // without it, a bootstrap re-run against the default in-memory dev
+        // server silently created a second tenant with the same slug and
+        // the CLI's reuse-by-slug fallback never triggered (round-3
+        // finding 4b).
+        if let Some(existing) = store.values().find(|t| t.slug == tenant.slug) {
+            if existing.id != tenant.id {
+                anyhow::bail!(
+                    "tenant with slug '{}' already exists ({})",
+                    tenant.slug,
+                    existing.id
+                );
+            }
+        }
+        store.insert(tenant.id.to_string(), tenant.clone());
         Ok(())
     }
 
@@ -1606,10 +1633,22 @@ impl MemWorkspaceRepository {
 #[async_trait]
 impl WorkspaceRepository for MemWorkspaceRepository {
     async fn create(&self, workspace: &Workspace) -> Result<()> {
-        self.store
-            .lock()
-            .await
-            .insert(workspace.id.to_string(), workspace.clone());
+        let mut store = self.store.lock().await;
+        // Port contract: (tenant_id, slug) is unique — /git/:ws_slug/:repo
+        // URL resolution must stay unambiguous. Guarded in code because the
+        // mem adapter has no schema to enforce SQLite's UNIQUE constraint.
+        if let Some(existing) = store.values().find(|ws| {
+            ws.tenant_id == workspace.tenant_id && ws.slug == workspace.slug
+        }) {
+            if existing.id != workspace.id {
+                anyhow::bail!(
+                    "workspace with slug '{}' already exists in tenant {}",
+                    workspace.slug,
+                    workspace.tenant_id
+                );
+            }
+        }
+        store.insert(workspace.id.to_string(), workspace.clone());
         Ok(())
     }
 
@@ -1668,6 +1707,25 @@ impl WorkspaceRepository for MemWorkspaceRepository {
             anyhow::bail!("simulated trust transition failure");
         }
         // In-memory writes cannot partially fail, so this is inherently atomic.
+        //
+        // Port contract (same as `create`): (tenant_id, slug) is unique.
+        // This is the path POST /api/v1/workspaces takes, so the guard here
+        // is what makes a bootstrap re-run's create fail and fall back to
+        // reuse-by-name on the default in-memory dev server.
+        {
+            let store = self.store.lock().await;
+            if let Some(existing) = store.values().find(|ws| {
+                ws.tenant_id == workspace.tenant_id && ws.slug == workspace.slug
+            }) {
+                if existing.id != workspace.id {
+                    anyhow::bail!(
+                        "workspace with slug '{}' already exists in tenant {}",
+                        workspace.slug,
+                        workspace.tenant_id
+                    );
+                }
+            }
+        }
         self.store
             .lock()
             .await

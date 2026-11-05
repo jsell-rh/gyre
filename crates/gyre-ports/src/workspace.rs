@@ -5,6 +5,10 @@ use gyre_domain::{Persona, PersonaScope, Policy, Workspace};
 
 #[async_trait]
 pub trait WorkspaceRepository: Send + Sync {
+    /// Fails if a workspace with the same `id`, or the same `(tenant_id,
+    /// slug)`, already exists — the pair must stay unique for git URL
+    /// resolution (`/git/:workspace_slug/:repo_name/*` must be unambiguous;
+    /// SQLite enforces it via `UNIQUE (tenant_id, slug)`).
     async fn create(&self, workspace: &Workspace) -> Result<()>;
     async fn find_by_id(&self, id: &Id) -> Result<Option<Workspace>>;
     /// Find a workspace by slug within a specific tenant.

@@ -1949,8 +1949,14 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
     step.advance("register personas");
 
     // ── Step 5: register built-in personas (pre-approved; resume: skip existing) ──
+    // The resume lookup is scoped to THIS tenant: the unscoped persona list
+    // spans all tenants, which made a second tenant's bootstrap skip
+    // registration and die at spawn with a persona 404 (round-3 finding 3).
     for persona in bootstrap::BUILTIN_PERSONAS {
-        match client_api.find_persona_by_slug(persona.slug).await? {
+        match client_api
+            .find_persona_by_slug_in_tenant(persona.slug, &summary.tenant_id)
+            .await?
+        {
             Some(_) => {
                 println!("  Persona '{}' already registered - skipping", persona.slug);
             }
@@ -2056,11 +2062,44 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
     // ── Step 8: spawn repo orchestrator ──
     // Task-093 endpoint: repo-tier orchestrator with exactly-one-live
     // semantics, repo-scoped JWT, and restart-on-failure — no synthetic task.
-    let orchestrator_name = format!("{repo_name}-orchestrator");
-    match client_api
-        .spawn_repo_orchestrator(&summary.repo_id, Some(&orchestrator_name))
-        .await
-    {
+    //
+    // Agent names are unique server-wide. A stopped predecessor holding the
+    // default name is released server-side (orchestrator.rs), but a LIVE
+    // agent elsewhere — e.g. another tenant's bootstrap of a same-named repo
+    // — still owns it; retry with a suffix instead of failing the run.
+    let base_orchestrator_name = format!("{repo_name}-orchestrator");
+    let mut orchestrator_name = base_orchestrator_name.clone();
+    let spawn_result = loop {
+        match client_api
+            .spawn_repo_orchestrator(&summary.repo_id, Some(&orchestrator_name))
+            .await
+        {
+            Ok(client::SpawnRepoOrchestratorOutcome::NameTaken) => {
+                let attempt = orchestrator_name.rsplit('-').next().and_then(|n| n.parse::<u32>().ok());
+                let next = attempt.map(|n| n + 1).unwrap_or(2);
+                // Strip any previous numeric suffix before appending the new one.
+                let stem = match attempt {
+                    Some(_) => orchestrator_name
+                        .rsplit_once('-')
+                        .map(|(s, _)| s.to_string())
+                        .unwrap_or(base_orchestrator_name.clone()),
+                    None => orchestrator_name.clone(),
+                };
+                if next > 20 {
+                    break Err(anyhow::anyhow!(
+                        "could not find a free orchestrator name (tried up to {orchestrator_name})"
+                    ));
+                }
+                println!(
+                    "  Name '{orchestrator_name}' is taken by a live agent elsewhere - \
+                     retrying as {stem}-{next}"
+                );
+                orchestrator_name = format!("{stem}-{next}");
+            }
+            other => break other,
+        }
+    };
+    match spawn_result {
         Ok(client::SpawnRepoOrchestratorOutcome::Spawned(spawned)) => {
             summary.orchestrator_agent_id = Some(spawned.agent.id.clone());
             // F3: record the truthful process-launch outcome so the summary
@@ -2081,6 +2120,12 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
         }
         Ok(client::SpawnRepoOrchestratorOutcome::AlreadyLive) => {
             println!("  A repo orchestrator is already active for this repo - keeping it");
+        }
+        // Unreachable: the retry loop above only breaks on a non-NameTaken
+        // outcome (or an error). Kept explicit so a future refactor of the
+        // loop cannot silently drop the case.
+        Ok(client::SpawnRepoOrchestratorOutcome::NameTaken) => {
+            return Err(step.fail(anyhow::anyhow!("orchestrator name still taken")));
         }
         Err(e) => return Err(step.fail(e)),
     }

@@ -1317,12 +1317,26 @@ impl GyreClient {
         serde_json::from_str(&text).context("parsing spec sync response")
     }
 
-    /// GET /api/v1/personas - find an existing persona by slug (resume path:
-    /// bootstrap re-runs skip re-registering built-in personas).
-    pub async fn find_persona_by_slug(&self, slug: &str) -> Result<Option<PersonaResponse>> {
+    /// GET /api/v1/personas?scope=tenant&scope_id=<tenant> - find an existing
+    /// persona by slug within the bootstrap tenant (resume path: bootstrap
+    /// re-runs skip re-registering built-in personas).
+    ///
+    /// The scope filter is mandatory, not cosmetic: the unscoped endpoint
+    /// lists personas across ALL tenants, so an unscoped lookup makes the
+    /// second tenant's bootstrap skip persona registration ("already
+    /// registered") and then fail at spawn with a persona 404 (round-3
+    /// finding 3 — cross-tenant resume defect).
+    pub async fn find_persona_by_slug_in_tenant(
+        &self,
+        slug: &str,
+        tenant_id: &str,
+    ) -> Result<Option<PersonaResponse>> {
         let resp = self
             .client
-            .get(format!("{}/api/v1/personas", self.base_url))
+            .get(format!(
+                "{}/api/v1/personas?scope=tenant&scope_id={tenant_id}",
+                self.base_url
+            ))
             .header("Authorization", self.auth_header())
             .send()
             .await
@@ -1514,6 +1528,12 @@ impl GyreClient {
         if status == reqwest::StatusCode::CONFLICT {
             return Ok(SpawnRepoOrchestratorOutcome::AlreadyLive);
         }
+        if status == reqwest::StatusCode::BAD_REQUEST && text.contains("already exists") {
+            // Name collision with a LIVE agent outside this repo's scope
+            // (stopped predecessors are released server-side). The caller
+            // retries with a distinct name; not a resume blocker.
+            return Ok(SpawnRepoOrchestratorOutcome::NameTaken);
+        }
         if !status.is_success() {
             anyhow::bail!("spawn repo orchestrator failed (HTTP {status}): {text}");
         }
@@ -1602,11 +1622,16 @@ impl GyreClient {
     }
 }
 
-/// Outcome of `spawn_repo_orchestrator`: fresh spawn, or a live orchestrator
-/// already exists for the repo (HTTP 409 — bootstrap resume path).
+/// Outcome of `spawn_repo_orchestrator`: fresh spawn, a live orchestrator
+/// already exists for the repo (HTTP 409 — bootstrap resume path), or the
+/// requested name is held by a LIVE agent elsewhere (HTTP 400 name
+/// collision — agent names are unique server-wide, so a second tenant
+/// bootstrapping a same-named repo hits this; the caller retries with a
+/// suffixed name).
 pub enum SpawnRepoOrchestratorOutcome {
     Spawned(SpawnOrchestratorResponse),
     AlreadyLive,
+    NameTaken,
 }
 
 /// Test-only helpers for spinning up real loopback HTTP servers that

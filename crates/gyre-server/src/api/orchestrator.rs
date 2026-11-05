@@ -422,11 +422,42 @@ async fn spawn_orchestrator(
     let now = now_secs();
 
     let mut agent = gyre_domain::Agent::new(new_id(), name, now);
-    if let Ok(Some(_)) = state.agents.find_by_name(&agent.name).await {
-        return Err(ApiError::InvalidInput(format!(
-            "an agent named '{}' already exists; choose a different name",
-            agent.name
-        )));
+    if let Ok(Some(existing)) = state.agents.find_by_name(&agent.name).await {
+        if is_live(&existing) {
+            return Err(ApiError::InvalidInput(format!(
+                "an agent named '{}' already exists; choose a different name",
+                agent.name
+            )));
+        }
+        // Resume semantics (§8): the scope-slot checks above already
+        // guarantee no LIVE orchestrator occupies this scope, so a name
+        // held by a Dead/Stopped/Failed agent is a stopped predecessor
+        // from a failed run — typically the bootstrap default name
+        // '{repo}-orchestrator' colliding with itself across runs
+        // (round-3 finding 4). Release the name by suffixing the dead
+        // row (same scheme the stale detector's restart path uses for
+        // replacements) instead of rejecting the re-run; the agent id,
+        // not the name, is the durable identity.
+        let base = existing
+            .name
+            .split("-superseded-")
+            .next()
+            .unwrap_or(&existing.name)
+            .to_string();
+        let mut n = 1;
+        let mut free = format!("{base}-superseded-{n}");
+        while let Ok(Some(_)) = state.agents.find_by_name(&free).await {
+            n += 1;
+            free = format!("{base}-superseded-{n}");
+        }
+        let mut renamed = existing;
+        renamed.name = free;
+        state.agents.update(&renamed).await?;
+        tracing::info!(
+            agent_id = %renamed.id,
+            new_name = %renamed.name,
+            "released orchestrator name held by a stopped predecessor"
+        );
     }
 
     agent.parent_id = parent_id.map(Id::new);
@@ -914,6 +945,247 @@ mod tests {
         assert_eq!(count, 1, "repo_id must appear exactly once: {obj:?}");
         assert_eq!(obj["orchestrator_type"], "repo_orchestrator");
         assert_eq!(obj["restart_on_failure"], true);
+    }
+
+    #[tokio::test]
+    async fn repo_orchestrator_response_serializes_no_key_twice() {
+        // Round-3 finding 1 regression: `OrchestratorAgentResponse` flattened
+        // `AgentResponse` (which carries `persona_id`) while also declaring
+        // `persona_id` itself, so serde emitted the key twice on the WIRE.
+        // `serde_json::to_value` collapses duplicates (Map insert), which is
+        // why the repo_id test above could not catch it — this test asserts
+        // on the serialized STRING, where duplicates survive, and then
+        // strict-deserializes it the way the CLI does (serde_derive rejects
+        // duplicate fields).
+        let state = test_state();
+        seed(&state).await;
+        let (agent, _token, _launch) =
+            spawn_repo_orchestrator_core(&state, "r-1", req(Some("wire-check")), "user-1")
+                .await
+                .unwrap();
+        let text = serde_json::to_string(&orchestrator_response(agent)).unwrap();
+
+        // No top-level key may appear twice, for ANY key — not just the ones
+        // a previous regression knew about.
+        let keys = top_level_keys(&text);
+        let mut seen = std::collections::HashSet::new();
+        for k in &keys {
+            assert!(seen.insert(k.clone()), "key '{k}' appears twice: {text}");
+        }
+
+        // persona_id is carried exactly once (by the flattened AgentResponse)
+        // with the resolved persona binding.
+        assert_eq!(keys.iter().filter(|k| *k == "persona_id").count(), 1);
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["persona_id"], "repo-orchestrator-persona");
+
+        // The CLI's strict shape must parse the wire bytes (this is the
+        // exact failure every first-run bootstrap hit: `duplicate field
+        // 'persona_id'`).
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct WireAgent {
+            id: String,
+            #[serde(default)]
+            repo_id: Option<String>,
+            #[serde(default)]
+            persona_id: Option<String>,
+            orchestrator_type: Option<String>,
+            restart_on_failure: Option<bool>,
+        }
+        let parsed: WireAgent = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed.persona_id.as_deref(), Some("repo-orchestrator-persona"));
+        assert_eq!(parsed.repo_id.as_deref(), Some("r-1"));
+    }
+
+    /// Extract the top-level object keys of a JSON object literal in document
+    /// order, duplicates included. Values may be scalars or nested
+    /// objects/arrays; only depth-1 keys are collected. Used by the
+    /// duplicate-key regression test — `serde_json::Value` cannot represent
+    /// duplicate keys (its Map inserts over them), so duplicates are only
+    /// visible in the text.
+    fn top_level_keys(json: &str) -> Vec<String> {
+        let chars: Vec<char> = json.chars().collect();
+        let mut keys = Vec::new();
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    in_string = false;
+                }
+                i += 1;
+                continue;
+            }
+            match c {
+                '"' => in_string = true,
+                '{' | '[' => {
+                    depth += 1;
+                    if c == '{' && depth == 1 {
+                        // The top-level object's first key follows its brace.
+                        i += 1;
+                        i = skip_ws(&chars, i);
+                        if i < chars.len() && chars[i] == '"' {
+                            let (key, next) = read_json_string(&chars, i);
+                            keys.push(key);
+                            i = next;
+                            continue;
+                        }
+                        continue;
+                    }
+                }
+                '}' | ']' => depth = depth.saturating_sub(1),
+                ',' if depth == 1 => {
+                    // In an object, a key follows every top-level comma.
+                    i += 1;
+                    i = skip_ws(&chars, i);
+                    if i < chars.len() && chars[i] == '"' {
+                        let (key, next) = read_json_string(&chars, i);
+                        keys.push(key);
+                        i = next;
+                        continue;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        keys
+    }
+
+    fn skip_ws(chars: &[char], mut i: usize) -> usize {
+        while i < chars.len() && chars[i].is_whitespace() {
+            i += 1;
+        }
+        i
+    }
+
+    /// Read a JSON string starting at `chars[start] == '"'`; returns the
+    /// decoded-ish content and the index just past the closing quote.
+    fn read_json_string(chars: &[char], start: usize) -> (String, usize) {
+        let mut s = String::new();
+        let mut i = start + 1;
+        while i < chars.len() {
+            let c = chars[i];
+            if c == '\\' && i + 1 < chars.len() {
+                s.push(chars[i + 1]);
+                i += 2;
+                continue;
+            }
+            if c == '"' {
+                return (s, i + 1);
+            }
+            s.push(c);
+            i += 1;
+        }
+        (s, i)
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_missing_persona() {
+        // Fail-closed persona resolution (round-3 finding 5): a persona
+        // absent from the repo/workspace/tenant chain must reject the spawn
+        // with 404 — never fall back to an unstyled orchestrator.
+        let state = test_state();
+        seed(&state).await;
+        // Remove the personas seed leaves nothing in the scope chain.
+        for slug in ["workspace-orchestrator", "repo-orchestrator"] {
+            let p = state
+                .personas
+                .find_by_slug_and_scope(
+                    slug,
+                    &gyre_domain::PersonaScope::Tenant(Id::new("t1")),
+                )
+                .await
+                .unwrap()
+                .expect("seeded persona");
+            state.personas.delete(&p.id).await.unwrap();
+        }
+
+        let err = spawn_repo_orchestrator_core(&state, "r-1", req(Some("no-persona")), "user-1")
+            .await
+            .unwrap_err();
+        match &err {
+            ApiError::NotFound(msg) => {
+                assert!(msg.contains("repo-orchestrator"), "got: {msg}");
+            }
+            other => panic!("expected NotFound, got: {other}"),
+        }
+        // Nothing was persisted — fail-closed means no orphan agent row.
+        assert!(state.agents.find_by_name("no-persona").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_unapproved_persona() {
+        // Fail-closed persona resolution: a persona that resolves but is not
+        // Approved must reject the spawn with a conflict — a Pending persona
+        // must not style an orchestrator that then runs unreviewed.
+        let state = test_state();
+        seed(&state).await;
+        let mut pending = state
+            .personas
+            .find_by_slug_and_scope(
+                "repo-orchestrator",
+                &gyre_domain::PersonaScope::Tenant(Id::new("t1")),
+            )
+            .await
+            .unwrap()
+            .expect("seeded persona");
+        pending.approval_status = gyre_domain::PersonaApprovalStatus::Pending;
+        state.personas.update(&pending).await.unwrap();
+
+        let err = spawn_repo_orchestrator_core(&state, "r-1", req(Some("unapproved")), "user-1")
+            .await
+            .unwrap_err();
+        match &err {
+            ApiError::Conflict(msg) => {
+                assert!(msg.contains("repo-orchestrator"), "got: {msg}");
+            }
+            other => panic!("expected Conflict, got: {other}"),
+        }
+        assert!(state.agents.find_by_name("unapproved").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn spawn_frees_name_of_stopped_predecessor() {
+        // Round-3 finding 4a: a failed bootstrap run leaves a stopped
+        // (Dead/Stopped/Failed) orchestrator holding the default name; the
+        // scope-slot check already guarantees no LIVE orchestrator holds the
+        // scope, so the re-run must release the name from the dead row
+        // instead of failing with 400 "already exists".
+        let state = test_state();
+        seed(&state).await;
+
+        let (first, _t, _l) =
+            spawn_repo_orchestrator_core(&state, "r-1", req(Some("gyre-orchestrator")), "user-1")
+                .await
+                .unwrap();
+        kill(&state, "gyre-orchestrator").await;
+
+        let (second, _t2, _l2) =
+            spawn_repo_orchestrator_core(&state, "r-1", req(Some("gyre-orchestrator")), "user-1")
+                .await
+                .unwrap();
+        assert_eq!(second.name, "gyre-orchestrator");
+        assert_eq!(second.status, AgentStatus::Active);
+
+        // The dead predecessor keeps its identity under a suffixed name.
+        let renamed = state.agents.find_by_id(&first.id).await.unwrap().unwrap();
+        assert_eq!(renamed.name, "gyre-orchestrator-superseded-1");
+        assert_eq!(renamed.status, AgentStatus::Dead);
+
+        // A LIVE holder still rejects with 400 (different-repo name steal
+        // must not be possible).
+        spawn_repo_orchestrator_core(&state, "r-2", req(Some("gyre-orchestrator")), "user-1")
+            .await
+            .unwrap_err();
     }
 
     #[tokio::test]

@@ -215,11 +215,15 @@ pub async fn push_and_sync_specs(
         }
     }
 
-    // Push the current branch to the server's bare repo. The server seeds
-    // `main` with an empty initial commit at repo creation, but bare repos
-    // accept non-fast-forward pushes by default (init_bare sets no
-    // receive.denyNonFastForwards), so the first bootstrap push of a local
-    // history that predates the server-side seed simply replaces it.
+    // Push the local branch to the server's bare repo. The server seeds
+    // `main` with an empty initial commit at repo creation, and the user's
+    // local history is unrelated to that seed, so git refuses the update
+    // as a non-fast-forward unless the push is forced. The seed commit is
+    // disposable scaffolding whose only purpose is making HEAD valid for
+    // `git worktree add` — bootstrap registers the user's local repo as
+    // the platform's source of truth, so replacing the seed with the real
+    // history is the intended first-run semantics (round-3 finding 2:
+    // the unforced push made EVERY first-run fail at this step).
     let push = tokio::process::Command::new("git")
         .arg("-C")
         .arg(repo_path)
@@ -227,7 +231,7 @@ pub async fn push_and_sync_specs(
             "-c",
             &format!("http.extraHeader=Authorization: Bearer {}", api.token()),
         ])
-        .args(["push", clone_url, "HEAD:refs/heads/main"])
+        .args(["push", "--force", clone_url, "HEAD:refs/heads/main"])
         .output()
         .await
         .map_err(|e| anyhow::anyhow!("failed to run git push: {e}"))?;
