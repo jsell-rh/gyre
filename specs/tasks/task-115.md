@@ -10,7 +10,7 @@ coverage_sections:
   - "agent-runtime.md §Phase 1: Spec Approval Triggers Orchestration"
   - "agent-runtime.md §Phase 2: Workspace Orchestrator — Cross-Repo Coordination"
   - "agent-runtime.md §Phase 3: Repo Orchestrator — Task Decomposition"
-commits: ["f5df0c01b81a0e72ff454f34a6ac6ffa1620778a", "336dd201779aed45093e5b6fe49cbb6ab9bea85e", "fc7939f7d647bb52b35fe53abed237739886b0f6", "30cc63e7bc35165d3841872c54cdf1492e880840", "79b06a7ae27ba9f1da101b8f824ecb08c831cca1", "7f9f113cf2c00c7ce2366d1204a1ed75893fe97d", "e62a9d7e8943ad0ece7495c2ae9b8f3e5ad57d78", "0a13a2ee8fd20987829dab377cebbe75e2edc768", "e2153b406a60c0565053e1792731eef3d1d1557c"]
+commits: ["f5df0c01b81a0e72ff454f34a6ac6ffa1620778a", "336dd201779aed45093e5b6fe49cbb6ab9bea85e", "fc7939f7d647bb52b35fe53abed237739886b0f6", "30cc63e7bc35165d3841872c54cdf1492e880840", "79b06a7ae27ba9f1da101b8f824ecb08c831cca1", "7f9f113cf2c00c7ce2366d1204a1ed75893fe97d", "e62a9d7e8943ad0ece7495c2ae9b8f3e5ad57d78", "0a13a2ee8fd20987829dab377cebbe75e2edc768", "e2153b406a60c0565053e1792731eef3d1d1557c", "de294c12051b3c1fe1e295c9847ffc0608dd29e8"]
 ---
 
 ## Spec Excerpt
@@ -92,80 +92,129 @@ Read `specs/system/agent-runtime.md` §1 (all of it, Phases 1-8) for full contex
 
 ## Shipped
 
-Repair round (2026-10-10, assignment base `6a9739e5`, review finding
-`25a53951`, fix commit `f5df0c01` on HEAD of
-`pipeline/task-115/e84ba8250dd64aa39a8421f491f8b3dc-1`):
+Repair round (review finding `52d8b49d`, fix commit `de294c12` on
+`pipeline/task-115/86b8a34e24314f26a52dc202f5efbfc4-1`, assignment base
+`d81b0fe4`):
 
-- **Fix** (`signal_chain.rs`, `decompose_delegation`): the Delegation
-  sub-task creation loop never set `repo_id`/`workspace_id`, so every
-  Implementation sub-task carried `Task::new` defaults (`repo_id=Id("")`,
-  `workspace_id=Id("default")`) — the scheduler's repo resolution treats an
-  empty repo id as unresolvable, stranding the decomposition output before
-  Phase 4's worker-spawn path. Now mirrors `assess_coordination`:
-  `sub.repo_id = repo.id`, `sub.workspace_id = repo.workspace_id`. The
-  existing test `scheduler_decomposes_delegation_into_ordered_subtasks`
-  already asserted `sub.repo_id == Id("r-1")` and failed deterministically
-  before the fix; it passes after. (2-line product change; nothing else
-  changed this round.)
+### F1 — scheduler double-processing (signal_chain.rs, rig_vertexai.rs)
 
-- **Phase 1** (`api/specs.rs`): `approve_spec` records the ledger approval,
-  emits the bus `SpecApproved` message (`Destination::Workspace(ws)`,
-  payload `{repo_id, spec_path, spec_sha, approved_by, approval_id}` —
-  `workspace_id` added server-side to scope the registry, distinct from the
-  bus destination), then invokes `signal_chain::on_spec_approved` to route
-  the workspace-destined signal server-side.
-- **Phase 2** (`signal_chain.rs`): `OrchestratorRegistry` — per-workspace and
-  per-repo `Arc<Mutex<()>>` maps behind one `Arc` (stable lock identity across
-  `AppState` clones). `on_spec_approved` acquires the workspace lock, ensures a
-  live workspace-orchestrator agent via the task-093 spawn core
-  (workspace-scoped JWT, keypair, budget), delivers the message to its inbox
-  (`Destination::Agent`, acked), and runs cross-repo coordination: delegation
-  task (`task_type: Delegation`, `spec_path: path@sha`) for the spec's repo,
-  coordination tasks (`task_type: Coordination`) for `spec_links` dependents,
-  priority-4 `CrossWorkspaceSpecChange` notifications for cross-workspace
-  dependents' Admins/Owners. Orchestrator transitions to Idle after processing
-  (spawned on demand, not long-lived).
-- **Phase 3**: `spawn_task_scheduler` (30 s loop, started in `main.rs`, job
-  registry tracked for `/healthz` and `POST /admin/jobs/task_scheduler/run`).
-  `scheduler_run_once` claims Backlog Delegation/Coordination tasks
-  (Backlog→InProgress claim makes re-entry idempotent), acquires the per-repo
-  registry lock, spawns the repo orchestrator via the task-093 core when none
-  is live, and processes: Delegation → reads the approved spec at the pinned
-  SHA (real `git cat-file` via `read_git_file`), decomposes (LLM judgment via
-  `state.llm` when configured; deterministic one-per-`##`-section fallback
-  without) into ordered Implementation sub-tasks carrying `spec_ref path@sha`,
-  `parent_task_id`, `order`, `depends_on` chaining, then marks the delegation
-  task Done. Coordination → impact assessment (LLM or conservative
-  deterministic), then Done. `Implementation` and untyped tasks stay Backlog —
-  Phase 4's worker-spawn path (task-118); `spawn_agent_core` independently
-  rejects Delegation/Coordination task types.
-- **Incidental fix**: `reject_spec`'s notification fanout fabricated a tenant
-  scope via `entry.repo_id.unwrap_or("default")` — also a repo/tenant type
-  confusion. Now resolves the tenant from the workspace record, skips+logs
-  when unresolvable; exemption entry deleted, `FROZEN_EXEMPTION_COUNT` 7→6.
+The pre-fix claim protocol could process one Delegation task twice:
+`scheduler_run_once` had no cycle serialization (the 30 s loop plus
+`POST /admin/jobs/task_scheduler/run` — whose `JobRegistry::trigger` runs
+the handler unserialized — could both claim one Backlog task via the
+non-atomic list/transition/update read-modify-write), and its stale
+InProgress re-claim (60 s) could re-run a still-live decomposition whose
+LLM call was unbounded (`reqwest::Client::new()` in rig_vertexai.rs:103).
+Fixed by layering three real guards:
 
-Test evidence (all run fresh this round at fix commit `f5df0c01`, fix
-verified before + after):
-`cargo test -p gyre-server --lib signal_chain` → 11 passed, 0 failed
-(incl. `scheduler_decomposes_delegation_into_ordered_subtasks`, which
-fails at the pre-fix source); `--lib api::specs` → 74 passed, 0 failed;
-`--lib api::orchestrator` → 7 passed, 0 failed; `--lib jobs` → 11 passed,
-0 failed; `--lib mcp` → 79 passed, 0 failed. Invariant gates at the fix
-commit: `check-scope-literal-defaults.sh` OK,
-`check-fabricated-scope-defaults.sh` OK, `check-arch.sh` OK,
-`check-task-commit-attribution.sh` OK (after adding `f5df0c01...` to this
-file's `commits:`). Sandbox transport restriction recorded
-(`tcp_listener_probe: unsupported, errno 95`,
+- **Cycle run lock** (`OrchestratorRegistry::scheduler_run_lock`):
+  `scheduler_run_once` holds one lock for the whole scan→claim→process
+  sequence, so concurrent cycles serialize and never race on the claim;
+  a mid-run task can never be re-selected because no cycle scans while
+  another executes. The stale InProgress re-selection remains purely as
+  crash recovery (task left claimed by a dead process).
+- **Re-read after the per-repo mutex** (defense in depth): the claimed
+  task is re-fetched after acquiring the repo lock and processed only
+  from the freshest snapshot; a task no longer InProgress (completed,
+  cancelled, or released by a prior run) is skipped instead of
+  re-decomposed.
+- **Latency bounds**: `LLM_CALL_TIMEOUT` (120 s `tokio::time::timeout`)
+  wraps both orchestrator `predict_json` calls (timeout degrades to the
+  same deterministic fallback as an LLM error), and every Vertex AI HTTP
+  client is now built with `.timeout(...)` (completion/streaming client
+  180 s, token-exchange clients 15 s, metadata server 2 s). All five
+  `unbounded-external-http` exemption entries are deleted and
+  `FROZEN_EXEMPTION_COUNT` lowered 5→0 — the invariant now passes with
+  zero exemptions.
+
+### F2 — false bulk-ack of the orchestrator inbox
+
+`run_workspace_orchestrator` ended with `messages.acknowledge_all`,
+recording EVERY inbox message as processed — including Escalations the
+stale-agent detector delivers to a live workspace orchestrator, which no
+consumer had seen; the documented crash-recovery poll
+(`GET /api/v1/agents/:id/messages?acknowledged=false`) then hid them. The
+run now acks only the `SpecApproved` message whose payload matches the
+signal it consumed (`list_unacked` + per-message `acknowledge`); other
+messages stay unacked for their real consumers.
+
+### F3 — decorative read and fail-open empty SHA
+
+- Phase 2 step 1's spec read discarded its result (a git subprocess per
+  approval for nothing). The read is now consumed: the delegation task's
+  description carries the spec's title/section-count/size summary derived
+  from the real blob (`summarize_spec_content`), and an unreadable blob
+  is warned, not silently ignored.
+- `decompose_delegation`'s ledger fallback mapped an unresolvable SHA to
+  `""` and completed the delegation with sub-tasks pinned to a malformed
+  `path@` spec_ref — the fail-open class the
+  `check-fail-open-ref-resolution` invariant bans for `resolve_ref`. A
+  missing ledger SHA is now a hard error: the run fails, the claim is
+  released to Blocked, and a later cycle retries once the ledger
+  resolves. ("Cannot determine the approved blob" is never "empty blob
+  is fine".)
+
+### Phase 3 step 2 — codebase state in decomposition (equivalent effect)
+
+Canonical §Phase 3 step 2 ("Reads the repo's current codebase state (via
+MCP tools)") is now implemented with equivalent effect: the repo
+orchestrator's decomposition reads the repo's tracked file tree at HEAD
+(`read_repo_tree`, real `git ls-tree`, bounded to 200 paths with an
+explicit truncation marker) and feeds it to the LLM decomposition prompt
+alongside the spec content. Disclosure: the mechanism is a server-side
+git read, not MCP-tool mediation — the orchestrator run is server-driven
+(likewise task creation goes through the task store rather than the
+`task.create` MCP tool, equivalent effect); no autonomous tool loop
+exists. With this, every Phase 3 step has a real implementation behind
+it, via equivalent-effect mechanisms for the tool-mediated wordings.
+
+### Prior rounds (context)
+
+Phase 1 (`api/specs.rs` approve handler: ledger record + bus
+`SpecApproved` emission + server-side routing via
+`signal_chain::on_spec_approved`), Phase 2 (`OrchestratorRegistry`
+per-workspace/per-repo mutexes, spawn-on-demand workspace orchestrator,
+delegation + coordination tasks, cross-workspace p4 notifications), and
+Phase 3 (task scheduler, repo orchestrator spawn, spec-pinned
+decomposition into ordered Implementation sub-tasks with
+`spec_ref`/`parent_task_id`/`order`/`depends_on`, coordination
+assessment) — see commit `f5df0c01` and earlier. Prior repair fixed
+sub-task repo/workspace scoping (`f5df0c01`) and the
+`reject_spec` fabricated-tenant fallback (exemption deleted,
+`FROZEN_EXEMPTION_COUNT` 7→6).
+
+### Test evidence (all run fresh this round at `de294c12`)
+
+`cargo test -p gyre-server --lib signal_chain` → **18 passed, 0 failed**
+(6 new regression tests; two of them verified to fail deterministically
+against the pre-fix code by temporarily reverting the fixes:
+`orchestrator_run_does_not_ack_escalations` — escalation falsely acked;
+`delegation_without_resolvable_sha_stays_blocked` — task completed with
+a malformed empty-SHA spec_ref). New tests:
+`concurrent_scheduler_cycles_do_not_double_process` (end-to-end no
+duplicate sub-task sets from concurrently entered cycles),
+`scheduler_cycles_serialize_on_the_run_lock` (deterministic: a second
+cycle blocks while the first holds the run lock — fails if the
+acquisition is removed), `stale_claim_crash_recovery_processes_once`
+(crash-recovery re-claim processes exactly once),
+`delegation_description_carries_spec_summary` (real git repo; the
+delegation description carries the title/section count derived from the
+read blob), `read_repo_tree_lists_tracked_files` (real git repo;
+tracked-file listing, truncation marker, unreadable repo → None).
+Related suites: `--lib api::specs` → 74 passed; `--lib
+api::orchestrator` → 7 passed; `--lib jobs` → 11 passed; `--lib mcp::`
+→ 78 passed; `cargo test -p gyre-adapters --lib llm::` → 23 passed,
+0 failed. Invariant gates at `de294c12`: `check-arch.sh`,
+`check-fail-open-ref-resolution.sh`, `check-fabricated-scope-defaults.sh`,
+`check-scope-literal-defaults.sh`, `check-in-memory-state-stores.sh`,
+`check-inert-enforcement.sh`, `check-byte-slice-truncation.sh`,
+`check-dead-message-kinds.sh`,
+`check-unbounded-external-http.sh` (zero exemptions remaining) — all OK.
+Diff-scoped clippy (`check-clippy-diff.py`) and
+`check-task-commit-attribution.sh` run at this commit — see evidence
+file. Sandbox transport restriction (unchanged from base,
 `/tmp/stage/capabilities.json`): listener-bound tests (`tty::`, `ws::`,
-`otlp_receiver::`, `git_http::`, gyre-cli `ws_integration`) cannot run here —
-unchanged from base, must run on host/CI; `cargo test --all` and exact-head
-GitHub checks remain for the verification gate. Evidence:
+`otlp_receiver::`, `git_http::`, gyre-cli `ws_integration`) cannot run
+here; `cargo test --all` and exact-head GitHub checks remain for the
+verification gate. Evidence:
 `/tmp/stage/review-evidence/task-115-evidence.txt`.
-
-Contract repair (finding `4ba66d19`, 2026-10-10): the prior round recorded
-completion by editing the contract itself — ticking the Acceptance Criteria
-checklist, rewriting the last criterion's text, and inserting `## Shipped`
-between the criteria and Agent Instructions. Restored all four contract
-sections byte-identical to the assignment template; completion is recorded
-only in the sanctioned places — frontmatter (`progress:`, `commits:`) and
-this end-of-file `## Shipped` section.
