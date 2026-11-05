@@ -161,18 +161,23 @@ the reviewer's (removed) probes.
   `lib.rs`). Test:
   `mem::meta_spec_binding_contract_tests::delete_fails_when_binding_references_meta_spec`.
 
-**Rebase repair round** (merge commit `15b451be`): merged upstream
-`75ada1c4` into this branch; the only conflicts were committed `web/dist`
-build artifacts where each side's bundle predated the other's `web/src`
-changes. Resolved by rebuilding dist from the merged `web/src` with the
-locked toolchain (`npm ci` — registry reachable this session — then
-`vite build`); no source changes. Post-merge probes at `15b451be`
-(`SKIP_WEB_BUILD=1`): gyre-server lib tests filtered to meta_spec /
-prompt_assembly / spawn / mem:: — 84 passed, 0 failed (includes
-`stale_pin_detection_creates_notification`, the approval-gating and
-binding-membership regression tests, and the mem binding-contract test);
-check-arch, check-abac-route-registry, check-mem-port-contracts all OK.
-Evidence: `/tmp/stage/review-evidence/task116-rebase-75ada1c4.md`.
+**Rebase repair rounds:** upstream was merged into this branch twice;
+both times the only conflicts were committed `web/dist` build artifacts
+where each side's bundle predated the other's `web/src` changes, and both
+were resolved the same way — rebuild dist from the merged `web/src` with
+the locked toolchain (`npm ci` then `vite build`); no source changes.
+- Round 1 (merge `15b451be`): upstream `75ada1c4`. Post-merge probes
+  (`SKIP_WEB_BUILD=1`): gyre-server lib tests filtered to meta_spec /
+  prompt_assembly / spawn / mem:: — 84 passed, 0 failed. Evidence:
+  `/tmp/stage/review-evidence/task116-rebase-75ada1c4.md`.
+- Round 2 (merge `6c327592`): upstream `3c39ab1f`. Post-merge probes
+  (`SKIP_WEB_BUILD=1`): same filters — 88 passed, 0 failed (includes
+  `stale_pin_detection_creates_notification`, the approval-gating and
+  binding-membership regression tests, and the mem binding-contract
+  test); `vitest run src/__tests__/MetaSpecs.test.js` — 102 passed;
+  check-arch, check-abac-route-registry, check-mem-port-contracts all OK.
+  Evidence: `/tmp/stage/review-evidence/task116-rebase-3c39ab1f.md`.
+
 `cargo test --all` and exact-head GitHub CI are owned by the verification
 stage per assignment constraints.
 
