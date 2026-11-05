@@ -8,7 +8,7 @@ coverage_sections:
   - "supply-chain.md §Attestation Levels"
   - "supply-chain.md §Level 3: Gyre-Managed Runtime (Highest)"
   - "supply-chain.md §Policy per Level"
-commits: ["19a3d5af84c00a6e3e1db1d1b2429f4c202df6e0", "96dfd8b805aa7e5dc53dc275c133697945d5766c", "12a0d0e9b582c0370a55b9bd03bdbf107443086f"]
+commits: ["19a3d5af84c00a6e3e1db1d1b2429f4c202df6e0", "96dfd8b805aa7e5dc53dc275c133697945d5766c"]
 ---
 
 ## Spec Excerpt
