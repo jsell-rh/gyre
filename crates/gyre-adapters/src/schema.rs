@@ -730,6 +730,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     chain_attestations,
     secrets,
     commit_signatures,
+    spec_assertion_results,
 );
 
 diesel::table! {
@@ -996,5 +997,21 @@ diesel::table! {
         certificate_chain_pem -> Nullable<Text>,
         rekor_entry_id -> Nullable<Text>,
         tenant_id -> Text,
+    }
+}
+
+diesel::table! {
+    spec_assertion_results (id) {
+        id -> Text,
+        repo_id -> Text,
+        spec_path -> Text,
+        line -> Integer,
+        assertion_type -> Text,
+        assertion_text -> Text,
+        params_json -> Text,
+        passed -> Bool,
+        explanation -> Text,
+        commit_sha -> Text,
+        checked_at -> BigInt,
     }
 }
