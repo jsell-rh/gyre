@@ -82,6 +82,33 @@ class GitHubChecksTest(unittest.TestCase):
             self.pr['statusCheckRollup']=[self.check(conclusion)]
             self.assertEqual(self.observe()['status'],'pending')
 
+    def test_contradictory_status_requires_current_exact_head_workflow_and_job(self):
+        check = self.check('SUCCESS','IN_PROGRESS') | {'completedAt':'2026-11-05T11:07:44Z'}
+        self.pr['statusCheckRollup'] = [check]
+        workflow = {'id':10,'head_sha':self.head,'status':'completed','conclusion':'success','run_attempt':1}
+        job = {'id':100,'run_id':10,'head_sha':self.head,'name':'e2e','run_attempt':1,
+               'status':'in_progress','conclusion':'success','completed_at':check['completedAt']}
+        def run(*args,**kwargs):
+            value = workflow if args[-1].endswith('/runs/10') else job
+            return subprocess.CompletedProcess(args,0,json.dumps(value),'')
+        fixed, evidence = ci.reconcile_checks(run,'https://github.com/example/repo/pull/1',self.head,self.pr)
+        self.assertEqual(ci.check_sets(fixed),([],[],[]))
+        self.assertEqual(evidence[0]['head'],self.head)
+        self.assertEqual(check['status'],'IN_PROGRESS')  # preserve the raw observation
+        for target,field,value in [(workflow,'head_sha',self.base),(workflow,'status','in_progress'),
+                                   (workflow,'run_attempt',2),(job,'head_sha',self.base),
+                                   (job,'completed_at',None),(job,'conclusion','failure'),
+                                   (job,'run_id',11),(job,'name','different-check')]:
+            with self.subTest(field=field,value=value):
+                previous=target[field];target[field]=value
+                unresolved,evidence=ci.reconcile_checks(run,'https://github.com/example/repo/pull/1',self.head,self.pr)
+                self.assertEqual(len(ci.check_sets(unresolved)[0]),1)
+                self.assertEqual(evidence,[])
+                target[field]=previous
+        check['conclusion']='FAILURE';job['conclusion']='failure'
+        failed,_=ci.reconcile_checks(run,'https://github.com/example/repo/pull/1',self.head,self.pr)
+        self.assertEqual(len(ci.check_sets(failed)[1]),1)
+
     def test_repair_evidence_separates_current_candidate_from_old_baseline(self):
         self.pr['statusCheckRollup'] = [self.check('FAILURE')]
         self.baseline = [{'head_sha': self.base, 'workflow_id': 5, 'status': 'completed',

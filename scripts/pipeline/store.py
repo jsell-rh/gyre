@@ -227,6 +227,18 @@ class Store:
         rows=[dict(row) for row in self.db.execute("SELECT * FROM work WHERE state IN ('ready','retry') AND retry_at<=?",(now,))]
         return sorted(rows,key=lambda row:sort_key(self,row,now))
 
+    def integration_waiting(self, data):
+        """A long external wait yields the lane, never the merge/check gates."""
+        ci = data.get('ci') or {}
+        # Green CI on an outdated branch needs our own base refresh. Parking
+        # it until GitHub becomes CLEAN deadlocks: only integration can do that.
+        if (ci.get('checks') == 'green' and ci.get('status') == 'policy_pending'
+                and ci.get('merge_state') == 'BEHIND'):
+            return False
+        return (ci.get('head') == data.get('published_head') and bool(ci.get('waiting_since'))
+                and ci.get('status') in ('pending','policy_pending','infrastructure')
+                and time.time()-ci['waiting_since'] >= self.setting('integration_wait_timeout',900))
+
     def integration_lane(self):
         lane = self.setting('integration_lane')
         if not lane:
@@ -238,6 +250,7 @@ class Store:
         ci = data.get('ci') or {}
         if (row['generation'] != lane['generation'] or data.get('candidate') != lane['candidate']
                 or data.get('repair') or data.get('delivered') or data.get('resolved')
+                or self.integration_waiting(data)
                 or (ci.get('status') == 'closed' and ci.get('head') == data.get('published_head'))
                 or self.setting('task_paused:'+lane['task'],False)):
             return None
@@ -248,6 +261,8 @@ class Store:
             return True
         data = self.task(work['task'])['data']
         ci = data.get('ci') or {}
+        if self.integration_waiting(data):
+            return False
         if ci.get('status') == 'closed' and ci.get('head') == data.get('published_head'):
             return False
         lane = self.integration_lane()
