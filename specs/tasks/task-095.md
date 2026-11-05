@@ -9,7 +9,7 @@ coverage_sections:
   - "platform-model.md §6 Post-Merge Validation"
   - "platform-model.md §6 Recovery Protocol"
   - "platform-model.md §6 Agent Behavior During Recovery"
-commits: ["c8595a409f15c267ab53b460532f409917124e2b", "ee2bcf8eff79c9849b8576ae12ba2a173108cd80", "c2e1ee93344be8f6989615ba84e315b590450273", "e6a6db47dbd8b988c8367a1965db50fd77d5abe7", "3a9b11f69c57cb576d2e3914ff7af7e54941b518", "5aaded213193d1af1cec693e729ac2872893b10b", "86c7d382312fae4fb52ae4effe40e021330f3ac2", "7c723298b41ee761067b15ae426651aa280fb75e", "54a7feeb0a86b24162a9603695b8662f6b236b6a"]
+commits: ["c8595a409f15c267ab53b460532f409917124e2b", "ee2bcf8eff79c9849b8576ae12ba2a173108cd80", "c2e1ee93344be8f6989615ba84e315b590450273", "e6a6db47dbd8b988c8367a1965db50fd77d5abe7", "3a9b11f69c57cb576d2e3914ff7af7e54941b518", "5aaded213193d1af1cec693e729ac2872893b10b", "86c7d382312fae4fb52ae4effe40e021330f3ac2", "7c723298b41ee761067b15ae426651aa280fb75e", "54a7feeb0a86b24162a9603695b8662f6b236b6a", "3ef9e1b8222821f330942f3fbf13edab1b3497eb"]
 ---
 
 ## Spec Excerpt
@@ -88,55 +88,77 @@ Read `specs/system/platform-model.md` §6 "Rollback & Recovery". The merge proce
 
 ## Shipped
 
-Round-6 revision (repair of the single Round-5 review finding), on top
-of the previously shipped §6 Post-Merge Validation + Recovery
-Protocol work (Rounds 1–5: post-merge gates on merged HEAD,
+Round-6 revision, plus checkpoint recovery, on top of the §6
+Post-Merge Validation + Recovery Protocol work (Rounds 1–5: post-merge
+gates on merged HEAD via detached worktree at `head_sha`,
 `MrStatus::Reverted`, queue pause on failure, `git revert -m 1`
 three-way-merge semantics, remediation tasks + RevertNotification,
-resubmission-stable circuit breaker, merge-commit-sha-scoped manual
-revert, upstream-merge resolution, enabled `builtin:attested-
-authorization` seed — details in `specs/reviews/task-095.md`):
+resubmission-stable circuit breaker keyed on source branch,
+merge-commit-sha-scoped manual revert, upstream-merge resolution,
+fail-closed `repo_status` ref resolution, enabled
+`builtin:attested-authorization` seed — details in
+`specs/reviews/task-095.md`).
 
-- **Round-6 finding (unattested test arm):** the unattested arm of
-  `policy_engine::builtin_signed_authorization_satisfied_by_chain_presence`
-  built its context without `subject.attestation_chain_present`, so
-  under the engine's fail-closed missing-attribute semantics
-  (`eval_condition` returns `false` when the attribute is absent) the
-  immutable deny's `!= true` condition could not match and `evaluate`
-  fell through to the anonymous default deny — `matched_policy: None`
-  instead of `Some("builtin-require-signed-authorization")`, panicking
-  the assertion. Rounds 4–5 missed it because the attested arm is
-  asserted first and failed earlier on the disabled Allow.
-- **Fix (test-side, not engine-side):** the chain-less subject now sets
-  `attestation_chain_present = false` explicitly (commit `54a7feeb`),
-  matching the neighboring `not_equals_bool_condition_compares_booleans`
-  test. The engine was deliberately left unchanged: production always
-  sets the attribute explicitly whenever it runs the attestation-scoped
-  evaluation (`git_http.rs` / `merge_processor.rs` set it `true` when a
-  chain is located; the chain-less path never constructs the
-  attestation context), and loosening `NotEquals` for missing
-  attributes would let any Allow policy with a `!=` condition match
-  subjects lacking the attribute — fail-open. The production decision
-  is Deny either way; only the matched-policy attribution was wrong.
+### Round-6 fix (unattested test arm)
+
+The unattested arm of
+`policy_engine::builtin_signed_authorization_satisfied_by_chain_presence`
+built its context without `subject.attestation_chain_present`, so under
+the engine's fail-closed missing-attribute semantics (`eval_condition`
+returns `false` when the attribute is absent) the immutable deny's
+`!= true` condition could not match and `evaluate` fell through to the
+anonymous default deny — `matched_policy: None` instead of
+`Some("builtin-require-signed-authorization")`, panicking the
+assertion. Fix is test-side: the chain-less subject now sets
+`attestation_chain_present = false` explicitly (with an in-test comment
+explaining why), matching the neighboring
+`not_equals_bool_condition_compares_booleans` test. The engine was
+deliberately left unchanged: production always sets the attribute
+explicitly whenever it runs the attestation-scoped evaluation
+(`git_http.rs` / `merge_processor.rs`), and loosening `NotEquals` for
+missing attributes would let any Allow policy with a `!=` condition
+match subjects lacking the attribute — fail-open. The production
+decision is Deny either way; only the matched-policy attribution was
+wrong.
+
+### Checkpoint recovery (this revision)
+
+The worker lease expired after Round 6; the source was recovered as a
+single squashed checkpoint commit `3ef9e1b8` on base `3c39ab1f`. The
+nine pre-recovery lineage SHAs previously listed in `commits:` are not
+resolvable in this repository's object store — they are retained above
+for cross-reference with `specs/reviews/task-095.md` and controller
+history. The full task work, including the Round-6 fix, now lives in
+`3ef9e1b8`, which has been appended to the `commits:` frontmatter so
+review scoping covers the recovered source (R3-F4 precedent: an
+unlisted task commit is invisible to review).
 
 ### Test evidence
 
-- Standalone rustc probe (`/tmp/stage/review-evidence/probe_policy_test_fix.rs`)
-  replicating the engine verbatim (`eval_condition`, `evaluate`,
-  `applies_to`) and the two builtin definitions, running the fixed
-  test's exact assertions: attested arm PASS (Allow, attributed to
+- On the recovered tree (`3ef9e1b8`): `cargo fmt --check -p
+  gyre-server` clean; `check-arch.sh`, `check-abac-route-registry.sh`,
+  `check-dead-message-kinds.sh`, `check-migration-versions.sh`,
+  `check-byte-slice-truncation.sh`,
+  `check-fail-open-ref-resolution.sh`, and
+  `check-task-commit-attribution.sh` all pass; the Round-6 fix content
+  verified present (`policy_engine.rs` unattested arm sets
+  `attestation_chain_present = false` with the rationale comment).
+- Standalone rustc probe
+  (`/tmp/stage/review-evidence/probe_policy_test_fix.rs`) replicating
+  the engine verbatim, running the fixed test's exact assertions:
+  attested arm PASS (Allow, attributed to
   `builtin-attested-authorization`), unattested arm PASS (Deny,
   attributed to `builtin-require-signed-authorization`); the pre-fix
   absent-attribute construction reproduced the finding's failure
   signature (Deny, `matched_policy: None`) as a regression guard.
-- `cargo fmt --check -p gyre-server` clean at `54a7feeb`;
-  `check-rustfmt-diff.py` clean against the new commit's changed
-  lines.
+- Prior full-suite evidence (R2–R3 rounds, on the pre-recovery
+  lineage): `gyre-server --lib merge_processor` 45 passed;
+  `gyre-server` all suites 1273 passed; `gyre-adapters` 324 passed /
+  12 ignored.
 
 Sandbox limitation recorded for remote verification: this runtime has
 no crates.io egress (connection refused to crates.io and
 static.crates.io; no registry cache, no target dir), so `cargo test -p
-gyre-server --lib policy_engine` cannot execute here. The fix is the
-exact change the finding's primary recommendation prescribed, verified
-against a verbatim replica of the engine logic; the deterministic
-repro must be confirmed by CI/remote verification on the branch head.
+gyre-server --lib policy_engine` and the full suite cannot execute
+here. The deterministic repro and full-suite green must be confirmed
+by CI/remote verification on the branch head.
