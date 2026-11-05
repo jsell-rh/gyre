@@ -43,3 +43,77 @@ Findings:
 Summary: the happy path is genuinely good — a real 9-step REST orchestration with thoughtful resumability, a correct admin-gated user-creation endpoint with hashed keys, both fix commits legitimate and regression-tested, and 23 relevant tests green under this review. But the spec's bootstrap promise is undermined at its load-bearing points: the admin identity has no tenant (F1), the spawned orchestrator has neither its persona nor a running process (F2, F3), and the spec-registry step both skips its specced behavior (F4) and ships a starter manifest the server cannot parse (F5) — with the acceptance criterion checked regardless. Revision required.
 
 — Verifier, 2026-09-30
+
+
+## Round 3 (candidate 22dfdc44, merge of base 110180fb)
+
+Candidate is merge-only: `git diff a4e6aa41 22dfdc44 -- crates/gyre-cli
+crates/gyre-server` is empty, so the task-099 implementation is byte-identical
+to the round-2-rejected source; none of the round-2 findings F1-F5 were
+addressed. All 10 frontmatter commits are ancestors of the candidate
+(attribution gate exit 0), and the mechanical gates pass (arch,
+task-commit-attribution, inert-enforcement, relative-path-defaults,
+scope-literal-defaults, migration-versions, mem-port-contracts, no-em-dash).
+
+All round-2 findings re-verified with fresh live evidence against a server
+built from this candidate (in-memory, dev token; evidence under
+/tmp/stage/review-evidence, see INDEX.md):
+
+- **F1 (major, unfixed): duplicate `persona_id` in the spawn wire JSON.**
+  `OrchestratorAgentResponse` flattens `AgentResponse` (which now carries
+  `persona_id`, agents.rs:62/90) and also declares `persona_id` itself
+  (spawn.rs:81); `orchestrator_response` neutralizes only the inner `repo_id`.
+  Live proof: raw spawn body contains `persona_id` twice
+  (probe2-spawn-response-raw.txt); strict deserialization into the CLI's
+  response shape errors `duplicate field 'persona_id'` (dup-probe); the
+  canonical `--dev --starter-kit` first run exits 1 at step 8
+  `parsing repo orchestrator response` with no summary
+  (e2e-dev-bootstrap.log). Every first-run bootstrap fails. The regression
+  test counts only the `repo_id` key and stays green.
+- **F2 (major, unfixed): step 6 push always rejected non-fast-forward.**
+  `push_and_sync_specs` pushes `HEAD:refs/heads/main` without --force
+  (bootstrap.rs:230) against the server repo's seeded initial commit; live
+  `! [rejected] HEAD -> main (fetch first)` in both --dev and --tenant flows,
+  so the ledger stays empty at first-run time. Isolation probe: a manual
+  force-push plus POST sync-specs returns `{"registered":1}` — the only
+  defect is the missing force flag. The in-code premise "bare repos accept
+  non-fast-forward pushes by default" is wrong for the client side.
+- **F3 (major, unfixed): cross-tenant persona resume defect.**
+  `find_persona_by_slug` (client.rs:1322) uses the unscoped
+  `GET /api/v1/personas` (server lists across ALL tenants). Live: dev-tenant
+  bootstrap followed by an 'Acme Corp' bootstrap on one server skips all four
+  persona registrations ("already registered - skipping") and step 8 fails
+  HTTP 404 "persona 'repo-orchestrator' not found in scope chain"
+  (e2e-acme-bootstrap.log, exit 1).
+- **F4 (major, unfixed): failed runs are not resumable.** SQLite variant
+  (round-2 live logs): after the 60s heartbeat window the stale detector
+  marks the orchestrator Dead and a re-run hits HTTP 400 "an agent named ...
+  already exists" (orchestrator.rs find_by_name) because the CLI
+  special-cases only 409. New in-memory variant (this round,
+  e2e-resume-run.log): the re-run creates a SECOND tenant 'dev', workspace,
+  and repo — the CLI's reuse-by-slug only triggers on create ERROR and the
+  mem adapter does not enforce the SQLite `tenants.slug UNIQUE` constraint —
+  then dies at step 8 with the persona 404. Exit 1 again in both variants,
+  contradicting the Shipped resumability claim and the printed resume hint.
+- **F5 (test gap, unfixed): no negative test pins the fail-closed persona
+  resolution.** No `spawn_rejects_missing_persona` /
+  `spawn_rejects_unapproved_persona` tests exist; the round-2 fail-open
+  mutation left all tests green. This round: 7 orchestrator::, 11 users::,
+  44 spec_registry, and 16 CLI bootstrap tests all pass while F1-F4 are
+  live — the suite cannot catch a regression of the enforcement.
+
+Focused probes (commands, exit codes, outputs preserved under
+/tmp/stage/review-evidence): `cargo test -p gyre-cli bootstrap` 16 passed;
+`cargo test -p gyre-server --lib -- orchestrator::` 7 passed; `-- users::`
+11 passed; `-- spec_registry` 44 passed. Environment note: the orchestrator
+process reports `launch_failed` (`/gyre/entrypoint.sh` absent in the
+sandbox) — the truthful launch reporting works as designed; this is an
+infrastructure restriction, not a code defect, and is not counted.
+
+Verdict: **needs-revision**. The candidate merges the new base but ships the
+round-2 defects verbatim: no first-run bootstrap completes (F1), the spec
+registry never populates at first-run time (F2), multi-tenant second runs
+break (F3), failed runs are not resumable (F4), and the enforcement has no
+test pin (F5).
+
+— Reviewer, round 3
