@@ -247,7 +247,7 @@ pub async fn delete_persona(
         .find_by_id(&Id::new(&id))
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("persona {id} not found")))?;
-    state.personas.delete(&Id::new(id)).await?;
+    state.personas.delete(&Id::new(&id)).await?;
     // De-index so persona searches never return deleted personas.
     crate::search_indexer::deindex(&state, "persona", &id).await;
     Ok(StatusCode::NO_CONTENT)

@@ -19,7 +19,6 @@
 //!   from every entity repository and returns the true document count.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use anyhow::Result;
 use gyre_domain::{
@@ -782,6 +781,10 @@ pub async fn reindex_all(state: &AppState) -> Result<u64> {
                     Some((a, t, m)) => (a, t, m),
                     None => (String::new(), mapping.timestamp, String::new()),
                 };
+            // Same normalization as index_pushed_commit: the branch facet
+            // carries the branch name ("main"), not the raw refname — the
+            // reindexed document must be identical to the push-path one.
+            let branch = mapping.branch.trim_start_matches("refs/heads/");
             index(
                 state,
                 commit_document(
@@ -789,7 +792,7 @@ pub async fn reindex_all(state: &AppState) -> Result<u64> {
                     &author,
                     timestamp,
                     &message,
-                    &mapping.branch,
+                    branch,
                     &mapping.agent_id.to_string(),
                     &repo.workspace_id.to_string(),
                     &repo.id.to_string(),
@@ -813,6 +816,7 @@ pub async fn reindex_all(state: &AppState) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use gyre_common::Id;
     use gyre_domain::{
         AgentCommit, ApprovalStatus, AuditEventType, AuditOutcome, PersonaScope, Review,
@@ -1013,7 +1017,7 @@ mod tests {
             None,
             Some(Id::new("ws-1")),
             Some(Id::new("repo-1")),
-            "agent",
+            "agent".to_string(),
             Some("agent-1".to_string()),
             AuditOutcome::Success,
             serde_json::json!({ "path": "/bin/echidnaaudit" }),
