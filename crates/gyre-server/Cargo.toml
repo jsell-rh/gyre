@@ -45,9 +45,13 @@ sha2 = "0.10"
 hex = { workspace = true }
 subtle = { workspace = true }
 ring = { workspace = true }
+x509-parser = { version = "0.16", features = ["verify"] }
+rcgen = { version = "0.13", features = ["x509-parser"] }
+pem = "3.0"
 base64 = "0.22"
 zstd = { workspace = true }
 tempfile = "3"
+time = "0.3"
 # OTLP gRPC trace receiver (HSI §3a): tonic gRPC server + generated OTLP proto types.
 tonic = { version = "0.12", default-features = false, features = ["transport", "codegen", "prost"] }
 opentelemetry-proto = { version = "0.27", default-features = false, features = ["gen-tonic", "trace"] }
