@@ -273,7 +273,9 @@ pub async fn emit_meta_spec_changed(
                     .await
                     .ok()
                     .flatten()
-                    .and_then(|j| serde_json::from_str::<crate::api::meta_specs::MetaSpecSet>(&j).ok())
+                    .and_then(|j| {
+                        serde_json::from_str::<crate::api::meta_specs::MetaSpecSet>(&j).ok()
+                    })
                     .map(|s| {
                         s.personas.values().any(|e| e.path == meta_spec.name)
                             || s.principles.iter().any(|e| e.path == meta_spec.name)
@@ -303,9 +305,7 @@ pub async fn emit_meta_spec_changed(
                     .emit_event(
                         None,
                         gyre_common::message::Destination::Broadcast,
-                        gyre_common::message::MessageKind::Custom(
-                            "meta_spec_changed".to_string(),
-                        ),
+                        gyre_common::message::MessageKind::Custom("meta_spec_changed".to_string()),
                         Some(payload),
                     )
                     .await;
@@ -418,9 +418,7 @@ pub async fn run_reconciliation(
     for path in changed_paths {
         match find_meta_spec_by_name(state, path).await {
             Ok(Some(ms)) => {
-                if ms.approval_status
-                    != gyre_domain::meta_spec::MetaSpecApprovalStatus::Approved
-                {
+                if ms.approval_status != gyre_domain::meta_spec::MetaSpecApprovalStatus::Approved {
                     info!(
                         meta_spec = %path,
                         status = ms.approval_status.as_str(),
@@ -469,10 +467,7 @@ pub async fn run_reconciliation(
             let task_id = Id::new(uuid::Uuid::new_v4().to_string());
             let mut task = gyre_domain::Task::new(task_id.clone(), &title, now);
             task.priority = TaskPriority::Medium;
-            task.labels = vec![
-                RECONCILIATION_LABEL.to_string(),
-                "auto-created".to_string(),
-            ];
+            task.labels = vec![RECONCILIATION_LABEL.to_string(), "auto-created".to_string()];
             task.description = Some(format!(
                 "Auto-created by the meta-spec reconciliation controller \
                  (meta-spec-reconciliation.md §6).\nMeta-spec: {} ({}) v{}\n\
@@ -488,7 +483,9 @@ pub async fn run_reconciliation(
             task.task_type = Some(TaskType::Delegation);
 
             match state.tasks.create(&task).await {
-                Err(e) => warn!(title, repo_id = %repo.id, error = %e, "reconciliation: failed to create task"),
+                Err(e) => {
+                    warn!(title, repo_id = %repo.id, error = %e, "reconciliation: failed to create task")
+                }
                 Ok(()) => {
                     summary.tasks_created += 1;
                     info!(title, repo_id = %repo.id, "reconciliation: created reconciliation task");
@@ -514,9 +511,7 @@ pub async fn run_reconciliation(
             .emit_event(
                 Some(ws_id.clone()),
                 gyre_common::message::Destination::Workspace(ws_id.clone()),
-                gyre_common::message::MessageKind::Custom(
-                    "reconciliation_started".to_string(),
-                ),
+                gyre_common::message::MessageKind::Custom("reconciliation_started".to_string()),
                 Some(serde_json::json!({
                     "workspace_id": ws_id.to_string(),
                     "tasks_created": summary.tasks_created,
@@ -564,11 +559,16 @@ pub fn diff_meta_spec_set(
     fn entries(set: &MetaSpecSet) -> BTreeMap<String, String> {
         let mut m: BTreeMap<String, String> = set
             .personas
-            .iter()
-            .map(|(_k, e)| (e.path.clone(), e.sha.clone()))
+            .values()
+            .map(|e| (e.path.clone(), e.sha.clone()))
             .collect();
         // Two personas may pin the same spec path — keep the first pin.
-        for e in set.principles.iter().chain(&set.standards).chain(&set.process) {
+        for e in set
+            .principles
+            .iter()
+            .chain(&set.standards)
+            .chain(&set.process)
+        {
             m.entry(e.path.clone()).or_insert_with(|| e.sha.clone());
         }
         m
@@ -716,10 +716,7 @@ pub async fn run_conformance_sweep(state: &Arc<AppState>) -> anyhow::Result<Swee
             let task_id = Id::new(uuid::Uuid::new_v4().to_string());
             let mut task = gyre_domain::Task::new(task_id, &title, now);
             task.priority = TaskPriority::Medium;
-            task.labels = vec![
-                DRIFT_REVIEW_LABEL.to_string(),
-                "auto-created".to_string(),
-            ];
+            task.labels = vec![DRIFT_REVIEW_LABEL.to_string(), "auto-created".to_string()];
             task.description = Some(format!(
                 "Auto-created by the meta-spec conformance sweep \
                  (meta-spec-reconciliation.md §10).\nActive meta-spec set SHA: \
@@ -885,7 +882,6 @@ mod tests {
     use gyre_common::message::MessageKind;
     use gyre_domain::meta_spec::{MetaSpec, MetaSpecApprovalStatus, MetaSpecKind, MetaSpecScope};
     use gyre_domain::{Repository, Workspace, WorkspaceMembership, WorkspaceRole};
-    use std::future::Future;
 
     fn now() -> u64 {
         std::time::SystemTime::now()
@@ -963,7 +959,10 @@ mod tests {
         }
     }
 
-    fn make_set(ws_id: &str, entries: Vec<MetaSpecPinnedEntry>) -> crate::api::meta_specs::MetaSpecSet {
+    fn make_set(
+        ws_id: &str,
+        entries: Vec<MetaSpecPinnedEntry>,
+    ) -> crate::api::meta_specs::MetaSpecSet {
         // Distinct persona keys per entry: a single reused key would make the
         // map collapse to the last entry, silently dropping the others (the
         // set-diff test would then pass by disappearance, not comparison).
@@ -980,25 +979,28 @@ mod tests {
         }
     }
 
-    async fn put_set(state: &Arc<AppState>, ws_id: &str, set: &crate::api::meta_specs::MetaSpecSet) {
+    async fn put_set(
+        state: &Arc<AppState>,
+        ws_id: &str,
+        set: &crate::api::meta_specs::MetaSpecSet,
+    ) {
         let json = serde_json::to_string(set).unwrap();
-        state.meta_spec_sets.upsert(&Id::new(ws_id), &json).await.unwrap();
+        state
+            .meta_spec_sets
+            .upsert(&Id::new(ws_id), &json)
+            .await
+            .unwrap();
     }
 
-    fn open_tasks_with_label<'a>(
-        state: &'a Arc<AppState>,
-        label: &'a str,
-    ) -> impl Future<Output = Vec<gyre_domain::Task>> + 'a {
-        async move {
-            state
-                .tasks
-                .list()
-                .await
-                .unwrap()
-                .into_iter()
-                .filter(|t| t.labels.iter().any(|l| l == label))
-                .collect()
-        }
+    async fn open_tasks_with_label(state: &Arc<AppState>, label: &str) -> Vec<gyre_domain::Task> {
+        state
+            .tasks
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.labels.iter().any(|l| l == label))
+            .collect()
     }
 
     // -- §6: reconciliation creates tasks for affected repos ----------------
@@ -1010,7 +1012,7 @@ mod tests {
         let _repo = make_repo(&state, "repo-1", "ws-recon-1").await;
         let ms = make_meta_spec(&state, "backend-developer", 4).await;
 
-        let summary = run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
 
         assert_eq!(summary.tasks_created, 1);
         let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
@@ -1033,9 +1035,14 @@ mod tests {
         let ws = make_workspace(&state, "ws-recon-empty").await;
         let ms = make_meta_spec(&state, "backend-developer", 2).await;
 
-        let summary = run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
         assert_eq!(summary.tasks_created, 0);
-        assert_eq!(open_tasks_with_label(&state, RECONCILIATION_LABEL).await.len(), 0);
+        assert_eq!(
+            open_tasks_with_label(&state, RECONCILIATION_LABEL)
+                .await
+                .len(),
+            0
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1057,23 +1064,37 @@ mod tests {
         let _repo = make_repo(&state, "repo-d", "ws-recon-dup").await;
         let ms = make_meta_spec(&state, "backend-developer", 4).await;
 
-        let first = run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
+        let first = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
         assert_eq!(first.tasks_created, 1);
 
         // Re-run with the same version → no new task.
-        let second = run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
+        let second = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
         assert_eq!(second.tasks_created, 0);
         assert_eq!(second.tasks_skipped, 1);
-        assert_eq!(open_tasks_with_label(&state, RECONCILIATION_LABEL).await.len(), 1);
+        assert_eq!(
+            open_tasks_with_label(&state, RECONCILIATION_LABEL)
+                .await
+                .len(),
+            1
+        );
 
         // New version → new task (different title).
-        state.meta_specs.update(&MetaSpec {
-            version: 5,
-            ..ms.clone()
-        }).await.unwrap();
-        let third = run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
+        state
+            .meta_specs
+            .update(&MetaSpec {
+                version: 5,
+                ..ms.clone()
+            })
+            .await
+            .unwrap();
+        let third = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
         assert_eq!(third.tasks_created, 1);
-        assert_eq!(open_tasks_with_label(&state, RECONCILIATION_LABEL).await.len(), 2);
+        assert_eq!(
+            open_tasks_with_label(&state, RECONCILIATION_LABEL)
+                .await
+                .len(),
+            2
+        );
     }
 
     // -- §6: set diffing (trigger condition) ---------------------------------
@@ -1082,14 +1103,23 @@ mod tests {
     async fn set_diff_detects_version_changes() {
         let old = make_set("ws", vec![pin("backend-developer", "a1")]);
         let new = make_set("ws", vec![pin("backend-developer", "a1")]);
-        assert!(diff_meta_spec_set(&old, &new).is_empty(), "same set → no changes");
+        assert!(
+            diff_meta_spec_set(&old, &new).is_empty(),
+            "same set → no changes"
+        );
 
         let new = make_set("ws", vec![pin("backend-developer", "b2")]);
-        assert_eq!(diff_meta_spec_set(&old, &new), vec!["backend-developer".to_string()]);
+        assert_eq!(
+            diff_meta_spec_set(&old, &new),
+            vec!["backend-developer".to_string()]
+        );
 
         // Newly bound entry counts as changed; the identical
         // backend-developer pin (a1 → a1) does not.
-        let new = make_set("ws", vec![pin("backend-developer", "a1"), pin("security", "c3")]);
+        let new = make_set(
+            "ws",
+            vec![pin("backend-developer", "a1"), pin("security", "c3")],
+        );
         assert_eq!(diff_meta_spec_set(&old, &new), vec!["security".to_string()]);
 
         // Removal is not a trigger.
@@ -1099,7 +1129,12 @@ mod tests {
 
     // -- §10: conformance sweep detects drift --------------------------------
 
-    fn sample_attestation(repo_id: &str, ws_id: &str, meta_sha: &str, created_at: u64) -> gyre_common::Attestation {
+    fn sample_attestation(
+        repo_id: &str,
+        ws_id: &str,
+        meta_sha: &str,
+        created_at: u64,
+    ) -> gyre_common::Attestation {
         use gyre_common::attestation::*;
         let content = InputContent {
             spec_path: "specs/system/x.md".to_string(),
@@ -1156,7 +1191,8 @@ mod tests {
         // Bind a meta-spec set — this is the desired state.
         let set = make_set("ws-sweep-1", vec![pin("backend-developer", "a1")]);
         put_set(&state, "ws-sweep-1", &set).await;
-        let active_sha = crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws.id).await;
+        let active_sha =
+            crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws.id).await;
         assert!(!active_sha.is_empty());
 
         // Provenance under an OLD set SHA → drift.
@@ -1174,7 +1210,11 @@ mod tests {
             accepted_at: Some(now()),
             created_at: now(),
         };
-        state.workspace_memberships.create(&membership).await.unwrap();
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
 
         let summary = run_conformance_sweep(&state).await.unwrap();
         assert_eq!(summary.drift_detected, 1);
@@ -1187,7 +1227,15 @@ mod tests {
         // MetaSpecDrift notification created for the admin member.
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-sweep"), Some(&ws.id), Some(6), Some(6), None, 10, 0)
+            .list_for_user(
+                &Id::new("user-sweep"),
+                Some(&ws.id),
+                Some(6),
+                Some(6),
+                None,
+                10,
+                0,
+            )
             .await
             .unwrap();
         assert!(
@@ -1200,13 +1248,19 @@ mod tests {
         // meta_spec_drift_detected event persisted (Event tier is stored).
         let msgs = state
             .messages
-            .list_by_workspace(&ws.id, Some("meta_spec_drift_detected"), None, None, None, Some(50))
+            .list_by_workspace(
+                &ws.id,
+                Some("meta_spec_drift_detected"),
+                None,
+                None,
+                None,
+                Some(50),
+            )
             .await
             .unwrap();
         assert!(
-            msgs.iter().any(|m| m.kind == MessageKind::Custom(
-                "meta_spec_drift_detected".to_string()
-            )),
+            msgs.iter()
+                .any(|m| m.kind == MessageKind::Custom("meta_spec_drift_detected".to_string())),
             "expected meta_spec_drift_detected event message"
         );
 
@@ -1216,7 +1270,12 @@ mod tests {
         assert_eq!(second.drift_detected, 1);
         assert_eq!(second.tasks_created, 0);
         assert_eq!(second.tasks_skipped, 1);
-        assert_eq!(open_tasks_with_label(&state, DRIFT_REVIEW_LABEL).await.len(), 1);
+        assert_eq!(
+            open_tasks_with_label(&state, DRIFT_REVIEW_LABEL)
+                .await
+                .len(),
+            1
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1227,7 +1286,8 @@ mod tests {
 
         let set = make_set("ws-sweep-2", vec![pin("backend-developer", "a1")]);
         put_set(&state, "ws-sweep-2", &set).await;
-        let active_sha = crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws.id).await;
+        let active_sha =
+            crate::compute_meta_spec_set_sha(state.meta_spec_sets.as_ref(), &ws.id).await;
 
         // Provenance under the CURRENT set SHA → no drift.
         let att = sample_attestation(repo.id.as_str(), "ws-sweep-2", &active_sha, now());
@@ -1236,7 +1296,12 @@ mod tests {
         let summary = run_conformance_sweep(&state).await.unwrap();
         assert_eq!(summary.drift_detected, 0);
         assert_eq!(summary.tasks_created, 0);
-        assert_eq!(open_tasks_with_label(&state, DRIFT_REVIEW_LABEL).await.len(), 0);
+        assert_eq!(
+            open_tasks_with_label(&state, DRIFT_REVIEW_LABEL)
+                .await
+                .len(),
+            0
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1300,9 +1365,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
-        let ws_json: serde_json::Value =
-            serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap())
-                .unwrap();
+        let ws_json: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         let ws_id = ws_json["id"].as_str().unwrap().to_string();
 
         make_repo(&state, "repo-e2e", &ws_id).await;
@@ -1356,7 +1424,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
-            open_tasks_with_label(&state, RECONCILIATION_LABEL).await.len(),
+            open_tasks_with_label(&state, RECONCILIATION_LABEL)
+                .await
+                .len(),
             1,
             "identical re-PUT must not create a second task"
         );
@@ -1398,7 +1468,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
         let ws_json: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap(),
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
         )
         .unwrap();
         let ws_id = ws_json["id"].as_str().unwrap().to_string();
@@ -1459,7 +1531,10 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/workspaces/{}/meta-spec-set", ws_id.as_str()))
+                    .uri(format!(
+                        "/api/v1/workspaces/{}/meta-spec-set",
+                        ws_id.as_str()
+                    ))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(reordered.to_string()))
@@ -1488,7 +1563,10 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri(format!("/api/v1/workspaces/{}/meta-spec-set", ws_id.as_str()))
+                    .uri(format!(
+                        "/api/v1/workspaces/{}/meta-spec-set",
+                        ws_id.as_str()
+                    ))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
                     .body(Body::from(changed.to_string()))
@@ -1512,15 +1590,22 @@ mod tests {
         let _r3 = make_repo(&state, "repo-m3", "ws-recon-multi").await;
         let ms = make_meta_spec(&state, "backend-developer", 4).await;
 
-        let s = run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
+        let s = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
         let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
         assert_eq!(s.tasks_created, 3, "§6 step 2: task per affected repo");
         assert_eq!(tasks.len(), 3);
-        let mut repo_ids: Vec<String> = tasks.iter().map(|t| t.repo_id.as_str().to_string()).collect();
+        let mut repo_ids: Vec<String> = tasks
+            .iter()
+            .map(|t| t.repo_id.as_str().to_string())
+            .collect();
         repo_ids.sort();
         assert_eq!(
             repo_ids,
-            vec!["repo-m1".to_string(), "repo-m2".to_string(), "repo-m3".to_string()],
+            vec![
+                "repo-m1".to_string(),
+                "repo-m2".to_string(),
+                "repo-m3".to_string()
+            ],
             "each repo gets its own task"
         );
     }
@@ -1534,20 +1619,29 @@ mod tests {
         let _repo2 = make_repo(&state, "repo-pb", "ws-recon-w2").await;
         let ms = make_meta_spec(&state, "backend-developer", 4).await;
 
-        let s1 = run_reconciliation(&state, &ws1.id, &[ms.name.clone()]).await;
+        let s1 = run_reconciliation(&state, &ws1.id, std::slice::from_ref(&ms.name)).await;
         assert_eq!(s1.tasks_created, 1);
-        let s2 = run_reconciliation(&state, &ws2.id, &[ms.name.clone()]).await;
-        assert_eq!(s2.tasks_created, 1, "second workspace must get its own reconciliation task");
+        let s2 = run_reconciliation(&state, &ws2.id, std::slice::from_ref(&ms.name)).await;
+        assert_eq!(
+            s2.tasks_created, 1,
+            "second workspace must get its own reconciliation task"
+        );
         assert_eq!(s2.tasks_skipped, 0);
 
         let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
         assert_eq!(tasks.len(), 2);
         assert_eq!(
-            tasks.iter().filter(|t| t.workspace_id.as_str() == "ws-recon-w1").count(),
+            tasks
+                .iter()
+                .filter(|t| t.workspace_id.as_str() == "ws-recon-w1")
+                .count(),
             1
         );
         assert_eq!(
-            tasks.iter().filter(|t| t.workspace_id.as_str() == "ws-recon-w2").count(),
+            tasks
+                .iter()
+                .filter(|t| t.workspace_id.as_str() == "ws-recon-w2")
+                .count(),
             1
         );
     }
@@ -1573,17 +1667,28 @@ mod tests {
             accepted_at: Some(now()),
             created_at: now(),
         };
-        state.workspace_memberships.create(&membership).await.unwrap();
+        state
+            .workspace_memberships
+            .create(&membership)
+            .await
+            .unwrap();
 
         // Two reconciliation tasks created (one per repo).
-        run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
+        run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
 
         let count_completed = |ws: gyre_domain::Workspace| {
             let state = state.clone();
             async move {
                 state
                     .messages
-                    .list_by_workspace(&ws.id, Some("reconciliation_completed"), None, None, None, Some(50))
+                    .list_by_workspace(
+                        &ws.id,
+                        Some("reconciliation_completed"),
+                        None,
+                        None,
+                        None,
+                        Some(50),
+                    )
                     .await
                     .unwrap()
                     .len()
@@ -1592,7 +1697,8 @@ mod tests {
 
         // NOT fired at creation time (§11: completion = all tasks done).
         assert_eq!(
-            count_completed(ws.clone()).await, 0,
+            count_completed(ws.clone()).await,
+            0,
             "no completion event while tasks are open"
         );
 
@@ -1605,7 +1711,8 @@ mod tests {
         state.tasks.update(&t1).await.unwrap();
         maybe_emit_reconciliation_completed(&state, &ws.id).await;
         assert_eq!(
-            count_completed(ws.clone()).await, 0,
+            count_completed(ws.clone()).await,
+            0,
             "one task still open — wave not complete"
         );
 
@@ -1617,7 +1724,8 @@ mod tests {
         state.tasks.update(&t2).await.unwrap();
         maybe_emit_reconciliation_completed(&state, &ws.id).await;
         assert_eq!(
-            count_completed(ws.clone()).await, 1,
+            count_completed(ws.clone()).await,
+            1,
             "all tasks terminal — ReconciliationCompleted must fire exactly once"
         );
 
@@ -1625,7 +1733,15 @@ mod tests {
         // emit_reconciliation_completed helper).
         let notifs = state
             .notifications
-            .list_for_user(&Id::new("user-wave"), Some(&ws.id), Some(6), Some(6), None, 10, 0)
+            .list_for_user(
+                &Id::new("user-wave"),
+                Some(&ws.id),
+                Some(6),
+                Some(6),
+                None,
+                10,
+                0,
+            )
             .await
             .unwrap();
         assert!(
@@ -1638,7 +1754,8 @@ mod tests {
         // Idempotency: a re-check of the complete wave must not re-emit.
         maybe_emit_reconciliation_completed(&state, &ws.id).await;
         assert_eq!(
-            count_completed(ws.clone()).await, 1,
+            count_completed(ws.clone()).await,
+            1,
             "idempotent: re-checking a complete wave must not re-emit"
         );
     }
@@ -1664,7 +1781,14 @@ mod tests {
             async move {
                 state
                     .messages
-                    .list_by_workspace(&ws_id, Some("reconciliation_completed"), None, None, None, Some(50))
+                    .list_by_workspace(
+                        &ws_id,
+                        Some("reconciliation_completed"),
+                        None,
+                        None,
+                        None,
+                        Some(50),
+                    )
                     .await
                     .unwrap()
                     .len()
@@ -1695,7 +1819,7 @@ mod tests {
         };
 
         // Wave 1: v4 → one task → complete → emit.
-        run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
+        run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
         complete_all_open().await;
         maybe_emit_reconciliation_completed(&state, &ws.id).await;
         assert_eq!(count_completed().await, 1, "wave 1 must emit exactly once");
@@ -1711,7 +1835,7 @@ mod tests {
             })
             .await
             .unwrap();
-        run_reconciliation(&state, &ws.id, &[ms.name.clone()]).await;
+        run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
         let open = open_tasks_with_label(&state, RECONCILIATION_LABEL)
             .await
             .into_iter()
@@ -1721,14 +1845,16 @@ mod tests {
 
         maybe_emit_reconciliation_completed(&state, &ws.id).await;
         assert_eq!(
-            count_completed().await, 1,
+            count_completed().await,
+            1,
             "wave 2 open — no completion while in flight"
         );
 
         complete_all_open().await;
         maybe_emit_reconciliation_completed(&state, &ws.id).await;
         assert_eq!(
-            count_completed().await, 2,
+            count_completed().await,
+            2,
             "wave 2 completion must emit its own ReconciliationCompleted"
         );
 
@@ -1736,7 +1862,8 @@ mod tests {
         // emit a third event for the same wave.
         maybe_emit_reconciliation_completed(&state, &ws.id).await;
         assert_eq!(
-            count_completed().await, 2,
+            count_completed().await,
+            2,
             "re-check must not re-emit wave 2"
         );
     }
@@ -1757,10 +1884,20 @@ mod tests {
         maybe_emit_reconciliation_completed(&state, &ws.id).await;
         let msgs = state
             .messages
-            .list_by_workspace(&ws.id, Some("reconciliation_completed"), None, None, None, Some(50))
+            .list_by_workspace(
+                &ws.id,
+                Some("reconciliation_completed"),
+                None,
+                None,
+                None,
+                Some(50),
+            )
             .await
             .unwrap();
-        assert!(msgs.is_empty(), "no reconciliation tasks — no completion event");
+        assert!(
+            msgs.is_empty(),
+            "no reconciliation tasks — no completion event"
+        );
     }
 
     // -- §11: MetaSpecDriftResolved on drift-review task completion ---------
@@ -1797,21 +1934,39 @@ mod tests {
         maybe_emit_drift_resolved(&state, &ws.id).await;
         let msgs = state
             .messages
-            .list_by_workspace(&ws.id, Some("meta_spec_drift_resolved"), None, None, None, Some(50))
+            .list_by_workspace(
+                &ws.id,
+                Some("meta_spec_drift_resolved"),
+                None,
+                None,
+                None,
+                Some(50),
+            )
             .await
             .unwrap();
         assert_eq!(
-            msgs.len(), 1,
+            msgs.len(),
+            1,
             "all drift-review tasks terminal → drift resolved event"
         );
 
         // ws2 still has an open drift-review task — no event.
         let msgs2 = state
             .messages
-            .list_by_workspace(&ws2.id, Some("meta_spec_drift_resolved"), None, None, None, Some(50))
+            .list_by_workspace(
+                &ws2.id,
+                Some("meta_spec_drift_resolved"),
+                None,
+                None,
+                None,
+                Some(50),
+            )
             .await
             .unwrap();
-        assert!(msgs2.is_empty(), "open drift-review task — drift not resolved");
+        assert!(
+            msgs2.is_empty(),
+            "open drift-review task — drift not resolved"
+        );
     }
 
     // -- §11: MetaSpecSetUpdated / MetaSpecChanged events --------------------
@@ -1843,7 +1998,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
         let ws_json: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap(),
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
         )
         .unwrap();
         let ws_id = ws_json["id"].as_str().unwrap().to_string();
@@ -1881,13 +2038,14 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(msgs.len(), 1, "set binding change must emit meta_spec_set_updated");
+        assert_eq!(
+            msgs.len(),
+            1,
+            "set binding change must emit meta_spec_set_updated"
+        );
         let payload = msgs[0].payload.as_ref().unwrap();
         assert_eq!(
-            payload["changed"]
-                .as_array()
-                .map(|a| a.len())
-                .unwrap_or(0),
+            payload["changed"].as_array().map(|a| a.len()).unwrap_or(0),
             1,
             "event payload must name the changed spec"
         );
@@ -1925,6 +2083,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(msgs.len(), 1, "identical re-PUT must not emit another event");
+        assert_eq!(
+            msgs.len(),
+            1,
+            "identical re-PUT must not emit another event"
+        );
     }
 }

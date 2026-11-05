@@ -1243,8 +1243,8 @@ pub async fn update_meta_spec_registry(
     // single-request flow. Re-approving unchanged content is a no-op.
     let content_changed_since_last_approval =
         previously_approved_hash.as_deref() != Some(ms.content_hash.as_str());
-    let newly_approved =
-        ms.approval_status == MetaSpecApprovalStatus::Approved && content_changed_since_last_approval;
+    let newly_approved = ms.approval_status == MetaSpecApprovalStatus::Approved
+        && content_changed_since_last_approval;
     if newly_approved {
         let spec_path = ms.name.clone();
         let workspaces = state.workspaces.list().await.unwrap_or_default();
@@ -1261,9 +1261,12 @@ pub async fn update_meta_spec_registry(
                 })
                 .unwrap_or(false);
             if binds {
-                let summary =
-                    crate::reconciliation::run_reconciliation(&state, &ws.id, &[spec_path.clone()])
-                        .await;
+                let summary = crate::reconciliation::run_reconciliation(
+                    &state,
+                    &ws.id,
+                    std::slice::from_ref(&spec_path),
+                )
+                .await;
                 tracing::info!(
                     workspace_id = %ws.id,
                     meta_spec = %spec_path,
@@ -1506,9 +1509,8 @@ mod registry_tests {
         assert_eq!(create_resp.status(), StatusCode::CREATED);
         let create_json = body_json(create_resp).await;
         let id = create_json["id"].as_str().unwrap().to_string();
-        assert_eq!(
-            create_json["required"].as_bool().unwrap(),
-            false,
+        assert!(
+            !create_json["required"].as_bool().unwrap(),
             "created entry defaults to required=false"
         );
 
@@ -1528,9 +1530,8 @@ mod registry_tests {
             .unwrap();
         assert_eq!(put_resp.status(), StatusCode::OK);
         let put_json = body_json(put_resp).await;
-        assert_eq!(
+        assert!(
             put_json["required"].as_bool().unwrap(),
-            true,
             "PUT required:true must be reflected in the response"
         );
 
@@ -1547,9 +1548,8 @@ mod registry_tests {
             .unwrap();
         assert_eq!(get_resp.status(), StatusCode::OK);
         let get_json = body_json(get_resp).await;
-        assert_eq!(
+        assert!(
             get_json["required"].as_bool().unwrap(),
-            true,
             "GET after PUT required:true must show required=true"
         );
     }
@@ -1611,7 +1611,10 @@ mod registry_tests {
             .await
             .unwrap();
         assert_eq!(create_resp.status(), StatusCode::CREATED);
-        let id = body_json(create_resp).await["id"].as_str().unwrap().to_string();
+        let id = body_json(create_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
         let set_resp = app
             .clone()
@@ -1644,11 +1647,7 @@ mod registry_tests {
                     .await
                     .unwrap()
                     .into_iter()
-                    .filter(|t| {
-                        t.labels
-                            .iter()
-                            .any(|l| l == "meta-spec-reconciliation")
-                    })
+                    .filter(|t| t.labels.iter().any(|l| l == "meta-spec-reconciliation"))
                     .count()
             }
         };
@@ -1717,8 +1716,10 @@ mod registry_tests {
             .filter(|t| t.labels.iter().any(|l| l == "meta-spec-reconciliation"))
             .collect();
         for mut t in tasks {
-            t.transition_status(gyre_domain::TaskStatus::InProgress).unwrap();
-            t.transition_status(gyre_domain::TaskStatus::Review).unwrap();
+            t.transition_status(gyre_domain::TaskStatus::InProgress)
+                .unwrap();
+            t.transition_status(gyre_domain::TaskStatus::Review)
+                .unwrap();
             t.transition_status(gyre_domain::TaskStatus::Done).unwrap();
             state.tasks.update(&t).await.unwrap();
         }
@@ -1746,14 +1747,16 @@ mod registry_tests {
             "content edit must reset approval to Pending (§2)"
         );
         assert_eq!(
-            recon_count().await, 1,
+            recon_count().await,
+            1,
             "content edit alone (Pending) must not trigger reconciliation"
         );
 
         // Step 2 of the UI flow: handleApprove PUTs only
         // {approval_status: Approved} — no prompt in the request. This is
         // the request the old trigger condition missed.
-        let approve2 = app.clone()
+        let approve2 = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("PUT")
@@ -1782,14 +1785,20 @@ mod registry_tests {
             .filter(|t| t.labels.iter().any(|l| l == "meta-spec-reconciliation"))
             .collect();
         for mut t in tasks {
-            if !matches!(t.status, gyre_domain::TaskStatus::Done | gyre_domain::TaskStatus::Cancelled) {
-                t.transition_status(gyre_domain::TaskStatus::InProgress).unwrap();
-                t.transition_status(gyre_domain::TaskStatus::Review).unwrap();
+            if !matches!(
+                t.status,
+                gyre_domain::TaskStatus::Done | gyre_domain::TaskStatus::Cancelled
+            ) {
+                t.transition_status(gyre_domain::TaskStatus::InProgress)
+                    .unwrap();
+                t.transition_status(gyre_domain::TaskStatus::Review)
+                    .unwrap();
                 t.transition_status(gyre_domain::TaskStatus::Done).unwrap();
                 state.tasks.update(&t).await.unwrap();
             }
         }
-        let reapprove = app.clone()
+        let reapprove = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("PUT")
@@ -1803,7 +1812,8 @@ mod registry_tests {
             .unwrap();
         assert_eq!(reapprove.status(), StatusCode::OK);
         assert_eq!(
-            recon_count().await, 2,
+            recon_count().await,
+            2,
             "re-approval of unchanged content must not trigger reconciliation"
         );
     }

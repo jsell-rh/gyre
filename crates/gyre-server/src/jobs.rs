@@ -512,10 +512,9 @@ pub async fn start_job_registry(state: Arc<AppState>) {
         .register(
             JobDefinition {
                 name: "meta_spec_conformance_sweep".to_string(),
-                description:
-                    "Sweeps all workspaces for meta-spec drift between the active \
+                description: "Sweeps all workspaces for meta-spec drift between the active \
                      meta-spec set and provenance-recorded set SHAs (§10)"
-                        .to_string(),
+                    .to_string(),
                 interval_secs: std::env::var("GYRE_META_SPEC_SWEEP_INTERVAL_SECS")
                     .ok()
                     .and_then(|v| v.parse().ok())

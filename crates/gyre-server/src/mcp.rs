@@ -1067,11 +1067,7 @@ async fn handle_update_task(state: &std::sync::Arc<AppState>, args: &Value) -> V
                     &task.workspace_id,
                 )
                 .await;
-                crate::reconciliation::maybe_emit_drift_resolved(
-                    state,
-                    &task.workspace_id,
-                )
-                .await;
+                crate::reconciliation::maybe_emit_drift_resolved(state, &task.workspace_id).await;
             }
             tool_result(format!("Updated task {id_str}"))
         }

@@ -25,6 +25,7 @@ pub struct MetaSpecFilter {
 // ---------------------------------------------------------------------------
 
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait MetaSpecRepository: Send + Sync {
     /// Create a new meta-spec. Returns the created entity.
     async fn create(&self, meta_spec: &MetaSpec) -> Result<()>;
@@ -57,6 +58,7 @@ pub trait MetaSpecRepository: Send + Sync {
 // ---------------------------------------------------------------------------
 
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait MetaSpecBindingRepository: Send + Sync {
     /// Create a binding linking a spec to a meta-spec at a pinned version.
     async fn create(&self, binding: &MetaSpecBinding) -> Result<()>;
