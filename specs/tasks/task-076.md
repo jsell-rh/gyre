@@ -9,7 +9,7 @@ coverage_sections:
   - "lsp-call-graph.md §8 LLM Integration"
   - "lsp-call-graph.md §9 Performance Considerations"
   - "lsp-call-graph.md §12 Relationship to Other Specs"
-commits: []
+commits: ["0b3f2317a93d1570882cca8defdfa4cbd24a6d45"]
 ---
 
 ## Spec Excerpt
