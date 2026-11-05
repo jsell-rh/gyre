@@ -2047,6 +2047,7 @@ mod tests {
     use super::spawn_agent_core;
     use crate::mem::{test_state, test_state_with_jj_ops, test_state_with_secrets};
     use gyre_common::Id;
+    use gyre_ports::GitOpsPort;
     use axum::{body::Body, Router};
     use http::{Request, StatusCode};
     use tower::ServiceExt;
