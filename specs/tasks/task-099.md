@@ -10,7 +10,7 @@ coverage_sections:
   - "platform-model.md §8 What It Does"
   - "platform-model.md §8 Starter Kit"
   - "platform-model.md §8 Protocol Injection"
-commits: ["28fe2508d63ff59965e28fdd012b4eccc39f8616", "ef1ea3e223a3994f3d8c7e97de69264684e5cf5f", "63250520c661eb0f1feed56cafba06e049260dd9", "e3fde3a652fb8b6b5acc876e134050ea5e67a547", "6ed19b4ce8eac208cfb6f173b77923c71358fc09", "4566fc4843802c3a1f9057809078ca2bba615721", "aede618804407b47b16f9e76dd434cac4f8e1646", "e54363c8dd92fa53e3fd2a8727fad0bd7a05f20e", "2061f8c4f7cd289e6328897d2c4ddf48be69970c", "c903a80b64fc25fa2fed19822990c95c53452e37"]
+commits: ["28fe2508d63ff59965e28fdd012b4eccc39f8616", "ef1ea3e223a3994f3d8c7e97de69264684e5cf5f", "63250520c661eb0f1feed56cafba06e049260dd9", "e3fde3a652fb8b6b5acc876e134050ea5e67a547", "6ed19b4ce8eac208cfb6f173b77923c71358fc09", "4566fc4843802c3a1f9057809078ca2bba615721", "aede618804407b47b16f9e76dd434cac4f8e1646", "e54363c8dd92fa53e3fd2a8727fad0bd7a05f20e", "2061f8c4f7cd289e6328897d2c4ddf48be69970c", "c903a80b64fc25fa2fed19822990c95c53452e37", "e39045ab01c3499e74646ba7137d6076cde4e556"]
 ---
 
 ## Spec Excerpt
@@ -158,90 +158,112 @@ Read `specs/system/platform-model.md` §8 "Bootstrap & First-Run" for the full s
 
 `gyre bootstrap` implements platform-model.md §8 as a real 9-step REST
 orchestration with resume semantics, backed by the server pieces the spec
-requires. Implementation commits are listed in the frontmatter; the revision
-round closed review findings F1-F7 from round 1, and this round repaired the
-task document back to the assigned contract (coverage_sections and contract
-body restored verbatim) without changing any Rust source.
+requires. Implementation commits are in the frontmatter; rounds 1-2 closed
+the F1-F7 findings (task history), and this round (4) repaired the five
+round-3 review findings — every one reproduced live before and verified
+fixed live after.
 
 ### Behavior
 
 - CLI: `bootstrap` subcommand with `--tenant/--workspace/--repo/
   --repo-path/--admin-user/--oidc-issuer/--dev/--starter-kit` (plus
-  `--server/--token`). Health check, then tenant (reuse by slug), admin
-  user + API key saved to `~/.gyre/config` with subsequent calls
-  authenticating as the new admin, workspace and repo (reuse by name),
-  4 built-in personas created and pre-approved, spec registry init,
-  default gates, repo orchestrator spawn, summary with IDs, API key
-  (shown once) and URLs. A failing step reports completed steps and a
-  resume hint (`StepTracker`); tenant/workspace/repo/persona reuse and
-  the saved-key admin path make a failed run resumable, and a 409 on
-  orchestrator spawn becomes `AlreadyLive`.
-- Admin user is tenant-bound at creation (F1): `POST /api/v1/users`
-  validates the tenant exists and persists `user.tenant_id` (migration
-  `000056_user_tenant_id`); the API-key auth path derives the tenant
-  scope from that binding and fail-closes (403) on a user without one;
-  the bootstrap admin gets `global_role: TenantAdmin`, not a global
-  superuser.
-- Spec registry (step 6, F4, F5): with a manifest present (pre-existing
-  or just written by `--starter-kit`), `push_and_sync_specs` commits the
-  starter-kit files, pushes `HEAD:refs/heads/main` to the server repo,
-  then calls `POST /api/v1/repos/:id/sync-specs` so the ledger
-  populates at first-run time; later pushes stay in sync via the
-  post-receive hook. The starter manifest uses the server's
-  `ApprovalConfig {mode: human_only}` shape and round-trips through the
-  real `parse_manifest` in a server-side test that `include_str!`s the
-  CLI's manifest.
-- Starter kit (F6): 5 files (`specs/manifest.yaml`, `specs/index.md`,
-  `specs/system/design-principles.md`, `AGENTS.md`, `.prek.yaml`),
-  never overwrites existing files; `--starter-kit` requires
-  `--repo-path` (explicit error, no relative-path default).
-- Orchestrator spawn (step 8, F2, F3): task-093 endpoint with
-  exactly-one-live semantics; the repo-orchestrator persona is resolved
-  from `state.personas` (repo > workspace > tenant scope chain, must be
-  Approved, fail-closed) and persisted on the agent row (migration
-  `000057_agent_persona_id`); the process launches on the resolved
-  compute target (workspace assignment > tenant default > local) and
-  the response and CLI summary report the truthful launch status
-  (`running`/`launch_failed`), never claiming running for a process
-  that failed to start.
-- Dev mode: `--dev` rejects `--tenant`/`--admin-user`/`--oidc-issuer`;
-  token precedence `--token` > `GYRE_AUTH_TOKEN` > static dev token.
-- Protocol Injection (coverage section retained per assigned contract):
-  the persona-attachment clause of step 8 is implemented as above; the
-  full MCP prompt-injection layer (protocol norms, context,
-  constraints) is decomposed to task-101 per the round-1 review F2
-  scope note and coverage row 52 (task-101 not-started).
+  `--server/--token`). Health check, tenant (reuse by slug), admin user +
+  API key saved to `~/.gyre/config` with subsequent calls authenticating
+  as the new admin, workspace and repo (reuse by name), 4 built-in
+  personas created and pre-approved, spec registry init, default gates,
+  repo orchestrator spawn, summary with IDs, API key (shown once) and
+  URLs. A failing step reports completed steps and a resume hint.
+- Round-3 finding 1 (wire): `OrchestratorAgentResponse` no longer
+  declares `persona_id` alongside the flattened `AgentResponse` (which
+  carries it from the domain agent), so the spawn response serializes
+  every key exactly once and the CLI's strict deserialization parses it —
+  step 8 completes and the summary prints.
+- Round-3 finding 2 (spec registry): `push_and_sync_specs` pushes with
+  `--force`. The server seeds `main` with a disposable empty initial
+  commit and the user's local history is unrelated to it, so the unforced
+  first-run push was always rejected as non-fast-forward and the ledger
+  stayed empty; bootstrap registers the local repo as the platform's
+  source of truth, so replacing the seed is the intended first-run
+  semantics.
+- Round-3 finding 3 (cross-tenant personas): the resume lookup is
+  `find_persona_by_slug_in_tenant` with `?scope=tenant&scope_id=...` —
+  the unscoped persona list spans all tenants, which made the second
+  tenant's bootstrap skip persona registration and die at spawn with a
+  persona 404.
+- Round-3 finding 4 (resume): (a) `spawn_orchestrator` releases a name
+  held by a Dead/Stopped/Failed agent (renamed `...-superseded-N`, same
+  suffix scheme the stale detector uses for restarts) instead of
+  rejecting with 400 — the scope-slot check already guarantees no live
+  orchestrator holds the scope; a LIVE name holder elsewhere (agent names
+  are unique server-wide) still gets 400 and the CLI retries with a
+  suffixed name. (b) The mem adapter now enforces the SQLite uniqueness
+  constraints in code — tenant `slug`, workspace `(tenant_id, slug)`, repo
+  `(workspace_id, name)`, each documented as a failure clause on its port
+  trait — so the tenant/workspace/repo reuse fallbacks trigger on the
+  default in-memory dev server too, instead of silently building a
+  parallel duplicate hierarchy.
+- Unchanged from prior rounds: admin user tenant binding at creation
+  (migration `000056_user_tenant_id`, fail-closed API-key auth), truthful
+  orchestrator launch status (`running`/`launch_failed`), starter kit
+  (5 files, never overwrites, requires `--repo-path`), persona
+  attachment persisted on the agent row (migration `000057`), dev mode
+  flag rejection and token precedence, Protocol Injection decomposed to
+  task-101 per the round-1 F2 scope note.
 
 ### Tests
 
-- CLI (`bootstrap.rs`, 13 tests + 3 parse tests in `main.rs`): slug
-  derivation, gate detection (cargo/arch variants), starter-kit file
-  set and never-overwrite, manifest documented shape, summary rendering
-  including launch-failure and already-live outcomes, flag
-  parsing/defaults/dev mode.
-- Server: `users.rs` (create with tenant validation, duplicate
-  external_id, unknown tenant, unknown role, minted key authenticates
-  through the full router with `Bearer <raw key>` and tenant binding),
-  `orchestrator.rs` (persona attached and asserted, scoped JWT, 409
-  conflicts, stale restart, truthful launch outcome), `spec_registry.rs`
-  (starter manifest round-trips through the real parser).
+- New in `orchestrator.rs`:
+  `repo_orchestrator_response_serializes_no_key_twice` asserts on the
+  serialized wire TEXT (a depth-1 key scanner; `serde_json::to_value`
+  collapses duplicates, which is why the old repo_id-only count test was
+  blind) and strict-deserializes the CLI shape;
+  `spawn_rejects_missing_persona` (404 when no persona resolves in the
+  repo/workspace/tenant chain); `spawn_rejects_unapproved_persona`
+  (conflict when the persona is not Approved);
+  `spawn_frees_name_of_stopped_predecessor` (dead predecessor renamed,
+  same-name respawn succeeds, live holder still rejected).
+- Mutation probes (evidence in this round's sandbox under
+  `/tmp/stage/review-evidence/`): reintroducing the duplicate
+  `persona_id` fails only the new wire test while the old repo_id test
+  stays green; fail-open persona resolution (fabricating an approved
+  persona on NotFound, and ignoring approval status) fails the
+  corresponding new tests.
+- `mr_timeline.rs` fixture corrected to distinct repo names — it relied
+  on the mem duplicate-`(workspace, name)` divergence the new guard
+  closes.
 
 ### Verification evidence
 
-- All evidence from this round is saved under `/tmp/stage/review-evidence/`
-  (source SHAs, commands, exit codes, output tails).
-- This round (contract-only repair, no Rust source changed), sandbox at
-  HEAD `56803714`: `cargo test -p gyre-cli bootstrap` — 16 passed, 0
-  failed; `cargo test -p gyre-server --lib -- users:: orchestrator::` —
-  18 passed, 0 failed; `cargo test -p gyre-server --lib -- spec_registry`
-  — 62 passed, 0 failed. Mechanical gates all exit 0 at HEAD: arch,
-  task-commit-attribution, inert-enforcement, relative-path-defaults,
-  scope-literal-defaults, migration-versions.
-- Pre-existing on the incoming base `75ada1c4` (reproduced in a temp
-  worktree and again at branch HEAD, not introduced by this branch):
-  check-cli-spec-parity exits 1 on the spec_assist SSE display path
-  (`main.rs:1235`); check-assertionless-tests exits 2 after its header.
-- Revision-round commits were additionally built and tested in their
-  original sandbox per the task operational history; full workspace
-  suites, all-target Clippy, and GitHub CI remain with verification and
-  publication.
+- All evidence saved under `/tmp/stage/review-evidence/` (source SHAs,
+  commands, exit codes, logs; `e2e/` for the live runs).
+- `cargo test -p gyre-server --lib`: 1262 passed, 1 failed —
+  `ws::tests::ws_activity_event_emits_to_telemetry`, reproduced
+  deterministically on the incoming base via `git stash` (pre-existing,
+  not introduced here). `cargo test -p gyre-cli`: 131 + 1 passed.
+  Orchestrator suite 11/11, users+spec_registry 55, mr_timeline 13.
+- Live e2e against a server built from this head: dev first-run
+  bootstrap with `--starter-kit` exits 0, spec ledger populated at
+  first-run time (1 entry via `GET /api/v1/specs`), spawn response
+  parsed, summary printed with truthful `launch_failed`; immediate
+  re-run reuses tenant/workspace/repo and reports the orchestrator
+  AlreadyLive; after admin-killing the orchestrator, a re-run frees the
+  stopped predecessor's name server-side (`gyre-demo-orchestrator-1`
+  dead, new spawn active under the original name) and exits 0; a
+  cross-tenant "Acme Corp" `--admin-user jsell` run on the same server
+  registers its own four personas, retries the live name collision as
+  `gyre-demo-orchestrator-2`, and exits 0 with the API key shown once
+  and config saved. Failure paths: server down / `--dev --tenant` /
+  missing `--tenant` all exit 1 with the expected messages.
+- Mechanical gates at this head exit 0: arch, mem-port-contracts,
+  migration-versions, inert-enforcement, scope-literal-defaults,
+  dead-message-kinds, api-auth, abac-route-registry,
+  abac-exempt-handlers, mcp-write-tools, no-em-dash,
+  conditional-test-guards, task-commit-attribution. The
+  relative-path-defaults exemption for the pre-existing spawn.rs prose
+  comment was re-anchored 601 -> 600 after this round's line shift
+  (same physical comment, entry count unchanged). Pre-existing on the
+  incoming base (reproduced via `git stash`): check-assertionless-tests
+  exits 2; check-cli-spec-parity exits 1 on the spec_assist SSE display
+  path.
+- Full workspace suites, all-target Clippy, and GitHub CI remain with
+  verification and publication.
