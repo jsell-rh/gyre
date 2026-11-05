@@ -87,8 +87,17 @@ terminal. Raw observations and reconciliation evidence are retained; missing,
 changed-head, or ambiguous evidence stays pending. GitHub still enforces all
 required checks at merge. A merged PR goes directly to confirmation of its
 original verified tree; its own merge must not start another verification.
-Upstream failures and transient CI infrastructure retain their distinct
-recovery paths. PR readiness is visible separately from a successful review run.
+Confirmed PR conflicts (`DIRTY` plus `CONFLICTING`) become durable rebase
+findings immediately, independently of CI readiness or integration-lane ownership.
+The observer rechecks the open PR, exact published head, and current target base
+before handing off. Implementation resumes the retained published head against
+current main, resolves conflicts, and must obtain fresh review and verification
+before the existing PR can merge. The handoff fences obsolete verification,
+releases integration, and creates one repair assignment; later polls cannot
+create duplicate repairs. Unknown mergeability and genuine policy waits remain
+observations. Upstream failures and transient CI infrastructure retain their
+distinct recovery paths. PR readiness is visible separately from a successful
+review run.
 
 A durable **integration lane** admits one candidate at a time to final
 verification, CI, and merge. Implementation and independent review remain
