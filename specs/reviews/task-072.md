@@ -95,3 +95,38 @@ needs-revision — F6/F7 are wrong-or-missing `Calls` edges in realistic Go layo
 ### Verdict
 
 complete — all R1/R2 findings are fixed by real product code verified at this HEAD; the one R3 finding (F9, attribution gate) is fixed in this round and the gate is green. The task's own scope (Go Pass 2 pipeline) is done: port + adapter + pipeline + resolution policy + lifecycle, each with tests that fail on the bugs they guard against.
+
+---
+
+## Round: R4 (resume of interrupted R4/R5 attempts)
+
+**Reviewer:** Independent review
+**Date:** 2026-11-05
+**Candidate:** 518dd91ab9a8f6fad3a539997de3e80c39b323e4 (base 110180fb)
+**Spec ref:** lsp-call-graph.md §1–6, §10 Phase 1, §11
+**Scope:** post-R3 surface — the clippy-diff gate repair (1eefe38c, comment-only doc move in `gyre-ports/src/graph.rs`), reconciliation with main via PR #680 (3bb4932d), the new adapter happy-path test (`env_override_binary_output_is_parsed_into_edges`), §11 Dockerfile wiring, attribution exemption shrink (3→2), and the durable CI failure on prior head fbecdeee.
+
+### Probes (all at the exact candidate; evidence under review-evidence/)
+
+- `cargo test -p gyre-domain call_graph_resolve` — 16/16 ok (revalidated from the interrupted attempt's saved evidence; re-run at this HEAD).
+- `cargo test -p gyre-domain go_extractor` — 13/13 ok (the interrupted attempt's unfinished probe; includes `qualified_name_uses_import_path_not_package_clause`, the F6 regression test).
+- `cargo test -p gyre-adapters call_graph` — 3/3 ok (incl. the new `GO_CALLGRAPH_BIN` stub happy-path test with ENV_LOCK serialization).
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib graph_extraction` — 22/22 ok (incl. `sync_go_repo_persists_calls_edges_in_graph_store` and all five Pass 2 lifecycle tests).
+- `bash scripts/check-arch.sh`, `check-mem-port-contracts.sh`, `check-task-commit-attribution.sh` — all exit 0; `python3 scripts/check-rustfmt-diff.py 110180fb` clean.
+- Clippy repair verified two ways: (a) the upsert-contract doc now sits at `graph.rs` lines 10–15, above `#[async_trait]`, outside the macro-expansion span — zero clippy warnings have primary spans in `graph.rs` in a focused `cargo clippy -p gyre-ports` run; (b) CI's Clippy job is green on fbecdeee (run 41921594788), whose `.rs` content is byte-identical to the candidate (`git diff --name-only fbecdeee..518dd91a -- '*.rs'` empty) with identical changed-line sets (no `.rs` moved on main between 59ff5d01 and 110180fb either). 1eefe38c verified comment-only.
+- Saved diff evidence from the interrupted attempt re-validated against the exact candidate (byte-identical after file-scope normalization).
+
+### Durable CI finding (Development controller FAILURE on fbecdeee)
+
+Run 41921594788: Clippy/Test/Format/Architecture-lint all green; the failure is isolated to the `test_dev*.py` step. Investigated: (a) that suite passes locally at fbecdeee itself (44/44, temp worktree) and at the candidate (44/44, including live gateway-auth tests) — the failure does not reproduce at either tree; (b) no `test_dev*.py` test executes the repo's own `check-task-commit-attribution.sh` or reads the checkout's git state (temp repos only), so the candidate's scripts-surface changes cannot deterministically break that step; (c) 53 minutes later the same job passed on main (run 41929393764, base 110180fb) carrying PR #680's updated pipeline tooling — which the candidate merged. Raw CI logs are blob-blocked from this sandbox. Conclusion: the failure was in pre-#680 pipeline tooling (superseded in this candidate) or transient infra; not a defect in the candidate's diff. The verifier should confirm the Development controller job is green on the candidate's own CI run.
+
+### Verification limitations (this round)
+
+- No Go toolchain in this sandbox (re-confirmed: prebuilt binary runs, `packages.Load` fails with `go command required, not found`); R3's manual binary exercise stands.
+- CI job-log blobs network-blocked; step-level conclusions via the REST jobs/annotations APIs.
+- Local clippy (rust-1.99.0 dev) emits a deny-by-default `clippy::never_loop` error at `rust_extractor.rs:1071` — pre-existing main code, untouched by this diff, and not emitted by CI's stable toolchain (Clippy green on both fbecdeee and the base with identical content). Not a candidate defect; noted for main's toolchain watch.
+- `test_pipeline*.py` locally: 138/139, the one error being `os.killpg` EPERM — a sandbox process-group-signal restriction reproduced with pure Python (no gyre code); CI runners are not so restricted.
+
+### Verdict
+
+complete — the candidate's Rust diff is CI-green on fbecdeee (all code gates), every focused suite passes at the exact candidate, the clippy-gate repair is verified comment-only and span-clean, the attribution exemption correctly shrank, and the durable CI failure is traced to a step the candidate's diff cannot affect and that passes at both trees locally. No findings.
