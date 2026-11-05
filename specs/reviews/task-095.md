@@ -126,3 +126,44 @@ The R2 scope note ("Circuit Breaker, CLI, UI are not implemented on main, assign
 ### Verdict
 
 **Needs-revision.** R3-F1 is a functional correctness defect in the headline §6 CLI feature (manual revert of a specific MR) with zero test coverage; R3-F2 means the circuit breaker — the other headline feature of `5aaded21` — cannot fire in the workflow the recovery protocol itself prescribes; R3-F3 is a fail-open health signal on the human decision path; R3-F4 must be corrected so the review record matches what actually landed. The R1/R2 findings themselves remain fixed on integrated main.
+
+## Round 7 — independent review of recovered candidate `881c2440` (base `3c39ab1f`)
+
+Review target: candidate `881c2440` on branch `pipeline/task-095/e04b99eadae74e64a2a2a29c216e362c-6` = base `3c39ab1f` + squashed checkpoint `3ef9e1b8` + two task-metadata commits (`4c218b0e`, `881c2440`, specs/tasks only).
+
+### Checkpoint-recovery fidelity (bounded by object-store evidence)
+
+`64015548` (the round-5 candidate, reviewed at checkpoint `bce07be9`) is resolvable in this object store. `git diff 64015548 3ef9e1b8 -- crates/ scripts/` is exactly: the Round-6 `policy_engine.rs` test fix (12 lines, test-side) plus `scripts/dashboard/public/dev-app.{js,css}` drift that comes from the new base containing PR #681 (absent from the old lineage). No other product delta — the squash faithfully carries rounds 1–6.
+
+### Independent evidence (this round, this sandbox)
+
+- **Round-6 fix verified deterministically.** Standalone rustc replica of the engine (`evaluate`/`eval_condition`/`eval_policy_conditions` verbatim, both §7.2 builtins verbatim; `/tmp/stage/review-evidence/probe_policy_test_fix.rs`): fixed unattested arm (explicit `attestation_chain_present = false`) → Deny attributed to `builtin-require-signed-authorization` PASS; attested arm → Allow attributed to `builtin-attested-authorization` PASS; user-deny-override and system-subject arms PASS; pre-fix absent-attribute construction reproduces the round-5 failure signature (Deny, `matched_policy: None`) as a regression guard. All 8 checks pass.
+- **Revert semantics verified against git itself.** `git revert -m 1` reference probes on scratch repos confirm exactly the behavior `git2_ops.rs::revert_commit` implements via `merge_trees(ancestor=tree(M), ours=tree(tip), theirs=tree(M^1))`: non-tip revert removes only the reverted merge's file and preserves later merges' files; same-file later change conflicts with the branch tip untouched. The `RevertResult::Conflict` recovery path (stay paused, escalate, no per-MR side effects) matches.
+- **All 88 mechanical gates pass at head**, including `check-fabricated-scope-defaults.sh` (exemption correctly moved to the shifted line), `check-fail-open-ref-resolution.sh` (baseline 0 — both R3-F3 sites fixed in product code), `check-abac-route-registry.sh` (duplicate count frozen at 17, five dead duplicates removed), `check-task-commit-attribution.sh`, `check-inert-enforcement.sh` (merge-time ABAC discard sites genuinely enforced now — Deny fails the queue entry).
+- **rustfmt** clean (edition 2021) on all 29 changed `.rs` files — also proves they are syntactically valid.
+- **Sandbox limitation (not a code defect):** no crates.io egress (connection refused; no registry cache, no target dir), so `cargo test` cannot execute here. Deferred to CI/remote verification: `cargo test --all`; specifically `cargo test -p gyre-server --lib policy_engine merge_processor` (the two previously-failing tests) and `cargo test -p gyre-adapters` (revert semantics tests).
+
+### Prior findings — all verified fixed in code
+
+- R4/bd8191d9 F1 (disabled `builtin:attested-authorization` seed): `enabled: true` at `abac_middleware.rs` + drift-refresh seeding so existing deployments pick up the fix (`builtin_policy_drifted` + update-on-reseed, idempotency asserted on `updated_at`).
+- R4 F2 (rustfmt line 1345): full-file rustfmt clean.
+- R4 F3 (fabricated-scope exemption line shift): exemption at `git_http.rs:1499`, check passes.
+- R5/202cfc5b (unattested test arm): fixed test-side with accurate rationale comment; engine deliberately left fail-closed (loosening `NotEquals` for missing attributes would be fail-open). Verified by probe.
+- R3-F1 (manual revert of wrong commit): `merge_commit_sha` persisted at merge time (single + group paths, both adapters + migration 000056), `revert_mr` uses the recorded SHA, rejects foreign-repo MRs (403) and missing SHA (409), surfaces Conflict (409) with no side effects, and manual reverts count toward the breaker.
+- R3-F2 (breaker keyed by mr_id, unreachable across resubmission): key is now `spec_ref`-stable (fallback MR id), remediation task instructs spec re-binding, `enqueue` rejects non-Open/Approved MRs, `process_next` 4b'' and the group path fail stale entries — a Reverted MR can no longer be silently re-merged.
+- R3-F3 (main_green fail-open): `repo_status` returns `false` on unresolvable HEAD, with a test that would go green under the old server-cwd fallback.
+
+### Task contract (platform-model.md §6)
+
+Post-merge gates run against the merged HEAD via detached worktree in both merge paths; on failure: pause (KV + MergeQueuePaused event), revert (`-m 1` three-way semantics), gate re-run on reverted HEAD, resume-or-escalate, MR `Reverted` (Merged→Reverted only, terminal), MrReverted event to the author agent + notification to the spawner, High-priority remediation task naming the failure, gate results invalidated to Pending; circuit breaker at 3 reverts cancels queue entries across the breaker key and escalates (Critical task + workspace notifications). Acceptance criteria 1–8 verified in code with meaningful tests (test doubles observe which SHA was reverted and can fail/conflict; the fail-closed test uses an unresolvable ref, not a stubbed gate).
+
+### Non-blocking observations
+
+- The Shipped narrative in `specs/tasks/task-095.md` describes the breaker as "keyed on source branch"; the code (and its own comments/tests) key on `spec_ref` with MR-id fallback — the code is the better design; the phrase is a stale narrative slip only.
+- `specs/tasks/task-068.md` frontmatter commit list was reordered (same SHA set, no semantic effect) inside the checkpoint squash.
+- Coverage row 35 (Agent Behavior During Recovery) stays `implemented`-Partial: the pause/resume events are emitted and persisted, but no orchestrator consumer exists yet (message-dispatch drain is a cross-cutting platform gap, disclosed in the coverage matrix, not owned by this task).
+- `5aaded21` remains listed in `commits:` but is not resolvable in this object store — disclosed in the Shipped section; its content is subsumed by the listed squash `3ef9e1b8`, so review scoping covers the source.
+
+### Verdict
+
+**Approved.** All four §6 coverage sections' contract items are genuinely implemented; every prior round's findings are fixed with independently verified evidence; the deterministic repro of the last open defect passes. Full-suite green must be confirmed by CI/remote verification on the branch head (this sandbox has no crates.io egress — an infrastructure restriction, recorded above, not a code defect).
