@@ -119,3 +119,46 @@ view, conflict dialog) and the §1/§7 presence liveness contracts (heartbeat
 legs, departure rebroadcast on all removal paths, session-scoped eviction
 stop, reconnect re-seed). Socket-level end-to-end tests remain for the
 controller's host run — they are environmental here.
+## Round 6 — rebase-repair round verified (candidate d7973486)
+
+Assignment base `3c39ab1f` → candidate `d7973486`. Net product delta reviewed in
+full: presence departure rebroadcast (all four removal paths →
+`broadcast_presence_departure`, `evict_stale_presence` extracted and spawned from
+`main.rs:73`), client presence heartbeat (`createPresenceHeartbeat`, all §1 legs +
+session-scoped eviction stop), ConcurrentEditBanner reconnect re-seed with
+stale-response sequence guard, `oneditingentity` wiring so beats re-send the current
+editing entity, the test-only determinism fix `3c5bdcd7`, and sweep hardening
+(anchored `/package-lock.json` ignore rule + `scripts/check-sandbox-sweep-artifacts.sh`
+gated in CI and pre-commit). All prior-round behavior (F1 selfUserId wiring
+`App.svelte:752/1069/1662/1699`, F2 Inbox `SpecDiffView` from persisted `body.diff`,
+409 + diff + both-editor notifications in `specs_assist.rs`, SpecConflictDialog)
+verified intact at the candidate.
+
+Evidence (this sandbox; `/tmp/stage/review-evidence/`):
+
+- `npm ci` + focused task-092 suites (presence, ConcurrentEditBanner) — 26/26 pass.
+- Full `npm test` — 1614 passed / 2 failed; both failures are jsdom timing-budget
+  assertions in `ExplorerCanvas-performance.test.js`, a file byte-identical
+  base↔candidate that passes 15/15 in isolation at BOTH base and candidate
+  (worktree control) — machine-load flakiness, environmental, matching the task's
+  noted pre-existing failure class. Not a regression.
+- Mutation probe (restored, tree clean): disabling the reconnect re-seed makes the
+  new banner test fail — load-bearing, not self-confirming.
+- `scripts/check-sandbox-sweep-artifacts.sh` → OK; `scripts/check-task-commit-
+  attribution.sh` → OK (all task-labeled product-surface commits recorded).
+- Rust compilation blocked by sandbox transport (crates.io refused, empty cargo
+  registry cache, no target/vendor): ws.rs/lib.rs verified by rustfmt parse + full
+  symbol/lock-discipline review; verifier must run
+  `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib ws::` (73 tests incl. the four
+  new socket departure tests) and `--lib specs_assist` (21) on the host.
+  Restriction is infrastructure, not a code defect.
+- dist freshness corroborated: dist+src unchanged since the checkpoint whose
+  retained log shows `vite build` producing exactly the committed hashed assets.
+- Determinism fix `3c5bdcd7` verified test-only (interleaved seeding with observer
+  confirmation; removes the 2ms-sleep heuristic; guarantees strictly increasing
+  `server_last_seen`).
+
+No findings. F1-F4 hold at the candidate; the rebase-repair round's changes are
+sound, mechanically gated, and test-only where claimed.
+
+**Verdict: approved.**
