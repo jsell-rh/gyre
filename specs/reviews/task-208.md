@@ -51,3 +51,22 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 23 (2026-10-10) — clobber 22 reproduced at candidate `1663138a`; product re-verified green
+
+Candidate: `1663138a1db84c433a39d30ab3dd8d1309cef01c` (tip, assigned), base `110180fbb248d6fa408492c0f9a3ec4a5a724372`. No resume artifacts existed; all probes fresh.
+
+**Finding (clobber 22 — same class as rounds 2–22, finding 765d9d2b):** the assigned candidate commit itself (`process: record task-208 branch commits`) rewrote `commits:` in `specs/tasks/task-208.md` from the four-SHA list restored at parent `eec43e46` back to `["a11cbf7e", "98fd096e"]`, dropping `ad1121c5` (task-208-labeled dist regeneration — the round-1 F1 fix that removed the forbidden surface from the RustEmbed'd shipped bundle) and `ea006d52` (task-208-labeled `.gitattributes` whitespace-gate exemption). Both are ancestors of HEAD (content intact — only attribution dropped). `scripts/check-task-commit-attribution.sh` exits 0 only because its product-surface regex `^(crates/|web/src|web/tests)` excludes `web/dist/` and root `.gitattributes`. Repair is mechanical: restore the four-SHA list as at `eec43e46`.
+
+**Fresh product verification (all green at this exact product state):**
+
+- Diff inspection `110180fb..1663138a`: complete end-to-end cutover — handlers, routes, ABAC mappings, `api.js` methods, tab bodies/state/fetches/CSS, test mocks, e2e-flow.sh (inverted to assert 404), api-reference rows, spec amendment, coverage matrices, M22 annotations. No out-of-scope edits (`/@{username}`, `?owner=me`, ledger, tokens, notif-prefs, memberships untouched; remaining `users/me/*` endpoints keep per-handler-auth ABAC-exempt model).
+- Dead-code grep over `crates/` + `web/src/` → zero matches; committed `web/dist/` forbidden-identifier grep → zero matches with kept-surface identifiers present; `git diff e184eb26..HEAD --stat` shows only the task frontmatter changed since the dist-regeneration merge (zero product drift).
+- `npm ci` + `npx vitest run src/__tests__/UserProfile.test.js` → **23/23 passed**, verbose reporter confirms the exact-six-tab guard executed.
+- **Mutation kill:** temporarily re-adding `{ id: 'my-agents' }` to the tabs array makes the suite fail (`expected [ 'info', 'my-agents', … ] to deeply equal [ 'info', … ]`) — the guard is real, not self-confirming. Source restored (worktree clean, post-restore 23/23).
+- `scripts/check-abac-route-registry.sh` → OK.
+- Router structure: no HTTP fallback service exists anywhere in the server, so with the three `.route()` registrations deleted, the removed URIs are structurally unroutable (axum default 404).
+
+**Deferred to verification (infrastructure restriction, not a code defect):** `cargo test -p gyre-server --lib my_stuff_endpoints_are_removed` could not run in this review sandbox — `static.crates.io`/`index.crates.io` unreachable (curl exit 7) and the local cargo cache holds only 27 of 399 `Cargo.lock` packages. Verification must run the focused router regression test plus the full `cargo test --all` / `cd web && npm test` suites.
+
+Verdict: **needs-revision** — sole finding is the frontmatter attribution clobber; all product acceptance criteria independently verified green.
