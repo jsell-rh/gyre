@@ -58,11 +58,17 @@ def reconcile_checks(run, url, head, pr):
     return pr | {'statusCheckRollup':checks}, evidence
 
 
+def merge_conflict(pr):
+    return (pr.get('state') == 'OPEN' and pr.get('mergeStateStatus') == 'DIRTY'
+            and pr.get('mergeable') == 'CONFLICTING'
+            and bool(re.fullmatch(r'[a-f0-9]{40}',pr.get('baseRefOid') or '')))
+
+
 def observe(run, url, head, base, directory):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     pr = json.loads(run('gh', 'pr', 'view', url, '--json',
-                        'headRefOid,statusCheckRollup,mergeStateStatus,state,mergeCommit', timeout=30).stdout)
+                        'headRefOid,statusCheckRollup,mergeStateStatus,state,mergeCommit,baseRefOid,mergeable', timeout=30).stdout)
     if pr['headRefOid'] != head:
         raise RuntimeError('PR head changed outside the recorded verification')
     if pr['state'] == 'MERGED':
@@ -71,6 +77,13 @@ def observe(run, url, head, base, directory):
         return {'status': 'closed'}
     checks = pr.get('statusCheckRollup') or []
     (directory / 'github-checks.json').write_text(json.dumps(pr, indent=2))
+    # Conflicts require source repair even when CI is green, absent, or still
+    # running. Recheck both refs and conflict state before handing off.
+    if merge_conflict(pr):
+        return {'status':'merge_conflict','head':head,'base':pr['baseRefOid'],
+                'verified_base':base,'pr':url,'merge_state':'DIRTY',
+                'check_summary':[{key:check.get(key) for key in ('name','status','conclusion','context','state')} for check in checks],
+                'detail':'The published PR conflicts with its current target branch. Resolve the merge against current main, preserving the retained implementation. Inspect all unmerged paths, resolve source conflicts, regenerate conflicting build artifacts from the resolved source, and obtain fresh independent review and verification.'}
     pr, reconciled = reconcile_checks(run,url,head,pr)
     (directory / 'github-check-reconciliation.json').write_text(json.dumps(reconciled,indent=2))
     pending, failed, infrastructure = check_sets(pr)
