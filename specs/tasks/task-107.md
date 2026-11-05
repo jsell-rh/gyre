@@ -6,7 +6,7 @@ progress: ready-for-review
 review: specs/reviews/task-107.md
 coverage_sections:
   - "identity-security.md §Layer 3: Sigstore/Fulcio"
-commits: ["ec3e247ed31b5f1b18297cf2e2594c4dcbb862d7"]
+commits: ["ec3e247ed31b5f1b18297cf2e2594c4dcbb862d7", "cd84c820d32b7670febdd659ed051daf7b5719a0"]
 ---
 
 ## Spec Excerpt
@@ -71,7 +71,7 @@ Read `specs/system/identity-security.md` §Layer 3. The current signing implemen
 
 Fulcio keyless commit signing with Rekor transparency-log recording,
 implementing every plan item and every review finding from the prior
-rounds (F1-F14).
+rounds (F1-F17).
 
 ### Behavior
 
@@ -125,47 +125,64 @@ rounds (F1-F14).
   sign/verify paths against a Fulcio built from upstream proto
   documentation.
 
-### This round (F13/F14 repair, head `cd5de509`)
+### This round (F15/F16/F17 repair, head `cd84c820`)
 
-- **F13**: the F12 auth.rs insertions had moved the exempted legacy
-  `claims.tenant_id` fallback site past the frozen exemption line
-  (auth.rs:786), so `scripts/check-fabricated-scope-defaults.sh`
-  exited 1 on the candidate head and every Rust-touching commit failed
-  pre-commit. The exemption line now tracks the current site
-  (auth.rs:838); the entry count stays at the frozen baseline of 5.
-- **F14**: `GYRE_AGENT_SIGNING_KEY` documented in
-  `docs/server-config.md` next to `GYRE_SIGNING_MODE`. While writing
-  the row, an empirical probe against the production loader showed the
-  natural generation command (`openssl genpkey -algorithm ed25519
-  -outform DER | base64 -w0`) produces PKCS#8 **v1**, which ring's
-  strict `Ed25519KeyPair::from_pkcs8` rejects with
-  `VersionNotSupported` - every common tool (openssl, Node, Python
-  `cryptography`) emits v1. `AgentSigningKey::from_pkcs8` and
-  `sign_bytes` now use ring's `from_pkcs8_maybe_unchecked`, the entry
-  point ring's own docs direct v1 callers to: v2 parsing is
-  byte-for-byte identical to the strict form (including the embedded
-  public-key/seed consistency check), and for v1 the public key is
-  derived from the operator's own private seed (jsonwebtoken's EdDSA
-  signing path uses the same entry point). A permanent regression test
-  with a fixed openssl-generated v1 key and precomputed expected kid
-  was added to `tests/task107_signing_key_env.rs` (leg 0 of the
-  provisioning/rotation test); it fails with
-  `VersionNotSupported` against the previous loader.
-- The pending merge of base `2f215b1e` (task-180) was resolved: both
-  sides' new diesel tables kept, `web/dist` rebuilt from the merged
-  `web/src` sources.
+- **F15** (fmt gate): rustfmt applied to exactly the 11 candidate-touched
+  files `scripts/check-rustfmt-diff.py 5df14f34` flagged. `cargo fmt --all`
+  was NOT taken wholesale: it also reformats pre-existing main debt on
+  unchanged lines in 13 other candidate-touched files, which would add
+  unrelated changed lines to the diff (and newly expose any pre-existing
+  clippy warning sitting on them to the changed-lines clippy gate). The
+  gate's own algorithm confirmed the minimal set: after formatting only
+  the flagged files, `check-rustfmt-diff.py 5df14f34` exits 0 at the new
+  head.
+- **F16** (clippy gate): the genuinely unused `use gyre_ports::KvJsonStore
+  as _;` import removed from `tests/task107_signing_key_env.rs`, and the
+  repo-conventional `#[allow(clippy::double_must_use)]` added to the two
+  new async_trait port traits (`CommitSignatureRepository`,
+  `SigningHttpTransport`), mirroring `spec_assertion_result_repo.rs`.
+- **Additional clippy defects F16's evidence run missed** (reproduced with
+  the gate's exact command, `cargo clippy --all-targets --all-features
+  -W clippy::all`, which CI uses and the reviewer's `--test
+  task107_signing_key_env` leg did not: that leg compiles the lib without
+  `cfg(test)`, so lib-internal test code was never linted):
+  `assert_eq!(_, true)` in `api/jj.rs` tests (`bool_assert_comparison`,
+  now `assert!`), `map_or(true, ..)` in `api/provenance.rs`
+  (`unnecessary_map_or`, now `is_none_or`, matching repo precedent), and
+  production code after `mod tests` in `sigstore.rs`
+  (`items_after_test_module`; the test module now sits at end of file).
+  `check-clippy-diff.py 5df14f34` exits 0 at the new head.
+- **Inert-enforcement false positives exposed by the same reformatting**
+  (found by diffing a full mechanical-gate sweep at the candidate against
+  the repair head, not by the review): moving the sigstore test module to
+  end of file brought the `verify_signature_fulcio` match-arm tail
+  expression under `check-inert-enforcement.sh`'s scan (it skips everything
+  after `mod tests`), and rustfmt split a `let result =` binding in the
+  conformance test so the call sat at line start. Both are consumed
+  results, not discarded enforcement; both are now written explicitly
+  (bound match-arm value; `now` local keeping the binding on one line) so
+  the discarded-result heuristic does not fire. No exemptions added;
+  the gate exits 0.
+- **F17**: the warn-continue exemption line now points at the actual
+  `seed_builtin_policies` site (`abac_middleware.rs:735`);
+  `check-warn-continue-creation.sh` exits 0.
 
-### Verification evidence (head `cd5de509`, under /tmp/stage/review-evidence/)
+### Verification evidence (head `cd84c820`, under /tmp/stage/review-evidence/)
 
-gyre-server lib suite 1273 passed / 0 failed
-(`f13-gyre-server-lib-full.txt`), including the sigstore,
-commit_signatures, api::jj, api::provenance, and auth suites;
-`task107_signing_key_env` 1/1 (`f13-signing-key-env.txt`);
-`task107_upstream_conformance` 3/3 (`f13-upstream-conformance.txt`);
-adapters commit_signature 5/5
-(`f13-adapters-commit-signature.txt`). All 19 mechanical gates pass
-(`f13-mechanical-gates.txt`), including fabricated-scope-defaults
-(exit 0, was exit 1 on the incoming candidate head) and
-task-commit-attribution. Live Fulcio interop remains blocked by
-sandbox network policy (fulcio.sigstore.dev:443 connect refused);
-exact-head GitHub CI is mandatory after review.
+`check-rustfmt-diff.py 5df14f34` exit 0 ("changed lines clean, 26 Rust
+files checked"; output captured in `summary.md`);
+`check-clippy-diff.py 5df14f34` exit 0: 26 Rust files, 1127 existing
+warnings outside changes (`f15-clippy-gate-final.txt`;
+`f15-clippy-gate.txt` is the pre-fix run reproducing all findings); `check-warn-continue-creation.sh`,
+`check-inert-enforcement.sh`, `check-fabricated-scope-defaults.sh`,
+`check-arch.sh`, and `check-task-commit-attribution.sh` all exit 0;
+a full mechanical-gate sweep diffed against the candidate head
+(`f15-mechanical-gates-candidate99d1caa9.txt` vs
+`f15-mechanical-gates-head.txt`) shows no gate regressed and
+warn-continue-creation fixed. Focused suites:
+sigstore 16/16, commit_signatures 6/6, api::jj 14/14,
+api::provenance 5/5, `task107_signing_key_env` 1/1,
+`task107_upstream_conformance` 3/3, adapters commit_signature 5/5.
+Live Fulcio interop remains blocked by sandbox network policy
+(fulcio.sigstore.dev:443 connect refused); exact-head GitHub CI is
+mandatory after review.
