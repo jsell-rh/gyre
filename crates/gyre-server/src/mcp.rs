@@ -6238,6 +6238,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_spawn_repo_orchestrator_denies_tenant_mismatch() {
+        // task-130 review 29e132008c6748508f2c52ec982d78d6: with the caller's
+        // tenant now derived from the signature-verified claims, the
+        // containment comparison in spawn_repo_orchestrator_core must still
+        // fire — a token whose tenant claim does not match the target
+        // workspace's real tenant is denied, not silently allowed.
+        let state = orch_state().await;
+        // Mint a workspace-orchestrator token claiming ws-1 but a tenant that
+        // does not match ws-1's row (seeded with tenant t1 by orch_state).
+        let token = state
+            .agent_signing_key
+            .mint_orchestrator(
+                "orch-tenant-mismatch",
+                "system",
+                &state.base_url,
+                state.agent_jwt_ttl_secs,
+                "t-other",
+                "ws-1",
+                None,
+                None,
+                "workspace_orchestrator",
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "orch-tenant-mismatch", token.clone())
+            .await
+            .unwrap();
+        let app = crate::build_router(state);
+
+        let (_status, json) = mcp_post_with_token(
+            app,
+            tool_call("gyre_spawn_repo_orchestrator", json!({ "repo_id": "r-1" })),
+            &token,
+        )
+        .await;
+        assert!(json["result"]["isError"].as_bool().unwrap());
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("tenant t1"),
+            "denial must name the workspace's real tenant, got: {text}"
+        );
+        assert!(
+            text.contains("t-other"),
+            "denial must name the caller's claims-derived tenant, got: {text}"
+        );
+    }
+
+    #[tokio::test]
     async fn mcp_spawn_repo_orchestrator_denies_repo_tier() {
         let state = orch_state().await;
         let (_id, token) = register_orchestrator(

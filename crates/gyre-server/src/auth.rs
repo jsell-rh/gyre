@@ -385,6 +385,8 @@ pub struct AuthenticatedAgent {
     pub roles: Vec<UserRole>,
     /// Tenant scope for this request.
     /// - JWT auth: extracted from `tenant_id` claim (defaults to "default").
+    /// - Agent/federated JWT with §1 hierarchy claims: mirrored from the
+    ///   signature-verified claims by `with_hierarchy_from_claims`.
     /// - All other auth methods: always "default".
     pub tenant_id: String,
     /// Workspace scope derived from the validated `workspace_id` claim
@@ -412,9 +414,21 @@ pub struct AuthenticatedAgent {
 impl AuthenticatedAgent {
     /// Derive the §1 Token Scoping hierarchy fields from validated JWT
     /// claims. Called on every path that populates `jwt_claims` so
-    /// `workspace_id`/`repo_id`/`scope` always mirror the claims the
-    /// signature actually verified.
+    /// `tenant_id`/`workspace_id`/`repo_id`/`scope` always mirror the claims
+    /// the signature actually verified.
+    ///
+    /// `tenant_id` is mirrored too (task-130 review 29e132008c6748508f2c52ec982d78d6):
+    /// tenant-containment handlers (spawn_repo_orchestrator_core,
+    /// spawn_workspace_orchestrator_core, explorer/git_http scope checks)
+    /// compare the caller's tenant against the target entity's real tenant,
+    /// and a fabricated extractor "default" identity denied correctly
+    /// minted scoped tokens their own happy path. The claim is only honored
+    /// when present — tokens without a tenant claim keep the
+    /// extractor-resolved identity.
     fn with_hierarchy_from_claims(mut self, claims: &serde_json::Value) -> Self {
+        if let Some(tenant) = claims.get("tenant_id").and_then(|v| v.as_str()) {
+            self.tenant_id = tenant.to_string();
+        }
         self.workspace_id = claims
             .get("workspace_id")
             .and_then(|v| v.as_str())
@@ -1459,6 +1473,79 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bytes.as_ref(), b"agent-42");
+    }
+
+    #[tokio::test]
+    async fn agent_jwt_tenant_mirrored_from_verified_claims() {
+        // task-130 review 29e132008c6748508f2c52ec982d78d6: the extractor must
+        // derive the caller's tenant from the signature-verified claims, not
+        // fabricate "default" — tenant-containment handlers
+        // (spawn_repo_orchestrator_core et al.) compare this value against
+        // the target entity's real tenant, and a fabricated identity denied
+        // correctly minted scoped tokens their own happy path.
+        async fn scope_handler(
+            crate::auth::AuthenticatedAgent {
+                tenant_id,
+                workspace_id,
+                repo_id,
+                scope,
+                ..
+            }: crate::auth::AuthenticatedAgent,
+        ) -> String {
+            format!(
+                "{tenant_id}|{}|{}|{}",
+                workspace_id.unwrap_or_default(),
+                repo_id.unwrap_or_default(),
+                scope.join(",")
+            )
+        }
+
+        let state = test_state();
+        // Workspace orchestrator scoped to tenant t1 / ws-1 (no repo).
+        let ws_token = state
+            .agent_signing_key
+            .mint_orchestrator(
+                "orch-tenant-mirror",
+                "system",
+                &state.base_url,
+                state.agent_jwt_ttl_secs,
+                "t1",
+                "ws-1",
+                None,
+                None,
+                "workspace_orchestrator",
+            )
+            .unwrap();
+        state
+            .kv_store
+            .kv_set("agent_tokens", "orch-tenant-mirror", ws_token.clone())
+            .await
+            .unwrap();
+
+        let app = Router::new()
+            .route("/protected", get(scope_handler))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header("Authorization", format!("Bearer {ws_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&bytes).unwrap();
+        assert_eq!(
+            body,
+            "t1|ws-1||workspace:ws-1:read,workspace:ws-1:spawn",
+            "tenant/workspace/scope must mirror the signature-verified claims, got: {body}"
+        );
     }
 
     #[tokio::test]
