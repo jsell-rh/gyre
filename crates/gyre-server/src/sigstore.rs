@@ -574,16 +574,42 @@ impl SignatureVerificationResult {
     /// no Fulcio certificate chain or Rekor entry for local records; the
     /// non-applicable phases are reported as `false` with a reason naming
     /// the mode.
-    pub fn local_mode(record: &CommitSignature, signature_valid: bool) -> Self {
-        let reason = if signature_valid {
-            "local-mode signature verified against the forge Ed25519 key (no Fulcio/Rekor in local mode)"
-                .to_string()
+    ///
+    /// `active_kid` is the kid of the forge key currently loaded in
+    /// `AppState`. When it differs from the record's `signing_key_id` the
+    /// record predates a key rotation (operator-provisioned
+    /// `GYRE_AGENT_SIGNING_KEY`, or a corrupted/replaced persisted key): the
+    /// signature cannot be checked against the sign-time key, which is
+    /// reported honestly as unverifiable-by-rotation rather than as a
+    /// tamper failure.
+    pub fn local_mode(
+        record: &CommitSignature,
+        active_kid: &str,
+        signature_valid: bool,
+    ) -> Self {
+        let (valid, reason) = if record.signing_key_id != active_kid {
+            (
+                false,
+                format!(
+                    "record was signed by forge key kid={} but the active forge key is kid={} (key rotated); the signature cannot be verified against the sign-time key",
+                    record.signing_key_id, active_kid
+                ),
+            )
+        } else if signature_valid {
+            (
+                true,
+                "local-mode signature verified against the forge Ed25519 key (no Fulcio/Rekor in local mode)"
+                    .to_string(),
+            )
         } else {
-            "local-mode signature did not verify against the forge Ed25519 key".to_string()
+            (
+                false,
+                "local-mode signature did not verify against the forge Ed25519 key".to_string(),
+            )
         };
         Self {
-            valid: signature_valid,
-            signature_valid,
+            valid,
+            signature_valid: valid,
             certificate_chain_valid: false,
             subject_matches: false,
             rekor_entry_exists: false,
@@ -1638,14 +1664,17 @@ pub async fn verify_state_commit_signature(
     };
     let result = match record.sigstore_mode {
         SigstoreMode::Local => {
-            // Real Ed25519 verification against the forge key (the key is
-            // regenerated per server start and published at
-            // /.well-known/jwks.json).
+            // Real Ed25519 verification against the forge key. The forge key
+            // is persisted across boots (task-107 F12: DB-backed KV or
+            // operator-provisioned GYRE_AGENT_SIGNING_KEY), so the active key
+            // is the sign-time key for every record signed by this
+            // deployment. A kid mismatch means the record predates a key
+            // rotation and is unverifiable rather than tampered.
             let sig_valid = crate::commit_signatures::verify_commit_signature(
                 &record,
                 &state.agent_signing_key.public_key_bytes,
             );
-            SignatureVerificationResult::local_mode(&record, sig_valid)
+            SignatureVerificationResult::local_mode(&record, &state.agent_signing_key.kid, sig_valid)
         }
         SigstoreMode::Fulcio => {
             let transport = production_transport(state.http_client.clone());

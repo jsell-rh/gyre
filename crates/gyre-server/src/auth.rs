@@ -98,8 +98,12 @@ pub struct AgentJwtClaims {
 
 /// Ed25519 key pair used to mint and verify agent JWTs.
 ///
-/// Generated fresh on every server start. The public key is exposed via
-/// `GET /.well-known/jwks.json` so external verifiers can validate tokens.
+/// The key is persisted across server restarts (task-107 F12): local-mode
+/// commit signature records survive restarts in the `CommitSignatureRepository`,
+/// so the forge key that signed them must survive too, or every pre-restart
+/// local-mode record would report `valid:false` (false integrity alarm). The
+/// public key is exposed via `GET /.well-known/jwks.json` so external
+/// verifiers can validate tokens.
 pub struct AgentSigningKey {
     pub encoding_key: jsonwebtoken::EncodingKey,
     pub decoding_key: jsonwebtoken::DecodingKey,
@@ -113,6 +117,21 @@ pub struct AgentSigningKey {
     pub public_key_bytes: Vec<u8>,
 }
 
+/// Derive a stable key id from the public key bytes. The kid must be a pure
+/// function of the key material (not a random UUID) so that a key loaded
+/// from persisted PKCS#8 keeps the kid it had when signature records
+/// stored it in `signing_key_id` — a random kid would make every
+/// load-from-persistence look like a key rotation.
+fn derive_kid(public_key_bytes: &[u8]) -> String {
+    use ring::digest::{digest, SHA256};
+    let hash = digest(&SHA256, public_key_bytes);
+    hash.as_ref()
+        .iter()
+        .take(16)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 impl AgentSigningKey {
     /// Generate a fresh Ed25519 key pair.
     pub fn generate() -> Self {
@@ -122,12 +141,22 @@ impl AgentSigningKey {
         let rng = SystemRandom::new();
         let pkcs8 =
             Ed25519KeyPair::generate_pkcs8(&rng).expect("Ed25519 key generation must succeed");
-        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
-            .expect("Ed25519 key pair construction must succeed");
+        Self::from_pkcs8(pkcs8.as_ref()).expect("freshly generated PKCS#8 must be valid")
+    }
+
+    /// Reconstruct the key pair from PKCS#8 DER bytes (e.g. loaded from the
+    /// `GYRE_AGENT_SIGNING_KEY` env var or the persisted server-identity KV
+    /// entry). The derived `kid` is identical to the one the same key
+    /// material had when it was generated, so `signing_key_id` values in
+    /// stored commit-signature records keep matching the active key.
+    pub fn from_pkcs8(pkcs8: &[u8]) -> Result<Self, String> {
+        use ring::signature::Ed25519KeyPair;
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8)
+            .map_err(|e| format!("invalid Ed25519 PKCS#8 key material: {e:?}"))?;
         use ring::signature::KeyPair as _;
         let pub_key_bytes = key_pair.public_key().as_ref();
 
-        let kid = uuid::Uuid::new_v4().to_string();
+        let kid = derive_kid(pub_key_bytes);
         let x = URL_SAFE_NO_PAD.encode(pub_key_bytes);
 
         let jwks_json = serde_json::json!({
@@ -145,14 +174,22 @@ impl AgentSigningKey {
         let encoding_key = jsonwebtoken::EncodingKey::from_ed_der(pkcs8.as_ref());
         let decoding_key = jsonwebtoken::DecodingKey::from_ed_der(pub_key_bytes);
 
-        Self {
+        Ok(Self {
             encoding_key,
             decoding_key,
             jwks_json,
             kid,
-            pkcs8_bytes: pkcs8.as_ref().to_vec(),
+            pkcs8_bytes: pkcs8.to_vec(),
             public_key_bytes: pub_key_bytes.to_vec(),
-        }
+        })
+    }
+
+    /// The PKCS#8 DER encoding of this key pair, for persistence across
+    /// restarts. Callers persisting this value are responsible for storing
+    /// it in server-side storage with the same protection as other forge
+    /// secret material.
+    pub fn pkcs8_der(&self) -> &[u8] {
+        &self.pkcs8_bytes
     }
 
     /// Sign arbitrary bytes with the Ed25519 private key.
@@ -1205,6 +1242,7 @@ HKWsbrW0tHUPuMuz8Xgvs0yV";
 
 #[cfg(test)]
 mod tests {
+    use super::AgentSigningKey;
     use crate::mem::test_state;
     use axum::{body::Body, routing::get, Router};
     use http::{Request, StatusCode};
@@ -2153,5 +2191,57 @@ mod tests {
         // Ticket is a UUID, not a Bearer token or API key
         assert!(ticket.len() == 36, "Ticket should be a UUID format");
         assert!(!ticket.starts_with("ey"), "Ticket must not be a JWT");
+    }
+
+    // ── task-107 F12: key persistence across restarts ─────────────────────
+
+    /// A key reconstructed from persisted PKCS#8 bytes is the same key:
+    /// same kid (so stored `signing_key_id` values keep matching), same
+    /// public key, and signatures made by the original verify under the
+    /// loaded one (and vice versa).
+    #[test]
+    fn from_pkcs8_roundtrips_key_material_and_kid() {
+        let original = AgentSigningKey::generate();
+        let reloaded = AgentSigningKey::from_pkcs8(original.pkcs8_der()).unwrap();
+
+        assert_eq!(
+            original.kid, reloaded.kid,
+            "kid must be derived from key material so reloads keep it stable"
+        );
+        assert_eq!(original.public_key_bytes, reloaded.public_key_bytes);
+        assert_eq!(original.jwks_json, reloaded.jwks_json);
+
+        let message = b"commit-sha-under-test";
+        let sig = original.sign_bytes(message);
+        assert_eq!(sig, reloaded.sign_bytes(message));
+
+        use ring::signature::{self, UnparsedPublicKey};
+        let pk = UnparsedPublicKey::new(&signature::ED25519, &reloaded.public_key_bytes);
+        assert!(
+            pk.verify(message, &sig).is_ok(),
+            "signature by the original key must verify under the reloaded key"
+        );
+    }
+
+    /// Distinct key material must yield distinct kids — otherwise a key
+    /// rotation would be indistinguishable from the same key and the
+    /// `local_mode` kid check would be vacuous.
+    #[test]
+    fn kid_is_distinct_per_key() {
+        let a = AgentSigningKey::generate();
+        let b = AgentSigningKey::generate();
+        assert_ne!(a.kid, b.kid);
+        assert_ne!(a.public_key_bytes, b.public_key_bytes);
+    }
+
+    /// Garbage or wrong-algorithm PKCS#8 must be rejected with an error,
+    /// not accepted as a usable key.
+    #[test]
+    fn from_pkcs8_rejects_invalid_material() {
+        assert!(AgentSigningKey::from_pkcs8(b"").is_err());
+        assert!(AgentSigningKey::from_pkcs8(b"not pkcs8 at all").is_err());
+        // 32 bytes of zeros is a valid length for a raw Ed25519 seed but is
+        // not PKCS#8 DER.
+        assert!(AgentSigningKey::from_pkcs8(&[0u8; 32]).is_err());
     }
 }
