@@ -397,10 +397,10 @@ mod tests {
         // (see crates/gyre-adapters/tests/fixtures/ts-lsp-stub.mjs), so this
         // runs hermetically in CI where typescript-language-server is not
         // installed.
-        let Some(node) = which_on_path("node") else {
+        if which_on_path("node").is_none() {
             eprintln!("skipping: node interpreter not on PATH");
             return;
-        };
+        }
         let _guard = ENV_LOCK.lock().await;
         let fixture = tempfile::TempDir::new().unwrap();
         write_ts_fixture(fixture.path());
