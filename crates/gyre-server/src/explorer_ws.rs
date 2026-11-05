@@ -190,6 +190,15 @@ const MAX_TOOL_TURNS: usize = 8;
 /// Per spec: 3 dedicated refinement turns for the self-check loop.
 /// These are tracked independently from tool-use turns.
 const MAX_REFINEMENT_TURNS: usize = 3;
+
+/// Default model for the explorer's Claude Agent SDK subprocess
+/// (explorer-implementation.md §8: `process.env.GYRE_LLM_MODEL ||
+/// 'claude-sonnet-4-6'`). Only used when neither a workspace/tenant LLM
+/// config nor `GYRE_LLM_MODEL` is set. The native LlmPort fallback keeps the
+/// platform-wide gemini default — its Vertex AI transport cannot serve
+/// claude model names.
+const EXPLORER_SDK_DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+
 /// Explorer status protocol values (spec: explorer-implementation.md §6).
 /// The Status message's `status` field MUST be one of exactly these three
 /// values — the frontend status indicator maps only these (ExplorerChat.svelte);
@@ -1779,12 +1788,212 @@ async fn run_explorer_agent_sdk(
     // Access to this code path is gated to admin-only users in run_explorer_agent()
     // to prevent privilege escalation (a read-only member would otherwise get
     // server-level graph access via the subprocess).
-    let token = &state.auth_token;
-    let system_prompt = build_system_prompt();
-    // Use workspace-scoped model resolution for consistent model selection
-    let (model, _) =
-        crate::llm_helpers::resolve_llm_model(state, workspace_id, "explorer-agent").await;
+    let token = state.auth_token.clone();
+    // SDK prompt variant: no repo context is pre-loaded, so workflow step 1
+    // tells the agent to call graph_summary first (spec §10).
+    let system_prompt = build_system_prompt_for_sdk();
+    // Model resolution per spec §8: workspace/tenant config, then
+    // GYRE_LLM_MODEL, then the explorer-specific `claude-sonnet-4-6` default
+    // (NOT the platform-wide gemini default — the SDK serves claude models).
+    let (model, _) = crate::llm_helpers::resolve_llm_model_with_default(
+        state,
+        workspace_id,
+        "explorer-agent",
+        EXPLORER_SDK_DEFAULT_MODEL,
+    )
+    .await;
 
+    // Load the graph once for the server-mediated self-check (spec §11).
+    // Reused across all refinement rounds of this message turn.
+    let rid = Id::new(repo_id);
+    let graph: Option<(
+        Vec<gyre_common::graph::GraphNode>,
+        Vec<gyre_common::graph::GraphEdge>,
+    )> = match (
+        state.graph_store.list_nodes(&rid, None).await,
+        state.graph_store.list_edges(&rid, None).await,
+    ) {
+        (Ok(n), Ok(e)) => Some((n, e)),
+        _ => {
+            // The agent's own graph_query_dryrun MCP tool hits the same store,
+            // so it is likely failing too. Proceed without server-mediated
+            // refinement rather than dead-ending the turn; the gap is logged.
+            warn!(repo_id = %repo_id, "Explorer SDK self-check skipped: graph store unavailable");
+            None
+        }
+    };
+    let selected_node_id = canvas_state.selected_node.as_ref().map(|n| n.id.as_str());
+
+    // Spec §11 self-check loop: extract the <view_query> from the agent's
+    // output, dry-run it server-side, and feed the result back for refinement.
+    // Capped at MAX_REFINEMENT_TURNS (3); when the cap is reached (or the
+    // warnings are resolved) the best version is sent to the frontend anyway.
+    let mut refinement_count = 0usize;
+    let mut current_question = user_question.to_string();
+    loop {
+        let (assistant_text, view_query) = run_sdk_subprocess_once(
+            state,
+            repo_id,
+            &current_question,
+            canvas_state,
+            sender,
+            conversation_history,
+            &model,
+            &system_prompt,
+            &server_url,
+            &token,
+            ping_interval,
+            &last_pong,
+            pong_timeout,
+        )
+        .await?;
+
+        // Record the exchange so subsequent messages (and refinement rounds)
+        // have full context. The assistant entry includes the emitted view
+        // query so later turns know what was applied to the canvas.
+        let assistant_full = match &view_query {
+            Some(q) => format!(
+                "{}\n\n<view_query>{}</view_query>",
+                assistant_text, q
+            ),
+            None => assistant_text.clone(),
+        };
+        conversation_history.push(ConversationMessage {
+            role: "user".to_string(),
+            content: ConversationContent::Text(current_question.clone()),
+        });
+        conversation_history.push(ConversationMessage {
+            role: "assistant".to_string(),
+            content: ConversationContent::Text(assistant_full),
+        });
+
+        let Some(query_json) = view_query else {
+            // No view query in this round — nothing to self-check.
+            break;
+        };
+
+        let check_result = graph
+            .as_ref()
+            .and_then(|(nodes, edges)| self_check_dry_run(&query_json, nodes, edges, selected_node_id));
+
+        match check_result {
+            Some(dr) => {
+                let actionable = actionable_dry_run_warnings(&dr, &query_json);
+                if actionable.is_empty() || refinement_count >= MAX_REFINEMENT_TURNS {
+                    if !actionable.is_empty() {
+                        // Spec §11: cap reached — send the best version anyway.
+                        info!(
+                            refinements = refinement_count,
+                            warnings = actionable.len(),
+                            "Explorer SDK self-check cap reached; sending best version"
+                        );
+                    }
+                    // Forward the finalized view query to the frontend, with the
+                    // agent's preceding text as the explanation.
+                    let view_msg = ExplorerServerMessage::ViewQuery {
+                        query: query_json.clone(),
+                        explanation: if assistant_text.is_empty() {
+                            None
+                        } else {
+                            Some(assistant_text.clone())
+                        },
+                    };
+                    sender
+                        .send(Message::Text(
+                            serialize_msg(&view_msg).unwrap_or_default().into(),
+                        ))
+                        .await?;
+                    break;
+                }
+                refinement_count += 1;
+                if !send_status(sender, STATUS_REFINING).await {
+                    anyhow::bail!("WebSocket connection lost during SDK self-check");
+                }
+                current_question = format!(
+                    "The server-side dry-run of your view query returned warnings:\n{}\n\n{}\nRefine the view query to resolve the warnings and output the improved \
+                     <view_query> block.",
+                    actionable
+                        .iter()
+                        .map(|w| format!("- {}", w))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    self_check_feedback(&dr)
+                );
+                continue;
+            }
+            None => {
+                // self_check_dry_run returns None only when the query failed to
+                // deserialize into a ViewQuery (structurally invalid). Match the
+                // native path's policy: never forward an unparseable query to
+                // the frontend. If refinement budget remains, ask the agent to
+                // fix the structure; otherwise reject with a visible warning.
+                if graph.is_none() {
+                    // Graph store unavailable — self-check was skipped, not failed.
+                    warn!("Forwarding SDK view query without self-check (graph store unavailable)");
+                    let view_msg = ExplorerServerMessage::ViewQuery {
+                        query: query_json.clone(),
+                        explanation: if assistant_text.is_empty() {
+                            None
+                        } else {
+                            Some(assistant_text.clone())
+                        },
+                    };
+                    sender
+                        .send(Message::Text(
+                            serialize_msg(&view_msg).unwrap_or_default().into(),
+                        ))
+                        .await?;
+                    break;
+                }
+                if refinement_count < MAX_REFINEMENT_TURNS {
+                    refinement_count += 1;
+                    if !send_status(sender, STATUS_REFINING).await {
+                        anyhow::bail!("WebSocket connection lost during SDK self-check");
+                    }
+                    current_question = (
+                        "Your <view_query> block is not a valid view query — it failed to \
+                         parse against the View Query Grammar (wrong field names or types). \
+                         Output a corrected <view_query> block."
+                    )
+                        .to_string();
+                    continue;
+                }
+                warn!("SDK view query failed to parse after {} refinements; rejecting", refinement_count);
+                stream_text(
+                    sender,
+                    "\n\n*Warning: Generated view query had invalid structure and was not applied.*",
+                    true,
+                )
+                .await;
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Run one Claude Agent SDK subprocess invocation: spawn the script, stream
+/// its output to the WebSocket client, and return the accumulated assistant
+/// text plus the extracted view query (if any). Does NOT push to conversation
+/// history and does NOT forward the view query — both are the caller's
+/// (self-check loop's) responsibility, so the query can be dry-run and refined
+/// before the frontend ever sees it (spec §11).
+async fn run_sdk_subprocess_once(
+    state: &AppState,
+    repo_id: &str,
+    user_question: &str,
+    canvas_state: &gyre_common::view_query::CanvasState,
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    conversation_history: &mut Vec<ConversationMessage>,
+    model: &str,
+    system_prompt: &str,
+    server_url: &str,
+    token: &str,
+    ping_interval: &mut tokio::time::Interval,
+    last_pong: &Arc<std::sync::Mutex<std::time::Instant>>,
+    pong_timeout: std::time::Duration,
+) -> anyhow::Result<(String, Option<serde_json::Value>)> {
     // Serialize conversation history for the SDK, preserving tool call context
     let history_json: Vec<serde_json::Value> = conversation_history
         .iter()
@@ -1889,6 +2098,9 @@ async fn run_explorer_agent_sdk(
 
     // Accumulate assistant response text for conversation history
     let mut accumulated_text = String::new();
+    // Captured <view_query> from the subprocess output (forwarded by the
+    // caller's self-check loop, not here — spec §11)
+    let mut captured_view_query: Option<serde_json::Value> = None;
 
     if let Some(stdout) = child.stdout.take() {
         use tokio::io::{AsyncBufReadExt, BufReader};
@@ -1947,24 +2159,11 @@ async fn run_explorer_agent_sdk(
                                 }
                             }
                             "view_query" => {
+                                // Capture for the caller's self-check loop (spec §11)
+                                // instead of forwarding immediately — the query
+                                // must be dry-run and possibly refined first.
                                 if let Some(query) = msg.get("query") {
-                                    let explanation = msg
-                                        .get("explanation")
-                                        .and_then(|v| v.as_str())
-                                        .map(|s| s.to_string());
-                                    let view_msg = ExplorerServerMessage::ViewQuery {
-                                        query: query.clone(),
-                                        explanation,
-                                    };
-                                    if sender
-                                        .send(Message::Text(
-                                            serialize_msg(&view_msg).unwrap_or_default().into(),
-                                        ))
-                                        .await
-                                        .is_err()
-                                    {
-                                        break; // Client disconnected
-                                    }
+                                    captured_view_query = Some(query.clone());
                                 }
                             }
                             "status" => {
@@ -2019,25 +2218,15 @@ async fn run_explorer_agent_sdk(
         }
     }
 
-    // Add both user and assistant messages to conversation history
-    // so subsequent SDK messages have full context.
-    conversation_history.push(ConversationMessage {
-        role: "user".to_string(),
-        content: ConversationContent::Text(user_question.to_string()),
-    });
-    // Use the actual accumulated assistant text (not a placeholder)
-    // so multi-turn conversations have real context.
+    // Hand the accumulated text (placeholder when the subprocess produced
+    // nothing, so multi-turn context stays honest) and the captured view
+    // query back to the self-check loop.
     let assistant_text = if accumulated_text.is_empty() {
         "[No response from SDK subprocess]".to_string()
     } else {
         accumulated_text
     };
-    conversation_history.push(ConversationMessage {
-        role: "assistant".to_string(),
-        content: ConversationContent::Text(assistant_text),
-    });
-
-    Ok(())
+    Ok((assistant_text, captured_view_query))
 }
 
 /// Fallback when no LLM is configured — generate template-based view queries
@@ -2892,117 +3081,51 @@ async fn run_explorer_agent(
 
             // If a view query was found, perform server-enforced self-check
             if let Some(query_json) = view_query {
-                // Dry-run the query server-side, with validation first
-                let dry_run_result = if let Ok(query) =
-                    serde_json::from_value::<gyre_common::view_query::ViewQuery>(query_json.clone())
-                {
-                    // Validate query before dry-run to prevent malformed queries
-                    let validation_errors = query.validate();
-                    let validation_warnings = query.warnings();
-                    if !validation_errors.is_empty() || !validation_warnings.is_empty() {
-                        let mut dr = gyre_domain::view_query_resolver::dry_run(
-                            &query,
-                            &nodes,
-                            &edges,
-                            selected_node_id,
+                // Dry-run the query server-side, with validation first.
+                // `None` = structurally invalid (failed to deserialize).
+                let dry_run_result =
+                    self_check_dry_run(&query_json, nodes, edges, selected_node_id);
+                let dry_run_result = match dry_run_result {
+                    Some(dr) => Some(dr),
+                    None => {
+                        warn!(
+                            "Failed to deserialize view query for self-check — rejecting invalid query"
                         );
-                        for err in validation_errors {
-                            dr.warnings.push(format!("Validation: {}", err));
-                        }
-                        for w in validation_warnings {
-                            dr.warnings.push(format!("Warning: {}", w));
-                        }
-                        Some(dr)
-                    } else {
-                        Some(gyre_domain::view_query_resolver::dry_run(
-                            &query,
-                            &nodes,
-                            &edges,
-                            selected_node_id,
-                        ))
+                        // Don't send unvalidated queries to the frontend.
+                        // Stream a warning with the raw JSON so the user can see what was attempted.
+                        let raw_preview = serde_json::to_string_pretty(&query_json)
+                            .unwrap_or_else(|_| query_json.to_string());
+                        // Truncate on a UTF-8 char boundary - a fixed byte index
+                        // would panic when byte 500 falls inside a multibyte
+                        // character (task-095 F4 flaw class).
+                        let truncated = if raw_preview.len() > 500 {
+                            format!(
+                                "{}...",
+                                crate::gate_executor::truncate_bytes(&raw_preview, 500)
+                            )
+                        } else {
+                            raw_preview
+                        };
+                        stream_text(
+                            sender,
+                            &format!(
+                                "\n\n*Warning: Generated view query had invalid structure and was not applied.*\n\n```json\n{}\n```",
+                                truncated
+                            ),
+                            true,
+                        ).await;
+                        break;
                     }
-                } else {
-                    warn!(
-                        "Failed to deserialize view query for self-check — rejecting invalid query"
-                    );
-                    // Don't send unvalidated queries to the frontend.
-                    // Stream a warning with the raw JSON so the user can see what was attempted.
-                    let raw_preview = serde_json::to_string_pretty(&query_json)
-                        .unwrap_or_else(|_| query_json.to_string());
-                    // Truncate on a UTF-8 char boundary - a fixed byte index
-                    // would panic when byte 500 falls inside a multibyte
-                    // character (task-095 F4 flaw class).
-                    let truncated = if raw_preview.len() > 500 {
-                        format!(
-                            "{}...",
-                            crate::gate_executor::truncate_bytes(&raw_preview, 500)
-                        )
-                    } else {
-                        raw_preview
-                    };
-                    stream_text(
-                        sender,
-                        &format!(
-                            "\n\n*Warning: Generated view query had invalid structure and was not applied.*\n\n```json\n{}\n```",
-                            truncated
-                        ),
-                        true,
-                    ).await;
-                    break;
                 };
 
                 if let Some(ref dr) = dry_run_result {
-                    // Collect actionable warnings. Include "may be cluttered"
-                    // warnings so the LLM knows when to narrow scope, but
-                    // downgrade them: only trigger refinement if there are
-                    // also non-clutter warnings or the result is very large.
-                    let actionable_warnings: Vec<&String> = dr
-                        .warnings
-                        .iter()
-                        .filter(|w| {
-                            // [info] prefixed warnings are informational — never trigger
-                            // refinement. These are inherent to the data model and cannot
-                            // be fixed by query changes (e.g., "SHA-based diff is approximate").
-                            if w.starts_with("[info]") {
-                                return false;
-                            }
-                            // Unfixable warnings: inherent to the data source, not
-                            // resolvable by query refinement. Skip to avoid wasting
-                            // a self-check turn.
-                            const UNFIXABLE_PREFIXES: &[&str] = &[
-                                "SHA-based diff shows an approximate",
-                                "Graph data truncated",
-                            ];
-                            if UNFIXABLE_PREFIXES.iter().any(|p| w.starts_with(p)) {
-                                return false;
-                            }
-                            // Validation errors are always actionable
-                            if w.starts_with("Validation:")
-                                || w.starts_with("Computed expression error:")
-                            {
-                                return true;
-                            }
-                            // "0 nodes" is actionable unless it's an interactive query
-                            if w.contains("matched 0 nodes") {
-                                return true;
-                            }
-                            // Clutter warnings are informational for All/TestGaps scopes
-                            if w.contains("may be cluttered") {
-                                let is_broad_scope = matches!(
-                                    serde_json::from_value::<gyre_common::view_query::ViewQuery>(
-                                        query_json.clone()
-                                    ),
-                                    Ok(q) if matches!(q.scope,
-                                        gyre_common::view_query::Scope::All
-                                        | gyre_common::view_query::Scope::TestGaps
-                                    )
-                                );
-                                // Still report to LLM, but only trigger refinement for narrow scopes
-                                return !is_broad_scope;
-                            }
-                            true
-                        })
-                        .collect();
+                    // Collect actionable warnings (shared classifier — same
+                    // rules as the SDK self-check loop): [info] and
+                    // data-source-inherent warnings never trigger refinement;
+                    // validation errors, empty results, and narrow-scope
+                    // clutter do.
+                    let actionable_warnings: Vec<&String> =
+                        actionable_dry_run_warnings(dr, &query_json);
                     if !actionable_warnings.is_empty() && refinement_count < MAX_REFINEMENT_TURNS {
                         // Self-check failed: inject dry-run results back as a synthetic
                         // tool_use → tool_result pair so the LLM can use its native
@@ -3030,12 +3153,7 @@ async fn run_explorer_agent(
                         });
 
                         // Tool result with the dry-run feedback
-                        let feedback = format!(
-                            "Dry-run FAILED. Please refine the <view_query>.\n\n- matched_nodes: {}\n- warnings: {:?}\n- matched names (sample): {:?}",
-                            dr.matched_nodes,
-                            dr.warnings,
-                            &dr.matched_node_names[..dr.matched_node_names.len().min(10)]
-                        );
+                        let feedback = self_check_feedback(dr);
                         conversation_history.push(ConversationMessage {
                             role: "user".to_string(),
                             content: ConversationContent::Blocks(vec![ContentBlock::ToolResult {
@@ -3471,7 +3589,13 @@ async fn execute_tool(
     }
 }
 
-fn build_system_prompt() -> String {
+/// Full system prompt body. `__WORKFLOW_STEP_1__` is substituted by
+/// [`build_system_prompt_with_workflow`] because the two agent paths start
+/// the spec §10 workflow differently: the native path pre-loads repo context
+/// into the prompt (step 1 becomes "skip graph_summary"), while the SDK
+/// subprocess has no pre-loaded context and must call the MCP tool first
+/// (spec §10 step 1 verbatim).
+fn build_system_prompt_body() -> String {
     r##"You are the Gyre Explorer agent. You help humans understand codebases they didn't write by generating interactive visualizations of the knowledge graph.
 
 ## Context
@@ -3496,7 +3620,7 @@ User messages may include a <canvas_state> JSON block showing what's currently s
 - search: Full-text search across the knowledge graph. Searches node names, qualified names, doc comments, file paths, and spec paths.
 
 ## Workflow
-1. Repository context is pre-loaded below — skip graph_summary unless you need detailed rankings or updated counts
+__WORKFLOW_STEP_1__
 2. If you need specific nodes, call graph_nodes with a name_pattern
 3. If you need relationships, call graph_edges
 4. For provenance questions ("who created X?", "when was Y modified?"), call node_provenance
@@ -3584,6 +3708,35 @@ Specs are first-class entities in the knowledge graph (Vision Principle 3). They
 - <view_query>{ ... JSON ... }</view_query> block"##.to_string()
 }
 
+/// Build the system prompt with the workflow's first step chosen by whether
+/// repo context is pre-loaded into the prompt (native LlmPort path) or must
+/// be fetched via the graph_summary MCP tool (Claude Agent SDK path).
+fn build_system_prompt_with_workflow(repo_context_preloaded: bool) -> String {
+    let step1 = if repo_context_preloaded {
+        // Native path: "## Current Repository Context" is appended to the
+        // system prompt by run_explorer_agent, so the summary is already
+        // in context and a graph_summary tool call is only needed for
+        // detailed rankings or refreshed counts.
+        "1. Repository context is pre-loaded below — skip graph_summary unless you need detailed rankings or updated counts"
+    } else {
+        // SDK path: nothing is pre-loaded — spec §10 workflow step 1 applies
+        // verbatim: understand the codebase before reasoning about it.
+        "1. Call graph_summary to understand the codebase structure"
+    };
+    build_system_prompt_body().replace("__WORKFLOW_STEP_1__", step1)
+}
+
+/// System prompt for the native LlmPort loop (repo context pre-loaded).
+fn build_system_prompt() -> String {
+    build_system_prompt_with_workflow(true)
+}
+
+/// System prompt for the Claude Agent SDK subprocess (no pre-loaded context —
+/// the agent must call graph_summary first per spec §10).
+fn build_system_prompt_for_sdk() -> String {
+    build_system_prompt_with_workflow(false)
+}
+
 /// Parse the LLM response to extract view query blocks from text.
 fn parse_view_query_from_text(text: &str) -> (String, Option<serde_json::Value>) {
     let mut text_parts = Vec::new();
@@ -3615,6 +3768,103 @@ fn parse_view_query_from_text(text: &str) -> (String, Option<serde_json::Value>)
     }
 
     (text_parts.join("\n\n"), view_query)
+}
+
+/// Returns the system default views seeded on first ListViews access.
+/// Delegates to saved_views::system_default_views() — single source of truth.
+/// Server-side self-check of an extracted view query (spec §11):
+/// deserialize → validate → dry-run against the graph.
+/// Returns `None` when the query JSON does not deserialize into a ViewQuery
+/// (structurally invalid — it must NOT be sent to the frontend). Otherwise
+/// returns the DryRunResult with any validation errors/warnings merged into
+/// `warnings` so they participate in the actionable-warning classification.
+fn self_check_dry_run(
+    query_json: &serde_json::Value,
+    nodes: &[gyre_common::graph::GraphNode],
+    edges: &[gyre_common::graph::GraphEdge],
+    selected_node_id: Option<&str>,
+) -> Option<gyre_domain::view_query_resolver::DryRunResult> {
+    let query =
+        serde_json::from_value::<gyre_common::view_query::ViewQuery>(query_json.clone()).ok()?;
+    let validation_errors = query.validate();
+    let validation_warnings = query.warnings();
+    let mut dr =
+        gyre_domain::view_query_resolver::dry_run(&query, nodes, edges, selected_node_id);
+    for err in validation_errors {
+        dr.warnings.push(format!("Validation: {}", err));
+    }
+    for w in validation_warnings {
+        dr.warnings.push(format!("Warning: {}", w));
+    }
+    Some(dr)
+}
+
+/// Warnings from a dry-run that a refinement turn could actually fix.
+/// Informational ([info]), unfixable (data-source-inherent), and broad-scope
+/// clutter warnings never trigger refinement; everything else does.
+/// Shared by the native LlmPort loop and the SDK self-check loop so both
+/// paths classify identically.
+fn actionable_dry_run_warnings<'a>(
+    dr: &'a gyre_domain::view_query_resolver::DryRunResult,
+    query_json: &serde_json::Value,
+) -> Vec<&'a String> {
+    dr.warnings
+        .iter()
+        .filter(|w| is_actionable_warning(w, query_json))
+        .collect()
+}
+
+fn is_actionable_warning(w: &str, query_json: &serde_json::Value) -> bool {
+    // [info] prefixed warnings are informational — never trigger
+    // refinement. These are inherent to the data model and cannot
+    // be fixed by query changes (e.g., "SHA-based diff is approximate").
+    if w.starts_with("[info]") {
+        return false;
+    }
+    // Unfixable warnings: inherent to the data source, not
+    // resolvable by query refinement. Skip to avoid wasting
+    // a self-check turn.
+    const UNFIXABLE_PREFIXES: &[&str] = &[
+        "SHA-based diff shows an approximate",
+        "Graph data truncated",
+    ];
+    if UNFIXABLE_PREFIXES.iter().any(|p| w.starts_with(p)) {
+        return false;
+    }
+    // Validation errors are always actionable
+    if w.starts_with("Validation:") || w.starts_with("Computed expression error:") {
+        return true;
+    }
+    // "0 nodes" is actionable unless it is an interactive query
+    if w.contains("matched 0 nodes") {
+        return true;
+    }
+    // Clutter warnings are informational for All/TestGaps scopes
+    if w.contains("may be cluttered") {
+        let is_broad_scope = matches!(
+            serde_json::from_value::<gyre_common::view_query::ViewQuery>(query_json.clone()),
+            Ok(q) if matches!(
+                q.scope,
+                gyre_common::view_query::Scope::All | gyre_common::view_query::Scope::TestGaps
+            )
+        );
+        // Still report to LLM, but only trigger refinement for narrow scopes
+        return !is_broad_scope;
+    }
+    true
+}
+
+/// Feedback message injected back into the conversation when the self-check
+/// dry-run fails, telling the agent what went wrong so it can refine.
+/// Shared by the native LlmPort loop (as a synthetic tool result) and the SDK
+/// self-check loop (as the refinement-round question).
+fn self_check_feedback(dr: &gyre_domain::view_query_resolver::DryRunResult) -> String {
+    format!(
+        "Dry-run FAILED. Please refine the <view_query>.\n\n- matched_nodes: {}\n- warnings: {:?}\n- matched names (sample): {:?}",
+        dr.matched_nodes,
+        dr.warnings,
+        &dr.matched_node_names[..dr.matched_node_names.len().min(10)]
+    )
 }
 
 /// Returns the system default views seeded on first ListViews access.
