@@ -2712,8 +2712,7 @@ async fn run_explorer_agent(
     // the §10 interaction-context fields the spec says the LLM receives:
     // selected_node, zoom_level, visible_groups, active_filter, active_lens,
     // active_query, recent_interactions.
-    let canvas_json =
-        build_canvas_context_json(canvas_state, cached_nodes.as_ref());
+    let canvas_json = build_canvas_context_json(canvas_state, cached_nodes.as_ref());
     let canvas_summary = if canvas_json.is_empty() {
         String::new()
     } else {
@@ -4001,22 +4000,19 @@ This shows all callers of TaskPort."#;
 
         assert_eq!(v["zoom_level"], json!(2.3), "zoom_level must reach the LLM");
         assert_eq!(
-            v["active_filter"], json!("calls"),
+            v["active_filter"],
+            json!("calls"),
             "active_filter must reach the LLM"
         );
         assert_eq!(v["selected_node"]["name"], json!("TaskPort"));
-        assert_eq!(
-            v["visible_groups"],
-            json!(["gyre-server", "gyre-domain"])
-        );
+        assert_eq!(v["visible_groups"], json!(["gyre-server", "gyre-domain"]));
         assert_eq!(v["active_lens"], json!("structural"));
         assert_eq!(v["active_query"]["type"], json!("blast_radius"));
         assert_eq!(v["recent_interactions"].as_array().unwrap().len(), 3);
 
         // Empty/absent optionals are omitted, not emitted as nulls/zeros.
         let bare: ExplorerClientMessage =
-            serde_json::from_str(r#"{"type":"message","text":"hi","canvas_state":{}}"#)
-                .unwrap();
+            serde_json::from_str(r#"{"type":"message","text":"hi","canvas_state":{}}"#).unwrap();
         let bare_state = match bare {
             ExplorerClientMessage::Message { canvas_state, .. } => canvas_state,
             _ => panic!("Expected Message variant"),
@@ -4031,7 +4027,12 @@ This shows all callers of TaskPort."#;
     #[test]
     fn test_system_prompt_documents_section_10_fields() {
         let prompt = build_system_prompt();
-        for field in ["zoom_level", "active_filter", "active_lens", "selected_node"] {
+        for field in [
+            "zoom_level",
+            "active_filter",
+            "active_lens",
+            "selected_node",
+        ] {
             assert!(
                 prompt.contains(field),
                 "system prompt must document the {field} canvas_state field"
