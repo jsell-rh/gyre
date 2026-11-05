@@ -9,7 +9,7 @@ coverage_sections:
   - "agent-runtime.md §Supported Backends"
   - "agent-runtime.md §Nix-Based Image Build"
   - "agent-runtime.md §Tenant and Workspace Configuration"
-commits: ["1fc4470b33cfa686d066c1d08d69a83bf846e94c", "c79542d8e436d565175a8b249e1c4c36524d69da", "029665115e9520dcb12625191f031697f0862db4", "57234e0fde87294b242c39e65535f85a7489e074", "9f9c7d9d2ec076a6882c2521836fc7b5d22441f9", "c88766e703b5fa5a2952b8d01d034cc117af6355", "5fcbe3614376eaa46e954a60475f9bd39b6015a9", "53e3830f8ba25070857de3d82d0a6467900751bb", "c04167b869690f970fac6f81ef0b1d762a63d1ae", "61f0d08d5d8a86f9313eec0531aeee0ef2049260", "940a86b1680eb94b55bf518430194da6458449ca", "2b2688014f2c647b2911647bf819d9d1cfe1106a"]
+commits: ["1fc4470b33cfa686d066c1d08d69a83bf846e94c", "c79542d8e436d565175a8b249e1c4c36524d69da", "029665115e9520dcb12625191f031697f0862db4", "57234e0fde87294b242c39e65535f85a7489e074", "9f9c7d9d2ec076a6882c2521836fc7b5d22441f9", "c88766e703b5fa5a2952b8d01d034cc117af6355", "5fcbe3614376eaa46e954a60475f9bd39b6015a9", "53e3830f8ba25070857de3d82d0a6467900751bb", "c04167b869690f970fac6f81ef0b1d762a63d1ae", "61f0d08d5d8a86f9313eec0531aeee0ef2049260", "940a86b1680eb94b55bf518430194da6458449ca", "2b2688014f2c647b2911647bf819d9d1cfe1106a", "d404a439217e9107fcc40e7456abb36df4e41341"]
 ---
 
 ## Spec Excerpt
@@ -117,12 +117,13 @@ Read `specs/system/agent-runtime.md` §3 (Compute Target Model) in its entirety.
 
 ## Shipped
 
-Resumed from the `cd426f7a` checkpoint; implementation commits
-(`02966511`…`2b26880`, merge repair `c79542d8`), the `6a9739e`/`722179f0`
-base merges (`976b339a`, `7e672231`), and the review-repair commit
-`1fc4470b` carry the work below. Evidence for this round is saved under
-`/tmp/stage/review-evidence/` (source SHAs, per-suite logs with exit codes,
-enforced-gate log, rustfmt/clippy diff checks).
+Implementation commits `02966511`...`2b26880` (merge repair `c79542d8`),
+review-repair commits `1fc4470b` and `d404a439`, the `6a9739e`/`722179f0`
+base merges (`976b339a`, `7e672231`), and the task-092 base merge
+`b30c8546` (web/dist rebuilt from merged sources) carry the work below.
+Evidence is saved under `/tmp/stage/review-evidence/` (source SHA,
+per-suite logs with exit codes, enforced-gate log, rustfmt/clippy diff
+checks, flake.lock verification methodology).
 
 ### Behavior
 
@@ -134,7 +135,7 @@ enforced-gate log, rustfmt/clippy diff checks).
   --detach` with the spec security defaults enforced at spawn time:
   `--network=none` (opt-in bridge via config), `--memory=2g`,
   `--pids-limit=512`, `--user=65534:65534`; worktree mounted as a volume;
-  runtime auto-detection (docker → podman).
+  runtime auto-detection (docker -> podman).
 - **SSH backend** — `SshDockerTarget` (`ssh.rs`) shells out to `ssh` with
   batch mode + bounded connect timeout and runs `docker run` on the remote
   host with the same security defaults; every remote argument is
@@ -143,20 +144,21 @@ enforced-gate log, rustfmt/clippy diff checks).
 - **Kubernetes backend** — `KubernetesTarget` (`kubernetes.rs`) creates a
   Pod via `kubectl apply` from a generated manifest (resource
   requests/limits, service account, namespace, image pull policy from
-  config; DNS-1035/253-char-safe pod names); `kill_process` →
-  `kubectl delete pod`; `is_alive` → pod phase check. New this round:
-  an explicit `kubectl_path` target-config option (pinned/cluster-specific
-  CLIs, e.g. OpenShift `oc`) drives every kubectl invocation.
+  config; DNS-1035/253-char-safe pod names); `kill_process` ->
+  `kubectl delete pod`; `is_alive` -> pod phase check. An explicit
+  `kubectl_path` target-config option (pinned/cluster-specific CLIs,
+  e.g. OpenShift `oc`) drives every kubectl invocation. The Pod's
+  `workingDir` is `/workspace` — the agent image entrypoint clones its
+  own checkout there; the server-local worktree path is never forwarded
+  (round-3 fix, see below).
 - **Persistence** — `ComputeTargetConfig` entity behind the
   `ComputeTargetRepository` port, implemented by SQLite, PostgreSQL, and
   mem adapters (tenant-scoped list, default flag, duplicate-name guard).
 - **Workspace selection + fallback chain** — `Workspace.compute_target_id`;
-  spawn resolution is request `compute_target_id` → workspace assignment →
-  tenant default → local container auto-detection. Cross-tenant targets
+  spawn resolution is request `compute_target_id` -> workspace assignment ->
+  tenant default -> local container auto-detection. Cross-tenant targets
   are rejected at BOTH the workspace-assignment path (4xx) and the spawn
-  path (404, indistinguishable from missing — no existence confirmation):
-  the request-supplied id AND a stale/tampered workspace assignment are
-  both tenant-checked against the workspace's tenant (review F2 fix).
+  path (404, indistinguishable from missing — no existence confirmation).
 - **Backend-aware lifecycle** — each spawned agent records both its
   `ProcessHandle` and the `SpawnBackend` that owns it, so admin kill
   routes to `docker rm` / `kubectl delete` / remote `docker rm` instead of
@@ -164,94 +166,95 @@ enforced-gate log, rustfmt/clippy diff checks).
 - **CRUD API** — `GET/POST /api/v1/compute-targets`,
   `GET/PUT/DELETE /api/v1/compute-targets/:id` (plus the pre-existing
   admin variants) with ABAC resolver mappings; the two stale
-  exemption-file entries were removed (frozen count lowered). Merged-base
-  drift resolved this round: `FROZEN_EXEMPTION_COUNT` lowered to the
-  merged exemption-file baseline (50). `PUT /api/v1/workspaces/:id`
+  exemption-file entries were removed (frozen count lowered, then
+  re-lowered to the merged baseline 50). `PUT /api/v1/workspaces/:id`
   accepts `compute_target_id` (string or null). UI: WorkspaceSettings
   "Compute" tab with a target dropdown.
-- **Nix image build + `wl_image_hash` (review F3 fix)** —
-  `docker/gyre-agent/flake.nix` builds the agent image from pinned
-  nixpkgs with `npm ci` from the committed lockfile and fixed timestamps
-  (`agent-image`, `agent-image-docker`, `agent-image-tar`); image
-  `User = 65534:65534`. The spawn flow now resolves the image digest
-  BEFORE minting the agent JWT (`docker image inspect` needs no running
-  container and returns exactly the image `docker run` will use) for
-  container and SSH backends and mints via `mint_with_workload`, so the
-  `wl_image_hash` claim is populated in the initial token. Kubernetes
-  records the cluster-pulled `imageID` in the post-spawn workload
-  attestation record (`GET /api/v1/agents/:id/workload`) — the imageID
-  only exists once the Pod is scheduled, and the JWT must pre-exist the
-  Pod it is injected into. The spec sentence (§ Nix-Based Image Build) was
-  amended to state this backend split precisely instead of leaving the
-  deviation undocumented.
+- **Nix image build + `wl_image_hash`** — `docker/gyre-agent/flake.nix`
+  builds the agent image from nixpkgs pinned by the committed
+  `docker/gyre-agent/flake.lock` (nixos-24.11 head `50ab7937`, NAR hash
+  byte-verified — see round 3 below), with `npm ci` from the committed
+  package-lock.json and fixed timestamps (`agent-image`,
+  `agent-image-docker`, `agent-image-tar`); image `User = 65534:65534`.
+  The spawn flow resolves the image digest BEFORE minting the agent JWT
+  (`docker image inspect`) for container and SSH backends and mints via
+  `mint_with_workload`, so the `wl_image_hash` claim is populated in the
+  initial token. Kubernetes records the cluster-pulled `imageID` in the
+  post-spawn workload attestation record (`GET /api/v1/agents/:id/workload`)
+  — the imageID only exists once the Pod is scheduled, and the JWT must
+  pre-exist the Pod it is injected into. The spec sentence (§ Nix-Based
+  Image Build) states this backend split precisely.
 
-### Review-round repairs (commit `1fc4470b`)
+### Review-round repairs
 
-- **F1 (blocking)** — the `976b339a` base merge kept BOTH parents' copies
-  of the ~1000-line test block in `api/spawn.rs` (36 E0428
-  duplicate-definition errors; `cargo test -p gyre-server --lib` failed to
-  compile). One copy removed; the suite compiles and passes. The merge
-  commits are now recorded in the `commits:` frontmatter (they were
-  absent, making the breaking change invisible to review scoping).
-- **F2 (unsafe scope handling)** — request-supplied `compute_target_id`
-  was resolved via global `get_by_id` with no tenant validation (an Admin
-  caller could bind a spawn to a foreign tenant's target, 201 Created).\  Both resolution paths now tenant-check; covered by
-  `spawn_rejects_cross_tenant_compute_target` (foreign-tenant id → 404,
-  no agent created) and
-  `spawn_rejects_stale_cross_tenant_workspace_assignment` (tampered
-  workspace assignment → 404).
-- **F3** — see `wl_image_hash` above; claim round-trip through real
-  EdDSA sign/verify covered by
-  `auth::tests::mint_with_workload_roundtrips_wl_image_hash_claim`.
-- **Merge regression (pre-existing on this branch, found while
-  re-running the suite)** — the task-117 kubernetes dispatch arm broke
-  the five task-097 secret-delivery tests, which had used Kubernetes-
-  typed targets as a local-process vehicle (they relied on the
-  pre-task-117 fall-through to LocalTarget; `kubectl` does not exist in
-  CI, so the dump script never ran). Repaired by giving the tests the
-  REAL kubernetes dispatch through a stub `kubectl` binary (via the new
-  `kubectl_path` config) that captures the applied Pod manifest; the
-  assertions parse `spec.containers[0].env` into a name→value map, so
-  env-delivery is now verified with structured name/value pairing
-  against the production manifest builder — equal or stronger
-  assertions, no cluster dependency.
-- **Housekeeping** — reworded the `./repos/` prose comment in spawn.rs
-  (line shifts broke the line-pinned exemption) and removed the stale
-  exemption entry (file shrinks); rustfmt-normalized the two files this
-  task owns (`spawn.rs`, `kubernetes.rs`).
+Round 2 (`1fc4470b`): duplicate test block from a base merge (compile
+failure), tenant-checking of request-supplied and workspace-assigned
+`compute_target_id` (cross-tenant 404s), `wl_image_hash` minted into the
+initial JWT, task-097 secret-delivery tests repaired onto the real
+kubernetes dispatch via a stub `kubectl`, exemption-file housekeeping.
+
+Round 3 (`d404a439`, findings from review `00e38774`):
+
+- **Kubernetes Pods could not start in the standard flow** — the k8s
+  dispatch arm forwarded the canonicalized SERVER-LOCAL worktree path as
+  the Pod `workingDir`; the manifest carries no volumes and the agent
+  image contains no such path, so under CRI the container failed to start
+  (runc chdir ENOENT) and the agent never ran. Fixed by mirroring the
+  SSH container arm: the k8s `SpawnConfig` overrides `work_dir` to
+  `/workspace` (the entrypoint clones its own checkout there). Regression
+  test `kubernetes_pod_working_dir_is_workspace_not_local_worktree`
+  captures the applied manifest through the stub-kubectl spawn path and
+  asserts `workingDir == "/workspace"` plus absence of server-local
+  volumes; mutation-checked (fails without the fix).
+- **`flake.lock` committed** — the flake previously left nixpkgs on the
+  moving `nixos-24.11` branch ref with no lock file ("created on first
+  run"), so two builds at different times resolved different nixpkgs.
+  `docker/gyre-agent/flake.lock` now pins the branch head `50ab7937` with
+  its NAR hash. No nix binary exists in this sandbox, so the lock node
+  was constructed and then independently verified: a NAR serializer
+  replicated from nix's own `archive.cc`/`serialise.cc` (byte format
+  cross-checked against nix's committed binary fixture
+  `tests/functional/duplicate.nar`) was validated against three
+  nix-generated public lock nodes (numtide/flake-utils,
+  nixpkgs@d02d88f8, nixpkgs@edf04b75 — all matched byte-for-byte) before
+  hashing the locked revision; methodology and match transcripts in
+  `/tmp/stage/review-evidence/flake-lock-verification.txt`. The flake.nix
+  comment now states the lock is committed.
+- **`docs/api-reference.md` table repair** — the tenant-scoped
+  compute-targets block was inserted mid-table, breaking the tail of the
+  admin endpoint table (bcp/scim rows rendered as paragraph text). The
+  block now sits below the admin table; stray trailing `|` dropped.
+- **Task-092 base merge resolved** (`b30c8546`) — conflicts were confined
+  to generated `web/dist` artifacts; both branches changed `web/src`, so
+  dist was rebuilt with vite from the merged sources (`npm ci` + build;
+  full web vitest: 65 files, 1624 passed / 41 skipped) rather than taking
+  either side's stale bundle.
 
 ### Test evidence
 
-All logs with exit codes under `/tmp/stage/review-evidence/`:
+All logs with exit codes under `/tmp/stage/review-evidence/` (source
+`d404a439`):
 
-- `cargo test -p gyre-server --lib api::spawn` → **38 passed, 0 failed**
-  (includes the 5 repaired secret-delivery tests and the 2 new
-  cross-tenant rejection tests; was: compile failure via F1).
-- `cargo test -p gyre-adapters compute --lib` → **41 passed, 0 failed**
+- `cargo test -p gyre-server --lib api::spawn` -> **39 passed, 0 failed**
+  (round-3 addition: the k8s workingDir regression test; includes the 5
+  secret-delivery and 2 cross-tenant rejection tests from round 2).
+- `cargo test -p gyre-adapters compute --lib` -> **41 passed, 0 failed**
   (4 ignored: daemon-required Docker/SSH integration tests; no docker,
-  podman, kubectl, or nix binary exists in this sandbox). New:
-  `spawn_uses_configured_kubectl_path` (stub kubectl captures the real
-  applied manifest).
-- `cargo test -p gyre-server --lib compute_target` → **24 passed**
-  (CRUD round-trip, invalid type rejection, 404s, non-admin 403,
-  duplicate-name 409, delete-referenced-by-workspace 409, admin
-  variants).
-- `cargo test -p gyre-server --lib workspaces::` → **15 passed**
-  (assign/clear `compute_target_id`, cross-tenant rejection).
-- `cargo test -p gyre-server --lib abac_middleware` → **9 passed**.
-- `cargo test -p gyre-server --lib auth::tests::mint_with_workload` →
-  **1 passed** (wl_image_hash EdDSA round-trip).
-- `python3 scripts/check-rustfmt-diff.py HEAD^1` → clean;
-  `python3 scripts/check-clippy-diff.py HEAD^1` → clean (changed lines).
-- Enforced static gates at HEAD (`enforced-gates.log`): arch, hierarchy,
-  abac-route-registry (frozen exemption count 50, duplicates at baseline
-  22), migration-versions, byte-slice-truncation, dead-message-kinds,
+  podman, kubectl, or nix binary exists in this sandbox).
+- `cargo test -p gyre-server --lib compute_target` -> **24 passed**.
+- Web vitest on the merged sources (merge-resolution probe):
+  **1624 passed, 41 skipped, 0 failed** (65 files).
+- `python3 scripts/check-rustfmt-diff.py HEAD^1` -> clean;
+  `python3 scripts/check-clippy-diff.py HEAD^1` -> clean (changed lines).
+- Enforced static gates at `d404a439` (`enforced-gates.log`): arch,
+  hierarchy, abac-route-registry, abac-exempt-handlers, mcp-write-tools,
+  migration-versions, byte-slice-truncation, dead-message-kinds,
   mem-port-contracts, in-memory-state-stores, migration-sql-portability,
-  abac-exempt-handlers, mcp-write-tools, relative-path-defaults,
-  fail-open-ref-resolution, fabricated-scope-defaults,
-  lossy-secret-conversion, scope-literal-defaults, inert-enforcement,
-  forged-scope-fields, forwarded-header-trust, unbounded-external-http,
-  task-commit-attribution — all exit 0 (attribution gate green after the
-  frontmatter update in this round); no new exemption entries.
-- `cargo test --all` / nextest / web vitest are owned by the verification
+  relative-path-defaults, fail-open-ref-resolution,
+  fabricated-scope-defaults, lossy-secret-conversion,
+  scope-literal-defaults, inert-enforcement, forged-scope-fields,
+  forwarded-header-trust, unbounded-external-http,
+  sandbox-sweep-artifacts — all exit 0; task-commit-attribution green
+  after the frontmatter update below; no new exemption entries.
+- `cargo test --all` / nextest / GitHub CI are owned by the verification
   stage; not re-run here per assignment scope.
