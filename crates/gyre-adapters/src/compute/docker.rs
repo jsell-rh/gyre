@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use gyre_ports::{ComputeTarget, ProcessHandle, SpawnConfig};
+use std::collections::HashMap;
 use tokio::process::Command;
 
 /// Spawns processes inside Docker containers via the `docker run` CLI.
@@ -50,6 +51,7 @@ impl ComputeTarget for DockerTarget {
             id: container_id,
             target_type: "docker".to_string(),
             pid: None,
+            options: HashMap::new(),
         })
     }
 

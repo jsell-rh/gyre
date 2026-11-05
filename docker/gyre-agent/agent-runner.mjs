@@ -20,6 +20,12 @@
  * the credential proxy via ANTHROPIC_BASE_URL (set by entrypoint.sh).
  * The GYRE_AUTH_TOKEN is still used directly for Gyre API calls as an
  * interim measure (see spec M27.4 for full opacity plan).
+
+ * Preview mode (meta-spec reconciliation §5): when GYRE_PREVIEW_ID is set and no
+ * GYRE_TASK_PROMPT override is provided, the agent implements a real spec under a
+ * draft meta-spec.  There is no task — the task-mutating MCP tools are withheld, the
+ * conversation is not uploaded, and completion is never signalled.  The server derives
+ * the result from the pushed preview branch, then kills the agent and deletes it.
  *
  * Vertex AI: When CLAUDE_CODE_USE_VERTEX=1, the SDK uses Vertex AI.
  * For Docker: cred-proxy handles GCE metadata emulation.
@@ -38,13 +44,19 @@ const gzipAsync = promisify(gzip);
 const serverUrl = process.env.GYRE_SERVER_URL;
 const token = process.env.GYRE_AUTH_TOKEN;
 const taskId = process.env.GYRE_TASK_ID;
+const previewId = process.env.GYRE_PREVIEW_ID;
+// Preview mode is identified by GYRE_PREVIEW_ID; an explicit GYRE_TASK_PROMPT is an
+// operator override and puts the runner back on the normal (task) path.
+const previewMode = !!previewId && !process.env.GYRE_TASK_PROMPT;
 const agentId = process.env.GYRE_AGENT_ID;
 const branch = process.env.GYRE_BRANCH;
 const repoId = process.env.GYRE_REPO_ID;
 const credProxy = process.env.GYRE_CRED_PROXY;
 
-if (!serverUrl || !taskId || !agentId || !branch) {
-  console.error('ERROR: Required env vars missing (GYRE_SERVER_URL, GYRE_TASK_ID, GYRE_AGENT_ID, GYRE_BRANCH)');
+// GYRE_TASK_ID is required in normal mode; a preview agent has no task and carries
+// GYRE_PREVIEW_ID in its place (meta-spec reconciliation §5).
+if (!serverUrl || !agentId || !branch || !(taskId || previewId)) {
+  console.error('ERROR: Required env vars missing (GYRE_SERVER_URL, GYRE_AGENT_ID, GYRE_BRANCH and GYRE_TASK_ID or GYRE_PREVIEW_ID)');
   process.exit(1);
 }
 
@@ -250,17 +262,26 @@ const options = {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     },
   },
-  allowedTools: [
-    'Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep',
-    'mcp__gyre__gyre_list_tasks', 'mcp__gyre__gyre_update_task',
-    'mcp__gyre__gyre_agent_heartbeat', 'mcp__gyre__gyre_record_activity',
-    'mcp__gyre__gyre_search', 'mcp__gyre__gyre_create_task',
-    // gyre_agent_complete is NOT listed — the runner calls it after conversation upload
-  ],
+  // Preview agents have no task: the task-mutating MCP tools are withheld so they can't
+  // touch the task ledger.  Everything else is identical to a normal run.
+  allowedTools: previewMode
+    ? [
+        'Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep',
+        'mcp__gyre__gyre_agent_heartbeat', 'mcp__gyre__gyre_record_activity',
+        'mcp__gyre__gyre_search',
+        // No task tools, and gyre_agent_complete is never called in preview mode
+      ]
+    : [
+        'Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep',
+        'mcp__gyre__gyre_list_tasks', 'mcp__gyre__gyre_update_task',
+        'mcp__gyre__gyre_agent_heartbeat', 'mcp__gyre__gyre_record_activity',
+        'mcp__gyre__gyre_search', 'mcp__gyre__gyre_create_task',
+        // gyre_agent_complete is NOT listed — the runner calls it after conversation upload
+      ],
   permissionMode: 'acceptEdits',
 };
 
-const taskPrompt = process.env.GYRE_TASK_PROMPT ||
+const defaultPrompt =
   `You are a Gyre autonomous agent. Your configuration:
 - Agent ID: ${agentId}
 - Task ID: ${taskId}
@@ -284,10 +305,53 @@ Use \`gyre_agent_heartbeat\` periodically to signal liveness.
 
 Begin by reading your task description, then implement it completely.`;
 
+const draftKind = process.env.GYRE_META_SPEC_DRAFT_KIND || 'unknown';
+const draftContent = process.env.GYRE_META_SPEC_DRAFT_CONTENT || 'unknown';
+const targetSpecPath = process.env.GYRE_TARGET_SPEC_PATH || 'unknown';
+
+const previewPrompt =
+  `You are a Gyre autonomous agent running a THROWAWAY preview of a draft meta-spec. Your configuration:
+- Agent ID: ${agentId}
+- Preview ID: ${previewId}
+- Branch: ${branch}
+- Repo ID: ${repoId || 'unknown'}
+- Working directory: ${process.env.GYRE_WORK_DIR || process.cwd()}
+- Draft meta-spec kind: ${draftKind}
+- Target spec: ${targetSpecPath}
+
+You have been spawned so a human can see what the draft meta-spec below actually produces
+against a real spec in a real repo. Your working directory contains a checked-out git clone
+of the repository on your branch. The draft is unapproved, has no SHA, and is committed
+nowhere — nothing you produce here will ever be merged.
+
+Draft meta-spec (${draftKind}):
+${draftContent}
+
+Instructions:
+1. Read \`${targetSpecPath}\` in ${process.env.GYRE_WORK_DIR || process.cwd()} — that is the spec you must implement.
+2. Implement that spec exactly as the draft meta-spec above instructs. Where the draft and
+   your usual conventions disagree, the draft wins.
+3. Commit your changes with a descriptive conventional-commit message.
+4. Push your changes: \`git push origin ${branch}\`
+
+There is no task, no review and no merge request on this branch:
+- Do NOT call gyre_agent_complete — the runner ends this run.
+- Do NOT create or update tasks — you have no task and must not touch the task ledger.
+- Do NOT expect a review or merge request. The push above is the entire deliverable, and
+  the branch is deleted once a human has read the diff.
+
+Use \`gyre_agent_heartbeat\` periodically to signal liveness.
+
+Begin by reading ${targetSpecPath}, then implement it completely.`;
+
+const taskPrompt = process.env.GYRE_TASK_PROMPT || (previewMode ? previewPrompt : defaultPrompt);
+
 // ── Main execution ──────────────────────────────────────────────────────────
 
 console.log(`=== Gyre Agent Runner starting ===`);
-console.log(`Agent: ${agentId} | Task: ${taskId} | Branch: ${branch}`);
+console.log(previewMode
+  ? `Agent: ${agentId} | Preview: ${previewId} | Branch: ${branch}`
+  : `Agent: ${agentId} | Task: ${taskId || 'none'} | Branch: ${branch}`);
 console.log(`Model: ${model} | Server: ${serverUrl}`);
 postLog(`Agent runner starting: model=${model}, branch=${branch}`);
 
@@ -363,6 +427,15 @@ try {
     }
   }
 
+  // ── Preview mode: no provenance upload, no completion call ───────────────
+  // Spec §5 skips provenance recording and MR creation — the server kills the agent and
+  // derives the diff from the pushed branch, then garbage-collects it.
+  if (previewMode) {
+    console.log(`=== Preview mode complete: ${messageCount} messages, ${turnCounter} turns, branch ${branch} (throwaway; no upload, no completion) ===`);
+    await postLog(`Preview complete: ${messageCount} messages, ${turnCounter} turns, branch=${branch}`);
+    process.exit(0);
+  }
+
   // ── Post-query: upload conversation, then signal completion ─────────────
 
   console.log(`[provenance] Uploading conversation (${conversationLog.length} messages, ${turnCounter} turns)...`);
@@ -400,18 +473,23 @@ try {
   console.log(`=== Agent runner complete (${messageCount} messages, ${turnCounter} turns) ===`);
   postLog(`Agent complete: ${messageCount} messages, ${turnCounter} turns, conversation_sha=${conversationSha || 'none'}`);
 } catch (err) {
-  // Best-effort: upload whatever conversation we have even on error
-  console.log(`[provenance] Uploading partial conversation after error...`);
-  conversationSha = await uploadConversation();
+  // Preview mode records no provenance and never signals completion — the server reads
+  // the branch (or its absence) and garbage-collects it.  Non-preview behaviour is
+  // unchanged: best-effort upload of the partial conversation, then a completion retry.
+  if (!previewMode) {
+    // Best-effort: upload whatever conversation we have even on error
+    console.log(`[provenance] Uploading partial conversation after error...`);
+    conversationSha = await uploadConversation();
 
-  // Still try to complete
-  try {
-    await fetch(`${serverUrl}/api/v1/agents/${agentId}/complete`, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ branch, title: `feat: implement task (error recovery)`, target_branch: 'main' }),
-    });
-  } catch (_) { /* best effort */ }
+    // Still try to complete
+    try {
+      await fetch(`${serverUrl}/api/v1/agents/${agentId}/complete`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ branch, title: `feat: implement task (error recovery)`, target_branch: 'main' }),
+      });
+    } catch (_) { /* best effort */ }
+  }
 
   console.error(`=== Agent runner error: ${err.message} ===`);
   process.exit(1);

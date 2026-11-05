@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use gyre_ports::{ComputeTarget, ProcessHandle, SpawnConfig};
+use std::collections::HashMap;
 use tokio::process::Command;
 
 /// Spawns processes on the local machine using tokio::process::Command.
@@ -27,6 +28,7 @@ impl ComputeTarget for LocalTarget {
             id,
             target_type: "local".to_string(),
             pid,
+            options: HashMap::new(),
         })
     }
 

@@ -18,8 +18,9 @@ vi.mock('../lib/api.js', () => ({
     workspacePresence: vi.fn().mockResolvedValue([]),
     thoroughPreview: vi.fn(),
     taskStatus: vi.fn(),
-    previewPersona: vi.fn(),
-    previewPersonaStatus: vi.fn(),
+    previewMetaSpec: vi.fn(),
+    previewMetaSpecStatus: vi.fn(),
+    deleteMetaSpecPreview: vi.fn(),
   },
 }));
 
@@ -435,9 +436,9 @@ describe('EditorSplit', () => {
         repoId: null,
         workspaceId: 'ws-1',
         targetSpecs: [
-          { path: 'specs/system/payment-retry.md' },
-          { path: 'specs/system/charge-processing.md' },
-          { path: 'specs/system/identity-security.md' },
+          { path: 'specs/system/payment-retry.md', repo_id: 'repo-1' },
+          { path: 'specs/system/charge-processing.md', repo_id: 'repo-1' },
+          { path: 'specs/system/identity-security.md', repo_id: 'repo-2' },
         ],
       },
     });
@@ -448,49 +449,35 @@ describe('EditorSplit', () => {
     expect(screen.getByTestId('preview-btn').disabled).toBe(true);
   });
 
-  it('selecting specs enables Preview and runs previewPersona against them', async () => {
+  it('selecting specs enables Preview and runs previewMetaSpec against them (real §5 body)', async () => {
     vi.useFakeTimers();
     try {
       const { api } = await import('../lib/api.js');
-      // Real PreviewResponse shape (meta_specs.rs): preview_id, state, specs,
-      // blast_radius, structural_impact — no architecture_diff/specs_diff.
-      api.previewPersona.mockResolvedValueOnce({
+      // Real §5 PreviewResponse (meta_specs.rs): { preview_id, agents: [{
+      // agent_id, repo_id, spec_path, branch }] } — nothing else.
+      api.previewMetaSpec.mockResolvedValueOnce({
         preview_id: 'pv-1',
-        state: 'running',
-        specs: [
-          { path: 'specs/system/payment-retry.md', status: 'running' },
-          { path: 'specs/system/charge-processing.md', status: 'running' },
+        agents: [
+          { agent_id: 'ag-1', repo_id: 'repo-1', spec_path: 'specs/system/payment-retry.md', branch: 'preview/pv-1/payment-retry' },
+          { agent_id: 'ag-2', repo_id: 'repo-1', spec_path: 'specs/system/charge-processing.md', branch: 'preview/pv-1/charge-processing' },
         ],
-        blast_radius: {
-          affected_workspaces: [{ id: 'ws-1' }],
-          affected_repos: [],
-          affected_workspace_count: 1,
-        },
-        structural_impact: { scope: 'workspace', affected_spec_count: 2 },
       });
-      api.previewPersonaStatus.mockResolvedValue({
+      api.previewMetaSpecStatus.mockResolvedValue({
         preview_id: 'pv-1',
         state: 'complete',
-        specs: [
-          { path: 'specs/system/payment-retry.md', status: 'complete' },
-          { path: 'specs/system/charge-processing.md', status: 'complete' },
+        agents: [
+          { agent_id: 'ag-1', repo_id: 'repo-1', spec_path: 'specs/system/payment-retry.md', branch: 'preview/pv-1/payment-retry', status: 'complete', diff: null },
+          { agent_id: 'ag-2', repo_id: 'repo-1', spec_path: 'specs/system/charge-processing.md', branch: 'preview/pv-1/charge-processing', status: 'complete', diff: null },
         ],
-        blast_radius: {
-          affected_workspaces: [{ id: 'ws-1' }],
-          affected_repos: [],
-          affected_workspace_count: 1,
-        },
-        structural_impact: { scope: 'workspace', affected_spec_count: 2 },
       });
       render(EditorSplit, {
         props: {
           content: 'You are a backend dev...',
           context: 'meta-spec',
           workspaceId: 'ws-1',
-          specPath: 'persona/backend-dev',
           targetSpecs: [
-            { path: 'specs/system/payment-retry.md' },
-            { path: 'specs/system/charge-processing.md' },
+            { path: 'specs/system/payment-retry.md', repo_id: 'repo-1' },
+            { path: 'specs/system/charge-processing.md', repo_id: 'repo-1' },
           ],
         },
       });
@@ -500,80 +487,84 @@ describe('EditorSplit', () => {
       expect(previewBtn.disabled).toBe(false);
       await fireEvent.click(previewBtn);
       await vi.waitFor(() => {
-        expect(api.previewPersona).toHaveBeenCalledWith('ws-1', {
-          persona_id: 'persona/backend-dev',
-          content: 'You are a backend dev...',
-          spec_paths: ['specs/system/payment-retry.md', 'specs/system/charge-processing.md'],
+        expect(api.previewMetaSpec).toHaveBeenCalledWith({
+          draft: { kind: 'meta:persona', content: 'You are a backend dev...' },
+          targets: [
+            { repo_id: 'repo-1', spec_path: 'specs/system/payment-retry.md' },
+            { repo_id: 'repo-1', spec_path: 'specs/system/charge-processing.md' },
+          ],
         });
       });
-      // Persona poll completes at 1.5s intervals
-      await vi.advanceTimersByTimeAsync(2000);
+      // The status poll completes at 2s intervals
+      await vi.advanceTimersByTimeAsync(2100);
       await vi.waitFor(() => expect(screen.getByTestId('iterate-btn')).toBeTruthy());
-      // Architecture tab (default) renders the real structural impact summary
+      // Architecture tab (default) renders the per-agent run summary — the
+      // spec paths and preview branches the real §5 status reports.
       const impact = screen.getByTestId('meta-impact');
-      expect(impact.textContent).toContain('workspace');
-      expect(impact.textContent).toContain('2');
+      expect(impact.textContent).toContain('specs/system/payment-retry.md');
+      expect(impact.textContent).toContain('preview/pv-1/payment-retry');
     } finally {
       vi.useRealTimers();
     }
   }, 20000);
 
-  it('renders the real PreviewResponse fields the server sends (meta_specs.rs shapes)', async () => {
+  it('renders the produced per-agent diff in the Code Diff tab (real §5 status shape)', async () => {
     vi.useFakeTimers();
     try {
       const { api } = await import('../lib/api.js');
       // Exact wire shapes from crates/gyre-server/src/api/meta_specs.rs —
-      // PreviewResponse and PreviewStatusResponse carry ONLY preview_id,
-      // state, specs, blast_radius and structural_impact. Feeding these
-      // (not synthetic architecture_diff/specs_diff mocks) pins that the
+      // PreviewStatusResponse carries per-agent { spec_path, branch, status,
+      // diff } where diff.patches hold the unified-diff text the preview
+      // branch produced. Feeding this (not synthetic mocks) pins that the
       // right panel renders what production actually returns.
-      const blast = {
-        affected_workspaces: [{ id: 'ws-1' }],
-        affected_repos: [
-          { id: 'repo-9', workspace_id: 'ws-1', reason: 'specs/payment/retry.md pinned in meta-spec set' },
-        ],
-        affected_workspace_count: 1,
-      };
-      const structural = { scope: 'workspace', affected_spec_count: 2 };
-      api.previewPersona.mockResolvedValueOnce({
+      api.previewMetaSpec.mockResolvedValueOnce({
         preview_id: 'pv-real-1',
-        state: 'running',
-        specs: [{ path: 'specs/payment/retry.md', status: 'running' }],
-        blast_radius: blast,
-        structural_impact: structural,
+        agents: [
+          { agent_id: 'ag-9', repo_id: 'repo-9', spec_path: 'specs/payment/retry.md', branch: 'preview/pv-real-1/retry' },
+        ],
       });
-      api.previewPersonaStatus.mockResolvedValue({
+      api.previewMetaSpecStatus.mockResolvedValue({
         preview_id: 'pv-real-1',
         state: 'complete',
-        specs: [{ path: 'specs/payment/retry.md', status: 'complete' }],
-        blast_radius: blast,
-        structural_impact: structural,
+        agents: [
+          {
+            agent_id: 'ag-9',
+            repo_id: 'repo-9',
+            spec_path: 'specs/payment/retry.md',
+            branch: 'preview/pv-real-1/retry',
+            status: 'complete',
+            diff: {
+              files_changed: 1,
+              insertions: 3,
+              deletions: 1,
+              patches: [{ patch: '@@ specs/payment/retry.md@@\n-old line\n+new line\n context' }],
+            },
+          },
+        ],
       });
       render(EditorSplit, {
         props: {
           content: 'You are a backend dev...',
           context: 'meta-spec',
           workspaceId: 'ws-1',
-          specPath: 'persona/backend-dev',
-          targetSpecs: [{ path: 'specs/payment/retry.md' }],
+          targetSpecs: [{ path: 'specs/payment/retry.md', repo_id: 'repo-9' }],
         },
       });
       await fireEvent.click(await screen.findByText('Select All'));
       await fireEvent.click(screen.getByTestId('preview-btn'));
-      await vi.advanceTimersByTimeAsync(2000);
+      await vi.advanceTimersByTimeAsync(2100);
       await vi.waitFor(() => expect(screen.getByTestId('iterate-btn')).toBeTruthy());
-      // Architecture tab (default) shows the server-computed structural
-      // impact and blast radius — the fields the real endpoint returns.
+      // Architecture tab (default) shows the per-agent run summary with the
+      // diff stats the real endpoint returns.
       const impact = screen.getByTestId('meta-impact');
-      expect(impact.textContent).toContain('workspace');
-      expect(impact.textContent).toContain('repo-9');
-      expect(impact.textContent).toContain('specs/payment/retry.md pinned in meta-spec set');
-      // Code Diff tab lists the per-spec statuses (the endpoint produces no
-      // line-level diff).
+      expect(impact.textContent).toContain('specs/payment/retry.md');
+      expect(impact.textContent).toContain('preview/pv-real-1/retry');
+      expect(impact.textContent).toContain('+3/-1');
+      // Code Diff tab shows the agent's produced unified diff lines.
       await fireEvent.click(screen.getByTestId('tab-code-diff'));
-      const statuses = await screen.findByTestId('meta-spec-statuses');
-      expect(statuses.textContent).toContain('specs/payment/retry.md');
-      expect(statuses.textContent).toContain('complete');
+      const panel = await screen.findByTestId('code-diff-panel');
+      expect(panel.textContent).toContain('-old line');
+      expect(panel.textContent).toContain('+new line');
     } finally {
       vi.useRealTimers();
     }
@@ -599,17 +590,17 @@ describe('EditorSplit', () => {
     expect(screen.queryByTestId('preview-running')).toBeNull();
   });
 
-  it('a previewPersona rejection (endpoint unavailable) returns to editing with an error banner, never a fabricated complete state', async () => {
+  it('a previewMetaSpec rejection (endpoint unavailable) returns to editing with an error banner, never a fabricated complete state', async () => {
     const { api } = await import('../lib/api.js');
-    api.previewPersona.mockRejectedValueOnce(
-      new Error('API /workspaces/ws-1/meta-specs/preview: 404 Not Found'),
+    api.previewMetaSpec.mockRejectedValueOnce(
+      new Error('API /meta-specs/preview: 404 Not Found'),
     );
     render(EditorSplit, {
       props: {
         content: 'You are a backend dev...',
         context: 'meta-spec',
         workspaceId: 'ws-1',
-        targetSpecs: [{ path: 'specs/a.md' }],
+        targetSpecs: [{ path: 'specs/a.md', repo_id: 'repo-1' }],
       },
     });
     await fireEvent.click(await screen.findByText('Select All'));
@@ -618,6 +609,31 @@ describe('EditorSplit', () => {
     expect(screen.getByTestId('preview-error').textContent).toContain('404');
     expect(screen.getByTestId('editor-split-textarea')).toBeTruthy();
     expect(screen.queryByTestId('iterate-btn')).toBeNull();
+  });
+
+  it('only sends targets with a repo_id — a spec without one can never spawn a preview agent', async () => {
+    const { api } = await import('../lib/api.js');
+    api.previewMetaSpec.mockResolvedValueOnce({ preview_id: 'pv-2', agents: [] });
+    api.previewMetaSpecStatus.mockResolvedValue({ preview_id: 'pv-2', state: 'complete', agents: [] });
+    render(EditorSplit, {
+      props: {
+        content: 'prompt text',
+        context: 'meta-spec',
+        workspaceId: 'ws-1',
+        targetSpecs: [
+          { path: 'specs/with-repo.md', repo_id: 'repo-1' },
+          { path: 'specs/no-repo.md' },
+        ],
+      },
+    });
+    await fireEvent.click(await screen.findByText('Select All'));
+    await fireEvent.click(screen.getByTestId('preview-btn'));
+    await waitFor(() => {
+      expect(api.previewMetaSpec).toHaveBeenCalledWith({
+        draft: { kind: 'meta:persona', content: 'prompt text' },
+        targets: [{ repo_id: 'repo-1', spec_path: 'specs/with-repo.md' }],
+      });
+    });
   });
 
   it('Escape cancels a running preview instead of closing the split (§9 State 2)', async () => {
@@ -637,37 +653,25 @@ describe('EditorSplit', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it('runs previewPersona without persona_id when specPath is null', async () => {
+  it('sends the caller-provided draftKind as the draft kind', async () => {
     const { api } = await import('../lib/api.js');
-    api.previewPersona.mockResolvedValueOnce({
-      preview_id: 'pv-2',
-      state: 'complete',
-      specs: [],
-      blast_radius: { affected_workspaces: [], affected_repos: [], affected_workspace_count: 0 },
-      structural_impact: { scope: 'workspace', affected_spec_count: 0 },
-    });
-    api.previewPersonaStatus.mockResolvedValue({
-      preview_id: 'pv-2',
-      state: 'complete',
-      specs: [],
-      blast_radius: { affected_workspaces: [], affected_repos: [], affected_workspace_count: 0 },
-      structural_impact: { scope: 'workspace', affected_spec_count: 0 },
-    });
+    api.previewMetaSpec.mockResolvedValueOnce({ preview_id: 'pv-3', agents: [] });
+    api.previewMetaSpecStatus.mockResolvedValue({ preview_id: 'pv-3', state: 'complete', agents: [] });
     render(EditorSplit, {
       props: {
-        content: 'prompt text',
+        content: 'principle text',
         context: 'meta-spec',
+        draftKind: 'meta:principle',
         workspaceId: 'ws-1',
-        targetSpecs: [{ path: 'specs/a.md' }],
+        targetSpecs: [{ path: 'specs/a.md', repo_id: 'repo-1' }],
       },
     });
     await fireEvent.click(await screen.findByText('Select All'));
     await fireEvent.click(screen.getByTestId('preview-btn'));
     await waitFor(() => {
-      expect(api.previewPersona).toHaveBeenCalledWith('ws-1', {
-        persona_id: undefined,
-        content: 'prompt text',
-        spec_paths: ['specs/a.md'],
+      expect(api.previewMetaSpec).toHaveBeenCalledWith({
+        draft: { kind: 'meta:principle', content: 'principle text' },
+        targets: [{ repo_id: 'repo-1', spec_path: 'specs/a.md' }],
       });
     });
   });

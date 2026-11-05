@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use gyre_ports::{ComputeTarget, ProcessHandle, SpawnConfig};
+use std::collections::HashMap;
 use tokio::process::Command;
 
 /// Container runtime to use for spawning agents.
@@ -206,6 +207,7 @@ impl ComputeTarget for ContainerTarget {
             id: container_id,
             target_type: "container".to_string(),
             pid: None,
+            options: HashMap::new(),
         })
     }
 
@@ -348,6 +350,7 @@ mod tests {
             id: "abc123".to_string(),
             target_type: "container".to_string(),
             pid: None,
+            options: HashMap::new(),
         };
         assert_eq!(handle.target_type, "container");
         assert!(handle.pid.is_none());

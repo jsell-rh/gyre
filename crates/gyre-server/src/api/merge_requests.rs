@@ -245,11 +245,25 @@ fn parse_review_decision(s: &str) -> Result<ReviewDecision, ApiError> {
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
-#[instrument(skip(state, req), fields(source = %req.source_branch, target = %req.target_branch))]
+#[instrument(skip(state, req, auth), fields(source = %req.source_branch, target = %req.target_branch))]
 pub async fn create_mr(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<CreateMrRequest>,
 ) -> Result<(StatusCode, Json<MrResponse>), ApiError> {
+    // Preview agents (meta-spec reconciliation §5) run with all ceremony
+    // stripped: no MRs — the preview branch is the entire deliverable. The
+    // agent runner withholds MR tools client-side, but allowedTools is
+    // advisory and `repository_id` here is caller-supplied, so without this
+    // gate a preview agent could open MRs on any repo its Agent-role ABAC
+    // policy allows — a scope escape beyond §5's "no MR" skip.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not create merge requests — preview runs skip MR ceremony; \
+             the preview branch is the deliverable"
+                .to_string(),
+        ));
+    }
     // Validate spec_ref SHA if provided ("path@sha" format, SHA must be 40-char hex).
     if let Some(ref spec_ref) = req.spec_ref {
         if let Some(sha) = spec_ref.rsplit_once('@').map(|(_, s)| s) {
@@ -931,6 +945,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/merge-requests")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1440,6 +1455,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/merge-requests")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1473,6 +1489,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/merge-requests")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -1497,6 +1514,7 @@ mod tests {
                     .method("POST")
                     .uri("/api/v1/merge-requests")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer test-token")
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )

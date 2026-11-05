@@ -243,6 +243,21 @@ pub async fn budget_summary(
 
 /// Check if spawning another agent would exceed workspace/tenant budget limits.
 pub async fn check_spawn_budget(state: &AppState, project_id: &str) -> Result<(), String> {
+    check_spawn_budget_for(state, project_id, 1).await
+}
+
+/// Check if spawning `requested` more agents at once would exceed
+/// workspace/tenant budget limits. A caller provisioning N agents in a single
+/// request must reserve all N slots up front: checking each spawn against
+/// current usage only (before any increments land) over-admits when
+/// max_concurrent_agents < N. Only the concurrency checks scale with
+/// `requested` — token/cost limits are daily consumption and do not depend on
+/// how many agents this one request spawns.
+pub async fn check_spawn_budget_for(
+    state: &AppState,
+    project_id: &str,
+    requested: u64,
+) -> Result<(), String> {
     let key = workspace_key(project_id);
 
     if let Ok(Some(config)) = state.budget_configs.get_config(&key).await {
@@ -255,9 +270,9 @@ pub async fn check_spawn_budget(state: &AppState, project_id: &str) -> Result<()
             .unwrap_or_else(|| new_ws_usage(project_id));
 
         if let Some(max) = config.max_concurrent_agents {
-            if usage.active_agents >= max {
+            if usage.active_agents.saturating_add(requested) > max {
                 return Err(format!(
-                    "workspace budget exceeded: max_concurrent_agents={max} ({} active)",
+                    "workspace budget exceeded: max_concurrent_agents={max} ({} active, {requested} requested)",
                     usage.active_agents
                 ));
             }
@@ -291,9 +306,9 @@ pub async fn check_spawn_budget(state: &AppState, project_id: &str) -> Result<()
                 .flatten()
                 .map(|u| u.active_agents)
                 .unwrap_or(0);
-            if current >= max {
+            if current.saturating_add(requested) > max {
                 return Err(format!(
-                    "tenant budget exceeded: max_concurrent_agents={max} ({current} active)"
+                    "tenant budget exceeded: max_concurrent_agents={max} ({current} active, {requested} requested)"
                 ));
             }
         }

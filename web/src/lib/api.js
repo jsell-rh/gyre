@@ -548,11 +548,11 @@ export const api = {
     return request(`/repos/${id}/graph/timeline${qs ? '?' + qs : ''}`);
   },
   workspaceGraph: (id) => request(`/workspaces/${id}/graph`),
-  // Meta-spec preview loop (S4.6)
-  previewPersona: (workspaceId, data) =>
-    request(`/workspaces/${workspaceId}/meta-specs/preview`, { method: 'POST', body: JSON.stringify(data) }),
-  previewPersonaStatus: (workspaceId, previewId) =>
-    request(`/workspaces/${workspaceId}/meta-specs/preview/${previewId}`),
+  // Meta-spec preview mode (meta-spec-reconciliation.md §5) — global routes
+  previewMetaSpec: (data) =>
+    request('/meta-specs/preview', { method: 'POST', body: JSON.stringify(data) }),
+  previewMetaSpecStatus: (previewId) => request(`/meta-specs/preview/${previewId}`),
+  deleteMetaSpecPreview: (previewId) => request(`/meta-specs/preview/${previewId}`, { method: 'DELETE' }),
   publishPersona: (_workspaceId, personaId, data) =>
     request(`/meta-specs-registry/${personaId}`, { method: 'PUT', body: JSON.stringify({ prompt: data.content }) }),
   // Workspace admin (S4.7)

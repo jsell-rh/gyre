@@ -59,8 +59,19 @@ fn status_str(s: &MergeQueueEntryStatus) -> String {
 #[instrument(skip(state, req), fields(mr_id = %req.merge_request_id))]
 pub async fn enqueue(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<EnqueueRequest>,
 ) -> Result<(StatusCode, Json<QueueEntryResponse>), ApiError> {
+    // Preview agents (meta-spec reconciliation §5) skip the merge queue like
+    // they skip MRs — the preview branch is the deliverable. Lower reachability
+    // than the task guards (enqueue needs an existing MR), but the same
+    // Agent-role 'write' escape applies, so guard it here too.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not enqueue merge requests — preview runs skip merge-queue ceremony"
+                .to_string(),
+        ));
+    }
     let priority = req.priority.unwrap_or(50);
     let mr_id = Id::new(req.merge_request_id);
     // Verify the MR exists before enqueueing — prevents a FK constraint violation (500)

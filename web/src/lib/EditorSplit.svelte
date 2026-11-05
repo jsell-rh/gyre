@@ -28,13 +28,16 @@
    *   onClose       — () => void — called when user dismisses (Back or Esc)
    *   context       — 'spec' | 'meta-spec' — display label
    *   workspaceId   — string | null — workspace scope for the presence banner (HSI §7)
-   *                   and the meta-spec preview endpoints (§9)
    *   wsStore       — WebSocket store ({ send, sessionId, onMessage }) for live presence
    *   selfUserId    — string | null — current user id (excludes own sessions)
    *   baseSha       — string | null — spec current_sha at load (optimistic concurrency)
-   *   targetSpecs   — array of { path } — selectable preview targets (§9 State 1).
-   *                   When provided (meta-spec context) the right panel shows the
-   *                   target spec selector in the editing state.
+   *   targetSpecs   — array of { path, repo_id } — selectable preview targets
+   *                   (§9 State 1). When provided (meta-spec context) the right
+   *                   panel shows the target spec selector in the editing state;
+   *                   repo_id is required — preview agents spawn per target repo
+   *                   (meta-spec-reconciliation.md §5).
+   *   draftKind     — meta-spec kind sent as the draft's `kind` in the preview
+   *                   POST body (§5: { draft: { kind, content }, targets }).
    *   onpublish     — () => void — Publish hook (meta-spec approval flow, §9 State 3)
    *   onPreviewStateChange — (state: 'editing' | 'preview_running' | 'preview_complete') => void
    *                   — notified on every preview state transition so the embedding
@@ -54,6 +57,7 @@
     selfUserId = null,
     baseSha = null,
     targetSpecs = [],
+    draftKind = 'meta:persona',
     onpublish = undefined,
     onPreviewStateChange = undefined,
   } = $props();
@@ -91,8 +95,9 @@
   let codeDiffFiles = $state([]); // [{ path, diff: [{op,text}] }]
   let previewRunning = $state(false);
   let activeImpactTab = $state('architecture');
-  // Last meta-spec preview result (real PreviewResponse shape: preview_id,
-  // state, specs, blast_radius, structural_impact) rendered in the right pane.
+  // Last meta-spec preview status (real §5 shape: preview_id, state,
+  // agents: [{agent_id, repo_id, spec_path, branch, status, diff}]) rendered
+  // in the right pane.
   let metaPreviewResult = $state(null);
 
   const selectableSpecs = $derived(
@@ -213,8 +218,11 @@
 
   const canRunPreview = $derived.by(() => {
     if (previewState !== 'editing' || previewRunning) return false;
-    // Meta-spec context: at least one target spec must be selected (§9 State 1).
-    if (context === 'meta-spec') return selectedSpecPaths.length > 0;
+    // Meta-spec context: at least one target spec with a repo must be selected
+    // (§9 State 1) — the §5 preview endpoint spawns one agent per { repo_id,
+    // spec_path } target, so a target without repo_id can never run.
+    if (context === 'meta-spec')
+      return selectableSpecs.some((s) => selectedSpecPaths.includes(s.path) && s.repo_id);
     // Spec context: needs a repo + spec path.
     return Boolean(repoId && specPath);
   });
@@ -230,16 +238,19 @@
     previewError = null;
     stopPreviewPoll();
     try {
-      if (context === 'meta-spec' && workspaceId) {
-        // Meta-spec preview loop (§9): preview the persona change against the
-        // selected target specs. Real PreviewResponse shape: { preview_id,
-        // state, specs, blast_radius, structural_impact }.
+      if (context === 'meta-spec') {
+        // Meta-spec preview loop (§9): real agent runs on throwaway preview
+        // branches (meta-spec-reconciliation.md §5) — one agent per selected
+        // target, no gates/MR/provenance. Response 202: { preview_id, agents:
+        // [{ agent_id, repo_id, spec_path, branch }] }.
+        const targets = selectableSpecs
+          .filter((s) => selectedSpecPaths.includes(s.path) && s.repo_id)
+          .map((s) => ({ repo_id: s.repo_id, spec_path: s.path }));
         let res;
         try {
-          res = await api.previewPersona(workspaceId, {
-            persona_id: specPath ?? undefined,
-            content,
-            spec_paths: selectedSpecPaths,
+          res = await api.previewMetaSpec({
+            draft: { kind: draftKind, content },
+            targets,
           });
         } catch (e) {
           // Preview service unavailable — return to editing; never present
@@ -247,11 +258,8 @@
           failPreview($t('editor_split.preview_unavailable'), e);
           return;
         }
-        if (res?.preview_id) {
-          pollPreviewPersona(res.preview_id, res);
-        } else if (res) {
-          applyPreviewResult(res);
-          finishPreview();
+        if (res?.preview_id && Array.isArray(res.agents)) {
+          pollPreviewRun(res.preview_id, res);
         } else {
           failPreview($t('editor_split.preview_unavailable'));
         }
@@ -309,28 +317,54 @@
     }, 10000);
   }
 
-  function pollPreviewPersona(previewId, initial) {
+  // Real agent runs take minutes, not seconds (§5 iteration cycle: "minutes,
+  // not hours") — poll patiently with a bounded wait instead of the 30s cap
+  // that only fit the old instantly-complete estimate endpoint.
+  const META_PREVIEW_POLL_MS = 2000;
+  const META_PREVIEW_TIMEOUT_MS = 600000;
+
+  /** Per-agent status label (§5 status endpoint: running|complete|failed|stopped|dead|unknown). */
+  function agentStatusLabel(status) {
+    if (status === 'complete') return $t('editor_split.status_complete');
+    if (status === 'running') return $t('editor_split.agent_implementing');
+    if (status === 'failed') return $t('editor_split.status_failed');
+    if (status === 'stopped') return $t('editor_split.status_stopped');
+    if (status === 'dead') return $t('editor_split.status_dead');
+    return $t('editor_split.status_unknown');
+  }
+
+  function agentStatusIcon(status) {
+    if (status === 'complete' || status === 'stopped') return '✓';
+    if (status === 'running') return '◐';
+    return '✗';
+  }
+
+  function agentStatusDone(status) {
+    return status === 'complete' || status === 'stopped';
+  }
+
+  function pollPreviewRun(previewId, initial) {
     previewState = 'preview_running';
-    previewProgress = (initial?.specs?.length ? initial.specs : selectedSpecPaths).map?.((pathOrSpec) =>
-      typeof pathOrSpec === 'string' ? { path: pathOrSpec, status: 'running' } : pathOrSpec,
-    ) ?? [];
-    if (!previewProgress.length) {
-      previewProgress = selectedSpecPaths.map((path) => ({ path, status: 'running' }));
-    }
-    if (initial) applyPreviewResult(initial);
+    previewProgress = (Array.isArray(initial?.agents) ? initial.agents : []).map((a) => ({
+      path: a?.spec_path ?? '',
+      status: 'running',
+    }));
+    metaPreviewResult = initial ?? null;
     let elapsed = 0;
     previewPollTimer = setInterval(async () => {
-      elapsed += 1500;
+      elapsed += META_PREVIEW_POLL_MS;
       try {
-        const status = await api.previewPersonaStatus(workspaceId, previewId);
-        previewProgress = status.specs ?? previewProgress;
-        if (status.state === 'complete') {
+        const status = await api.previewMetaSpecStatus(previewId);
+        if (Array.isArray(status?.agents)) {
+          previewProgress = status.agents.map((a) => ({
+            path: a?.spec_path ?? '',
+            status: a?.status ?? 'unknown',
+          }));
+          metaPreviewResult = status;
+        }
+        if (status?.state === 'complete') {
           applyPreviewResult(status);
           finishPreview();
-          return;
-        }
-        if (status.state === 'failed' || status.state === 'error') {
-          failPreview($t('editor_split.preview_failed', { values: { error: status.state } }));
           return;
         }
       } catch (e) {
@@ -339,26 +373,47 @@
         failPreview($t('editor_split.preview_unavailable'), e);
         return;
       }
-      if (elapsed >= 30000) {
+      if (elapsed >= META_PREVIEW_TIMEOUT_MS) {
         failPreview($t('editor_split.preview_timeout'));
       }
-    }, 1500);
+    }, META_PREVIEW_POLL_MS);
   }
 
   /**
    * Map a completed preview result onto the Architecture (ghost overlays /
    * node delta) and Code Diff tabs. Accepts the shapes returned by
-   * thoroughPreview/taskStatus ({predictions, code_diff}) and the real
-   * previewPersona PreviewResponse ({preview_id, state, specs,
-   * blast_radius, structural_impact}) — the meta-spec result is kept whole
+   * thoroughPreview/taskStatus ({predictions, code_diff}) and the real §5
+   * preview status ({preview_id, state, agents: [{agent_id, repo_id,
+   * spec_path, branch, status, diff}]}) — the meta-spec result is kept whole
    * for the right-pane summary (§9 State 3).
    */
   function applyPreviewResult(result) {
     if (!result) return;
     // Meta-spec preview results (real server shape) are stored for the
-    // Architecture pane summary and per-spec Code Diff listing.
+    // Architecture pane summary; each agent's diff.patches carry the
+    // unified-diff text its preview branch produced (§5 iteration step 4).
     if (result.preview_id) {
       metaPreviewResult = result;
+      const agentFiles = Array.isArray(result.agents)
+        ? result.agents
+            .filter((a) => Array.isArray(a?.diff?.patches))
+            .map((a) => ({
+              path: a.spec_path ?? '',
+              diff: a.diff.patches
+                .flatMap((p) => String(p?.patch ?? '').split('\n'))
+                .filter((line) => line.length > 0)
+                .map((line) => ({
+                  op:
+                    line.startsWith('+') && !line.startsWith('+++')
+                      ? 'add'
+                      : line.startsWith('-') && !line.startsWith('---')
+                        ? 'remove'
+                        : 'context',
+                  text: line,
+                })),
+            }))
+        : [];
+      if (agentFiles.length) codeDiffFiles = agentFiles;
     }
     // Structural delta → ghost overlays on the Architecture tab.
     const preds = result.predictions ?? [];
@@ -385,7 +440,7 @@
       }
     }
     // Line-level diff → Code Diff tab.
-    const files = result.code_diff ?? result.specs_diff ?? [];
+    const files = result.code_diff ?? [];
     if (Array.isArray(files) && files.length) {
       codeDiffFiles = files.map((f) => ({
         path: f.path ?? f.spec_path ?? '',
@@ -394,7 +449,12 @@
           : [{ op: 'context', text: String(f.diff ?? '') }],
       }));
     }
-    if (result.specs?.length) previewProgress = result.specs;
+    if (Array.isArray(result.agents)) {
+      previewProgress = result.agents.map((a) => ({
+        path: a?.spec_path ?? '',
+        status: a?.status ?? 'unknown',
+      }));
+    }
   }
 
   function finishPreview() {
@@ -933,13 +993,13 @@
           <div class="progress-list">
             {#each previewProgress as item (item.path)}
               <div class="progress-item">
-                <span class="progress-icon" aria-hidden="true">{item.status === 'complete' ? '✓' : '◐'}</span>
+                <span class="progress-icon" aria-hidden="true">{agentStatusIcon(item.status)}</span>
                 <span class="progress-path">{item.path}</span>
-                <span class="progress-status">{item.status === 'complete' ? $t('editor_split.status_complete') : $t('editor_split.agent_implementing')}</span>
+                <span class="progress-status">{agentStatusLabel(item.status)}</span>
               </div>
             {/each}
           </div>
-          <div class="progress-summary">{$t('editor_split.progress_label', { values: { done: previewProgress.filter((p) => p.status === 'complete').length, total: previewProgress.length } })}</div>
+          <div class="progress-summary">{$t('editor_split.progress_label', { values: { done: previewProgress.filter((p) => agentStatusDone(p.status)).length, total: previewProgress.length } })}</div>
           <button class="dismiss-btn-sm cancel-preview" onclick={cancelPreview} data-testid="cancel-preview">{$t('editor_split.cancel_preview')}</button>
         </div>
       {:else}
@@ -983,33 +1043,23 @@
             aria-labelledby="editor-split-tab-arch"
           >
             {#if context === 'meta-spec' && metaPreviewResult}
-              <!-- Meta-spec preview (§9 State 3): the real PreviewResponse —
-                   structural impact + blast radius the server computed. -->
+              <!-- Meta-spec preview (§9 State 3): the real §5 status — one
+                   agent per target spec, its preview branch and produced
+                   diff stats. -->
               <div class="meta-impact" data-testid="meta-impact">
                 <div class="meta-impact-section">
-                  <h4 class="meta-impact-title">{$t('editor_split.architecture')}</h4>
-                  <dl class="meta-impact-list">
-                    <div class="meta-impact-row"><dt>{$t('editor_split.impact_scope')}</dt><dd>{metaPreviewResult.structural_impact?.scope ?? '—'}</dd></div>
-                    <div class="meta-impact-row"><dt>{$t('editor_split.impact_affected_spec_count')}</dt><dd>{metaPreviewResult.structural_impact?.affected_spec_count ?? '—'}</dd></div>
-                    <div class="meta-impact-row"><dt>{$t('editor_split.impact_affected_workspaces')}</dt><dd>{metaPreviewResult.blast_radius?.affected_workspace_count ?? metaPreviewResult.blast_radius?.affected_workspaces?.length ?? 0}</dd></div>
-                    <div class="meta-impact-row"><dt>{$t('editor_split.impact_affected_repos')}</dt><dd>{metaPreviewResult.blast_radius?.affected_repos?.length ?? 0}</dd></div>
-                  </dl>
+                  <h4 class="meta-impact-title">{$t('editor_split.preview_agents_title')}</h4>
+                  <ul class="meta-repo-list">
+                    {#each metaPreviewResult.agents ?? [] as a (a.agent_id ?? a.spec_path)}
+                      <li class="meta-repo-item">
+                        <span class="meta-repo-id">{a.spec_path}</span>
+                        <span class="meta-repo-reason">
+                          {agentStatusLabel(a.status)}{a.branch ? ` · ${a.branch}` : ''}{#if a.diff && typeof a.diff.files_changed === 'number'} · +{a.diff.insertions ?? 0}/-{a.diff.deletions ?? 0} ({a.diff.files_changed} {$t('editor_split.diff_files')}){/if}
+                        </span>
+                      </li>
+                    {/each}
+                  </ul>
                 </div>
-                {#if metaPreviewResult.blast_radius?.affected_repos?.length}
-                  <div class="meta-impact-section">
-                    <h4 class="meta-impact-title">{$t('editor_split.impact_affected_repos')}</h4>
-                    <ul class="meta-repo-list">
-                      {#each metaPreviewResult.blast_radius.affected_repos as repo (repo.id)}
-                        <li class="meta-repo-item">
-                          <span class="meta-repo-id">{repo.id}</span>
-                          {#if repo.reason}
-                            <span class="meta-repo-reason">{$t('editor_split.impact_reason')}: {repo.reason}</span>
-                          {/if}
-                        </li>
-                      {/each}
-                    </ul>
-                  </div>
-                {/if}
               </div>
             {:else}
               <ArchPreviewCanvas
@@ -1036,14 +1086,14 @@
                 </div>
               {/each}
             {:else if context === 'meta-spec' && previewState === 'preview_complete'}
-              <!-- Meta-spec previews report per-spec completion; the endpoint
-                   produces no line-level diff, so list the spec statuses. -->
-              {#if metaPreviewResult?.specs?.length}
+              <!-- No agent produced a diff for this preview — list the
+                   per-agent statuses so the outcome is still visible. -->
+              {#if metaPreviewResult?.agents?.length}
                 <div class="meta-spec-statuses" data-testid="meta-spec-statuses">
-                  {#each metaPreviewResult.specs as s (s.path)}
+                  {#each metaPreviewResult.agents as s (s.agent_id ?? s.spec_path)}
                     <div class="meta-spec-status">
-                      <span class="meta-spec-path">{s.path}</span>
-                      <span class="meta-spec-state">{s.status}</span>
+                      <span class="meta-spec-path">{s.spec_path}</span>
+                      <span class="meta-spec-state">{agentStatusLabel(s.status)}</span>
                     </div>
                   {/each}
                 </div>
@@ -1285,10 +1335,6 @@
     gap: var(--space-4);
   }
   .meta-impact-title { margin: 0 0 var(--space-2); font-size: 12px; font-weight: 600; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: 0.04em; }
-  .meta-impact-list { margin: 0; display: flex; flex-direction: column; gap: var(--space-2); }
-  .meta-impact-row { display: flex; justify-content: space-between; gap: var(--space-3); font-size: 13px; }
-  .meta-impact-row dt { color: var(--color-text-secondary); }
-  .meta-impact-row dd { margin: 0; font-family: var(--font-mono, monospace); }
   .meta-repo-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--space-2); }
   .meta-repo-item { display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
   .meta-repo-id { font-family: var(--font-mono, monospace); }

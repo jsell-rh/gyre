@@ -16,7 +16,7 @@
    *   repoId      — string | null
    *   scope       — 'tenant' | 'workspace' | 'repo'
    */
-  import { getContext } from 'svelte';
+  import { getContext, onDestroy } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import { entityName, shortId } from '../lib/entityNames.svelte.js';
@@ -27,8 +27,7 @@
   import Modal from '../lib/Modal.svelte';
   import InlineChat from '../lib/InlineChat.svelte';
   import DiffSuggestion from '../lib/DiffSuggestion.svelte';
-  import { toastSuccess, toastError } from '../lib/toast.svelte.js';
-  import EditorSplit from '../lib/EditorSplit.svelte';
+  import { toastSuccess, toastError, toastInfo } from '../lib/toast.svelte.js';
 
   let { workspaceId = null, repoId = null, scope = 'workspace' } = $props();
 
@@ -344,16 +343,37 @@
   let wsLoading   = $state(true);
   let wsError     = $state(null);
 
+  /** @type {'editing' | 'running' | 'complete'} */
+  let previewState = $state('editing');
+
   let wsMetaSpecs       = $state([]);   // all kinds, not just personas
   let selectedMsId      = $state('');
   let selectedMsContent = $state('');
 
   let targetSpecs       = $state([]);
+  let selectedSpecPaths = $state([]);
 
-  // True while the embedded EditorSplit's preview loop is running (§9
-  // State 2) — locks the persona selector above it.
-  let msLocked          = $state(false);
+  // Preview state is server-owned: this mirrors the agents POST /meta-specs/preview
+  // spawned and the diffs their preview/<id>/<slug> branches produced.
+  let previewId       = $state(null);
+  /** @type {{agent_id: string|null, repo_id: string|null, spec_path: string, branch: string|null, status: string, diff: object|null}[]} */
+  let previewAgents   = $state([]);
+  let previewAgentTab = $state(0);
+  let previewError    = $state(null);
+  // Set when we stop polling before the server reports completion (bounded timeout or
+  // repeated poll failures): agents are still running, so the panel shows live status.
+  let previewStalled  = $state(false);
+  let clearing        = $state(false);
+  let previewInterval = null;
+  let previewRun      = 0; // generation counter — invalidates in-flight POST/polls after a reset
 
+  const PREVIEW_POLL_MS = 2000;
+  const PREVIEW_POLL_TIMEOUT_MS = 600000; // preview agents take minutes, not hours
+  const PREVIEW_POLL_MAX_ERRORS = 3;
+  const AGENT_STATUSES = ['running', 'complete', 'failed', 'stopped', 'dead', 'unknown'];
+
+  let wsSuggestions     = $state([]);
+  let wsNextSuggId      = 0;
   let publishSaving     = $state(false);
 
   async function loadWorkspaceData() {
@@ -369,8 +389,11 @@
         selectedMsId = wsMetaSpecs[0].id;
         selectedMsContent = wsMetaSpecs[0].prompt || '';
       }
+      // Preview targets need repo_id — the POST body carries { repo_id, spec_path }.
+      // Ledger entries without a repo can never be spawned against, so they are
+      // filtered out here rather than 400-ing the whole run at submit time.
       targetSpecs = Array.isArray(sp)
-        ? sp.filter(s => !s.kind || !s.kind.startsWith('meta:'))
+        ? sp.filter(s => !s.kind || !s.kind.startsWith('meta:')).filter(s => s.repo_id)
         : [];
     } catch (e) {
       wsError = e.message;
@@ -382,6 +405,199 @@
     selectedMsId = id;
     const ms = wsMetaSpecs.find(m => m.id === id);
     selectedMsContent = ms?.prompt || '';
+    wsSuggestions = [];
+    previewState = 'editing';
+    stopPreview();
+  }
+
+  function toggleSpec(path) {
+    if (selectedSpecPaths.includes(path)) {
+      selectedSpecPaths = selectedSpecPaths.filter(p => p !== path);
+    } else {
+      selectedSpecPaths = [...selectedSpecPaths, path];
+    }
+  }
+
+  function selectAll() { selectedSpecPaths = targetSpecs.map(s => s.path); }
+  function clearAll()  { selectedSpecPaths = []; }
+
+  const canPreview = $derived.by(() => selectedSpecPaths.length > 0 && previewState === 'editing');
+
+  // Preview run generation: every reset invalidates in-flight POST/poll promises so
+  // a stale response can never write state belonging to a previous run.
+  function resetPreviewState() {
+    previewRun += 1;
+    stopPreview();
+    previewId = null;
+    previewAgents = [];
+    previewAgentTab = 0;
+    previewError = null;
+    previewStalled = false;
+  }
+
+  async function startPreview() {
+    resetPreviewState();
+    previewState = 'running';
+
+    const ms = wsMetaSpecs.find(m => m.id === selectedMsId);
+    const draft = {
+      kind: ms?.kind || 'meta:persona',
+      content: selectedMsContent,
+    };
+    const targets = targetSpecs
+      .filter(s => selectedSpecPaths.includes(s.path))
+      .map(s => ({ repo_id: s.repo_id, spec_path: s.path }));
+
+    const run = previewRun;
+    try {
+      const res = await api.previewMetaSpec({ draft, targets });
+      if (run !== previewRun) return; // superseded by a reset
+      previewId = res?.preview_id ?? null;
+      if (!previewId || !Array.isArray(res.agents)) {
+        previewError = $t('meta_specs.workspace.preview_malformed');
+        previewState = 'complete';
+        return;
+      }
+      previewAgents = res.agents.map(a => ({
+        agent_id: a.agent_id ?? null,
+        repo_id: a.repo_id ?? null,
+        spec_path: a.spec_path,
+        branch: a.branch ?? null,
+        status: 'running',
+        diff: null,
+      }));
+      pollPreview(run);
+    } catch (e) {
+      if (run !== previewRun) return;
+      previewError = e?.message ?? String(e);
+      toastError($t('meta_specs.workspace.preview_failed', { values: { error: previewError } }));
+      previewState = 'editing';
+    }
+  }
+
+  function pollPreview(run) {
+    let elapsed = 0;
+    let errors = 0;
+    previewInterval = setInterval(async () => {
+      if (run !== previewRun) { stopPreview(); return; }
+      elapsed += PREVIEW_POLL_MS;
+      if (elapsed >= PREVIEW_POLL_TIMEOUT_MS) {
+        // Bounded wait: stop polling but keep the panel live — the agents are
+        // still running server-side and will land on the preview branches.
+        previewStalled = true;
+        stopPreview();
+        return;
+      }
+      let status;
+      try {
+        status = await api.previewMetaSpecStatus(previewId);
+      } catch {
+        errors += 1;
+        if (errors >= PREVIEW_POLL_MAX_ERRORS) {
+          previewStalled = true;
+          stopPreview();
+        }
+        return;
+      }
+      if (run !== previewRun) { stopPreview(); return; }
+      errors = 0;
+      previewAgents = Array.isArray(status?.agents)
+        ? status.agents.map(a => ({
+            agent_id: a.agent_id ?? null,
+            repo_id: a.repo_id ?? null,
+            spec_path: a.spec_path,
+            branch: a.branch ?? null,
+            status: AGENT_STATUSES.includes(a.status) ? a.status : 'unknown',
+            diff: a.diff ?? null,
+          }))
+        : previewAgents;
+      if (status?.state === 'complete') {
+        stopPreview();
+        previewState = 'complete';
+      }
+    }, PREVIEW_POLL_MS);
+  }
+
+  function stopPreview() {
+    if (previewInterval) { clearInterval(previewInterval); previewInterval = null; }
+  }
+
+  function agentStatusIs(a, ...statuses) { return statuses.includes(a.status); }
+
+  const previewDone = $derived.by(() =>
+    previewAgents.filter(a => agentStatusIs(a, 'complete', 'stopped')).length
+  );
+
+  function statusLabel(a) {
+    if (a.status === 'running')  return $t('meta_specs.workspace.agent_implementing');
+    if (a.status === 'complete') return $t('meta_specs.workspace.status_complete');
+    if (a.status === 'failed')   return $t('meta_specs.workspace.status_failed');
+    if (a.status === 'stopped')  return $t('meta_specs.workspace.status_stopped');
+    if (a.status === 'dead')     return $t('meta_specs.workspace.status_dead');
+    return $t('meta_specs.workspace.status_unknown');
+  }
+
+  function statusIcon(a) {
+    if (a.status === 'complete' || a.status === 'stopped') return '✓';
+    if (a.status === 'running') return '◐';
+    return '✗';
+  }
+
+  function statusClass(a) {
+    if (a.status === 'complete' || a.status === 'stopped') return 'ok';
+    if (a.status === 'running') return 'run';
+    return 'err';
+  }
+
+  function specSlug(path) {
+    const base = (path || '').split('/').pop() || 'spec';
+    return base.replace(/\.[^.]+$/, '') || 'spec';
+  }
+
+  function agentPatchLines(a) {
+    const patches = Array.isArray(a?.diff?.patches) ? a.diff.patches : [];
+    const lines = [];
+    for (const p of patches) {
+      if (typeof p?.patch === 'string' && p.patch.length > 0) lines.push(...p.patch.split('\n'));
+    }
+    return lines;
+  }
+
+  function agentDiffStats(a) {
+    const d = a?.diff;
+    if (!d || typeof d.files_changed !== 'number') return null;
+    return d;
+  }
+
+  function selectedAgent() { return previewAgents[previewAgentTab] ?? null; }
+
+  function onAgentTabKeydown(e) {
+    if (previewAgents.length < 2) return;
+    if (e.key === 'ArrowRight') { e.preventDefault(); previewAgentTab = (previewAgentTab + 1) % previewAgents.length; }
+    if (e.key === 'ArrowLeft')  { e.preventDefault(); previewAgentTab = (previewAgentTab - 1 + previewAgents.length) % previewAgents.length; }
+  }
+
+  function cancelPreview() {
+    // Esc/Cancel stops waiting but leaves the server-side run alone — the GC
+    // sweep owns teardown. Returning to editing invalidates the poll.
+    resetPreviewState();
+    previewState = 'editing';
+  }
+
+  function iterate() { resetPreviewState(); previewState = 'editing'; }
+
+  async function clearPreviewRun() {
+    if (!previewId || clearing) return;
+    clearing = true;
+    try {
+      await api.deleteMetaSpecPreview(previewId);
+      toastSuccess($t('meta_specs.toast.preview_cleared'));
+      iterate();
+    } catch (e) {
+      toastError($t('meta_specs.toast.preview_clear_failed', { values: { error: e?.message ?? 'unknown error' } }));
+    } finally {
+      clearing = false;
+    }
   }
 
   async function publish() {
@@ -397,11 +613,42 @@
     }
   }
 
+  async function handleWsChatMessage(text) {
+    if (repoId) {
+      try {
+        const res = await api.specsAssist(repoId, { message: text, context: selectedMsContent });
+        if (res.ok) return res;
+      } catch { /* fall through */ }
+    }
+    try {
+      const res = await api.specsAssistGlobal({ persona_id: selectedMsId, message: text });
+      if (res.ok) return res;
+    } catch { /* fall through */ }
+
+    const id = `ws-suggestion-${wsNextSuggId++}`;
+    wsSuggestions = [...wsSuggestions, { id, content: `+ ${text}\n# Suggested addition` }];
+    return $t('meta_specs.toast.suggestion_added');
+  }
+
+  function wsAcceptSuggestion(s) {
+    selectedMsContent = selectedMsContent + '\n\n' + s.content;
+    wsSuggestions = wsSuggestions.filter(x => x.id !== s.id);
+  }
+  function wsDismissSuggestion(id) { wsSuggestions = wsSuggestions.filter(x => x.id !== id); }
+  function wsEditSuggestion(s) {
+    selectedMsContent = selectedMsContent + '\n\n' + s.content;
+    wsSuggestions = wsSuggestions.filter(x => x.id !== s.id);
+  }
+
   function handleRepoRedirect() {
     if (navigate && workspaceId) navigate('meta-specs', { scope: 'workspace', workspaceId });
   }
 
   // ─── Lifecycle ───────────────────────────────────────────────────────────────
+
+  // onDestroy guarantees cleanup even if the $effect cleanup is skipped
+  // (e.g. parent unmounts this component while a preview interval is active).
+  onDestroy(() => stopPreview());
 
   $effect(() => {
     if (scope === 'workspace' || scope === 'repo') {
@@ -409,10 +656,12 @@
     } else {
       loadTenantSpecs();
     }
+    return () => stopPreview();
   });
 </script>
 
 <svelte:window onkeydown={(e) => {
+  if (e.key === 'Escape' && previewState === 'running') cancelPreview();
   if (e.key === 'Escape' && createMode) createMode = false;
 }} onbeforeunload={(e) => {
   if (editDirty) { e.preventDefault(); return ''; }
@@ -447,39 +696,168 @@
       <div role="alert"><EmptyState title={$t('meta_specs.workspace.failed_to_load')} description={wsError} /></div>
       <button class="retry-btn" onclick={loadWorkspaceData}>{$t('common.retry')}</button>
     {:else}
-      <div class="preview-loop-wrap" data-testid="preview-loop">
-        <!-- §9 preview loop: the reusable EditorSplit (ui-layout.md §2) in
-             meta-spec context — the single production implementation of the
-             Editing → Preview Running → Preview Complete loop. -->
-        <div class="editor-header">
-          <label class="persona-label" for="ms-select">{$t('meta_specs.workspace.meta_spec_label')}</label>
-          <select
-            id="ms-select"
-            class="persona-select"
-            value={selectedMsId}
-            onchange={(e) => onMsChange(e.target.value)}
-            disabled={msLocked}
-            aria-label={$t('meta_specs.workspace.persona_aria')}
-          >
-            {#each wsMetaSpecs as ms (ms.id)}
-              <option value={ms.id}>[{kindLabel(ms.kind)}] {ms.name}</option>
+      <div class="split-layout" data-testid="preview-loop">
+        <!-- LEFT: Meta-spec editor -->
+        <div class="split-left">
+          <div class="editor-header">
+            <label class="persona-label" for="ms-select">{$t('meta_specs.workspace.meta_spec_label')}</label>
+            <select
+              id="ms-select"
+              class="persona-select"
+              value={selectedMsId}
+              onchange={(e) => onMsChange(e.target.value)}
+              disabled={previewState === 'running'}
+              aria-label={$t('meta_specs.workspace.persona_aria')}
+            >
+              {#each wsMetaSpecs as ms (ms.id)}
+                <option value={ms.id}>[{kindLabel(ms.kind)}] {ms.name}</option>
+              {/each}
+            </select>
+          </div>
+
+          {#if previewState === 'running'}
+            <div class="persona-diff" role="region" aria-label={$t('meta_specs.workspace.diff_readonly_aria')}>
+              {#each selectedMsContent.split('\n') as line}
+                <div class="diff-line {line.startsWith('+') ? 'add' : line.startsWith('-') ? 'remove' : 'ctx'}">{line}</div>
+              {/each}
+            </div>
+          {:else}
+            <textarea
+              class="persona-textarea"
+              bind:value={selectedMsContent}
+              placeholder={$t('meta_specs.workspace.textarea_placeholder')}
+              aria-label={$t('meta_specs.workspace.textarea_aria')}
+              data-testid="persona-textarea"
+            ></textarea>
+
+            {#each wsSuggestions as s (s.id)}
+              <DiffSuggestion
+                suggestion={s}
+                onaccept={() => wsAcceptSuggestion(s)}
+                onedit={() => wsEditSuggestion(s)}
+                ondismiss={() => wsDismissSuggestion(s.id)}
+              />
             {/each}
-          </select>
-          {#if publishSaving}
-            <span class="publishing-note" role="status">{$t('meta_specs.workspace.publishing')}</span>
+
+            <InlineChat
+              recipient="meta-spec editor"
+              recipientType="spec-edit"
+              onmessage={handleWsChatMessage}
+            />
+
+            <div class="editor-actions">
+              {#if previewState === 'complete'}
+                <Button variant="secondary" onclick={iterate}>{$t('meta_specs.workspace.iterate')}</Button>
+              {:else}
+                <Button variant="secondary" onclick={startPreview} disabled={!canPreview}>{$t('meta_specs.workspace.preview')}</Button>
+              {/if}
+              <Button variant="primary" onclick={publish} disabled={publishSaving}>{publishSaving ? $t('meta_specs.workspace.publishing') : $t('meta_specs.workspace.publish')}</Button>
+            </div>
           {/if}
         </div>
-        <div class="editor-split-host">
-          <EditorSplit
-            bind:content={selectedMsContent}
-            repoId={repoId}
-            specPath={selectedMsId}
-            context="meta-spec"
-            workspaceId={workspaceId}
-            targetSpecs={targetSpecs}
-            onpublish={publish}
-            onPreviewStateChange={(s) => (msLocked = s === 'preview_running')}
-          />
+
+        <!-- RIGHT: Spec selector / progress / impact -->
+        <div class="split-right">
+          {#if previewState === 'editing'}
+            <div class="spec-selector">
+              <div class="spec-selector-header">
+                <span class="spec-selector-title">{$t('meta_specs.workspace.preview_against')}</span>
+                <div class="spec-selector-shortcuts">
+                  <button class="link-btn" onclick={selectAll}>{$t('meta_specs.workspace.select_all')}</button>
+                  <button class="link-btn" onclick={clearAll}>{$t('meta_specs.workspace.clear')}</button>
+                </div>
+              </div>
+              <div class="spec-checklist">
+                {#each targetSpecs as spec (spec.path)}
+                  <label class="spec-check-item">
+                    <input type="checkbox" checked={selectedSpecPaths.includes(spec.path)} onchange={() => toggleSpec(spec.path)} />
+                    <span class="spec-check-path">{spec.path}</span>
+                  </label>
+                {:else}
+                  <p class="empty-specs">{$t('meta_specs.workspace.no_specs_available')}</p>
+                {/each}
+              </div>
+            </div>
+
+          {:else if previewState === 'running'}
+            <div class="preview-progress" data-testid="preview-running" aria-live="polite">
+              <div class="progress-header" role="status">{$t('meta_specs.workspace.preview_running')}</div>
+              {#if previewError}
+                <div class="preview-error" role="alert">{previewError}</div>
+              {/if}
+              <div class="progress-list">
+                {#each previewAgents as a (a.spec_path)}
+                  <div class="progress-item">
+                    <span class="progress-icon {statusClass(a)}" aria-hidden="true">{statusIcon(a)}</span>
+                    <span class="progress-path">{a.spec_path}</span>
+                    <span class="progress-status">{statusLabel(a)}</span>
+                  </div>
+                {/each}
+              </div>
+              <div class="progress-summary">{$t('meta_specs.workspace.progress_label', { values: { done: previewDone, total: previewAgents.length } })}</div>
+              {#if previewStalled}
+                <div class="progress-stalled" role="status">{$t('meta_specs.workspace.preview_stalled')}</div>
+              {/if}
+              <Button variant="secondary" onclick={cancelPreview}>{$t('meta_specs.workspace.cancel_preview')} <kbd>Esc</kbd></Button>
+            </div>
+
+          {:else}
+            <div class="impact-panel" data-testid="preview-complete">
+              {#if previewError}
+                <div class="preview-error" role="alert">{previewError}</div>
+              {/if}
+              {#if previewStalled}
+                <div class="progress-stalled" role="status">{$t('meta_specs.workspace.preview_stalled')}</div>
+              {/if}
+              {#if previewAgents.length > 1}
+                <div class="impact-tabs" role="tablist" aria-label={$t('meta_specs.workspace.impact_view_aria')} tabindex="0" onkeydown={onAgentTabKeydown}>
+                  {#each previewAgents as a, i (a.spec_path)}
+                    <button
+                      class="impact-tab"
+                      role="tab"
+                      id="preview-agent-tab-{i}"
+                      aria-controls="preview-agent-panel-{i}"
+                      aria-selected={previewAgentTab === i}
+                      class:active={previewAgentTab === i}
+                      tabindex={previewAgentTab === i ? 0 : -1}
+                      onclick={() => previewAgentTab = i}
+                    >{specSlug(a.spec_path)}</button>
+                  {/each}
+                </div>
+              {/if}
+              {#if selectedAgent()}
+                {@const a = selectedAgent()}
+                <div class="impact-content" role="tabpanel" id="preview-agent-panel-{previewAgentTab}" aria-labelledby="preview-agent-tab-{previewAgentTab}">
+                  <div class="agent-summary">
+                    <span class="mono">{a.spec_path}</span>
+                    <span class="progress-status">{statusLabel(a)}</span>
+                    {#if a.branch}
+                      <span class="mono text-muted">{a.branch}</span>
+                    {/if}
+                    {#if agentDiffStats(a)}
+                      <span class="text-muted">+{agentDiffStats(a).insertions ?? 0} / -{agentDiffStats(a).deletions ?? 0} · {agentDiffStats(a).files_changed ?? 0} {$t('meta_specs.workspace.diff_files')}</span>
+                    {/if}
+                  </div>
+                  {#if agentPatchLines(a).length}
+                    <div class="code-diff">
+                      {#each agentPatchLines(a) as line}
+                        <div class="code-diff-line {line.startsWith('+') ? 'add' : line.startsWith('-') ? 'remove' : 'ctx'}">{line}</div>
+                      {/each}
+                    </div>
+                  {:else if agentStatusIs(a, 'complete', 'stopped')}
+                    <span class="impact-empty">{$t('meta_specs.workspace.no_diff_available')}</span>
+                  {:else if agentStatusIs(a, 'failed', 'dead', 'unknown')}
+                    <span class="impact-empty">{$t('meta_specs.workspace.agent_failed')}</span>
+                  {:else}
+                    <span class="impact-empty">{$t('meta_specs.workspace.agent_still_running')}</span>
+                  {/if}
+                </div>
+              {/if}
+              <div class="impact-actions">
+                <Button variant="secondary" onclick={clearPreviewRun} disabled={clearing || !previewId}>{$t('meta_specs.workspace.clear_preview')}</Button>
+              </div>
+            </div>
+          {/if}
         </div>
       </div>
     {/if}
@@ -1253,16 +1631,6 @@
   .split-right { display: flex; flex-direction: column; gap: var(--space-4); position: sticky; top: var(--space-4); }
 
   .editor-header { display: flex; align-items: center; gap: var(--space-3); }
-
-  /* Workspace scope — §9 preview loop host (EditorSplit mount) */
-  .preview-loop-wrap { display: flex; flex-direction: column; gap: var(--space-4); flex: 1; }
-  .editor-split-host {
-    flex: 1; min-height: 560px;
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
-    overflow: hidden;
-  }
-  .publishing-note { font-size: var(--text-xs); color: var(--color-text-muted); }
   .persona-label { font-size: var(--text-sm); font-weight: 600; color: var(--color-text-muted); white-space: nowrap; }
   .persona-select {
     flex: 1; padding: var(--space-1) var(--space-3);
@@ -1270,6 +1638,66 @@
     border: 1px solid var(--color-border-strong);
     border-radius: var(--radius); color: var(--color-text); font-size: var(--text-sm);
   }
+  .persona-textarea {
+    width: 100%; min-height: 280px; padding: var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius); color: var(--color-text);
+    font-family: var(--font-mono); font-size: var(--text-sm);
+    line-height: 1.6; resize: vertical; box-sizing: border-box;
+  }
+  .persona-textarea:focus:not(:focus-visible) { outline: none; border-color: var(--color-border-strong); }
+  .persona-textarea:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; border-color: var(--color-focus); }
+  .persona-diff {
+    min-height: 280px; padding: var(--space-3);
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border); border-radius: var(--radius);
+    font-family: var(--font-mono); font-size: var(--text-sm); overflow-x: auto;
+  }
+  .diff-line { padding: 0 var(--space-1); line-height: 1.5; }
+  .diff-line.add { background: color-mix(in srgb, var(--color-success) 12%, transparent); color: var(--color-success); }
+  .diff-line.remove { background: color-mix(in srgb, var(--color-danger) 12%, transparent); color: var(--color-danger); }
+  .diff-line.ctx { color: var(--color-text-muted); }
+  .editor-actions { display: flex; gap: var(--space-2); justify-content: flex-end; }
+
+  .spec-selector { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius); overflow: hidden; }
+  .spec-selector-header { display: flex; justify-content: space-between; align-items: center; padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--color-border); background: var(--color-surface-elevated); }
+  .spec-selector-title { font-size: var(--text-sm); font-weight: 600; color: var(--color-text); }
+  .spec-selector-shortcuts { display: flex; gap: var(--space-2); }
+  .link-btn { background: none; border: none; color: var(--color-link); font-size: var(--text-xs); cursor: pointer; padding: 0; text-decoration: underline; font-family: var(--font-body); }
+  .spec-checklist { max-height: 360px; overflow-y: auto; padding: var(--space-2) 0; }
+  .spec-check-item { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-1) var(--space-3); cursor: pointer; font-size: var(--text-sm); color: var(--color-text); transition: background var(--transition-fast); }
+  .spec-check-item:hover { background: var(--color-surface-elevated); }
+  .spec-check-path { font-family: var(--font-mono); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .empty-specs { padding: 1rem 0.75rem; color: var(--color-text-muted); font-size: var(--text-sm); margin: 0; }
+
+  .preview-progress { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius); padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-3); }
+  .progress-header { font-weight: 600; font-size: var(--text-base); }
+  .progress-list { display: flex; flex-direction: column; gap: var(--space-1); }
+  .progress-item { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); }
+  .progress-icon { font-size: 0.9rem; width: 1.2rem; text-align: center; }
+  .progress-path { font-family: var(--font-mono); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .progress-status { color: var(--color-text-muted); font-size: var(--text-xs); white-space: nowrap; }
+  .progress-summary { font-size: var(--text-sm); color: var(--color-text-muted); }
+
+  .impact-panel { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius); overflow: hidden; }
+  .impact-tabs { display: flex; border-bottom: 1px solid var(--color-border); }
+  .impact-tab { padding: 0.5rem 1rem; background: none; border: none; border-bottom: 2px solid transparent; color: var(--color-text-muted); cursor: pointer; font-size: var(--text-sm); transition: color var(--transition-fast); font-family: var(--font-body); }
+  .impact-tab.active { color: var(--color-text); border-bottom-color: var(--color-link, var(--color-focus)); }
+  .impact-content { padding: var(--space-4); font-size: var(--text-sm); }
+  .code-diff { display: flex; flex-direction: column; gap: 0; overflow-x: auto; max-height: 480px; overflow-y: auto; }
+  .code-diff-line { font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.5; white-space: pre; padding: 0 var(--space-2); }
+  .code-diff-line.add { color: var(--color-success); background: color-mix(in srgb, var(--color-success) 10%, transparent); }
+  .code-diff-line.remove { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 10%, transparent); }
+  .code-diff-line.ctx { color: var(--color-text-muted); }
+  .agent-summary { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; padding-bottom: var(--space-3); border-bottom: 1px solid var(--color-border); margin-bottom: var(--space-3); font-size: var(--text-sm); }
+  .impact-actions { display: flex; gap: var(--space-2); justify-content: flex-end; padding: var(--space-3) var(--space-4); border-top: 1px solid var(--color-border); background: var(--color-surface-elevated); }
+  .impact-empty { font-size: var(--text-sm); color: var(--color-text-muted); }
+  .preview-error { color: var(--color-danger); font-size: var(--text-sm); padding: var(--space-2) var(--space-3); border: 1px solid color-mix(in srgb, var(--color-danger) 30%, transparent); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
+  .progress-stalled { font-size: var(--text-xs); color: var(--color-warning); padding: var(--space-2); border: 1px solid color-mix(in srgb, var(--color-warning) 30%, transparent); border-radius: var(--radius-sm); background: color-mix(in srgb, var(--color-warning) 8%, transparent); }
+  .progress-icon.ok { color: var(--color-success); }
+  .progress-icon.run { color: var(--color-warning); }
+  .progress-icon.err { color: var(--color-danger); }
 
   /* ── Delete confirm ── */
   .delete-confirm-text { font-size: var(--text-sm); color: var(--color-text); margin: 0 0 var(--space-4); }
@@ -1286,7 +1714,7 @@
   .retry-btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
 
   /* ── Focus-visible ── */
-  .pill:focus-visible, .editor-tab:focus-visible,
+  .pill:focus-visible, .impact-tab:focus-visible, .editor-tab:focus-visible,
   .link-btn:focus-visible, .persona-select:focus-visible, .required-toggle:focus-visible,
   .sidebar-item:focus-visible, .kind-card:focus-visible, .version-node:focus-visible {
     outline: 2px solid var(--color-focus); outline-offset: 2px;
@@ -1295,7 +1723,7 @@
   .mono { font-family: var(--font-mono); }
 
   @media (prefers-reduced-motion: reduce) {
-    .pill, .editor-tab, .link-btn, .required-toggle,
-    .sidebar-item, .kind-card, .spec-textarea { transition: none; }
+    .spec-check-item, .pill, .impact-tab, .editor-tab, .link-btn, .required-toggle,
+    .sidebar-item, .kind-card, .persona-textarea, .spec-textarea { transition: none; }
   }
 </style>

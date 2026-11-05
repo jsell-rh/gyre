@@ -112,6 +112,10 @@ impl GitOpsPort for NoopGitOps {
         Ok(())
     }
 
+    async fn force_remove_worktree(&self, _repo_path: &str, _worktree_path: &str) -> Result<()> {
+        Ok(())
+    }
+
     async fn list_worktrees(&self, _repo_path: &str) -> Result<Vec<String>> {
         Ok(vec![])
     }
@@ -138,6 +142,10 @@ impl GitOpsPort for NoopGitOps {
         _branch_name: &str,
         _from_ref: &str,
     ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn delete_branch(&self, _repo_path: &str, _branch_name: &str) -> Result<()> {
         Ok(())
     }
 
@@ -269,6 +277,10 @@ impl GitOpsPort for ConfigurableGitOps {
         Ok(())
     }
 
+    async fn force_remove_worktree(&self, _repo_path: &str, _worktree_path: &str) -> Result<()> {
+        Ok(())
+    }
+
     async fn list_worktrees(&self, _repo_path: &str) -> Result<Vec<String>> {
         Ok(vec![])
     }
@@ -295,6 +307,10 @@ impl GitOpsPort for ConfigurableGitOps {
         _branch_name: &str,
         _from_ref: &str,
     ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn delete_branch(&self, _repo_path: &str, _branch_name: &str) -> Result<()> {
         Ok(())
     }
 
@@ -3256,7 +3272,13 @@ impl gyre_ports::MessageRepository for MemMessageRepository {
 #[cfg(test)]
 pub fn test_state() -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None)
+    Arc::new(test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        None,
+        None,
+    ))
 }
 
 /// Build a test AppState backed by a real `StoragePort` (e.g. a temp-file
@@ -3266,13 +3288,13 @@ pub fn test_state_with_storage(
     storage: Arc<dyn gyre_ports::storage::StoragePort>,
 ) -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(
+    Arc::new(test_state_inner(
         Arc::new(NoopGitOps),
         workspaces,
         policies,
         Some(storage),
         None,
-    )
+    ))
 }
 
 /// Build a test AppState with a custom `SecretRepository` — used to exercise
@@ -3283,13 +3305,13 @@ pub fn test_state_with_secrets(
     secrets: Arc<dyn gyre_ports::SecretRepository>,
 ) -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(
+    Arc::new(test_state_inner(
         Arc::new(NoopGitOps),
         workspaces,
         policies,
         None,
         Some(secrets),
-    )
+    ))
 }
 
 /// Build a test AppState whose workspace repo fails every `apply_trust_transition`,
@@ -3297,7 +3319,13 @@ pub fn test_state_with_secrets(
 #[cfg(test)]
 pub fn test_state_failing_trust() -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(true);
-    test_state_inner(Arc::new(NoopGitOps), workspaces, policies, None, None)
+    Arc::new(test_state_inner(
+        Arc::new(NoopGitOps),
+        workspaces,
+        policies,
+        None,
+        None,
+    ))
 }
 
 /// Construct a paired workspace + policy repo that share a single in-memory
@@ -3325,7 +3353,23 @@ fn shared_workspace_policy_pair(
 #[cfg(test)]
 pub fn test_state_with_git_ops(git_ops: Arc<dyn gyre_ports::GitOpsPort>) -> Arc<crate::AppState> {
     let (workspaces, policies) = shared_workspace_policy_pair(false);
-    test_state_inner(git_ops, workspaces, policies, None, None)
+    Arc::new(test_state_inner(git_ops, workspaces, policies, None, None))
+}
+
+/// Build a test AppState with the meta-spec preview knobs pinned, so TTL expiry
+/// and the preview concurrency cap are testable without mutating the process
+/// environment (which every other test in this binary reads).
+#[cfg(test)]
+pub fn test_state_with_preview_config(
+    git_ops: Arc<dyn gyre_ports::GitOpsPort>,
+    preview_ttl_secs: u64,
+    preview_budget_max_concurrent: Option<u64>,
+) -> Arc<crate::AppState> {
+    let (workspaces, policies) = shared_workspace_policy_pair(false);
+    let mut state = test_state_inner(git_ops, workspaces, policies, None, None);
+    state.preview_ttl_secs = preview_ttl_secs;
+    state.preview_budget_max_concurrent = preview_budget_max_concurrent;
+    Arc::new(state)
 }
 
 /// Shared builder for all in-memory test states. Callers supply the git ops
@@ -3338,10 +3382,10 @@ fn test_state_inner(
     policies: Arc<dyn gyre_ports::PolicyRepository>,
     storage: Option<Arc<dyn gyre_ports::storage::StoragePort>>,
     secrets: Option<Arc<dyn gyre_ports::SecretRepository>>,
-) -> Arc<crate::AppState> {
+) -> crate::AppState {
     use std::collections::HashMap;
     use tokio::sync::{broadcast, Mutex};
-    Arc::new(crate::AppState {
+    crate::AppState {
         auth_token: "test-token".to_string(),
         base_url: "http://localhost:3000".to_string(),
         repos: Arc::new(MemRepoRepository::default()),
@@ -3359,6 +3403,9 @@ fn test_state_inner(
         kv_store: Arc::new(MemKvStore::default()),
         agent_signing_key: Arc::new(crate::auth::AgentSigningKey::generate()),
         agent_jwt_ttl_secs: 3600,
+        preview_ttl_secs: 86_400,
+        preview_jwt_ttl_secs: 1_800,
+        preview_budget_max_concurrent: None,
         users: Arc::new(MemUserRepository::default()),
         api_keys: Arc::new(MemApiKeyRepository::default()),
         jwt_config: None,
@@ -3461,7 +3508,7 @@ fn test_state_inner(
         judgment_ledger: Arc::new(MemJudgmentLedgerRepository),
         secrets: secrets.unwrap_or_else(|| Arc::new(MemSecretRepository::default())),
         ws_tickets: crate::auth::WsTicketStore::new(),
-    })
+    }
 }
 
 // ── In-memory SecretRepository ──────────────────────────────────────────────

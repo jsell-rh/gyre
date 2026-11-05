@@ -176,8 +176,22 @@ fn parse_task_priority(s: &str) -> Result<TaskPriority, ApiError> {
 
 pub async fn create_task(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Json(req): Json<CreateTaskRequest>,
 ) -> Result<(StatusCode, Json<TaskResponse>), ApiError> {
+    // Preview agents (meta-spec reconciliation §5) run ceremony-free: no task
+    // ledger writes. The MCP dispatch already refuses `gyre_create_task` for
+    // preview agents, but allowedTools is advisory and builtin policy grants
+    // the Agent role 'write' on '*' — without this gate a preview agent's live
+    // JWT can create task-ledger rows through the REST surface, the same
+    // escape class closed for POST /agents/{id}/complete and POST /merge-requests.
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not create tasks — preview runs skip task ceremony; \
+             the preview branch is the deliverable"
+                .to_string(),
+        ));
+    }
     let now = now_secs();
     let mut task = Task::new(new_id(), req.title, now);
     task.description = req.description;
@@ -280,9 +294,19 @@ pub async fn get_task(
 
 pub async fn update_task(
     State(state): State<Arc<AppState>>,
+    auth: crate::auth::AuthenticatedAgent,
     Path(id): Path<String>,
     Json(req): Json<UpdateTaskRequest>,
 ) -> Result<Json<TaskResponse>, ApiError> {
+    // Preview agents may not mutate the task ledger (meta-spec reconciliation
+    // §5 skip-ceremony; same rationale as the create_task guard above).
+    if crate::api::meta_specs::caller_is_preview_agent(&state, &auth).await {
+        return Err(ApiError::Forbidden(
+            "preview agents may not update tasks — preview runs skip task ceremony; \
+             the preview branch is the deliverable"
+                .to_string(),
+        ));
+    }
     let mut task = state
         .tasks
         .find_by_id(&Id::new(&id))
