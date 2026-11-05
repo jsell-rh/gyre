@@ -12,7 +12,7 @@ coverage_sections:
   - "view-query-grammar.md §14 High-risk untested code"
   - "view-query-grammar.md §15 Authentication concept"
   - "view-query-grammar.md §16 Relationship to Other Specs"
-commits: ["e9c6e76b2b42e6333cc1152ac05f814ef81fb09e", "3b1c93fe6f3498f4d5ab67a1cd0e48fd564dd916", "8f65014884ec0a5173d695f1d4610c7e35a1c65e"]
+commits: ["e9c6e76b2b42e6333cc1152ac05f814ef81fb09e", "3b1c93fe6f3498f4d5ab67a1cd0e48fd564dd916", "8f65014884ec0a5173d695f1d4610c7e35a1c65e", "3a61cb9619705ea94cc192e6e9461074f99d57df"]
 ---
 
 ## Spec Excerpt
@@ -110,9 +110,11 @@ Verified the task-062/063 grammar primitives end-to-end, closed the §10 wiring 
 
 Each round that changed `web/src` rebuilt the committed `web/dist` in the same source, so `SKIP_WEB_BUILD=1` deployments serve the fixed SPA. The current bundle contains the §10 wire fields, the `ZoomInteractionTracker` logic, and the round-4 freshness fix (live-zoom preference and the reactive visible-tree-groups effect verified as minified symbols in the bundle).
 
-### Test evidence (re-verified this round; logs in /tmp/stage/review-evidence/task-064-round5)
+### Test evidence (re-verified this round; logs in /tmp/stage/review-evidence/task-064-round6)
 
-- Rust: `cargo test -p gyre-server --lib -- explorer_ws::` — 38 passed, 0 failed (includes the LLM-boundary §10 tests: canvas-context JSON surfacing zoom_level/active_filter, system-prompt documentation, plus §10 deserialization).
+Round-6 verification repair: the controller `checks.sh` run failed only on the changed-lines rustfmt check for `explorer_ws.rs` (lines 2715–2716, 4004–4034); every other gate in that run passed (clippy changed-lines clean, all lint scripts OK, web build succeeded with pre-existing warnings only). Fixed with `rustfmt --edition 2021` on that file — whitespace-only reflow, no semantic change; pre-existing formatting drift in files outside this task's diff was left untouched. Evidence in `task-064-round6/log.txt`.
+
+- Rust: `cargo test -p gyre-server --lib -- explorer_ws::` — 42 passed, 0 failed (includes the LLM-boundary §10 tests: canvas-context JSON surfacing zoom_level/active_filter, system-prompt documentation, plus §10 deserialization).
 - Rust: `cargo test -p gyre-server --test explorer_ws_integration` — 8 passed, 0 failed.
 - Rust: `cargo test -p gyre-domain --test view_query_composition` — 8 passed, 0 failed.
 - Web: `npx vitest run src/__tests__/canvas-state.test.js` — 21 passed, 0 failed (wire normalization with live-zoom preference and the round-4 staleness regression — wire zoom must agree with the interaction trail — zoom/query recording, coalescing, ZoomInteractionTracker cases).
