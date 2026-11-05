@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "observability.md §Audit Event Schema"
-commits: ["4fe453dfb18c84a8a00ae02faae99043785bd699", "99de714b08938493b1a60d1e2217baabbf665275", "9e70fa7f78e58979f79aef505e9120c10460e280", "7cc1a7a51e0c1248ed55e5321b76494340aa9d76", "67bbe6835e3c5d332e23df5cba1255ed86bbe767"]
+commits: ["4fe453dfb18c84a8a00ae02faae99043785bd699", "99de714b08938493b1a60d1e2217baabbf665275", "9e70fa7f78e58979f79aef505e9120c10460e280"]
 review: specs/reviews/task-102.md
 ---
 
