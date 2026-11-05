@@ -5,6 +5,7 @@ import { describe, it, expect } from 'vitest';
 import {
   toWireCanvasState,
   recordZoomInteraction,
+  ZoomInteractionTracker,
   ZOOM_INTERACTION_THRESHOLD,
 } from '../lib/canvas-state.js';
 
@@ -171,5 +172,102 @@ describe('recordZoomInteraction (§10 zoom actions)', () => {
 
   it('default threshold matches the exported constant', () => {
     expect(ZOOM_INTERACTION_THRESHOLD).toBe(0.2);
+  });
+});
+
+describe('ZoomInteractionTracker (programmatic zoom is not a user interaction)', () => {
+  // Mirrors the component loop: record() runs every animation frame with the
+  // current camera zoom; arm() is called by wheel/keyboard/pinch handlers;
+  // disarm() is called when a programmatic zoom source takes the camera.
+
+  it('records user wheel zoom and coalesces the gesture into one entry', () => {
+    const t = new ZoomInteractionTracker();
+    let trail = [];
+    // Initial auto-fit (disarmed): baseline settles at 1.0, nothing recorded.
+    trail = t.record(trail, 1.0);
+    expect(trail).toEqual([]);
+    // User wheel burst 1.0 → 1.5 → 2.0.
+    t.arm();
+    trail = t.record(trail, 1.5); // +50% > 20% → new entry
+    trail = t.record(trail, 2.0); // same gesture → coalesce
+    expect(trail).toEqual([
+      { action: 'zoom_in', to_level: 2.0, base_level: 1.0 },
+    ]);
+  });
+
+  it('a query-driven fit after a user zoom does NOT rewrite the zoom entry', () => {
+    // The review-probe failure scenario: one user wheel-zoom (1.0→1.5), then a
+    // query-driven "fit" to 2.8. The fit is programmatic — the user's entry
+    // must keep to_level 1.5, not be rewritten to 2.8.
+    const t = new ZoomInteractionTracker();
+    let trail = [];
+    trail = t.record(trail, 1.0); // auto-fit settles baseline
+    t.arm();
+    trail = t.record(trail, 1.5); // user zoom
+    expect(trail[0].to_level).toBe(1.5);
+    // applyViewQuery "fit": disarm, then the camera animates to 2.8.
+    t.disarm(1.5);
+    trail = t.record(trail, 2.2); // mid-animation frame
+    trail = t.record(trail, 2.8); // settled
+    expect(trail).toEqual([
+      { action: 'zoom_in', to_level: 1.5, base_level: 1.0 },
+    ]);
+  });
+
+  it('drill transitions and auto-fits never record while disarmed', () => {
+    const t = new ZoomInteractionTracker();
+    let trail = [{ action: 'click', node: 'Foo' }];
+    // Drill transition: disarm at start, camera eases 1.0 → 3.2 over frames.
+    t.disarm(1.0);
+    for (const z of [1.4, 2.1, 2.7, 3.2]) trail = t.record(trail, z);
+    expect(trail).toEqual([{ action: 'click', node: 'Foo' }]);
+  });
+
+  it('re-arming after a programmatic zoom starts a NEW entry from the settled level', () => {
+    const t = new ZoomInteractionTracker();
+    let trail = [];
+    trail = t.record(trail, 1.0);
+    t.arm();
+    trail = t.record(trail, 1.5); // user gesture #1
+    t.disarm(1.5);
+    trail = t.record(trail, 2.8); // programmatic fit settles at 2.8
+    // User zooms out from the settled 2.8 → 1.4 (−50%).
+    t.arm();
+    trail = t.record(trail, 1.4);
+    expect(trail).toEqual([
+      { action: 'zoom_in', to_level: 1.5, base_level: 1.0 }, // gesture #1 frozen
+      { action: 'zoom_out', to_level: 1.4, base_level: 2.8 }, // measured from settled level
+    ]);
+  });
+
+  it('a small nudge after re-arm does not resurrect the old entry', () => {
+    const t = new ZoomInteractionTracker();
+    let trail = [];
+    trail = t.record(trail, 1.0);
+    t.arm();
+    trail = t.record(trail, 1.5);
+    t.disarm(1.5);
+    trail = t.record(trail, 2.8); // programmatic fit
+    t.arm();
+    // User wheels slightly (+10%, below threshold): nothing recorded, and the
+    // old entry must not be coalesced/rewritten with the new level.
+    trail = t.record(trail, 3.08);
+    expect(trail).toEqual([
+      { action: 'zoom_in', to_level: 1.5, base_level: 1.0 },
+    ]);
+  });
+
+  it('consecutive user gestures without programmatic zoom still coalesce', () => {
+    // Pre-existing designed behavior: a trailing zoom entry stays open for the
+    // next user gesture when no programmatic zoom intervened.
+    const t = new ZoomInteractionTracker();
+    let trail = [];
+    trail = t.record(trail, 1.0);
+    t.arm();
+    trail = t.record(trail, 1.5);
+    trail = t.record(trail, 1.5); // steady frames between gestures (still armed)
+    trail = t.record(trail, 2.2); // next wheel burst, same open gesture
+    expect(trail).toHaveLength(1);
+    expect(trail[0]).toEqual({ action: 'zoom_in', to_level: 2.2, base_level: 1.0 });
   });
 });

@@ -66,12 +66,16 @@ export const ZOOM_INTERACTION_THRESHOLD = 0.2;
  * @param {number} [opts.threshold] - relative change threshold (default 0.2)
  * @param {number|null} [opts.lastRecordedLevel] - last recorded zoom level;
  *   pass null on first call. Returned via the result for subsequent calls.
+ * @param {boolean} [opts.allowCoalesce=true] - set false to forbid updating a
+ *   trailing zoom entry (used by ZoomInteractionTracker when the trailing
+ *   entry belongs to an earlier, already-ended gesture).
  * @returns {{interactions: Array, lastRecordedLevel: number|null}} new trail
  *   and the level to pass as lastRecordedLevel on the next call
  */
 export function recordZoomInteraction(interactions, zoom, opts = {}) {
   const threshold = opts.threshold ?? ZOOM_INTERACTION_THRESHOLD;
   const lastRecorded = opts.lastRecordedLevel ?? null;
+  const allowCoalesce = opts.allowCoalesce !== false;
   const rounded = Math.round(zoom * 100) / 100;
   const trail = Array.isArray(interactions) ? interactions : [];
 
@@ -80,7 +84,7 @@ export function recordZoomInteraction(interactions, zoom, opts = {}) {
     && typeof last === 'object'
     && (last.action === 'zoom_in' || last.action === 'zoom_out');
 
-  if (isZoomEntry) {
+  if (allowCoalesce && isZoomEntry) {
     // Coalesce: a continuous gesture updates the trailing entry (direction
     // is measured against the level where the gesture started).
     const base = typeof last.base_level === 'number' ? last.base_level : rounded;
@@ -114,4 +118,90 @@ export function recordZoomInteraction(interactions, zoom, opts = {}) {
     interactions: [...trail.slice(-9), entry],
     lastRecordedLevel: rounded,
   };
+}
+
+/**
+ * Armed/disarmed state machine deciding when camera zoom changes count as
+ * user zoom interactions in the §10 recent_interactions trail.
+ *
+ * Only user-initiated zoom (wheel, keyboard, pinch) is recorded. Programmatic
+ * camera control — the initial auto-fit, drill transitions, breadcrumb
+ * navigation, query-driven "fit"/level zoom, search-result fits — must call
+ * `disarm()` when it takes over the camera. While disarmed, `record()` just
+ * refreshes the baseline, so the next user gesture (which re-arms via
+ * `arm()`) is measured against the settled level: programmatic zoom deltas
+ * are never attributed to the user.
+ *
+ * Coalescing is gesture-scoped: a trailing zoom entry is only updated while
+ * it belongs to the current gesture. After a disarm, the previous gesture's
+ * entry is frozen (its to_level keeps the level the user actually zoomed
+ * to), and the next user gesture that crosses the threshold starts a NEW
+ * entry instead of rewriting the old one with programmatic levels.
+ */
+export class ZoomInteractionTracker {
+  /**
+   * @param {object} [opts]
+   * @param {number} [opts.threshold] - relative change threshold (default 0.2)
+   */
+  constructor(opts = {}) {
+    this.threshold = opts.threshold ?? ZOOM_INTERACTION_THRESHOLD;
+    this.armed = false;
+    this.baseline = null;
+    this.gestureEntry = null;
+  }
+
+  /** A user zoom gesture (wheel/keyboard/pinch) has begun or is continuing. */
+  arm() {
+    this.armed = true;
+  }
+
+  /**
+   * Programmatic camera control takes over: zoom changes are NOT user
+   * interactions until the next arm(). Freezes the current gesture's
+   * trailing entry and re-baselines.
+   * @param {number} [zoom] current zoom level to re-baseline against
+   */
+  disarm(zoom) {
+    this.armed = false;
+    this.gestureEntry = null;
+    if (typeof zoom === 'number') {
+      this.baseline = Math.round(zoom * 100) / 100;
+    }
+  }
+
+  /**
+   * Feed the current zoom level (e.g. once per animation frame).
+   * @param {Array} interactions current trail (newest last)
+   * @param {number} zoom current zoom level
+   * @returns {Array} the trail to store (same reference when unchanged)
+   */
+  record(interactions, zoom) {
+    if (!this.armed) {
+      // Keep the baseline fresh so the first armed gesture compares correctly.
+      this.baseline = Math.round(zoom * 100) / 100;
+      this.gestureEntry = null;
+      return interactions;
+    }
+    const trail = Array.isArray(interactions) ? interactions : [];
+    // Only coalesce into the entry the current gesture created; a trailing
+    // zoom entry from an earlier (pre-disarm) gesture must stay frozen.
+    const canCoalesce = this.gestureEntry != null && trail[trail.length - 1] === this.gestureEntry;
+    const { interactions: next, lastRecordedLevel } = recordZoomInteraction(trail, zoom, {
+      threshold: this.threshold,
+      lastRecordedLevel: this.baseline,
+      allowCoalesce: canCoalesce,
+    });
+    this.baseline = lastRecordedLevel;
+    if (next !== trail) {
+      // The trail changed: either this gesture's entry was appended, or the
+      // coalesce path rewrote it into a fresh object. Follow the object so
+      // subsequent frames of the same gesture keep coalescing into it.
+      const last = next[next.length - 1];
+      if (last && typeof last === 'object'
+        && (last.action === 'zoom_in' || last.action === 'zoom_out')) {
+        this.gestureEntry = last;
+      }
+    }
+    return next;
+  }
 }

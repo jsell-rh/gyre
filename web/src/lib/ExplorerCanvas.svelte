@@ -16,7 +16,7 @@
     computeTestUnreachable as computeTestUnreachableSet,
   } from './test-reachability.js';
   import { edgePassesFilter } from './canvas-filters.js';
-  import { recordZoomInteraction } from './canvas-state.js';
+  import { ZoomInteractionTracker } from './canvas-state.js';
 
   /** @type {{ repoId: string, nodes: any[], edges: any[], activeQuery: import('./types/view-query.ts').ViewQuery | null }} */
   let {
@@ -256,24 +256,21 @@
   // Only user-initiated zoom (wheel, keyboard, pinch) is recorded - the
   // initial auto-fit, drill transitions and query-driven zoom are not user
   // interactions and are represented by their own interaction records.
-  let zoomTrackLevel = null;
-  let zoomTrackArmed = false;
+  // ZoomInteractionTracker holds the armed/disarmed state: programmatic
+  // camera control calls disarmZoomTracking() so animated zooms are never
+  // attributed to the user; wheel/keyboard/pinch handlers call armZoomTracking().
+  const zoomTracker = new ZoomInteractionTracker();
   function armZoomTracking() {
-    zoomTrackArmed = true;
+    zoomTracker.arm();
+  }
+  // Call when a programmatic zoom source (drill transition, breadcrumb
+  // navigation, query-driven fit, search fit, zoom-to-node, auto-fit on data
+  // change) takes control of the camera.
+  function disarmZoomTracking() {
+    zoomTracker.disarm(cam.zoom);
   }
   function trackZoomChange() {
-    const rounded = Math.round(cam.zoom * 100) / 100;
-    if (!zoomTrackArmed) {
-      // Keep the baseline fresh so the first armed gesture compares correctly.
-      zoomTrackLevel = rounded;
-      return;
-    }
-    const { interactions, lastRecordedLevel } = recordZoomInteraction(
-      recentInteractions,
-      cam.zoom,
-      { lastRecordedLevel: zoomTrackLevel },
-    );
-    zoomTrackLevel = lastRecordedLevel;
+    const interactions = zoomTracker.record(recentInteractions, cam.zoom);
     if (interactions !== recentInteractions) {
       recentInteractions = interactions;
       try {
@@ -682,6 +679,7 @@
         const cy = (minY + maxY) / 2;
         const bw = maxX - minX + 100;
         const bh = maxY - minY + 100;
+        disarmZoomTracking();
         targetCam.x = cx;
         targetCam.y = cy;
         targetCam.zoom = Math.max(MIN_ZOOM, Math.min(W / bw, H / bh, 4) * 0.85);
@@ -694,6 +692,7 @@
   function zoomToNode(nodeId) {
     const ln = layoutNodes.find(l => (l.node?.id ?? l.id) === nodeId);
     if (ln) {
+      disarmZoomTracking();
       targetCam.x = ln.x;
       targetCam.y = ln.y;
       targetCam.zoom = Math.min(W / (ln.w + 60), H / (ln.h + 60), 4) * 0.85;
@@ -1489,6 +1488,7 @@
 
     if (isDataChange) {
       const fitZoom = Math.min(W / layoutW, H / layoutH) * 0.85;
+      disarmZoomTracking();
       targetCam = { x: 0, y: 0, zoom: fitZoom };
       cam = { ...targetCam };
     }
@@ -4305,6 +4305,7 @@
     targetCam.x = wx;
     targetCam.y = wy;
     const fitZoom = Math.min(W / (ww + 60), H / (wh + 60), 4) * 0.85;
+    disarmZoomTracking();
     targetCam.zoom = Math.max(fitZoom, cam.zoom * 1.5);
     drillTransitioning = true;
     drillTransitionStart = performance.now();
@@ -4345,6 +4346,7 @@
 
     if (hit.kind === 'tree-group') {
       // Zoom into this tree group smoothly
+      disarmZoomTracking();
       targetCam.x = hit.x;
       targetCam.y = hit.y;
       const fitZoom = Math.min(W / hit.w, H / hit.h) * 0.85;
@@ -4354,6 +4356,7 @@
       // Zoom into leaf node — open its detail panel
       selectedNodeId = node?.id;
       onNodeDetail(node);
+      disarmZoomTracking();
       targetCam.x = hit.x;
       targetCam.y = hit.y;
       targetCam.zoom = Math.max(cam.zoom * 2, 3);
@@ -4528,6 +4531,7 @@
     onNodeDetail(null);
 
     // Smooth zoom-out: animate camera with ease-out cubic to the target parent node or fit all.
+    disarmZoomTracking();
     cam._drillStartX = cam.x;
     cam._drillStartY = cam.y;
     cam._drillStartZoom = cam.zoom;
@@ -4827,6 +4831,7 @@
     if (activeQuery === lastZoomedQuery) return;
     // Handle { level: N } zoom
     if (typeof activeQuery.zoom === 'object' && activeQuery.zoom.level != null) {
+      disarmZoomTracking();
       targetCam.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, activeQuery.zoom.level));
       lastZoomedQuery = activeQuery;
       scheduleRedraw();
@@ -4850,6 +4855,7 @@
     if (minX === Infinity) return;
     const mw = maxX - minX, mh = maxY - minY;
     const fitZoom = Math.min(W / (mw || 1), H / (mh || 1)) * 0.8;
+    disarmZoomTracking();
     targetCam = { x: (minX + maxX) / 2, y: (minY + maxY) / 2, zoom: Math.min(fitZoom, MAX_ZOOM) };
     lastZoomedQuery = activeQuery;
     scheduleRedraw();
