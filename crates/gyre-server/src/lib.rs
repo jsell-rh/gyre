@@ -793,11 +793,11 @@ pub const AGENT_SIGNING_KEY_KV_KEY: &str = "agent_signing_key_pkcs8_b64";
 
 /// Resolve the forge Ed25519 signing key for this boot:
 ///
-/// 1. `GYRE_AGENT_SIGNING_KEY` (base64 PKCS#8 DER) — explicit operator
-///    provisioning; takes precedence and is never overwritten in the DB, so
-///    rotation is a deliberate operator act. Invalid material is a hard
-///    startup error: silently falling back to a different key would break
-///    every signature the operator expects to verify.
+/// 1. `GYRE_AGENT_SIGNING_KEY` (base64 PKCS#8 DER, v1 or v2) — explicit
+///    operator provisioning; takes precedence and is never overwritten in the
+///    DB, so rotation is a deliberate operator act. Invalid material is a
+///    hard startup error: silently falling back to a different key would
+///    break every signature the operator expects to verify.
 /// 2. The key persisted in the durable KV store (PostgreSQL or SQLite,
 ///    whichever backend `build_state` selected) — the default path.
 /// 3. A freshly generated key, persisted for the next boot. In pure

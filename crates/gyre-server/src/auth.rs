@@ -149,9 +149,22 @@ impl AgentSigningKey {
     /// entry). The derived `kid` is identical to the one the same key
     /// material had when it was generated, so `signing_key_id` values in
     /// stored commit-signature records keep matching the active key.
+    ///
+    /// Accepts both PKCS#8 v1 and v2 documents. Every common operator tool
+    /// (`openssl genpkey -algorithm ed25519`, Node's
+    /// `privateKey.export({type:'pkcs8'})`, Python `cryptography`) emits v1,
+    /// which has no embedded public key; ring's strict `from_pkcs8` rejects
+    /// v1 with `VersionNotSupported` and ring's own documentation directs
+    /// v1 callers to `from_pkcs8_maybe_unchecked`. For v1 the public key is
+    /// derived from the private seed (there is no separately-supplied public
+    /// key to distrust — the material is the operator's own key); v2 parsing
+    /// is byte-for-byte identical to `from_pkcs8`, including the embedded
+    /// public-key/seed consistency check, so ring-generated and DB-persisted
+    /// keys are unaffected. `jsonwebtoken`'s EdDSA signing path uses the same
+    /// `from_pkcs8_maybe_unchecked` entry point.
     pub fn from_pkcs8(pkcs8: &[u8]) -> Result<Self, String> {
         use ring::signature::Ed25519KeyPair;
-        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8)
+        let key_pair = Ed25519KeyPair::from_pkcs8_maybe_unchecked(pkcs8)
             .map_err(|e| format!("invalid Ed25519 PKCS#8 key material: {e:?}"))?;
         use ring::signature::KeyPair as _;
         let pub_key_bytes = key_pair.public_key().as_ref();
@@ -197,7 +210,9 @@ impl AgentSigningKey {
     /// Used by the attestation module to sign merge attestation bundles.
     pub fn sign_bytes(&self, data: &[u8]) -> Vec<u8> {
         use ring::signature::Ed25519KeyPair;
-        let key_pair = Ed25519KeyPair::from_pkcs8(&self.pkcs8_bytes)
+        // Same v1-or-v2 tolerance as `from_pkcs8`: `pkcs8_bytes` may hold an
+        // operator-provisioned v1 document (see `GYRE_AGENT_SIGNING_KEY`).
+        let key_pair = Ed25519KeyPair::from_pkcs8_maybe_unchecked(&self.pkcs8_bytes)
             .expect("stored pkcs8 bytes must remain valid");
         key_pair.sign(data).as_ref().to_vec()
     }

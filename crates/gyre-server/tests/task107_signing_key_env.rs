@@ -48,8 +48,66 @@ async fn generate_key_material() -> (TempDir, String, String, String) {
     (dir, db_url, kid, encoded)
 }
 
+/// A PKCS#8 **v1** Ed25519 document — the encoding every common operator
+/// tool emits (`openssl genpkey -algorithm ed25519 -outform DER | base64`,
+/// Node `privateKey.export({type:'pkcs8'})`, Python `cryptography`). v1 has
+/// no embedded public key, so ring's strict `Ed25519KeyPair::from_pkcs8`
+/// rejects it with `VersionNotSupported`; the production loader must accept
+/// it (ring's documented entry point for v1 derives the public key from the
+/// private seed). Generated with the exact command documented for
+/// `GYRE_AGENT_SIGNING_KEY` in docs/server-config.md.
+const OPENSSL_V1_PKCS8_B64: &str =
+    "MC4CAQAwBQYDK2VwBCIEIL184aaMioYbIJKWxfXjdTEHvvwzB976iDkNhbySu6x8";
+/// kid = SHA-256(public key)[..16] for the key above, precomputed from its
+/// derived public key so the test is independent of `derive_kid` itself.
+const OPENSSL_V1_KEY_KID: &str = "b618c0c4f5a201452c2b8a6e8be184b8";
+
 #[tokio::test(flavor = "multi_thread")]
 async fn env_provisioned_key_wins_and_rotation_is_reported_as_rotation() {
+    // Leg 0 — openssl-generated v1 PKCS#8 must provision the active forge
+    // key (the encoding the documented generation command produces) and
+    // sign records that verify. Runs first and clears the env var so the
+    // rotation legs below start from a clean environment.
+    {
+        let dir = TempDir::new().unwrap();
+        let db_url = format!("sqlite://{}", dir.path().join("gyre.db").display());
+        unsafe { std::env::set_var("GYRE_DATABASE_URL", &db_url) };
+        unsafe { std::env::set_var("GYRE_AGENT_SIGNING_KEY", OPENSSL_V1_PKCS8_B64) };
+
+        let state = build_state("f12-token", "http://127.0.0.1:1", None);
+        assert_eq!(
+            state.agent_signing_key.kid, OPENSSL_V1_KEY_KID,
+            "v1 PKCS#8 (openssl-generated) must provision the active forge key \
+             with the kid derived from its public key"
+        );
+        // The env-provisioned key is never written to the DB.
+        let persisted = state
+            .kv_store
+            .kv_get(AGENT_SIGNING_KEY_KV_NAMESPACE, AGENT_SIGNING_KEY_KV_KEY)
+            .await
+            .unwrap();
+        assert_eq!(persisted, None, "operator-provisioned key must not be persisted");
+
+        // The provisioned key actually signs, and its records verify.
+        let repo_id = "repo-f12-v1";
+        let commit_sha = "0123456789abcdef0123456789abcdef01234567";
+        let record = sign_commit_local(
+            repo_id,
+            commit_sha,
+            &attribution(),
+            &state.agent_signing_key,
+            "http://127.0.0.1:1",
+        );
+        state.commit_signatures.save(&record).await.unwrap();
+        let result = verify_state_commit_signature(&state, repo_id, commit_sha)
+            .await
+            .unwrap()
+            .expect("record must exist");
+        assert!(result.valid, "v1-provisioned key must sign verifiable records");
+
+        unsafe { std::env::remove_var("GYRE_AGENT_SIGNING_KEY") };
+    }
+
     // Key A: the deployment's original forge key (DB 1).
     let (_dir_a, db_a, kid_a, key_a) = generate_key_material().await;
     // Key B: material generated against an unrelated DB — a distinct key.
