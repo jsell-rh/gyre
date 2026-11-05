@@ -9,7 +9,7 @@ coverage_sections:
   - "analytics.md §Auto-Emitted Events"
   - "analytics.md §Query API"
   - "analytics.md §Query Parameters"
-commits: ["dc13ede362c2ce9111036cf243dd4d9f4bf56e2d", "38c2c5e777fb71633ba6106f6cb8ff037c58e4ff"]
+commits: ["dc13ede362c2ce9111036cf243dd4d9f4bf56e2d", "38c2c5e777fb71633ba6106f6cb8ff037c58e4ff", "b818d20ddb3ae88181a40284928f6671bf69416a"]
 ---
 
 ## Spec Excerpt
@@ -116,9 +116,12 @@ pub struct AnalyticsEvent {
   SQLite, Postgres, and mem adapters (adapter test
   `analytics_query_filtered_all_params`).
 
-### Trigger-point completeness (review repair round)
+### Trigger-point completeness (review repair round, commit b818d20d)
 
-The independent review found three events whose trigger coverage was
+The branch was first reconciled with main (d81b0fe4, merge commit
+  a488d9df) — web/dist taken byte-identical from main and the coverage
+  SUMMARY TOTAL recomputed from the merged per-file rows. The
+  independent review then found three events whose trigger coverage was
   partial: terminal queue outcomes, internal task transitions, and the
   spec-rejection kill path. All are now wired in production code:
 
@@ -148,6 +151,11 @@ The independent review found three events whose trigger coverage was
   agent stop (reason `killed (repo archived)`) now record with the same
   agent_id/task_id/reason/duration_secs properties as the
   fail/admin-kill/stale-abort paths.
+- **CI gate repair** — a deny-by-default `clippy::never_loop` error in
+  pre-existing `rust_extractor.rs` code (loop that always broke on the
+  first iteration) fails the CI clippy gate on any error-level finding;
+  rewritten as the behavior-identical `if let Some(candidate) =
+  …next()` clippy itself suggests.
 
 Each new trigger point has a regression test that fails on the old code:
   `gate_failure_during_selection_records_queue_processed_failed`,
