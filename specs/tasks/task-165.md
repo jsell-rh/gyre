@@ -62,7 +62,9 @@ Read `specs/system/supply-chain.md` §"gyre-stack.lock", §"Attestation Levels",
 ## Shipped
 
 Repair round (review findings 4492822e, two items, both resolved at HEAD
-`68c0be4e` without changing task-165 production behavior):
+`68c0be4e` without changing task-165 production behavior; repair commit
+`b3c18c84`, follow-ups `5777ed4e` frontmatter record and `892af8ff`
+mechanical SUMMARY sync — see below):
 
 - **Invariant gate `check-fabricated-scope-defaults.sh`**: the finding's
   stale line-anchored exemption (`git_http.rs:1495`, drifted to 1727 by
@@ -86,6 +88,12 @@ Repair round (review findings 4492822e, two items, both resolved at HEAD
   path (spawn.rs `attest_agent_with_container` writes container_id +
   image_hash for M19.4 container targets), which the
   `level3_detected_from_workload_attestation` test exercises.
+- **SUMMARY sync (side fix, commit `892af8ff`)**: re-ran
+  `scripts/update-coverage-summary.sh` — the committed SUMMARY.md was
+  stale relative to the merged coverage files (upstream task-063 moved 6
+  view-query-grammar rows to implemented; totals now 300 assigned / 120
+  implemented / 48%). Mechanical only; no coverage-row status changed by
+  hand.
 
 ### Actual behavior
 
