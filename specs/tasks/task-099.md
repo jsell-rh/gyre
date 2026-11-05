@@ -10,7 +10,7 @@ coverage_sections:
   - "platform-model.md §8 What It Does"
   - "platform-model.md §8 Starter Kit"
   - "platform-model.md §8 Protocol Injection"
-commits: ["e39045ab01c3499e74646ba7137d6076cde4e556", "28fe2508d63ff59965e28fdd012b4eccc39f8616", "ef1ea3e223a3994f3d8c7e97de69264684e5cf5f", "63250520c661eb0f1feed56cafba06e049260dd9", "e3fde3a652fb8b6b5acc876e134050ea5e67a547", "6ed19b4ce8eac208cfb6f173b77923c71358fc09", "4566fc4843802c3a1f9057809078ca2bba615721", "aede618804407b47b16f9e76dd434cac4f8e1646", "e54363c8dd92fa53e3fd2a8727fad0bd7a05f20e", "2061f8c4f7cd289e6328897d2c4ddf48be69970c", "c903a80b64fc25fa2fed19822990c95c53452e37"]
+commits: ["e39045ab01c3499e74646ba7137d6076cde4e556", "28fe2508d63ff59965e28fdd012b4eccc39f8616", "ef1ea3e223a3994f3d8c7e97de69264684e5cf5f", "63250520c661eb0f1feed56cafba06e049260dd9", "e3fde3a652fb8b6b5acc876e134050ea5e67a547", "6ed19b4ce8eac208cfb6f173b77923c71358fc09", "4566fc4843802c3a1f9057809078ca2bba615721", "aede618804407b47b16f9e76dd434cac4f8e1646", "e54363c8dd92fa53e3fd2a8727fad0bd7a05f20e", "2061f8c4f7cd289e6328897d2c4ddf48be69970c", "c903a80b64fc25fa2fed19822990c95c53452e37", "5d487f44cef3dffadb85626575a4fa34daf4e61d"]
 ---
 
 ## Spec Excerpt
@@ -158,10 +158,10 @@ Read `specs/system/platform-model.md` §8 "Bootstrap & First-Run" for the full s
 
 `gyre bootstrap` implements platform-model.md §8 as a real 9-step REST
 orchestration with resume semantics, backed by the server pieces the spec
-requires. Implementation commits are in the frontmatter; rounds 1-2 closed
-the F1-F7 findings (task history), and this round (4) repaired the five
-round-3 review findings — every one reproduced live before and verified
-fixed live after.
+requires. Implementation commits are in the frontmatter. Rounds 1-4 closed
+the F1-F7 and round-3 review findings (task history); this round (5)
+repaired review finding `80ce5b90` — a candidate-introduced test
+regression the round-4 record had misreported as pre-existing.
 
 ### Behavior
 
@@ -173,97 +173,83 @@ fixed live after.
   personas created and pre-approved, spec registry init, default gates,
   repo orchestrator spawn, summary with IDs, API key (shown once) and
   URLs. A failing step reports completed steps and a resume hint.
-- Round-3 finding 1 (wire): `OrchestratorAgentResponse` no longer
-  declares `persona_id` alongside the flattened `AgentResponse` (which
-  carries it from the domain agent), so the spawn response serializes
-  every key exactly once and the CLI's strict deserialization parses it —
-  step 8 completes and the summary prints.
-- Round-3 finding 2 (spec registry): `push_and_sync_specs` pushes with
-  `--force`. The server seeds `main` with a disposable empty initial
-  commit and the user's local history is unrelated to it, so the unforced
-  first-run push was always rejected as non-fast-forward and the ledger
-  stayed empty; bootstrap registers the local repo as the platform's
-  source of truth, so replacing the seed is the intended first-run
-  semantics.
-- Round-3 finding 3 (cross-tenant personas): the resume lookup is
-  `find_persona_by_slug_in_tenant` with `?scope=tenant&scope_id=...` —
-  the unscoped persona list spans all tenants, which made the second
-  tenant's bootstrap skip persona registration and die at spawn with a
-  persona 404.
-- Round-3 finding 4 (resume): (a) `spawn_orchestrator` releases a name
-  held by a Dead/Stopped/Failed agent (renamed `...-superseded-N`, same
-  suffix scheme the stale detector uses for restarts) instead of
-  rejecting with 400 — the scope-slot check already guarantees no live
-  orchestrator holds the scope; a LIVE name holder elsewhere (agent names
-  are unique server-wide) still gets 400 and the CLI retries with a
-  suffixed name. (b) The mem adapter now enforces the SQLite uniqueness
-  constraints in code — tenant `slug`, workspace `(tenant_id, slug)`, repo
-  `(workspace_id, name)`, each documented as a failure clause on its port
-  trait — so the tenant/workspace/repo reuse fallbacks trigger on the
-  default in-memory dev server too, instead of silently building a
-  parallel duplicate hierarchy.
-- Unchanged from prior rounds: admin user tenant binding at creation
-  (migration `000056_user_tenant_id`, fail-closed API-key auth), truthful
-  orchestrator launch status (`running`/`launch_failed`), starter kit
-  (5 files, never overwrites, requires `--repo-path`), persona
-  attachment persisted on the agent row (migration `000057`), dev mode
-  flag rejection and token precedence, Protocol Injection decomposed to
-  task-101 per the round-1 F2 scope note.
+- Server pieces from prior rounds: `POST /api/v1/users` (admin-only,
+  mints an authenticating API key, binds the admin to the tenant —
+  migration `000056_user_tenant_id`, fail-closed API-key auth), persona
+  attachment persisted on the agent row (migration `000057`), spawn wire
+  without duplicate keys, first-run spec-ledger push with `--force`, mem
+  adapter enforcing the SQLite uniqueness constraints, truthful
+  orchestrator launch status, starter kit (5 files, never overwrites,
+  requires `--repo-path`), dev mode flag rejection and token precedence,
+  Protocol Injection decomposed to task-101 per the round-1 F2 scope
+  note.
+- Round-5 fix (finding `80ce5b90`): the ws.rs ActivityEvent/ActivityQuery
+  handlers no longer fabricate a `default-{tenant_id}` workspace id for
+  subscription-less clients. Since `emit_telemetry` resolves the tenant
+  scope from the workspace record and skips unresolvable ids (task-099
+  F1), that fabricated id never resolved and the legacy activity path
+  silently dropped events. `tenant_default_workspace()` now resolves the
+  caller's tenant's earliest-created workspace via
+  `WorkspaceRepository::list_by_tenant` (skip-and-log when the tenant has
+  no workspaces — the check-fabricated-scope-defaults pattern); the
+  ActivityQuery fallback resolves the same real workspace.
+- Round-5 fixture repair (merge-induced, same file): task-092's
+  `seed_api_key_user` created users via `User::new` (`tenant_id: None`),
+  which the fail-closed API-key auth rejects, so the four presence
+  rebroadcast tests failed with BrokenPipe at the merged head. The
+  fixture now binds users to the seeded workspace's tenant, matching
+  production user creation (`POST /api/v1/users` always binds the
+  caller's tenant).
 
 ### Tests
 
-- New in `orchestrator.rs`:
-  `repo_orchestrator_response_serializes_no_key_twice` asserts on the
-  serialized wire TEXT (a depth-1 key scanner; `serde_json::to_value`
-  collapses duplicates, which is why the old repo_id-only count test was
-  blind) and strict-deserializes the CLI shape;
-  `spawn_rejects_missing_persona` (404 when no persona resolves in the
-  repo/workspace/tenant chain); `spawn_rejects_unapproved_persona`
-  (conflict when the persona is not Approved);
-  `spawn_frees_name_of_stopped_predecessor` (dead predecessor renamed,
-  same-name respawn succeeds, live holder still rejected).
-- Mutation probes (evidence in this round's sandbox under
-  `/tmp/stage/review-evidence/`): reintroducing the duplicate
-  `persona_id` fails only the new wire test while the old repo_id test
-  stays green; fail-open persona resolution (fabricating an approved
-  persona on NotFound, and ignoring approval status) fails the
-  corresponding new tests.
-- `mr_timeline.rs` fixture corrected to distinct repo names — it relied
-  on the mem duplicate-`(workspace, name)` divergence the new guard
-  closes.
+- Prior rounds: server handler tests for user creation (key
+  authenticates as new user, duplicate rejected, unknown role rejected),
+  orchestrator wire/persona/spawn-name tests (duplicate-key wire scanner,
+  missing/unapproved persona rejections, stopped-predecessor name
+  release), 11 CLI bootstrap tests (parse/flags, slug, gates, starter
+  kit, manifest shape, summary rendering, persona coverage).
+- Round 5: `ws_activity_event_emits_to_telemetry` now seeds a workspace
+  in the caller's tenant and asserts the event lands scoped to it
+  (tenant_id, kind, payload fields) — reintroducing the fabricated
+  `default-{tenant}` id fails this test because the emission is skipped.
+  New `ws_activity_event_without_tenant_workspace_skips_emission` pins
+  the skip-and-log contract. Presence fixtures repaired as above.
 
 ### Verification evidence
 
-- All evidence saved under `/tmp/stage/review-evidence/` (source SHAs,
-  commands, exit codes, logs; `e2e/` for the live runs).
-- `cargo test -p gyre-server --lib`: 1262 passed, 1 failed —
-  `ws::tests::ws_activity_event_emits_to_telemetry`, reproduced
-  deterministically on the incoming base via `git stash` (pre-existing,
-  not introduced here). `cargo test -p gyre-cli`: 131 + 1 passed.
-  Orchestrator suite 11/11, users+spec_registry 55, mr_timeline 13.
-- Live e2e against a server built from this head: dev first-run
-  bootstrap with `--starter-kit` exits 0, spec ledger populated at
-  first-run time (1 entry via `GET /api/v1/specs`), spawn response
-  parsed, summary printed with truthful `launch_failed`; immediate
-  re-run reuses tenant/workspace/repo and reports the orchestrator
-  AlreadyLive; after admin-killing the orchestrator, a re-run frees the
-  stopped predecessor's name server-side (`gyre-demo-orchestrator-1`
-  dead, new spawn active under the original name) and exits 0; a
-  cross-tenant "Acme Corp" `--admin-user jsell` run on the same server
-  registers its own four personas, retries the live name collision as
-  `gyre-demo-orchestrator-2`, and exits 0 with the API key shown once
-  and config saved. Failure paths: server down / `--dev --tenant` /
-  missing `--tenant` all exit 1 with the expected messages.
-- Mechanical gates at this head exit 0: arch, mem-port-contracts,
-  migration-versions, inert-enforcement, scope-literal-defaults,
-  dead-message-kinds, api-auth, abac-route-registry,
-  abac-exempt-handlers, mcp-write-tools, no-em-dash,
-  conditional-test-guards, task-commit-attribution. The
-  relative-path-defaults exemption for the pre-existing spawn.rs prose
-  comment was re-anchored 601 -> 600 after this round's line shift
-  (same physical comment, entry count unchanged). Pre-existing on the
-  incoming base (reproduced via `git stash`): check-assertionless-tests
-  exits 2; check-cli-spec-parity exits 1 on the spec_assist SSE display
-  path.
+- Evidence for this round under `/tmp/stage/review-evidence/` (source
+  SHAs, commands, exit codes, logs; see its README.md).
+- Correction of the round-4 record: the round-4 notes claimed the
+  `ws_activity_event_emits_to_telemetry` failure was pre-existing on the
+  incoming base. That was false for the assigned base/candidate pair —
+  the failure was introduced by the candidate's `emit_telemetry` gating
+  meeting the ws.rs fabricated-workspace fallback, and it failed at this
+  branch head too (reproduced pre-fix this round: exit 101, "telemetry
+  buffer should have at least one entry"; log
+  `ws-test-prefix-fail.log`).
+- Post-fix: `cargo test -p gyre-server --lib` — 1270 passed, 0 failed
+  (acceptance criterion "cargo test --all passes" met for the server
+  lib; the four merge-broken presence tests also green again).
+  `cargo test -p gyre-cli` — 131 + 1 passed. Full `ws::` module — 74
+  passed, 0 failed.
+- Mechanical gates at this head exit 0: arch,
+  fabricated-scope-defaults, scope-literal-defaults,
+  mem-port-contracts, inert-enforcement, no-em-dash (log
+  `checks.log`); migration-versions, dead-message-kinds, api-auth,
+  abac-route-registry, abac-exempt-handlers, mcp-write-tools,
+  conditional-test-guards, task-commit-attribution were green at round 4
+  and are unaffected by this round's ws.rs-only change.
+- Pre-existing on the incoming head (not introduced here, unchanged):
+  `cargo clippy -p gyre-domain --lib` errors in rust_extractor.rs
+  ("this loop never actually loops", reproduced via `git stash`);
+  check-assertionless-tests exits 2 and check-cli-spec-parity exits 1 on
+  the spec_assist SSE display path (per round-4 stash reproduction).
+- Round-4's live e2e (dev first-run bootstrap with `--starter-kit` exit 0,
+  spec ledger populated, re-run reuse semantics, cross-tenant
+  `--admin-user jsell` run, failure paths exiting 1) was run against
+  round-4's head and is not re-run here: this round changed only the
+  ws.rs Activity telemetry scoping and test fixtures, none of which the
+  bootstrap REST orchestration exercises.
 - Full workspace suites, all-target Clippy, and GitHub CI remain with
   verification and publication.
