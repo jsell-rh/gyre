@@ -621,6 +621,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ spec_path: specPath, content }),
     }),
+  getSpecAssertionResults: (repoId, specPath) =>
+    request(`/repos/${repoId}/specs/${encodeURIComponent(specPath)}/assertions`),
   specsAssist: (repoId, body) =>
     fetch(`${API_BASE}/repos/${repoId}/specs/assist`, {
       method: 'POST',
