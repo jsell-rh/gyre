@@ -491,7 +491,7 @@ pub(crate) async fn spawn_agent_core(
     // Fail closed (task-077 F6): if the restriction policies cannot be created,
     // abort the spawn — never leave an interrogation agent running unrestricted.
     if is_interrogation {
-        if let Err(e) = create_interrogation_policies(&state, &agent.id.to_string()).await {
+        if let Err(e) = create_interrogation_policies(state, agent.id.as_str()).await {
             // Roll back the already-created agent record and token so the
             // aborted spawn leaves no orphaned entities behind.
             if let Err(del_err) = state.agents.delete(&agent.id).await {
@@ -3018,7 +3018,7 @@ mod tests {
             async fn create(&self, policy: &gyre_domain::Policy) -> anyhow::Result<()> {
                 let mut store = self.policies.lock().await;
                 if store.contains_key(&policy.id.to_string()) {
-                    anyhow::bail!("policy id already exists: {}", policy.id.to_string());
+                    anyhow::bail!("policy id already exists: {}", policy.id);
                 }
                 store.insert(policy.id.to_string(), policy.clone());
                 Ok(())

@@ -26,4 +26,4 @@ crates/gyre-server/src/snapshot.rs:132         # restore_snapshot: bulk re-creat
 # respective subsystem's hardening task, out of task-077's trust-gradient
 # deliverable) ---
 crates/gyre-server/src/api/spawn.rs:330        # spawn_agent_core: agent row + worktree row via `?`; worktree failure leaves agent record — needs rollback-on-failure or transaction
-crates/gyre-server/src/git_http.rs:2789        # process_breaking_changes: spec + task records created per breaking change without a transaction
+crates/gyre-server/src/git_http.rs:2809        # process_breaking_changes: spec + task records created per breaking change without a transaction (re-anchored 2789→2809: main 0cb71015 inserted lines above)
