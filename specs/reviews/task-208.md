@@ -51,3 +51,53 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 28 (2026-11-05) — attribution clobber 27 at candidate 40b7d228; product verified green
+
+Assignment: base `701cb1ad`, candidate `40b7d228`. Probes run at HEAD = candidate
+(fresh `npm ci`; evidence in `/tmp/stage/review-evidence/task-208-round28-*.txt`):
+
+- Zero product drift: `git diff --stat b50f6977..HEAD` touches only
+  `specs/tasks/task-208.md` (the attribution rewrite). `b50f6977` is the round-27
+  merge of the assigned base `701cb1ad` with zero task-208-surface drift.
+- Dead-code grep (`get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs`
+  over `crates/` + `web/src/`) → zero matches; route and ABAC registrations for
+  `/api/v1/users/me/{agents,tasks,mrs}` absent; router 404 regression test
+  `my_stuff_endpoints_are_removed` present at `users.rs:948`, source-inspected
+  genuine (in-process `app()` router, asserts NOT_FOUND on all three URIs).
+- Committed-dist forbidden-identifier grep → zero matches; kept-surface
+  identifiers (`users/me/tokens`) present in `web/dist/assets/index-CMDRzIOf.js`.
+- `UserProfile.svelte` tabs array is exactly the six permitted tabs; the
+  exact-six-tab guard test asserts the exact `data-id` list.
+- Spec amendments and coverage matrices intact (user-management.md supersession
+  note + struck M22.8 row; coverage row 22 `n/a`, HSI row 54 `implemented`).
+- Remaining `users/me/*` endpoints keep their per-handler-auth ABAC-exempt model
+  (exemption-file entries unchanged).
+- `cd web && npm ci && npm test` → **65 files, 1624 passed | 41 skipped**.
+
+**Finding (sole blocker, clobber 27 — same class as rounds 2–27):** the candidate
+tip commit `40b7d228` ("process: record task-208 branch commits") rewrote
+`commits:` from the fully-attributed four-SHA list restored at parent `df6c5e7d`
+back to `["a11cbf7e…", "98fd096e…"]`, dropping
+`ad1121c5093cd2f1f2b3824ed88352ac4e181fd9` (dist regeneration — the round-1 F1
+fix that removes the HSI-§12-forbidden my-stuff surface from the RustEmbed'd
+`SKIP_WEB_BUILD=1` shipped bundle) and `ea006d52bb42e96e6f176b02b5390b6cb56a3116`
+(`.gitattributes` whitespace-gate exemption). Both are task-208-labeled
+product-surface commits and verified ancestors of HEAD (`git merge-base
+--is-ancestor` exit 0), so content is intact — only attribution is dropped.
+Per the AGENTS.md task-commit-attribution invariant an unlisted commit is
+invisible to review scoping. `scripts/check-task-commit-attribution.sh` exits 0
+at the candidate only because its product-surface regex `^(crates/|web/src|web/tests)`
+excludes `web/dist/` and root `.gitattributes` (documented blind spot).
+Reproduce: `git diff df6c5e7d..40b7d228 -- specs/tasks/task-208.md`.
+Repair is mechanical, product untouched: restore the four-SHA list at the tip.
+
+Rust test execution is transport-blocked in this review sandbox (index.crates.io
+connection refused; no registry cache — offline resolution fails on `anyhow`).
+The verifier must run `cargo test -p gyre-server my_stuff_endpoints_are_removed`
+and `cargo test --all`. This is an infrastructure restriction, not a code defect;
+product state is byte-identical to the round-27-verified state, where the router
+test passed.
+
+Verdict: **needs-revision** (attribution clobber only; every product acceptance
+criterion independently verified green at this candidate).
