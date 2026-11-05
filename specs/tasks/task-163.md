@@ -6,7 +6,7 @@ progress: ready-for-review
 coverage_sections:
   - "dependency-graph.md §Enforcement Policies"
   - "dependency-graph.md §Cascade Testing"
-commits: ["71e25bb8c1b92e52babd309d383dc4de864794b8"]
+commits: ["71e25bb8c1b92e52babd309d383dc4de864794b8", "38e4ae86"]
 ---
 
 ## Spec Excerpt
@@ -85,7 +85,7 @@ Test evidence (all at HEAD of this branch):
 Sandbox note: TCP listener probe unsupported (errno 95) — no live HTTP verification possible here; exact-head GitHub CI remains the transport check. Recorded in /tmp/stage/review-evidence/sandbox-transport-restriction.json.
 
 
-## Verification Repair (round 2, finding 44b85cf5ee5a4d98a5f7473cdc870775)
+### Verification Repair (round 2, finding 44b85cf5ee5a4d98a5f7473cdc870775)
 
 The verification gate (`tools/checks.sh`, a generated copy of `scripts/dev-check.sh`) exited 1 at candidate `370fbbb4` (base `653a696f`). The log tail only showed the passing web build; `dev-check.sh` collects gate failures via `gate()` and continues, so the real failure printed mid-log.
 
@@ -96,7 +96,7 @@ The verification gate (`tools/checks.sh`, a generated copy of `scripts/dev-check
 - Evidence: `/tmp/stage/review-evidence/verification-repair-44b85cf5.json`, `gate-outputs.txt`.
 
 
-## Contract Repair (round 3, finding be954b5208a94a77b82fec33c11efc35)
+### Contract Repair (round 3, finding be954b5208a94a77b82fec33c11efc35)
 
 Finding category `contract`: "The implementation changed the assigned requirements. Restore the original task contract and implement it; normative changes require separate spec review."
 
@@ -108,3 +108,14 @@ Audit of every change to this task's assigned contract (base `770785f7` → cand
 - **Port-contract fidelity**: the assigned plan named \`list_by_dependency(edge_id)\` and \`get/set\`, but the ports already existed on base with \`list_by_source_repo\` / \`get_for_workspace\` / \`set_for_workspace\` and base callers depend on those signatures. Redefining the port to match the stale plan text would have broken base callers and violated the hexagonal contract; the implemented adapters satisfy the port that exists. The task's own Agent Instructions said the domain types and adapters already exist and the port files are referenced at their current signatures.
 - Focused suites re-run at the merged head after this repair: see `/tmp/stage/review-evidence/contract-repair-be954b52/focused-suites.log`.
 - `git diff --check` clean; the attribution gate passes at this state.
+
+### Verification Repair (round 4, finding 7c3d6579d2b74376bcb410752cd3cac7)
+
+`cargo test --all --quiet` exited 101 at candidate `a5417644` (base `59ff5d01`): `api::scim::tests::scim_delete_user` panicked at `crates/gyre-server/src/api/scim.rs:541:41` (`created["id"].as_str().unwrap()` on `None`) — the only failure among 1226 passing lib tests.
+
+- **Merge resolution first**: the branch arrived mid-merge of base `59ff5d01`, conflicted in `lib.rs` AppState store wiring — the candidate wires `breaking_changes`/`dependency_policies` through `store!` (task-163) while upstream converted `dependencies` to `store!` (task-199). Resolved at `6f60258d` as the union: all three through `store!`; `DependencyRepository` is implemented by both `SqliteStorage` and `PgStorage` in the merged tree.
+- **Root cause of the test failure**: a test-level data race on a process-global env var. `check_scim_auth()` reads `GYRE_SCIM_TOKEN` from the environment at request time; every SCIM test's `scim_request()` configures `"test-scim-token"` before each authorized request, but `scim_unauthorized_without_token` pointed the env var at `"secret"`. With lib tests running in parallel, that `set_var` landing while another SCIM test's request was in flight made the handler reject the create with 403 — a create response then carries no `"id"`, and `scim_delete_user` panics extracting it. Nondeterministic under parallel scheduling: it passed three earlier verification rounds and failed this one; it also passed a full local lib run before the fix.
+- **Probe evidence** (temporary integration test through the real `api_router()` + `build_state()`, not committed): 2000 authorized SCIM creates with a concurrent divergent env writer → **1711 forbidden** (the exact failure mode); with a same-value writer → **0 forbidden**. Probe source and log: `/tmp/stage/review-evidence/scim-race-probe.rs`, `scim-race-probe-run.log`.
+- **Fix** (commit `38e4ae86`): `scim_unauthorized_without_token` configures the shared test token value like every other SCIM test. The rejection under test still comes from the missing `Authorization` header (403, assertion strength unchanged); with all writers of `GYRE_SCIM_TOKEN` using one value, no interleaving can mismatch an authorized bearer against the configured token. The sibling `GYRE_SIGSTORE_MODE` races in `commit_signatures.rs` were audited: all three assertions expect `SigstoreMode::Local` under any interleaving — benign.
+- **Post-fix at head `38e4ae86`**: `cargo test -p gyre-server --lib` — 1242 passed, 0 failed (includes `merge_processor::trigger_cascade` and `api::dependencies` suites); `api::scim::tests` — 6 passed in each of 10 consecutive runs; task-163 focused suites — adapters `breaking_change` 7 passed, `dependency_policy` 4 passed, `--test task163_dependency_persistence` 2 passed; `python3 scripts/check-rustfmt-diff.py 59ff5d01` — changed lines clean; `check-task-commit-attribution.sh` — OK with `38e4ae86` recorded.
+- Full summary: `/tmp/stage/review-evidence/verification-repair-7c3d6579.json`.
