@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use gyre_common::Id;
-use gyre_domain::{AnalyticsEvent, Task, TaskPriority, TaskStatus, TaskType};
+use gyre_domain::{Task, TaskPriority, TaskStatus, TaskType};
 use gyre_ports::search::SearchDocument;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
@@ -342,20 +342,7 @@ pub async fn transition_task_status(
         .await;
 
     // Auto-track status transition as analytics event
-    let event = AnalyticsEvent::new(
-        new_id(),
-        "task.status_changed",
-        task.assigned_to.as_ref().map(|id| id.to_string()),
-        serde_json::json!({
-            "task_id": task.id.to_string(),
-            "old_status": format!("{:?}", old_status),
-            "new_status": format!("{:?}", new_status),
-            "assigned_to": task.assigned_to.as_ref().map(|id| id.to_string()),
-        }),
-        ts,
-    )
-    .with_scope(None, None, Some(&task.workspace_id), None);
-    let _ = state.analytics.record(&event).await;
+    super::analytics::record_task_status_changed(&state, &task, &old_status).await;
 
     Ok(Json(TaskResponse::from(task)))
 }

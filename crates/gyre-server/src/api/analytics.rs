@@ -43,6 +43,38 @@ pub struct QueryEventsParams {
     pub group_by: Option<String>,
 }
 
+// ─── Auto-emit helpers ────────────────────────────────────────────────────────
+
+/// Record the spec-required `task.status_changed` analytics event
+/// (analytics.md §Auto-Emitted Events: trigger "Task transitions status",
+/// properties `old_status`, `new_status`, `task_id`, `assigned_to`).
+///
+/// Every production path that persists a task status transition must call
+/// this — the HTTP status endpoint and the MCP `update_task` tool are the
+/// explicit paths; internal auto-advances (agent spawn/completion, admin
+/// force-kill, stale-agent abort, spec rejection, repo archival) are the
+/// rest. `old_status` is the status before the transition just persisted.
+pub(crate) async fn record_task_status_changed(
+    state: &AppState,
+    task: &gyre_domain::Task,
+    old_status: &gyre_domain::TaskStatus,
+) {
+    let ev = AnalyticsEvent::new(
+        new_id(),
+        "task.status_changed",
+        task.assigned_to.as_ref().map(|id| id.to_string()),
+        serde_json::json!({
+            "task_id": task.id.to_string(),
+            "old_status": format!("{:?}", old_status),
+            "new_status": format!("{:?}", task.status),
+            "assigned_to": task.assigned_to.as_ref().map(|id| id.to_string()),
+        }),
+        now_secs(),
+    )
+    .with_scope(None, None, Some(&task.workspace_id), None);
+    let _ = state.analytics.record(&ev).await;
+}
+
 #[derive(Deserialize)]
 pub struct CountEventsParams {
     pub event_name: String,

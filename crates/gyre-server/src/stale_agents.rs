@@ -77,9 +77,22 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                     if let Ok(Some(mut task)) = state.tasks.find_by_id(task_id).await {
                         use gyre_domain::TaskStatus;
                         if task.status == TaskStatus::InProgress {
+                            let pre_block_status = task.status.clone();
                             let _ = task.transition_status(TaskStatus::Blocked);
                             task.updated_at = now;
                             let _ = state.tasks.update(&task).await;
+                            // task.status_changed analytics event (analytics.md
+                            // §Auto-Emitted Events: "Task transitions status") —
+                            // the stale-abort auto-block is a production
+                            // transition.
+                            if task.status != pre_block_status {
+                                crate::api::analytics::record_task_status_changed(
+                                    state,
+                                    &task,
+                                    &pre_block_status,
+                                )
+                                .await;
+                            }
                         }
                     }
                 }
@@ -314,6 +327,15 @@ mod tests {
         agent.transition_status(AgentStatus::Active).unwrap();
         state.agents.create(&agent).await.unwrap();
 
+        // In-flight task assigned to the agent — the abort path blocks it.
+        let mut task = gyre_domain::Task::new(Id::new("task-stale-1"), "Stale task", 1_000);
+        task.transition_status(gyre_domain::TaskStatus::InProgress)
+            .ok();
+        state.tasks.create(&task).await.unwrap();
+        let mut with_task = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
+        with_task.current_task_id = Some(Id::new("task-stale-1"));
+        state.agents.update(&with_task).await.unwrap();
+
         // Age past the heartbeat timeout, no heartbeat ever recorded.
         let mut aged = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
         aged.spawned_at = aged.spawned_at.saturating_sub(10_000);
@@ -324,6 +346,14 @@ mod tests {
 
         let dead = state.agents.find_by_id(&agent.id).await.unwrap().unwrap();
         assert_eq!(dead.status, AgentStatus::Dead);
+
+        let blocked = state
+            .tasks
+            .find_by_id(&Id::new("task-stale-1"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(blocked.status, gyre_domain::TaskStatus::Blocked);
 
         let events = state
             .analytics
@@ -343,5 +373,22 @@ mod tests {
             ev.properties["duration_secs"].as_u64().is_some(),
             "duration_secs must be present"
         );
+
+        // analytics.md §Auto-Emitted Events: task.status_changed — the
+        // stale-abort auto-block is a production transition and must record.
+        let status_events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            status_events.len(),
+            1,
+            "stale-abort auto-block must record task.status_changed"
+        );
+        let sev = &status_events[0];
+        assert_eq!(sev.properties["task_id"], "task-stale-1");
+        assert_eq!(sev.properties["old_status"], "InProgress");
+        assert_eq!(sev.properties["new_status"], "Blocked");
     }
 }

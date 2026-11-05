@@ -106,15 +106,60 @@ pub struct AnalyticsEvent {
 - All 12 spec-required auto-emitted events record at their real trigger
   points with all spec-required properties, each proven by a passing
   per-event test: `task.status_changed`, `mr.merged`, `mr.closed`,
-  `agent.spawned`, `agent.completed`, `agent.failed` (fail/admin-kill/
-  stale-abort paths), `merge_queue.processed`, `gate.failed`,
-  `gate.passed`, `spec.approved`, `budget.warning`, `search.query`.
+  `agent.spawned`, `agent.completed`, `agent.failed`,
+  `merge_queue.processed`, `gate.failed`, `gate.passed`, `spec.approved`,
+  `budget.warning`, `search.query`.
 - Query API: `POST/GET /api/v1/analytics/events`, `GET /count`, `GET /daily`
   with the full spec filter set — `event_name` (exact or trailing-`*`
   prefix), `agent_id`, `user_id`, `workspace_id`, `repo_id`, `since`,
   `until`, `limit` (default 100, cap 10_000), `group_by` — implemented on
   SQLite, Postgres, and mem adapters (adapter test
   `analytics_query_filtered_all_params`).
+
+### Trigger-point completeness (review repair round)
+
+The independent review found three events whose trigger coverage was
+  partial: terminal queue outcomes, internal task transitions, and the
+  spec-rejection kill path. All are now wired in production code:
+
+- **`merge_queue.processed` on every terminal outcome** — a new
+  `fail_queue_entry()` helper in merge_processor.rs updates the entry to
+  `Failed` and records the event atomically at every failure site:
+  quality-gate failure during candidate selection (the primary failure
+  mode), MR not found (selection and atomic-group paths), repo not found,
+  dependency-closed dep-health failure, spec-policy blocks
+  (no-spec_ref/approval/stale), breaking-change policy, spec-link gates
+  (superseded/conflicts), constraint enforcement, and attestation-ABAC
+  denial. The merged/conflict/git_error sites keep their existing
+  emissions. Circuit-breaker `Cancelled` entries now record with the spec
+  outcome value `skipped` (`emit_queue_processed_terminal`). When the MR
+  no longer resolves, the event records with the MR id from the entry and
+  no fabricated scope.
+- **`task.status_changed` on internal transitions** — a shared
+  `record_task_status_changed()` helper (api/analytics.rs) is now called
+  by every production path that persists a task status transition: the
+  HTTP status endpoint and MCP `update_task` (refactored onto the
+  helper), agent-spawn auto-advance Backlog→InProgress, agent-completion
+  auto-advance →Review, admin force-kill task block →Blocked, stale-abort
+  task block →Blocked, spec-rejection cancellation →Cancelled, and
+  repo-archive cancellation →Cancelled.
+- **`agent.failed` on the remaining kill paths** — the spec-rejection
+  agent stop (reason `killed: spec rejected: …`) and the repo-archive
+  agent stop (reason `killed (repo archived)`) now record with the same
+  agent_id/task_id/reason/duration_secs properties as the
+  fail/admin-kill/stale-abort paths.
+
+Each new trigger point has a regression test that fails on the old code:
+  `gate_failure_during_selection_records_queue_processed_failed`,
+  `mr_not_found_during_selection_records_queue_processed_failed`,
+  `spec_policy_block_records_queue_processed_failed`,
+  `circuit_breaker_cancel_records_queue_processed_skipped`,
+  `spawn_auto_advance_records_task_status_changed`,
+  `complete_auto_advance_records_task_status_changed`, plus assertions
+  added to `admin_kill_blocks_active_task`,
+  `abort_records_agent_failed_analytics_event`,
+  `reject_spec_cancels_in_flight_tasks`, `archive_cancels_active_tasks`,
+  and `archive_stops_active_agents`.
 
 ### Verification-finding repair round (commit dc13ede3)
 
@@ -154,12 +199,11 @@ The prior candidate failed the deterministic verification gates (rustfmt,
 
 ### Test evidence
 
-- `cargo test -p gyre-server --lib`: 1274 passed, 0 failed.
+- `cargo test -p gyre-server --lib`: 1293 passed, 0 failed (includes
+  the 11 new/extended trigger-point regression tests).
 - `cargo test -p gyre-server --test api_integration`: 67 passed, 0 failed.
-- `cargo test -p gyre-server --test dependency_persistence --test
-  search_wiring`: 2 passed.
-- `cargo test -p gyre-ports -p gyre-domain -p gyre-common`: 483 passed.
-- All 20 static gates pass with this branch's scripts AND with the base
-  (75ada1c4) scripts; rustfmt and clippy diff gates clean against the
-  base; exemption-growth subset check passes. Evidence retained under
-  review-evidence/ (see the controller's artifact store).
+- `cargo fmt --check -p gyre-server`: clean.
+- Earlier rounds (unchanged, see commits 38c2c5e/dc13ede3):
+  `cargo test -p gyre-ports -p gyre-domain -p gyre-common`: 483 passed;
+  adapter test `analytics_query_filtered_all_params` green on
+  SQLite/Postgres/mem.

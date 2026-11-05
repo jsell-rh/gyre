@@ -969,8 +969,20 @@ pub async fn reject_spec(
             ) {
                 continue;
             }
+            let pre_cancel_status = task.status.clone();
             let _ = task.cancel(Some(cancel_reason.clone()), now);
             let _ = state.tasks.update(&task).await;
+            // task.status_changed analytics event (analytics.md §Auto-Emitted
+            // Events: "Task transitions status") — the spec-rejection
+            // cancellation is a production transition.
+            if task.status != pre_cancel_status {
+                crate::api::analytics::record_task_status_changed(
+                    &state,
+                    &task,
+                    &pre_cancel_status,
+                )
+                .await;
+            }
 
             // If an agent is working on this task, stop it.
             let agents = state.agents.list().await.unwrap_or_default();
@@ -980,6 +992,28 @@ pub async fn reject_spec(
                 {
                     let _ = agent.transition_status(gyre_domain::AgentStatus::Stopped);
                     let _ = state.agents.update(&agent).await;
+                    // agent.failed analytics event (analytics.md §Auto-Emitted
+                    // Events: "Agent fails or is killed") — the spec-rejection
+                    // stop is a kill path, like stop_agent/admin kill/stale
+                    // abort, and must record with the same properties.
+                    let ev = AnalyticsEvent::new(
+                        new_id(),
+                        "agent.failed",
+                        Some(agent.id.to_string()),
+                        serde_json::json!({
+                            "task_id": agent.current_task_id.as_ref().map(|id| id.to_string()),
+                            "reason": format!("killed: {cancel_reason}"),
+                            "duration_secs": now.saturating_sub(agent.spawned_at),
+                        }),
+                        now,
+                    )
+                    .with_scope(
+                        None,
+                        None,
+                        Some(&agent.workspace_id),
+                        agent.repo_id.as_ref(),
+                    );
+                    let _ = state.analytics.record(&ev).await;
 
                     // Send shutdown message to agent's inbox.
                     state
@@ -3016,6 +3050,51 @@ specs:
         // Agent should be stopped.
         let updated_agent = state.agents.find_by_id(&agent_id).await.unwrap().unwrap();
         assert_eq!(updated_agent.status, gyre_domain::AgentStatus::Stopped);
+
+        // analytics.md §Auto-Emitted Events: task.status_changed — the
+        // spec-rejection cancellation is a production transition and must
+        // record. Regression: previously only the HTTP status endpoint and
+        // MCP update_task recorded.
+        let status_events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            status_events.len(),
+            1,
+            "spec-rejection cancellation must record task.status_changed"
+        );
+        let sev = &status_events[0];
+        assert_eq!(sev.properties["task_id"], "reject-task-1");
+        assert_eq!(sev.properties["old_status"], "InProgress");
+        assert_eq!(sev.properties["new_status"], "Cancelled");
+
+        // analytics.md §Auto-Emitted Events: agent.failed ("Agent fails or
+        // is killed") — the spec-rejection agent stop is a kill path, like
+        // stop_agent/admin kill/stale abort. Regression: this fourth kill
+        // path previously recorded no event.
+        let failed_events = state
+            .analytics
+            .query(Some("agent.failed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            failed_events.len(),
+            1,
+            "spec-rejection agent stop must record agent.failed"
+        );
+        let fev = &failed_events[0];
+        assert_eq!(fev.agent_id.as_deref(), Some("reject-agent-1"));
+        assert_eq!(fev.properties["task_id"], "reject-task-1");
+        assert_eq!(
+            fev.properties["reason"],
+            "killed: spec rejected: spec is invalid"
+        );
+        assert!(
+            fev.properties["duration_secs"].as_u64().is_some(),
+            "duration_secs must be present"
+        );
     }
 
     /// analytics.md §Auto-Emitted Events: rejecting a spec closes its open

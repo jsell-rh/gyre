@@ -81,6 +81,18 @@ async fn trip_circuit_breaker(
                 Some("circuit breaker: failed post-merge validation 3 times".to_string()),
             )
             .await;
+        // merge_queue.processed analytics event (analytics.md §Auto-Emitted
+        // Events: "Queue entry processed") — a circuit-breaker cancellation
+        // is a terminal outcome; the spec outcome value is "skipped".
+        emit_queue_processed_terminal(
+            state,
+            entry,
+            None,
+            "skipped",
+            "circuit_breaker",
+            "circuit breaker: failed post-merge validation 3 times",
+        )
+        .await;
     }
 
     // Escalate to humans.
@@ -225,14 +237,14 @@ async fn handle_dep_health_issues(
                 warn!(mr_id = %mr.id, "failed to create dep-failure task: {e}");
             }
 
-            state
-                .merge_queue
-                .update_status(
-                    &entry.id,
-                    MergeQueueEntryStatus::Failed,
-                    Some(format!("dependency MR-{dep_id} was closed")),
-                )
-                .await?;
+            fail_queue_entry(
+                state,
+                entry,
+                Some(mr),
+                "dependency_closed",
+                &format!("dependency MR-{dep_id} was closed"),
+            )
+            .await?;
 
             return Ok(true);
         }
@@ -569,14 +581,7 @@ async fn merge_atomic_group(
         None => {
             warn!(repo_id = %first_mr.repository_id, "repository not found for atomic group");
             for ge in &group_entries {
-                state
-                    .merge_queue
-                    .update_status(
-                        &ge.id,
-                        MergeQueueEntryStatus::Failed,
-                        Some("repository not found".to_string()),
-                    )
-                    .await?;
+                fail_queue_entry(state, ge, None, "repo_not_found", "repository not found").await?;
             }
             return Ok(());
         }
@@ -1019,14 +1024,14 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                         reason = %reason,
                         "quality gate failed during candidate selection, failing entry"
                     );
-                    state
-                        .merge_queue
-                        .update_status(
-                            &candidate.id,
-                            MergeQueueEntryStatus::Failed,
-                            Some(format!("quality gate failed: {reason}")),
-                        )
-                        .await?;
+                    fail_queue_entry(
+                        state,
+                        candidate,
+                        None,
+                        "quality_gate",
+                        &format!("quality gate failed: {reason}"),
+                    )
+                    .await?;
                     continue;
                 }
             }
@@ -1040,14 +1045,14 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 Some(mr) => mr,
                 None => {
                     warn!(mr_id = %candidate.merge_request_id, "MR not found for queue entry, skipping");
-                    state
-                        .merge_queue
-                        .update_status(
-                            &candidate.id,
-                            MergeQueueEntryStatus::Failed,
-                            Some("merge request not found".to_string()),
-                        )
-                        .await?;
+                    fail_queue_entry(
+                        state,
+                        candidate,
+                        None,
+                        "mr_not_found",
+                        "merge request not found",
+                    )
+                    .await?;
                     continue;
                 }
             };
@@ -1117,14 +1122,14 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
         Some(r) => r,
         None => {
             warn!(repo_id = %mr.repository_id, "repository not found for MR");
-            state
-                .merge_queue
-                .update_status(
-                    &entry.id,
-                    MergeQueueEntryStatus::Failed,
-                    Some("repository not found".to_string()),
-                )
-                .await?;
+            fail_queue_entry(
+                state,
+                &entry,
+                Some(&mr),
+                "repo_not_found",
+                "repository not found",
+            )
+            .await?;
             return Ok(());
         }
     };
@@ -1162,10 +1167,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
             if mr.spec_ref.is_none() {
                 let reason = "spec policy requires a spec_ref but MR has none".to_string();
                 warn!(entry_id = %entry.id, %reason, "spec policy blocked merge");
-                state
-                    .merge_queue
-                    .update_status(&entry.id, MergeQueueEntryStatus::Failed, Some(reason))
-                    .await?;
+                fail_queue_entry(state, &entry, Some(&mr), "spec_policy", &reason).await?;
                 return Ok(());
             }
 
@@ -1173,14 +1175,14 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 let spec_ref = mr.spec_ref.as_deref().unwrap();
                 if let Err(reason) = crate::api::gates::verify_spec_ref(state, spec_ref).await {
                     warn!(entry_id = %entry.id, %reason, "spec approval check blocked merge");
-                    state
-                        .merge_queue
-                        .update_status(
-                            &entry.id,
-                            MergeQueueEntryStatus::Failed,
-                            Some(format!("spec approval required: {reason}")),
-                        )
-                        .await?;
+                    fail_queue_entry(
+                        state,
+                        &entry,
+                        Some(&mr),
+                        "spec_policy",
+                        &format!("spec approval required: {reason}"),
+                    )
+                    .await?;
                     return Ok(());
                 }
             }
@@ -1204,13 +1206,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                                 "spec policy requires current spec: '{path}' HEAD is {current_sha} but MR references {sha}"
                             );
                             warn!(entry_id = %entry.id, %reason, "stale spec blocked merge");
-                            state
-                                .merge_queue
-                                .update_status(
-                                    &entry.id,
-                                    MergeQueueEntryStatus::Failed,
-                                    Some(reason),
-                                )
+                            fail_queue_entry(state, &entry, Some(&mr), "spec_policy", &reason)
                                 .await?;
                             return Ok(());
                         } else {
@@ -1276,9 +1272,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                          breaking change(s) from this repo"
                     );
                     warn!(entry_id = %entry.id, %reason, "breaking change policy blocked merge");
-                    state
-                        .merge_queue
-                        .update_status(&entry.id, MergeQueueEntryStatus::Failed, Some(reason))
+                    fail_queue_entry(state, &entry, Some(&mr), "breaking_change_policy", &reason)
                         .await?;
                     return Ok(());
                 }
@@ -1329,10 +1323,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                     spec_path, link.source_path
                 );
                 warn!(entry_id = %entry.id, %reason, "spec link merge gate blocked merge");
-                state
-                    .merge_queue
-                    .update_status(&entry.id, MergeQueueEntryStatus::Failed, Some(reason))
-                    .await?;
+                fail_queue_entry(state, &entry, Some(&mr), "spec_link_gate", &reason).await?;
                 return Ok(());
             }
         }
@@ -1358,9 +1349,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                             spec_path, other_spec_path
                         );
                         warn!(entry_id = %entry.id, %reason, "spec link merge gate blocked merge");
-                        state
-                            .merge_queue
-                            .update_status(&entry.id, MergeQueueEntryStatus::Failed, Some(reason))
+                        fail_queue_entry(state, &entry, Some(&mr), "spec_link_gate", &reason)
                             .await?;
                         return Ok(());
                     }
@@ -1437,10 +1426,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 %reason,
                 "constraint enforcement blocked merge"
             );
-            state
-                .merge_queue
-                .update_status(&entry.id, MergeQueueEntryStatus::Failed, Some(reason))
-                .await?;
+            fail_queue_entry(state, &entry, Some(&mr), "constraint_enforcement", &reason).await?;
             return Ok(());
         }
     }
@@ -1530,10 +1516,7 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 %reason,
                 "attestation ABAC denied merge"
             );
-            state
-                .merge_queue
-                .update_status(&entry.id, MergeQueueEntryStatus::Failed, Some(reason))
-                .await?;
+            fail_queue_entry(state, &entry, Some(&mr), "attestation_abac", &reason).await?;
             return Ok(());
         }
     }
@@ -1854,6 +1837,60 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Emit a `merge_queue.processed` analytics event for a queue entry that
+/// reached a terminal outcome without merging (analytics.md §Auto-Emitted
+/// Events: trigger "Queue entry processed"; terminal outcomes are `failed`
+/// and `skipped`).
+///
+/// `mr` supplies author/scope when the caller already holds the MR record;
+/// otherwise the MR is resolved from the entry so scope filters still work,
+/// and the event records unscoped when the MR no longer resolves (e.g. the
+/// MR was deleted before the entry was processed).
+async fn emit_queue_processed_terminal(
+    state: &AppState,
+    entry: &MergeQueueEntry,
+    mr: Option<&MergeRequest>,
+    outcome: &str,
+    failure_kind: &str,
+    detail: &str,
+) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mr = match mr {
+        Some(m) => Some(m.clone()),
+        None => state
+            .merge_requests
+            .find_by_id(&entry.merge_request_id)
+            .await
+            .ok()
+            .flatten(),
+    };
+    let ev = AnalyticsEvent::new(
+        Id::new(Uuid::new_v4().to_string()),
+        "merge_queue.processed",
+        mr.as_ref()
+            .and_then(|m| m.author_agent_id.as_ref().map(|id| id.to_string())),
+        serde_json::json!({
+            "entry_id": entry.id.to_string(),
+            "mr_id": entry.merge_request_id.to_string(),
+            "outcome": outcome,
+            "wait_secs": now.saturating_sub(entry.enqueued_at),
+            "failure_kind": failure_kind,
+            "detail": detail,
+        }),
+        now,
+    )
+    .with_scope(
+        None,
+        None,
+        mr.as_ref().map(|m| &m.workspace_id),
+        mr.as_ref().map(|m| &m.repository_id),
+    );
+    let _ = state.analytics.record(&ev).await;
+}
+
 /// Emit a `merge_queue.processed` analytics event with `outcome: "failed"`
 /// (analytics.md §Auto-Emitted Events) when a queue entry fails without merging.
 async fn emit_queue_processed_failed(
@@ -1863,26 +1900,31 @@ async fn emit_queue_processed_failed(
     failure_kind: &str,
     detail: &str,
 ) {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let ev = AnalyticsEvent::new(
-        Id::new(Uuid::new_v4().to_string()),
-        "merge_queue.processed",
-        mr.author_agent_id.as_ref().map(|id| id.to_string()),
-        serde_json::json!({
-            "entry_id": entry.id.to_string(),
-            "mr_id": mr.id.to_string(),
-            "outcome": "failed",
-            "wait_secs": now.saturating_sub(entry.enqueued_at),
-            "failure_kind": failure_kind,
-            "detail": detail,
-        }),
-        now,
-    )
-    .with_scope(None, None, Some(&mr.workspace_id), Some(&mr.repository_id));
-    let _ = state.analytics.record(&ev).await;
+    emit_queue_processed_terminal(state, entry, Some(mr), "failed", failure_kind, detail).await;
+}
+
+/// Fail a merge-queue entry (terminal `Failed`) and record the spec-required
+/// `merge_queue.processed` analytics event with outcome "failed". Every
+/// production path that fails a queue entry must go through here so the
+/// status change and the analytics event cannot diverge (analytics.md
+/// §Auto-Emitted Events: "Queue entry processed").
+async fn fail_queue_entry(
+    state: &AppState,
+    entry: &MergeQueueEntry,
+    mr: Option<&MergeRequest>,
+    failure_kind: &str,
+    reason: &str,
+) -> anyhow::Result<()> {
+    state
+        .merge_queue
+        .update_status(
+            &entry.id,
+            MergeQueueEntryStatus::Failed,
+            Some(reason.to_string()),
+        )
+        .await?;
+    emit_queue_processed_terminal(state, entry, mr, "failed", failure_kind, reason).await;
+    Ok(())
 }
 
 /// Emit an `mr.merged` analytics event (analytics.md §Auto-Emitted Events:
@@ -4101,6 +4143,273 @@ mod tests {
             MrStatus::Merged,
             "mr-b should be merged after mr-a was failed due to gate failure"
         );
+    }
+
+    /// analytics.md §Auto-Emitted Events: `merge_queue.processed` (trigger
+    /// "Queue entry processed") must record on EVERY terminal outcome, not
+    /// only on concluded merge attempts. A quality-gate failure during
+    /// candidate selection is the primary failure mode — the entry reaches
+    /// terminal `Failed` without a merge ever being attempted. Regression:
+    /// this path previously failed the entry with no analytics event.
+    #[tokio::test]
+    async fn gate_failure_during_selection_records_queue_processed_failed() {
+        use gyre_domain::{GateResult, GateType, QualityGate};
+
+        let state = test_state();
+        let repo = create_repo_in_workspace(&state, "test-repo", "ws-1").await;
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-gate-fail"),
+            repo.id.clone(),
+            "MR (gate failed)",
+            "feat/gate-fail",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-1");
+        mr.author_agent_id = Some(Id::new("agent-gate-fail"));
+        state.merge_requests.create(&mr).await.unwrap();
+
+        enqueue_mr(&state, "mr-gate-fail", 100, 2000).await;
+
+        let gate = QualityGate {
+            id: Id::new("gate-gf-1"),
+            repo_id: repo.id.clone(),
+            name: "unit-tests".to_string(),
+            gate_type: GateType::TestCommand,
+            command: Some("cargo test".to_string()),
+            required_approvals: None,
+            persona: None,
+            required: true,
+            gate_phase: Default::default(),
+            timeout_secs: None,
+            created_at: 1000,
+        };
+        state.quality_gates.save(&gate).await.unwrap();
+
+        let gate_result = GateResult {
+            id: Id::new("gr-gf-1"),
+            gate_id: Id::new("gate-gf-1"),
+            mr_id: Id::new("mr-gate-fail"),
+            status: GateStatus::Failed,
+            output: Some("test failure".to_string()),
+            started_at: Some(1000),
+            finished_at: Some(1001),
+        };
+        state.gate_results.save(&gate_result).await.unwrap();
+
+        // event-emission:ok — asserts the analytics emission directly via
+        // state.analytics.query below; the broadcast channel is not under test.
+        process_next(&state).await.unwrap();
+
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-gate-fail"))
+            .await
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(entry.status, MergeQueueEntryStatus::Failed);
+
+        let events = state
+            .analytics
+            .query(Some("merge_queue.processed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "gate failure during selection must record merge_queue.processed"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.properties["mr_id"], "mr-gate-fail");
+        assert_eq!(ev.properties["outcome"], "failed");
+        assert_eq!(ev.properties["failure_kind"], "quality_gate");
+        assert!(
+            ev.properties["wait_secs"].as_u64().is_some(),
+            "wait_secs (spec-required) must be present"
+        );
+        assert_eq!(ev.workspace_id.as_deref(), Some("ws-1"));
+        assert_eq!(ev.agent_id.as_deref(), Some("agent-gate-fail"));
+    }
+
+    /// analytics.md §Auto-Emitted Events: `merge_queue.processed` must
+    /// record when an entry is failed because its MR no longer resolves.
+    /// The MR record is gone, so the event records unscoped with the MR id
+    /// from the entry itself. Regression: this path previously failed the
+    /// entry with no analytics event.
+    #[tokio::test]
+    async fn mr_not_found_during_selection_records_queue_processed_failed() {
+        let state = test_state();
+
+        // Enqueue an entry whose MR does not exist.
+        enqueue_mr(&state, "mr-ghost", 100, 2000).await;
+
+        // event-emission:ok — asserts the analytics emission directly via
+        // state.analytics.query below; the broadcast channel is not under test.
+        process_next(&state).await.unwrap();
+
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-ghost"))
+            .await
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(entry.status, MergeQueueEntryStatus::Failed);
+
+        let events = state
+            .analytics
+            .query(Some("merge_queue.processed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "MR-not-found failure must record merge_queue.processed"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.properties["mr_id"], "mr-ghost");
+        assert_eq!(ev.properties["outcome"], "failed");
+        assert_eq!(ev.properties["failure_kind"], "mr_not_found");
+        assert!(
+            ev.properties["wait_secs"].as_u64().is_some(),
+            "wait_secs (spec-required) must be present"
+        );
+        assert!(
+            ev.workspace_id.is_none(),
+            "event records unscoped when the MR no longer resolves"
+        );
+    }
+
+    /// analytics.md §Auto-Emitted Events: `merge_queue.processed` must
+    /// record when spec enforcement policy blocks a merge before any merge
+    /// attempt. Regression: this path previously failed the entry with no
+    /// analytics event.
+    #[tokio::test]
+    async fn spec_policy_block_records_queue_processed_failed() {
+        let state = test_state();
+        let repo = create_repo_in_workspace(&state, "test-repo", "ws-1").await;
+
+        // Policy: MRs without a spec_ref are blocked from merging.
+        let policy = gyre_domain::SpecPolicy {
+            require_spec_ref: true,
+            ..Default::default()
+        };
+        state
+            .spec_policies
+            .set_for_repo(&repo.id.to_string(), policy)
+            .await
+            .unwrap();
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-no-spec"),
+            repo.id.clone(),
+            "MR (no spec_ref)",
+            "feat/no-spec",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-1");
+        state.merge_requests.create(&mr).await.unwrap();
+
+        enqueue_mr(&state, "mr-no-spec", 100, 2000).await;
+
+        // event-emission:ok — asserts the analytics emission directly via
+        // state.analytics.query below; the broadcast channel is not under test.
+        process_next(&state).await.unwrap();
+
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-no-spec"))
+            .await
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(entry.status, MergeQueueEntryStatus::Failed);
+        assert!(
+            entry
+                .error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("spec_ref"),
+            "entry failure reason should name the spec policy: {:?}",
+            entry.error_message
+        );
+
+        let events = state
+            .analytics
+            .query(Some("merge_queue.processed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "spec-policy block must record merge_queue.processed"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.properties["mr_id"], "mr-no-spec");
+        assert_eq!(ev.properties["outcome"], "failed");
+        assert_eq!(ev.properties["failure_kind"], "spec_policy");
+        assert!(
+            ev.properties["wait_secs"].as_u64().is_some(),
+            "wait_secs (spec-required) must be present"
+        );
+        assert_eq!(ev.workspace_id.as_deref(), Some("ws-1"));
+    }
+
+    /// analytics.md §Auto-Emitted Events: `merge_queue.processed` outcome
+    /// `skipped` — the circuit breaker cancels a reverted MR's queue
+    /// entries permanently; that cancellation is a terminal processing
+    /// outcome and must record. Regression: Cancelled entries previously
+    /// recorded no event at all, so the spec outcome value "skipped" was
+    /// never emitted.
+    #[tokio::test]
+    async fn circuit_breaker_cancel_records_queue_processed_skipped() {
+        let state = test_state();
+        let repo = create_repo_in_workspace(&state, "test-repo", "ws-1").await;
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-cb"),
+            repo.id.clone(),
+            "MR (circuit breaker)",
+            "feat/cb",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-1");
+        state.merge_requests.create(&mr).await.unwrap();
+
+        enqueue_mr(&state, "mr-cb", 100, 2000).await;
+
+        trip_circuit_breaker(&state, &Id::new("ws-1"), repo.id.as_str(), "mr-cb")
+            .await
+            .unwrap();
+
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-cb"))
+            .await
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(entry.status, MergeQueueEntryStatus::Cancelled);
+
+        let events = state
+            .analytics
+            .query(Some("merge_queue.processed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "circuit-breaker cancellation must record merge_queue.processed"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.properties["mr_id"], "mr-cb");
+        assert_eq!(ev.properties["outcome"], "skipped");
+        assert_eq!(ev.properties["failure_kind"], "circuit_breaker");
+        assert!(
+            ev.properties["wait_secs"].as_u64().is_some(),
+            "wait_secs (spec-required) must be present"
+        );
+        assert_eq!(ev.workspace_id.as_deref(), Some("ws-1"));
     }
 
     /// Verify that a candidate whose atomic group is not ready is skipped,

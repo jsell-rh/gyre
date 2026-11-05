@@ -1058,21 +1058,8 @@ async fn handle_update_task(state: &AppState, args: &Value) -> Value {
             // task.status_changed analytics event (analytics.md §Auto-Emitted).
             // The MCP tool is the autonomous-agent path for task transitions;
             // the HTTP endpoint in tasks.rs is the other. Both must record.
-            if let Some(old) = old_status {
-                let ev = gyre_domain::AnalyticsEvent::new(
-                    gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
-                    "task.status_changed",
-                    task.assigned_to.as_ref().map(|id| id.to_string()),
-                    serde_json::json!({
-                        "task_id": task.id.to_string(),
-                        "old_status": format!("{:?}", old),
-                        "new_status": format!("{:?}", task.status),
-                        "assigned_to": task.assigned_to.as_ref().map(|id| id.to_string()),
-                    }),
-                    now_secs(),
-                )
-                .with_scope(None, None, Some(&task.workspace_id), None);
-                let _ = state.analytics.record(&ev).await;
+            if let Some(old) = old_status.as_ref() {
+                crate::api::analytics::record_task_status_changed(state, &task, old).await;
             }
             tool_result(format!("Updated task {id_str}"))
         }

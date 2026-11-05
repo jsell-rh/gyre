@@ -308,9 +308,21 @@ pub async fn admin_kill_agent(
     if let Some(task_id) = &agent.current_task_id {
         if let Ok(Some(mut task)) = state.tasks.find_by_id(task_id).await {
             if task.status == TaskStatus::InProgress {
+                let pre_block_status = task.status.clone();
                 let _ = task.transition_status(TaskStatus::Blocked);
                 task.updated_at = now;
                 let _ = state.tasks.update(&task).await;
+                // task.status_changed analytics event (analytics.md
+                // §Auto-Emitted Events: "Task transitions status") — the
+                // admin force-kill auto-block is a production transition.
+                if task.status != pre_block_status {
+                    crate::api::analytics::record_task_status_changed(
+                        &state,
+                        &task,
+                        &pre_block_status,
+                    )
+                    .await;
+                }
             }
         }
     }
@@ -1112,6 +1124,25 @@ mod tests {
 
         let blocked_task = state.tasks.find_by_id(&task_id).await.unwrap().unwrap();
         assert_eq!(blocked_task.status, TaskStatus::Blocked);
+
+        // analytics.md §Auto-Emitted Events: task.status_changed (trigger
+        // "Task transitions status") — the admin force-kill auto-block is a
+        // production transition and must record. Regression: previously only
+        // the HTTP status endpoint and MCP update_task recorded.
+        let events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "admin force-kill auto-block must record task.status_changed"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.properties["task_id"], "task-for-kill");
+        assert_eq!(ev.properties["old_status"], "InProgress");
+        assert_eq!(ev.properties["new_status"], "Blocked");
     }
 
     #[tokio::test]

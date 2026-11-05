@@ -548,11 +548,19 @@ pub(crate) async fn spawn_agent_core(
 
     // Assign task to agent and advance to InProgress
     task.assigned_to = Some(agent.id.clone());
+    let pre_assign_status = task.status.clone();
     if task.status == TaskStatus::Backlog {
         let _ = task.transition_status(TaskStatus::InProgress);
     }
     task.updated_at = now;
     state.tasks.update(&task).await?;
+    // task.status_changed analytics event (analytics.md §Auto-Emitted
+    // Events: "Task transitions status") — the spawn auto-advance
+    // Backlog→InProgress is a production transition and must record,
+    // like the HTTP status endpoint and MCP update_task.
+    if task.status != pre_assign_status {
+        super::analytics::record_task_status_changed(state, &task, &pre_assign_status).await;
+    }
 
     // Build clone URL: {base_url}/git/{workspace_slug}/{repo_name}
     // Reuse the already-fetched workspace; fall back to workspace_id if not found.
@@ -1257,6 +1265,7 @@ pub async fn complete_agent(
     // Transition task to Review (navigate through intermediate states as needed)
     if let Some(task_id) = &agent.current_task_id {
         if let Ok(Some(mut task)) = state.tasks.find_by_id(task_id).await {
+            let pre_transition_status = task.status.clone();
             if task.status == TaskStatus::Backlog {
                 let _ = task.transition_status(TaskStatus::InProgress);
             }
@@ -1266,6 +1275,14 @@ pub async fn complete_agent(
             let _ = task.transition_status(TaskStatus::Review);
             task.updated_at = now;
             let _ = state.tasks.update(&task).await;
+            // task.status_changed analytics event (analytics.md §Auto-Emitted
+            // Events: "Task transitions status") — the completion
+            // auto-advance to Review is a production transition and must
+            // record, like the HTTP status endpoint and MCP update_task.
+            if task.status != pre_transition_status {
+                super::analytics::record_task_status_changed(&state, &task, &pre_transition_status)
+                    .await;
+            }
         }
     }
 
@@ -2382,6 +2399,89 @@ mod tests {
                 .is_some_and(|p| !p.is_empty()),
             "persona must be a non-empty string"
         );
+    }
+
+    /// analytics.md §Auto-Emitted Events: `task.status_changed` (trigger
+    /// "Task transitions status") must record on the spawn auto-advance
+    /// Backlog→InProgress, not only on the HTTP status endpoint and the MCP
+    /// update_task tool. Regression: the internal auto-advance previously
+    /// persisted the transition with no analytics event.
+    #[tokio::test]
+    async fn spawn_auto_advance_records_task_status_changed() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Auto-advance analytics").await;
+        let (_, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/auto-advance").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "spawn auto-advance must record task.status_changed"
+        );
+        let ev = &events[0];
+        assert_eq!(ev.properties["task_id"], task_id);
+        assert_eq!(ev.properties["old_status"], "Backlog");
+        assert_eq!(ev.properties["new_status"], "InProgress");
+        assert_eq!(ev.properties["assigned_to"], agent_id);
+        assert_eq!(ev.agent_id.as_deref(), Some(agent_id.as_str()));
+    }
+
+    /// analytics.md §Auto-Emitted Events: `task.status_changed` must record
+    /// on the completion auto-advance to Review. The spawn auto-advance
+    /// (Backlog→InProgress) records first, so the completion transition is
+    /// the second event. Regression: this internal transition previously
+    /// persisted with no analytics event.
+    #[tokio::test]
+    async fn complete_auto_advance_records_task_status_changed() {
+        let state = test_state();
+        let app = crate::api::api_router().with_state(state.clone());
+        let (app, repo_id) = create_repo(app).await;
+        let (app, task_id) = create_task(app, "Complete advance analytics").await;
+        let (app, spawn_json) = do_spawn(app, &repo_id, &task_id, "feat/complete-advance").await;
+        let agent_id = spawn_json["agent"]["id"].as_str().unwrap().to_string();
+
+        let body = serde_json::json!({
+            "branch": "feat/complete-advance",
+            "title": "Done",
+            "target_branch": "main",
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/agents/{agent_id}/complete"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let events = state
+            .analytics
+            .query(Some("task.status_changed"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            2,
+            "spawn auto-advance and completion auto-advance must each record"
+        );
+        let completion_ev = events
+            .iter()
+            .find(|e| e.properties["new_status"] == "Review")
+            .expect("completion auto-advance must record a →Review event");
+        assert_eq!(completion_ev.properties["task_id"], task_id);
+        assert_eq!(completion_ev.properties["old_status"], "InProgress");
+        assert_eq!(completion_ev.properties["assigned_to"], agent_id);
     }
 
     #[tokio::test]
