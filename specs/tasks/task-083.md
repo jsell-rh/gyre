@@ -8,7 +8,7 @@ coverage_sections:
   - "ui-navigation.md §2 Workspace Home"
   - "ui-navigation.md §3 Repo Mode"
   - "ui-navigation.md §10 Cross-Workspace View"
-commits: ["f46b2f8f9ad32fb65f0731c37b58ba8f85987023"]
+commits: ["f46b2f8f9ad32fb65f0731c37b58ba8f85987023", "38134ff8290ccc0e6b6112fdff9caa45109ad897"]
 ---
 
 ## Authority and Scope
@@ -114,37 +114,37 @@ is claimed here, per section, with the verifying evidence below.
   error toasts/states (cross-workspace unknown-workspace toast, Agent Rules
   error + Retry, per-section load errors) rather than empty success.
 
-Verification (review-fix round at head `2ff2e596`; merge `01fac1c1`
-brings in assigned base `110180fbb` — source merged clean, `web/dist`
-conflicts resolved by full rebuild; evidence:
-`/tmp/stage/review-evidence/task-083-review-fixes.txt`):
+Verification (rebase round at merge commit `38134ff8`, bringing the
+branch onto assigned base `5df14f344`; evidence:
+`/tmp/stage/review-evidence/task-083-rebase-38134ff8.txt`):
 
-- Review findings repaired: **F1** — the `NodeDetailPanel` import
-  dropped from `ExplorerView.svelte` (node clicks in the Architecture tab
-  threw `ReferenceError`) is restored; the rebuilt bundle no longer ships
-  the dangling `NodeDetailPanel(` global the merge-round dist contained.
-  **F2** — the Architecture Graph|Briefing sub-tab is now controlled from
-  App (`archSubTab` prop through `RepoMode` into `ExplorerView`), so a
-  drawer Briefing click while the Architecture tab is already active
-  switches the rendered content, and App mirrors the `?subTab=` param on
-  every change so the URL always matches the content. **F3** — the
-  merge-queue `.sort` by position/priority lost in the generation-guard
-  refactor is restored.
-- Focused probes (`npm ci` locked versions): the 10 navigation-related
-  test files after all three fixes → **195 passed / 0 failed** (41
-  pre-existing skips); `ExplorerViewScope.test.js` with the two new F2
-  regression tests (prop-driven content switch with the real
-  `getWorkspaceBriefing('ws-1', null, 'repo-1')` fetch, control-bar
-  reporting) → **7 passed / 0 failed**. `npm run build` → EXIT=0.
-- Prior rounds' evidence (full frontend suite 1598 passed / 0 failed,
-  cargo `api::graph::tests` 28, `briefing` 24, `graph_integration` 37,
-  all 0 failed, at rebase head `a387ad98`; see
-  `/tmp/stage/review-evidence/task-083-rebase-a387ad98.txt`) covers the
-  source merged here; this round's diff is the three review fixes plus
-  regression tests plus the dist rebuild. Full suites, architecture
-  checks, and exact-head GitHub CI remain owned by verification and
-  publication. Host verification items are unchanged: Playwright e2e
-  needs a TCP listener (errno 95 in this sandbox, see
+- Merge conflicts resolved: `web/src/__tests__/Inbox.test.js` kept BOTH
+  sides' independent additions (the task's HSI §1.5 scope-filtering
+  describe block and the base's spec-assertion-failure card test — the
+  auto-merged `Inbox.svelte` normalizes both response shapes, bare array
+  and `{notifications:[...]}`); `web/dist` conflicts (rename/rename on the
+  hashed elk chunk, `index.html`) resolved by full rebuild from the merged
+  source (`npm ci` locked versions, `npm run build` → EXIT=0, fresh
+  `elk.bundled-D5vovQfs.js` / `index-G2KCvett.js`). No Rust conflicts;
+  the base's changes (spec-assertion results, explorer ws) auto-merged
+  without touching the task's briefing repo-narrowing code.
+- Focused probes after resolution: the 17 navigation- and Inbox-related
+  test files (Inbox, api, BidirectionalNav, ScopeTransitions, NoSidebar,
+  CrossWorkspaceHome, WorkspaceHome ×5, WorkspaceDrawerSectionNav,
+  RepoMode ×2, ExplorerViewScope, ExplorerViewDrillUrl, Briefing) →
+  **266 passed / 0 failed** (41 pre-existing skips); `Inbox.test.js`
+  alone → 37 passed / 0 failed. Merge-integrity probe:
+  `scripts/check-abac-route-registry.sh` on the merged tree → OK (both
+  sides touched `abac_middleware.rs`/`api/mod.rs`; no duplicate resolver
+  entries introduced).
+- Prior rounds' evidence (review fixes F1–F3 at head `2ff2e596`, full
+  frontend suite 1598 passed / 0 failed, cargo `api::graph::tests` 28,
+  `briefing` 24, `graph_integration` 37, all 0 failed, at rebase head
+  `a387ad98`) covers the task-side source merged here; this round's diff
+  is the rebase resolution plus the dist rebuild. Full suites,
+  architecture checks, and exact-head GitHub CI remain owned by
+  verification and publication. Host verification items are unchanged:
+  Playwright e2e needs a TCP listener (errno 95 in this sandbox, see
   `/tmp/stage/capabilities.json`).
 
 Contract note for the reviewer: an earlier attempt ticked the acceptance

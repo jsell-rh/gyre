@@ -389,6 +389,7 @@ describe('Inbox', () => {
       expect(container.textContent).toContain('Agent needs clarification');
       expect(container.textContent).not.toContain('Consider increasing trust');
       // Exactly one card body (one visible notification).
+      const cards = container.querySelectorAll('.inbox-card');
       expect(cards.length).toBe(1);
     });
   });
