@@ -4083,7 +4083,10 @@ impl gyre_ports::SessionRepository for MemSessionRepository {
             .cloned())
     }
 
-    async fn find_by_token_hash(&self, token_hash: &str) -> Result<Option<gyre_domain::UserSession>> {
+    async fn find_by_token_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<gyre_domain::UserSession>> {
         Ok(self
             .sessions
             .read()

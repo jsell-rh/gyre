@@ -1,23 +1,15 @@
 # scope-literal-defaults-exemptions.txt — legacy pre-existing sites that
 # fabricate a "default" tenant/workspace identity at construction time.
-# Frozen at 24 entries (seeded when this check was introduced by the
-# task-099 process revision). Fix a site by resolving the real scope (or
-# refusing to create the entity without it), then DELETE its line and
-# lower FROZEN_EXEMPTION_COUNT in scripts/check-scope-literal-defaults.sh.
+# Fix a site by resolving the real scope (or refusing to create the entity
+# without it), then DELETE its line and lower FROZEN_EXEMPTION_COUNT in
+# scripts/check-scope-literal-defaults.sh.
 # NEVER add entries; NEVER raise the frozen count.
 
-# task-099 F1 revision round owns these (admin user is never bound to a
-# tenant; AuthenticatedAgent for API-key users hardcodes the fabricated
-# identity; emit_event/emit_telemetry messages carry it):
-crates/gyre-server/src/auth.rs:670
-crates/gyre-server/src/auth.rs:708
-crates/gyre-server/src/auth.rs:774
-crates/gyre-server/src/auth.rs:815
-crates/gyre-server/src/auth.rs:845
-crates/gyre-server/src/auth.rs:882
-crates/gyre-server/src/auth.rs:1205
-crates/gyre-server/src/lib.rs:503
-crates/gyre-server/src/lib.rs:547
+# The former auth.rs / lib.rs sites (task-099 F1) were fixed by attributing
+# the bootstrap tenant identity via crate::DEFAULT_TENANT_ID (see
+# gyre-server/src/lib.rs): the "default" tenant is a real entity created on
+# first startup (specs/system/hierarchy-enforcement.md), not a fabricated
+# scope, and every former site now names it explicitly.
 
 # Unowned legacy (record-conversion `From` impls fabricating tenant on the
 # wire; domain constructor defaults) — opportunistic fixes welcome:

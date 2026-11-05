@@ -555,7 +555,7 @@ impl JudgmentLedgerRepository for PgStorage {
             }
 
             // Sort all entries by timestamp descending, apply limit+offset.
-            entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+            entries.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
             let entries = entries
                 .into_iter()
                 .skip(off as usize)

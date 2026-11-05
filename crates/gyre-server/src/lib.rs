@@ -82,6 +82,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex, RwLock};
 
+/// Id of the bootstrap tenant created on first startup
+/// (specs/system/hierarchy-enforcement.md §Bootstrap): single-tenant
+/// deployments run entirely inside this tenant. Auth paths whose credential
+/// carries no tenant scope — global token, API key, federated agent JWT, and
+/// a user JWT without a `tenant_id` claim
+/// (specs/system/message-bus.md §Authentication) — resolve to it.
+pub const DEFAULT_TENANT_ID: &str = "default";
+
 /// In-memory presence entry for a single browser-tab session.
 #[derive(Clone)]
 pub struct PresenceEntry {
@@ -500,7 +508,7 @@ impl AppState {
 
         let mut msg = Message {
             id,
-            tenant_id: Id::new("default"),
+            tenant_id: Id::new(DEFAULT_TENANT_ID),
             from: MessageOrigin::Server,
             workspace_id,
             to,
@@ -544,7 +552,7 @@ impl AppState {
         let id = Id::new(uuid::Uuid::new_v4().to_string());
         let msg = Message {
             id,
-            tenant_id: Id::new("default"),
+            tenant_id: Id::new(DEFAULT_TENANT_ID),
             from: MessageOrigin::Server,
             workspace_id: Some(workspace_id.clone()),
             to: Destination::Workspace(workspace_id),
@@ -1403,7 +1411,10 @@ pub fn spawn_session_cleanup(state: Arc<AppState>) {
             let cutoff = now.saturating_sub(RETENTION_PAST_EXPIRY_SECS);
             match state.sessions.delete_expired_before(cutoff).await {
                 Ok(n) if n > 0 => {
-                    tracing::info!(deleted = n, "session retention cleanup removed expired sessions");
+                    tracing::info!(
+                        deleted = n,
+                        "session retention cleanup removed expired sessions"
+                    );
                 }
                 Ok(_) => {}
                 Err(e) => {

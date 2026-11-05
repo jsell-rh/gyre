@@ -168,8 +168,7 @@ pub(crate) async fn credential_revoked(
                 .filter(|s| s.token_hash == credential_hash)
                 .collect();
             // No session rows yet → nothing has been revoked; allow.
-            !credential_sessions.is_empty()
-                && credential_sessions.iter().all(|s| s.revoked)
+            !credential_sessions.is_empty() && credential_sessions.iter().all(|s| s.revoked)
         }
         Err(e) => {
             // Storage failure must not become an authentication bypass in
@@ -464,8 +463,9 @@ pub struct AuthenticatedAgent {
     pub user_id: Option<Id>,
     pub roles: Vec<UserRole>,
     /// Tenant scope for this request.
-    /// - JWT auth: extracted from `tenant_id` claim (defaults to "default").
-    /// - All other auth methods: always "default".
+    /// - JWT auth: extracted from the `tenant_id` claim, falling back to the
+    ///   bootstrap default tenant ([DEFAULT_TENANT_ID]) when absent.
+    /// - All other auth methods: always the bootstrap default tenant.
     pub tenant_id: String,
     /// Raw JWT claims for ABAC evaluation (G6).
     /// - JWT auth (Keycloak or agent JWT): populated with the full claims object.
@@ -487,7 +487,7 @@ struct JwtClaims {
     email: Option<String>,
     #[serde(default)]
     realm_access: Option<RealmAccess>,
-    /// Tenant scope claim. Absent = "default".
+    /// Tenant scope claim. Absent = bootstrap default tenant.
     #[serde(default)]
     tenant_id: Option<String>,
 }
@@ -667,7 +667,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 agent_id: "system".to_string(),
                 user_id: None,
                 roles: vec![UserRole::Admin],
-                tenant_id: "default".to_string(),
+                tenant_id: crate::DEFAULT_TENANT_ID.to_string(),
                 jwt_claims: None, // Admin bypass — no ABAC evaluation.
                 deprecated_token_auth,
             });
@@ -705,7 +705,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     agent_id,
                     user_id: None,
                     roles: vec![UserRole::Agent],
-                    tenant_id: "default".to_string(),
+                    tenant_id: crate::DEFAULT_TENANT_ID.to_string(),
                     jwt_claims,
                     deprecated_token_auth,
                 });
@@ -740,7 +740,9 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                 // §Session Management — revoking all sessions signs the
                 // credential out).
                 if credential_revoked(state, &user.id, &credential_hash).await {
-                    return Err((StatusCode::UNAUTHORIZED, "Session has been revoked").into_response());
+                    return Err(
+                        (StatusCode::UNAUTHORIZED, "Session has been revoked").into_response()
+                    );
                 }
                 // Session tracking (user-management.md §Session Management:
                 // one session row per credential+device; throttled
@@ -762,16 +764,17 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedAgent {
                     .to_string();
                 // A revoked session for this device rejects auth; a new or
                 // still-active session is recorded/refreshed.
-                if !track_session(state, &user.id, &credential_hash, &ip_address, &user_agent)
-                    .await
+                if !track_session(state, &user.id, &credential_hash, &ip_address, &user_agent).await
                 {
-                    return Err((StatusCode::UNAUTHORIZED, "Session has been revoked").into_response());
+                    return Err(
+                        (StatusCode::UNAUTHORIZED, "Session has been revoked").into_response()
+                    );
                 }
                 return Ok(AuthenticatedAgent {
                     agent_id: user.display_name.clone(),
                     user_id: Some(user.id),
                     roles: user.roles,
-                    tenant_id: "default".to_string(),
+                    tenant_id: crate::DEFAULT_TENANT_ID.to_string(),
                     jwt_claims: None, // API key — no ABAC evaluation.
                     deprecated_token_auth,
                 });
@@ -812,7 +815,7 @@ pub async fn authenticate_token(
             agent_id: "system".to_string(),
             user_id: None,
             roles: vec![UserRole::Admin],
-            tenant_id: "default".to_string(),
+            tenant_id: crate::DEFAULT_TENANT_ID.to_string(),
             jwt_claims: None,
             deprecated_token_auth: false,
         });
@@ -842,7 +845,7 @@ pub async fn authenticate_token(
                 agent_id,
                 user_id: None,
                 roles: vec![UserRole::Agent],
-                tenant_id: "default".to_string(),
+                tenant_id: crate::DEFAULT_TENANT_ID.to_string(),
                 jwt_claims,
                 deprecated_token_auth: false,
             });
@@ -879,7 +882,7 @@ pub async fn authenticate_token(
                 agent_id: user.display_name.clone(),
                 user_id: Some(user.id),
                 roles: user.roles,
-                tenant_id: "default".to_string(),
+                tenant_id: crate::DEFAULT_TENANT_ID.to_string(),
                 jwt_claims: None,
                 deprecated_token_auth: false,
             });
@@ -973,8 +976,15 @@ async fn validate_jwt(
         .clone()
         .unwrap_or_else(|| claims.sub.clone());
 
-    // Extract and validate tenant_id from JWT claim.
-    let tenant_id = claims.tenant_id.as_deref().unwrap_or("default").to_string();
+    // Extract and validate tenant_id from JWT claim. A JWT without the
+    // claim resolves to the bootstrap default tenant (message-bus.md
+    // §Authentication) — a real tenant created on first startup, not a
+    // fabricated scope — and is still validated below.
+    let tenant_id = claims
+        .tenant_id
+        .as_deref()
+        .unwrap_or(crate::DEFAULT_TENANT_ID)
+        .to_string();
     validate_tenant_id(&tenant_id, &roles).map_err(|e| format!("invalid tenant_id in JWT: {e}"))?;
 
     // Find or auto-create user.
@@ -1202,7 +1212,7 @@ async fn validate_federated_jwt(token: &str, state: &Arc<AppState>) -> Option<Au
         agent_id: format!("{remote_host}/{}", claims.sub),
         user_id: None,
         roles: vec![UserRole::Agent],
-        tenant_id: "default".to_string(),
+        tenant_id: crate::DEFAULT_TENANT_ID.to_string(),
         jwt_claims: fed_claims_json,
         deprecated_token_auth: false,
     })
@@ -1394,15 +1404,15 @@ HKWsbrW0tHUPuMuz8Xgvs0yV";
 
 #[cfg(test)]
 mod tests {
-    use gyre_common::Id;
     use axum::{body::Body, routing::get, Router};
+    use gyre_common::Id;
     use http::{Request, StatusCode};
     use std::sync::Arc;
     use tower::ServiceExt;
 
     use super::{
-        test_helpers::*, AuthenticatedAgent, WsTicketStore, SESSION_TTL_SECS,
-        SESSION_TOUCH_THROTTLE_SECS, credential_revoked, track_session,
+        credential_revoked, test_helpers::*, track_session, AuthenticatedAgent, WsTicketStore,
+        SESSION_TOUCH_THROTTLE_SECS, SESSION_TTL_SECS,
     };
     use crate::mem::test_state;
     use gyre_domain::UserRole;
@@ -2372,14 +2382,7 @@ mod tests {
         );
         state.sessions.create(&stale).await.unwrap();
         assert!(
-            track_session(
-                &state,
-                &user_id,
-                "cred-stale",
-                "127.0.0.1",
-                "gyre-test/1.0"
-            )
-            .await,
+            track_session(&state, &user_id, "cred-stale", "127.0.0.1", "gyre-test/1.0").await,
             "active session must allow auth"
         );
         let touched = state
@@ -2419,14 +2422,7 @@ mod tests {
         let seeded_active = fresh.last_active_at;
         let seeded_expiry = fresh.expires_at;
         assert!(
-            track_session(
-                &state,
-                &user_id,
-                "cred-fresh",
-                "127.0.0.1",
-                "gyre-test/1.0"
-            )
-            .await,
+            track_session(&state, &user_id, "cred-fresh", "127.0.0.1", "gyre-test/1.0").await,
             "active session must allow auth"
         );
         let after = state
@@ -2473,14 +2469,7 @@ mod tests {
         state.sessions.create(&expired).await.unwrap();
 
         assert!(
-            track_session(
-                &state,
-                &user_id,
-                "cred-remint",
-                "10.1.1.1",
-                "gyre-old/1.0"
-            )
-            .await,
+            track_session(&state, &user_id, "cred-remint", "10.1.1.1", "gyre-old/1.0").await,
             "an expired-but-not-revoked session must not reject auth \
              (expiry is not revocation)"
         );
@@ -2498,8 +2487,7 @@ mod tests {
             "expired session must be re-minted as exactly one live row, got {live:?}"
         );
         assert_ne!(
-            live[0].id,
-            expired.id,
+            live[0].id, expired.id,
             "the re-minted row must be a new row (fresh TTL), not the expired one"
         );
         assert!(
@@ -2509,16 +2497,7 @@ mod tests {
 
         // Second request on the same device must find the new row (no
         // re-mint-per-request explosion).
-        assert!(
-            track_session(
-                &state,
-                &user_id,
-                "cred-remint",
-                "10.1.1.1",
-                "gyre-old/1.0"
-            )
-            .await
-        );
+        assert!(track_session(&state, &user_id, "cred-remint", "10.1.1.1", "gyre-old/1.0").await);
         let all = state.sessions.list_for_user(&user_id).await.unwrap();
         let live: Vec<_> = all
             .iter()

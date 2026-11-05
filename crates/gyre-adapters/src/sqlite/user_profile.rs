@@ -742,7 +742,11 @@ mod tests {
 
         // Exact (user, credential, ip, user-agent) → found.
         let found = SessionRepository::find_by_credential_and_device(
-            &s, &u.id, "cred-hash", "127.0.0.1", "gyre-test/1.0",
+            &s,
+            &u.id,
+            "cred-hash",
+            "127.0.0.1",
+            "gyre-test/1.0",
         )
         .await
         .unwrap()
@@ -753,7 +757,11 @@ mod tests {
         // new session, not the same one.
         assert!(
             SessionRepository::find_by_credential_and_device(
-                &s, &u.id, "cred-hash", "10.0.0.1", "gyre-test/1.0",
+                &s,
+                &u.id,
+                "cred-hash",
+                "10.0.0.1",
+                "gyre-test/1.0",
             )
             .await
             .unwrap()
@@ -762,7 +770,11 @@ mod tests {
         );
         assert!(
             SessionRepository::find_by_credential_and_device(
-                &s, &u.id, "cred-hash", "127.0.0.1", "other-agent/9",
+                &s,
+                &u.id,
+                "cred-hash",
+                "127.0.0.1",
+                "other-agent/9",
             )
             .await
             .unwrap()
@@ -789,7 +801,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(after.last_active_at, 1_500, "touch must persist last_active_at");
+        assert_eq!(
+            after.last_active_at, 1_500,
+            "touch must persist last_active_at"
+        );
         assert_eq!(
             after.expires_at,
             1_500 + 30 * 24 * 3600,
@@ -808,8 +823,12 @@ mod tests {
 
         let old_expired_revoked = make_session("sess-rr", &u.id, "h-rr", 1_000, 1_000);
         let old_expired_live = make_session("sess-rl", &u.id, "h-rl", 1_000, 2_000);
-        SessionRepository::create(&s, &old_expired_revoked).await.unwrap();
-        SessionRepository::create(&s, &old_expired_live).await.unwrap();
+        SessionRepository::create(&s, &old_expired_revoked)
+            .await
+            .unwrap();
+        SessionRepository::create(&s, &old_expired_live)
+            .await
+            .unwrap();
         SessionRepository::revoke(&s, &Id::new("sess-rr"), &u.id)
             .await
             .unwrap();
@@ -849,7 +868,11 @@ mod tests {
         SessionRepository::create(&s, &fresh).await.unwrap();
 
         let found = SessionRepository::find_by_credential_and_device(
-            &s, &u.id, "cred-x", "127.0.0.1", "gyre-test/1.0",
+            &s,
+            &u.id,
+            "cred-x",
+            "127.0.0.1",
+            "gyre-test/1.0",
         )
         .await
         .unwrap()
@@ -947,7 +970,11 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .chain(SessionRepository::list_for_user(&s, &other.id).await.unwrap())
+            .chain(
+                SessionRepository::list_for_user(&s, &other.id)
+                    .await
+                    .unwrap(),
+            )
             .collect();
         // sess-a2 (unexpired) and sess-a1 (revoked, expired) both survive;
         // sess-b1 (unrevoked, expired) is gone.
@@ -957,7 +984,9 @@ mod tests {
             "unexpired session and revoked session survive; expired live row deleted"
         );
         assert!(
-            remaining.iter().any(|x| x.id == Id::new("sess-a1") && x.revoked),
+            remaining
+                .iter()
+                .any(|x| x.id == Id::new("sess-a1") && x.revoked),
             "the revoked row must survive retention cleanup"
         );
         assert!(

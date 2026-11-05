@@ -129,11 +129,7 @@ impl ResourceResolver {
                 RouteResourceMapping::api("/api/v1/repos/:id/status", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/queue/pause", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/queue/resume", "repo", Some("write")),
-                RouteResourceMapping::api(
-                    "/api/v1/repos/:id/revert/:mr_id",
-                    "repo",
-                    Some("write"),
-                ),
+                RouteResourceMapping::api("/api/v1/repos/:id/revert/:mr_id", "repo", Some("write")),
                 RouteResourceMapping::api("/api/v1/repos/:id/post-merge-gates", "gate", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/stack-policy", "repo", None),
                 RouteResourceMapping::api("/api/v1/repos/:id/spec-policy", "repo", None),
@@ -736,18 +732,26 @@ pub async fn seed_builtin_policies(state: &Arc<AppState>) {
     for policy in policies {
         match state.policies.find_by_id(&policy.id.to_string()).await {
             Ok(None) => {
-                if let Err(e) = state.policies.create(&policy).await {
-                    tracing::warn!(
-                        policy_id = %policy.id,
-                        err = %e,
-                        "Failed to seed built-in ABAC policy"
-                    );
-                } else {
-                    tracing::debug!(
-                        policy_id = %policy.id,
-                        name = %policy.name,
-                        "Seeded built-in ABAC policy"
-                    );
+                // Idempotent startup seeding, non-fatal by design: a policy
+                // that already exists skips this path, and a failed seed logs
+                // loudly while the server still boots; enforcement for the
+                // seeded policy is absent either way until it is seeded.
+                let seeded = state.policies.create(&policy).await; // policy-create:ok
+                match seeded {
+                    Err(e) => {
+                        tracing::warn!(
+                            policy_id = %policy.id,
+                            err = %e,
+                            "Failed to seed built-in ABAC policy"
+                        );
+                    }
+                    Ok(()) => {
+                        tracing::debug!(
+                            policy_id = %policy.id,
+                            name = %policy.name,
+                            "Seeded built-in ABAC policy"
+                        );
+                    }
                 }
             }
             Ok(Some(_)) => {} // already exists → idempotent

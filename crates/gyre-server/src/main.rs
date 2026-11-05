@@ -3,7 +3,8 @@ use gyre_server::{
     abac_middleware, audit_simulator, build_router, build_state, jobs, merge_processor,
     procfs_monitor, register_default_compute_target, seed_builtin_meta_specs, siem,
     spawn_budget_daily_reset, spawn_llm_rate_limiter_cleanup, spawn_presence_eviction,
-    spawn_session_cleanup, spawn_stale_agent_detector, spawn_stale_peer_detector, telemetry, JwtConfig,
+    spawn_session_cleanup, spawn_stale_agent_detector, spawn_stale_peer_detector, telemetry,
+    JwtConfig,
 };
 use std::sync::Arc;
 use tracing::info;

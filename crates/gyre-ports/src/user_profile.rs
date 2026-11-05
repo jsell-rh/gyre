@@ -1,7 +1,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use gyre_common::Id;
-use gyre_domain::{JudgmentEntry, JudgmentType, UserNotificationPreference, UserSession, UserToken};
+use gyre_domain::{
+    JudgmentEntry, JudgmentType, UserNotificationPreference, UserSession, UserToken,
+};
 
 #[async_trait]
 pub trait UserNotificationPreferenceRepository: Send + Sync {
@@ -26,6 +28,7 @@ pub trait UserTokenRepository: Send + Sync {
 /// (throttled `last_active_at` updates), and can be revoked individually or
 /// in bulk ("sign out everywhere").
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait SessionRepository: Send + Sync {
     /// Create a session. Fails if a session with the same `id` already exists.
     async fn create(&self, session: &UserSession) -> Result<()>;

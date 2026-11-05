@@ -1874,7 +1874,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK, "TenantAdmin must be able to view any user's sessions");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "TenantAdmin must be able to view any user's sessions"
+        );
         let json = body_json(resp).await;
         let sessions = json["sessions"].as_array().unwrap();
         assert_eq!(sessions.len(), 1, "victim has exactly one session");
@@ -1886,7 +1890,9 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri(format!("/api/v1/users/{victim_user_id}/sessions/{victim_session_id}"))
+                    .uri(format!(
+                        "/api/v1/users/{victim_user_id}/sessions/{victim_session_id}"
+                    ))
                     .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
@@ -1953,7 +1959,9 @@ mod tests {
                     .uri("/api/v1/users")
                     .header("Authorization", "Bearer test-token")
                     .header("Content-Type", "application/json")
-                    .body(Body::from(r#"{"username":"attacker","roles":["ReadOnly"]}"#))
+                    .body(Body::from(
+                        r#"{"username":"attacker","roles":["ReadOnly"]}"#,
+                    ))
                     .unwrap(),
             )
             .await
@@ -1986,7 +1994,9 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/v1/users/{victim_user_id}/sessions/revoke-all"))
+                    .uri(format!(
+                        "/api/v1/users/{victim_user_id}/sessions/revoke-all"
+                    ))
                     .header("Authorization", format!("Bearer {attacker_key}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -2055,7 +2065,9 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/v1/users/{victim_user_id}/sessions/revoke-all"))
+                    .uri(format!(
+                        "/api/v1/users/{victim_user_id}/sessions/revoke-all"
+                    ))
                     .header("Authorization", "Bearer test-token")
                     .body(Body::empty())
                     .unwrap(),
