@@ -2645,17 +2645,31 @@ pub(crate) async fn report_cascade_test_result(
 /// Workspace-scoped policies from OTHER workspaces are filtered out: the
 /// engine's `evaluate` does not check scope_id, and one workspace's trust Deny
 /// must not hold another workspace's merges.
+///
+/// Returns `Err` when the policy or workspace store cannot be READ (review
+/// F9): a read failure means the trust state cannot be determined, and the
+/// caller (`supervised_trust_hold`) fails CLOSED — never degrades the error
+/// to "no policies", which would silently drop a Supervised workspace's
+/// merge Deny and let the merge proceed.
 async fn evaluate_merge_abac(
     state: &AppState,
     mr: &MergeRequest,
     repo: &gyre_domain::Repository,
-) -> crate::policy_engine::EvalResult {
+) -> anyhow::Result<crate::policy_engine::EvalResult> {
+    use anyhow::Context as _;
+
     // Resolve tenant_id from repo → workspace (same pattern as
     // evaluate_attestation_abac; subject.tenant_id is required context parity).
-    let tenant_id = match state.workspaces.find_by_id(&repo.workspace_id).await {
-        Ok(ws) => ws.map(|w| w.tenant_id.to_string()),
-        Err(_) => None,
-    };
+    // A workspace-store read failure PROPAGATES (review F9): the previous
+    // `Err(_) => None` silently dropped tenant context, which could make
+    // tenant-conditioned Deny policies silently not match — the same
+    // fail-open degradation class as the policy-list read below.
+    let workspace = state
+        .workspaces
+        .find_by_id(&repo.workspace_id)
+        .await
+        .context("supervised trust gate: workspace store read failed")?;
+    let tenant_id = workspace.map(|w| w.tenant_id.to_string());
 
     let mut ctx = crate::policy_engine::AttributeContext::default();
     ctx.set("subject.type", "system");
@@ -2667,7 +2681,18 @@ async fn evaluate_merge_abac(
     ctx.set("resource.repo_id", repo.id.as_str());
     ctx.set("resource.workspace_id", mr.workspace_id.as_str());
 
-    let policies = state.policies.list().await.unwrap_or_default();
+    // Review F9: the policy-list read error PROPAGATES. The previous
+    // `.unwrap_or_default()` degraded a store failure to an empty policy
+    // set, and because the hold below requires an EXPLICIT Deny match, the
+    // merge proceeded in a Supervised workspace with the error discarded —
+    // fail OPEN. This is the flaw class the repo mechanically bans for
+    // refs (check-fail-open-ref-resolution.sh): a default converting
+    // "cannot determine state" into "state is fine" on a decision signal.
+    let policies = state
+        .policies
+        .list()
+        .await
+        .context("supervised trust gate: policy store read failed")?;
     let policies: Vec<_> = policies
         .into_iter()
         .filter(|p| {
@@ -2678,7 +2703,9 @@ async fn evaluate_merge_abac(
                     || p.scope_id.as_deref() == Some(mr.workspace_id.as_str()))
         })
         .collect();
-    crate::policy_engine::evaluate(policies, &ctx, "merge", "mr")
+    Ok(crate::policy_engine::evaluate(
+        policies, &ctx, "merge", "mr",
+    ))
 }
 
 /// TASK-077 / HSI §2 (F5): the supervised-trust hold predicate shared by the
@@ -2689,6 +2716,17 @@ async fn evaluate_merge_abac(
 /// identity; `None` when the merge may proceed. See `evaluate_merge_abac`
 /// for why only an explicit Deny match (`matched_policy.is_some()`) holds:
 /// the engine's default-deny is the Guided/Autonomous state per HSI §2.
+///
+/// Fails CLOSED on a policy/workspace store read failure (review F9): a
+/// read error means the trust state cannot be determined, and degrading it
+/// to "no policies" would let a Supervised workspace's merge Deny silently
+/// vanish while the operator believes the workspace is Supervised. A read
+/// failure is therefore a HOLD (requeue), never a pass — the same
+/// fail-closed direction as the HTTP ABAC middleware, whose identical
+/// `unwrap_or_default` yields an empty set that the engine default-denies.
+/// The hold is a requeue, not a failure, so the merge retries once the
+/// store recovers, and the human-approval escape (`mr.status == Approved`)
+/// still applies.
 async fn supervised_trust_hold(
     state: &AppState,
     mr: &MergeRequest,
@@ -2697,7 +2735,21 @@ async fn supervised_trust_hold(
     if mr.status == MrStatus::Approved {
         return None; // human-approval escape (HSI §2/§13)
     }
-    let result = evaluate_merge_abac(state, mr, repo).await;
+    let result = match evaluate_merge_abac(state, mr, repo).await {
+        Ok(result) => result,
+        Err(e) => {
+            warn!(
+                mr_id = %mr.id,
+                workspace_id = %mr.workspace_id,
+                error = %e,
+                "supervised trust gate: policy evaluation unavailable, failing closed (hold)"
+            );
+            return Some(format!(
+                "supervised trust: policy store unavailable for MR {}, failing closed",
+                mr.id
+            ));
+        }
+    };
     if result.effect == gyre_domain::policy::PolicyEffect::Deny && result.matched_policy.is_some() {
         Some(format!(
             "supervised trust: human MR approval required for MR {}",
@@ -6552,6 +6604,138 @@ mod tests {
             updated.status,
             MrStatus::Merged,
             "Guided workspace (no trust Deny) must not hold the merge"
+        );
+    }
+
+    // TASK-077 review F9: the supervised-trust gate must fail CLOSED on a
+    // policy-store read failure. The previous implementation degraded
+    // `list()` errors to an empty policy set via `unwrap_or_default()`, and
+    // because the hold requires an EXPLICIT Deny match, the merge proceeded
+    // in a Supervised workspace with the error silently discarded.
+    #[tokio::test]
+    async fn policy_store_read_failure_holds_supervised_merge_fail_closed() {
+        let state = crate::mem::test_state_failing_policy_lists();
+
+        seed_workspace_with_trust(
+            &state,
+            "ws-sup-fc",
+            "Supervised WS fail-closed",
+            gyre_domain::TrustLevel::Supervised,
+        )
+        .await;
+        let repo = create_repo_in_workspace(&state, "sup-repo-fc", "ws-sup-fc").await;
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-sup-fc"),
+            repo.id.clone(),
+            "MR in supervised workspace with failing policy store",
+            "feat/sup-fc",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-sup-fc");
+        state.merge_requests.create(&mr).await.unwrap();
+        enqueue_mr(&state, "mr-sup-fc", 50, 1000).await;
+
+        // Run a merge-processor cycle with the policy store unreadable.
+        process_next(&state).await.unwrap();
+
+        // The MR must NOT have been merged: an unreadable policy store means
+        // the trust state cannot be determined, and the gate must not treat
+        // "cannot determine" as "no policies" (fail OPEN).
+        let updated = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-sup-fc"))
+            .await
+            .unwrap()
+            .expect("mr should exist");
+        assert_eq!(
+            updated.status,
+            MrStatus::Open,
+            "policy-store read failure must fail CLOSED — MR stays Open"
+        );
+
+        // The entry must be requeued (not failed, not merged) with a reason
+        // naming the fail-closed hold, so the merge retries once the store
+        // recovers and the human-approval path stays live.
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-sup-fc"))
+            .await
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(
+            entry.status,
+            MergeQueueEntryStatus::Queued,
+            "fail-closed hold must requeue, not fail — store recovery must unblock it"
+        );
+        let reason = entry
+            .error_message
+            .as_deref()
+            .unwrap_or_else(|| panic!("requeued entry must carry a hold reason"));
+        assert!(
+            reason.contains("supervised trust") && reason.contains("failing closed"),
+            "hold reason must name the fail-closed supervised-trust hold, got: {reason}"
+        );
+    }
+
+    // TASK-077 review F9, sibling direction: fail-closed is NOT
+    // Supervised-specific. A read failure must hold even a Guided workspace's
+    // merge — the inverse would make "store down" indistinguishable from
+    // "no Deny policies" only for the trust-free level, reintroducing the
+    // fail-open asymmetry the HTTP middleware does not have.
+    #[tokio::test]
+    async fn policy_store_read_failure_holds_guided_merge_fail_closed() {
+        let state = crate::mem::test_state_failing_policy_lists();
+
+        seed_workspace_with_trust(
+            &state,
+            "ws-guided-fc",
+            "Guided WS fail-closed",
+            gyre_domain::TrustLevel::Guided,
+        )
+        .await;
+        let repo = create_repo_in_workspace(&state, "guided-repo-fc", "ws-guided-fc").await;
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-guided-fc"),
+            repo.id.clone(),
+            "MR in guided workspace with failing policy store",
+            "feat/guided-fc",
+            "main",
+            1000,
+        );
+        mr.workspace_id = Id::new("ws-guided-fc");
+        state.merge_requests.create(&mr).await.unwrap();
+        enqueue_mr(&state, "mr-guided-fc", 50, 1000).await;
+
+        process_next(&state).await.unwrap();
+
+        // With a WORKING store this MR merges (guided_workspace_open_mr_merges);
+        // with an unreadable store the gate cannot prove there is no Deny, so
+        // it must hold — "cannot determine state" is never "state is fine".
+        let updated = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-guided-fc"))
+            .await
+            .unwrap()
+            .expect("mr should exist");
+        assert_eq!(
+            updated.status,
+            MrStatus::Open,
+            "policy-store read failure must hold even without trust Deny policies — fail closed"
+        );
+
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-guided-fc"))
+            .await
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(
+            entry.status,
+            MergeQueueEntryStatus::Queued,
+            "fail-closed hold must requeue so store recovery unblocks the merge"
         );
     }
 

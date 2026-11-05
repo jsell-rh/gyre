@@ -1760,6 +1760,10 @@ pub struct MemPolicyRepository {
     /// Test hook: when set, `create` returns an error to simulate a policy-store
     /// write failure (exercises fail-closed seeding, task-077 F6 class).
     fail_creates: Arc<std::sync::atomic::AtomicBool>,
+    /// Test hook: when set, `list` returns an error to simulate a policy-store
+    /// read failure (exercises the fail-closed supervised-trust merge gate,
+    /// task-077 F9 class).
+    fail_lists: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MemPolicyRepository {
@@ -1771,6 +1775,7 @@ impl MemPolicyRepository {
             policies,
             decisions: Arc::new(Mutex::new(Vec::new())),
             fail_creates: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fail_lists: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -1778,6 +1783,13 @@ impl MemPolicyRepository {
     #[cfg(test)]
     pub fn fail_creates(&self) {
         self.fail_creates
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test hook: cause subsequent `list` calls to fail.
+    #[cfg(test)]
+    pub fn fail_lists(&self) {
+        self.fail_lists
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
@@ -1800,6 +1812,9 @@ impl gyre_ports::PolicyRepository for MemPolicyRepository {
     }
 
     async fn list(&self) -> Result<Vec<gyre_domain::Policy>> {
+        if self.fail_lists.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("simulated policy store list failure");
+        }
         Ok(self.policies.lock().await.values().cloned().collect())
     }
 
@@ -3321,6 +3336,24 @@ pub fn test_state_failing_policy_creates() -> Arc<crate::AppState> {
     let pol_store = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
     let policies = MemPolicyRepository::from_store(Arc::clone(&pol_store));
     policies.fail_creates();
+    let workspaces = MemWorkspaceRepository::with_policy_store(pol_store);
+    test_state_inner(
+        Arc::new(NoopGitOps),
+        Arc::new(workspaces),
+        Arc::new(policies),
+        None,
+        None,
+    )
+}
+
+/// Build an AppState whose policy repo fails every `list`, used to exercise
+/// the fail-closed supervised-trust merge gate (task-077 F9): a policy-store
+/// read failure must HOLD the merge, never degrade to "no policies".
+#[cfg(test)]
+pub fn test_state_failing_policy_lists() -> Arc<crate::AppState> {
+    let pol_store = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    let policies = MemPolicyRepository::from_store(Arc::clone(&pol_store));
+    policies.fail_lists();
     let workspaces = MemWorkspaceRepository::with_policy_store(pol_store);
     test_state_inner(
         Arc::new(NoopGitOps),
