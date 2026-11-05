@@ -3,7 +3,7 @@ title: "View Query Grammar — Interaction Context, Composition Examples & Integ
 spec_ref: "view-query-grammar.md §10–16"
 depends_on:
   - task-063
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "view-query-grammar.md §10 Interaction Context"
   - "view-query-grammar.md §11 Composition Examples"
