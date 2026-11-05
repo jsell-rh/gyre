@@ -19,11 +19,25 @@
 //! the registry mutex serializes concurrent signals within this process.
 
 /// Age after which a claimed (InProgress) Delegation/Coordination task is
-/// considered stale and re-claimed by the scheduler. Matches the stale-agent
-/// detector's heartbeat timeout (60 s); the scheduler cycle is 30 s, so a
-/// healthy in-flight run — whose LLM calls are not internally time-bounded —
-/// is never re-selected mid-run.
+/// considered stale and re-claimed by the scheduler. This is **crash
+/// recovery** for a task left InProgress by a dead process — it can never
+/// fire mid-run, because a whole scheduler cycle (scan → claim → process)
+/// holds the cycle run lock
+/// ([`OrchestratorRegistry::scheduler_run_lock`]): no cycle can scan
+/// candidates while another is executing, so a live in-flight run is never
+/// re-selected. Every orchestrator LLM call is additionally latency-bounded
+/// (`LLM_CALL_TIMEOUT` plus the adapter's HTTP client timeout), so an
+/// in-flight run always finishes or fails within bounded time and releases
+/// the run lock.
 const SCHEDULER_CLAIM_STALENESS_SECS: u64 = 60;
+
+/// Latency bound for one orchestrator LLM judgment call (decomposition or
+/// coordination assessment). reqwest has no default total timeout, so an
+/// unbounded adapter call would hold the scheduler's cycle run lock and the
+/// per-repo mutex indefinitely, stalling every later cycle. On timeout the
+/// caller degrades to its deterministic fallback — the same handling as an
+/// LLM error.
+const LLM_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -51,6 +65,15 @@ use crate::AppState;
 #[derive(Clone, Default)]
 pub struct OrchestratorRegistry {
     inner: Arc<RwLock<RegistryInner>>,
+    /// Serializes whole task-scheduler cycles (scan → claim → process).
+    /// The 30 s loop and the operator trigger
+    /// (`POST /api/v1/admin/jobs/task_scheduler/run`, whose
+    /// `JobRegistry::trigger` runs the handler without serialization) both
+    /// enter through `scheduler_run_once`, which holds this lock for the
+    /// entire cycle — so two concurrent cycles can never both claim the
+    /// same Backlog task. A plain lock, not durable state: nothing is
+    /// stored here.
+    cycle_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Default)]
@@ -101,6 +124,15 @@ impl OrchestratorRegistry {
             .entry(repo_id.clone())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
+    }
+
+    /// The whole-cycle scheduler lock: `scheduler_run_once` acquires this
+    /// before scanning candidates and holds it until the cycle completes,
+    /// so concurrent cycles (background loop + admin trigger) serialize
+    /// instead of racing on the non-atomic Backlog claim. Shared across
+    /// clones like the scope locks above.
+    pub async fn scheduler_run_lock(&self) -> Arc<Mutex<()>> {
+        self.cycle_lock.clone()
     }
 }
 
@@ -276,16 +308,31 @@ async fn run_workspace_orchestrator(
         .to_string();
 
     // 1. Read the approved spec content (real git object read at the
-    //    approved SHA). The workspace orchestrator's own run only needs the
-    //    spec reference for task creation — the repo orchestrator reads the
-    //    full content during decomposition (Phase 3) — so a failed read
-    //    here is non-fatal and logged by `read_git_file` itself.
+    //    approved SHA — agent-runtime.md §1 Phase 2 step 1). The content
+    //    feeds the delegation task's metadata below (title, section
+    //    count, size): the workspace orchestrator's own run only needs
+    //    the reference for task creation — the repo orchestrator reads
+    //    the full content during decomposition (Phase 3) — so a failed
+    //    read here is non-fatal (warned below); Phase 3 re-reads and
+    //    surfaces hard failures there.
+    let mut spec_summary: Option<String> = None;
     if let (Some(rid), true) = (&repo_id, !spec_sha.is_empty()) {
         if let Ok(Some(repo)) = state.repos.find_by_id(rid).await {
             let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
-            let _ =
-                crate::spec_registry::read_git_file(&git_bin, &repo.path, &spec_sha, &spec_path)
-                    .await;
+            match crate::spec_registry::read_git_file(&git_bin, &repo.path, &spec_sha, &spec_path)
+                .await
+            {
+                Some(content) => {
+                    spec_summary = Some(summarize_spec_content(&content));
+                }
+                None => {
+                    tracing::warn!(
+                        repo_id = %rid,
+                        spec_ref = format!("{spec_path}@{spec_sha}"),
+                        "signal-chain: approved spec blob unreadable at delegation time; the repo orchestrator re-reads it during decomposition"
+                    );
+                }
+            }
         }
     }
 
@@ -322,8 +369,12 @@ async fn run_workspace_orchestrator(
         task.spec_path = Some(spec_path.clone());
         task.spec_ref = Some(spec_ref.clone());
         task.description = Some(format!(
-            "Delegation task created by workspace orchestrator {} for approved spec {spec_ref} (agent-runtime.md §1 Phase 2).",
-            orchestrator.id
+            "Delegation task created by workspace orchestrator {} for approved spec {spec_ref} (agent-runtime.md §1 Phase 2).{}",
+            orchestrator.id,
+            spec_summary
+                .as_ref()
+                .map(|s| format!(" Approved spec: {s}."))
+                .unwrap_or_default()
         ));
         task.priority = TaskPriority::High;
         task.assigned_to = Some(orchestrator.id.clone());
@@ -383,11 +434,32 @@ async fn run_workspace_orchestrator(
         }
     }
 
-    // Mark the inbox delivery acknowledged — this run consumed it.
-    let _ = state
-        .messages
-        .acknowledge_all(&orchestrator.id, "processed by workspace orchestrator run")
-        .await;
+    // Acknowledge ONLY the SpecApproved signal this run consumed. Other
+    // inbox messages — e.g. Escalations the stale-agent detector delivers
+    // to a live workspace orchestrator — must stay unacked for their real
+    // consumers: bulk-acking here would falsely record them as processed,
+    // hiding them from the documented crash-recovery poll
+    // (GET /api/v1/agents/:id/messages?acknowledged=false).
+    match state.messages.list_unacked(&orchestrator.id, 1000).await {
+        Ok(unacked) => {
+            for msg in unacked {
+                if msg.kind == MessageKind::SpecApproved && msg.payload.as_ref() == Some(payload) {
+                    if let Err(e) = state.messages.acknowledge(&msg.id, &orchestrator.id).await {
+                        tracing::warn!(
+                            message_id = %msg.id,
+                            "signal-chain: failed to acknowledge consumed SpecApproved message: {e}"
+                        );
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                orchestrator_id = %orchestrator.id,
+                "signal-chain: could not list unacked inbox messages for targeted ack: {e}"
+            );
+        }
+    }
 
     // The orchestrator "completes after processing its inbox": transition
     // to Idle so the next SpecApproved spawns a fresh session (spawned on
@@ -475,21 +547,37 @@ async fn notify_cross_workspace_change(
 
 /// Run one task-scheduler cycle (agent-runtime.md §1 Phases 3–4 routing).
 ///
+/// The whole cycle — scan, claim, process — holds the registry's cycle
+/// lock, so the 30 s loop and the operator trigger
+/// (`POST /api/v1/admin/jobs/task_scheduler/run`) serialize: two concurrent
+/// cycles can never both claim one Backlog task (the claim is a plain
+/// read-modify-write against the task store, not a compare-and-swap, so
+/// serialization is what makes it safe). Cycles also never re-select a task
+/// mid-run: no cycle scans while another executes, and every LLM call is
+/// bounded (`LLM_CALL_TIMEOUT`), so a run cannot hold the cycle lock
+/// indefinitely.
+///
 /// Finds Backlog tasks with `task_type` Delegation or Coordination, claims
-/// each (Backlog→InProgress — the claim makes cycle re-entry idempotent),
-/// and runs the repo orchestrator for its repo under the per-repo registry
-/// mutex. `Implementation` tasks are NOT handled here — they are Phase 4's
-/// worker-spawn path, intentionally excluded by the task_type
-/// discriminator. Tasks with unresolved repos are left Backlog.
+/// each (Backlog→InProgress), and runs the repo orchestrator for its repo
+/// under the per-repo registry mutex. Stale InProgress tasks (crash
+/// recovery: left claimed by a dead process) and Blocked tasks (released by
+/// a failed run) are re-selected. `Implementation` tasks are NOT handled
+/// here — they are Phase 4's worker-spawn path, intentionally excluded by
+/// the task_type discriminator. Tasks with unresolved repos are left
+/// Backlog.
 pub async fn scheduler_run_once(state: &AppState) -> anyhow::Result<()> {
+    // One cycle at a time: the scan-claim-process sequence must not
+    // interleave with another cycle (see the doc comment above).
+    let cycle_lock = state.orchestrator_registry.scheduler_run_lock().await;
+    let _cycle_guard = cycle_lock.lock().await;
+
     // Candidate set: Backlog (never claimed), Blocked (the failure-release
     // state — a later cycle retries the orchestrator run), and InProgress
-    // only when stale: a run claimed within the last cycle-interval band
-    // may still be executing (LLM calls are not internally bounded), so a
-    // fresh claim is never re-selected. The staleness bound matches the
-    // stale-agent detector's heartbeat timeout (60 s) — one scheduler
-    // cycle (30 s) is inside it, so a healthy in-flight run is never
-    // double-claimed by the loop.
+    // only when stale (crash recovery: a task left claimed by a dead
+    // process; the staleness bound matches the stale-agent detector's
+    // heartbeat timeout). Because this cycle holds the cycle lock for the
+    // whole scan-claim-process sequence, a task being processed by the
+    // current cycle is never re-selected by a concurrent one.
     let now = crate::api::now_secs();
     let mut candidates = state.tasks.list_by_status(&TaskStatus::Backlog).await?;
     candidates.extend(state.tasks.list_by_status(&TaskStatus::Blocked).await?);
@@ -559,6 +647,40 @@ pub async fn scheduler_run_once(state: &AppState) -> anyhow::Result<()> {
         // here (per-repo mutex, exactly-one-active repo orchestrator).
         let lock = state.orchestrator_registry.repo_lock(&repo.id).await;
         let _guard = lock.lock().await;
+
+        // Defense in depth against a stale or double claim: re-read the
+        // task AFTER acquiring the repo lock and process only the freshest
+        // snapshot. If anything finished, cancelled, or re-claimed it since
+        // this cycle's claim (a prior run completing under this lock, spec
+        // rejection cancellation), re-running decomposition from the stale
+        // snapshot would duplicate the sub-task set.
+        match state.tasks.find_by_id(&task.id).await {
+            Ok(Some(current)) if current.status == TaskStatus::InProgress => {
+                task = current;
+            }
+            Ok(Some(current)) => {
+                tracing::info!(
+                    task_id = %task.id,
+                    task_status = ?current.status,
+                    "signal-chain scheduler: task is no longer claimed InProgress; skipping (already processed, cancelled, or released)"
+                );
+                continue;
+            }
+            Ok(None) => {
+                tracing::info!(
+                    task_id = %task.id,
+                    "signal-chain scheduler: task disappeared since claim; skipping"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    "signal-chain scheduler: re-read after claim failed: {e}; skipping"
+                );
+                continue;
+            }
+        }
 
         if let Err(e) = run_repo_orchestrator(state, &repo, &task).await {
             // Release the claim so a later cycle retries. InProgress→Blocked
@@ -652,7 +774,13 @@ async fn decompose_delegation(
     // 1. Read the delegation task's approved spec. `spec_ref` carries the
     //    pinned "path@sha" from Phase 2; when it is absent, fall back to
     //    the bare `spec_path` + the ledger's current SHA for tasks created
-    //    by other paths (e.g. MCP task.create).
+    //    by other paths (e.g. MCP task.create). A missing ledger SHA is a
+    //    hard failure — never an empty one: pinning "path@" would decompose
+    //    against a blob that cannot be identified, converting "cannot
+    //    determine the approved blob" into "empty blob is fine" (the same
+    //    failure class the fail-open-ref-resolution invariant bans). The
+    //    error releases the claim to Blocked so a later cycle retries once
+    //    the ledger resolves.
     let (spec_path, spec_sha) = match task.spec_ref.as_deref() {
         Some(r) if r.contains('@') => {
             let (path, sha) = r.split_once('@').unwrap();
@@ -665,7 +793,14 @@ async fn decompose_delegation(
                     .find_by_path(p)
                     .await?
                     .map(|e| e.current_sha)
-                    .unwrap_or_default();
+                    .filter(|s| !s.is_empty());
+                let Some(sha) = sha else {
+                    anyhow::bail!(
+                        "delegation task {} references spec {p} with no approved SHA in \
+                         the ledger; cannot pin the approved blob for decomposition",
+                        task.id
+                    );
+                };
                 (p.to_string(), sha)
             }
             _ => {
@@ -801,6 +936,53 @@ struct ProposedSubtask {
     order: Option<u32>,
 }
 
+/// Summarize approved spec content for the delegation task's metadata:
+/// the first `#` heading (title), the `##` section count, and the size —
+/// all derived from the real blob the workspace orchestrator read, so the
+/// delegation record carries what was actually read (Phase 2 step 1)
+/// instead of discarding the content.
+fn summarize_spec_content(content: &str) -> String {
+    let title = content
+        .lines()
+        .find_map(|l| l.strip_prefix("# ").map(|t| t.trim().to_string()))
+        .unwrap_or_else(|| "(untitled)".to_string());
+    let sections = content.lines().filter(|l| l.starts_with("## ")).count();
+    format!("\"{title}\" — {sections} sections, {} bytes", content.len())
+}
+
+/// Read a bounded summary of the repo's current codebase state: the
+/// tracked file tree at HEAD (`git ls-tree -r --name-only HEAD`),
+/// truncated to `max_entries` paths with an explicit "(N more files)"
+/// marker. Returns `None` when the repo or HEAD is unreadable — the
+/// caller then decomposes from spec content only (logged).
+async fn read_repo_tree(git_bin: &str, repo_path: &str, max_entries: usize) -> Option<String> {
+    let out = tokio::process::Command::new(git_bin)
+        .arg("-C")
+        .arg(repo_path)
+        .args(["ls-tree", "-r", "--name-only", "HEAD"])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(out.stdout).ok()?;
+    let total = text.lines().filter(|l| !l.trim().is_empty()).count();
+    let shown: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(max_entries)
+        .collect();
+    if shown.is_empty() {
+        return None;
+    }
+    let mut summary = shown.join("\n");
+    if total > max_entries {
+        summary.push_str(&format!("\n... ({} more files)", total - max_entries));
+    }
+    Some(summary)
+}
+
 /// Deterministic fallback: one sub-task per `##` section, order = section
 /// index, depends_on chains the previous section (set by the caller).
 fn deterministic_decomposition(spec_path: &str, content: &str) -> Vec<ProposedSubtask> {
@@ -890,21 +1072,54 @@ async fn decompose(
     let (model, _) =
         crate::llm_helpers::resolve_llm_model(state, &repo.workspace_id, "decompose_spec").await;
     let port = factory.for_model(&model);
+
+    // Read the repo's current codebase state (agent-runtime.md \u00a71 Phase 3
+    // step 2): the tracked file tree at HEAD, fed to the LLM alongside the
+    // spec so decomposition considers what already exists. Equivalent
+    // effect to the spec's "via MCP tools" wording \u2014 the orchestrator run
+    // is server-driven, so it reads git directly instead of calling its
+    // own MCP tools (same stance as task creation via the task store).
+    let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
+    let codebase_state = read_repo_tree(&git_bin, &repo.path, 200).await;
+    if codebase_state.is_none() {
+        tracing::debug!(
+            repo_id = %repo.id,
+            "signal-chain: repo tree unreadable; decomposing from spec content only"
+        );
+    }
+
     let user_prompt = format!(
         "Decompose the following approved spec into ordered implementation sub-tasks.\n\n\
          Repo: {repo_name} ({repo_id})\nSpec: {spec_path}@{spec_sha}\n\n\
-         Spec content:\n```\n{content}\n```\n\n\
+         Spec content:\n```\n{content}\n```\n\n{codebase_section}\n\
          Respond with valid JSON only: an array of objects \
          {{\"title\": string, \"description\": string, \"order\": number}}, \
          where lower order runs first and same-order tasks may run in parallel.",
         repo_name = repo.name,
         repo_id = repo.id,
+        codebase_section = codebase_state
+            .map(|tree| format!("Current codebase state (tracked files at HEAD):\n{tree}\n"))
+            .unwrap_or_default(),
     );
-    let value = match port.predict_json(&persona, &user_prompt).await {
-        Ok(v) => v,
-        Err(e) => {
+    // Latency-bounded: a hung model must not hold the scheduler's cycle
+    // lock and the per-repo mutex indefinitely (LLM_CALL_TIMEOUT).
+    let value = match tokio::time::timeout(
+        LLM_CALL_TIMEOUT,
+        port.predict_json(&persona, &user_prompt),
+    )
+    .await
+    {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
             tracing::warn!(
                 "signal-chain: LLM decomposition failed ({e:#}); falling back to deterministic decomposition"
+            );
+            return Ok(deterministic_decomposition(spec_path, &content));
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = LLM_CALL_TIMEOUT.as_secs(),
+                "signal-chain: LLM decomposition timed out; falling back to deterministic decomposition"
             );
             return Ok(deterministic_decomposition(spec_path, &content));
         }
@@ -984,11 +1199,32 @@ async fn coordinate(
         desc = task.description.as_deref().unwrap_or(""),
     );
 
-    let value = match port.predict_json(&persona, &user_prompt).await {
-        Ok(v) => v,
-        Err(e) => {
+    // Latency-bounded like the decomposition call (LLM_CALL_TIMEOUT): a
+    // hung model must not stall the scheduler cycle.
+    let value = match tokio::time::timeout(
+        LLM_CALL_TIMEOUT,
+        port.predict_json(&persona, &user_prompt),
+    )
+    .await
+    {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
             tracing::warn!(
                 "signal-chain: LLM coordination assessment failed ({e:#}); assuming action needed"
+            );
+            return Ok(CoordinationAssessment {
+                create_subtask: true,
+                title: format!("Review dependency change: {}", task.spec_path.as_deref().unwrap_or("")),
+                description: format!(
+                    "A spec this repo depends on changed. Review and update as needed. Coordination task: {}.",
+                    task.id
+                ),
+            });
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = LLM_CALL_TIMEOUT.as_secs(),
+                "signal-chain: LLM coordination assessment timed out; assuming action needed"
             );
             return Ok(CoordinationAssessment {
                 create_subtask: true,
@@ -1602,5 +1838,350 @@ mod tests {
             TaskStatus::Done,
             "retry after transient failure completes the delegation task"
         );
+    }
+
+    // ── Review-finding regressions (task-115 repair round) ───────────────────
+
+    /// Review finding F1: concurrent scheduler cycles (the 30 s loop plus
+    /// `POST /api/v1/admin/jobs/task_scheduler/run`, whose
+    /// `JobRegistry::trigger` runs the handler without serialization) must
+    /// not double-process one Delegation task. The pre-fix claim was a
+    /// non-atomic read-modify-write with no cycle serialization: two
+    /// concurrently entered cycles could both claim the same Backlog task
+    /// and decompose it twice (duplicate Implementation sub-tasks, later
+    /// duplicate worker agents). The cycle run lock serializes whole
+    /// cycles — both entries here run concurrently and produce exactly one
+    /// sub-task set. (The mid-run race itself — one cycle scanning while
+    /// another's LLM call is in flight — cannot be reproduced
+    /// deterministically in-process, which is exactly why the
+    /// serialization lock below is asserted directly rather than hoped
+    /// for.)
+    #[tokio::test]
+    async fn concurrent_scheduler_cycles_do_not_double_process() {
+        let state = chain_state().await;
+        on_spec_approved(&state, &approved_payload()).await;
+
+        let (a, b) = tokio::join!(
+            scheduler_run_once(&state),
+            scheduler_run_once(&state)
+        );
+        a.unwrap();
+        b.unwrap();
+
+        let tasks = state.tasks.list().await.unwrap();
+        let delegation = tasks
+            .iter()
+            .find(|t| t.task_type == Some(TaskType::Delegation))
+            .expect("delegation task exists");
+        assert_eq!(delegation.status, TaskStatus::Done);
+        let subs: Vec<_> = tasks
+            .iter()
+            .filter(|t| {
+                t.parent_task_id.as_ref() == Some(&delegation.id)
+                    && t.task_type == Some(TaskType::Implementation)
+            })
+            .collect();
+        assert_eq!(
+            subs.len(),
+            1,
+            "exactly one sub-task set — no duplicate decomposition from concurrent cycles"
+        );
+    }
+
+    /// Review finding F1, deterministic half: `scheduler_run_once` holds
+    /// the registry's cycle lock for the whole scan-claim-process sequence,
+    /// so a second cycle entered while one is in flight blocks on the same
+    /// lock instead of scanning (and racing on the non-atomic Backlog
+    /// claim). Fails if the cycle-lock acquisition is removed from
+    /// `scheduler_run_once`.
+    #[tokio::test]
+    async fn scheduler_cycles_serialize_on_the_run_lock() {
+        let state = chain_state().await;
+
+        // Simulate an in-flight cycle: the run lock is held.
+        let lock = state.orchestrator_registry.scheduler_run_lock().await;
+        let guard = lock.lock().await;
+
+        let bg = tokio::spawn(async move { scheduler_run_once(&state).await });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !bg.is_finished(),
+            "a second cycle must block while the first holds the run lock"
+        );
+
+        drop(guard);
+        bg.await.unwrap().unwrap();
+    }
+
+    /// Review finding F1 (crash-recovery half): a Delegation task left
+    /// InProgress by a dead process is re-claimed (stale claim) and
+    /// processed exactly once — one sub-task set, delegation Done.
+    #[tokio::test]
+    async fn stale_claim_crash_recovery_processes_once() {
+        let state = chain_state().await;
+        on_spec_approved(&state, &approved_payload()).await;
+
+        // Simulate a crashed process: the delegation was claimed
+        // InProgress long ago and never completed.
+        let mut delegation = state
+            .tasks
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|t| t.task_type == Some(TaskType::Delegation))
+            .expect("delegation task created");
+        delegation.transition_status(TaskStatus::InProgress).unwrap();
+        delegation.updated_at = 0; // far in the past → stale
+        state.tasks.update(&delegation).await.unwrap();
+
+        scheduler_run_once(&state).await.unwrap();
+
+        let tasks = state.tasks.list().await.unwrap();
+        let delegation = tasks
+            .iter()
+            .find(|t| t.task_type == Some(TaskType::Delegation))
+            .expect("delegation task exists");
+        assert_eq!(
+            delegation.status,
+            TaskStatus::Done,
+            "stale claim is recovered and completed"
+        );
+        let subs: Vec<_> = tasks
+            .iter()
+            .filter(|t| {
+                t.parent_task_id.as_ref() == Some(&delegation.id)
+                    && t.task_type == Some(TaskType::Implementation)
+            })
+            .collect();
+        assert_eq!(subs.len(), 1, "recovered claim processes exactly once");
+    }
+
+    /// Review finding F2: the workspace orchestrator run must acknowledge
+    /// ONLY the SpecApproved signal it consumed. The pre-fix
+    /// `acknowledge_all` marked every inbox message processed — including
+    /// Escalations the stale-agent detector delivers to a live workspace
+    /// orchestrator, which no consumer had seen — hiding them from the
+    /// documented crash-recovery poll
+    /// (GET /api/v1/agents/:id/messages?acknowledged=false).
+    #[tokio::test]
+    async fn orchestrator_run_does_not_ack_escalations() {
+        let state = chain_state().await;
+        on_spec_approved(&state, &approved_payload()).await;
+
+        let orch = state
+            .agents
+            .list_by_workspace(&Id::new("ws-1"))
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|a| a.orchestrator_type == OrchestratorType::WorkspaceOrchestrator)
+            .expect("workspace orchestrator spawned");
+
+        // Deliver an Escalation to the live orchestrator's inbox (as the
+        // stale-agent detector does on repo-orchestrator death).
+        state
+            .emit_event(
+                Some(Id::new("ws-1")),
+                Destination::Agent(orch.id.clone()),
+                MessageKind::Escalation,
+                Some(serde_json::json!({
+                    "event": "repo_orchestrator_dead",
+                    "agent_id": "agent-x",
+                })),
+            )
+            .await;
+
+        // A second, different approval reuses the orchestrator and runs it.
+        let mut second = approved_payload();
+        second["approval_id"] = serde_json::json!("approval-2");
+        on_spec_approved(&state, &second).await;
+
+        let unacked = state.messages.list_unacked(&orch.id, 100).await.unwrap();
+        assert!(
+            unacked.iter().any(|m| m.kind == MessageKind::Escalation),
+            "escalation must stay unacked for its real consumer, got {unacked:?}"
+        );
+        assert!(
+            unacked.iter().all(|m| m.kind != MessageKind::SpecApproved),
+            "both SpecApproved signals were consumed and acked by their runs"
+        );
+    }
+
+    /// Review finding F3(2): a Delegation task whose spec has no approved
+    /// SHA in the ledger must NOT be decomposed against a malformed
+    /// `path@` spec_ref (empty SHA) — "cannot determine the approved blob"
+    /// is not "empty blob is fine". The run fails, the claim is released to
+    /// Blocked for retry, and no sub-tasks are created.
+    #[tokio::test]
+    async fn delegation_without_resolvable_sha_stays_blocked() {
+        let state = chain_state().await;
+
+        let mut t = Task::new(Id::new("del-nosha"), "Delegation without ledger SHA", 0);
+        t.task_type = Some(TaskType::Delegation);
+        t.repo_id = Id::new("r-1");
+        t.workspace_id = Id::new("ws-1");
+        t.spec_path = Some("specs/system/never-approved.md".to_string());
+        state.tasks.create(&t).await.unwrap();
+
+        scheduler_run_once(&state).await.unwrap();
+
+        let after = state
+            .tasks
+            .find_by_id(&Id::new("del-nosha"))
+            .await
+            .unwrap()
+            .expect("task survives");
+        assert_eq!(
+            after.status,
+            TaskStatus::Blocked,
+            "unpinnable delegation is released for retry, not completed"
+        );
+        let tasks = state.tasks.list().await.unwrap();
+        let subs: Vec<_> = tasks
+            .iter()
+            .filter(|t| t.parent_task_id.as_ref() == Some(&Id::new("del-nosha")))
+            .collect();
+        assert!(
+            subs.is_empty(),
+            "no sub-tasks pinned to a malformed empty-SHA spec_ref"
+        );
+    }
+
+    /// Phase 2 step 1 (agent-runtime.md §1): the workspace orchestrator
+    /// READS the approved spec content and the read is consumed — the
+    /// delegation task's description carries the title/section/size
+    /// summary derived from the real blob (the pre-fix code discarded the
+    /// read result: a decorative git subprocess per approval).
+    #[tokio::test]
+    async fn delegation_description_carries_spec_summary() {
+        let state = chain_state().await;
+
+        // A real git repo holding the approved spec blob.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path();
+        for args in [
+            vec!["init"],
+            vec!["config", "user.email", "test@gyre.dev"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            std::process::Command::new("git")
+                .args(&args)
+                .current_dir(repo_path)
+                .output()
+                .unwrap();
+        }
+        std::fs::create_dir_all(repo_path.join("specs/system")).unwrap();
+        std::fs::write(
+            repo_path.join("specs/system/auth.md"),
+            "# Auth Spec Title\n\nIntro.\n\n## Section One\n\nBody.\n\n## Section Two\n\nBody.\n",
+        )
+        .unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        let sha = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo_path)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        // Point repo r-1 at the real git repo and pin the ledger SHA.
+        let mut repo = state.repos.find_by_id(&Id::new("r-1")).await.unwrap().unwrap();
+        repo.path = repo_path.to_string_lossy().to_string();
+        state.repos.update(&repo).await.unwrap();
+        let mut entry = state
+            .spec_ledger
+            .find_by_path("specs/system/auth.md")
+            .await
+            .unwrap()
+            .expect("ledger entry seeded");
+        entry.current_sha = sha.clone();
+        state.spec_ledger.save(&entry).await.unwrap();
+
+        let mut payload = approved_payload();
+        payload["spec_sha"] = serde_json::json!(sha);
+        on_spec_approved(&state, &payload).await;
+
+        let tasks = state.tasks.list().await.unwrap();
+        let delegation = tasks
+            .iter()
+            .find(|t| t.task_type == Some(TaskType::Delegation))
+            .expect("delegation task created");
+        let description = delegation.description.as_deref().unwrap_or("");
+        assert!(
+            description.contains("Auth Spec Title"),
+            "delegation description carries the spec title derived from the read blob: {description}"
+        );
+        assert!(
+            description.contains("2 sections"),
+            "delegation description carries the section count: {description}"
+        );
+    }
+
+    /// Phase 3 step 2 (agent-runtime.md §1): the repo orchestrator's
+    /// decomposition input includes the repo's current codebase state —
+    /// the tracked file tree at HEAD, read via a real git subprocess.
+    #[tokio::test]
+    async fn read_repo_tree_lists_tracked_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path();
+        for args in [
+            vec!["init"],
+            vec!["config", "user.email", "test@gyre.dev"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            std::process::Command::new("git")
+                .args(&args)
+                .current_dir(repo_path)
+                .output()
+                .unwrap();
+        }
+        std::fs::create_dir_all(repo_path.join("src")).unwrap();
+        std::fs::write(repo_path.join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(repo_path.join("README.md"), "# t\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+
+        let tree = read_repo_tree("git", &repo_path.to_string_lossy(), 200)
+            .await
+            .expect("tracked files listed at HEAD");
+        assert!(tree.contains("src/main.rs"), "tree: {tree}");
+        assert!(tree.contains("README.md"), "tree: {tree}");
+
+        // Bounded listing marks truncation explicitly.
+        let truncated = read_repo_tree("git", &repo_path.to_string_lossy(), 1)
+            .await
+            .unwrap();
+        assert!(
+            truncated.contains("more files"),
+            "bounded listing marks truncation: {truncated}"
+        );
+
+        // Unreadable repo (no git dir) → None; the caller degrades to
+        // spec-content-only decomposition.
+        let none = read_repo_tree("git", "/nonexistent/gyre-path", 200).await;
+        assert!(none.is_none());
     }
 }
