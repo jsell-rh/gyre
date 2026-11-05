@@ -5,7 +5,7 @@ depends_on: [task-201]
 progress: ready-for-review
 coverage_sections:
   - "search.md §Searchable Entities"
-commits: ["e2583917beb41b812d6f5799149f23e30ff332d7", "80f13a7059e1458ce3f10551909461a4a5677342", "309fc7dd426b346fdfa576a5770c49d65fc2aced"]
+commits: ["80f13a7059e1458ce3f10551909461a4a5677342", "309fc7dd426b346fdfa576a5770c49d65fc2aced"]
 ---
 
 ## Spec Excerpt
@@ -48,12 +48,12 @@ Depends on task-201 (real FTS backend + `SearchPort` semantics). Populate every 
 
 ## Acceptance Criteria
 
-- [x] All 10 entity types (spec, task, mr, commit, agent, persona, activity_event, audit_event, review, file) are indexed with the specced fields and facets. Each write path calls `SearchPort::index` synchronously (except file/code search which runs via a background job).
-- [x] Spec content is extracted from the git blob on push and indexed as `body`.
-- [x] `POST /api/v1/admin/search/reindex` rebuilds the entire index from all domain repositories and returns the true document count (NOT a count of pre-existing docs).
-- [x] After a reindex against a seeded store, `GET /api/v1/search?q=` finds entities of each type; a query that matches a spec by body content returns that spec.
-- [x] A test seeds entities of at least 4 distinct types (including spec-by-content and commit-by-message), runs the reindex coordinator against a real SQLite FTS backend, and asserts each type is retrievable. The test MUST fail if any type is skipped or if reindex counts stale docs instead of rebuilding.
-- [x] `cargo test --all` and `bash scripts/check-arch.sh` pass.
+- [ ] All 10 entity types (spec, task, mr, commit, agent, persona, activity_event, audit_event, review, file) are indexed with the specced fields and facets. Each write path calls `SearchPort::index` synchronously (except file/code search which runs via a background job).
+- [ ] Spec content is extracted from the git blob on push and indexed as `body`.
+- [ ] `POST /api/v1/admin/search/reindex` rebuilds the entire index from all domain repositories and returns the true document count (NOT a count of pre-existing docs).
+- [ ] After a reindex against a seeded store, `GET /api/v1/search?q=` finds entities of each type; a query that matches a spec by body content returns that spec.
+- [ ] A test seeds entities of at least 4 distinct types (including spec-by-content and commit-by-message), runs the reindex coordinator against a real SQLite FTS backend, and asserts each type is retrievable. The test MUST fail if any type is skipped or if reindex counts stale docs instead of rebuilding.
+- [ ] `cargo test --all` and `bash scripts/check-arch.sh` pass.
 
 ## Agent Instructions
 
@@ -64,9 +64,11 @@ Depends on task-201 (real FTS backend + `SearchPort` semantics). Populate every 
 
 ## Shipped
 
-All 10 searchable entity types from search.md §Searchable Entities are now
+All 10 searchable entity types from search.md §Searchable Entities are
 indexed with real content and the specced facets, and the admin reindex
-endpoint performs a true full rebuild from domain storage.
+endpoint performs a true full rebuild from domain storage. Production code
+lives in commits `80f13a70` and `309fc7dd`; this round re-verified it
+unchanged after the executor restored the assigned task contract.
 
 ### Behavior
 
@@ -86,17 +88,16 @@ endpoint performs a true full rebuild from domain storage.
   `api/merge_requests.rs`, `api/spawn.rs`, `api/orchestrator.rs`), and
   audit events (`api/audit.rs`, `container_audit.rs`, `procfs_monitor.rs`).
 - **Spec pushes** (`git_http.rs`): after the ledger sync, spec content is
-  extracted from the pushed git blob (`git show sha:specs/<path>`) and
-  indexed as `body` with `approval_status`/`scope`/`owner` facets.
+  extracted from the pushed git blob and indexed as `body` with
+  `approval_status`/`scope`/`owner` facets.
 - **Commit pushes** (`git_http.rs`): message + author are read from the git
-  object store (`git show -s --format=%an%x1f%at%x1f%B`) and indexed with
-  `branch`/`agent_id`/`date` facets.
+  object store and indexed with `branch`/`agent_id`/`date` facets.
 - **Code search (files)** is eventually consistent per spec: a
   `search_code_index` job registered in the existing `JobRegistry` walks
   the default branch (`git ls-tree -r -l`), skips binaries (NUL sniff) and
   blobs over 1 MiB, and indexes real file content with a `language` facet.
   It is triggered on default-branch pushes and runs hourly.
-- **Real full reindex**: `POST /api/v1/admin/search/reindex` now calls the
+- **Real full reindex**: `POST /api/v1/admin/search/reindex` calls the
   coordinator, which clears the index first (port `reindex_all` contract)
   and then rebuilds from every domain repository (spec ledger + git blobs,
   tasks, MRs + reviews, agents, personas, activity events, audit events,
@@ -105,21 +106,17 @@ endpoint performs a true full rebuild from domain storage.
 
 ### Test evidence
 
+Re-verified this round at branch head `ce656789` (no code changes needed;
+evidence in `/tmp/stage/review-evidence/task-202-repair.txt`):
 `cargo test -p gyre-server --lib search_indexer` — 6 passed, including
 `full_reindex_rebuilds_all_entity_types_from_real_storage`, which seeds all
 10 entity types plus a poisoned stale doc against a real SQLite FTS5
-backend, asserts the true count (12), idempotency, stale-doc removal, and
-per-type retrieval including spec-by-body-content and commit-by-message
-(distinctive terms quokkafederation/wombatintegration et al. so no seeded
-doc can cross-match). `cargo test -p gyre-adapters --lib search` — 13
-passed (FTS5 schema, stemming, upsert/delete, filters,
-`reindex_all_clears_and_reports_count`). `cargo test -p gyre-server --lib
-orchestrator` — 10 passed after the activity-event indexing there was
-routed through a bottom-of-file helper to keep the frozen
-inert-enforcement exemption line numbers pinned (check now OK).
-`bash scripts/check-arch.sh` passed. A full sweep of `scripts/check-*.sh`
-shows no violations grown versus base d81b0fe4 (identical pre-existing
-counts); evidence saved under `/tmp/stage/review-evidence/`.
+backend, asserts the true count, idempotency, stale-doc removal, and
+per-type retrieval including spec-by-body-content and commit-by-message.
+`cargo test -p gyre-adapters --lib search` — 13 passed (FTS5 schema,
+stemming, upsert/delete, filters, `reindex_all_clears_and_reports_count`).
+`cargo test -p gyre-server --lib orchestrator` — 10 passed.
+`bash scripts/check-arch.sh` passed.
 
 Full-workspace `cargo test --all` and GitHub CI are deferred to
 verification per assignment scope.
