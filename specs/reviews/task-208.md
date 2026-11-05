@@ -51,3 +51,18 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 35 (2026-10-07) — attribution clobber #34 at candidate `916c443c`
+
+Assigned base `2115ae23` (verifier-script-overlay fix, already merged at `0ce8a8f6` in round 33 — verified ancestor of the candidate). The tip commit `916c443c` ("process: record task-208 branch commits") has exactly one change (`git diff ec472acd 916c443c`): it rewrites `commits:` from the fully-attributed four-SHA list restored by the round-34 repair at parent `ec472acd` back to `["a11cbf7e", "98fd096e"]`, dropping `ad1121c5` (the round-1 F1 fix that regenerated `web/dist/` so the RustEmbed'd `SKIP_WEB_BUILD=1` artifact no longer ships the HSI-§12-forbidden my-stuff surface) and `ea006d52` (root `.gitattributes` whitespace-gate exemption). Both dropped SHAs are verified ancestors of the candidate (`git merge-base --is-ancestor`, exit 0 each), so product content is intact — only review scoping is damaged: per the AGENTS.md task-commit-attribution invariant, an unlisted commit is invisible to the verifier, and at this candidate the F1 dist-regen fix is unscoped. Same documented class as clobbers 2–33; the checkpoint attribution pass (`dev-attribution.py`) and the in-repo gate (`scripts/check-task-commit-attribution.sh`, product-surface regex `^(crates/|web/src|web/tests)` at line ~114) share the `web/dist/`/root-`.gitattributes` blind spot.
+
+All product acceptance criteria independently re-verified green at this exact candidate with fresh executable probes:
+
+- Dead-code grep (`get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs` over `crates/` + `web/src/`) → zero matches.
+- Routes and ABAC registrations for `/api/v1/users/me/{agents,tasks,mrs}` absent from `api/mod.rs` / `abac_middleware.rs`; remaining `users/me/*` endpoints keep their per-handler-auth ABAC-exempt model (resolver entry for `/api/v1/users/me`, exempt `/me/notifications`; handlers retain caller + cross-tenant Forbidden guards).
+- Router 404 regression test `my_stuff_endpoints_are_removed` present (`users.rs:948`), source-inspected genuine (real `app().oneshot` requests with a bearer token asserting `StatusCode::NOT_FOUND` on all three URIs); executed fresh: `cargo test -p gyre-server my_stuff_endpoints_are_removed` → `api::users::tests::my_stuff_endpoints_are_removed ... ok`, 1 passed / 0 failed.
+- Committed dist (`web/dist/assets/index-CT5URoV_.js`) clean of forbidden identifiers (`my-agents|my-tasks|my-mrs|users/me/agents|users/me/tasks|users/me/mrs` → zero matches); kept-surface identifiers (`users/me/tokens`, `users/me/judgments`) present.
+- Spec amendment and coverage matrices intact: `user-management.md` §"My Stuff" supersession recorded, M22.8 row struck, coverage row 22 → `n/a`, HSI row 54 → `implemented`.
+- Fresh `npm ci` + `npx vitest run src/__tests__/UserProfile.test.js` → 23/23 passed.
+
+Verdict: **needs-revision** — one process finding (attribution clobber #34; repair is mechanical frontmatter restoration of the four-SHA list at a new tip, product untouched). Verifier must still run `cargo test --all` and `cd web && npm test`. Evidence: `/tmp/stage/review-evidence/task-208-round35-review.txt` (with `-clobber-diff.txt`, `-ancestry.txt`, `-cargo-test.txt`, `-userprofile-test.txt`).
