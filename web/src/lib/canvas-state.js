@@ -11,7 +11,14 @@
  *
  * Emits: selected_node, zoom_level, visible_tree_groups, active_filter,
  * active_lens, active_query, recent_interactions. Tolerates inputs that are
- * already partially normalized (snake_case keys win over camelCase).
+ * already partially normalized (snake_case-only inputs pass through).
+ *
+ * `zoom_level` resolution: the live camelCase `zoom` (kept fresh by the
+ * canvas component on every canvasState write) wins over a `zoom_level`
+ * snapshot, which is only as fresh as whatever last wrote it (e.g. a lens
+ * toggle) and can contradict the zoom levels reported in
+ * recent_interactions. Inputs carrying only `zoom_level` (already
+ * normalized) still pass through unchanged.
  *
  * @param {object|null|undefined} cs - internal canvas state
  * @returns {object} wire-format canvas state (always safe to JSON.stringify)
@@ -26,9 +33,9 @@ export function toWireCanvasState(cs) {
   }
   const sel = cs.selectedNode ?? cs.selected_node ?? null;
   const wire = {
-    zoom_level: typeof cs.zoom_level === 'number'
-      ? cs.zoom_level
-      : (typeof cs.zoom === 'number' ? cs.zoom : 1),
+    zoom_level: typeof cs.zoom === 'number'
+      ? cs.zoom
+      : (typeof cs.zoom_level === 'number' ? cs.zoom_level : 1),
     visible_tree_groups: Array.isArray(cs.visible_tree_groups)
       ? cs.visible_tree_groups
       : (Array.isArray(cs.visibleGroups) ? cs.visibleGroups : []),

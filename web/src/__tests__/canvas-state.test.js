@@ -62,9 +62,25 @@ describe('toWireCanvasState (§10 wire format)', () => {
     expect(wire.selected_node).toEqual({ id: 'n1', name: 'Foo', node_type: '', qualified_name: null });
   });
 
-  it('prefers explicit zoom_level over legacy zoom and defaults missing values', () => {
-    const wire = toWireCanvasState({ zoom_level: 4.2, zoom: 1 });
-    expect(wire.zoom_level).toBe(4.2);
+  it('prefers the live zoom over a stale zoom_level snapshot (round-4 staleness)', () => {
+    // Regression guard: syncCanvasState() used to snapshot zoom_level only on
+    // lens toggles, while the zoom $effect kept `zoom` fresh. Preferring the
+    // snapshot sent contradictory data to the agent: canvas_state.zoom_level
+    // 1.0 alongside recent_interactions { zoom_in, to_level: 3.0 }.
+    const cs = {
+      zoom_level: 1, // snapshot from an earlier lens toggle - stale
+      zoom: 3, // live, kept fresh by the canvas zoom-sync effect
+      recent_interactions: [{ action: 'zoom_in', to_level: 3, base_level: 1 }],
+    };
+    const wire = toWireCanvasState(cs);
+    expect(wire.zoom_level).toBe(3);
+    // The wire zoom must agree with what the interaction trail reports.
+    expect(wire.zoom_level).toBe(wire.recent_interactions[0].to_level);
+  });
+
+  it('honors zoom_level for already-normalized inputs and defaults missing values', () => {
+    // Snake-only normalized input (e.g. server round-trip) has no live zoom.
+    expect(toWireCanvasState({ zoom_level: 4.2 }).zoom_level).toBe(4.2);
     expect(toWireCanvasState({}).zoom_level).toBe(1);
     expect(toWireCanvasState(null).zoom_level).toBe(1);
     expect(toWireCanvasState(null).visible_tree_groups).toEqual([]);

@@ -772,17 +772,16 @@
   // Keep canvasState enriched with active filter, lens, and visible tree groups
   // so the LLM receives full context about what the user is looking at.
   // Deferred to avoid errors during initial mount (test environments).
+  // zoom_level and visible_tree_groups are NOT snapshotted here: they go stale
+  // between lens toggles. They are owned by the reactive sync effects below
+  // (zoom $effect / visible-tree-groups $effect), and toWireCanvasState()
+  // prefers the live `zoom` over any snapshot.
   function syncCanvasState() {
     try {
-      const visibleGroups = (rootLayoutNodes ?? [])
-        .filter(ln => ln.kind === 'tree-group' && ln.treeNode?.label)
-        .map(ln => ln.treeNode.label);
       canvasState = {
         ...canvasState,
         active_filter: filter,
         active_lens: lens,
-        visible_tree_groups: visibleGroups,
-        zoom_level: cam.zoom,
         recent_interactions: recentInteractions,
       };
     } catch { /* ignore during init */ }
@@ -4970,6 +4969,28 @@
   $effect(() => {
     if (Math.abs(cam.zoom - (canvasState.zoom ?? 1)) > 0.01) {
       canvasState = { ...canvasState, zoom: cam.zoom };
+    }
+  });
+
+  // Keep canvasState.visible_tree_groups fresh (§10 interaction context).
+  // rootLayoutNodes changes on data reloads, layout-mode switches and drill
+  // navigation; snapshotting the groups only on lens change (the old
+  // syncCanvasState behavior) sent stale groups to the agent. The guard only
+  // writes when the list actually changed, so the effect settles.
+  $effect(() => {
+    const groups = (rootLayoutNodes ?? [])
+      .filter(ln => ln.kind === 'tree-group' && ln.treeNode?.label)
+      .map(ln => ln.treeNode.label);
+    const current = canvasState.visible_tree_groups;
+    const same = Array.isArray(current)
+      && current.length === groups.length
+      && current.every((g, i) => g === groups[i]);
+    if (!same) {
+      canvasState = {
+        ...canvasState,
+        visible_tree_groups: groups,
+        visibleGroups: groups,
+      };
     }
   });
 
