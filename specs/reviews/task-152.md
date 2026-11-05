@@ -57,3 +57,54 @@ Round-2 verdict: the fix is strictly better than the old gate — removes all fa
 - LLM-synthesized briefing architecture narrative over grounded delta facts (prompt-template + model-config aware, 10s-bounded) with template narratives as the quality floor on every failure mode.
 - Docs: api-reference timeline/briefing rows corrected to the shipped response shapes.
 - Gate repair: template-substitution gate's const-span swallowed the next const's `/// Variables:` doc block (7 false positives on pristine main, pre-commit-only so CI never saw it); fixed by comment-stripping the span, proven non-blinding by planted-bug probes for both true-positive classes.
+
+## Round 3 of pipeline attempt 7dfee652 (candidate `6667f594`, base `d81b0fe4`)
+
+Independent re-review of the recovered-checkpoint candidate (single product commit
+`9d918c25` squashed from the pipeline branch; `6667f594` records the `commits:` list).
+All probes run live this round on the exact candidate tree (`CARGO_TARGET_DIR=/tmp/gyre-review-target`,
+logs under `/tmp/stage/review-evidence/r8-*.log`); the empty resume artifact from the
+interrupted prior attempt was discarded and nothing reused.
+
+- **Tree integrity**: no merge-conflict markers anywhere in the tree (the earlier
+  `f3efccbe` unresolved-conflict class is absent); `git status` clean; acceptance
+  checkboxes remain in their assigned unchecked state (the round-3 contract finding
+  is not re-introduced).
+- **Domain**: `cargo test -p gyre-domain --lib narrative` → 15 passed, 0 failed.
+- **Server narrative/briefing**: `cargo test -p gyre-server --lib -- narrative briefing`
+  → 22 passed, 0 failed (incl. `timeline_endpoint_returns_grounded_narrative`,
+  both briefing narrative tests, 4 MCP briefing parity tests).
+- **Extraction**: `cargo test -p gyre-server --lib graph_extraction` → 23 passed
+  (incl. `compact_delta_records_true_removed_edge_count` driving the real pipeline
+  over a real bare git repo, and both `edge_entry_*` tests).
+- **Session registry**: `cargo test -p gyre-server --lib session_registry` → 4 passed.
+- **Discrimination (mutation probe)**: `generate_template_narrative` disabled
+  (early `return String::new()`) → 10/15 domain tests fail AND both template-dependent
+  server tests fail (`timeline_endpoint_returns_grounded_narrative`,
+  `briefing_summary_falls_back_to_template_narrative_without_llm`); only the
+  empty-delta/facts-json tests and the LLM-path (echo-mock) test survive, exactly the
+  set that does not depend on template rendering. The suite is not self-confirming.
+  File restored; tree verified byte-identical to `6667f594` afterwards.
+- **Gates**: check-arch (gyre-domain pure, no LLM-port import), byte-slice-truncation
+  (exemption list correctly reduced, no new entries), task-commit-attribution, and
+  template-substitution all exit 0. Non-blinding probes on the candidate-modified
+  template-substitution gate: rogue `{{rogue_var}}` planted in
+  `PROMPT_GRAPH_NARRATIVE`'s value → exit 1; dropped `.replace("{{facts}}", ...)`
+  at the `llm_architecture_narrative` call site → exit 1. Both planted-bug classes caught.
+- **Transport gap closed**: this runtime's TCP listener probe now succeeds
+  (`/tmp/stage/capabilities.json`), so the previously-deferred
+  `cargo test -p gyre-server --test explorer_ws_integration` was run on the exact
+  candidate: **8 passed, 0 failed**, including `explorer_ws_connect_and_list_views`
+  (the round-6 verification failure) and the new
+  `explorer_ws_session_limit_is_per_server_instance`. The per-`AppState`
+  `ExplorerSessionRegistry` fix is confirmed under the real WS transport, not just
+  structurally.
+
+Minor (non-blocking, unchanged from round 1): `get_graph_timeline` propagates a
+grounding-load failure as a 500 rather than degrading to ungrounded narratives
+(the briefing path tolerates the same failure with a warn + default grounding);
+real error propagation, same store backing `list_deltas`, not a §6 defect.
+
+Verdict: **complete** — every §6 acceptance criterion is satisfied by production
+code proven live this round; tests are discriminating; gates pass without
+weakening; the recovered checkpoint carries no merge debris.
