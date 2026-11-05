@@ -7,7 +7,7 @@ progress: not-started
 coverage_sections:
   - "lsp-call-graph.md §5 Per-Language Implementation (Rust)"
   - "lsp-call-graph.md §10 Implementation Phases (Phase 2)"
-commits: []
+commits: ["0ae61233004a471788036e6b923d51afcc147db2"]
 ---
 
 ## Spec Excerpt
