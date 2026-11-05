@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Built-In Personas"
-commits: ["646684f41e5bba33b803ed70825971874ee4f318", "5f5ab82a4eb3906a5493bf1d51a851281fa79d8b", "e27cc0dab572a10d96ead8578f72bfa1dd71409d", "151cf7d2fef662f87f0306ba70b8f3197fb41802", "fcb712c51c1f27b597e4a0cb798e63d7f341f6e9", "f16e969ce52622e8f6133deb60550d77dd7ed47e"]
+commits: ["1319006b9be7608ccf3d3b46aeeed8cd45c7c74b", "646684f41e5bba33b803ed70825971874ee4f318", "5f5ab82a4eb3906a5493bf1d51a851281fa79d8b", "e27cc0dab572a10d96ead8578f72bfa1dd71409d", "151cf7d2fef662f87f0306ba70b8f3197fb41802", "fcb712c51c1f27b597e4a0cb798e63d7f341f6e9", "f16e969ce52622e8f6133deb60550d77dd7ed47e"]
 ---
 
 ## Spec Excerpt
@@ -59,29 +59,32 @@ Built-in personas can be overridden at workspace or repo scope (with human appro
 
 ## Shipped
 
-Implemented in `151cf7d2` (domain defs + adapters + server seeding), `fcb712c5` (tenant-create hook), `f16e969c` (startup wiring), with the dual-source-of-truth defect repaired in `e27cc0da` (CLI bootstrap personas re-exported from `gyre_domain::BUILTIN_PERSONA_DEFS`; the CLI's four private prompt copies deleted — there is now exactly one definition of the built-in personas, embedded from `specs/personas/*.md`, shared by server seeding and `gyre bootstrap`).
+Built-in persona seeding implemented in `151cf7d2` (domain defs + adapters + server seeding), `fcb712c5` (tenant-create hook + `specs/personas/repo-orchestrator.md`), `f16e969c` (startup wiring), `e27cc0da` (single source of truth: CLI bootstrap re-exports `gyre_domain::BUILTIN_PERSONA_DEFS`), with verification repairs in `5f5ab82a` (rustfmt/digit-grouping on task-changed lines) and dist reverts in `63e2eeff`/`5945c0d5`.
 
-**Where things live:**
-- Domain: `BUILTIN_PERSONA_DEFS` + `builtin_personas(tenant_id, now)` in `crates/gyre-domain/src/workspace.rs` — four personas in spec-table order, prompts embedded via `include_str!("../../../specs/personas/<slug>.md")`, `content_hash` computed via `Persona::refresh_content_hash()` (SHA-256), `approval_status: Approved`, approved by the system user.
-- Server: `seed_builtin_personas` / `seed_builtin_personas_for_tenant` in `crates/gyre-server/src/lib.rs` — check-before-insert via `find_by_slug_and_scope` so existing/customized personas are never overwritten; idempotent across restarts.
-- Call sites: server startup (`crates/gyre-server/src/main.rs:55`, after migrations, before the listener bind), tenant creation (`crates/gyre-server/src/api/tenants.rs:80`, so every new tenant gets its own scoped copies), and the admin demo-seed path (caller-scoped).
-- CLI: `gyre bootstrap` registers the same four personas by re-exporting the domain defs (`crates/gyre-cli/src/bootstrap.rs`).
-- `specs/personas/repo-orchestrator.md` exists (created by `fcb712c5`; required by the spec table).
+### What ships
 
-**Verification (focused probes, re-run green at merged tree `6fd54cc0` = candidate `9cce476c` + base `73a31e0b`; the base merge brought only foreign spec files, no code):**
-- `cargo test -p gyre-domain --lib builtin` — 2 passed (spec-table coverage, pre-approved tenant scope, independently recomputed SHA-256 hashes)
-- `cargo test -p gyre-adapters --lib sqlite::workspace::persona` — 2 passed (round-trip through SQLite, slug+scope lookup for idempotent reseed)
-- `cargo test -p gyre-server --lib seed_builtin_personas` — 3 passed (creates four + idempotent, scoped to own tenant, preserves existing) — this re-run is the interaction probe for task-189's persona scope-resolution changes (`f4acb4eb`, landed after the original green run at `e27cc0da`)
-- `cargo test -p gyre-server --lib create_tenant_seeds` — 1 passed (tenant-create hook seeds through the real router)
-- `cargo test -p gyre-cli --bin gyre bootstrap` — 15 passed (incl. `builtin_personas_are_the_domain_seed_definitions`: pointer-equality with `gyre_domain::BUILTIN_PERSONA_DEFS`, making the single source of truth mechanical)
-- Mechanical gates at `6fd54cc0`: `check-task-commit-attribution.sh`, `check-arch.sh`, `check-mem-port-contracts.sh`, `check-scope-literal-defaults.sh`, `check-fabricated-scope-defaults.sh`, `check-in-memory-state-stores.sh`, `check-forged-scope-fields.sh`, `check-relative-path-defaults.sh`, `check-byte-slice-truncation.sh`, `check-inert-enforcement.sh` — all exit 0; coverage SUMMARY.md in sync. (`check-early-return-side-effects.sh` errors on mawk in this sandbox — gawk-only `\s` regex, script untouched by task-140, not invoked by CI — environmental, pre-existing.)
-- Evidence: `/tmp/stage/review-evidence/probe-all-final.log` (tree SHA, per-suite output, exit codes).
+- Domain: `BUILTIN_PERSONA_DEFS` + `builtin_personas(tenant_id, now)` in `crates/gyre-domain/src/workspace.rs` — the four spec-table personas (`workspace-orchestrator`, `repo-orchestrator`, `accountability`, `security`), prompts embedded via `include_str!("../../../specs/personas/<slug>.md")`, `content_hash` = SHA-256 via `Persona::refresh_content_hash()`, `approval_status: Approved`, approved by the system user, `version: 1`.
+- Server: `seed_builtin_personas` / `seed_builtin_personas_for_tenant` in `crates/gyre-server/src/lib.rs` — check-before-insert via `find_by_slug_and_scope`, so existing/customized personas are never overwritten and seeding is idempotent across restarts.
+- Call sites: server startup (`crates/gyre-server/src/main.rs:55`, after migrations), tenant creation (`crates/gyre-server/src/api/tenants.rs`, every new tenant gets its own scoped copies), and the admin demo-seed path.
+- CLI: `gyre bootstrap` registers the same four personas from the domain defs (pointer-equality test makes the single source of truth mechanical).
 
-**Sandbox restriction:** TCP listeners are unsupported in this sandbox (errno 95, `/tmp/stage/capabilities.json`), so the live startup path could not be exercised over HTTP; it is verified via the `main.rs:55` wiring plus the router-level tests above. Live HTTP verification belongs to host verification/CI.
+### Repairs on this branch
 
-**Contract repair (finding 763d5ad1):** checkpoint `19969af2` had committed a `## Verification Repair (finding 41db4f79)` ledger section into this task file; that heading is not in the pipeline's operational-section strip list (`scripts/dev-contract.py` `requirement_parts`: Shipped / Implementation Notes / Implementation Log / Review), so it registered as an assignment-contract amendment and filed the contract repair. The section is deleted — the task file is now byte-identical to the assigned contract. The underlying dist repair is durably recorded in the `63e2eeff` / `5945c0d5` commit messages (web/dist reverted to main's committed state after checkpoint `ba5227a7` swept regenerated bundles into the branch); no verifier, exemption, or test was touched. Coverage row 13 (platform-model.md §Built-In Personas) is updated to `implemented` with code evidence, SUMMARY.md regenerated.
+- **Finding 1aa47b6a** (`rate_limit_exhaustion_returns_429` returned 200): the 429 exhaustion test raced the wall clock across a second boundary, refilling the bucket mid-test. Fixed in `646684f4` by injecting a frozen clock (`RateLimiter::with_clock`) into `rate_limited_app`, plus a `refills_to_full_rate_on_new_second` test with a scripted clock exercising the refill deterministically.
+- **Finding cdd23225** (review): that same `646684f4` checkpoint committed the refill test without compiling it — the `move` closure took ownership of the `AtomicU64` tick, so the later `tick.store(...)` was error E0382, blocking the entire gyre-server lib test target. Fixed in `1319006b`: the tick is shared via `Arc<AtomicU64>` (clone captured by the closure); the test compiles, is rustfmt-clean, and passes.
+- **Finding 93ef2291** (verification gate): rustfmt/clippy failures on four task-changed lines — fixed in `5f5ab82a`, formatting only.
+- **Finding 763d5ad1** (contract): a stray `## Verification Repair` ledger section in this task file was deleted; the task file matches the assigned contract (operational content lives in this Shipped section).
 
-**Verification repair (finding 93ef2291):** the verification gate (`check-rustfmt-diff.py` + `check-clippy-diff.py`) failed on four task-140 changed lines: rustfmt wanted multi-line form for the `match storage.find_by_slug_and_scope(...)` line in `crates/gyre-adapters/src/sqlite/workspace.rs:630` and the `assert!(p.system_prompt.starts_with('#'), ...)` line in `crates/gyre-cli/src/bootstrap.rs:293`, and `clippy::inconsistent_digit_grouping` fired on `crates/gyre-domain/src/workspace.rs:356,364` (`1700_000_000` vs the codebase-wide `1_700_000_000` convention). Fixed in `5f5ab82a` — pure formatting/digit-grouping, zero behavior change. The branch's merge with base `75ada1c4` (confined to `specs/coverage/SUMMARY.md`) was resolved by regenerating the summary via `scripts/update-coverage-summary.sh`, so the TOTAL row is mechanically derived from the merged per-spec files (310 not-started / 110 implemented). Re-run at tree `5f5ab82a`: rustfmt gate clean (9 files), clippy gate clean (9 files), and the three affected suites green — `gyre-domain --lib builtin` 2 passed, `gyre-adapters --lib sqlite::workspace::persona` 2 passed, `gyre-cli --bin gyre bootstrap` 15 passed. Evidence: `/tmp/stage/review-evidence/gates.log`, `test-domain.log`, `test-adapters.log`, `test-cli.log`.
+### Test evidence (tree `1319006b`, this sandbox)
+
+- `cargo test -p gyre-server --lib` — **1260 passed, 0 failed** (full suite; proves the E0382 block is gone and no regression elsewhere).
+- Includes: `rate_limit::tests::refills_to_full_rate_on_new_second` ok, `middleware::tests::rate_limit_exhaustion_returns_429` ok (finding 1aa47b6a), `seed_builtin_personas_*` 3 ok, `create_tenant_seeds_builtin_personas` ok.
+- Prior rounds (documented in review history): `gyre-domain --lib builtin` 2 passed, `gyre-adapters --lib sqlite::workspace::persona` 2 passed, `gyre-cli --bin gyre bootstrap` 15 passed; mechanical gates (arch, attribution, mem-port-contracts, scope-literal, in-memory-state, forged-scope, relative-path, byte-slice, inert-enforcement) all exit 0.
+- Evidence logs: `/tmp/stage/review-evidence/test-server-lib-full.log`, `test-server-rate-limit.log`, `test-server-seed.log`, `test-server-tenant-create.log`.
+
+### Sandbox restrictions
+
+TCP listeners are unsupported in this sandbox (errno 95, `/tmp/stage/capabilities.json`), so the live startup path is verified via the `main.rs:55` wiring plus the router-level tests; live HTTP verification belongs to host verification/CI. Heavy builds on this sandbox's slow disk also made the `tirith` pre-tool hook time out intermittently during this round — environmental, no code impact.
 
 ## Agent Instructions
 
