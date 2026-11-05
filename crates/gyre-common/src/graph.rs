@@ -269,18 +269,17 @@ impl ConceptView {
     /// Project `nodes`/`edges` through this concept view (realized-model.md §4).
     ///
     /// A node is included when it matches ANY include rule (union):
-    /// - `include_types`    — Type/Class/Enum nodes glob-matched on `name`
-    ///                        and `qualified_name`.
-    /// - `include_traits`   — Trait/Interface nodes glob-matched on `name`
-    ///                        and `qualified_name`.
-    /// - `include_modules`  — Module/Package nodes glob-matched on
-    ///                        `qualified_name` (e.g. `*::merge*`).
-    /// - `include_endpoints`— Endpoint nodes glob-matched on the route path
-    ///                        (`name` then `qualified_name`).
-    /// - `include_specs`    — nodes whose `spec_path`/`spec_paths` (or a
-    ///                        `GovernedBy` edge to a spec node) references a
-    ///                        listed spec; the spec nodes themselves are
-    ///                        included too.
+    /// - `include_types` — Type/Class/Enum nodes glob-matched on `name` and
+    ///   `qualified_name`.
+    /// - `include_traits` — Trait/Interface nodes glob-matched on `name` and
+    ///   `qualified_name`.
+    /// - `include_modules` — Module/Package nodes glob-matched on
+    ///   `qualified_name` (e.g. `*::merge*`).
+    /// - `include_endpoints` — Endpoint nodes glob-matched on the route path
+    ///   (`name` then `qualified_name`).
+    /// - `include_specs` — nodes whose `spec_path`/`spec_paths` (or a
+    ///   `GovernedBy` edge to a spec node) references a listed spec; the spec
+    ///   nodes themselves are included too.
     ///
     /// Edges are included when both endpoints are in the matched node set.
     /// Soft-deleted nodes/edges (`deleted_at` set) are never included.
@@ -302,13 +301,13 @@ impl ConceptView {
         // - the spec node itself (name/qualified_name is the spec path), and
         // - every node governed by a listed spec (GovernedBy source), plus the
         //   GovernedBy target spec node.
-        let node_index: std::collections::HashMap<&str, &GraphNode> = all_nodes
+        let node_index: std::collections::HashMap<&str, &GraphNode> =
+            all_nodes.iter().map(|n| (n.id.as_str(), *n)).collect();
+        let mut spec_linked_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for e in all_edges
             .iter()
-            .map(|n| (n.id.as_str(), *n))
-            .collect();
-        let mut spec_linked_ids: std::collections::HashSet<&str> =
-            std::collections::HashSet::new();
-        for e in all_edges.iter().filter(|e| e.edge_type == EdgeType::GovernedBy) {
+            .filter(|e| e.edge_type == EdgeType::GovernedBy)
+        {
             if let Some(target) = node_index.get(e.target_id.as_str()) {
                 if self.spec_node_matches(target) {
                     spec_linked_ids.insert(e.target_id.as_str());
@@ -328,9 +327,7 @@ impl ConceptView {
 
         let matched: Vec<GraphNode> = all_nodes
             .into_iter()
-            .filter(|n| {
-                self.matches_node(n, &spec_linked_ids, &endpoint_routes)
-            })
+            .filter(|n| self.matches_node(n, &spec_linked_ids, &endpoint_routes))
             .cloned()
             .collect();
 
@@ -516,7 +513,12 @@ mod concept_tests {
             include_specs: vec!["identity-security.md".to_string()],
         };
 
-        let auth_type = node("r", "JwtAuthValidator", NodeType::Type, "crates::JwtAuthValidator");
+        let auth_type = node(
+            "r",
+            "JwtAuthValidator",
+            NodeType::Type,
+            "crates::JwtAuthValidator",
+        );
         let plain_type = node("r", "Invoice", NodeType::Type, "crates::Invoice");
         let auth_trait = node("r", "AuthProvider", NodeType::Trait, "crates::AuthProvider");
         let auth_module = node("r", "auth", NodeType::Module, "gyre_domain::auth::tokens");
@@ -526,7 +528,7 @@ mod concept_tests {
         let mut governed = governed;
         governed.spec_path = Some("specs/system/identity-security.md".to_string());
 
-        let nodes = vec![
+        let nodes = [
             auth_type.clone(),
             plain_type.clone(),
             auth_trait.clone(),
@@ -545,10 +547,22 @@ mod concept_tests {
         );
         let mut routes = routes;
         routes.metadata = Some(r#"{"path":"/api/v1/auth/login","method":"POST"}"#.to_string());
-        let edges = vec![
+        let edges = [
             routes,
-            edge("r", "e1", &auth_type.id.to_string(), &governed.id.to_string(), EdgeType::DependsOn),
-            edge("r", "e2", &plain_type.id.to_string(), &governed.id.to_string(), EdgeType::DependsOn),
+            edge(
+                "r",
+                "e1",
+                &auth_type.id.to_string(),
+                &governed.id.to_string(),
+                EdgeType::DependsOn,
+            ),
+            edge(
+                "r",
+                "e2",
+                &plain_type.id.to_string(),
+                &governed.id.to_string(),
+                EdgeType::DependsOn,
+            ),
         ];
 
         let (matched_nodes, matched_edges) = concept.project(nodes.iter(), edges.iter());
@@ -557,15 +571,20 @@ mod concept_tests {
         assert!(names.contains(&"JwtAuthValidator"), "type glob must match");
         assert!(names.contains(&"AuthProvider"), "trait glob must match");
         assert!(names.contains(&"auth"), "module glob must match");
-        assert!(!names.contains(&"billing"), "unrelated module must not match");
+        assert!(
+            !names.contains(&"billing"),
+            "unrelated module must not match"
+        );
         assert!(names.contains(&"login"), "endpoint glob must match");
-        assert!(names.contains(&"TokenStore"), "spec-governed node must match");
+        assert!(
+            names.contains(&"TokenStore"),
+            "spec-governed node must match"
+        );
         assert!(!names.contains(&"Invoice"), "unrelated type must not match");
 
         // e0 (endpoint→type) and e1 (type→governed) have both endpoints
         // matched; e2 has one unmatched endpoint.
-        let mut matched_edge_ids: Vec<&str> =
-            matched_edges.iter().map(|e| e.id.as_str()).collect();
+        let mut matched_edge_ids: Vec<&str> = matched_edges.iter().map(|e| e.id.as_str()).collect();
         matched_edge_ids.sort_unstable();
         assert_eq!(matched_edge_ids, vec!["e0", "e1"]);
     }
@@ -583,10 +602,15 @@ mod concept_tests {
         };
         // Spec node named by path (extractor convention: Module node whose
         // name/qualified_name is the spec path).
-        let spec_node = node("r", "specs/system/abac-policy-engine.md", NodeType::Module, "specs/system/abac-policy-engine.md");
+        let spec_node = node(
+            "r",
+            "specs/system/abac-policy-engine.md",
+            NodeType::Module,
+            "specs/system/abac-policy-engine.md",
+        );
         let code = node("r", "PolicyEngine", NodeType::Type, "crates::PolicyEngine");
-        let nodes = vec![spec_node.clone(), code.clone()];
-        let edges = vec![edge(
+        let nodes = [spec_node.clone(), code.clone()];
+        let edges = [edge(
             "r",
             "e1",
             &code.id.to_string(),
@@ -597,7 +621,10 @@ mod concept_tests {
         let (matched, _) = concept.project(nodes.iter(), edges.iter());
         // The code node is the GovernedBy source; the spec node is the target.
         let ids: Vec<&str> = matched.iter().map(|n| n.id.as_str()).collect();
-        assert!(ids.contains(&spec_node.id.as_str()), "spec node must be included");
+        assert!(
+            ids.contains(&spec_node.id.as_str()),
+            "spec node must be included"
+        );
         assert!(
             ids.contains(&code.id.as_str()),
             "node governed by listed spec must be included"
@@ -618,7 +645,7 @@ mod concept_tests {
         let mut deleted = node("r", "DeletedType", NodeType::Type, "crates::DeletedType");
         deleted.deleted_at = Some(1);
         let active = node("r", "ActiveType", NodeType::Type, "crates::ActiveType");
-        let nodes = vec![deleted, active];
+        let nodes = [deleted, active];
         let (matched, _) = concept.project(nodes.iter(), std::iter::empty());
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].name, "ActiveType");

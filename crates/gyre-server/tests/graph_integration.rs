@@ -422,7 +422,9 @@ async fn test_graph_concept() {
 
     // A name that is not a defined concept must 404, not substring-match.
     let resp404 = ctx
-        .get(&format!("/api/v1/repos/{repo_id}/graph/concept/not-a-concept"))
+        .get(&format!(
+            "/api/v1/repos/{repo_id}/graph/concept/not-a-concept"
+        ))
         .await;
     assert_eq!(resp404.status(), 404);
 }

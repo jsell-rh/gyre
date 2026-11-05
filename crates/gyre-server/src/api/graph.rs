@@ -678,7 +678,10 @@ pub async fn assemble_workspace_concept_projection(
 /// `specs/manifest.yaml` at its default branch. Returns `None` when the repo
 /// has no manifest, the manifest is unparseable, or no concept with that
 /// name is defined.
-async fn resolve_concept_view(repo: &gyre_domain::Repository, concept_name: &str) -> Option<gyre_common::graph::ConceptView> {
+async fn resolve_concept_view(
+    repo: &gyre_domain::Repository,
+    concept_name: &str,
+) -> Option<gyre_common::graph::ConceptView> {
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
     let yaml = crate::spec_registry::read_git_file(
         &git_bin,
@@ -2848,8 +2851,7 @@ concepts:
             &auth_type.id,
             EdgeType::RoutesTo,
         );
-        route_edge.metadata =
-            Some(r#"{"path":"/api/v1/auth/login","method":"POST"}"#.to_string());
+        route_edge.metadata = Some(r#"{"path":"/api/v1/auth/login","method":"POST"}"#.to_string());
         state.graph_store.create_edge(route_edge).await.unwrap();
     }
 
@@ -2860,7 +2862,12 @@ concepts:
         let (_tmp, repo_path) = init_manifest_repo(AUTH_CONCEPT_MANIFEST);
 
         // Point the repo at the real git checkout so the manifest resolves.
-        let repo = state.repos.find_by_id(&Id::new(&repo_id)).await.unwrap().unwrap();
+        let repo = state
+            .repos
+            .find_by_id(&Id::new(&repo_id))
+            .await
+            .unwrap()
+            .unwrap();
         let mut repo = repo;
         repo.path = repo_path;
         state.repos.update(&repo).await.unwrap();
@@ -2918,7 +2925,12 @@ concepts:
         let (_ws_id, repo_id) = setup_workspace_and_repo(&state).await;
         let (tmp, repo_path) = init_manifest_repo(AUTH_CONCEPT_MANIFEST);
 
-        let repo = state.repos.find_by_id(&Id::new(&repo_id)).await.unwrap().unwrap();
+        let repo = state
+            .repos
+            .find_by_id(&Id::new(&repo_id))
+            .await
+            .unwrap()
+            .unwrap();
         let mut repo = repo;
         repo.path = repo_path;
         state.repos.update(&repo).await.unwrap();
@@ -2955,7 +2967,9 @@ concepts:
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!("/api/v1/repos/{repo_id}/graph/concept/Authentication"))
+                    .uri(format!(
+                        "/api/v1/repos/{repo_id}/graph/concept/Authentication"
+                    ))
                     .header("Authorization", auth())
                     .body(Body::empty())
                     .unwrap(),
@@ -2972,7 +2986,12 @@ concepts:
         let (tmp, repo_path) = init_manifest_repo(AUTH_CONCEPT_MANIFEST);
 
         // repo-1 gets a real manifest checkout + concept nodes.
-        let repo = state.repos.find_by_id(&Id::new("repo-1")).await.unwrap().unwrap();
+        let repo = state
+            .repos
+            .find_by_id(&Id::new("repo-1"))
+            .await
+            .unwrap()
+            .unwrap();
         let mut repo = repo;
         repo.path = repo_path;
         state.repos.update(&repo).await.unwrap();
@@ -3007,7 +3026,9 @@ specs:
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(format!("/api/v1/workspaces/{ws_id}/graph/concept/Authentication"))
+                    .uri(format!(
+                        "/api/v1/workspaces/{ws_id}/graph/concept/Authentication"
+                    ))
                     .header("Authorization", auth())
                     .body(Body::empty())
                     .unwrap(),

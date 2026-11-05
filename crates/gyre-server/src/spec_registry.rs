@@ -1211,7 +1211,10 @@ concepts:
 
         let auth = &m.concepts[0];
         assert_eq!(auth.name, "Authentication");
-        assert_eq!(auth.description, "Token validation, RBAC, ABAC, JWT handling");
+        assert_eq!(
+            auth.description,
+            "Token validation, RBAC, ABAC, JWT handling"
+        );
         let view = gyre_common::graph::ConceptView::from(auth);
         assert_eq!(
             view.include_types,
@@ -1219,7 +1222,10 @@ concepts:
         );
         assert_eq!(view.include_traits, vec!["*Auth*"]);
         assert_eq!(view.include_modules, vec!["*::auth*", "*::identity*"]);
-        assert_eq!(view.include_endpoints, vec!["/api/v1/auth/*", "/.well-known/*"]);
+        assert_eq!(
+            view.include_endpoints,
+            vec!["/api/v1/auth/*", "/.well-known/*"]
+        );
         assert_eq!(
             view.include_specs,
             vec!["identity-security.md", "abac-policy-engine.md"]
