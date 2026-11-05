@@ -373,6 +373,45 @@ mod tests {
         assert!(detect_all_languages(dir.path()).is_empty());
     }
 
+    #[test]
+    fn detect_all_languages_typescript_markers() {
+        // The TypeScript extractor is selected by either marker named in
+        // task-075: a root tsconfig.json, or a package.json (root or one
+        // level down, for frontend-in-a-subdir monorepos).
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("tsconfig.json"), "{}").unwrap();
+        assert_eq!(
+            detect_all_languages(dir.path()),
+            vec![Language::TypeScript],
+            "tsconfig.json alone must select the TypeScript Pass 2 extractor"
+        );
+
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"x","devDependencies":{"typescript":"^5.0.0"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            detect_all_languages(dir.path()),
+            vec![Language::TypeScript],
+            "package.json with a TypeScript dependency must select the TypeScript extractor"
+        );
+
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("frontend")).unwrap();
+        std::fs::write(
+            dir.path().join("frontend").join("package.json"),
+            "{\"name\":\"web\"}",
+        )
+        .unwrap();
+        assert_eq!(
+            detect_all_languages(dir.path()),
+            vec![Language::TypeScript],
+            "a package.json one level down (frontend monorepo layout) must select the TypeScript extractor"
+        );
+    }
+
     /// Build a raw Pass 2 qualified name the way `scripts/go-callgraph`
     /// (`golang.org/x/tools/go/callgraph/cha`) does: import path
     /// (module + directory) + `.` + `Type.Method` or `func`.
