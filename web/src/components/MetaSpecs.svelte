@@ -347,6 +347,9 @@
   let wsMetaSpecs       = $state([]);   // all kinds, not just personas
   let selectedMsId      = $state('');
   let selectedMsContent = $state('');
+  // Published prompt of the selected meta-spec — the baseline the locked
+  // editor diffs pending changes against during a preview (§9 State 2).
+  let selectedMsBaseline = $state('');
 
   let targetSpecs       = $state([]);
 
@@ -368,6 +371,7 @@
       if (wsMetaSpecs.length > 0 && !selectedMsId) {
         selectedMsId = wsMetaSpecs[0].id;
         selectedMsContent = wsMetaSpecs[0].prompt || '';
+        selectedMsBaseline = wsMetaSpecs[0].prompt || '';
       }
       targetSpecs = Array.isArray(sp)
         ? sp.filter(s => !s.kind || !s.kind.startsWith('meta:'))
@@ -382,6 +386,7 @@
     selectedMsId = id;
     const ms = wsMetaSpecs.find(m => m.id === id);
     selectedMsContent = ms?.prompt || '';
+    selectedMsBaseline = ms?.prompt || '';
   }
 
   async function publish() {
@@ -477,6 +482,7 @@
             context="meta-spec"
             workspaceId={workspaceId}
             targetSpecs={targetSpecs}
+            baselineContent={selectedMsBaseline}
             onpublish={publish}
             onPreviewStateChange={(s) => (msLocked = s === 'preview_running')}
           />

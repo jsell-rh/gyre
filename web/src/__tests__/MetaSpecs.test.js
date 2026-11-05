@@ -1194,6 +1194,67 @@ describe('MetaSpecs -- workspace scope', () => {
     const select = await findByLabelText('Persona');
     expect(select.disabled).toBe(true);
   });
+
+  it('locked editor shows the diff of pending changes vs the published prompt (§9 State 2)', async () => {
+    vi.useFakeTimers();
+    api.previewPersona.mockResolvedValue(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
+    api.previewPersonaStatus.mockResolvedValue(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
+
+    const { findByText, findByTestId, queryByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+
+    // Edit the draft beyond the published registry prompt (persona-1).
+    const textarea = await findByTestId('editor-split-textarea');
+    await fireEvent.input(textarea, {
+      target: { value: 'You are a backend developer focused on Rust.\nHandle all errors with Result<T, E>.' },
+    });
+
+    await fireEvent.click(await findByText('Select All'));
+    await fireEvent.click(await findByTestId('preview-btn'));
+
+    // Editor locked, showing the pending change marked with '+' — the §9
+    // State 2 wireframe's "+ Handle all errors..." line.
+    const locked = await findByTestId('editor-locked');
+    expect(locked).toBeTruthy();
+    expect(queryByTestId('editor-split-textarea')).toBeNull();
+    const diff = await findByTestId('locked-diff');
+    const addLine = diff.querySelector('.locked-diff-add .locked-diff-text');
+    expect(addLine.textContent).toBe('Handle all errors with Result<T, E>.');
+    expect(diff.querySelector('.locked-diff-add .locked-diff-marker').textContent).toBe('+');
+    // The unchanged published prompt stays as context
+    const ctxLine = diff.querySelector('.locked-diff-context .locked-diff-text');
+    expect(ctxLine.textContent).toBe('You are a backend developer focused on Rust.');
+    expect(screen.getByTestId('locked-diff-summary').textContent).toBe('+1 -0');
+  });
+
+  it('locked editor falls back to the verbatim draft when the meta-spec has no stored prompt', async () => {
+    vi.useFakeTimers();
+    api.getMetaSpecs.mockResolvedValue([
+      { ...mockPersonas[0], prompt: '' },
+    ]);
+    api.previewPersona.mockResolvedValue(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
+    api.previewPersonaStatus.mockResolvedValue(
+      realPreviewShape('running', [{ path: 'specs/payment/retry.md', status: 'running' }]),
+    );
+
+    const { findByText, findByTestId, queryByTestId } = render(MetaSpecs, { props: { scope: 'workspace', workspaceId: 'ws-1' } });
+    await fireEvent.input(await findByTestId('editor-split-textarea'), {
+      target: { value: 'Draft with no baseline.' },
+    });
+    await fireEvent.click(await findByText('Select All'));
+    await fireEvent.click(await findByTestId('preview-btn'));
+
+    const locked = await findByTestId('editor-locked');
+    expect(locked).toBeTruthy();
+    // Empty baseline → no diff markers, verbatim draft
+    expect(queryByTestId('locked-diff')).toBeNull();
+    expect(locked.textContent).toContain('Draft with no baseline.');
+  });
 });
 
 // ─── Repo scope ───────────────────────────────────────────────────────────────

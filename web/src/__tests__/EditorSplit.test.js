@@ -672,6 +672,89 @@ describe('EditorSplit', () => {
     });
   });
 
+  // ── Locked-editor pending-changes diff (§9 State 2 "shows diff of changes") ──
+
+  it('locked editor shows the diff of pending changes against the baseline while a preview runs', async () => {
+    const { api } = await import('../lib/api.js');
+    api.thoroughPreview.mockResolvedValueOnce({ task_id: 'task-diff-1' });
+    api.taskStatus.mockResolvedValue({ status: 'running' });
+    render(EditorSplit, {
+      props: {
+        content: '# Persona\nHandle all errors with Result<T, E>.\nBe terse.',
+        baselineContent: '# Persona\nBe terse.',
+        repoId: 'repo-1',
+        specPath: 'specs/auth.md',
+      },
+    });
+    await fireEvent.click(await screen.findByTestId('preview-btn'));
+    await waitFor(() => expect(screen.getByTestId('editor-locked')).toBeTruthy());
+    // Diff view — not the verbatim draft
+    const diff = screen.getByTestId('locked-diff');
+    expect(diff).toBeTruthy();
+    // Context line unchanged, added line marked with '+' (§9 State 2 wireframe)
+    expect(diff.querySelector('.locked-diff-context .locked-diff-text').textContent).toBe('# Persona');
+    const addLine = diff.querySelector('.locked-diff-add .locked-diff-text');
+    expect(addLine.textContent).toBe('Handle all errors with Result<T, E>.');
+    expect(diff.querySelector('.locked-diff-add .locked-diff-marker').textContent).toBe('+');
+    // Summary counts the pending additions
+    expect(screen.getByTestId('locked-diff-summary').textContent).toBe('+1 -0');
+    // Locked: no textarea while the preview runs
+    expect(screen.queryByTestId('editor-split-textarea')).toBeNull();
+  });
+
+  it('locked editor marks removed baseline lines with "-"', async () => {
+    const { api } = await import('../lib/api.js');
+    api.thoroughPreview.mockResolvedValueOnce({ task_id: 'task-diff-2' });
+    api.taskStatus.mockResolvedValue({ status: 'running' });
+    render(EditorSplit, {
+      props: {
+        content: 'New body.',
+        baselineContent: 'Old body.',
+        repoId: 'repo-1',
+        specPath: 'specs/auth.md',
+      },
+    });
+    await fireEvent.click(await screen.findByTestId('preview-btn'));
+    await waitFor(() => expect(screen.getByTestId('locked-diff')).toBeTruthy());
+    const diff = screen.getByTestId('locked-diff');
+    expect(diff.querySelector('.locked-diff-remove .locked-diff-text').textContent).toBe('Old body.');
+    expect(diff.querySelector('.locked-diff-remove .locked-diff-marker').textContent).toBe('-');
+    expect(diff.querySelector('.locked-diff-add .locked-diff-text').textContent).toBe('New body.');
+    expect(screen.getByTestId('locked-diff-summary').textContent).toBe('+1 -1');
+  });
+
+  it('locked editor falls back to the verbatim draft when no baseline is provided', async () => {
+    const { api } = await import('../lib/api.js');
+    api.thoroughPreview.mockResolvedValueOnce({ task_id: 'task-diff-3' });
+    api.taskStatus.mockResolvedValue({ status: 'running' });
+    render(EditorSplit, {
+      props: { content: 'Just a draft.', repoId: 'repo-1', specPath: 'specs/auth.md' },
+    });
+    await fireEvent.click(await screen.findByTestId('preview-btn'));
+    await waitFor(() => expect(screen.getByTestId('editor-locked')).toBeTruthy());
+    // No baseline → verbatim draft, no diff markers
+    expect(screen.queryByTestId('locked-diff')).toBeNull();
+    expect(screen.getByTestId('editor-locked').textContent).toContain('Just a draft.');
+  });
+
+  it('locked editor shows no diff when the draft equals the baseline', async () => {
+    const { api } = await import('../lib/api.js');
+    api.thoroughPreview.mockResolvedValueOnce({ task_id: 'task-diff-4' });
+    api.taskStatus.mockResolvedValue({ status: 'running' });
+    render(EditorSplit, {
+      props: {
+        content: 'Unchanged draft.',
+        baselineContent: 'Unchanged draft.',
+        repoId: 'repo-1',
+        specPath: 'specs/auth.md',
+      },
+    });
+    await fireEvent.click(await screen.findByTestId('preview-btn'));
+    await waitFor(() => expect(screen.getByTestId('editor-locked')).toBeTruthy());
+    expect(screen.queryByTestId('locked-diff')).toBeNull();
+    expect(screen.getByTestId('editor-locked').textContent).toContain('Unchanged draft.');
+  });
+
   // ── LLM suggestion Accept / Edit / Dismiss (§3 steps 4-6) ──────────────────
 
   /** Build an SSE response body from (event, data) pairs, server format. */
