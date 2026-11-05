@@ -329,7 +329,14 @@ mod tests {
         // never an error -- Pass 2 is best-effort. PYRIGHT_LANGSERVER_BIN
         // pointing at a nonexistent path makes the skip deterministic
         // regardless of whether the host happens to have pyright on PATH.
+        // The ambient override is saved and restored: the sibling
+        // pyright_references_map_to_call_edges test resolves the real
+        // server through the same variable, and ENV_LOCK serializes but
+        // does not order the two tests -- deletion here would silently
+        // skip the real-chain test whenever this test happens to run
+        // first.
         let _guard = ENV_LOCK.lock().await;
+        let saved_bin = std::env::var("PYRIGHT_LANGSERVER_BIN").ok();
         let repo = tempfile::TempDir::new().unwrap();
         write_python_fixture(repo.path());
         std::env::set_var("PYRIGHT_LANGSERVER_BIN", "/nonexistent/pyright-langserver");
@@ -338,7 +345,10 @@ mod tests {
             .extract_call_edges(repo.path(), Language::Python)
             .await
             .expect("Pass 2 must never error");
-        std::env::remove_var("PYRIGHT_LANGSERVER_BIN");
+        match saved_bin {
+            Some(bin) => std::env::set_var("PYRIGHT_LANGSERVER_BIN", bin),
+            None => std::env::remove_var("PYRIGHT_LANGSERVER_BIN"),
+        }
         assert!(edges.is_empty());
     }
 
