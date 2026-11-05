@@ -73,7 +73,12 @@ Read `specs/system/source-control.md` §4 for the full spec. The jj adapter is i
 ## Shipped
 
 Automatic jj rebase on target branch movement (source-control.md §4),
-including the R2 review findings F6/F7/F8.
+including the R2 review findings F6/F7/F8. Behavior unchanged since
+round 5; round 6 verified the merge of base `110180fb` (created by the
+prior run, which died at the controller's pre-flight GitHub connectivity
+check before building it) — all task source is byte-identical to the
+round-5 verified HEAD `d25adcd1`, and the merged tree passes every
+focused probe.
 
 ### Behavior
 
@@ -116,21 +121,17 @@ including the R2 review findings F6/F7/F8.
 
 ### Test evidence
 
-Fresh run this round at HEAD `d25adcd1` (merge of base `8d0625df`
-resolved — spawn.rs test imports unioned, `test_state_with_jj_ops`
-repaired for the new secrets parameter), against real jj 0.39.0 built
-from crates.io `jj-cli --locked` (GitHub release-asset CDN unreachable
-from the sandbox). Logs + exit codes in
-`/tmp/stage/review-evidence/task-106-r5/`:
+Round 6 (merge verification) at HEAD `e2ab1893` — merge of base
+`110180fb` unioned with the task branch; the only overlapping file was
+`gyre-server/src/lib.rs` (upstream `store!` conversions for the search /
+dependency repositories), resolved as a union with the task's `jj_ops`
+wiring. All seven task-106 source files verified byte-identical to the
+round-5 real-jj-verified HEAD `d25adcd1`. Logs + exit codes in
+`/tmp/stage/review-evidence/task-106-r6/`:
 
-- `cargo test -p gyre-adapters jj` → 14/14 EXIT 0, incl.
-  `jj_rebase_clean_after_target_moves`, `jj_rebase_conflict_surfaces_files`,
-  `jj_rebase_b_moves_whole_stack`, `jj_resolve_list_exit_code_contract`,
-  `jj_workspace_add_resolves_branch_created_after_init`,
-  `jj_workspace_add_failure_cleans_half_created_dir`. Guard-skip
-  disambiguation recorded (with jj: 2.60s; without: 0.03s).
-- `cargo test -p gyre-server --lib merge_processor` → 57/57 EXIT 0,
-  incl. `merge_triggers_rebase_of_inflight_agents`,
+- `cargo check -p gyre-server --tests` → EXIT 0.
+- `cargo test -p gyre-server --lib merge_processor` → 57/57 EXIT 0, incl.
+  `merge_triggers_rebase_of_inflight_agents`,
   `rebase_destination_is_moved_target_branch_not_default`,
   `rebase_conflict_surfaces_as_state`, `rebase_skips_dead_agents`,
   `rebase_failure_does_not_consume_backoff_window`,
@@ -139,5 +140,25 @@ from the sandbox). Logs + exit codes in
   `post_merge_gate_failure_skips_inflight_rebase`.
 - `cargo test -p gyre-server --lib spawn` → 42/42 EXIT 0, incl.
   `spawn_absolutizes_legacy_relative_repo_path_for_jj_children`.
-- `cargo test -p gyre-server --lib` → 1254/1254 EXIT 0 (post-merge-repair
-  sanity); `cargo check -p gyre-server --tests` → EXIT 0.
+- `cargo test -p gyre-server --lib` → 1254/1254 EXIT 0 (post-merge
+  sanity; same count as round 5).
+- `cargo test -p gyre-server --test search_wiring --test
+  dependency_persistence` → 2/2 EXIT 0 (upstream tests the merge
+  brought in).
+- `cargo test -p gyre-adapters jj` → 14/14 EXIT 0 in 0.02s — **guard-
+  skip**: jj-cli could not be reinstalled this round
+  (static.crates.io/index.crates.io connection refused from the sandbox),
+  so these ran without the jj binary. The round-5 real-jj evidence
+  stands for the byte-identical adapter code: 14/14 against real
+  jj 0.39.0 (built from crates.io `jj-cli --locked` in that round),
+  incl. `jj_rebase_clean_after_target_moves`,
+  `jj_rebase_conflict_surfaces_files`, `jj_rebase_b_moves_whole_stack`,
+  `jj_resolve_list_exit_code_contract`,
+  `jj_workspace_add_resolves_branch_created_after_init`,
+  `jj_workspace_add_failure_cleans_half_created_dir`; guard-skip
+  disambiguation recorded then (with jj: 2.60s; without: 0.03s).
+
+All builds used `SKIP_WEB_BUILD=1` (documented Rust-only path, committed
+`web/dist/`): npm registry tarball fetches are blocked from this sandbox
+(EACCES), so build.rs `npm ci` cannot run here. Recorded as transport
+restrictions for remote verification, not code defects.
