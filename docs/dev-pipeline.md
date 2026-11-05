@@ -184,7 +184,9 @@ node scripts/loop-dashboard.mjs
 ```
 
 The browser cockpit listens on `http://127.0.0.1:7690` and remains connected to
-the same ledger. The terminal cockpit offers filtering, live logs, attempt
+the same ledger. Type a sandbox count (0–1000) in the header and press Enter or
+Apply; Escape cancels the edit. Zero drains new work. The +/− controls also remain
+available. The terminal cockpit offers filtering, live logs, attempt
 history, retry, and cancellation. Press `?` for keys; `q`/Ctrl-C detaches while
 workers continue. `serve --plain` selects text output. Stop the supervisor with Ctrl-C;
 already claimed stages finish independently. Restarting `serve` adopts their
