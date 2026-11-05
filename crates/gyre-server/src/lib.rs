@@ -318,6 +318,8 @@ pub struct AppState {
     pub spec_ledger: Arc<dyn gyre_ports::SpecLedgerRepository>,
     /// Spec approval event history (persisted).
     pub spec_approval_history: Arc<dyn gyre_ports::SpecApprovalEventRepository>,
+    /// Persisted spec assertion check results (system-explorer.md §9).
+    pub spec_assertion_results: Arc<dyn gyre_ports::SpecAssertionResultRepository>,
     /// Spec links graph: all inter-spec links from manifests (M22.3).
     pub spec_links_store: spec_registry::SpecLinksStore,
     /// Budget limits per entity: entity_key -> BudgetConfig (M22.2).
@@ -914,7 +916,10 @@ pub fn build_state(
             dyn NetworkPeerRepository,
             mem::MemNetworkPeerRepository::default()
         ),
-        dependencies: Arc::new(mem::MemDependencyRepository::default()),
+        dependencies: store!(
+            dyn DependencyRepository,
+            mem::MemDependencyRepository::default()
+        ),
         breaking_changes: Arc::new(mem::MemBreakingChangeRepository::default()),
         dependency_policies: Arc::new(mem::MemDependencyPolicyRepository::default()),
         rate_limiter: rate_limit::RateLimiter::new(rate_per_sec),
@@ -990,6 +995,10 @@ pub fn build_state(
             dyn SpecApprovalEventRepository,
             mem::MemSpecApprovalEventRepository::default()
         ),
+        spec_assertion_results: store!(
+            dyn gyre_ports::SpecAssertionResultRepository,
+            mem::MemSpecAssertionResultRepository::default()
+        ),
         spec_links_store: Arc::new(Mutex::new(Vec::new())),
         budget_configs: store!(
             dyn BudgetRepository,
@@ -1003,7 +1012,10 @@ pub fn build_state(
             dyn gyre_ports::BudgetCallRepository,
             mem::MemBudgetCallRepository::default()
         ),
-        search: Arc::new(gyre_adapters::MemSearchAdapter::new()),
+        search: store!(
+            dyn gyre_ports::SearchPort,
+            gyre_adapters::MemSearchAdapter::new()
+        ),
         tenants: store!(
             dyn gyre_ports::TenantRepository,
             mem::MemTenantRepository::default()
