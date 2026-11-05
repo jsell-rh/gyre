@@ -104,7 +104,11 @@ retained for the unchanged candidate. An exact-head CI or policy wait lasting
 other candidates can finish. Sandbox-free observation continues; that task may
 rejoin only after its external gate changes to ready or merged. Receipt changes
 reset the wait, but repeated polls do not. Yielding grants no merge permission
-and discards no candidate or review. The cockpit lists waiting tasks separately.
+and discards no candidate or review. A PR with green exact-head CI and GitHub
+merge state `BEHIND` is eligible for base refresh rather than parked: updating
+that base is our integration work, and waiting for GitHub to become ready first
+would deadlock. Pending CI and other policy holds remain parked. The cockpit
+lists waiting tasks separately.
 Checks on a different merge tree are
 never reused as proof of the final tree; protected exact-head GitHub checks
 and authoritative upstream-tree comparison still gate delivery.
