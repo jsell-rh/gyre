@@ -10,7 +10,7 @@ coverage_sections:
   - "explorer-implementation.md §6 Messages: Server → Client"
   - "explorer-implementation.md §20 Server Implementation"
   - "explorer-implementation.md §21 Explorer WebSocket Handler"
-commits: ["30dc28260cce7cede699be712d0f1773de3994be", "dc85eb6a76a848c81d3ef81d8a96dcf986f8ed32"]
+commits: ["dc85eb6a76a848c81d3ef81d8a96dcf986f8ed32", "30dc28260cce7cede699be712d0f1773de3994be"]
 ---
 
 ## Spec Excerpt
