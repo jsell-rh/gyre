@@ -60,8 +60,8 @@ pub(crate) mod ws;
 use axum::{routing::get, Router};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin, TelemetryBuffer};
-use gyre_common::WsMessage;
 use gyre_common::Id;
+use gyre_common::WsMessage;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
     AttestationRepository, AuditRepository, BreakingChangeRepository, BudgetRepository,
@@ -1152,13 +1152,7 @@ pub(crate) async fn evict_stale_presence(state: &Arc<AppState>) {
         let map = state.presence.read().await;
         map.iter()
             .filter(|(_, entry)| entry.server_last_seen + 60_000 < now_ms)
-            .map(|(key, entry)| {
-                (
-                    key.clone(),
-                    entry.connection_id,
-                    entry.workspace_id.clone(),
-                )
-            })
+            .map(|(key, entry)| (key.clone(), entry.connection_id, entry.workspace_id.clone()))
             .collect()
     };
 
@@ -1179,7 +1173,7 @@ pub(crate) async fn evict_stale_presence(state: &Arc<AppState>) {
             }
         }
 
-        crate::ws::broadcast_presence_departure(&state, &user_id, &session_id, &workspace_id).await;
+        crate::ws::broadcast_presence_departure(state, &user_id, &session_id, &workspace_id).await;
     }
 }
 

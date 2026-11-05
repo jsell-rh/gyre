@@ -672,8 +672,8 @@ mod tests {
         state.workspaces.create(&ws).await.unwrap();
         let user = User::new(
             gyre_common::Id::new(user_id),
-            &format!("ext-{user_id}"),
-            &format!("user-{user_id}"),
+            format!("ext-{user_id}"),
+            format!("user-{user_id}"),
             1000,
         );
         state.users.create(&user).await.unwrap();
@@ -701,9 +701,13 @@ mod tests {
     }
 
     /// Subscribe a connection to the workspace, asserting the subscribe ack.
-    async fn subscribe_ws(ws: &mut tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >, workspace_id: &str, session_id: Option<&str>) {
+    async fn subscribe_ws(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        workspace_id: &str,
+        session_id: Option<&str>,
+    ) {
         let sub = WsMessage::Subscribe {
             scopes: vec![gyre_common::SubscribeScope {
                 workspace_id: gyre_common::Id::new(workspace_id),
@@ -736,14 +740,11 @@ mod tests {
         expected_view: &str,
     ) -> WsMessage {
         loop {
-            let msg = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                ws.next(),
-            )
-            .await
-            .expect("timed out waiting for presence message")
-            .unwrap()
-            .unwrap();
+            let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+                .await
+                .expect("timed out waiting for presence message")
+                .unwrap()
+                .unwrap();
             if let tungstenite::Message::Text(text) = msg {
                 let decoded: WsMessage = serde_json::from_str(&text).unwrap();
                 if let WsMessage::UserPresence {
@@ -776,7 +777,9 @@ mod tests {
         subscribe_ws(&mut subject, "ws-presence", Some("sess-disc")).await;
         subject
             .send(tungstenite::Message::Text(user_presence_msg(
-                "sess-disc", "ws-presence", "specs",
+                "sess-disc",
+                "ws-presence",
+                "specs",
             )))
             .await
             .unwrap();
@@ -795,7 +798,9 @@ mod tests {
         // Subject disconnects gracefully (beforeunload leg).
         subject
             .send(tungstenite::Message::Text(user_presence_msg(
-                "sess-disc", "ws-presence", "disconnected",
+                "sess-disc",
+                "ws-presence",
+                "disconnected",
             )))
             .await
             .unwrap();
@@ -808,13 +813,11 @@ mod tests {
         assert_eq!(user_id.to_string(), "u-disc");
 
         // Entry is gone from the presence map.
-        assert!(
-            !state
-                .presence
-                .read()
-                .await
-                .contains_key(&("u-disc".to_string(), "sess-disc".to_string()))
-        );
+        assert!(!state
+            .presence
+            .read()
+            .await
+            .contains_key(&("u-disc".to_string(), "sess-disc".to_string())));
     }
 
     #[tokio::test]
@@ -831,7 +834,9 @@ mod tests {
         subscribe_ws(&mut subject, "ws-presence", Some("sess-close")).await;
         subject
             .send(tungstenite::Message::Text(user_presence_msg(
-                "sess-close", "ws-presence", "specs",
+                "sess-close",
+                "ws-presence",
+                "specs",
             )))
             .await
             .unwrap();
@@ -841,16 +846,16 @@ mod tests {
         subject.close(None).await.unwrap();
 
         let departure = expect_presence(&mut observer, "sess-close", "disconnected").await;
-        let WsMessage::UserPresence { user_id, .. } = &departure else { unreachable!() };
+        let WsMessage::UserPresence { user_id, .. } = &departure else {
+            unreachable!()
+        };
         assert_eq!(user_id.to_string(), "u-close");
 
-        assert!(
-            !state
-                .presence
-                .read()
-                .await
-                .contains_key(&("u-close".to_string(), "sess-close".to_string()))
-        );
+        assert!(!state
+            .presence
+            .read()
+            .await
+            .contains_key(&("u-close".to_string(), "sess-close".to_string())));
     }
 
     #[tokio::test]
@@ -882,7 +887,9 @@ mod tests {
             let sid = format!("sess-cap-{i}");
             subscribe_ws(&mut s, "ws-presence", Some(&sid)).await;
             s.send(tungstenite::Message::Text(user_presence_msg(
-                &sid, "ws-presence", "specs",
+                &sid,
+                "ws-presence",
+                "specs",
             )))
             .await
             .unwrap();
@@ -896,14 +903,18 @@ mod tests {
         subscribe_ws(&mut sixth, "ws-presence", Some("sess-cap-5")).await;
         sixth
             .send(tungstenite::Message::Text(user_presence_msg(
-                "sess-cap-5", "ws-presence", "specs",
+                "sess-cap-5",
+                "ws-presence",
+                "specs",
             )))
             .await
             .unwrap();
 
         // Observer must learn about the evicted session's departure…
         let departure = expect_presence(&mut observer, "sess-cap-0", "disconnected").await;
-        let WsMessage::UserPresence { user_id, .. } = &departure else { unreachable!() };
+        let WsMessage::UserPresence { user_id, .. } = &departure else {
+            unreachable!()
+        };
         assert_eq!(user_id.to_string(), "u-cap");
         // …and the 6th session's arrival.
         expect_presence(&mut observer, "sess-cap-5", "specs").await;
@@ -934,7 +945,9 @@ mod tests {
         subscribe_ws(&mut subject, "ws-presence", Some("sess-idle")).await;
         subject
             .send(tungstenite::Message::Text(user_presence_msg(
-                "sess-idle", "ws-presence", "specs",
+                "sess-idle",
+                "ws-presence",
+                "specs",
             )))
             .await
             .unwrap();
@@ -951,16 +964,16 @@ mod tests {
         crate::evict_stale_presence(&state).await;
 
         let departure = expect_presence(&mut observer, "sess-idle", "disconnected").await;
-        let WsMessage::UserPresence { user_id, .. } = &departure else { unreachable!() };
+        let WsMessage::UserPresence { user_id, .. } = &departure else {
+            unreachable!()
+        };
         assert_eq!(user_id.to_string(), "u-idle");
 
-        assert!(
-            !state
-                .presence
-                .read()
-                .await
-                .contains_key(&("u-idle".to_string(), "sess-idle".to_string()))
-        );
+        assert!(!state
+            .presence
+            .read()
+            .await
+            .contains_key(&("u-idle".to_string(), "sess-idle".to_string())));
     }
 
     #[tokio::test]
