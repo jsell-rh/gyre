@@ -51,3 +51,35 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 26 — verdict needs-revision (attribution clobber 25 at the assigned candidate)
+
+Candidate: `048386f2098da44673cf1c2a0cd15543aed9cc65` (assigned base `d81b0fe4`). Evidence:
+`/tmp/stage/review-evidence/round26-probes.txt`.
+
+**Product surface: fully verified intact, zero drift since the verified merge `44c1181e`.**
+
+- Dead-code grep (`get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs` over `crates/` + `web/src/`) → zero matches.
+- Route + ABAC registrations for `/api/v1/users/me/{agents,tasks,mrs}` absent from `api/mod.rs` / `abac_middleware.rs`.
+- Router 404 regression test `my_stuff_endpoints_are_removed` present (`users.rs:948`), source-inspected genuine (in-process router oneshot, bearer token, asserts 404 on all three URIs).
+- Committed dist `web/dist/assets/index-CMDRzIOf.js`: forbidden identifiers (`my-agents|my-tasks|my-mrs|users/me/agents|users/me/tasks|users/me/mrs`) → zero matches; kept-surface identifiers present.
+- `git diff 44c1181e..048386f2` over every task-208 surface (users.rs, api/mod.rs, abac_middleware.rs, api.js, UserProfile.svelte, UserProfile.test.js, web/dist/, amended specs) → empty. Only `specs/tasks/task-208.md` changed since the merge.
+- Focused frontend probe after fresh `npm ci`: `npx vitest run src/__tests__/UserProfile.test.js` → 23/23 passed, including the exact-six-tab guard (`toEqual(['info','tokens','memberships','ledger','notif-prefs','notifications'])`).
+- Spec amendment (Part 1) re-inspected in the base→candidate diff: faithful supersession record, M22.8 row struck, UI Pages row dropped; `e2e-flow.sh` correctly inverted to assert 404 with `fail` on any other code.
+- Rust test deferred to verification: `static.crates.io` unreachable from this sandbox (curl 000, no registry cache or vendor dir) — transport restriction, not a code defect. Verifier must run `cargo test -p gyre-server my_stuff_endpoints_are_removed`, `cargo test --all`, and `cd web && npm test`.
+
+**Finding F1 (process, blocking — 25th occurrence of the documented clobber class):** the assigned
+candidate tip commit `048386f2` ("process: record task-208 branch commits") rewrote `commits:` in
+`specs/tasks/task-208.md` from the full four-SHA list restored at parent `8d5277c8` back to the
+two-SHA list, dropping `ad1121c5093cd2f1f2b3824ed88352ac4e181fd9` (dist regeneration that removed
+the HSI-§12-forbidden my-stuff surface from the RustEmbed'd `SKIP_WEB_BUILD=1` artifact — the round-1
+F1 fix) and `ea006d52bb42e96e6f176b02b5390b6cb56a3116` (`.gitattributes` whitespace-gate exemption).
+Both are task-208-labeled product-surface commits and verified ancestors of HEAD
+(`git merge-base --is-ancestor` exit 0 for each). An unlisted commit is invisible to review scoping.
+The in-repo gate `scripts/check-task-commit-attribution.sh` passes (exit 0) because its product-surface
+regex `^(crates/|web/src/|web/tests)` (line 114) excludes `web/dist/` and root `.gitattributes` — the
+same blind spot documented since round 2. Repair is mechanical and product-untouched: restore the
+four-SHA list at the tip. Residual for the process owner: the checkpoint attribution pass
+(`dev-attribution.py` path filter) will likely re-drop them at the next checkpoint.
+
+Verdict: **needs-revision** — one finding, F1 above. No product defect found.
