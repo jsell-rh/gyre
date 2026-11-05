@@ -66,3 +66,48 @@ Independently re-checked each Round 1 finding against the current diff. All thre
 ## Verdict
 
 All Round 1 findings (F1, F2, F3) are repaired with real enforcement and hard regression tests; the handoff's two open questions are verified consistent. **progress: complete.**
+
+## Round 3 — rebase-repair verification (base 722179f0 → candidate 0ef0ba67)
+
+The base already carries the task-087 feature lineage (round-1 commits merged upstream,
+including upstream's parallel F2 fix); the candidate diff is the round-2 F1/F2/F3 repair
+set plus the second rebase-repair merge of upstream 722179f0 (task-063). Independently
+verified at `0ef0ba67`:
+
+- **F1 (payload endpoint)**: spec-exact route `GET /api/v1/trace-spans/:span_id/payload`
+  with real per-handler authorization (span → trace → MR → workspace → tenant, 403 on
+  mismatch). Mutation probe: disabling the guard makes
+  `span_payload_forbids_cross_tenant_access` fail (200 ≠ 403) — the test is hard.
+  6/6 api::traces tests pass.
+- **F2 (mem payloads)**: `store()` populates payload rows from raw summaries
+  (empty-side→None mirroring `sqlite decode_payload_blob`), 4KB column truncation
+  mirroring `sqlite truncate_summary`, replacement cascade, promoted-trace permanence.
+  Both the task branch's `trace_contract_tests` (3/3) and upstream's retained
+  `trace_payload_tests` (6/6) pass against the merged code — the merge resolution
+  keeps the round-2-verified contract without upstream's double-locked store mutex
+  (lock order store→permanent→payloads is consistent across all methods; no deadlock).
+- **F3 (wire casing)**: `SpanKind`/`SpanStatus` emit PascalCase per the HSI §3a JSON
+  example with legacy-lowercase aliases and case-insensitive parse; gyre-common trace
+  tests 8/8; web consumer suites pass (DetailPanel + FlowRenderer 69/69;
+  ExplorerCanvas/NodeDetailPanel/MoldableView 209/209).
+- **Rebase resolution**: `web/dist` committed state is byte-identical to a fresh
+  `npm run build` from the merged `web/src` (build.rs rebuild left `git status` empty);
+  `index.html` references exactly the bundles present, no stale hashed bundles.
+- **OTLP/gate lifecycle** (base, spot-verified): otlp_receiver 10/10 including the real
+  tonic gRPC round-trip (`grpc_receiver_accepts_export` — listener permitted in this
+  sandbox, so the round-2 environmental hang does not apply) and the graph-linkage test
+  (HTTP→Endpoint, function→Function, DB→Module, unresolved→None).
+- **Mechanical checks**: check-arch, check-abac-route-registry, check-abac-exempt-handlers
+  (88 handlers; task exemption entry removed), check-unwritten-store-fields (exemption
+  removed), check-migration-versions, check-mem-port-contracts, check-task-commit-attribution
+  — all pass. Exemption baselines shrank, never grew.
+- **Docs**: api-reference.md and hierarchy-enforcement.md now describe the actual
+  authorization semantics; no spec contradiction.
+
+Non-blocking observation: `SpanPayload`'s port doc notes zstd/1MB payload capping, which
+SQLite and Postgres enforce; the RAM-resident mem adapter keeps raw payload bytes (4KB
+column truncation and row semantics do mirror the SQL adapters). Recorded in
+`/tmp/stage/review-evidence/task-087-round3.md`; not a contract hollowing given the
+adapter's in-memory nature, the max_spans bound, and round 2's acceptance.
+
+Verdict: **approved** — independent evidence supports the task contract at `0ef0ba67`.
