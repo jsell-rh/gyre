@@ -251,7 +251,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET` | `/api/v1/workspaces/{id}/budget` | Current `BudgetConfig` (limits) + `BudgetUsage` (real-time snapshot) for a project-scoped workspace; `id` is the project UUID (M22.2) |
 | `PUT` | `/api/v1/workspaces/{id}/budget` | Set workspace budget limits: `{max_tokens_per_day?, max_cost_per_day?, max_concurrent_agents?, max_agent_lifetime_secs?}`; returns 400 if any limit exceeds the tenant ceiling (cascade validation); **Admin only** (M22.2) |
 | `GET` | `/api/v1/budget/summary` | Tenant-wide `BudgetConfig` + `BudgetUsage` plus per-workspace breakdown; **Admin only** (M22.2) |
-| `GET` | `/api/v1/search` | Full-text search (`?q=&entity_type=&workspace_id=&limit=20`); results: `[{entity_type, id, title, snippet, score}]` (M22.7) |
+| `GET` | `/api/v1/search` | Full-text search (`?q=&entity_type=&workspace_id=&limit=20`); results: `[{entity_type, id, title, snippet, score}]` — access-scoped to the caller (tenant + accessible workspaces/repos, derived from auth; `workspace_id` only narrows within that scope) (M22.7, search.md §Access Scoping) |
 | `POST` | `/api/v1/search/reindex` | Trigger full entity reindex; **Admin only** (H-14, M22.7) |
 | `POST/GET` | `/api/v1/policies` | Create / list declarative ABAC policies; 8 operators (Equals, NotEquals, In, NotIn, GreaterThan, LessThan, Contains, Exists); first-match-wins; default-deny (M22.6) |
 | `GET/PUT/DELETE` | `/api/v1/policies/{id}` | Read / update / delete policy (M22.6) |
@@ -420,7 +420,7 @@ Gyre exposes an MCP (Model Context Protocol) server at `/mcp`. Agents can discov
 | `gyre_record_activity` | Log a typed AG-UI activity event |
 | `gyre_agent_heartbeat` | Send agent heartbeat |
 | `gyre_agent_complete` | Signal task completion (opens MR, cleans worktree) |
-| `gyre_search` | Full-text search across all entities (`q`, `entity_type`, `workspace_id`, `limit` params) (M22.7) |
+| `gyre_search` | Full-text search (`q`, `entity_type`, `workspace_id`, `limit` params) — access-scoped to the agent's token context; `workspace_id` only narrows within that scope (M22.7, search.md §Access Scoping) |
 | `gyre_analytics_query` | Decision-support analytics (`query_type`: `usage`\|`compare`\|`top`); wraps the three M23 analytics endpoints (M23) |
 | `gyre_message_send` | Send a Directed or Custom message to an agent/workspace. Params: `to` (destination), `kind`, `payload`, `tier`. Derives workspace from agent JWT. `payload` is validated against the kind's schema (message-bus.md §Payload Schemas): required fields must be present/non-null and every schema-known field must match its declared wire type; a missing or wrongly-typed field is a tool error. |
 | `gyre_message_poll` | Poll own inbox for Directed messages. Params: `after_ts`, `after_id`, `limit`, `unacked_only`. Derives agent_id from JWT. |
