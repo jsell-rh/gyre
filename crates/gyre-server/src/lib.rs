@@ -872,7 +872,6 @@ pub fn build_state(
     let spec_links_store: spec_registry::SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
     load_spec_links_into_store(&spec_link_repo, &spec_links_store);
 
-
     Arc::new(AppState {
         auth_token: auth_token.to_string(),
         base_url: base_url.to_string(),

@@ -363,7 +363,11 @@ pub async fn delete_repo(
 
     // Clean up the spec-link graph rows sourced from this repo (spec-links.md
     // §Forge-Maintained Spec Graph): durable table first, then the hot cache.
-    if let Err(e) = state.spec_link_repo.delete_by_source_repo(&repo.id.to_string()).await {
+    if let Err(e) = state
+        .spec_link_repo
+        .delete_by_source_repo(&repo.id.to_string())
+        .await
+    {
         tracing::warn!(repo_id = %repo.id, "Failed to delete spec links for repo: {e}");
     }
     state

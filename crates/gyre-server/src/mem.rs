@@ -2723,9 +2723,7 @@ impl gyre_ports::SpecLinkRepository for MemSpecLinkRepository {
         let source_repo_key = |e: &gyre_domain::spec_links::SpecLinkEntry| {
             e.source_repo_id.clone().unwrap_or_default()
         };
-        store.retain(|l| {
-            !(source_repo_key(l) == source_repo_id && l.source_path == source_path)
-        });
+        store.retain(|l| !(source_repo_key(l) == source_repo_id && l.source_path == source_path));
         store.extend(links.iter().cloned());
         Ok(())
     }
@@ -2738,9 +2736,10 @@ impl gyre_ports::SpecLinkRepository for MemSpecLinkRepository {
         Ok(())
     }
     async fn delete_by_source_repo(&self, source_repo_id: &str) -> Result<()> {
-        self.store.lock().await.retain(|l| {
-            l.source_repo_id.as_deref().unwrap_or_default() != source_repo_id
-        });
+        self.store
+            .lock()
+            .await
+            .retain(|l| l.source_repo_id.as_deref().unwrap_or_default() != source_repo_id);
         Ok(())
     }
 }
@@ -2805,7 +2804,12 @@ mod spec_link_contract_tests {
         assert_eq!(all.len(), expected.len());
         for exp in &expected {
             let got = all.iter().find(|l| l.id == exp.id).expect("link present");
-            assert_eq!(got, exp, "entry {id} must round-trip losslessly", id = exp.id);
+            assert_eq!(
+                got,
+                exp,
+                "entry {id} must round-trip losslessly",
+                id = exp.id
+            );
         }
     }
 
@@ -2819,9 +2823,13 @@ mod spec_link_contract_tests {
         repo.save(&other).await.unwrap();
 
         let replacement = entry("new-1", SpecLinkType::DependsOn);
-        repo.replace_for_source("repo-1", &old.source_path, std::slice::from_ref(&replacement))
-            .await
-            .unwrap();
+        repo.replace_for_source(
+            "repo-1",
+            &old.source_path,
+            std::slice::from_ref(&replacement),
+        )
+        .await
+        .unwrap();
 
         let all = repo.list_all().await.unwrap();
         assert_eq!(all.len(), 2, "old row replaced, unrelated row kept");
@@ -3543,7 +3551,6 @@ fn test_state_inner(
         secrets: secrets.unwrap_or_else(|| Arc::new(MemSecretRepository::default())),
         ws_tickets: crate::auth::WsTicketStore::new(),
     })
-
 }
 
 // ── In-memory SecretRepository ──────────────────────────────────────────────

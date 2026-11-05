@@ -110,16 +110,13 @@ pub async fn run_once(state: &Arc<AppState>) -> anyhow::Result<()> {
 async fn mark_link_status(state: &AppState, link_id: &str, status: &str, now: u64) {
     let updated: Option<crate::spec_registry::SpecLinkEntry> = {
         let mut store = state.spec_links_store.lock().await;
-        store
-            .iter_mut()
-            .find(|l| l.id == link_id)
-            .map(|link| {
-                link.status = status.to_string();
-                if status == "stale" {
-                    link.stale_since = Some(now);
-                }
-                link.clone()
-            })
+        store.iter_mut().find(|l| l.id == link_id).map(|link| {
+            link.status = status.to_string();
+            if status == "stale" {
+                link.stale_since = Some(now);
+            }
+            link.clone()
+        })
     };
     if let Some(entry) = updated {
         if let Err(e) = state.spec_link_repo.save(&entry).await {

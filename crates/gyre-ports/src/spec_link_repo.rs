@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use gyre_domain::spec_links::SpecLinkEntry;
 
 #[async_trait]
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 pub trait SpecLinkRepository: Send + Sync {
     /// All persisted links, tenant-wide.
     async fn list_all(&self) -> Result<Vec<SpecLinkEntry>>;

@@ -102,7 +102,6 @@ fn insertable_row(e: &SpecLinkEntry) -> NewSpecLinkRow {
     }
 }
 
-
 #[async_trait]
 impl SpecLinkRepository for SqliteStorage {
     async fn list_all(&self) -> Result<Vec<SpecLinkEntry>> {

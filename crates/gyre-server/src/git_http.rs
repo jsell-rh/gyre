@@ -1492,15 +1492,28 @@ async fn process_spec_lifecycle(
                 Err(e) => warn!(title, "spec-lifecycle: failed to create task: {e}"),
                 Ok(()) => {
                     info!(title, "spec-lifecycle: created task for spec change");
-                    // Look up workspace_id from repo for proper scoping.
-                    let ws_id = state
-                        .repos
-                        .find_by_id(&gyre_common::Id::new(repo_id))
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|r| r.workspace_id)
-                        .unwrap_or_else(|| gyre_common::Id::new("default"));
+                    // Look up workspace_id from repo for proper scoping. A failed
+                    // lookup means the scope cannot be determined: skip the
+                    // workspace-scoped emissions and log — never fabricate a
+                    // "default" workspace identity (see
+                    // emit_reconciliation_completed in lib.rs).
+                    let ws_id = match state.repos.find_by_id(&gyre_common::Id::new(repo_id)).await {
+                        Ok(Some(repo)) => Some(repo.workspace_id),
+                        Ok(None) => {
+                            warn!(
+                                title,
+                                "spec-lifecycle: repo {repo_id} not found; skipping workspace-scoped event emission"
+                            );
+                            None
+                        }
+                        Err(e) => {
+                            warn!(
+                                title,
+                                "spec-lifecycle: failed to look up repo {repo_id}: {e}; skipping workspace-scoped event emission"
+                            );
+                            None
+                        }
+                    };
                     let change_kind = match status_char {
                         'A' => "added",
                         'M' => "modified",
@@ -1508,27 +1521,29 @@ async fn process_spec_lifecycle(
                         'R' => "renamed",
                         _ => "unknown",
                     };
-                    state
-                        .emit_event(
-                            Some(ws_id.clone()),
-                            gyre_common::message::Destination::Workspace(ws_id.clone()),
-                            gyre_common::message::MessageKind::SpecChanged,
-                            Some(serde_json::json!({
-                                "repo_id": repo_id,
-                                "spec_path": path,
-                                "change_kind": change_kind,
-                                "task_id": task_id.to_string(),
-                            })),
-                        )
-                        .await;
-                    state
-                        .emit_event(
-                            Some(ws_id.clone()),
-                            gyre_common::message::Destination::Workspace(ws_id),
-                            gyre_common::message::MessageKind::TaskCreated,
-                            Some(serde_json::json!({"task_id": task_id.to_string()})),
-                        )
-                        .await;
+                    if let Some(ws_id) = ws_id {
+                        state
+                            .emit_event(
+                                Some(ws_id.clone()),
+                                gyre_common::message::Destination::Workspace(ws_id.clone()),
+                                gyre_common::message::MessageKind::SpecChanged,
+                                Some(serde_json::json!({
+                                    "repo_id": repo_id,
+                                    "spec_path": path,
+                                    "change_kind": change_kind,
+                                    "task_id": task_id.to_string(),
+                                })),
+                            )
+                            .await;
+                        state
+                            .emit_event(
+                                Some(ws_id.clone()),
+                                gyre_common::message::Destination::Workspace(ws_id),
+                                gyre_common::message::MessageKind::TaskCreated,
+                                Some(serde_json::json!({"task_id": task_id.to_string()})),
+                            )
+                            .await;
+                    }
 
                     // Cross-workspace spec change notification (priority 4):
                     // Find inbound cross-workspace links targeting this spec path

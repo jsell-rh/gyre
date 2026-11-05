@@ -14,8 +14,8 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-pub use gyre_domain::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry};
 pub use gyre_domain::spec_links::{SpecLinkEntry, SpecLinkType};
+pub use gyre_domain::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry};
 
 // ---------------------------------------------------------------------------
 // Manifest structs (parsed from specs/manifest.yaml)
@@ -54,7 +54,6 @@ impl Default for ManifestDefaults {
 fn default_true() -> bool {
     true
 }
-
 
 /// A link declared in the manifest between specs.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -593,20 +592,20 @@ pub async fn sync_spec_ledger(
             // including specs whose link set is now EMPTY, so links removed
             // from the manifest are deleted from the durable table too (an
             // empty set must clear the persisted rows, not skip them).
-            let links_by_path: std::collections::HashMap<&str, Vec<SpecLinkEntry>> =
-                new_links
-                    .iter()
-                    .fold(std::collections::HashMap::new(), |mut acc, link| {
-                        acc.entry(link.source_path.as_str()).or_default().push(link.clone());
-                        acc
-                    });
+            let links_by_path: std::collections::HashMap<&str, Vec<SpecLinkEntry>> = new_links
+                .iter()
+                .fold(std::collections::HashMap::new(), |mut acc, link| {
+                    acc.entry(link.source_path.as_str())
+                        .or_default()
+                        .push(link.clone());
+                    acc
+                });
             for entry in &manifest.specs {
                 let empty: Vec<SpecLinkEntry> = Vec::new();
-                let links = links_by_path
-                    .get(entry.path.as_str())
-                    .unwrap_or(&empty);
-                if let Err(e) =
-                    link_repo.replace_for_source(repo_scope, &entry.path, links).await
+                let links = links_by_path.get(entry.path.as_str()).unwrap_or(&empty);
+                if let Err(e) = link_repo
+                    .replace_for_source(repo_scope, &entry.path, links)
+                    .await
                 {
                     warn!(
                         source_repo_id = repo_scope,
@@ -2101,10 +2100,7 @@ specs:
 
     /// Helper: overwrite files in an existing test repo, commit, and return
     /// the new HEAD SHA (models a second push).
-    fn add_commit(
-        dir: &tempfile::TempDir,
-        files: &[(&str, &str)],
-    ) -> String {
+    fn add_commit(dir: &tempfile::TempDir, files: &[(&str, &str)]) -> String {
         let path = dir.path();
         let run = |args: &[&str]| {
             let out = std::process::Command::new("git")
@@ -2319,9 +2315,12 @@ specs:
         target: system/parent.md
         target_sha: old_pinned_sha
         reason: needs parent guarantees"#;
-        let (dir, sha) =
-            make_test_repo(&[("specs/manifest.yaml", manifest), ("specs/system/parent.md", "# P"), ("specs/system/child.md", "# C")])
-                .await;
+        let (dir, sha) = make_test_repo(&[
+            ("specs/manifest.yaml", manifest),
+            ("specs/system/parent.md", "# P"),
+            ("specs/system/child.md", "# C"),
+        ])
+        .await;
 
         // "Push" phase: run sync against the real durable repo (a real
         // SQLite database, exactly as the server wires it in build_state).
@@ -2338,15 +2337,18 @@ specs:
         // Target spec already in the ledger at a DIFFERENT SHA than the pinned
         // one, so the link is stale — the post-restart staleness check below
         // must observe the same state.
-        let parent = make_test_ledger_entry("system/parent.md", "new_current_sha", ApprovalStatus::Approved);
+        let parent = make_test_ledger_entry(
+            "system/parent.md",
+            "new_current_sha",
+            ApprovalStatus::Approved,
+        );
         ledger.save(&parent).await.unwrap();
 
         // Context repos for cross-workspace resolution (None-linked tests
         // don't resolve, but pass real stores to match server wiring).
         let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
             Arc::new(MemWorkspaceRepository::default());
-        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> =
-            Arc::new(MemRepoRepository::default());
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = Arc::new(MemRepoRepository::default());
         sync_spec_ledger(
             &ledger,
             &links_store,
@@ -2364,7 +2366,11 @@ specs:
         .await;
 
         let before_restart: Vec<SpecLinkEntry> = links_store.lock().await.clone();
-        assert_eq!(before_restart.len(), 1, "sync must record the depends_on link");
+        assert_eq!(
+            before_restart.len(),
+            1,
+            "sync must record the depends_on link"
+        );
         let pushed = &before_restart[0];
         assert_eq!(pushed.source_path, "system/child.md");
         assert_eq!(pushed.target_path, "system/parent.md");
@@ -2454,8 +2460,7 @@ specs:
 
         let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
             Arc::new(MemWorkspaceRepository::default());
-        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> =
-            Arc::new(MemRepoRepository::default());
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = Arc::new(MemRepoRepository::default());
         sync_spec_ledger(
             &ledger,
             &links_store,
@@ -2569,8 +2574,7 @@ specs:
 
         let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
             Arc::new(MemWorkspaceRepository::default());
-        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> =
-            Arc::new(MemRepoRepository::default());
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = Arc::new(MemRepoRepository::default());
 
         // Real push from repo A, then a real push from repo B with the same
         // manifest (both use the production id construction).
@@ -2609,11 +2613,15 @@ specs:
         let cache: Vec<SpecLinkEntry> = links_store.lock().await.clone();
         assert_eq!(cache.len(), 2, "both repos' links must be in the cache");
         assert!(
-            cache.iter().any(|l| l.source_repo_id.as_deref() == Some("repo-a")),
+            cache
+                .iter()
+                .any(|l| l.source_repo_id.as_deref() == Some("repo-a")),
             "repo A's link must survive a repo-B push"
         );
         assert!(
-            cache.iter().any(|l| l.source_repo_id.as_deref() == Some("repo-b")),
+            cache
+                .iter()
+                .any(|l| l.source_repo_id.as_deref() == Some("repo-b")),
             "repo B's new link must be present"
         );
         let distinct_ids: std::collections::HashSet<&str> =
@@ -2695,8 +2703,7 @@ specs:
         let links_store: SpecLinksStore = Arc::new(Mutex::new(Vec::new()));
         let ws_ctx: Arc<dyn gyre_ports::WorkspaceRepository> =
             Arc::new(MemWorkspaceRepository::default());
-        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> =
-            Arc::new(MemRepoRepository::default());
+        let repos_ctx: Arc<dyn gyre_ports::RepoRepository> = Arc::new(MemRepoRepository::default());
 
         // First push: manifest declares the link.
         sync_spec_ledger(
@@ -2750,7 +2757,6 @@ specs:
             "removed link must be deleted from the durable table, got {persisted:?}"
         );
     }
-
 
     // -----------------------------------------------------------------------
     // TASK-019: Cycle detection tests
