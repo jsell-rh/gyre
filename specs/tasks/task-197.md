@@ -1,11 +1,11 @@
 ---
 title: "Materialize default Tenant entity on first-startup bootstrap"
 spec_ref: "hierarchy-enforcement.md §1 Bootstrap Behavior (§50-66)"
-depends_on: []
+depends_on: [task-225]
 progress: ready-for-review
 coverage_sections:
   - "hierarchy-enforcement.md §5"
-commits: ["71901c549c031a0a774ce71e87e9842bc7932048"]
+commits: ["71901c549c031a0a774ce71e87e9842bc7932048", "2419125dd059894f7b106d45306133a5b1cf84d5"]
 ---
 
 ## Spec Excerpt
@@ -138,7 +138,24 @@ Verification (evidence: /tmp/stage/review-evidence/task-197-verification.md):
   logic. Probe reverted; post-revert re-run passes.
 - `bash scripts/check-arch.sh` → passed.
 
-This round changed no production code: commit 71901c54 (identical product
-code to the earlier attempt's a5f43d42) already carried the implementation;
-the resume flow had reset only this task file to not-started, which this
-commit restores to ready-for-review.
+### Repair round (clippy finding)
+
+The retained verification failure (checks.sh exit 1) was
+`clippy::needless_borrows_for_generic_args` at the bootstrap test's
+`serde_json::to_value(&tenant.budget)` / `to_value(&Some(...))` — both
+operands implement `Serialize` directly. Fixed in 2419125d by dropping the
+borrows; re-verified:
+
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib bootstrap_default_tenant`
+  → 1 passed; full `SKIP_WEB_BUILD=1 cargo test -p gyre-server` →
+  1243 + 66 + 21 + 3 + 1 passed, 0 failed.
+- Clippy over `-p gyre-server --all-targets` (with the base's pre-existing
+  `never_loop` in gyre-domain force-warned so the build reaches gyre-server;
+  that lint is identical in base 3c39ab1f and outside this task's files):
+  zero warnings pointing at `src/lib.rs` or `src/main.rs`; the only remaining
+  `needless_borrows` hits are in merge_processor.rs / speculative_merge.rs,
+  both unchanged from base.
+- `bash scripts/check-arch.sh` → passed.
+
+Evidence: /tmp/stage/review-evidence/task-197-verification.md (this round:
+task-197-repair-round.md alongside it).
