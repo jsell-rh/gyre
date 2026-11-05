@@ -665,39 +665,30 @@ async fn merge_atomic_group(
         // single-entry path; without it the atomic group path would be a
         // Supervised bypass. Human-approval escape: an MR already Approved
         // (by a human, via the status endpoint) proceeds.
-        // Hold only on an EXPLICIT Deny match (matched_policy set): the
-        // engine's default-deny (no policy governs system merge/mr) is the
-        // Guided/Autonomous state per HSI §2 — "The merge processor is NOT
-        // blocked — no trust:require-human-mr-review policy exists".
-        if mr.status != MrStatus::Approved {
-            let result = evaluate_merge_abac(state, &mr, &repo).await;
-            if result.effect == gyre_domain::policy::PolicyEffect::Deny
-                && result.matched_policy.is_some()
-            {
-                warn!(
-                    group = %group_name,
-                    mr_id = %mr.id,
-                    workspace_id = %mr.workspace_id,
-                    matched_policy = ?result.matched_policy,
-                    "supervised trust: holding atomic group for human MR approval"
-                );
-                rollback_atomic_group(
-                    state,
-                    group_name,
-                    &repo,
-                    target_branch,
-                    pre_group_sha.as_deref(),
-                    &merged_entries,
-                    &group_entries,
-                    &format!(
-                        "supervised trust: human MR approval required for MR {}",
-                        mr.id
-                    ),
-                    &mr.id,
-                )
-                .await?;
-                return Ok(());
-            }
+        // The selection loop (Step 4c') already skips groups with a held
+        // member, so this is defense in depth against TOCTOU — a member
+        // becoming held between selection and group processing still rolls
+        // the group back, without starving the queue.
+        if let Some(reason) = supervised_trust_hold(state, &mr, &repo).await {
+            warn!(
+                group = %group_name,
+                mr_id = %mr.id,
+                workspace_id = %mr.workspace_id,
+                "supervised trust: holding atomic group for human MR approval"
+            );
+            rollback_atomic_group(
+                state,
+                group_name,
+                &repo,
+                target_branch,
+                pre_group_sha.as_deref(),
+                &merged_entries,
+                &group_entries,
+                &reason,
+                &mr.id,
+            )
+            .await?;
+            return Ok(());
         }
 
         // Attempt the merge for this member.
@@ -1111,6 +1102,34 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                 }
             }
 
+            // Step 4c': TASK-077 / HSI §2 (F5) supervised-trust hold,
+            // evaluated DURING selection (review repair 6425cc46). A
+            // trust-held candidate is skipped exactly like the other
+            // not-ready conditions above so the processor tries the next
+            // candidate in the SAME cycle. Evaluating the hold only after
+            // selection and returning early starves the shared queue:
+            // `update_status` does not rotate `enqueued_at`, so a held
+            // head-of-queue entry is re-selected and re-held every cycle,
+            // monopolizing the processor and blocking later entries —
+            // cross-workspace Guided/Autonomous merges and same-workspace
+            // human-approved MRs (the spec's own review-escape) alike.
+            // The entry stays Queued with a hold reason so the
+            // human-approval path stays live; once a human approves the MR
+            // via the status endpoint, the gate passes and it merges.
+            if let Some(reason) = selection_trust_hold(state, &candidate_mr).await? {
+                info!(
+                    entry_id = %candidate.id,
+                    mr_id = %candidate.merge_request_id,
+                    %reason,
+                    "supervised trust: holding merge for human MR approval, trying next candidate"
+                );
+                state
+                    .merge_queue
+                    .update_status(&candidate.id, MergeQueueEntryStatus::Queued, Some(reason))
+                    .await?;
+                continue;
+            }
+
             found = Some((candidate.clone(), candidate_mr));
             break;
         }
@@ -1481,37 +1500,26 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
     // until a human approves the MR via the status endpoint. The processor's
     // own Open → Approved transition happens only after this gate, so it
     // cannot self-satisfy the escape.
-    // Hold only on an EXPLICIT Deny match (matched_policy set): the engine's
-    // default-deny (no policy governs system merge/mr) is precisely the
-    // Guided/Autonomous state per HSI §2 — "The merge processor is NOT
-    // blocked — no trust:require-human-mr-review policy exists". Holding on
-    // default-deny would stall every Guided/Autonomous merge.
-    if mr.status != MrStatus::Approved {
-        let result = evaluate_merge_abac(state, &mr, &repo).await;
-        if result.effect == gyre_domain::policy::PolicyEffect::Deny
-            && result.matched_policy.is_some()
-        {
-            warn!(
-                entry_id = %entry.id,
-                mr_id = %mr.id,
-                workspace_id = %mr.workspace_id,
-                matched_policy = ?result.matched_policy,
-                "supervised trust: holding merge for human MR approval"
-            );
-            // Requeue (not Failed): Failed is terminal and would permanently
-            // block the human-approval path. Queued entries are retried on the
-            // next cycle; once a human sets the MR to Approved, the gate
-            // passes and the merge proceeds.
-            state
-                .merge_queue
-                .update_status(
-                    &entry.id,
-                    MergeQueueEntryStatus::Queued,
-                    Some("supervised trust: human MR approval required".to_string()),
-                )
-                .await?;
-            return Ok(());
-        }
+    // The selection loop (Step 4c') already skips trust-held candidates, so
+    // this is defense in depth against TOCTOU — a policy created or an MR
+    // un-approved between selection and processing still holds here, for
+    // one cycle, without starving the queue (selection re-skips next cycle).
+    if let Some(reason) = supervised_trust_hold(state, &mr, &repo).await {
+        warn!(
+            entry_id = %entry.id,
+            mr_id = %mr.id,
+            workspace_id = %mr.workspace_id,
+            "supervised trust: holding merge for human MR approval"
+        );
+        // Requeue (not Failed): Failed is terminal and would permanently
+        // block the human-approval path. Queued entries are retried on the
+        // next cycle; once a human sets the MR to Approved, the gate
+        // passes and the merge proceeds.
+        state
+            .merge_queue
+            .update_status(&entry.id, MergeQueueEntryStatus::Queued, Some(reason))
+            .await?;
+        return Ok(());
     }
 
     // TASK-061 (§7.2): Populate attestation chain ABAC subject attributes
@@ -2671,6 +2679,71 @@ async fn evaluate_merge_abac(
         })
         .collect();
     crate::policy_engine::evaluate(policies, &ctx, "merge", "mr")
+}
+
+/// TASK-077 / HSI §2 (F5): the supervised-trust hold predicate shared by the
+/// selection loop and both merge paths. Returns `Some(reason)` when the MR
+/// is not yet human-approved (the escape is `mr.status == Approved`, set
+/// only via the MR status endpoint, never by the processor before the
+/// gate) and an EXPLICIT Deny policy matches the merge processor's service
+/// identity; `None` when the merge may proceed. See `evaluate_merge_abac`
+/// for why only an explicit Deny match (`matched_policy.is_some()`) holds:
+/// the engine's default-deny is the Guided/Autonomous state per HSI §2.
+async fn supervised_trust_hold(
+    state: &AppState,
+    mr: &MergeRequest,
+    repo: &gyre_domain::Repository,
+) -> Option<String> {
+    if mr.status == MrStatus::Approved {
+        return None; // human-approval escape (HSI §2/§13)
+    }
+    let result = evaluate_merge_abac(state, mr, repo).await;
+    if result.effect == gyre_domain::policy::PolicyEffect::Deny && result.matched_policy.is_some() {
+        Some(format!(
+            "supervised trust: human MR approval required for MR {}",
+            mr.id
+        ))
+    } else {
+        None
+    }
+}
+
+/// Selection-loop trust gate (TASK-077 / HSI §2 F5, review repair
+/// 6425cc46): returns the hold reason when the candidate — or, for an
+/// atomic-group candidate, ANY member of its group — is held by an
+/// explicit trust Deny before human approval. Group members are checked
+/// as a unit because `merge_atomic_group` rolls the whole group back on a
+/// held member; skipping only the individual candidate would re-select
+/// the group next cycle and starve the queue the same way. A missing
+/// repository returns `None` (not held): the merge paths own the
+/// "repository not found" failure semantics.
+async fn selection_trust_hold(
+    state: &AppState,
+    candidate_mr: &MergeRequest,
+) -> anyhow::Result<Option<String>> {
+    let members: Vec<MergeRequest> = if let Some(ref group) = candidate_mr.atomic_group {
+        let all_mrs = state.merge_requests.list().await?;
+        all_mrs
+            .into_iter()
+            .filter(|m| m.atomic_group.as_deref() == Some(group))
+            .collect()
+    } else {
+        vec![candidate_mr.clone()]
+    };
+
+    // All group members share the same repository (merge_atomic_group
+    // depends on this); a single candidate uses its own repo.
+    let repo = match state.repos.find_by_id(&candidate_mr.repository_id).await? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    for mr in &members {
+        if let Some(reason) = supervised_trust_hold(state, mr, &repo).await {
+            return Ok(Some(reason));
+        }
+    }
+    Ok(None)
 }
 
 /// TASK-061 (§7.2): Evaluate ABAC policies with attestation chain subject attributes.
@@ -6483,7 +6556,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supervised_trust_denies_atomic_group_member_rolls_back_group() {
+    async fn supervised_trust_holds_atomic_group_members() {
         let state = test_state();
 
         seed_workspace_with_trust(
@@ -6521,7 +6594,12 @@ mod tests {
 
         process_next(&state).await.unwrap();
 
-        // No member may merge: the group is held and rolled back to Queued.
+        // No member may merge: the group is held — every member entry stays
+        // Queued (never Failed, never Merged) with a reason naming the
+        // supervised trust hold. With the selection-loop trust gate the
+        // group is skipped before any member is marked Processing, so no
+        // rollback is needed; `merge_atomic_group`'s per-member gate remains
+        // as defense in depth and produces the same observable state.
         for mr_id in ["mr-group-a", "mr-group-b"] {
             let updated = state
                 .merge_requests
@@ -6544,15 +6622,310 @@ mod tests {
             assert_eq!(
                 entry.status,
                 MergeQueueEntryStatus::Queued,
-                "atomic group member {mr_id} must be requeued after rollback"
+                "atomic group member {mr_id} must stay queued under the supervised trust hold"
             );
             let reason = entry
                 .error_message
                 .as_deref()
-                .unwrap_or_else(|| panic!("requeued entry {mr_id} must carry a rollback reason"));
+                .unwrap_or_else(|| panic!("held entry {mr_id} must carry a hold reason"));
             assert!(
                 reason.contains("supervised trust"),
-                "rollback reason must name supervised trust, got: {reason}"
+                "hold reason must name supervised trust, got: {reason}"
+            );
+        }
+    }
+
+    // ── TASK-077 review repair (finding 6425cc46): queue starvation ──────
+    //
+    // The trust hold must SKIP to the next candidate inside the selection
+    // loop, exactly like gates-pending / repo-paused / group-not-ready. A
+    // hold that terminates the cycle instead re-selects the same
+    // head-of-queue entry every cycle (the requeue does not rotate
+    // enqueued_at, so the (priority DESC, enqueued_at ASC) sort position is
+    // stable) and starves every later queue entry — cross-workspace
+    // autonomous merges AND same-workspace human-approved MRs (HSI §2/§13's
+    // own review-approve-merge escape).
+
+    #[tokio::test]
+    async fn trust_hold_does_not_starve_later_autonomous_entry() {
+        let state = test_state();
+
+        // Supervised workspace: OLDER queue entry awaiting human approval.
+        seed_workspace_with_trust(
+            &state,
+            "ws-mixed-sup",
+            "Mixed Sup WS",
+            gyre_domain::TrustLevel::Supervised,
+        )
+        .await;
+        let sup_repo = create_repo_in_workspace(&state, "mixed-sup-repo", "ws-mixed-sup").await;
+        let mut sup_mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-mixed-sup"),
+            sup_repo.id.clone(),
+            "Held MR in supervised workspace",
+            "feat/mixed-sup",
+            "main",
+            1000,
+        );
+        sup_mr.workspace_id = Id::new("ws-mixed-sup");
+        state.merge_requests.create(&sup_mr).await.unwrap();
+        enqueue_mr(&state, "mr-mixed-sup", 50, 1000).await; // enqueued first
+
+        // Guided workspace: NEWER, merge-ready entry at the same priority.
+        seed_workspace_with_trust(
+            &state,
+            "ws-mixed-guided",
+            "Mixed Guided WS",
+            gyre_domain::TrustLevel::Guided,
+        )
+        .await;
+        let guided_repo =
+            create_repo_in_workspace(&state, "mixed-guided-repo", "ws-mixed-guided").await;
+        let mut guided_mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-mixed-guided"),
+            guided_repo.id.clone(),
+            "Merge-ready MR in guided workspace",
+            "feat/mixed-guided",
+            "main",
+            1001,
+        );
+        guided_mr.workspace_id = Id::new("ws-mixed-guided");
+        state.merge_requests.create(&guided_mr).await.unwrap();
+        enqueue_mr(&state, "mr-mixed-guided", 50, 1001).await; // enqueued later
+
+        // Several cycles: the held entry must not monopolize the processor.
+        for _ in 0..3 {
+            process_next(&state).await.unwrap();
+        }
+
+        let guided = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-mixed-guided"))
+            .await
+            .unwrap()
+            .expect("guided mr should exist");
+        assert_eq!(
+            guided.status,
+            MrStatus::Merged,
+            "Guided workspace MR queued behind a Supervised hold must still merge \
+             (HSI §12: Guided merges if gates pass; the merge queue is shared)"
+        );
+
+        let sup = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-mixed-sup"))
+            .await
+            .unwrap()
+            .expect("supervised mr should exist");
+        assert_eq!(
+            sup.status,
+            MrStatus::Open,
+            "supervised MR must stay held for human approval across cycles"
+        );
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-mixed-sup"))
+            .await
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(
+            entry.status,
+            MergeQueueEntryStatus::Queued,
+            "held entry must stay Queued so the human-approval path stays live"
+        );
+        assert!(
+            entry
+                .error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("supervised trust"),
+            "hold reason must name supervised trust, got: {:?}",
+            entry.error_message
+        );
+    }
+
+    #[tokio::test]
+    async fn trust_hold_does_not_starve_later_human_approved_entry() {
+        let state = test_state();
+
+        seed_workspace_with_trust(
+            &state,
+            "ws-escape",
+            "Escape WS",
+            gyre_domain::TrustLevel::Supervised,
+        )
+        .await;
+        let repo = create_repo_in_workspace(&state, "escape-repo", "ws-escape").await;
+
+        // OLDER unapproved MR — held for human review, sorts first.
+        let mut held_mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-escape-held"),
+            repo.id.clone(),
+            "Unapproved MR awaiting human review",
+            "feat/escape-held",
+            "main",
+            1000,
+        );
+        held_mr.workspace_id = Id::new("ws-escape");
+        state.merge_requests.create(&held_mr).await.unwrap();
+        enqueue_mr(&state, "mr-escape-held", 50, 1000).await;
+
+        // NEWER MR a human has already Approved via the status endpoint —
+        // HSI §2/§13's exact escape. It must merge past the held one.
+        let mut approved_mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-escape-approved"),
+            repo.id.clone(),
+            "Human-approved MR behind a held entry",
+            "feat/escape-approved",
+            "main",
+            1001,
+        );
+        approved_mr.workspace_id = Id::new("ws-escape");
+        approved_mr.transition_status(MrStatus::Approved).unwrap();
+        state.merge_requests.create(&approved_mr).await.unwrap();
+        enqueue_mr(&state, "mr-escape-approved", 50, 1001).await;
+
+        for _ in 0..3 {
+            process_next(&state).await.unwrap();
+        }
+
+        let approved = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-escape-approved"))
+            .await
+            .unwrap()
+            .expect("approved mr should exist");
+        assert_eq!(
+            approved.status,
+            MrStatus::Merged,
+            "human-approved MR queued behind a held entry must merge — \
+             the review-approve-merge escape must not stall on an older \
+             unapproved MR (HSI §2/§13)"
+        );
+
+        let held = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-escape-held"))
+            .await
+            .unwrap()
+            .expect("held mr should exist");
+        assert_eq!(
+            held.status,
+            MrStatus::Open,
+            "unapproved MR must stay held for human approval"
+        );
+        let entry = state
+            .merge_queue
+            .find_by_id(&Id::new("entry-mr-escape-held"))
+            .await
+            .unwrap()
+            .expect("entry should exist");
+        assert_eq!(
+            entry.status,
+            MergeQueueEntryStatus::Queued,
+            "held entry must stay Queued so the human-approval path stays live"
+        );
+    }
+
+    #[tokio::test]
+    async fn trust_held_atomic_group_does_not_starve_later_entry() {
+        let state = test_state();
+
+        // Supervised workspace: a two-member atomic group, both members
+        // unapproved — the group is held as a unit.
+        seed_workspace_with_trust(
+            &state,
+            "ws-group-starve",
+            "Group Starve WS",
+            gyre_domain::TrustLevel::Supervised,
+        )
+        .await;
+        let group_repo =
+            create_repo_in_workspace(&state, "group-starve-repo", "ws-group-starve").await;
+        create_mr_in_group(
+            &state,
+            "mr-starve-a",
+            &group_repo.id,
+            "ws-group-starve",
+            "bundle-starve",
+            "feat/starve-a",
+            Some("agent-1"),
+        )
+        .await;
+        create_mr_in_group(
+            &state,
+            "mr-starve-b",
+            &group_repo.id,
+            "ws-group-starve",
+            "bundle-starve",
+            "feat/starve-b",
+            Some("agent-1"),
+        )
+        .await;
+        enqueue_mr(&state, "mr-starve-a", 50, 1000).await;
+        enqueue_mr(&state, "mr-starve-b", 50, 1001).await;
+
+        // Guided workspace: NEWER independent entry behind the held group.
+        seed_workspace_with_trust(
+            &state,
+            "ws-group-guided",
+            "Group Guided WS",
+            gyre_domain::TrustLevel::Guided,
+        )
+        .await;
+        let guided_repo =
+            create_repo_in_workspace(&state, "group-guided-repo", "ws-group-guided").await;
+        let mut guided_mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-starve-guided"),
+            guided_repo.id.clone(),
+            "Merge-ready MR behind a held atomic group",
+            "feat/starve-guided",
+            "main",
+            1002,
+        );
+        guided_mr.workspace_id = Id::new("ws-group-guided");
+        state.merge_requests.create(&guided_mr).await.unwrap();
+        enqueue_mr(&state, "mr-starve-guided", 50, 1002).await;
+
+        for _ in 0..3 {
+            process_next(&state).await.unwrap();
+        }
+
+        let guided = state
+            .merge_requests
+            .find_by_id(&Id::new("mr-starve-guided"))
+            .await
+            .unwrap()
+            .expect("guided mr should exist");
+        assert_eq!(
+            guided.status,
+            MrStatus::Merged,
+            "Guided MR queued behind a held atomic group must still merge — \
+             a held group must not monopolize the shared merge queue"
+        );
+
+        for mr_id in ["mr-starve-a", "mr-starve-b"] {
+            let updated = state
+                .merge_requests
+                .find_by_id(&Id::new(mr_id))
+                .await
+                .unwrap()
+                .expect("group member should exist");
+            assert_eq!(
+                updated.status,
+                MrStatus::Open,
+                "held group member {mr_id} must stay Open"
+            );
+            let entry = state
+                .merge_queue
+                .find_by_id(&Id::new(format!("entry-{mr_id}")))
+                .await
+                .unwrap()
+                .expect("entry should exist");
+            assert_eq!(
+                entry.status,
+                MergeQueueEntryStatus::Queued,
+                "held group member {mr_id} must stay Queued"
             );
         }
     }
