@@ -27,6 +27,7 @@
     MrCreated: 'mr_created', MrNeedsReview: 'mr_needs_review',
     GateFailure: 'gate_failure', SuggestedSpecLink: 'suggested_link',
     TaskCreated: 'task_created', BudgetWarning: 'budget_warning',
+    SpecAssertionFailure: 'spec_assertion_failure',
   };
 
   function normType(t) {
