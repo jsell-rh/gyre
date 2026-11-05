@@ -349,12 +349,31 @@ pub(crate) async fn spawn_agent_core(
     }
 
     // Fetch workspace for compute target resolution and clone URL.
-    let workspace = state
-        .workspaces
-        .find_by_id(&repo.workspace_id)
-        .await
-        .ok()
-        .flatten();
+    //
+    // §1 Token Scoping: the workspace row is also the source of the tenant
+    // scope claim for the agent JWT. A missing row means the repo carries a
+    // dangling workspace reference (POST /api/v1/repos still accepts any
+    // workspace_id, so the state is reachable via the public API). Fail the
+    // spawn closed — never mint an unscoped legacy token that would bypass
+    // the MCP scope gate — mirroring the orchestrator spawn path
+    // (orchestrator.rs) and the stale-restart path (stale_agents.rs).
+    let workspace = match state.workspaces.find_by_id(&repo.workspace_id).await {
+        Ok(Some(ws)) => Some(ws),
+        Err(e) => {
+            return Err(ApiError::Internal(anyhow::anyhow!(
+                "workspace lookup for repo {}: {e}",
+                repo.id
+            )));
+        }
+        Ok(None) => {
+            return Err(ApiError::NotFound(format!(
+                "workspace {} referenced by repo {} does not exist; the tenant scope for \
+                 the agent token cannot be determined — fix the repo's workspace \
+                 reference before spawning",
+                repo.workspace_id, repo.id
+            )));
+        }
+    };
 
     // Resolve compute target via DB: request ID → workspace assignment → tenant default.
     // If req.compute_target_id is set it must exist; return 404 immediately if not found.
@@ -433,40 +452,31 @@ pub(crate) async fn spawn_agent_core(
     //
     // §1 Token Scoping: the hierarchy claims come from the spawn context —
     // repo → workspace → tenant. A worker agent's token is scoped to its
-    // repo (`repo:{name}:write`).
-    let tenant_id = workspace.as_ref().map(|ws| ws.tenant_id.to_string());
-    let token = match tenant_id.as_deref() {
-        // Tenant scope determined: mint the scoped worker JWT.
-        Some(tenant) => state
-            .agent_signing_key
-            .mint(
-                &agent.id.to_string(),
-                &req.task_id,
-                &auth.agent_id,
-                &state.base_url,
-                jwt_ttl,
-                tenant,
-                &repo.workspace_id.to_string(),
-                &req.repo_id,
-                &repo.name,
-            )
-            .unwrap_or_else(|e| {
-                tracing::error!("JWT pre-mint failed, falling back to UUID token: {e}");
-                uuid::Uuid::new_v4().to_string()
-            }),
-        // Workspace unresolvable — the tenant scope cannot be determined.
-        // Mint fails closed (UUID fallback) rather than carrying a
-        // fabricated tenant identity (task-097 F3 class).
-        None => {
-            tracing::error!(
-                workspace_id = %repo.workspace_id,
-                "JWT pre-mint skipped: workspace unresolvable, tenant scope cannot be determined; \
-                 falling back to UUID token for agent {}",
-                agent.id
-            );
-            uuid::Uuid::new_v4().to_string()
-        }
-    };
+    // repo (`repo:{name}:write`). The workspace row was resolved (and its
+    // existence enforced) before the agent record was created, so the
+    // tenant scope is always determined here; a mint failure fails the
+    // spawn closed — an agent that cannot receive a scoped token is never
+    // downgraded to an unscoped legacy token that would bypass the MCP
+    // scope gate.
+    let ws = workspace.as_ref().ok_or_else(|| {
+        ApiError::Internal(anyhow::anyhow!(
+            "workspace resolved before agent creation but missing at token mint"
+        ))
+    })?;
+    let token = state
+        .agent_signing_key
+        .mint(
+            &agent.id.to_string(),
+            &req.task_id,
+            &auth.agent_id,
+            &state.base_url,
+            jwt_ttl,
+            &ws.tenant_id.to_string(),
+            &repo.workspace_id.to_string(),
+            &req.repo_id,
+            &repo.name,
+        )
+        .map_err(|e| ApiError::Internal(anyhow::anyhow!("agent token mint: {e}")))?;
     // Store now so the container can authenticate immediately upon start.
     let _ = state
         .kv_store
@@ -664,10 +674,12 @@ pub(crate) async fn spawn_agent_core(
         // process starts — raw values are never in the agent env.
         // Failure is logged and skipped: a missing/undecryptable secret must
         // not block spawning the agent itself.
-        // tenant_id was resolved above at mint time (§1 Token Scoping).
+        // tenant_id comes from the workspace row resolved (and enforced)
+        // at the start of the spawn (§1 Token Scoping).
         // An unresolvable workspace means the tenant scope cannot be
         // determined — skip the tenant-scoped secret resolution and log
         // rather than fabricating a "default" tenant identity (task-097 F3).
+        let tenant_id = workspace.as_ref().map(|ws| ws.tenant_id.to_string());
         match tenant_id.as_deref() {
             Some(tenant) => {
                 match state
@@ -1882,7 +1894,11 @@ mod tests {
     }
 
     async fn create_repo(app: Router) -> (Router, String) {
-        let body = serde_json::json!({"workspace_id": "ws-1", "name": "test-repo"});
+        // Spawn fails closed when the repo's workspace row is missing (§1
+        // Token Scoping: the workspace row is the tenant-scope source for
+        // agent JWTs) — create the fixture workspace first.
+        let (app, ws_id) = create_workspace(app, "ws-1").await;
+        let body = serde_json::json!({"workspace_id": ws_id, "name": "test-repo"});
         let resp = app
             .clone()
             .oneshot(
@@ -3202,19 +3218,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_unresolvable_workspace_skips_secret_resolution() {
-        // A repo in a nonexistent workspace ("ws-ghost") is accepted by the
-        // create-repo validation (it only rejects `..`/`/`), so the spawn
-        // path sees workspace=None. The F3 fix must skip secret resolution
-        // (warn) rather than fabricate tenant "default" — a tenant-scoped
-        // secret named LEAK in the "default" tenant must NOT leak into the
-        // agent env.
+    async fn spawn_unresolvable_workspace_fails_closed() {
+        // §1 Token Scoping + task-097 F3: a repo whose workspace row is
+        // missing carries a dangling reference — POST /api/v1/repos accepts
+        // any workspace_id, so this state is public-API-reachable (seeded
+        // here directly into the store for determinism). The spawn must
+        // FAIL CLOSED: the tenant scope for the agent JWT cannot be
+        // determined, so no agent may be created, no unscoped legacy token
+        // may be minted (it would bypass the MCP §1 scope gate), and no
+        // tenant-scoped secret may be delivered (the F3 leak: a secret
+        // named LEAK in a fabricated "default" tenant must not reach the
+        // agent env — trivially guaranteed because no container runs).
         let state = test_state();
         let app = crate::api::api_router().with_state(state.clone());
         let temp = tempfile::tempdir().expect("tempdir");
         let dump_path = temp.path().join("env-dump").to_string_lossy().into_owned();
 
-        let (app, repo_id) = create_repo_in_workspace(app, "ws-ghost").await;
+        // Seed the dangling repo directly into the store.
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-ghost"),
+            gyre_common::Id::new("ws-ghost"),
+            "wt-repo".to_string(),
+            format!("{}/ws-ghost/wt-repo.git", state.repos_root),
+            0,
+        );
+        state.repos.create(&repo).await.unwrap();
+        let repo_id = repo.id.to_string();
+
         let (app, task_id) = create_task(app, "Ghost workspace task").await;
         let (app, ct_id) = create_env_dump_compute_target(app, "env-dump-ghost", &dump_path).await;
 
@@ -3231,22 +3261,46 @@ mod tests {
         .await;
 
         create_worktree_dir(&state, "ws-ghost", "wt-repo", "feat/ghost");
-        let (_, json) = do_spawn_with_target(app, &repo_id, &task_id, "feat/ghost", &ct_id).await;
+        let body = serde_json::json!({
+            "name": "ghost-worker",
+            "repo_id": repo_id,
+            "task_id": task_id,
+            "branch": "feat/ghost",
+            "compute_target_id": ct_id,
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/agents/spawn")
+                    .header("content-type", "application/json")
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(
-            json["agent"]["status"], "active",
-            "unresolvable workspace must not fail the spawn"
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "spawn must fail closed when the repo's workspace is unresolvable"
+        );
+        let json = body_json(resp).await;
+        let err = json["error"].as_str().unwrap_or_default();
+        assert!(
+            err.contains("ws-ghost"),
+            "error must name the unresolvable workspace, got: {err}"
         );
 
-        let dump = wait_for_dump(&dump_path)
-            .await
-            .expect("env-dump script should have written its output");
-        // GYRE_CRED_PROXY is platform-injected (not a secret); assert no
-        // secret-sourced env var leaked.
+        // Fail-closed guarantees: no agent record, hence no token minted
+        // and no container dispatched (no env dump, no secret delivery).
         assert!(
-            !dump
-                .lines()
-                .any(|l| l.starts_with("GYRE_CRED_") && l != "GYRE_CRED_PROXY=http://127.0.0.1:8765"),
-            "no secret-sourced GYRE_CRED_* may be delivered when the workspace is unresolvable:\n{dump}"
+            state.agents.find_by_name("ghost-worker").await.unwrap().is_none(),
+            "no agent record may be created when the tenant scope cannot be determined"
+        );
+        assert!(
+            !std::path::Path::new(&dump_path).exists(),
+            "no container may run (env dump must never be written) when the spawn fails closed"
         );
     }
 
