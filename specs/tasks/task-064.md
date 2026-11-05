@@ -12,7 +12,7 @@ coverage_sections:
   - "view-query-grammar.md §14 High-risk untested code"
   - "view-query-grammar.md §15 Authentication concept"
   - "view-query-grammar.md §16 Relationship to Other Specs"
-commits: ["2dbaea81c731e2d6b695f48d94fde99dab2f833e"]
+commits: ["2dbaea81c731e2d6b695f48d94fde99dab2f833e", "94327d80b00054645764a62cc8c318eff820ac83"]
 ---
 
 ## Spec Excerpt
@@ -71,8 +71,8 @@ commits: ["2dbaea81c731e2d6b695f48d94fde99dab2f833e"]
 - [x] Integration test: test coverage gaps query identifies unreachable functions
 - [x] Integration test: high-risk untested code query intersects complexity + test gaps
 - [x] Integration test: authentication concept query expands from seed nodes
-- [x] `cargo test --all` passes (focused runs on the touched crates this round: gyre-domain 388 lib + 8 composition, gyre-common 111, gyre-server lib 1257, explorer_ws_integration 8; full workspace suites owned by verification)
-- [x] `cd web && npm test` passes (66 files, 1638 passed / 41 skipped at the candidate commit; canvas-state suite re-verified this round: 14/14)
+- [x] `cargo test --all` passes (focused runs on the touched crates, re-verified on the restored checkout this round: gyre-domain `view_query_composition` 8/8, gyre-server `explorer_ws_integration` 8/8; full workspace suites owned by verification)
+- [x] `cd web && npm test` passes (canvas-state suite re-verified this round after `npm ci` with locked versions: 14/14; full suite at the implementation commit: 66 files, 1638 passed / 41 skipped)
 
 ## Agent Instructions
 
@@ -106,17 +106,17 @@ Verified the task-062/063 grammar primitives end-to-end and closed three real §
 - "Blast Radius (click)" (§12) and "Test Coverage Gaps" (§13) already matched the spec shapes — verified by resolution tests rather than re-implemented.
 - No system default for §15 (Authentication concept): seed nodes are repo-specific, so a universal preset is meaningless; the concept scope is reachable via LLM queries, concept search, and user-composed JSON (all tested).
 
-### Contract-repair round (7fdcd39c)
+### Stale-dist repair (94327d80)
 
-- The executor restored the assigned task document over the candidate head; the production fix (commit 2dbaea81) was preserved unchanged — no source modifications were needed this round.
-- **Stale-dist defect found and repaired**: commit 2dbaea81 changed `web/src` but never rebuilt the committed `web/dist`, so `SKIP_WEB_BUILD=1` deployments would keep serving the pre-fix SPA (the old bundle lacks `to_level`/`zoom_in` interaction recording and the `selected_node` normalization). Rebuilt via the project's own build path (build.rs) and committed as 94327d80; bundle delta ~+3.5KB, css hash unchanged.
-- Re-verified with focused probes on the restored checkout (evidence: /tmp/stage/review-evidence/task-064-focused-probes.log): `cargo test -p gyre-domain --test view_query_composition` 8/8, `cargo test -p gyre-server --test explorer_ws_integration` 8/8, and `npx vitest run src/__tests__/canvas-state.test.js` 14/14 after `npm ci` with locked versions.
+Commit 2dbaea81 changed `web/src` but initially never rebuilt the committed `web/dist`, so `SKIP_WEB_BUILD=1` deployments would have kept serving the pre-fix SPA (no `to_level`/`zoom_in` interaction recording, no `selected_node` normalization). Rebuilt via the project's own build path (build.rs) and committed as 94327d80; the committed bundle contains `selected_node`, `recent_interactions`, and `zoom_in` (re-checked this round).
+
+### Contract-repair rounds
+
+The executor restored the assigned task document over the candidate head twice; each time the production fix (2dbaea81 + 94327d80) was preserved unchanged — no source modifications were needed. This round re-verified the restored checkout with focused probes and restored these notes: `cargo test -p gyre-domain --test view_query_composition` 8/8, `cargo test -p gyre-server --test explorer_ws_integration` 8/8, `npm ci` (locked versions) + `npx vitest run src/__tests__/canvas-state.test.js` 14/14 (evidence: /tmp/stage/review-evidence/task-064-*.log).
 
 ### Test evidence
 
-- `cargo test -p gyre-domain` → 388 lib + 8 composition tests, 0 failed
-- `cargo test -p gyre-common` → 111 passed, 0 failed
-- `cargo test -p gyre-server --lib` → 1257 passed, 0 failed
-- `cargo test -p gyre-server --test explorer_ws_integration` → 8 passed, 0 failed
-- `cd web && npm test` → 66 files, 1638 passed / 41 skipped, 0 failed (includes the new `canvas-state.test.js`, 14 tests — one is a regression guard proving the camelCase selection drop was real)
-- Clippy on the touched crates: no new findings (the pre-existing `never_loop` error in `rust_extractor.rs` and `end` loop-counter warning in `view_query.rs:798` exist on the base commit `d81b0fe4` — untouched by this task)
+- Rust: `cargo test -p gyre-domain --test view_query_composition` — 8 passed, 0 failed (blast radius tiering, test gaps, high-risk intersect, concept expansion, interactive re-run, system default shapes).
+- Rust: `cargo test -p gyre-server --test explorer_ws_integration` — 8 passed, 0 failed (canvas-state context surfaced to the LLM, saved-view handling).
+- Web: `npx vitest run src/__tests__/canvas-state.test.js` — 14 passed, 0 failed (wire normalization, zoom/query interaction recording, coalescing, non-user zoom exclusion).
+- Full suites at the implementation commit: gyre-domain 388 lib tests, gyre-common 111, gyre-server lib 1257, web 66 files / 1638 passed / 41 skipped. Full workspace gates are owned by verification.
