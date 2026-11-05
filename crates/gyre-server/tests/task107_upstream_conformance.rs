@@ -24,9 +24,9 @@
 //! Live-instance verification (blocked in sandboxed CI by network policy,
 //! run on a networked host): the public Fulcio trust bundle can be fetched
 //! and inspected directly:
-//!   curl -s https://fulcio.sigstore.dev/api/v2/trustBundle | jq '.chains[0][0]'
-//! The element must be a PEM string beginning `-----BEGIN CERTIFICATE-----`,
-//! not base64. Feeding that bundle JSON into a `FixedBundle` transport and
+//!   curl -s https://fulcio.sigstore.dev/api/v2/trustBundle | jq '.chains[0]'
+//! The chain must be an OBJECT with a `certificates` array whose elements
+//! are PEM strings beginning `-----BEGIN CERTIFICATE-----`, not base64. Feeding that bundle JSON into a `FixedBundle` transport and
 //! verifying any Fulcio-issued record exercises the same decode path.
 
 use anyhow::{anyhow, Context, Result};
@@ -67,11 +67,15 @@ impl UpstreamFulcio {
         }
     }
 
-    /// Trust bundle EXACTLY as upstream serves it: `chains` is a list of
-    /// chains, each chain a list of PEM STRINGS.
+    /// Trust bundle EXACTLY as upstream serves it: the protojson of
+    /// `TrustBundle { repeated CertificateChain chains = 1; }` — `chains` is
+    /// a list of chain OBJECTS, each with a `certificates` array of PEM
+    /// STRINGS (fulcio.proto / grpc_server.go GetTrustBundle).
     fn trust_bundle_json(&self) -> String {
         serde_json::json!({
-            "chains": [[ self.ca_cert.pem() ]]
+            "chains": [
+                { "certificates": [ self.ca_cert.pem() ] }
+            ]
         })
         .to_string()
     }
@@ -263,14 +267,20 @@ async fn production_verifies_against_upstream_pem_bundle() {
 }
 
 /// Belt-and-braces for the raw-JSON contract: the trust bundle the probe
-/// serves must actually contain PEM strings (guards the guard — if the
-/// probe's own JSON drifted back to base64, the two tests above would
-/// quietly lose their meaning).
+/// serves must actually match the upstream protojson SHAPE — each chain an
+/// object with a `certificates` array of PEM strings (guards the guard — if
+/// the probe's own JSON drifted back to the bare-array or base64 shape, the
+/// tests above would quietly lose their meaning).
 #[test]
 fn probe_bundle_actually_encodes_pem_strings() {
     let fulcio = UpstreamFulcio::new();
     let bundle: serde_json::Value = serde_json::from_str(&fulcio.trust_bundle_json()).unwrap();
-    let first = bundle["chains"][0][0]
+    let chain = &bundle["chains"][0];
+    assert!(
+        chain.is_object(),
+        "upstream serves each chain as a CertificateChain object, got: {chain}"
+    );
+    let first = chain["certificates"][0]
         .as_str()
         .expect("chain element must be a JSON string");
     assert!(

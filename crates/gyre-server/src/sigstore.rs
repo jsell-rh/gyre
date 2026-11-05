@@ -113,17 +113,44 @@ struct FulcioChain {
     certificates: Vec<String>,
 }
 
-/// Fulcio v2 trust bundle: `{"chains": [[<cert>, ...], ...]}` where each
-/// element is a certificate in the same encoding as the chain field above
-/// (upstream serves PEM strings). `chains` is repeated precisely so an
-/// instance can serve multiple concurrent CA chains (rotation windows,
-/// multi-CA deployments) — verification must try every chain, not just the
-/// first (review F11).
+/// One chain in the Fulcio v2 trust bundle. Upstream serves the protojson
+/// of `message TrustBundle { repeated CertificateChain chains = 1; }` where
+/// `message CertificateChain { repeated string certificates = 1; }` — each
+/// chain is an OBJECT with a `certificates` array of PEM strings
+/// (fulcio.proto; grpc_server.go GetTrustBundle builds `[]*CertificateChain`
+/// message objects; sigstore-python's REST client iterates
+/// `trust_bundle_json["chains"][i]["certificates"]`). Some private/v1-era
+/// deployments instead serve the bare-array shape, so both are tolerated.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TrustBundleChainWire {
+    /// Upstream protojson: `{"certificates": ["<PEM>", ...]}`.
+    Object(FulcioChain),
+    /// Bare-array legacy shape: `["<PEM>", ...]`.
+    Array(Vec<String>),
+}
+
+impl TrustBundleChainWire {
+    fn certificates(self) -> Vec<String> {
+        match self {
+            TrustBundleChainWire::Object(c) => c.certificates,
+            TrustBundleChainWire::Array(certs) => certs,
+        }
+    }
+}
+
+/// Fulcio v2 trust bundle: `{"chains": [<chain>, ...]}` where each chain is
+/// a `CertificateChain` object whose `certificates` array holds PEM strings
+/// (leaf first, then intermediates and the root; upstream protojson — see
+/// `TrustBundleChainWire`). `chains` is repeated precisely so an instance can
+/// serve multiple concurrent CA chains (rotation windows, multi-CA
+/// deployments) — verification must try every chain, not just the first
+/// (review F11).
 
 #[derive(Deserialize)]
 struct TrustBundleResponse {
     #[serde(default)]
-    chains: Vec<Vec<String>>,
+    chains: Vec<TrustBundleChainWire>,
 }
 
 #[derive(Serialize)]
@@ -655,7 +682,11 @@ async fn fetch_trust_bundle(
     let text = transport.fulcio_trust_bundle(fulcio_url).await?;
     let bundle: TrustBundleResponse =
         serde_json::from_str(&text).context("fulcio trust bundle response invalid")?;
-    Ok(bundle.chains)
+    Ok(bundle
+        .chains
+        .into_iter()
+        .map(|c| c.certificates())
+        .collect())
 }
 
 /// (b) Chain check: the record's stored chain (leaf first, then
@@ -1270,13 +1301,19 @@ mod tests {
             }
         }
 
-        /// Upstream wire contract: trust-bundle chain elements are PEM
-        /// strings (grpc_server.go serves CertPEM()/ChainPEM() output), NOT
-        /// base64(DER).
+        /// Upstream wire contract (F19): the trust bundle is the protojson of
+        /// `TrustBundle { repeated CertificateChain chains = 1; }` — each
+        /// chain is an OBJECT with a `certificates` array of PEM strings
+        /// (grpc_server.go serves CertPEM()/ChainPEM() output), NOT a bare
+        /// array and NOT base64(DER).
         fn trust_bundle_json(&self) -> String {
-            let chain1 = [self.trusted_ca.cert.pem()];
-            let chain2 = [self.second_trusted_ca.cert.pem()];
-            serde_json::json!({ "chains": [chain1, chain2] }).to_string()
+            serde_json::json!({
+                "chains": [
+                    { "certificates": [self.trusted_ca.cert.pem()] },
+                    { "certificates": [self.second_trusted_ca.cert.pem()] },
+                ]
+            })
+            .to_string()
         }
     }
 
@@ -1466,15 +1503,15 @@ mod tests {
         // Make the rogue CA the issuer but ALSO serve it as a third trusted
         // chain — the leaf must verify because SOME served chain roots it.
         stack.knobs.untrusted_ca = true;
-        // Serve the rogue CA in the bundle too — as PEM strings, the
-        // upstream encoding (this is the multi-chain F11 case; the bundle
-        // here is hand-built, so it must encode the SAME upstream contract
-        // the mock's own trust_bundle_json does).
+        // Serve the rogue CA in the bundle too — in the upstream protojson
+        // object shape with PEM strings (this is the multi-chain F11 case;
+        // the bundle here is hand-built, so it must encode the SAME upstream
+        // contract the mock's own trust_bundle_json does).
         let bundle = serde_json::json!({
             "chains": [
-                [stack.trusted_ca.cert.pem()],
-                [stack.second_trusted_ca.cert.pem()],
-                [stack.untrusted_ca.cert.pem()],
+                { "certificates": [stack.trusted_ca.cert.pem()] },
+                { "certificates": [stack.second_trusted_ca.cert.pem()] },
+                { "certificates": [stack.untrusted_ca.cert.pem()] },
             ]
         });
         let record = sign(&stack, "chain2sha").await;
@@ -1492,6 +1529,75 @@ mod tests {
             result.reason
         );
         assert!(result.valid);
+    }
+
+    /// F19: the production decoder must accept the trust bundle EXACTLY as
+    /// every real Fulcio serves it — the protojson of
+    /// `TrustBundle { repeated CertificateChain chains = 1; }`, each chain an
+    /// OBJECT with a `certificates` array — and end-to-end verification
+    /// against that shape must succeed (the prior round's list-of-lists
+    /// decode made every fulcio-mode record fail with
+    /// `fulcio trust bundle response invalid`). The bare-array legacy shape
+    /// stays tolerated, and a chain that is neither shape is rejected.
+    #[tokio::test]
+    async fn verification_accepts_upstream_trust_bundle_object_shape() {
+        let stack = MockSigningStack::new();
+        let record = sign(&stack, "bundleshape").await;
+
+        // Exact upstream shape: chain objects with a `certificates` array.
+        let upstream_bundle = serde_json::json!({
+            "chains": [
+                { "certificates": [stack.trusted_ca.cert.pem()] },
+                { "certificates": [stack.second_trusted_ca.cert.pem()] },
+            ]
+        })
+        .to_string();
+        let verifying = FixedBundleStack {
+            inner: stack,
+            bundle: upstream_bundle,
+            knobs: MockKnobs::default(),
+        };
+        let result = verify_signature_fulcio(&record, &test_config(), &verifying, test_now()).await;
+        assert!(
+            result.valid,
+            "upstream protojson bundle shape must verify end-to-end: {:?}",
+            result.reason
+        );
+
+        // Legacy bare-array shape stays tolerated.
+        let legacy_bundle = serde_json::json!({
+            "chains": [[verifying.inner.trusted_ca.cert.pem()]]
+        })
+        .to_string();
+        let legacy_verifying = FixedBundleStack {
+            bundle: legacy_bundle,
+            ..verifying
+        };
+        let result =
+            verify_signature_fulcio(&record, &test_config(), &legacy_verifying, test_now()).await;
+        assert!(
+            result.valid,
+            "legacy bare-array bundle shape stays tolerated: {:?}",
+            result.reason
+        );
+
+        // A chain that is neither an object nor an array is rejected — the
+        // decode genuinely gates, not a fail-open default.
+        let malformed = serde_json::json!({
+            "chains": [legacy_verifying.inner.trusted_ca.cert.pem()]
+        })
+        .to_string();
+        let malformed_verifying = FixedBundleStack {
+            bundle: malformed,
+            ..legacy_verifying
+        };
+        let err = fetch_trust_bundle("http://fulcio", &malformed_verifying)
+            .await
+            .expect_err("a string chain must not deserialize");
+        assert!(
+            err.to_string().contains("response invalid"),
+            "unexpected error: {err}"
+        );
     }
 
     /// A transport wrapper serving a fixed trust-bundle JSON.
