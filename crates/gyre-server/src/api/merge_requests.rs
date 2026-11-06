@@ -2038,6 +2038,7 @@ mod tests {
                         .method("PUT")
                         .uri(format!("/api/v1/merge-requests/{mr_a_id}/status"))
                         .header("content-type", "application/json")
+                        .header("authorization", "Bearer test-token")
                         .body(Body::from(serde_json::to_vec(&body).unwrap()))
                         .unwrap(),
                 )
