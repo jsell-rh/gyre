@@ -30,13 +30,15 @@ Infrastructure failures retry with backoff without changing the task contract.
 Build-capable assignments request one CPU and 4 GiB RAM. Cargo builds and Rust
 unit tests use one worker; the guarded frontend test command also serializes
 Vitest files. A confirmed OOM raises only that task/stage to 8 GiB for its next
-assignment. An OOM at 8 GiB requires attention; connection failures never raise
+assignment. An OOM at 8 GiB requires attention (including across main advances and partial checkpoints); connection failures never raise
 memory. Compute choices and the triggering evidence remain in the ledger.
 
 An optional, read-only Kubernetes runtime observer uses `runtime_kube_context`
 and `runtime_namespace` settings to capture workload termination reasons before
 pods disappear. It only records pods matching existing owned resource records;
-cluster diagnostics are not a prerequisite for healthy gateway execution.
+cluster diagnostics are not a prerequisite for healthy gateway execution. Read-only
+cgroup counters also detect child-only OOM kills that leave the pod running;
+a compiler failure by itself never raises memory.
 Without an authoritative OOM and its killed allocation size, no memory escalation
 is inferred. The cockpit reports the actual runtime failure instead of calling
 an OOM a model or generic transport failure.

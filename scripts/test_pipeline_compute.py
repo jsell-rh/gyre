@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 from pipeline.store import Store
-from pipeline.compute import profile, record_oom
+from pipeline.compute import profile, record_oom, from_usage
 from pipeline.runtime import observe, failure, restart, snapshot
 from pipeline.execution import Execution, Attention
 
@@ -26,6 +26,14 @@ class ComputeTests(unittest.TestCase):
         self.assertEqual(profile(self.store,'task-002','implement')['memory'],'4Gi')
         self.assertIsInstance(record_oom(self.store,'task-001','implement',8,{}),Attention)
         self.assertEqual(profile(self.store,'task-001','implement')['memory'],'8Gi')
+
+    def test_child_only_oom_is_not_misclassified_as_bad_candidate_code(self):
+        usage={'memory.events':{'oom_kill':'1'},'memory.max':str(4*1024**3),'memory.peak':str(4*1024**3)}
+        error=from_usage(self.execution,'owned',usage)
+        self.assertEqual(error.category,'sandbox_oom')
+        self.assertEqual(error.retry_delay,0)
+        self.assertEqual(profile(self.store,'task-001','implement')['memory'],'8Gi')
+        self.assertIsNone(from_usage(self.execution,'owned',{'memory.events':{'oom_kill':'0'}}))
 
     def test_durable_runtime_observer_preserves_allocation_and_captures_oom_once(self):
         self.store.set_setting('runtime_kube_context','dedicated-context');self.store.set_setting('runtime_namespace','gyre')

@@ -146,6 +146,9 @@ def run(execution, path, identity, probe=None):
                 value = decode_poll(result.stdout)
                 if value.get('usage'):
                     (execution.directory/'remote-usage.json').write_text(json.dumps(value['usage']))
+                    from .compute import from_usage
+                    oom=from_usage(execution,name,value['usage'])
+                    if oom:raise oom
                 data = base64.b64decode(value['log'], validate=True)
                 if value['offset'] != offset + len(data):
                     raise ValueError('verification log offset mismatch')

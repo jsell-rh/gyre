@@ -28,3 +28,15 @@ def record_oom(store, task, stage, observed_gib, evidence):
         error.category = 'sandbox_oom'
         error.diagnostic = evidence
     return error
+
+
+def from_usage(execution, name, usage):
+    """Child-only OOMs need not terminate PID 1 or mark the pod OOMKilled."""
+    counters=usage.get('memory.events',{})
+    if not isinstance(counters,dict) or int(counters.get('oom_kill',0))<=0:return None
+    try:gib=int(usage['memory.max'])/(1024**3)
+    except (KeyError,ValueError,TypeError):
+        from .execution import Attention
+        error=Attention('Cgroup recorded an OOM but its memory limit is unavailable');error.category='sandbox_oom';return error
+    return record_oom(execution.store,execution.claim['task'],execution.claim['stage'],gib,
+                      {'source':'cgroup','sandbox':name,**usage})
