@@ -50,3 +50,32 @@ Test suites run: `cargo test -p gyre-server --lib api::workspaces` (12 passed), 
 ### Verdict
 
 needs-revision — F5 means the task's central deliverable (Supervised trust actually requiring human merge approval, per HSI §2 Mechanical Implementation) is not enforced end-to-end: the Deny policy is created but never consulted. F6 is the same silent-restriction-loss class R1 F1 established, surviving in an adjacent handler. F7/F8 are coverage gaps on fix-introduced branches and an explicit acceptance criterion.
+
+## Round: R5 (review of candidate 80727be2, base 1ae18d1c)
+
+**Reviewer:** independent review agent
+**Commits reviewed:** full diff base..candidate (all 12 attributed task commits plus repair rounds through F9)
+**Evidence:** /tmp/stage/review-evidence/ (review-summary.md, probe logs)
+
+### Verification of the F5–F9 repair chain (all confirmed genuine)
+
+- **F5 (merge-time enforcement):** `evaluate_merge_abac` constructs the specced service identity (subject.type "system", subject.id "merge-processor", action "merge", resource_type "mr") and `supervised_trust_hold` gates all three merge paths: the selection loop (merge_processor.rs:1119 via `selection_trust_hold`, group members checked as a unit), the single-entry path (:1507), and the atomic-group path (:672, with group rollback). The HTTP catch-all Deny is excluded by id (`DEFAULT_DENY_POLICY_ID`); the attestation-scoped immutable builtin (resource_types ["attestation"]) cannot match the merge context. 60/60 merge_processor tests pass, including hold/requeue, human-approval escape, atomic-group hold, three no-starvation tests, and both startup-seeded-builtin tests.
+- **Human-approval escape is human-only:** REST `transition_mr_status` blocks `UserRole::Agent` from setting Approved (merge_requests.rs:842-848, test `agent_cannot_approve_mr_status_supervised_escape` passes); no MCP tool or WS surface can set MR status; the processor itself sets Open→Approved→Merged only after the gate on every path (verified statically, order of operations).
+- **F6:** `create_interrogation_policies_in` propagates creation errors (spawn aborts); built-in seeding is fail-closed (`seed_builtin_policies` returns `anyhow::Result`, test `builtin_policy_seeding_fails_closed_on_store_error` passes); cleanup deletes retry on failure.
+- **F7:** both Custom directions tested (`trust_transition_preset_to_custom_preserves_trust_policies`, `trust_transition_custom_to_preset_deletes_and_reseeds` — pass).
+- **F8:** field-level domain tests for `trust_policies_for_level` (name/effect/priority band/actions/resource_types/condition/scope/enabled/immutable) and `TrustLevel::parse`/`from_db_str` — 416 gyre-domain tests pass.
+- **F9:** both fail-closed tests pass; they are mutation-sensitive by construction (under the old fail-open `Err(_) => None` arm the fixtures merge and the `MrStatus::Open` assertions fail).
+- **Mechanical gates:** 23/24 rc=0. `check-silent-result-discard.sh` rc=1 — every flagged line cross-checked against the candidate's changed hunks: all pre-existing baseline sites (matches the shipped claim). fmt clean on all touched packages.
+- **Script changes are repairs, not weakenings:** exemption entries only removed; `check-non-atomic-creation.sh` rewritten gawk→python3 for portability with equivalent detection semantics; meta_specs registry routes gained real Admin gates with a rejecting test; recovery.rs ref-resolution sites fail closed (frozen count 2→0).
+
+### Findings
+
+- [ ] **F10: Candidate-introduced test regression — `transition_mr_status` gained `AuthenticatedAgent` but one pre-existing test was not updated; `cargo test -p gyre-server --lib api::merge_requests` exits 101.** At base 1ae18d1c the handler had NO auth parameter (the PUT /merge-requests/:id/status route was unauthenticated — a real hole the candidate closes as a prerequisite of the agent-approval guard, correct in itself). The candidate added the Bearer test-token header to three test call sites in api/merge_requests.rs but missed the fourth, `lineage_parent_merged_satisfies_dependency` (:2032-2046, LineageRepo test module), which still sends no Authorization header and now gets a deterministic 401 ("Missing Bearer token", auth.rs) where it asserts 200 on the approved transition. Full server lib: 1296 passed / 1 failed. Violates the acceptance criterion "cargo test --all passes". Fix: add the same header to the missed oneshot request.
+
+### Scope note (non-blocking, for the coverage flip)
+
+§12 "What Each Level Controls" rows beyond MR merge and spec approval (Notifications cadence, Inbox priority ranges 1-10 vs 1-9, Briefing detail, Agent completion summaries) are not differentiated by trust level anywhere in server or web code. The task's acceptance criteria and §13's mechanical preset mapping (Autonomous = keep only `builtin:require-human-spec-approval`) do not cover these UX rows, and coverage row 43 (§8) separately tracks the inbox priority-mapping gap — so this is not a contract violation, but coverage row 12 should not be flipped to implemented wholesale on task completion; only its MR-merge and spec-approval semantics are delivered and verified here.
+
+### Verdict
+
+needs-revision — one mechanical defect (F10): the candidate's own test suite is red. Everything else in the task contract — enum/entity/migrations, preset policy sets, atomic transitions with 409, immutable-Deny-first evaluation, seeded builtin, CRUD prefix guards, strict trust_level parsing, merge-time enforcement on all paths with a human-only approval escape, fail-closed F6/F9 semantics, and the mechanical gates — is independently verified working at this candidate.
