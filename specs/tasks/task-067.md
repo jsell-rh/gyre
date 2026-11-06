@@ -3,7 +3,7 @@ title: "Progressive Drill-Down & Breadcrumb Navigation"
 spec_ref: "explorer-canvas.md §5"
 depends_on:
   - task-065
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "explorer-canvas.md §5 Progressive Drill-Down"
 commits: ["7519d04cec17d1e9f82d965e2b87cef98a0aa241"]
