@@ -144,21 +144,19 @@ Clicking a repo from Workspace Home enters Repo Mode. The top bar shows `[←] W
 | `App.svelte` | Application shell — top bar, two-mode routing, mobile drawer, keyboard shortcuts (no persistent sidebar) |
 | `WorkspaceHome.svelte` | Workspace home dashboard — 5 section cards |
 | `RepoMode.svelte` | Repo mode shell — horizontal tab routing |
-| `ExplorerCanvas.svelte` | Architecture graph (d3-force + ELK, 9 node types) |
+| `ExplorerCanvas.svelte` | Unified architecture canvas — semantic zoom treemap, lens toggle (structural/evaluative/observable), filter presets, view query rendering, minimap (replaces the former Graph/Flow tabs) |
 | `ArchPreviewCanvas.svelte` | Architecture mini canvas in spec detail panel |
 | `EditorSplit.svelte` | Side-by-side spec editor + architecture canvas |
 | `DetailPanel.svelte` | Slide-in right panel for entity drill-in |
 | `InlineChat.svelte` | SSE-driven LLM chat widget |
-| `FlowCanvas.svelte` | Canvas 2D animated agent flow graph (workspace Explorer) |
 | `PresenceAvatars.svelte` | Live presence avatars in status bar |
 | `ScopeBreadcrumb.svelte` | Top bar workspace/repo context breadcrumb |
-| `MoldableView.svelte` | View-mode switcher (graph / list / timeline / flow) |
 
 ---
 
 ## Design System
 
-Red Hat brand CSS variables (`web/src/lib/design-system.css`) — dark theme with `gray-95` (#151515) background, `red-50` (#ee0000) primary. Component library: `Button`, `Badge`, `Card`, `Table`, `Input`, `Modal`, `Toast`, `Tabs`, `Skeleton`, `EmptyState`, `Breadcrumb`, `SearchBar`, `NodeBadge`, `StatusBadge`, `DiffSuggestion`.
+Red Hat brand CSS variables (`web/src/lib/design-system.css`) — dark theme with `gray-95` (#151515) background, `red-50` (#ee0000) primary. Component library: `Button`, `Badge`, `Card`, `Table`, `Input`, `Modal`, `Toast`, `Tabs`, `Skeleton`, `EmptyState`, `Breadcrumb`, `SearchBar`, `StatusBadge`, `DiffSuggestion`.
 
 ---
 
