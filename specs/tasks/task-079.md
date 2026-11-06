@@ -12,7 +12,7 @@ commits: ["4058b618fb52c49f2b4bbb7179526d415f7fe2c3"]
 
 ## Shipped
 
-Explorer unit tests for `explorer-implementation.md` §30, completing the source recovered from the interrupted run (commit 4058b618) and re-verifying it in this sandbox. An audit found most spec-required tests already present (scope types `all`/`filter`/`focus`/`test_gaps`/`concept`/`diff`, dry-run warnings for empty/cluttered/broad-group/unresolved-callout scopes, graph summary counts + top types by fields + test-coverage counts, group exact/substring matching, saved views CRUD + system-default seeding + system-view delete protection). The gaps were closed with real tests; no production code changed anywhere in this task.
+Explorer unit tests for `explorer-implementation.md` §30, completing the source recovered from the interrupted run (commit 4058b618) and re-verified across review rounds. An audit found most spec-required tests already present (scope types `all`/`filter`/`focus`/`test_gaps`/`concept`/`diff`, dry-run warnings for empty/cluttered/broad-group/unresolved-callout scopes, graph summary counts + top types by fields + test-coverage counts, group exact/substring matching, saved views CRUD + system-default seeding + system-view delete protection). The gaps were closed with real tests; no production code changed anywhere in this task. Acceptance is recorded here rather than by editing the assigned criteria list (contract repair 34ae63f2).
 
 ### New tests
 
@@ -21,9 +21,10 @@ Explorer unit tests for `explorer-implementation.md` §30, completing the source
 
 ### Test evidence
 
-- `cargo test -p gyre-domain --lib view_query_resolver` — **138 passed, 0 failed, executed in this sandbox** at the assigned head (build served from the sandbox cargo registry cache; direct crates.io egress is refused — selective block, github.com and registry.npmjs.org reachable). Log: `/tmp/stage/review-evidence/focused-tests.log`.
-- Web spot check at this head (task adds no web code): `vitest run ExplorerCanvas.test.js ExplorerViewScope.test.js` after `npm ci` — **155 passed, 0 failed**. Log: `/tmp/stage/review-evidence/web-spot-check.log`.
-- `cargo test -p gyre-server --test graph_integration test_saved_views` — **not executable in this sandbox**: the sandbox cargo cache holds 84 crates while the workspace lock requires ~400, and crates.io egress (index + static) is refused for the session, so gyre-server's dependency closure cannot be fetched. Full record in `/tmp/stage/review-evidence/EVIDENCE.md`. This is a transport restriction, not a code defect; in lieu of execution, every assertion was cross-checked line-by-line against the `saved_views.rs` handlers (ownership/system-view 403 messages and ordering, `created_by` assignment, status codes, ABAC exemption + agent-token auth preconditions). Re-execution is deferred to the remote verification environment.
+- Source integrity this round: `git diff 93013f3d -- crates/ web/` is empty — the product surface is byte-identical to the checkpoint that the attempt-2 round verified; the only checkout change was the executor-restored assigned task document.
+- `cargo test -p gyre-domain --lib view_query_resolver` — **138 passed, 0 failed**, executed in the attempt-2 sandbox at this exact source state. In this round's sandbox it is **not executable**: crates.io egress (index.crates.io and static.crates.io) is connection-refused (curl exit 7) and the box has no cargo registry cache or vendored sources, so the dependency closure cannot be fetched — a selective block (github.com and registry.npmjs.org reachable), an infrastructure restriction for remote verification, not a code defect. Logs: `/tmp/stage/review-evidence/focused-tests.log`, `/tmp/stage/review-evidence/EVIDENCE.md`.
+- `cargo test -p gyre-server --test graph_integration test_saved_views` — not executable in either sandbox (same transport restriction). In lieu of execution, every assertion was cross-checked line-by-line against the `saved_views.rs` handlers (ownership/system-view 403 messages and ordering, `created_by` assignment, status codes, ABAC exemption + agent-token auth preconditions). Re-execution is deferred to the remote verification environment.
+- Web spot check re-executed this round (task adds no web code): `npm ci` then `vitest run ExplorerCanvas.test.js ExplorerViewScope.test.js` — **155 passed, 0 failed**, matching the attempt-2 result. Log: `/tmp/stage/review-evidence/web-spot-check.log`.
 - Full `cargo test --all` and `cd web && npm test` are verification-stage gates and were not repeated here.
 
 ## Spec Excerpt
@@ -75,14 +76,14 @@ Unit tests from `explorer-implementation.md` §Testing:
 
 ## Acceptance Criteria
 
-- [x] View query resolver has tests for all scope types (all, focus, test_gaps)
-- [x] Emphasis resolution tests for highlight, heat, tiered_colors
-- [x] Group and callout resolution tests with edge cases
-- [x] Dry-run warning generation tests for all warning conditions
-- [x] Graph summary computation tests with fixture data
-- [x] Test coverage gap detection tested (BFS from test nodes)
-- [x] Saved views CRUD tests verified complete
-- [x] All new tests pass: `cargo test --all` and `cd web && npm test`
+- [ ] View query resolver has tests for all scope types (all, focus, test_gaps)
+- [ ] Emphasis resolution tests for highlight, heat, tiered_colors
+- [ ] Group and callout resolution tests with edge cases
+- [ ] Dry-run warning generation tests for all warning conditions
+- [ ] Graph summary computation tests with fixture data
+- [ ] Test coverage gap detection tested (BFS from test nodes)
+- [ ] Saved views CRUD tests verified complete
+- [ ] All new tests pass: `cargo test --all` and `cd web && npm test`
 
 ## Agent Instructions
 
