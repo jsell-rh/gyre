@@ -70,9 +70,9 @@ static_gates() {
 # candidate verifier too, so legitimate strengthening is checked. Restoring
 # scripts at their original paths preserves checks that derive the repo root
 # from their own location; the reviewer sees the original merge tree.
-restore_scripts() { git restore --source=HEAD --worktree -- scripts; }
+restore_scripts() { python3 /tmp/stage/verifier-script-overlay.py finish /tmp/stage/script-overlay.json; }
 trap restore_scripts EXIT
-git restore --source=HEAD^1 --worktree -- scripts
+python3 /tmp/stage/verifier-script-overlay.py begin /tmp/stage/script-overlay.json
 static_gates
 restore_scripts
 trap - EXIT
