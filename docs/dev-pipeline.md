@@ -122,6 +122,23 @@ Checks on a different merge tree are
 never reused as proof of the final tree; protected exact-head GitHub checks
 and authoritative upstream-tree comparison still gate delivery.
 
+Generated `web/dist` is produced by final integration, not coding workers.
+The executor discards worker bundle changes against the assigned base and
+mechanically resolves generated-only merge conflicts. Actual source conflicts
+still go to implementation. For an already-published PR with green checks, the
+observer reproduces conflict paths using Git only; generated-only conflicts
+request integration refresh without an LLM, preserving the source review.
+Classification is bound to both refs and rechecked after inspection.
+
+The remote verifier builds assets from the integrated source, runs the Rust and
+frontend suites, and publishes the generated build on its claim-specific branch.
+The host verifies a linear artifact commit changes only `web/dist`, followed by
+exactly the assigned task's append-only commit attribution. No other source or
+requirement change is accepted. The final receipt records the tested source head
+and published artifact tree; GitHub CI and exact-tree merge confirmation apply
+to the final published head. Generated files are never merely chosen from an old
+branch and shipped without rebuilding.
+
 Model assignments default to four hours (`model_timeout: 14400` seconds in the
 private ledger). Existing assignments retain the harness deadline they started
 with. A failed run records `diagnostic.json`: the runner's actual timeout budget,
@@ -186,7 +203,9 @@ A narrow OpenShell adapter records sandbox/provider intent before the external
 create, attaches the claim's ownership labels, enforces shared compute capacity,
 and refreshes expired gateway authentication. Fullsend's normal cleanup runs;
 unconfirmed deletion stays charged and is retried independently. A pending
-allocation is retained across fullsend's readiness retries. A deleted sandbox
+allocation is retained across fullsend's readiness retries; a repeated create
+adopts only the existing claim's ownership-labeled sandbox. Terminal/deleted
+allocations cannot be recreated within an attempt. A deleted sandbox
 cannot be recreated within the same attempt. A failed run's source checkpoint
 is explicitly incomplete and cannot approve itself. Cleanup also fences and
 stops an orphaned host runner using its boot ID, PID, and process start time.
@@ -196,6 +215,15 @@ A host validator checkpoints and publishes actual source before deletion;
 source guards, exact-candidate independent review, remote verification, CI repair,
 and protected merge observation remain controller responsibilities. Raw fullsend
 logs/transcripts are retained and Pi events feed the existing cockpit stream.
+Pi runs under a detached supervisor with a bounded deadline inside the sandbox.
+Stdout and stderr spool separately and clients resume by verified byte offsets.
+Idle readers long-poll rather than creating a busy RPC loop for every worker.
+A lost launch acknowledgement or broken RPC reconnects to the same claim/command
+identity; it cannot start another coding process. Transport failures retry with
+backoff for up to five minutes before normal source capture and sandbox cleanup.
+A genuine process failure or incomplete verdict remains a failure. Local
+checkpoint adoption also records its originating attempt and a bounded log tail;
+a missing log cannot discard an otherwise recoverable checkpoint.
 The large trusted input checkout is removed after execution, keeping receipts
 and diagnostics without retaining duplicate repository clones indefinitely.
 
@@ -219,7 +247,32 @@ the same ledger. Type a sandbox count (0–1000) in the header and press Enter o
 Apply; Escape cancels the edit. Zero drains new work. The +/− controls also remain
 available. The terminal cockpit offers filtering, live logs, attempt
 history, retry, and cancellation. Press `?` for keys; `q`/Ctrl-C detaches while
-workers continue. `serve --plain` selects text output. Stop the supervisor with Ctrl-C;
+workers continue. In a run log, `/` filters source lines, `m` toggles Markdown
+for agent prose, `w` toggles wrapping, and `a` toggles command colors (`NO_COLOR`
+is respected). Left/right arrows pan long lines. Scrolling up pauses following
+without moving the reading position as output arrives; `f` or `G` returns to
+live output. The bordered pane shows follow state, active modes, and line/column
+ranges, including on short terminals. Full logs remain available rather than
+only the last 64 KiB.
+
+The terminal's **Configuration** tab is the third tab (`Tab`/`Shift-Tab`), or
+press `,` from a run/list view. Select a setting with `j`/`k`, press Enter to
+edit, Enter to save, and Escape to discard. It edits the same private SQLite
+ledger as the browser and CLI, with no HyperShell preference file. External
+changes refresh automatically; an edit based on an older value is rejected
+rather than overwriting another controller's change.
+
+- Capacity, pause state, verification reservations, and per-stage concurrency
+  affect new admission. Existing workers finish. An empty stage limit inherits
+  total capacity; limits never bypass global admission or reservations.
+- Agent and verification deadlines apply to new assignments, in seconds.
+- Retry base and ceiling affect future exponential-backoff schedules, retaining
+  jitter. Existing wake times and explicit stage-specific delays remain intact.
+- Model, repository, gateway, and last successful gateway health check are
+  read-only. The pinned model must agree with inference routing and admission;
+  credentials remain outside the editor.
+
+`serve --plain` selects text output. Stop the supervisor with Ctrl-C;
 already claimed stages finish independently. Restarting `serve` adopts their
 leases and discovers pending work. `pause` stops new model-stage dispatch while
 preserving the desired slot count; `resume` enables it again. Slots zero also
@@ -290,7 +343,10 @@ registration (`gyre-d-<instance hash>`) snapshots the connection metadata and
 mints its own token; it does not copy a refresh token or modify the source
 registration. This also isolates authentication when HyperShell uses the same
 physical gateway. Gyre's persistent GitHub provider and profile use
-`gyre-gh-<instance hash>` instead of the shared `github` name. Per-run inference
+`gyre-gh-<instance hash>` instead of the shared `github` name. Its credentials are reconciled under a
+private lock: unchanged values are health-checked, never rewritten by each
+Fullsend worker. A changed credential is updated once. This avoids unnecessary
+provider generations propagating to running sandboxes. Per-run inference
 providers remain separate and are purged normally. Sandbox/provider cleanup
 retains the existing owner and claim checks.
 
@@ -416,6 +472,8 @@ Implementation and review use Fullsend/Pi. Verification is a model-free gateway
 job using the same pinned worker image and shared sandbox reservations. The local
 controller reconciles Git metadata and uploads a prerequisite Git bundle; Cargo,
 source guards, npm builds, and tests execute only in the disposable verifier.
+Verification uses the gateway resource defaults, just like coding workers;
+explicit `verification_cpu` and `verification_memory` settings override them.
 Every verifier gets an isolated build target, so cross-checkout host cache
 invalidation is unnecessary. There is no host build fallback. Per-stage `limits`
 can bound verification concurrency independently without changing desired slots.

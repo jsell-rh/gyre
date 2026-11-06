@@ -111,7 +111,7 @@ def implement(execution, task):
                                                 'id': execution.claim['id'],
                                                 'agent_exit': result['agent_exit'],
                                                 'detail': 'Continue from this saved source checkpoint. The previous assignment did not complete; do not repeat broad repository exploration or full integration gates.',
-                                                'log_tail': execution.log.read_text(errors='replace')[-12000:]}}
+                                                'log_tail': execution.log_tail(12000)}}
     if contract_changed:
         updates['repair'].update(category='contract',
             detail='The protected task text changed. The executor restores the assigned task document in the next checkout; preserve the existing production fix. Keep all progress notes under exactly ## Shipped, using ### for round subheadings. Do not rename that heading or add diagnostic top-level sections. Normative changes require separate spec review.',
@@ -205,6 +205,13 @@ def verify(execution, task):
                               '-m', f"verify({task['name']}): reconcile candidate with main",
                               approved_candidate, cwd=path, check=False)
     if merge.returncode:
+        generated,remaining=helper('pipeline-artifacts').resolve_generated_conflicts(path,inp['base'])
+        if generated:
+            execution.store.event('generated_conflicts_resolved',{'paths':generated,'base':inp['base']},task['name'],execution.claim['id'])
+            if not remaining:
+                execution.command('git','-c','core.hooksPath=/dev/null','commit','--no-gpg-sign','--no-edit',cwd=path)
+                merge.returncode=0
+    if merge.returncode:
         finding = {'id': execution.claim['id'], 'category': 'rebase', 'source': inp['candidate'],
                    'base': inp['base'], 'details': merge.stdout + merge.stderr}
         return {'passed': False}, {'repair': finding}, [finding]
@@ -222,20 +229,34 @@ def verify(execution, task):
             prerequisite = baseline_repair(execution, observation)
             finding = observation | {'id': execution.claim['id'], 'category': 'baseline',
                                      'source': inp['candidate'], 'prerequisite': prerequisite,
-                                     'log_tail': execution.log.read_text(errors='replace')[-16000:]}
+                                     'log_tail': execution.log_tail(16000)}
             return {'passed': False, 'checks': records}, {
                 'repair': finding, 'dependencies': sorted(set(task['data']['dependencies']) | {prerequisite})}, [finding]
         finding = {'id': execution.claim['id'], 'category': 'verification',
                    'source': inp['candidate'], 'base': inp['base'],
                    'command': failed['command'], 'exit_code': code,
                    'artifact': str(execution.log),
-                   'log_tail': execution.log.read_text(errors='replace')[-16000:]}
+                   'log_tail': execution.log_tail(16000)}
         return {'passed': False, 'checks': records}, {'repair': finding}, [finding]
     branch = f"pipeline/verified/{execution.claim['id']}-{execution.claim['token']}"
-    execution.command('git', 'push', 'origin', head + ':refs/heads/' + branch, cwd=path, timeout=180)
+    if remote.get('publication'):
+        publication=remote['publication']
+        actual=execution.command('git','ls-remote','origin','refs/heads/'+branch,cwd=path).stdout.split()
+        if not actual or actual[0]!=publication.get('head'):raise Retry('verified artifact branch was not confirmed')
+        execution.command('git','fetch','--quiet','origin',branch,cwd=path,timeout=180)
+        try:
+            helper('pipeline-artifacts').validate(path,{'head':head,'tree':tree},publication,task['name'],branch)
+        except ValueError as exc:
+            from .execution import Attention
+            raise Attention('Verified artifact proof rejected: '+str(exc)) from exc
+        head,tree=publication['head'],publication['tree']
+        execution.store.event('generated_artifacts_verified',publication|{'tested_head':remote['head']},task['name'],execution.claim['id'])
+    else:
+        execution.command('git', 'push', 'origin', head + ':refs/heads/' + branch, cwd=path, timeout=180)
     receipt = {'candidate': inp['candidate'], 'base': inp['base'], 'head': head,
                'tree': tree, 'branch': branch, 'checks': records, 'passed': True,
-               'engine': 'gateway', 'sandbox': remote['sandbox']}
+               'engine': 'gateway', 'sandbox': remote['sandbox'],
+               'tested_head':remote.get('head'),'artifacts':remote.get('publication')}
     (execution.directory / 'verified.json').write_text(json.dumps(receipt))
     return receipt, {'verified': receipt}, []
 
@@ -274,7 +295,7 @@ def publish(execution, task):
             rejected = ci_failure(execution,task,previous,observed)
             if rejected:
                 return rejected
-            if observed['status'] not in ('passed','policy_pending') or observed.get('checks') != 'green':
+            if observed['status'] not in ('passed','policy_pending','artifact_refresh') or observed.get('checks') != 'green':
                 raise Wait('Awaiting CI on the recorded published head before changing the branch')
     path = checkout(execution, head)
     shipped = helper('dev-merge-message').message(task['name'],
