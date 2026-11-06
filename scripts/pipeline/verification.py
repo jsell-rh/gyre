@@ -85,7 +85,8 @@ def run(execution, path, identity, probe=None):
             shutil.copyfile(ROOT / 'scripts' / source, bundle / source)
         gate = (ROOT / 'scripts/dev-check.sh').read_text().replace('/tmp/gyre', '/sandbox/workspace/checkout')
         (bundle / 'checks.sh').write_text(gate)
-        job = identity | {'image': image, 'repo_url': store.setting('repo_url', 'https://github.com/jsell-rh/gyre.git'),
+        timeout=store.setting('verification_timeout',10800)
+        job = identity | {'image': image, 'timeout_seconds':timeout, 'repo_url': store.setting('repo_url', 'https://github.com/jsell-rh/gyre.git'),
                           'task':execution.claim['task'],'publication_branch':f"pipeline/verified/{execution.claim['id']}-{execution.claim['token']}"}
         if probe is not None:
             job['probe'] = probe
@@ -137,7 +138,7 @@ def run(execution, path, identity, probe=None):
             execution.os('sandbox', 'upload', name, str(source), '/tmp/stage/' + source.name, '--no-git-ignore', timeout=180)
         execution.phase('Verifying', sandbox=name, engine='verification')
         offset, failures, launched = 0, 0, False
-        deadline = time.monotonic() + store.setting('verification_timeout', 10800)
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             execution.current()
             try:

@@ -140,6 +140,7 @@ class VerificationTests(unittest.TestCase):
     def test_uncertain_create_waits_for_the_same_allocation_instead_of_recreating(self):
         with tempfile.TemporaryDirectory() as directory:
             s=Store(directory);self.addCleanup(s.close);s.put_task('task-001','g','body',{})
+            s.set_setting('verification_timeout',14400)
             work=s.enqueue('verify','task-001','g',{})
             execution=Execution(s,s.claim('verify','verifier'))
             identity={'candidate':'candidate','head':'head','base':'head','tree':'tree'}
@@ -162,6 +163,8 @@ class VerificationTests(unittest.TestCase):
             with patch.object(execution,'login'),patch.object(execution,'os',side_effect=invoke) as operations,patch.object(execution,'remote',side_effect=remote),patch.object(execution.cancelled,'wait',return_value=False),patch('pipeline.verification.gateway.inventory',side_effect=inventory):
                 receipt=run(execution,Path(directory),identity)
             self.assertFalse(receipt['passed'])
+            job=json.loads((execution.directory/'verification-input/verify-job.json').read_text())
+            self.assertEqual(job['timeout_seconds'],14400)
             self.assertEqual(sum(c.args[:2]==('sandbox','create') for c in operations.call_args_list),1)
             self.assertIn('acknowledgement timed out',execution.log.read_text())
             self.assertEqual(s.compute_used(),0)

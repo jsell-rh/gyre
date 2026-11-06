@@ -297,6 +297,8 @@ rather than overwriting another controller's change.
   affect new admission. Existing workers finish. An empty stage limit inherits
   total capacity; limits never bypass global admission or reservations.
 - Agent and verification deadlines apply to new assignments, in seconds.
+- Verification commands inherit the configured verification deadline; no shorter
+  hidden compiler timeout discards a healthy thin worker's cache.
 - Retry base and ceiling affect future exponential-backoff schedules, retaining
   jitter. Existing wake times and explicit stage-specific delays remain intact.
 - Model, repository, gateway, and last successful gateway health check are
