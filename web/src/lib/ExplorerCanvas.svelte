@@ -35,6 +35,7 @@
     assertionResults = [], // [{ line, assertion_text, passed, explanation }] from spec assertion check
     assertionSpecPath = null, // spec path currently being edited (for assertion badge rendering)
     highlightedSpanId = null, // span_id to highlight on canvas (from evaluative tab click)
+    rootLabel = '',          // breadcrumb root segment label (repo name at repo scope)
     // Architectural timeline (system-explorer.md §6)
     timeline = [],             // ArchitecturalDelta records from graph/timeline endpoint
     timelineActive = false,    // Whether time travel mode is active
@@ -4231,6 +4232,77 @@
     scheduleRedraw();
   }
 
+  // ── Progressive drill-down scope resolution (explorer-canvas.md §5) ─────
+  // Double-clicking a container drills the canvas into its children via
+  // Contains edges. Real graph nodes (package/module/type with Contains
+  // children) drill directly. Synthetic path-tree groups — the treemap's
+  // directory-style groupings, e.g. the top-level package cells — have no
+  // node id in the Contains index, so resolve them to the real graph node
+  // whose Contains subtree covers the group's contents. For a group named
+  // "greeting-service" that is the greeting-service package node, and
+  // drilling shows exactly the modules inside it (spec Level 0 → 1).
+  function isContainsAncestor(ancestorId, nodeId) {
+    const { childToParent } = treeData;
+    let cur = childToParent.get(nodeId);
+    while (cur) {
+      if (cur === ancestorId) return true;
+      cur = childToParent.get(cur);
+    }
+    return false;
+  }
+
+  // Resolve a synthetic tree-group layout node to the real graph node whose
+  // Contains subtree covers the group's laid-out members. Returns null when
+  // no single member covers the rest (pure directory grouping) — callers
+  // then fall back to the camera zoom.
+  function resolveTreeGroupScopeNode(ln) {
+    if (!ln || ln.kind !== 'tree-group') return null;
+    // Real graph-node cells use their node id; synthetic path groups use
+    // '__tree__'-prefixed ids.
+    if (!ln.id.startsWith('__tree__')) return ln.node ?? null;
+    const { parentToChildren } = treeData;
+    // Collect the real graph nodes laid out inside this group's cell subtree.
+    const members = [];
+    const seen = new Set();
+    function collectCells(cells) {
+      for (const cell of cells) {
+        if (seen.has(cell.id)) continue;
+        seen.add(cell.id);
+        if (cell.node && !cell.id.startsWith('__tree__')) members.push(cell.node);
+        const kids = childrenIndex.get(cell.id);
+        if (kids) collectCells(kids);
+      }
+    }
+    collectCells(childrenIndex.get(ln.id) ?? []);
+    if (members.length === 0) return null;
+    // The scope node is the member that is a Contains-ancestor of every other
+    // member (the package/module node the group was formed around).
+    for (const cand of members) {
+      if (!(parentToChildren.get(cand.id)?.length > 0)) continue;
+      let coversAll = true;
+      for (const other of members) {
+        if (other.id !== cand.id && !isContainsAncestor(cand.id, other.id)) {
+          coversAll = false;
+          break;
+        }
+      }
+      if (coversAll) return cand;
+    }
+    return null;
+  }
+
+  // Unified drill target for a canvas hit: a real container node drills
+  // itself; a synthetic tree-group resolves to its Contains scope node.
+  // Returns null when there is nothing to drill (leaf nodes, scopeless
+  // directory groups).
+  function drillTargetForHit(hit) {
+    if (!hit) return null;
+    const node = hit.node;
+    if (node && (treeData.parentToChildren.get(node.id) ?? []).length > 0) return node;
+    if (hit.kind === 'tree-group') return resolveTreeGroupScopeNode(hit);
+    return null;
+  }
+
   // Drill into a node with smooth spatial zoom transition.
   // Zooms INTO the clicked node's bounding box, fades unrelated nodes,
   // then renders children in the same layout style.
@@ -4296,10 +4368,11 @@
 
     // Progressive drill-down via Contains edges (explorer-canvas.md §Progressive Drill-Down):
     // Double-click → filter to children, update breadcrumb, smooth zoom transition.
-    if (node) {
-      const children = treeData.parentToChildren.get(node.id) ?? [];
-      if (children.length > 0) {
-        drillInto(node);
+    // Real container nodes and resolvable synthetic groups (packages) both drill.
+    if (node || hit.kind === 'tree-group') {
+      const drillTarget = drillTargetForHit(hit);
+      if (drillTarget) {
+        drillInto(drillTarget);
         return;
       }
     }
@@ -4346,12 +4419,14 @@
       y: menuY,
       node: hit.node,
       hit,
+      drillTarget: drillTargetForHit(hit),
     };
   }
 
   function contextMenuAction(action) {
     if (!contextMenu) return;
     const node = contextMenu.node;
+    const drillTarget = contextMenu.drillTarget;
     contextMenu = null;
     ctxMoreOpen = false;
     if (action === 'trace') {
@@ -4443,10 +4518,11 @@
       // preserving all canvas state (zoom, query, conversation, drill-down).
       onNodeDetail({ ...node, _action: 'view_code' });
     } else if (action === 'drill') {
-      // Drill into this node via Contains edges with smooth zoom transition
-      const children = treeData.parentToChildren.get(node.id) ?? [];
-      if (children.length > 0) {
-        drillInto(node);
+      // Drill into this node via Contains edges with smooth zoom transition.
+      // For synthetic tree-groups this is the resolved Contains scope node.
+      const target = drillTarget ?? node;
+      if (target && (treeData.parentToChildren.get(target.id) ?? []).length > 0) {
+        drillInto(target);
       }
     }
   }
@@ -4611,8 +4687,14 @@
       const ln = layoutNodes.find(l => (l.node?.id ?? l.id) === selectedNodeId);
       if (ln?.node) {
         const children = treeData.parentToChildren.get(ln.node.id) ?? [];
-        if (children.length > 0) drillInto(ln.node);
-        else onNodeDetail(ln.node);
+        if (children.length > 0) {
+          drillInto(ln.node);
+        } else {
+          // Synthetic tree-group selection: resolve to its Contains scope
+          const scopeNode = resolveTreeGroupScopeNode(ln);
+          if (scopeNode) drillInto(scopeNode);
+          else onNodeDetail(ln.node);
+        }
       }
       return;
     }
@@ -5339,7 +5421,7 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                 View history
               </button>
-              {#if (treeData.parentToChildren.get(contextMenu.node.id) ?? []).length > 0}
+              {#if contextMenu.drillTarget && (treeData.parentToChildren.get(contextMenu.drillTarget.id) ?? []).length > 0}
                 <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('drill')}>
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M13 17l5-5-5-5M6 17l5-5-5-5"/></svg>
                   Drill into
@@ -5541,6 +5623,7 @@
   <!-- Breadcrumb -->
   <Breadcrumb
     {breadcrumb}
+    rootLabel={rootLabel || 'Root'}
     onNavigate={(i) => { navigateBreadcrumb(i); }}
     onReset={() => { navigateBreadcrumb(-1); }}
   />
