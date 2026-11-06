@@ -325,7 +325,7 @@ class Store:
         with self.transaction():
             row = self._current(ident, token)
             failures = row['failures'] + 1 if count_failure else 0
-            delay = min(900, 5 * 2 ** min(failures - 1, 8) * random.uniform(.8, 1.2)) if delay is None else delay
+            delay = min(self.setting('retry_max_seconds', 900), self.setting('retry_base_seconds', 5) * 2 ** min(failures - 1, 8) * random.uniform(.8, 1.2)) if delay is None else delay
             retry_at=time.time()+delay
             self.db.execute("UPDATE work SET state=?,failures=?,retry_at=?,ready_since=?,result=?,owner=NULL,expires=NULL,updated=? WHERE id=?",
                             ('attention' if attention else 'retry', failures, retry_at,retry_at, json.dumps(reason), time.time(), ident))
