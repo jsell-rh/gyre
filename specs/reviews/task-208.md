@@ -51,3 +51,23 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 40 (2026-11-06) — commit-attribution clobber reproduced at candidate `c8a3a506`; verdict needs-revision
+
+Assigned candidate `c8a3a506bf878db289bc6e7c29d004ddaaa75c5a` (merge of assigned base `9bef21a4`, task-197). Continuation of an interrupted round-39 review; all evidence revalidated fresh at the exact candidate, no prior verdict reused.
+
+Product surface — verified clean (fresh probes at `c8a3a506`):
+
+- Dead-code grep (`get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs` over `crates/` + `web/src/`) → zero matches; the only `users/me/{agents,tasks,mrs}` hits in `crates/` are the regression test's own fixtures (`users.rs:950-952`).
+- Routes and ABAC registrations for the three my-stuff endpoints absent from `api/mod.rs` / `abac_middleware.rs`.
+- Regenerated-dist forbidden-identifier grep (`my-agents|my-tasks|my-mrs|users/me/agents|users/me/tasks|users/me/mrs` over `web/dist/assets/`) → zero matches; kept-surface identifiers (`users/me/tokens`, `users/me/judgments`) present in the shipped bundle (`index-CYVJLA6W.js`).
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib my_stuff_endpoints_are_removed` → 1 passed / 0 failed. `cd web && npm ci && npx vitest run src/__tests__/UserProfile.test.js` → 23/23 passed.
+- Merge from assigned base `9bef21a4` has zero task-208-surface drift: `git diff 34e01d27..c8a3a506` touches only `crates/gyre-server/src/lib.rs`, `src/main.rs`, `specs/tasks/task-197.md` (all task-197/base-side).
+
+Findings:
+
+- [-] **F-clobber (37th occurrence of the rounds-2–36 class): the task's `commits:` frontmatter at the candidate lists only two SHAs (`a11cbf7e`, `98fd096e`), dropping `ad1121c5093cd2f1f2b3824ed88352ac4e181fd9` (round-1 F1 fix — regenerated `web/dist/` so the RustEmbed'd `SKIP_WEB_BUILD=1` shipped artifact no longer contains the HSI-§12-forbidden my-stuff surface) and `ea006d52bb42e96e6f176b02b5390b6cb56a3116` (root `.gitattributes` whitespace-gate exemption for generated bundles).** Reproduced mechanically: the checkpoint pass `872f31ca` restored the full four-SHA list, then the attribution pass `34e01d27` ("process: record task-208 branch commits") rewrote it back to two SHAs — its product-surface path filter (`crates/`, `web/src`, `web/tests`) excludes `web/dist/` and root `.gitattributes`. Both dropped SHAs are task-208-labeled, verified ancestors of HEAD, and their changes are live in the tree (dist regenerated; `.gitattributes` exemption present), yet they are invisible to verifier review scoping, which keys off the `commits:` list. The in-repo gate `scripts/check-task-commit-attribution.sh` passes only because it shares the same `web/dist/` blind spot. Repair is mechanical and product-untouched: restore `commits:` to the four-SHA list. Residual process gap (owner: attribution-pass/gate path filter must include `web/dist/` and root `.gitattributes`) remains unresolved after 37 rounds.
+
+Verdict: **needs-revision** (attribution defect only; product implementation of task-208 remains fully verified).
+
+Evidence: `/tmp/stage/review-evidence/task-208-round40-*` (clobber commit show, commits-line history, ancestry, deadcode-grep, dist-grep, attribution-gate, merge-drift, rust-test, npm-ci/vitest outputs).
