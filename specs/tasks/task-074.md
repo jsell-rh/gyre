@@ -3,7 +3,7 @@ title: "LSP Call Graph — Python pyright Integration"
 spec_ref: "lsp-call-graph.md §5 Python, §10 Phase 3"
 depends_on:
   - task-072
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "lsp-call-graph.md §5 Per-Language Implementation (Python)"
   - "lsp-call-graph.md §10 Implementation Phases (Phase 3)"
