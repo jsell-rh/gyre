@@ -3,6 +3,7 @@
   import { t } from 'svelte-i18n';
   import { renderMarkdown } from './markdown.js';
   import { validateViewQuery } from './view-query-validator.js';
+  import { toWireCanvasState } from './canvas-state.js';
 
   let {
     repoId = '',
@@ -14,6 +15,7 @@
     graphHints = [],
     graphNodes = [],
     graphEdges = [],
+    onLoadView = () => {},
   } = $props();
 
   // ── Spec path detection ─────────────────────────────────────────────────
@@ -488,10 +490,15 @@
     scrollToBottom();
 
     try {
+      // §10 Interaction Context: send the normalized snake_case canvas state
+      // (selected_node, zoom_level, visible_tree_groups, active_filter,
+      // active_lens, active_query, recent_interactions) - the internal
+      // camelCase fields (selectedNode, zoom, breadcrumb) are not part of
+      // the wire format and would be dropped server-side.
       ws.send(JSON.stringify({
         type: 'message',
         text: text,
-        canvas_state: canvasState,
+        canvas_state: toWireCanvasState(canvasState),
       }));
       // Increment AFTER successful send so failed sends don't count toward
       // the session limit (which would eventually block the client).
@@ -508,6 +515,8 @@
     savedViewsDropdownOpen = false;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     activeViewId = view.id;
+    // §10: query actions are tracked in recent_interactions with the preset name
+    onLoadView(view);
     ws.send(JSON.stringify({ type: 'load_view', view_id: view.id }));
   }
 
