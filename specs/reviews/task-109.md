@@ -1,0 +1,30 @@
+# Review — task-109 (Externalize spec lifecycle configuration, spec-lifecycle.md §Configuration)
+
+Candidate: `5651f8125b0985c6a9ef7dd206397f8db4b94961` (single squashed checkpoint commit) against assigned base `1ae18d1c42bf9c48ae1e3c10369dbc81920664c9`.
+Verdict: **needs-revision** (not approved) — one decisive finding.
+
+## Probes run (evidence: /tmp/stage/review-evidence/task-109/)
+
+- `bash scripts/check-migration-versions.sh` → **FAIL, exit 1** — duplicate Diesel migration version `20261008000056` (`01-migration-versions-check.txt`).
+- Mechanical checks at candidate head: check-arch, check-abac-route-registry, check-mem-port-contracts, check-in-memory-state-stores, check-migration-sql-portability → all exit 0 (`mech-*.txt`).
+- `cd web && npm ci && npx vitest run src/__tests__/RepoSettings.test.js` → **56/56 passed** (`09-vitest-RepoSettings.txt`).
+- Rust compilation probes **blocked by sandbox infrastructure** (crates.io unreachable, no cached registry; npm registry reachable): `cargo test` could not run. Deferred checks for the verifier are recorded in `03-rust-probes-blocked.txt` — notably `cargo test -p gyre-adapters --lib` is *expected to fail* on the duplicate-version guard test (see F1).
+
+## Verified working (no findings)
+
+- **Domain** (`gyre-domain/src/spec_lifecycle_config.rs`): all eight spec fields; typed `TaskPriority` for the three priority fields (invalid strings rejected at deserialization); defaults byte-for-byte match the prior hardcoded behavior (watched `specs/system/` + `specs/development/`, ignored milestones/prior-art/personas/prompts, Medium/High/High, flags true); serde field-level defaults protect partial payloads; `is_watched` gives ignored-over-watched precedence.
+- **Port + adapters**: `SpecLifecycleRepository` port (absent row ⇒ defaults, never an error), SQLite and Postgres Diesel implementations with upsert-on-conflict, mem adapter port-backed and wired through `store!` in `AppState` (durable-state invariant respected).
+- **API** (`api/spec_lifecycle.rs`): GET returns defaults for unconfigured repos, 404 for unknown repo; PUT enforces Admin/Developer in the handler body (Agent gets 403 — an agent must not disable the drift detector); route registered in `api/mod.rs` with an ABAC `RouteResourceMapping` entry; documented in `docs/api-reference.md`. Mirrors the established spec-policy sibling pattern.
+- **Hook wiring** (`git_http.rs`): `process_spec_lifecycle` loads per-repo config through the same port the API writes; `enabled=false` returns before any diff/task/approval work; filtering via `config.is_watched`; `classify_spec_change` takes priorities from config; both `auto_invalidate_approvals` and `dedup_open_tasks` gates honored; task workspace scope comes from the repo resolved at push time (no "default" fabrication). No hardcoded watched-path literals remain in production code. Hook tests are genuinely end-to-end (real bare git repo, real pushed commits, config set through the port).
+- **UI** (`RepoSettings.svelte` + `api.js` + `en.json`): Spec Lifecycle tab with enabled/flag toggles, tag-style add/remove path lists, three priority selects; tests assert render, load call, and save payload shape (56/56 green).
+- **Task contract**: `specs/tasks/task-109.md` diff only touches `progress:`, `commits:`, and appends `Shipped` — acceptance-criteria checkboxes and assigned prose untouched.
+
+## Findings
+
+- [-] **F1 (major): duplicate Diesel migration version — the new migration silently never runs, and the repo's migration invariant fails.** The candidate adds `crates/gyre-adapters/migrations/2026-10-08-000056_spec_lifecycle_configs/`, but the assigned base `1ae18d1c` already contains `2026-10-08-000056_spec_assertion_results` (from `b79f5c0b`). Per Diesel's version semantics as enforced by this repo (`scripts/check-migration-versions.sh`; guard test `no_duplicate_migration_version_prefixes` in `crates/gyre-adapters/src/sqlite/mod.rs:325`), version = text before the first `_` with dashes removed, and only one migration runs per version (alphabetically first wins): both directories map to `20261008000056`, so `spec_lifecycle_configs` wins nothing — `spec_assertion_results` is alphabetically first and the **`spec_lifecycle_configs` table is never created on fresh databases**. Runtime consequence: `SqliteStorage`/`PgStorage` `get_for_repo`/`set_for_repo` fail with "no such table", `GET/PUT /api/v1/repos/:id/settings/spec-lifecycle` returns 500s, and the push hook silently degrades to defaults via `.unwrap_or_default()` — per-repo config is non-functional on fresh deployments while single-process tests against pre-provisioned DBs stay green. This is the exact failure class documented in the script header (task-095 review F5). Additionally the mechanical invariant itself fails at the candidate: `scripts/check-migration-versions.sh` exits 1 (pre-commit + CI), and `cargo test -p gyre-adapters --lib` fails on the guard test, so the acceptance criterion "`cargo test --all` passes" is not satisfiable. Root cause is rebase-related: the shipped notes state probes ran at merged HEAD `2bb4d127` on base `ed57c723`, where the sibling `000056_spec_assertion_results` migration did not yet exist; the final candidate was re-squashed onto `1ae18d1c`, which carries it. Reproduce: `bash scripts/check-migration-versions.sh` → FAIL exit 1. Remedy: renumber to the next unused sequence (`2026-10-08-000057_spec_lifecycle_configs`) and re-run the deferred Rust probes at the renumbered head.
+
+## Deferred to verification (sandbox cannot reach crates.io)
+
+1. `cargo test -p gyre-adapters --lib` — expected to fail on `no_duplicate_migration_version_prefixes` until F1 is fixed.
+2. Fresh-DB runtime probe: `SqliteStorage::new(<fresh path>)` then `set_for_repo(...)` — expected "no such table: spec_lifecycle_configs" until F1 is fixed.
+3. After renumber: `cargo test -p gyre-adapters --lib spec_lifecycle`, `cargo test -p gyre-server --lib spec_lifecycle` / `git_http::tests::parse_spec_changes` / `classify_spec_change`, and `cargo test --all`.
