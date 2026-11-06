@@ -87,3 +87,85 @@ The rejected integration's only preserved item was `specs/coverage/SUMMARY.md`. 
 All three findings repaired with real implementations and regression tests that fail on the original failure classes. No new exemptions, no gate weakening, no deleted tests, no unrelated changes — the round-2 diff beyond the F1/F2/F3 product repairs is spec/coverage bookkeeping and this task file. **progress: complete.**
 
 — Reviewer, 2026-10-09
+
+## Round 3 (2026-11-06) — migration version-collision repair re-verified, verdict PASS
+
+Candidate `26fb31c2` (base `9bef21a4`). The round-2 product tree is preserved:
+the only post-merge code change is the renumber commit `50c48714` —
+`git diff 020df4e4..26fb31c2 -- crates/` is exactly two R100 renames
+(`000056_user_entity_profile_fields` → `000057_…`, up.sql/down.sql
+byte-identical), the regression test's partition-key literal
+(`20261008000056` → `20261008000057`, pre-set now correctly including
+task-180's `spec_assertion_results`), and 000056→000057 comments in
+`schema.rs`, `sqlite/mod.rs`, `auth.rs`.
+
+### Collision confirmed real
+
+Base `9bef21a4` carries `2026-10-08-000056_spec_assertion_results` (task-180,
+landed on main); the task branch's merge parent carried
+`2026-10-08-000056_user_entity_profile_fields`. Both map to Diesel version
+`20261008000056`; Diesel runs one migration per version (first
+alphabetically), so task-120's migration would have been silently dropped on
+fresh databases — the durable verification finding (`checks.sh` exit 1) was
+correct. The renumber is the right repair: task-180's 000056 is published on
+main and keeps the version; the unsynced task-120 migration moves to the next
+unused sequence, 000057.
+
+### Independent evidence (persisted, `/tmp/stage/review-evidence/task-120-final/`)
+
+- `check-migration-versions.txt` — `bash scripts/check-migration-versions.sh`
+  → exit 0 (no duplicate Diesel versions; the script replicates Diesel's
+  version-from-directory-name extraction).
+- `check-migration-sql-portability.sh` → exit 0. `check-arch.sh`,
+  `check-mem-port-contracts.sh`, `check-task-commit-attribution.sh` → exit 0.
+  Frontmatter includes the renumber commit `50c48714`;
+  `grep -c '| not-started |' specs/coverage/system/user-management.md` → 0.
+- `migration-replay.py` / `migration-replay.txt` — **standalone replay of the
+  full migration sequence against system SQLite (no Rust/Diesel)**: all 56
+  pre-migrations (including task-180's 000056) apply cleanly, then the
+  renumbered 000057 alone: users table gains
+  username/avatar_url/preferences/last_login_at/tenant_id/global_role;
+  `idx_users_username` unique index created; legacy-row backfill produces
+  unique, URL-safe handles (`Alice Smith`×2 → `alice-smith`/`alice-smith-2`,
+  `jörg`/empty/65-char → `u-<row id>` escape hatch, external-id fallback);
+  timezone=UTC / locale=en-US defaults; backfilled preferences JSON parses
+  with every `UserPreferences` key. This replays the semantics of the Rust
+  regression test `migration_000057_backfills_unique_url_safe_usernames`
+  (whose partition logic was read and verified: pre-set includes 000056,
+  target `20261008000057`, `target.len() == 1` asserted).
+- `rustfmt-files.txt` — `cargo fmt --check -p gyre-adapters -p gyre-server`:
+  drift only in files untouched by task-120 (`git2_ops.rs`, `sqlite/audit.rs`,
+  `merge_processor.rs`, … — pre-existing); none of the renumber-touched files
+  (`schema.rs`, `sqlite/mod.rs`, `auth.rs`) nor any task-120 product file
+  appears in the diff.
+- No stale references: the only remaining `000056_user_entity` strings are
+  this review file's historical round-1 findings (correct as history).
+
+### Transport / infrastructure restriction (recorded, not a code defect)
+
+This review sandbox has **no crates.io network access, no cargo registry
+cache, no vendored dependencies, and no prebuilt target directory**, so Rust
+compilation is impossible here (`cargo test` fails at `download of
+config.json failed`). Compensating evidence: the executor's durable
+`checks.sh` run on the pre-renumber tree completed the entire Rust + web
+build and test cycle (failing only on the version-duplicate script — the
+finding this repair addresses), and the renumber commit's only non-comment
+change is a test string literal, which cannot break compilation. The
+migration's actual SQL execution — the substance of the repair — is
+independently proven by the standalone SQLite replay above.
+
+**Deferred checks for the verifier** (require a build-capable environment):
+`cargo test -p gyre-adapters --lib` (incl.
+`migration_000057_backfills_unique_url_safe_usernames` and
+`no_duplicate_migration_version_prefixes`), `cargo test -p gyre-server --lib`
+(`api::users`, `api::scim`, `auth::`), and the acceptance-criterion
+`cargo test --all`.
+
+### Verdict
+
+The verification finding is real, the repair is correct and minimal, the
+renumbered migration provably runs on SQLite and produces the specced schema,
+backfill, uniqueness, and defaults, and nothing else in the candidate changed
+since the round-2 PASS. No findings. **progress: complete.**
+
+— Reviewer, 2026-11-06
