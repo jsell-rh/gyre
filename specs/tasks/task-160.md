@@ -7,7 +7,7 @@ coverage_sections:
   - "hierarchy-enforcement.md §Invariant Enforcement"
   - "hierarchy-enforcement.md §Enforcement"
   - "hierarchy-enforcement.md §New Scripts"
-commits: ["b297d1b2e6588ae68f35eb1419b73e7652b53b7b", "2698b9b63b73e5f3b2230a0b7e8e30d160265f3d", "ba78ab2a5e1a2147a04cf7e148f53e6c0abb34e3"]
+commits: ["b82af6b4b10dbd3306cc23546efb34c07bd6c640", "b297d1b2e6588ae68f35eb1419b73e7652b53b7b", "2698b9b63b73e5f3b2230a0b7e8e30d160265f3d", "ba78ab2a5e1a2147a04cf7e148f53e6c0abb34e3"]
 ---
 
 ## Spec Excerpt
@@ -86,6 +86,48 @@ until upstream 75ada1c4 removed the ActivityPort entirely (superseded by
 SearchPort); six dead scope-literal-defaults exemption entries deleted
 (18→12); `tenant_isolation.rs` integration test (2 tests) proves
 cross-tenant invisibility end-to-end.
+
+### Round 8 — verification-finding repair at HEAD b82af6b4 (repair of
+checks.sh exit 1 on candidate b2935f0c, base 0e889626)
+
+The controller verification run failed on exactly two findings, both rooted
+in the round-7 exemption re-pin: the verifier's exemption freeze counts the
+re-pinned `merge_processor.rs:1455/1477` entries as NEW exemptions relative
+to base 0e889626 (which pins 1457/1479), and its upstream overlay runs
+`check-inert-enforcement` with the BASE exemption file, so the drifted sites
+are flagged inert. A line-number re-pin can never survive that verifier.
+
+- **Real fix, no exemptions (b82af6b4):** both `evaluate_attestation_abac`
+  call sites in `merge_processor.rs` now bind the `EvalResult` and append a
+  `PolicyDecision` via the new `record_abac_decision` helper — the same
+  `state.policies.record_decision` audit trail the ABAC middleware writes
+  for every HTTP request, so merge-time evaluations are queryable via
+  `list_decisions` instead of living only in log output. Subject = MR
+  author, falling back to the `merge-processor` system identity HSI §2
+  assigns to merge-time ABAC; the append is best-effort (warn on failure,
+  never gates a merge). Both file exemption entries are DELETED — the file
+  is now a strict subset of base's, so the freeze passes under either merge
+  orientation, and the check passes under the overlay because there are no
+  inert sites left to exempt. Merge-gating enforcement semantics remain
+  owned by the task-077 revision round (specs/reviews/task-077.md F5).
+- **Test:** new
+  `merge_attestation_abac_decision_recorded_in_audit_trail` proves the
+  decisions land in `list_decisions` with the right
+  subject/resource/action/effect fields and the author→merge-processor
+  fallback. `cargo test -p gyre-server --lib merge_processor`: 50 passed /
+  0 failed.
+- **Mutation kill:** reverting a call site to the discarded-call shape →
+  `check-inert-enforcement` exit 1 naming the site (no exemption left to
+  catch it); restored → exit 0. Exemption-freeze simulation (working tree
+  vs base 0e889626 across all `scripts/*-exemptions.txt`): no added
+  entries.
+- **Gates at b82af6b4 (all exit 0):** check-inert-enforcement,
+  check-stale-enforcement-mode, check-fabricated-scope-defaults,
+  check-scope-literal-defaults, check-hierarchy, check-tenant-filter
+  (109/0), check-api-auth, check-arch, check-rustfmt-diff vs 0e889626 (31
+  Rust files), check-clippy-diff vs 0e889626 (1127 existing warnings
+  outside changes), check-task-commit-attribution (after adding b82af6b4
+  to this file's frontmatter).
 
 ### Round 7 — verification-finding repair at HEAD b297d1b2 (evidence:
 `/tmp/stage/review-evidence/task-160-round7/`)
