@@ -106,7 +106,7 @@ pub use rust_extractor::RustExtractor;
 pub use spec_approval::SpecApproval;
 pub use spec_assertions::{
     evaluate_assertions, parse_assertions, AssertionResult, Comparison, ParsedAssertion, Predicate,
-    Subject,
+    SpecAssertionResult, Subject,
 };
 pub use spec_ledger::{ApprovalStatus, SpecApprovalEvent, SpecLedgerEntry};
 pub use spec_policy::SpecPolicy;

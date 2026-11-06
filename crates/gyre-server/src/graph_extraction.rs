@@ -42,7 +42,20 @@ pub struct AgentPushContext {
     pub tenant_id: String,
 }
 
-/// Port references needed only for the post-extraction divergence check.
+/// Workspace/tenant identity for push-scoped notifications (system-explorer §9).
+///
+/// Derived at each extraction call site from the repo's own workspace, so
+/// assertion-failure notifications fire for every push — including CLI/user
+/// pushes and mirror syncs, which carry no agent context. Without a scope
+/// (repo workspace unresolvable) notifications are skipped and the failure
+/// is only persisted.
+pub struct PushNotificationScope {
+    pub workspace_id: String,
+    pub tenant_id: String,
+}
+
+/// Port references needed for push-scoped notifications and the divergence
+/// check (spec assertion failures use the notification + membership repos).
 ///
 /// Bundled into a single struct to stay within clippy's argument-count limit.
 pub struct DivergencePorts<'a> {
@@ -69,7 +82,12 @@ pub struct DivergenceScope<'a> {
 /// When `agent_ctx` is provided, the delta is enriched with agent identity and
 /// spec reference, and a post-extraction divergence check is performed.
 ///
+/// `notification_scope` carries the repo's workspace/tenant identity for
+/// spec-assertion-failure notifications (§9) — independent of `agent_ctx`, so
+/// notifications also fire for user and mirror pushes.
+///
 /// All errors are logged and swallowed — extraction must never fail a push.
+#[allow(clippy::too_many_arguments)]
 pub async fn extract_and_store_graph(
     repo_path: &str,
     repo_id: &str,
@@ -78,6 +96,8 @@ pub async fn extract_and_store_graph(
     git_bin: &str,
     agent_ctx: Option<AgentPushContext>,
     divergence_ports: Option<DivergencePorts<'_>>,
+    results_repo: Arc<dyn gyre_ports::SpecAssertionResultRepository>,
+    notification_scope: Option<PushNotificationScope>,
 ) {
     if let Err(e) = do_extract(
         repo_path,
@@ -87,6 +107,8 @@ pub async fn extract_and_store_graph(
         git_bin,
         agent_ctx,
         divergence_ports,
+        results_repo,
+        notification_scope,
     )
     .await
     {
@@ -94,6 +116,7 @@ pub async fn extract_and_store_graph(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn do_extract(
     repo_path: &str,
     repo_id: &str,
@@ -102,6 +125,8 @@ async fn do_extract(
     git_bin: &str,
     agent_ctx: Option<AgentPushContext>,
     divergence_ports: Option<DivergencePorts<'_>>,
+    results_repo: Arc<dyn gyre_ports::SpecAssertionResultRepository>,
+    notification_scope: Option<PushNotificationScope>,
 ) -> anyhow::Result<()> {
     // --- Step 1: snapshot the commit tree into a temp directory ---------------
 
@@ -291,12 +316,8 @@ async fn do_extract(
             edges_added_count += 1;
         }
     }
-    for (key, edge) in &old_edge_map {
-        if !new_edge_map.contains_key(key) {
-            graph_store.delete_edge(&edge.id).await?;
-            edges_removed_count += 1;
-        }
-    }
+    edges_removed_count +=
+        sweep_stale_edges(&old_edge_map, &new_edge_map, graph_store.as_ref()).await?;
 
     let node_count = final_nodes.len();
     let edge_count = new_edge_map.len();
@@ -363,8 +384,10 @@ async fn do_extract(
             &final_nodes,
             &spec_edges,
             &repo_id_parsed,
-            &agent_ctx,
+            new_sha,
+            notification_scope.as_ref(),
             divergence_ports.as_ref(),
+            results_repo.as_ref(),
         )
         .await
         {
@@ -623,6 +646,36 @@ fn edge_type_key(et: &EdgeType) -> &'static str {
     }
 }
 
+/// Soft-delete stale Pass 1 edges (step 5 of `do_extract`).
+///
+/// F8 (task-072 R2): `Calls` edges are exempt — they are owned by Pass 2, the
+/// background call-graph pass. Pass 1's syntax-only extractors emit no `Calls`
+/// edges for Go, so an unconditional sweep would soft-delete every Pass 2 edge
+/// on each push and race the still-running Pass 2 writer of the previous push
+/// (the graph would briefly lose all call data). Pass 2 reconciles its own edge
+/// type in [`extract_and_persist_call_graph`]. Tradeoff: stale Pass 1 `Calls`
+/// edges from the Rust/TS syntax extractors stay until Pass 2 for those
+/// languages lands (Phase 1 scope is Go).
+///
+/// Returns the number of edges removed.
+async fn sweep_stale_edges(
+    old_edge_map: &HashMap<(String, String, String), GraphEdge>,
+    new_edge_map: &HashMap<(String, String, String), GraphEdge>,
+    graph_store: &dyn GraphPort,
+) -> anyhow::Result<usize> {
+    let mut removed = 0usize;
+    for (key, edge) in old_edge_map {
+        if !new_edge_map.contains_key(key) {
+            if edge.edge_type == EdgeType::Calls {
+                continue;
+            }
+            graph_store.delete_edge(&edge.id).await?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 /// Compute field-level differences between an old and new version of the same node.
 ///
 /// Compares the mutable fields that extraction can produce — skips ID, repo_id,
@@ -796,6 +849,7 @@ pub async fn extract_and_persist_call_graph(
     let mut known_edges = existing_edges.to_vec();
     let mut persisted = 0usize;
 
+    let mut extraction_ran = false;
     for lang in languages {
         let raw = match extractor.extract_call_edges(repo_root, lang).await {
             Ok(r) => r,
@@ -812,6 +866,10 @@ pub async fn extract_and_persist_call_graph(
         if raw.is_empty() {
             continue;
         }
+        // Non-empty raw output is positive evidence the toolchain ran (the
+        // adapter degrades a missing tool to `Ok(vec![])`, which is
+        // indistinguishable from a genuinely call-free repo).
+        extraction_ran = true;
 
         let edges = resolve_call_edges(lang, &raw, nodes, &known_edges, repo_id);
         for edge in edges {
@@ -824,6 +882,64 @@ pub async fn extract_and_persist_call_graph(
                     tracing::warn!(repo_id = %repo_id, error = %e, "failed to persist Pass 2 edge");
                 }
             }
+        }
+    }
+
+    // Reconcile Pass 2's own edge type (F8, task-072 R2). Because step 5's
+    // stale sweep skips `Calls`, removal of stale call edges is Pass 2's job:
+    // a live Calls edge is soft-deleted when its (source, target) pair is
+    // absent from this run's resolved set (freshly persisted + carried-over
+    // Pass 1 edges), or when the pair is covered but this row's id is not —
+    // a legacy row from before edge ids became content-derived (it would
+    // otherwise duplicate the fresh row forever). Skipped when no language
+    // produced raw output: a missing/failed toolchain degrades to empty
+    // output, and deleting every Calls edge because the tool was unavailable
+    // would wipe the graph's call data.
+    if extraction_ran {
+        let mut resolved: HashMap<(String, String), HashSet<String>> = HashMap::new();
+        for e in known_edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Calls)
+        {
+            resolved
+                .entry((
+                    e.source_id.as_str().to_string(),
+                    e.target_id.as_str().to_string(),
+                ))
+                .or_default()
+                .insert(e.id.as_str().to_string());
+        }
+        let live_calls = match graph_store.list_edges(repo_id, Some(EdgeType::Calls)).await {
+            Ok(edges) => edges,
+            Err(e) => {
+                tracing::warn!(repo_id = %repo_id, error = %e, "Pass 2 reconcile: list_edges failed");
+                Vec::new()
+            }
+        };
+        let mut reconciled = 0usize;
+        for edge in live_calls {
+            let pair = (
+                edge.source_id.as_str().to_string(),
+                edge.target_id.as_str().to_string(),
+            );
+            let stale = match resolved.get(&pair) {
+                None => true,
+                Some(ids) => !ids.contains(edge.id.as_str()),
+            };
+            if stale {
+                if let Err(e) = graph_store.delete_edge(&edge.id).await {
+                    tracing::warn!(repo_id = %repo_id, error = %e, "failed to delete stale Calls edge");
+                } else {
+                    reconciled += 1;
+                }
+            }
+        }
+        if reconciled > 0 {
+            tracing::info!(
+                repo_id = %repo_id,
+                edges = reconciled,
+                "Pass 2 call graph reconcile: stale Calls edges soft-deleted"
+            );
         }
     }
 
@@ -841,14 +957,23 @@ pub async fn extract_and_persist_call_graph(
 ///
 /// Scans the extracted repo tree for markdown files containing
 /// `<!-- gyre:assert ... -->` comments, evaluates each assertion against the
-/// fresh graph data, and creates inbox notifications for failures.
+/// fresh graph data, persists the results (§9 inline view), and creates
+/// priority-9 inbox notifications for failures.
+///
+/// Notifications are scoped by `notification_scope` (the repo's workspace),
+/// NOT by agent context — every push type (agent, user CLI, mirror sync)
+/// notifies. Failures already recorded for the same commit are not
+/// re-notified (mirror-sync cycles re-extract unchanged SHAs).
+#[allow(clippy::too_many_arguments)]
 async fn check_spec_assertions_on_push(
     repo_root: &Path,
     nodes: &[GraphNode],
     edges: &[GraphEdge],
     repo_id: &Id,
-    agent_ctx: &Option<AgentPushContext>,
+    commit_sha: &str,
+    notification_scope: Option<&PushNotificationScope>,
     divergence_ports: Option<&DivergencePorts<'_>>,
+    results_repo: &dyn gyre_ports::SpecAssertionResultRepository,
 ) -> anyhow::Result<()> {
     use gyre_domain::spec_assertions;
 
@@ -858,7 +983,11 @@ async fn check_spec_assertions_on_push(
         return Ok(());
     }
 
-    let mut failed_assertions: Vec<(String, spec_assertions::AssertionResult)> = Vec::new();
+    let mut failed_assertions: Vec<(String, usize, String)> = Vec::new();
+    // Specs whose failures were already recorded for this exact commit
+    // (duplicate-suppressed — see below).
+    let mut specs_already_notified: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     // Walk the specs directory for markdown files.
     fn walk_md_files(dir: &Path, results: &mut Vec<std::path::PathBuf>) {
@@ -880,35 +1009,135 @@ async fn check_spec_assertions_on_push(
     let mut md_files = Vec::new();
     walk_md_files(&specs_dir, &mut md_files);
 
+    // Spec paths present in the pushed tree (whether or not they still carry
+    // assertions) — the complement of stored rows is swept below so deleted
+    // or renamed specs do not keep serving stale results.
+    let mut present_spec_paths: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+
     for md_path in &md_files {
-        let content = match std::fs::read_to_string(md_path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        // Quick check: skip files without assertion comments.
-        if !content.contains("gyre:assert") {
-            continue;
-        }
-
+        // Canonical spec identity: path relative to `specs/` (no `specs/`
+        // prefix) — the same form the spec ledger, `GET /api/v1/specs/:path`,
+        // and the assertion-results endpoint use. `md_path` always starts at
+        // `repo_root/specs/`, so strip both. Registered before the read so
+        // an unreadable-but-present spec is never swept as deleted.
         let relative_path = md_path
             .strip_prefix(repo_root)
             .unwrap_or(md_path)
             .to_string_lossy()
             .to_string();
+        let spec_path = relative_path
+            .strip_prefix("specs/")
+            .unwrap_or(&relative_path)
+            .to_string();
+        present_spec_paths.insert(spec_path.clone());
+
+        let content = match std::fs::read_to_string(md_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
 
         let parsed = spec_assertions::parse_assertions(&content);
         if parsed.is_empty() {
+            // The spec no longer carries assertions (they were removed since
+            // the last push, or the marker string only appears inside fenced
+            // documentation examples). Replace semantics require the stored
+            // set to reflect this: drop any prior rows for the spec.
+            if let Err(e) = results_repo
+                .delete_by_spec(repo_id.as_str(), &spec_path)
+                .await
+            {
+                warn!(
+                    %repo_id,
+                    spec_path = %spec_path,
+                    "failed to clear stale spec assertion results: {e}"
+                );
+            }
             continue;
         }
 
-        let results = spec_assertions::evaluate_assertions(&parsed, nodes, edges);
-        for result in results {
-            if !result.passed {
-                failed_assertions.push((relative_path.clone(), result));
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // Previously stored rows for this spec — the last push's check state.
+        // Used both for duplicate suppression (same commit re-extracted by a
+        // mirror-sync cycle) and to detect newly failing assertions.
+        let prior_results = results_repo
+            .list_by_spec(repo_id.as_str(), &spec_path)
+            .await
+            .unwrap_or_default();
+
+        let records: Vec<gyre_domain::SpecAssertionResult> = parsed
+            .iter()
+            .zip(spec_assertions::evaluate_assertions(&parsed, nodes, edges))
+            .map(|(assertion, result)| gyre_domain::SpecAssertionResult {
+                id: Uuid::new_v4().to_string(),
+                repo_id: repo_id.as_str().to_string(),
+                spec_path: spec_path.clone(),
+                line: result.line,
+                assertion_type: assertion.type_name().to_string(),
+                assertion_text: result.assertion_text,
+                params_json: assertion.params_json().to_string(),
+                passed: result.passed,
+                explanation: result.explanation.clone(),
+                commit_sha: commit_sha.to_string(),
+                checked_at: now,
+            })
+            .collect();
+
+        for record in &records {
+            if !record.passed {
+                failed_assertions.push((
+                    spec_path.clone(),
+                    record.line,
+                    record.explanation.clone(),
+                ));
+            }
+        }
+
+        // Persist the full result set (pass and fail) so the spec's inline
+        // view can show the last push's check state (system-explorer.md §9).
+        if let Err(e) = results_repo.save_results(&records).await {
+            warn!(
+                %repo_id,
+                spec_path = %spec_path,
+                "failed to persist spec assertion results: {e}"
+            );
+        }
+
+        // Duplicate suppression: if the stored set for this spec was already
+        // produced by this exact commit (mirror-sync cycles re-extract
+        // unchanged SHAs every interval), do not notify again.
+        let already_recorded_for_commit =
+            !prior_results.is_empty() && prior_results.iter().all(|r| r.commit_sha == commit_sha);
+        if already_recorded_for_commit {
+            specs_already_notified.insert(spec_path);
+        }
+    }
+
+    // Replace semantics for specs that no longer exist in the pushed tree:
+    // a deleted or renamed spec file leaves stored rows that the GET
+    // endpoint would keep serving as the spec's "latest check". Sweep them.
+    if let Ok(stored_paths) = results_repo.list_spec_paths(repo_id.as_str()).await {
+        for stale in stored_paths {
+            if present_spec_paths.contains(&stale) {
+                continue;
+            }
+            if let Err(e) = results_repo.delete_by_spec(repo_id.as_str(), &stale).await {
+                warn!(
+                    %repo_id,
+                    spec_path = %stale,
+                    "failed to sweep stale spec assertion results: {e}"
+                );
             }
         }
     }
+
+    // Only failures from specs whose failing state is new for this commit
+    // warrant a notification; drop suppressed ones.
+    failed_assertions.retain(|(path, _, _)| !specs_already_notified.contains(path));
 
     if failed_assertions.is_empty() {
         return Ok(());
@@ -920,22 +1149,29 @@ async fn check_spec_assertions_on_push(
         "spec assertion failures detected on push"
     );
 
-    // Create notifications for assertion failures (when agent context and
-    // divergence ports are available).
-    if let (Some(ctx), Some(ports)) = (agent_ctx, divergence_ports) {
+    // Create priority-9 notifications for the failures (§9 Inbox items).
+    // Scoped by the repo's workspace — fires for every push type, not just
+    // agent pushes. Skipped when the scope or notification ports are
+    // unavailable (repo workspace unresolvable, or a caller without ports).
+    if let (Some(scope), Some(ports)) = (notification_scope, divergence_ports) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
 
+        // The first failing spec — linked as the notification's entity_ref so
+        // the Inbox "Update Spec" action can open it.
+        let first_spec_path = failed_assertions[0].0.clone();
+
         let body = serde_json::json!({
             "repo_id": repo_id.as_str(),
-            "failures": failed_assertions.iter().map(|(path, r)| {
+            "spec_path": first_spec_path,
+            "commit_sha": commit_sha,
+            "failures": failed_assertions.iter().map(|(path, line, explanation)| {
                 serde_json::json!({
                     "spec_path": path,
-                    "line": r.line,
-                    "assertion": r.assertion_text,
-                    "explanation": r.explanation,
+                    "line": line,
+                    "explanation": explanation,
                 })
             }).collect::<Vec<_>>(),
         })
@@ -946,7 +1182,7 @@ async fn check_spec_assertions_on_push(
             failed_assertions.len()
         );
 
-        let ws_id = Id::new(&ctx.workspace_id);
+        let ws_id = Id::new(&scope.workspace_id);
         let members = ports.membership_repo.list_by_workspace(&ws_id).await?;
 
         for member in members {
@@ -964,11 +1200,13 @@ async fn check_spec_assertions_on_push(
                 member.user_id.clone(),
                 NotificationType::SpecAssertionFailure,
                 &title,
-                &ctx.tenant_id,
+                &scope.tenant_id,
                 now,
             );
             notif.body = Some(body.clone());
             notif.repo_id = Some(repo_id.as_str().to_string());
+            // Link to the failing spec so Inbox actions can open it.
+            notif.entity_ref = Some(first_spec_path.clone());
 
             if let Err(e) = ports.notification_repo.create(&notif).await {
                 warn!(
@@ -1302,6 +1540,435 @@ mod tests {
         assert_eq!(calls[0].target_id, callee.id);
         assert_eq!(calls[0].edge_type, EdgeType::Calls);
     }
+    #[tokio::test]
+    async fn push_check_persists_assertion_results_via_repo() {
+        use crate::mem::MemSpecAssertionResultRepository;
+        use gyre_common::graph::{SpecConfidence, Visibility};
+        use gyre_ports::SpecAssertionResultRepository as _;
+
+        // A repo snapshot with a spec carrying two assertions: one that passes
+        // against the graph below, one that fails.
+        let dir = tempfile::TempDir::new().unwrap();
+        let specs_dir = dir.path().join("specs").join("system");
+        std::fs::create_dir_all(&specs_dir).unwrap();
+        std::fs::write(
+            specs_dir.join("architecture.md"),
+            "# Architecture\n\n<!-- gyre:assert type=\"no_dependency\" from=\"gyre-domain\" to=\"gyre-adapters\" -->\n\n<!-- gyre:assert type=\"implements\" subject=\"SearchService\" trait=\"FullTextPort\" -->\n",
+        )
+        .unwrap();
+
+        let repo_id = Id::new("repo-assert");
+        let mk_node = |id: &str, name: &str| GraphNode {
+            id: Id::new(id),
+            repo_id: repo_id.clone(),
+            node_type: NodeType::Module,
+            name: name.to_string(),
+            qualified_name: name.to_string(),
+            file_path: format!("crates/{name}/src/lib.rs"),
+            line_start: 1,
+            line_end: 10,
+            visibility: Visibility::Public,
+            doc_comment: None,
+            spec_path: None,
+            spec_paths: vec![],
+            spec_confidence: SpecConfidence::None,
+            last_modified_sha: "abc".to_string(),
+            last_modified_by: None,
+            last_modified_at: 0,
+            created_sha: "abc".to_string(),
+            created_at: 0,
+            complexity: None,
+            churn_count_30d: 0,
+            test_coverage: None,
+            first_seen_at: 0,
+            last_seen_at: 0,
+            deleted_at: None,
+            test_node: false,
+            spec_approved_at: None,
+            milestone_completed_at: None,
+        };
+        let nodes = vec![mk_node("nd", "gyre-domain"), mk_node("na", "gyre-adapters")];
+
+        let results_repo = MemSpecAssertionResultRepository::default();
+        check_spec_assertions_on_push(
+            dir.path(),
+            &nodes,
+            &[],
+            &repo_id,
+            "deadbeef",
+            None,
+            None,
+            &results_repo,
+        )
+        .await
+        .unwrap();
+
+        // Both assertions (pass and fail) are persisted under the canonical
+        // spec path (no `specs/` prefix), ordered by line.
+        let stored = results_repo
+            .list_by_spec(repo_id.as_str(), "system/architecture.md")
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), 2, "both assertions must be persisted");
+        assert_eq!(stored[0].line, 3);
+        assert_eq!(stored[0].assertion_type, "no_dependency");
+        assert!(
+            stored[0].passed,
+            "no edge from gyre-domain to gyre-adapters exists"
+        );
+        assert_eq!(stored[0].commit_sha, "deadbeef");
+        assert_eq!(stored[1].line, 5);
+        assert_eq!(stored[1].assertion_type, "implements");
+        assert!(
+            !stored[1].passed,
+            "SearchService node is absent from the graph"
+        );
+
+        // A second push replaces the stored set for the same spec (no stale
+        // rows from the first check linger).
+        std::fs::write(
+            specs_dir.join("architecture.md"),
+            "# Architecture\n\n<!-- gyre:assert type=\"all_have\" node_type=\"Endpoint\" property=\"auth_middleware\" -->\n",
+        )
+        .unwrap();
+        check_spec_assertions_on_push(
+            dir.path(),
+            &nodes,
+            &[],
+            &repo_id,
+            "deadbeef2",
+            None,
+            None,
+            &results_repo,
+        )
+        .await
+        .unwrap();
+
+        let replaced = results_repo
+            .list_by_spec(repo_id.as_str(), "system/architecture.md")
+            .await
+            .unwrap();
+        assert_eq!(
+            replaced.len(),
+            1,
+            "re-push must replace prior rows for the spec"
+        );
+        assert_eq!(replaced[0].assertion_type, "all_have");
+        assert_eq!(replaced[0].commit_sha, "deadbeef2");
+    }
+
+    #[tokio::test]
+    async fn push_check_sweeps_stale_results_when_assertions_or_specs_vanish() {
+        use crate::mem::MemSpecAssertionResultRepository;
+        use gyre_common::graph::{SpecConfidence, Visibility};
+        use gyre_ports::SpecAssertionResultRepository as _;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let specs_dir = dir.path().join("specs").join("system");
+        std::fs::create_dir_all(&specs_dir).unwrap();
+        std::fs::write(
+            specs_dir.join("kept.md"),
+            "<!-- gyre:assert type=\"no_dependency\" from=\"gyre-domain\" to=\"gyre-adapters\" -->\n",
+        )
+        .unwrap();
+        std::fs::write(
+            specs_dir.join("emptied.md"),
+            "<!-- gyre:assert type=\"no_dependency\" from=\"gyre-domain\" to=\"gyre-adapters\" -->\n",
+        )
+        .unwrap();
+        std::fs::write(
+            specs_dir.join("doomed.md"),
+            "<!-- gyre:assert type=\"no_dependency\" from=\"gyre-domain\" to=\"gyre-adapters\" -->\n",
+        )
+        .unwrap();
+
+        let repo_id = Id::new("repo-sweep");
+        let mk_node = |id: &str, name: &str| GraphNode {
+            id: Id::new(id),
+            repo_id: repo_id.clone(),
+            node_type: NodeType::Module,
+            name: name.to_string(),
+            qualified_name: name.to_string(),
+            file_path: format!("crates/{name}/src/lib.rs"),
+            line_start: 1,
+            line_end: 10,
+            visibility: Visibility::Public,
+            doc_comment: None,
+            spec_path: None,
+            spec_paths: vec![],
+            spec_confidence: SpecConfidence::None,
+            last_modified_sha: "abc".to_string(),
+            last_modified_by: None,
+            last_modified_at: 0,
+            created_sha: "abc".to_string(),
+            created_at: 0,
+            complexity: None,
+            churn_count_30d: 0,
+            test_coverage: None,
+            first_seen_at: 0,
+            last_seen_at: 0,
+            deleted_at: None,
+            test_node: false,
+            spec_approved_at: None,
+            milestone_completed_at: None,
+        };
+        let nodes = vec![mk_node("nd", "gyre-domain"), mk_node("na", "gyre-adapters")];
+
+        let results_repo = MemSpecAssertionResultRepository::default();
+        check_spec_assertions_on_push(
+            dir.path(),
+            &nodes,
+            &[],
+            &repo_id,
+            "sha1",
+            None,
+            None,
+            &results_repo,
+        )
+        .await
+        .unwrap();
+
+        for path in ["system/kept.md", "system/emptied.md", "system/doomed.md"] {
+            let stored = results_repo
+                .list_by_spec(repo_id.as_str(), path)
+                .await
+                .unwrap();
+            assert_eq!(stored.len(), 1, "{path} seeded with one result");
+        }
+
+        // Next push: `emptied.md` keeps its file but loses its assertions;
+        // `doomed.md` is deleted entirely; `kept.md` is unchanged.
+        std::fs::write(
+            specs_dir.join("emptied.md"),
+            "# Emptied\n\nNo assertions remain.\n",
+        )
+        .unwrap();
+        std::fs::remove_file(specs_dir.join("doomed.md")).unwrap();
+
+        check_spec_assertions_on_push(
+            dir.path(),
+            &nodes,
+            &[],
+            &repo_id,
+            "sha2",
+            None,
+            None,
+            &results_repo,
+        )
+        .await
+        .unwrap();
+
+        let kept = results_repo
+            .list_by_spec(repo_id.as_str(), "system/kept.md")
+            .await
+            .unwrap();
+        assert_eq!(kept.len(), 1, "unchanged spec keeps its results");
+        assert_eq!(kept[0].commit_sha, "sha2", "unchanged spec is re-checked");
+
+        let emptied = results_repo
+            .list_by_spec(repo_id.as_str(), "system/emptied.md")
+            .await
+            .unwrap();
+        assert!(
+            emptied.is_empty(),
+            "spec whose assertions were all removed must not keep stale rows"
+        );
+
+        let doomed = results_repo
+            .list_by_spec(repo_id.as_str(), "system/doomed.md")
+            .await
+            .unwrap();
+        assert!(
+            doomed.is_empty(),
+            "deleted spec file must not keep stale rows"
+        );
+    }
+
+    #[tokio::test]
+    async fn push_check_creates_priority9_notifications_for_failed_assertions() {
+        use crate::mem::{
+            MemNotificationRepository, MemSpecAssertionResultRepository,
+            MemWorkspaceMembershipRepository,
+        };
+        use gyre_common::NotificationType;
+        use gyre_domain::{WorkspaceMembership, WorkspaceRole};
+
+        // Spec with one failing assertion (subject node absent from graph).
+        let dir = tempfile::TempDir::new().unwrap();
+        let specs_dir = dir.path().join("specs").join("system");
+        std::fs::create_dir_all(&specs_dir).unwrap();
+        std::fs::write(
+            specs_dir.join("architecture.md"),
+            "# Architecture\n\n<!-- gyre:assert type=\"implements\" subject=\"SearchService\" trait=\"FullTextPort\" -->\n",
+        )
+        .unwrap();
+
+        let repo_id = Id::new("repo-assert-notif");
+        let nodes: Vec<GraphNode> = vec![];
+        let results_repo = MemSpecAssertionResultRepository::default();
+        let notif_repo = MemNotificationRepository::default();
+        let membership_repo = MemWorkspaceMembershipRepository::default();
+
+        // One Developer and one Viewer in the workspace; only the Developer
+        // is within the notify set (Admin/Developer/Owner).
+        membership_repo
+            .create(&WorkspaceMembership::new(
+                Id::new("m-dev"),
+                Id::new("user-dev"),
+                Id::new("ws-1"),
+                WorkspaceRole::Developer,
+                Id::new("inviter"),
+                1_000,
+            ))
+            .await
+            .unwrap();
+        membership_repo
+            .create(&WorkspaceMembership::new(
+                Id::new("m-view"),
+                Id::new("user-view"),
+                Id::new("ws-1"),
+                WorkspaceRole::Viewer,
+                Id::new("inviter"),
+                1_000,
+            ))
+            .await
+            .unwrap();
+
+        let scope = PushNotificationScope {
+            workspace_id: "ws-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+        };
+        let ports = DivergencePorts {
+            notification_repo: &notif_repo,
+            membership_repo: &membership_repo,
+        };
+
+        check_spec_assertions_on_push(
+            dir.path(),
+            &nodes,
+            &[],
+            &repo_id,
+            "deadbeef",
+            Some(&scope),
+            Some(&ports),
+            &results_repo,
+        )
+        .await
+        .unwrap();
+
+        // The Developer gets exactly one priority-9 SpecAssertionFailure
+        // notification carrying the failing spec and assertion.
+        let dev_notifs = notif_repo
+            .list_for_user(
+                &Id::new("user-dev"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(dev_notifs.len(), 1, "developer must be notified");
+        let n = &dev_notifs[0];
+        assert_eq!(n.notification_type, NotificationType::SpecAssertionFailure);
+        assert_eq!(n.priority, 9);
+        assert_eq!(n.repo_id.as_deref(), Some("repo-assert-notif"));
+        let body: serde_json::Value = serde_json::from_str(n.body.as_deref().unwrap()).unwrap();
+        assert_eq!(body["failures"][0]["spec_path"], "system/architecture.md");
+        assert_eq!(body["repo_id"], "repo-assert-notif");
+        // §9: the notification links to the failing spec so the Inbox
+        // "Update Spec" action can open it.
+        assert_eq!(n.entity_ref.as_deref(), Some("system/architecture.md"));
+        assert_eq!(body["spec_path"], "system/architecture.md");
+
+        // The Viewer is outside the notify set.
+        let view_notifs = notif_repo
+            .list_for_user(
+                &Id::new("user-view"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert!(
+            view_notifs.is_empty(),
+            "viewer must not receive spec assertion failure notifications"
+        );
+
+        // All-failing assertions must not spam one notification per failure:
+        // still a single notification per user for the push.
+        assert_eq!(body["failures"].as_array().unwrap().len(), 1);
+
+        // Duplicate suppression: re-checking the same commit (mirror-sync
+        // cycle re-extracting an unchanged SHA) must not notify again.
+        check_spec_assertions_on_push(
+            dir.path(),
+            &nodes,
+            &[],
+            &repo_id,
+            "deadbeef",
+            Some(&scope),
+            Some(&ports),
+            &results_repo,
+        )
+        .await
+        .unwrap();
+        let dev_notifs_after = notif_repo
+            .list_for_user(
+                &Id::new("user-dev"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            dev_notifs_after.len(),
+            1,
+            "same-commit re-check must not duplicate the notification"
+        );
+
+        // A new commit with the same failure does notify again (the failure
+        // is still live and the state is new for this push).
+        check_spec_assertions_on_push(
+            dir.path(),
+            &nodes,
+            &[],
+            &repo_id,
+            "deadbeef3",
+            Some(&scope),
+            Some(&ports),
+            &results_repo,
+        )
+        .await
+        .unwrap();
+        let dev_notifs_new_commit = notif_repo
+            .list_for_user(
+                &Id::new("user-dev"),
+                Some(&Id::new("ws-1")),
+                None,
+                None,
+                None,
+                50,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            dev_notifs_new_commit.len(),
+            2,
+            "a new commit with a failing assertion must notify again"
+        );
+    }
 
     #[tokio::test]
     async fn pass2_dedups_calls_edge_already_present_from_pass1() {
@@ -1358,5 +2025,309 @@ mod tests {
             calls.is_empty(),
             "no new Calls edge should be persisted for a duplicate"
         );
+    }
+
+    #[tokio::test]
+    async fn pass2_edge_ids_stable_across_runs() {
+        // F8 idempotence: re-running Pass 2 over the same call structure must
+        // reuse the content-derived edge id (upsert in place), not mint a new
+        // UUID — consumers tracking edges by id or first_seen_at would
+        // otherwise see churn on every push.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("go.mod"),
+            "module example.com/app\n\ngo 1.21\n",
+        )
+        .unwrap();
+
+        let repo_id = Id::new("repo-go");
+        let caller = make_go_fn("example.com/app/api.Handler", "api/handler.go", &repo_id);
+        let callee = make_go_fn("example.com/app/svc.DoWork", "svc/work.go", &repo_id);
+        let nodes = vec![caller.clone(), callee.clone()];
+
+        let store = MemGraphStore::new();
+        for n in &nodes {
+            store.create_node(n.clone()).await.unwrap();
+        }
+
+        let fake = FakeCallGraphExtractor {
+            edges: vec![CallEdge {
+                from: "example.com/app/api.Handler".to_string(),
+                to: "example.com/app/svc.DoWork".to_string(),
+            }],
+        };
+
+        extract_and_persist_call_graph(dir.path(), &nodes, &[], &repo_id, &store, &fake).await;
+        let first = store
+            .list_edges(&repo_id, Some(EdgeType::Calls))
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        let first = &first[0];
+
+        // Ensure the second run's `now` differs, so a row replacement (rather
+        // than an in-place upsert) would be observable in first_seen_at.
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+        extract_and_persist_call_graph(dir.path(), &nodes, &[], &repo_id, &store, &fake).await;
+        let second = store
+            .list_edges(&repo_id, Some(EdgeType::Calls))
+            .await
+            .unwrap();
+        assert_eq!(
+            second.len(),
+            1,
+            "second run must not create a duplicate row"
+        );
+        assert_eq!(
+            second[0].id, first.id,
+            "edge id must be content-derived and stable across runs"
+        );
+        assert_eq!(
+            second[0].first_seen_at, first.first_seen_at,
+            "first_seen_at must be preserved across runs"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_preserves_calls_edges_owned_by_pass2() {
+        // F8 mid-flight race: push N+1's Pass 1 stale sweep runs while push
+        // N's Pass 2 writer may still be persisting Calls edges. The sweep
+        // must never touch the Calls type — a delete there races the async
+        // writer and briefly empties the graph's call data.
+        let repo_id = Id::new("repo-race");
+        let store = MemGraphStore::new();
+        let node = make_graph_node("fn-a", "crate::fn_a");
+
+        let calls_edge = GraphEdge {
+            id: Id::new("pass2-edge"),
+            repo_id: repo_id.clone(),
+            source_id: node.id.clone(),
+            target_id: Id::new("fn-b"),
+            edge_type: EdgeType::Calls,
+            metadata: None,
+            first_seen_at: 1,
+            last_seen_at: 1,
+            deleted_at: None,
+        };
+        let contains_edge = GraphEdge {
+            id: Id::new("pass1-contains"),
+            repo_id: repo_id.clone(),
+            source_id: node.id.clone(),
+            target_id: Id::new("mod-x"),
+            edge_type: EdgeType::Contains,
+            metadata: None,
+            first_seen_at: 1,
+            last_seen_at: 1,
+            deleted_at: None,
+        };
+        for e in [&calls_edge, &contains_edge] {
+            store.create_edge(e.clone()).await.unwrap();
+        }
+
+        // Pass 1 of the next push re-emits neither edge (e.g. both endpoints
+        // moved to a file the syntax extractors no longer parse).
+        let old_edge_map: HashMap<(String, String, String), GraphEdge> =
+            [calls_edge.clone(), contains_edge.clone()]
+                .into_iter()
+                .map(|e| {
+                    (
+                        (
+                            e.source_id.as_str().to_string(),
+                            e.target_id.as_str().to_string(),
+                            edge_type_key(&e.edge_type).to_string(),
+                        ),
+                        e,
+                    )
+                })
+                .collect();
+
+        let removed = sweep_stale_edges(&old_edge_map, &HashMap::new(), &store)
+            .await
+            .unwrap();
+        assert_eq!(removed, 1, "only the non-Calls stale edge is removed");
+
+        let live = store.list_edges(&repo_id, None).await.unwrap();
+        assert_eq!(
+            live.len(),
+            1,
+            "the Calls edge must survive the Pass 1 sweep"
+        );
+        assert_eq!(live[0].id, Id::new("pass2-edge"));
+        assert!(live[0].deleted_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn pass2_reconciles_stale_calls_edges() {
+        // F8 lifecycle: with the Pass 1 sweep no longer deleting Calls edges,
+        // Pass 2 must reconcile its own type — a call edge that disappears
+        // from the type checker's output is soft-deleted, live ones keep
+        // their identity.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("go.mod"),
+            "module example.com/app\n\ngo 1.21\n",
+        )
+        .unwrap();
+
+        let repo_id = Id::new("repo-go");
+        let caller = make_go_fn("example.com/app/api.Handler", "api/handler.go", &repo_id);
+        let callee = make_go_fn("example.com/app/svc.DoWork", "svc/work.go", &repo_id);
+        let other = make_go_fn("example.com/app/svc.Gone", "svc/gone.go", &repo_id);
+        let nodes = vec![caller.clone(), callee.clone(), other.clone()];
+
+        let store = MemGraphStore::new();
+        for n in &nodes {
+            store.create_node(n.clone()).await.unwrap();
+        }
+
+        // Run 1: two calls.
+        let fake_two = FakeCallGraphExtractor {
+            edges: vec![
+                CallEdge {
+                    from: "example.com/app/api.Handler".to_string(),
+                    to: "example.com/app/svc.DoWork".to_string(),
+                },
+                CallEdge {
+                    from: "example.com/app/api.Handler".to_string(),
+                    to: "example.com/app/svc.Gone".to_string(),
+                },
+            ],
+        };
+        extract_and_persist_call_graph(dir.path(), &nodes, &[], &repo_id, &store, &fake_two).await;
+        let after_first = store
+            .list_edges(&repo_id, Some(EdgeType::Calls))
+            .await
+            .unwrap();
+        assert_eq!(after_first.len(), 2);
+
+        // Run 2: the call to svc.Gone no longer exists in the source.
+        let fake_one = FakeCallGraphExtractor {
+            edges: vec![CallEdge {
+                from: "example.com/app/api.Handler".to_string(),
+                to: "example.com/app/svc.DoWork".to_string(),
+            }],
+        };
+        extract_and_persist_call_graph(dir.path(), &nodes, &[], &repo_id, &store, &fake_one).await;
+
+        let after_second = store
+            .list_edges(&repo_id, Some(EdgeType::Calls))
+            .await
+            .unwrap();
+        assert_eq!(
+            after_second.len(),
+            1,
+            "stale Calls edge must be reconciled away"
+        );
+        assert_eq!(after_second[0].target_id, callee.id);
+        assert_eq!(
+            after_second[0].id, after_first[0].id,
+            "surviving edge keeps its content-derived id"
+        );
+    }
+
+    #[tokio::test]
+    async fn pass2_reconcile_skipped_when_toolchain_unavailable() {
+        // A missing toolchain degrades to Ok(vec![]) — indistinguishable from
+        // a call-free repo. Reconcile must not interpret that as "no calls
+        // exist" and wipe the graph's Calls edges.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("go.mod"),
+            "module example.com/app\n\ngo 1.21\n",
+        )
+        .unwrap();
+
+        let repo_id = Id::new("repo-go");
+        let caller = make_go_fn("example.com/app/api.Handler", "api/handler.go", &repo_id);
+        let callee = make_go_fn("example.com/app/svc.DoWork", "svc/work.go", &repo_id);
+        let nodes = vec![caller.clone(), callee.clone()];
+
+        let store = MemGraphStore::new();
+        for n in &nodes {
+            store.create_node(n.clone()).await.unwrap();
+        }
+        store
+            .create_edge(GraphEdge {
+                id: Id::new("prior-pass2-edge"),
+                repo_id: repo_id.clone(),
+                source_id: caller.id.clone(),
+                target_id: callee.id.clone(),
+                edge_type: EdgeType::Calls,
+                metadata: None,
+                first_seen_at: 1,
+                last_seen_at: 1,
+                deleted_at: None,
+            })
+            .await
+            .unwrap();
+
+        let empty = FakeCallGraphExtractor { edges: vec![] };
+        extract_and_persist_call_graph(dir.path(), &nodes, &[], &repo_id, &store, &empty).await;
+
+        let calls = store
+            .list_edges(&repo_id, Some(EdgeType::Calls))
+            .await
+            .unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "empty toolchain output must not wipe existing Calls edges"
+        );
+    }
+
+    #[tokio::test]
+    async fn pass2_reconcile_removes_legacy_duplicate_id_rows() {
+        // Rows written before edge ids became content-derived carry random
+        // UUIDs for the same (source, target) pair. Reconcile must collapse
+        // them onto the fresh content-derived row instead of keeping both.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("go.mod"),
+            "module example.com/app\n\ngo 1.21\n",
+        )
+        .unwrap();
+
+        let repo_id = Id::new("repo-go");
+        let caller = make_go_fn("example.com/app/api.Handler", "api/handler.go", &repo_id);
+        let callee = make_go_fn("example.com/app/svc.DoWork", "svc/work.go", &repo_id);
+        let nodes = vec![caller.clone(), callee.clone()];
+
+        let store = MemGraphStore::new();
+        for n in &nodes {
+            store.create_node(n.clone()).await.unwrap();
+        }
+        // The legacy row: same pair, pre-content-id UUID.
+        store
+            .create_edge(GraphEdge {
+                id: Id::new("legacy-random-uuid"),
+                repo_id: repo_id.clone(),
+                source_id: caller.id.clone(),
+                target_id: callee.id.clone(),
+                edge_type: EdgeType::Calls,
+                metadata: None,
+                first_seen_at: 1,
+                last_seen_at: 1,
+                deleted_at: None,
+            })
+            .await
+            .unwrap();
+
+        let fake = FakeCallGraphExtractor {
+            edges: vec![CallEdge {
+                from: "example.com/app/api.Handler".to_string(),
+                to: "example.com/app/svc.DoWork".to_string(),
+            }],
+        };
+        extract_and_persist_call_graph(dir.path(), &nodes, &[], &repo_id, &store, &fake).await;
+
+        let calls = store
+            .list_edges(&repo_id, Some(EdgeType::Calls))
+            .await
+            .unwrap();
+        assert_eq!(calls.len(), 1, "legacy duplicate row must be collapsed");
+        assert_ne!(calls[0].id, Id::new("legacy-random-uuid"));
+        assert_eq!(calls[0].source_id, caller.id);
+        assert_eq!(calls[0].target_id, callee.id);
     }
 }

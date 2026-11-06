@@ -227,6 +227,18 @@ class Store:
         rows=[dict(row) for row in self.db.execute("SELECT * FROM work WHERE state IN ('ready','retry') AND retry_at<=?",(now,))]
         return sorted(rows,key=lambda row:sort_key(self,row,now))
 
+    def integration_waiting(self, data):
+        """A long external wait yields the lane, never the merge/check gates."""
+        ci = data.get('ci') or {}
+        # Green CI on an outdated branch needs our own base refresh. Parking
+        # it until GitHub becomes CLEAN deadlocks: only integration can do that.
+        if (ci.get('checks') == 'green' and ci.get('status') == 'policy_pending'
+                and ci.get('merge_state') == 'BEHIND'):
+            return False
+        return (ci.get('head') == data.get('published_head') and bool(ci.get('waiting_since'))
+                and ci.get('status') in ('pending','policy_pending','infrastructure')
+                and time.time()-ci['waiting_since'] >= self.setting('integration_wait_timeout',900))
+
     def integration_lane(self):
         lane = self.setting('integration_lane')
         if not lane:
@@ -238,6 +250,7 @@ class Store:
         ci = data.get('ci') or {}
         if (row['generation'] != lane['generation'] or data.get('candidate') != lane['candidate']
                 or data.get('repair') or data.get('delivered') or data.get('resolved')
+                or self.integration_waiting(data)
                 or (ci.get('status') == 'closed' and ci.get('head') == data.get('published_head'))
                 or self.setting('task_paused:'+lane['task'],False)):
             return None
@@ -248,6 +261,12 @@ class Store:
             return True
         data = self.task(work['task'])['data']
         ci = data.get('ci') or {}
+        if self.integration_waiting(data):
+            return False
+        # A new base must not silently bypass an unresolved source safety hold.
+        for row in self.db.execute("SELECT input FROM work WHERE task=? AND generation=? AND stage='verify' AND state='attention'", (work['task'],work['generation'])):
+            if json.loads(row['input']).get('candidate') == data.get('candidate'):
+                return False
         if ci.get('status') == 'closed' and ci.get('head') == data.get('published_head'):
             return False
         lane = self.integration_lane()
@@ -302,15 +321,20 @@ class Store:
                                 ((updates or {})['review']['candidate'], row['task'], row['generation']))
             self.event('completed', result, row['task'], ident)
 
-    def retry(self, ident, token, reason, delay=None, count_failure=True):
+    def retry(self, ident, token, reason, delay=None, count_failure=True, attention=False):
         with self.transaction():
             row = self._current(ident, token)
             failures = row['failures'] + 1 if count_failure else 0
             delay = min(900, 5 * 2 ** min(failures - 1, 8) * random.uniform(.8, 1.2)) if delay is None else delay
             retry_at=time.time()+delay
-            self.db.execute("UPDATE work SET state='retry',failures=?,retry_at=?,ready_since=?,result=?,owner=NULL,expires=NULL,updated=? WHERE id=?",
-                            (failures, retry_at,retry_at, json.dumps(reason), time.time(), ident))
-            self.event('retry_scheduled', {'reason': reason, 'delay': delay}, row['task'], ident)
+            self.db.execute("UPDATE work SET state=?,failures=?,retry_at=?,ready_since=?,result=?,owner=NULL,expires=NULL,updated=? WHERE id=?",
+                            ('attention' if attention else 'retry', failures, retry_at,retry_at, json.dumps(reason), time.time(), ident))
+            self.event('needs_attention' if attention else 'retry_scheduled', {'reason': reason, 'delay': delay}, row['task'], ident)
+            if attention and row['stage'] == 'verify':
+                lane=self.setting('integration_lane')
+                if lane and lane['task'] == row['task']:
+                    self.db.execute("DELETE FROM settings WHERE key='integration_lane'")
+                    self.event('integration_released',{'reason':'verification safety failure needs attention'},row['task'],ident)
 
     def reserve(self, name, ident, token, kind, limit, data=None):
         with self.transaction():
