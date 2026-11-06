@@ -32,7 +32,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `POST/GET` | `/api/v1/tenants/{id}/trust-anchors` | Create (**Admin only**) / list trust anchors for a tenant; body: `{id, issuer, jwks_uri, anchor_type: "user"|"agent"|"addon", constraints?}`; trust anchors are identity issuers the verification algorithm trusts (TASK-006, authorization-provenance §1.1) |
 | `GET/PUT/DELETE` | `/api/v1/tenants/{id}/trust-anchors/{aid}` | Get / update / delete a specific trust anchor (**Admin only**); PUT body: `{issuer?, jwks_uri?, anchor_type?, constraints?}` — partial update (TASK-006) |
 | `POST/GET` | `/api/v1/workspaces` | Create (**Admin only**, H-15) / list workspaces (`?tenant_id=` filter); workspace groups repos under a shared budget and quota (M22.1) |
-| `GET/PUT/DELETE` | `/api/v1/workspaces/{id}` | Read / update (**Admin only**) / delete (**Admin only**) workspace (H-15, M22.1) |
+| `GET/PUT/DELETE` | `/api/v1/workspaces/{id}` | Read / update (**Admin only**) / delete (**Admin only**) workspace (H-15, M22.1). Update accepts `compute_target_id` — bind the workspace's agent spawns to one tenant compute target, or JSON `null` to clear (agent-runtime.md §3; unknown/cross-tenant IDs are rejected) |
 | `POST/GET` | `/api/v1/workspaces/{id}/repos` | Add / list repos in a workspace (M22.1) |
 | `GET` | `/api/v1/workspaces/{workspace_id}/tasks` | List tasks scoped to a workspace (M34 Slice 6 — preferred access pattern) |
 | `GET` | `/api/v1/workspaces/{workspace_id}/agents` | List agents scoped to a workspace (M34 Slice 6) |
@@ -267,7 +267,7 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `GET/PUT` | `/api/v1/admin/retention` | List / update retention policies (Admin only) |
 | `POST/GET` | `/api/v1/admin/siem` | Create / list SIEM forwarding targets (Admin only) |
 | `PUT/DELETE` | `/api/v1/admin/siem/{id}` | Update / delete a SIEM target (Admin only) |
-| `POST/GET` | `/api/v1/admin/compute-targets` | Create / list remote compute targets (`target_type`: `"local"`, `"ssh"`, `"container"` — Docker/Podman, auto-detected via `which`). **SSH targets** accept `host` field and optionally `container_mode: true` to run agents in containers on the remote SSH host. **Container security defaults (G8):** `--network=none` (default for all container types — G8 security invariant). Agent containers needing server access (clone/heartbeat/complete) must opt in via `"network": "bridge"` in the compute target config. Git credentials are passed via a credential helper script (not embedded in the clone URL). `GYRE_AGENT_COMMAND` is launched via `exec` (not `eval`) for a clean process tree. `--memory=2g --pids-limit=512` (resource limits — override via `memory_limit`/`pids_limit`), `--user=65534:65534` (nobody:nogroup — override via `user`). `config` JSON also accepts `command` (entrypoint binary, default `/gyre/entrypoint.sh`) and `args` (argument list) to configure the container entrypoint. (Admin only, M24) |
+| `POST/GET` | `/api/v1/admin/compute-targets` | Create / list remote compute targets (`target_type`: `"local"`, `"ssh"`, `"container"` — Docker/Podman, auto-detected via `which`). **SSH targets** accept `host` field and `container_mode` (default `true` per agent-runtime.md §3 — runs `docker run` on the remote host with the same security defaults; `container_mode: false` is the legacy bare remote-process mode). **Container security defaults (G8):** `--network=none` (default for all container types — G8 security invariant). Agent containers needing server access (clone/heartbeat/complete) must opt in via `"network": "bridge"` in the compute target config. Git credentials are passed via a credential helper script (not embedded in the clone URL). `GYRE_AGENT_COMMAND` is launched via `exec` (not `eval`) for a clean process tree. `--memory=2g --pids-limit=512` (resource limits — override via `memory_limit`/`pids_limit`), `--user=65534:65534` (nobody:nogroup — override via `user`). `config` JSON also accepts `command` (entrypoint binary, default `/gyre/entrypoint.sh`) and `args` (argument list) to configure the container entrypoint. (Admin only, M24) |
 | `GET/DELETE` | `/api/v1/admin/compute-targets/{id}` | Get / delete a compute target (Admin only) |
 | `POST` | `/api/v1/admin/compute-targets/{id}/tunnel` | Open an SSH tunnel for a compute target: `{direction: "forward"|"reverse", local_port, remote_port, local_host?, remote_host?}` (`local_host` and `remote_host` default to `"localhost"`). Reverse tunnels (`-R`) let air-gapped agents dial out so the server can reach them through NAT. (G12, Admin only) |
 | `GET` | `/api/v1/admin/compute-targets/{id}/tunnel` | List active SSH tunnels for a compute target (G12, Admin only) |
@@ -292,6 +292,19 @@ See [server-config.md](server-config.md) for authentication mechanisms and envir
 | `PUT` | `/api/v1/network/peers/{id}` | Update peer endpoint (roaming): `{endpoint: "host:port"}` — JWT caller must own the peer (agent_id match); updates `last_seen` (M26.2) |
 | `DELETE` | `/api/v1/network/peers/{id}` | Remove a peer from the mesh |
 | `GET` | `/api/v1/network/derp-map` | Get DERP relay map for WireGuard coordination |
+
+
+**Tenant-scoped compute targets (agent-runtime.md §3):** full CRUD for the authenticated user's tenant. `target_type` is one of `"Container"`, `"Ssh"`, `"Kubernetes"`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/v1/compute-targets` | List compute targets for the caller's tenant (any authenticated member) |
+| `POST` | `/api/v1/compute-targets` | Register a compute target: `{name, target_type, config?, is_default?}` (Tenant Admin only; duplicate names in the tenant return 409) |
+| `GET` | `/api/v1/compute-targets/{id}` | Get compute target details (tenant-scoped — another tenant's target is 404) |
+| `PUT` | `/api/v1/compute-targets/{id}` | Update `name`/`config`/`is_default` (Tenant Admin only) |
+| `DELETE` | `/api/v1/compute-targets/{id}` | Remove a compute target — 409 if any workspace references it (Tenant Admin only) |
+
+Workspace selection (same spec section): `PUT /api/v1/workspaces/{id}` accepts `compute_target_id` (a target in the same tenant, or JSON `null` to clear; cross-tenant or unknown IDs are rejected with 400). At spawn time the effective target resolves as: request `compute_target_id` → workspace assignment → tenant default (`is_default`) → local container auto-detection (Docker, then Podman; bare local process only when no container runtime exists).
 
 ---
 
