@@ -1410,6 +1410,7 @@
               {/if}
               <ExplorerCanvas
                 repoId={selectedRepoId}
+                rootLabel={repos.find(r => r.id === selectedRepoId)?.name ?? ''}
                 nodes={effectiveGraph.nodes ?? []}
                 edges={effectiveGraph.edges ?? []}
                 activeQuery={activeViewQuery}
