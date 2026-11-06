@@ -10,7 +10,7 @@
 //! |------------|----------------------------------------|
 //! | Go         | `scripts/go-callgraph/go-callgraph` (CHA binary) |
 //! | Rust       | `scripts/rust-callgraph.sh` (rust-analyzer LSP)  |
-//! | Python     | `scripts/python-callgraph.py` (stdlib `ast`)     |
+//! | Python     | `scripts/python-callgraph.sh` (pyright LSP)      |
 //! | TypeScript | `scripts/ts-callgraph.mjs` (typescript-language-server LSP) |
 //!
 //! Each tool prints a JSON array of `{"from", "to"}` objects to stdout. This
@@ -62,10 +62,10 @@ impl CallGraphExtractor for SubprocessCallGraphExtractor {
                     return Ok(Vec::new());
                 }
             },
-            Language::Python => match find_script("python-callgraph.py") {
-                Some(s) => (PathBuf::from("python3"), vec![s]),
+            Language::Python => match find_script("python-callgraph.sh") {
+                Some(s) => (PathBuf::from("bash"), vec![s]),
                 None => {
-                    tracing::info!("python-callgraph.py not found; skipping Python Pass 2");
+                    tracing::info!("python-callgraph.sh not found; skipping Python Pass 2");
                     return Ok(Vec::new());
                 }
             },
@@ -277,16 +277,78 @@ mod tests {
         assert!(edges.is_empty());
     }
 
+    /// Python fixture shared by the pyright tests. Exercises every
+    /// Python-specific pattern from the task spec: cross-module call,
+    /// method dispatch through a typed receiver, class instantiation,
+    /// decorator application, and a module-level call.
+    fn write_python_fixture(dir: &Path) {
+        std::fs::create_dir_all(dir.join("app")).unwrap();
+        std::fs::write(dir.join("pyproject.toml"), "[project]\nname = 'fixture'\n").unwrap();
+        std::fs::write(dir.join("app/__init__.py"), "").unwrap();
+        std::fs::write(
+            dir.join("app/util.py"),
+            "def helper(x):\n    return x + 1\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("app/deco.py"), "def wrap(f):\n    return f\n").unwrap();
+        std::fs::write(
+            dir.join("app/service.py"),
+            "class Service:\n    def __init__(self):\n        self.ready = True\n\n    def handle(self):\n        return 1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("app/main.py"),
+            concat!(
+                "from app.util import helper\n",
+                "from app.deco import wrap\n",
+                "from app.service import Service\n",
+                "\n",
+                "s = Service()\n",
+                "\n",
+                "@wrap\n",
+                "def decorated():\n",
+                "    pass\n",
+                "\n",
+                "def run():\n",
+                "    helper(1)\n",
+                "    s = Service()\n",
+                "    return s.handle()\n",
+                "\n",
+                "def other():\n",
+                "    run()\n",
+                "\n",
+                "helper(2)\n",
+            ),
+        )
+        .unwrap();
+    }
+
     #[tokio::test]
-    async fn missing_interpreter_degrades_gracefully() {
-        // Python path: if python3 or the script is missing, we get an empty
-        // vec rather than an error.
-        let dir = tempfile::TempDir::new().unwrap();
+    async fn missing_pyright_langserver_degrades_to_empty() {
+        // Missing pyright binary must degrade to Ok(vec![]) with a warning,
+        // never an error -- Pass 2 is best-effort. PYRIGHT_LANGSERVER_BIN
+        // pointing at a nonexistent path makes the skip deterministic
+        // regardless of whether the host happens to have pyright on PATH.
+        // The ambient override is saved and restored: the sibling
+        // pyright_references_map_to_call_edges test resolves the real
+        // server through the same variable, and ENV_LOCK serializes but
+        // does not order the two tests -- deletion here would silently
+        // skip the real-chain test whenever this test happens to run
+        // first.
+        let _guard = ENV_LOCK.lock().await;
+        let saved_bin = std::env::var("PYRIGHT_LANGSERVER_BIN").ok();
+        let repo = tempfile::TempDir::new().unwrap();
+        write_python_fixture(repo.path());
+        std::env::set_var("PYRIGHT_LANGSERVER_BIN", "/nonexistent/pyright-langserver");
         let extractor = SubprocessCallGraphExtractor::new();
         let edges = extractor
-            .extract_call_edges(dir.path(), Language::Python)
+            .extract_call_edges(repo.path(), Language::Python)
             .await
             .expect("Pass 2 must never error");
+        match saved_bin {
+            Some(bin) => std::env::set_var("PYRIGHT_LANGSERVER_BIN", bin),
+            None => std::env::remove_var("PYRIGHT_LANGSERVER_BIN"),
+        }
         assert!(edges.is_empty());
     }
 
@@ -545,5 +607,52 @@ mod tests {
                 edges.len()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn pyright_references_map_to_call_edges() {
+        // Full-chain integration test: wrapper -> pyright LSP driver ->
+        // textDocument/references -> Calls edges, against a REAL
+        // pyright-langserver when one is installed (PYRIGHT_LANGSERVER_BIN
+        // or PATH). The deterministic stub-langserver coverage of the same
+        // driver contract runs in CI regardless (node --test
+        // scripts/dashboard/test/python-callgraph.test.mjs).
+        let _guard = ENV_LOCK.lock().await;
+        let bin = std::env::var("PYRIGHT_LANGSERVER_BIN")
+            .ok()
+            .filter(|p| Path::new(p).is_file())
+            .map(PathBuf::from)
+            .or_else(|| which_on_path("pyright-langserver"));
+        let Some(bin) = bin else {
+            eprintln!("pyright-langserver not found; skipping real-pyright integration test");
+            return;
+        };
+        let repo = tempfile::TempDir::new().unwrap();
+        write_python_fixture(repo.path());
+        std::env::set_var("PYRIGHT_LANGSERVER_BIN", &bin);
+        let extractor = SubprocessCallGraphExtractor::new();
+        let edges = extractor
+            .extract_call_edges(repo.path(), Language::Python)
+            .await
+            .expect("pyright Pass 2 must succeed when the server is present");
+        std::env::remove_var("PYRIGHT_LANGSERVER_BIN");
+
+        let mut pairs: Vec<(String, String)> = edges
+            .iter()
+            .map(|e| (e.from.clone(), e.to.clone()))
+            .collect();
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            vec![
+                ("app.main".into(), "app.service.Service".into()),
+                ("app.main".into(), "app.util.helper".into()),
+                ("app.main.decorated".into(), "app.deco.wrap".into()),
+                ("app.main.other".into(), "app.main.run".into()),
+                ("app.main.run".into(), "app.service.Service".into()),
+                ("app.main.run".into(), "app.service.Service.handle".into()),
+                ("app.main.run".into(), "app.util.helper".into()),
+            ]
+        );
     }
 }
