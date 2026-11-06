@@ -1,6 +1,6 @@
 # Spec Coverage Summary
 
-**Last updated:** 2026-10-10
+**Last updated:** 2026-11-06
 
 | Spec | Total | n/a | Not Started | Assigned | Implemented | Verified | Coverage |
 |------|-------|-----|-------------|----------|-------------|----------|----------|
@@ -21,7 +21,7 @@
 | human-system-interface.md | 55 | 20 | 0 | 19 | 9 | 7 | 45% |
 | identity-security.md | 12 | 2 | 0 | 2 | 4 | 4 | 80% |
 | lsp-call-graph.md | 12 | 0 | 0 | 12 | 0 | 0 | 0% |
-| merge-dependencies.md | 20 | 3 | 0 | 1 | 0 | 16 | 94% |
+| merge-dependencies.md | 20 | 3 | 0 | 0 | 1 | 16 | 100% |
 | message-bus.md | 17 | 3 | 0 | 2 | 1 | 11 | 85% |
 | meta-spec-reconciliation.md | 18 | 7 | 0 | 7 | 4 | 0 | 36% |
 | observability.md | 9 | 0 | 0 | 3 | 3 | 3 | 66% |
@@ -42,6 +42,6 @@
 | ui-layout.md | 42 | 4 | 0 | 37 | 1 | 0 | 2% |
 | ui-navigation.md | 33 | 7 | 0 | 1 | 13 | 12 | 96% |
 | user-management.md | 36 | 10 | 0 | 26 | 0 | 0 | 0% |
-| view-query-grammar.md | 16 | 0 | 0 | 16 | 0 | 0 | 0% |
+| view-query-grammar.md | 16 | 0 | 0 | 3 | 13 | 0 | 81% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **219** | **0** | **310** | **110** | **163** | **46%** |
+| **TOTAL** | **802** | **219** | **0** | **296** | **124** | **163** | **49%** |
