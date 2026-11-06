@@ -47,3 +47,96 @@ Notes (not findings):
 - `jj_squash_into_parent` flaked twice early in the review run (vim editor killed with signal 15 under harness load), then passed 6+ consecutive times standalone and batched, on both `c1c6dd9e` and `c1c6dd9e^`. Environmental, not a regression.
 
 Verdict: **needs-revision** — F1-F5 are genuinely resolved, but F6-F7 break jj provisioning in the default configuration and on every post-first new-branch spawn respectively, F8 undermines the deferral guarantee this round added, and all three fail silently.
+
+## Round 15
+
+Candidate `bbf51bd7` (assigned base `88bd81bf`). Production behavior unchanged
+since round 5; the intervening rounds were review, compile, and gate repairs
+(R13/R14 = rustfmt + exemption re-pins, verified behavior-neutral by diff
+inspection of `6d15a91f`: one test `if` collapsed to one line, two
+task-077-owned exemption pins re-pinned 2014/2036→2022/2044, entry count
+unchanged).
+
+Sandbox restriction (not a code defect): this review sandbox cannot execute
+Rust tests or jj at all — index.crates.io transport refused (ECONNREFUSED),
+no registry cache, no CARGO_TARGET_DIR artifacts, no jj binary on disk. The
+20 grep/git-based gate scripts all pass (EXIT 0), and
+`python3 scripts/check-rustfmt-diff.py 88bd81bf` → EXIT 0. Evidence:
+`/tmp/stage/review-evidence/task-106-r15/`.
+
+Static re-verification of all prior product findings — resolved:
+
+- **F1** (stdout/stderr, conflict detection): `jj_rebase` classifies via the
+  `jj resolve --list -r @` exit-code contract (0 = conflicted with files on
+  stdout, 2 = clean); no text scraping for the decision; count parsed from
+  stderr. Pinned by real-jj fixture tests (which see the finding below).
+- **F2** (worktrees cannot host jj repos): per-repo standalone jj main
+  checkout at `{repo.path}/jj-main` + per-agent workspaces at
+  `{repo.path}/workspaces/{agent_id}`; recorded worktree path is the jj
+  workspace when provisioned, plain-git worktree otherwise; teardown
+  (`cleanup_jj_workspace`: forget + dir removal) wired into stale-agents,
+  kill, and worktree-delete paths.
+- **F3** (rebase before gates): `rebase_inflight_agents` runs only in the
+  gates-passed `else` arm of both the single-entry path (`:2336`) and the
+  atomic-group path (`:1363`).
+- **F4** (backoff before action): backoff written only after Success/Conflict;
+  `rebase_failure_does_not_consume_backoff_window` pins it.
+- **F5** (`-r` splits stacks): `jj rebase -b @ -d <moved branch>`.
+- **F6** (relative paths): `configured_repos_path()` anchors relative
+  GYRE_REPOS_PATH/default at the process cwd (pinned by three tests);
+  `spawn_agent_core` absolutizes legacy relative `repo.path` rows before any
+  jj/git child call (pinned by `spawn_absolutizes_legacy_relative_repo_path_for_jj_children`).
+- **F7** (stale view + half-created workspace): `jj_workspace_add` runs
+  `jj git import` before `-r <branch>` and, on failure, forgets the workspace
+  and removes the dir (pinned by two real-jj fixture tests).
+- **F8** (replay drops deferral on Err): `run_rebase` returns
+  consumed=false on Err; both trigger and replay paths keep the marker;
+  `replay_failure_keeps_pending_rebase` pins it.
+- **R3 F12** (idle-only replay starves): `replay_pending_rebases` runs on
+  every `process_next` cycle; `replay_pending_rebase_runs_under_sustained_queue_load` pins it.
+- **R12 F1** (cross-repo worktree selection): trigger-path fallback and
+  replay-path re-derivation are repo-scoped; three tests pin the negative
+  and positive cases.
+
+The merge-processor test set is meaningful (drives `process_next` end-to-end
+with a configurable jj double, asserts rebase argv, WS events, MR flags, KV
+markers, gate-failure suppression) — not self-confirming.
+
+New finding:
+
+- [ ] **F-CI (major): the jj recorded-fixture tests never execute in CI —
+  the "runs in CI" leg of the F1 fix-class rule is unmet, and the shipped
+  claim is false.** `.github/workflows/ci.yml`'s test job runs
+  `cargo nextest run --all` on ubuntu-latest with no jj installed (no jj
+  install step anywhere in CI, Docker, or the devshell). All 15 tests in
+  `crates/gyre-adapters/src/jj_ops.rs` begin with
+  `if !jj_available() { return; }` — on a CI runner each passes with zero
+  assertions executed. This is exactly the class the task's own process
+  patch (commit `0cd43693`, ancestor of this candidate) codified in
+  `scripts/check-ignored-tool-tests.sh`: "external-tool contracts need (1)
+  empirical verification against the real binary, and (2) recorded-fixture
+  tests that run in CI." The committed exemption-file comment "FIXED
+  (recorded-fixture tests now run in CI for jj_init/jj_new/…)" is false as
+  stated, and the `#[ignore]`→runtime-guard conversion removed these
+  functions from that check's detection scope (it only detects `#[ignore]`
+  callers), so the mechanical guarantee is silently hollow. Aggravator:
+  `jj_workspace_forget_absent_workspace_is_ok` — the forget-idempotence
+  contract every git-fallback agent's cleanup hits — has, per the shipped
+  notes' own admission, never run against a real jj binary in any recorded
+  round. Fix direction: install a pinned jj (e.g. jj-cli 0.39.0) in the CI
+  test job, or add a CI step that runs `cargo test -p gyre-adapters jj`
+  with jj installed and fails on guard-skip; then re-run the never-executed
+  forget test. Evidence:
+  `/tmp/stage/review-evidence/task-106-r15/01-finding-ci-jj-tests.md`.
+
+Deferred to remote verification (sandbox transport restrictions — see
+`00-infra-restrictions.md`): `cargo test -p gyre-server --lib`,
+`cargo test -p gyre-adapters jj` with a real jj on PATH (must not
+guard-skip), `cargo test --all`, and a web-enabled build.
+
+Verdict: **needs-revision** — all product findings through R12 are resolved
+and the production implementation is real, but the task's own verification
+framework (recorded-fixture tests that run in CI) is not actually in place:
+CI cannot run a single jj-contract assertion, one contract test has never
+executed against the real binary anywhere, and the completion notes assert
+otherwise.
