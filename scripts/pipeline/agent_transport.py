@@ -31,7 +31,7 @@ def stream(execution, name, argv, timeout, invoke):
     if result.returncode:raise RuntimeError('agent transport directory unavailable')
     result=invoke(['sandbox','upload',name,str(path),root+'/command.json','--no-git-ignore'],capture_output=True,text=True,timeout=60)
     if result.returncode:raise RuntimeError('agent transport launch input unavailable')
-    launched=False;terminal=False;connected=False;offset=err_offset=0;unavailable=None;failures=0
+    launched=False;terminal=False;connected=False;long_poll=False;offset=err_offset=0;unavailable=None;failures=0
     state_path=execution.directory/('agent-transport-'+key+'-state.json')
     def state(phase,**extra):
         temporary=state_path.with_suffix('.tmp')
@@ -43,10 +43,10 @@ def stream(execution, name, argv, timeout, invoke):
             execution.current()
             try:
                 if not launched:call('launch',root);launched=True
-                output=call('poll',root,'--offset',str(offset),'--stderr-offset',str(err_offset))
+                output=call('poll',root,'--offset',str(offset),'--stderr-offset',str(err_offset),*(['--wait','8'] if long_poll else []))
                 frames=[line.removeprefix('GYRE_AGENT_POLL ') for line in output.splitlines() if line.startswith('GYRE_AGENT_POLL ')]
                 if len(frames)!=1:raise ValueError('invalid agent transport frame')
-                frame=json.loads(frames[0]);out=base64.b64decode(frame['stdout'],validate=True);err=base64.b64decode(frame['stderr'],validate=True)
+                frame=json.loads(frames[0]);long_poll=frame.get('long_poll',False);out=base64.b64decode(frame['stdout'],validate=True);err=base64.b64decode(frame['stderr'],validate=True)
                 if frame['offset']!=offset+len(out) or frame['stderr_offset']!=err_offset+len(err):raise ValueError('agent transport offset mismatch')
                 # Advance only after the reader received the exact bytes.
                 sys.stdout.buffer.write(out);sys.stdout.buffer.flush()
@@ -76,7 +76,7 @@ def stream(execution, name, argv, timeout, invoke):
                 if time.monotonic()-unavailable>execution.store.setting('agent_reconnect_timeout',300):
                     state('lost',exit_code=74)
                     return 74
-            time.sleep(min(15,2**min(failures,4)) if failures else .25)
+            time.sleep(min(15,2**min(failures,4)) if failures else 1)
         state('timeout',exit_code=124)
         return 124
     finally:

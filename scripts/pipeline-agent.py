@@ -9,6 +9,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import time
 
 
 def atomic(path, value):
@@ -33,7 +34,15 @@ def read_chunk(root,name,offset):
         return base64.b64encode(data).decode(),source.tell()
 
 
-def poll(root,offset,stderr_offset):
+def poll(root,offset,stderr_offset,wait=0):
+    deadline=time.monotonic()+min(10,max(0,wait))
+    while time.monotonic()<deadline:
+        if ((root/'result.json').exists() or
+                ((root/'stdout').exists() and (root/'stdout').stat().st_size>offset) or
+                ((root/'stderr').exists() and (root/'stderr').stat().st_size>stderr_offset)):
+            break
+        if (root/'identity.json').exists() and not alive(json.loads((root/'identity.json').read_text())):break
+        time.sleep(.1)
     out,offset=read_chunk(root,'stdout',offset)
     err,stderr_offset=read_chunk(root,'stderr',stderr_offset)
     result=root/'result.json';identity=root/'identity.json';receipt=None
@@ -45,7 +54,7 @@ def poll(root,offset,stderr_offset):
         err_size=(root/'stderr').stat().st_size if (root/'stderr').exists() else 0
         if offset>=out_size and stderr_offset>=err_size:receipt=final
     running=alive(json.loads(identity.read_text())) if identity.exists() else True
-    return {'stdout':out,'stderr':err,'offset':offset,'stderr_offset':stderr_offset,'result':receipt,'alive':running}
+    return {'stdout':out,'stderr':err,'offset':offset,'stderr_offset':stderr_offset,'result':receipt,'alive':running,'long_poll':True}
 
 
 def main():
@@ -54,6 +63,7 @@ def main():
     parser.add_argument('root',type=Path)
     parser.add_argument('--offset',type=int,default=0)
     parser.add_argument('--stderr-offset',type=int,default=0)
+    parser.add_argument('--wait',type=float,default=8)
     args=parser.parse_args();root=args.root
     identity=root/'identity.json';result=root/'result.json'
     if args.operation=='launch':
@@ -99,7 +109,7 @@ def main():
             value=json.loads(identity.read_text())
             if alive(value):os.kill(value['pid'],signal.SIGTERM)
         return
-    print('GYRE_AGENT_POLL '+json.dumps(poll(root,args.offset,args.stderr_offset)))
+    print('GYRE_AGENT_POLL '+json.dumps(poll(root,args.offset,args.stderr_offset,args.wait)))
 
 
 if __name__=='__main__':main()

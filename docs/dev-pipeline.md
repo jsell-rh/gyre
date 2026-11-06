@@ -217,6 +217,7 @@ and protected merge observation remain controller responsibilities. Raw fullsend
 logs/transcripts are retained and Pi events feed the existing cockpit stream.
 Pi runs under a detached supervisor with a bounded deadline inside the sandbox.
 Stdout and stderr spool separately and clients resume by verified byte offsets.
+Idle readers long-poll rather than creating a busy RPC loop for every worker.
 A lost launch acknowledgement or broken RPC reconnects to the same claim/command
 identity; it cannot start another coding process. Transport failures retry with
 backoff for up to five minutes before normal source capture and sandbox cleanup.
