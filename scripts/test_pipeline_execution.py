@@ -58,6 +58,27 @@ class CrashTest(unittest.TestCase):
         self.assertEqual(observed[0]['data']['candidate'],'saved-source')
         self.assertEqual(self.store.db.execute("SELECT count(*) FROM events WHERE kind='checkpoint_contract_restored'").fetchone()[0],1)
 
+    def test_verifier_safety_failure_stops_retries_and_releases_lane_until_operator_retry(self):
+        from pipeline.execution import Attention
+        self.store.finish(self.work,self.claim['token'],{})
+        self.store.put_task('task-001','g','body',{'candidate':'source','dependencies':[]})
+        work=self.store.enqueue('verify','task-001','g',{'candidate':'source','base':'main'})
+        claim=self.store.claim('verify','verifier')
+        with patch.dict(cli.HANDLERS,{'verify':lambda *_: (_ for _ in ()).throw(Attention('source changed'))}):
+            cli.run_claim(self.store,claim)
+        self.assertEqual(self.store.db.execute('SELECT state FROM work WHERE id=?',(work,)).fetchone()[0],'attention')
+        self.assertIsNone(self.store.integration_lane())
+        new=self.store.enqueue('verify','task-001','g',{'candidate':'source','base':'advanced-main'})
+        self.assertIsNone(self.store.claim('verify','cannot-bypass',ident=new))
+        self.store.put_task('task-002','g','body',{'candidate':'other'})
+        self.store.enqueue('verify','task-002','g',{'candidate':'other'})
+        other=self.store.claim('verify','next-task')
+        self.assertEqual(other['task'],'task-002')
+        self.store.finish(other['id'],other['token'],{}, {'delivered':{'sha':'merged'}})
+        with self.store.transaction():
+            self.store.db.execute("UPDATE work SET state='ready',retry_at=0 WHERE id=?",(work,))
+        self.assertIsNotNone(self.store.claim('verify','operator-retry',ident=work))
+
     def test_terminal_readiness_does_not_hold_dead_compute(self):
         from pipeline.execution import Retry
         execution = Execution(self.store, self.claim)
