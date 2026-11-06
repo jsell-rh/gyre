@@ -107,36 +107,42 @@ The task-120 product surface — User entity profile fields
 updated_at), `UserPreferences` with Theme/UiDensity/DiffView/FeedScope,
 per-tenant unique immutable URL-safe username derived from SSO
 `preferred_username` on first login, server-side JSON preferences via
-`GET`/`PUT /api/v1/users/me`, migration 000056 — is complete and unchanged
-this round: six product commits plus the Round-1/2 repairs, the rustfmt fix
-`7d53b6d2`, the clippy derive-scoping fix `7752dd2e`, and the 000056
-`INTEGER` to `BIGINT` fix `93913405`, as reviewed in
-`specs/reviews/task-120.md` Round 2 (PASS).
+`GET`/`PUT /api/v1/users/me` — is complete: six product commits plus the
+Round-1/2 repairs (rustfmt `7d53b6d2`, clippy derive-scoping `7752dd2e`,
+INTEGER→BIGINT `93913405`), the rebase repair (`c76b224d`/`7f00472c`),
+all as reviewed in `specs/reviews/task-120.md` Round 2 (PASS).
 
-**This round — rebase repair (finding `8884e159`, evidence under
-/tmp/stage/review-evidence/task-120-rebase-8884e159/):** resolved the
-staged merge of assignment base `3c39ab1f` (merge commit `ab7a779b`). The
-only conflict was the `specs/coverage/SUMMARY.md` TOTAL row: each parent's
-TOTAL was consistent with its own table but wrong for the merged table
-(main landed task-172, moving ui-layout 38 assigned/0 implemented to 37/1;
-this branch landed task-120, moving user-management 26/0 to 23/3).
-Resolved by regenerating `SUMMARY.md` with the repo's canonical generator
-`scripts/update-coverage-summary.sh` from the merged per-spec files —
-TOTAL 802/219/0/307/113/163/47%.
+**This round — migration version-collision repair (verification finding,
+`checks.sh` exit 1):** after the rebase onto main, the repo held two
+migrations mapping to Diesel version `20261008000056` — task-120's
+`user_entity_profile_fields` and task-180's `spec_assertion_results`
+(landed on main). Diesel runs only one migration per version
+(alphabetically first wins), so task-120's migration was silently
+dropped: its columns/index would never be created on fresh databases
+while every test that constructs `SqliteStorage` on a DB already carrying
+000056 stayed green.
+
+Repair: renumbered the task-120 migration directory to the next unused
+sequence — `2026-10-08-000057_user_entity_profile_fields` (task-180's
+000056 is already published on main, so it keeps the version; the
+unsynced task-120 migration moves). SQL is unchanged. Updated the one
+code-level version literal (the regression test's partition key in
+`gyre-adapters/src/sqlite/mod.rs`, now targeting `20261008000057`, with
+the pre-migration set correctly including 000056) and the 000056→000057
+comments in `sqlite/mod.rs`, `schema.rs`, and `auth.rs`.
 
 ### Verification
 
-- All 40 merged per-spec rows match their coverage files (programmatic
-  status-count comparison); the recomputed TOTAL equals both the row sums
-  and the generator's own formula (276/583 to 47%).
-- Generator idempotency: re-running `update-coverage-summary.sh` on
-  `ab7a779b` produces a zero diff.
-- Merge integrity: `git diff 3c39ab1f ab7a779b` over all merge-staged
-  paths is empty except SUMMARY.md's 3 expected lines; no `crates/` files
-  were touched, so the task-120 product surface is bit-identical to the
-  reviewed `4bd6c4c1`.
-- `bash scripts/check-task-commit-attribution.sh` returns OK (merge
-  commits are out of its scope by design).
+- `bash scripts/check-migration-versions.sh` → OK (no duplicate versions).
+- `bash scripts/check-migration-sql-portability.sh` → OK.
+- `cargo test -p gyre-adapters --lib` → **353 passed, 0 failed**
+  (12 ignored), including the renumbered
+  `migration_000057_backfills_unique_url_safe_usernames` regression
+  guard, `no_duplicate_migration_version_prefixes`,
+  `migrations_create_previously_shadowed_columns`, and
+  `migration_is_idempotent`.
+- rustfmt: the three touched Rust files are clean (pre-existing drift in
+  untouched files is out of changed-lines scope).
 
 Transport note (recorded per assignment): this sandbox's listener probe
 (`accept`) is not supported (errno 95, `capabilities.json`) — server-boot

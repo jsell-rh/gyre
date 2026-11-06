@@ -309,7 +309,7 @@ mod tests {
         SqliteStorage::new(path).unwrap();
     }
 
-    /// Regression guard for migration 000056 (task-120): the username
+    /// Regression guard for migration 000057 (task-120): the username
     /// backfill must actually run on SQLite and must leave every legacy row
     /// with a unique, URL-safe handle.
     ///
@@ -321,14 +321,19 @@ mod tests {
     /// deployment's startup entirely. The fix runs the deletion as
     /// sequential depth-1 UPDATEs over a scratch column.
     ///
-    /// This test builds a pre-000056 database (all migrations except 000056
-    /// applied, legacy rows inserted), applies 000056 alone, and asserts the
+    /// This test builds a pre-000057 database (all migrations except 000057
+    /// applied, legacy rows inserted), applies 000057 alone, and asserts the
     /// backfill semantics: sanitization of non-URL-safe and over-long
     /// handles, empty-handle coverage, de-duplication, and the pass-2
     /// collision hardening where a dedup suffix collides with a distinct
     /// pre-existing handle. It fails on every regression class above.
+    ///
+    /// (The migration was originally numbered 000056; after main landed
+    /// task-180's `spec_assertion_results` under the same 000056 version,
+    /// Diesel would have silently dropped this one — alphabetically-first
+    /// wins — so it was renumbered to the next unused sequence, 000057.)
     #[test]
-    fn migration_000056_backfills_unique_url_safe_usernames() {
+    fn migration_000057_backfills_unique_url_safe_usernames() {
         use diesel::migration::MigrationSource;
         use diesel::Connection;
 
@@ -336,12 +341,14 @@ mod tests {
         let path = tmp.path().to_str().unwrap();
         let mut conn = SqliteConnection::establish(path).unwrap();
 
-        // Apply every migration except 000056: the pre-migration state.
+        // Apply every migration except 000057: the pre-migration state.
+        // (000056 here is task-180's spec_assertion_results, a different
+        // migration that legitimately owns that version on main.)
         let all = MIGRATIONS.migrations().unwrap();
         let (pre, target): (Vec<_>, Vec<_>) = all
             .into_iter()
-            .partition(|m| m.name().version().to_string() != "20261008000056");
-        assert_eq!(target.len(), 1, "000056 not found in embedded migrations");
+            .partition(|m| m.name().version().to_string() != "20261008000057");
+        assert_eq!(target.len(), 1, "000057 not found in embedded migrations");
         use diesel::migration::MigrationConnection;
         // run_migrations is the raw harness method — unlike
         // run_pending_migrations (used by SqliteStorage::new) it does not
@@ -350,7 +357,7 @@ mod tests {
         conn.setup().unwrap();
         conn.run_migrations(&pre).unwrap();
 
-        // Legacy rows exactly as a pre-000056 deployment would hold them
+        // Legacy rows exactly as a pre-000057 deployment would hold them
         // (users: id, external_id, name NOT NULL; display_name from 000036
         // left NULL so the backfill reads `name`).
         use diesel::RunQueryDsl;
@@ -373,7 +380,7 @@ mod tests {
             .unwrap();
         }
 
-        // Run 000056 alone. Panics here on the original parser-overflow
+        // Run 000057 alone. Panics here on the original parser-overflow
         // version and on a dedup collision aborting at CREATE UNIQUE INDEX.
         conn.run_migrations(&target).unwrap();
 
