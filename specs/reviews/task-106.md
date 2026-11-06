@@ -47,3 +47,66 @@ Notes (not findings):
 - `jj_squash_into_parent` flaked twice early in the review run (vim editor killed with signal 15 under harness load), then passed 6+ consecutive times standalone and batched, on both `c1c6dd9e` and `c1c6dd9e^`. Environmental, not a regression.
 
 Verdict: **needs-revision** — F1-F5 are genuinely resolved, but F6-F7 break jj provisioning in the default configuration and on every post-first new-branch spawn respectively, F8 undermines the deferral guarantee this round added, and all three fail silently.
+
+## Round 13
+
+Candidate `c3d83fbd` vs assigned base `4871a825` (task-067 work merged into
+the branch via `7ae9a2b0`). The only task-106 change since the R12-reviewed
+state is `a5b167e3`: the R12-F1 fix (repo-scoped worktree fallback) plus
+three pinning tests, +217/-4 in `merge_processor.rs` only. Evidence:
+`/tmp/stage/review-evidence/task-106-r13/`.
+
+R12-F1 fix verified (statically — see deferred checks):
+
+- Trigger path (`find_rebase_targets`): the fallback for a missing
+  (repo, source_branch) worktree record is now scoped to the moved repo
+  (`.or_else(|| worktrees.iter().find(|wt| wt.repository_id == repo.id))`);
+  a worktree in a different repo can never be rebased for this repo's
+  movement.
+- Replay path (`replay_pending_rebases`): the cross-repo
+  `.or_else(|| worktrees.first())` fallback is removed entirely; only the
+  pending repo's worktree can receive the deferral, otherwise the marker is
+  dropped as non-actionable (matches the documented drop semantics).
+- Three new pinning tests cover both trigger-path directions (skip when only
+  an other-repo worktree exists; same-repo fallback wins over a same-named
+  other-repo worktree regardless of HashMap iteration order) and the
+  replay-path drop. All helper/API references verified to exist with
+  matching signatures.
+
+Findings (both are gate regressions introduced by `a5b167e3`; both gates are
+green at the merge result `7ae9a2b0` vs the same base, verified in a
+throwaway worktree):
+
+- [ ] **F14 (major): rustfmt-diff gate is red at the candidate —
+  `python3 scripts/check-rustfmt-diff.py 4871a825` exits 1.** The new R12-F1
+  test `rebase_skips_agent_with_only_other_repo_worktree` contains an
+  unformatted multi-line `if` at `merge_processor.rs:7096-7098` (fits on one
+  line per default rustfmt style; reproduced directly with standalone
+  `rustfmt --edition 2021`). This is the exact failure class the R10/R11
+  gate-repair round fixed; the R12-F1 fix commit reintroduced it without
+  re-running the gate. Fix: run `rustfmt --edition 2021` on
+  `crates/gyre-server/src/merge_processor.rs` (candidate-owned file, churn
+  confined to the task's diff).
+- [ ] **F15 (major): check-inert-enforcement gate is red at the candidate —
+  `bash scripts/check-inert-enforcement.sh` exits 1 with 2 inert sites.**
+  `a5b167e3` adds ~8 comment lines in production hunks before the two
+  pre-existing, exemption-pinned `evaluate_attestation_abac` sites, drifting
+  them from 2014/2036 (pins, correct at `7ae9a2b0`) to 2022/2044; the
+  exemption file was not re-pinned. The sites are byte-identical to base
+  lines 1457/1479 (task-077-owned pre-existing hazards, count unchanged at 4
+  repo-wide) — pure pin drift, same class the R10/R11 round repaired. Fix:
+  re-pin the two entries to 2022/2044 (site content and count unchanged).
+
+Deferred checks (transport-blocked in this sandbox, not defects — see
+`deferred-checks.md`): `cargo test -p gyre-server --lib` (crates.io blocked,
+no cached registry/target — the three new R12-F1 tests plus the eight
+round-5 rebase tests must run in verification), `cargo test -p gyre-adapters
+jj` with a real jj binary (jj absent, not installable; adapter byte-unchanged
+since the R12-reviewed state), `check-clippy-diff.py` vs `4871a825` (needs
+compilation). Four awk-based gate scripts fail under this sandbox's mawk
+1.3.4 identically at base — environmental.
+
+Verdict: **needs-revision** — the R12-F1 fix itself is correct and
+well-tested, but the candidate ships two red mechanical gates
+(rustfmt-diff, inert-enforcement exemption drift) that must be repaired
+before approval.
