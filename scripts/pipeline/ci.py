@@ -40,9 +40,11 @@ def read(execution, task, receipt):
     observation = module.observe(execution.command, task['data']['pr'], receipt['head'],
                                           receipt['base'], execution.directory)
     latest = json.loads(execution.command('gh','pr','view',task['data']['pr'],'--json',
-                       'headRefOid,statusCheckRollup,state',timeout=30).stdout)
+                       'headRefOid,statusCheckRollup,state,baseRefOid,mergeStateStatus,mergeable',timeout=30).stdout)
     if latest['headRefOid'] != receipt['head']:
         raise Wait('PR changed during CI observation; discard the stale observation')
+    if observation['status'] == 'merge_conflict' and (not module.merge_conflict(latest) or latest['baseRefOid'] != observation['base']):
+        raise Wait('PR conflict or target base changed during observation; recheck before requesting implementation')
     latest, reconciled = module.reconcile_checks(execution.command,task['data']['pr'],receipt['head'],latest)
     pending, failed, infrastructure = module.check_sets(latest)
     if observation['status'] in ('candidate_failed','baseline_failed') and (not failed or latest['state'] != 'OPEN'):
@@ -75,7 +77,7 @@ def read(execution, task, receipt):
 
 def failure(execution, task, receipt, observation):
     status = observation['status']
-    if status not in ('candidate_failed','baseline_failed','closed'):
+    if status not in ('candidate_failed','baseline_failed','closed','merge_conflict'):
         return None
     finding = observation | {'id':execution.claim['id'],'category':'ci','source':receipt['head']}
     if observation.get('log'):
@@ -83,6 +85,10 @@ def failure(execution, task, receipt, observation):
     if status == 'closed':
         # Human closure is not a request for another implementation/PR.
         raise Wait('Associated PR was closed; awaiting an operator decision')
+    if status == 'merge_conflict':
+        finding.update(category='rebase',published_head=receipt['head'])
+        return observation, {'repair':finding,'candidate':receipt['head'],'candidate_base':receipt['base'],
+                             'review':None,'verified':None}, [finding]
     if status == 'baseline_failed':
         from .stages import baseline_repair
         prerequisite = baseline_repair(execution,observation)
