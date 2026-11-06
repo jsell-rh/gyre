@@ -41,7 +41,20 @@ q / Ctrl-c       Detach; workers keep running
 Text fields accept normal typing. Esc cancels editing.
 Agent groups stay together; sorting applies within each group.
 Filtering does not reveal hidden completed runs: press c to include them.
-Logs and details scroll with the navigation keys; / filters work lists only.`
+LOG VIEWER
+/                 Filter source log lines (case-insensitive substring)
+Enter / Esc       Keep / cancel filter; Esc clears an applied log filter
+m                 Toggle Markdown rendering (default off)
+w                 Toggle line wrapping (default off)
+a                 Toggle ANSI colors (default on; NO_COLOR always wins)
+Left / Right      Pan horizontally when wrapping is off (also H / L)
+Shift-Left/Right  Pan half a viewport; 0 / $ jump to line start / end
+f / G             Follow the end of the log
+
+Scrolling up pauses following. Reaching the bottom resumes following.
+Log filters are separate from work-list and history filters.
+The entire log remains available; no trailing-byte truncation is applied.
+Logs and details use the same vertical navigation keys as other scroll panes.`
 
 func (m Model) currentFilter() string {
 	if m.historyIssue != nil {
@@ -206,6 +219,11 @@ func (m *Model) navigation(v tea.KeyMsg) (bool, tea.Cmd) {
 	textInput := m.screen == "signin" && m.signInActive && m.signInPrompt != nil && len(m.signInPrompt.Choices) == 0
 	if textInput {
 		return false, nil
+	}
+	if m.screen == "logs" && !m.helpOpen && m.pendingRetry == nil && m.pendingCancel == nil {
+		if handled, cmd := m.logNavigation(v); handled {
+			return true, cmd
+		}
 	}
 	if key == "?" {
 		m.helpOpen = !m.helpOpen

@@ -247,7 +247,15 @@ the same ledger. Type a sandbox count (0–1000) in the header and press Enter o
 Apply; Escape cancels the edit. Zero drains new work. The +/− controls also remain
 available. The terminal cockpit offers filtering, live logs, attempt
 history, retry, and cancellation. Press `?` for keys; `q`/Ctrl-C detaches while
-workers continue. `serve --plain` selects text output. Stop the supervisor with Ctrl-C;
+workers continue. In a run log, `/` filters source lines, `m` toggles Markdown
+for agent prose, `w` toggles wrapping, and `a` toggles command colors (`NO_COLOR`
+is respected). Left/right arrows pan long lines. Scrolling up pauses following
+without moving the reading position as output arrives; `f` or `G` returns to
+live output. The bordered pane shows follow state, active modes, and line/column
+ranges, including on short terminals. Full logs remain available rather than
+only the last 64 KiB.
+
+`serve --plain` selects text output. Stop the supervisor with Ctrl-C;
 already claimed stages finish independently. Restarting `serve` adopts their
 leases and discovers pending work. `pause` stops new model-stage dispatch while
 preserving the desired slot count; `resume` enables it again. Slots zero also
