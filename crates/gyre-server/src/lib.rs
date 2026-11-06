@@ -61,6 +61,7 @@ use axum::{routing::get, Router};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use gyre_common::message::{Destination, Message, MessageKind, MessageOrigin, TelemetryBuffer};
 use gyre_common::Id;
+use gyre_common::WsMessage;
 use gyre_ports::{
     AgentCommitRepository, AgentRepository, AnalyticsRepository, ApiKeyRepository,
     AttestationRepository, AuditRepository, BreakingChangeRepository, BudgetRepository,
@@ -318,6 +319,8 @@ pub struct AppState {
     pub spec_ledger: Arc<dyn gyre_ports::SpecLedgerRepository>,
     /// Spec approval event history (persisted).
     pub spec_approval_history: Arc<dyn gyre_ports::SpecApprovalEventRepository>,
+    /// Persisted spec assertion check results (system-explorer.md §9).
+    pub spec_assertion_results: Arc<dyn gyre_ports::SpecAssertionResultRepository>,
     /// Spec links graph: all inter-spec links from manifests (M22.3).
     pub spec_links_store: spec_registry::SpecLinksStore,
     /// Budget limits per entity: entity_key -> BudgetConfig (M22.2).
@@ -991,6 +994,10 @@ pub fn build_state(
             dyn SpecApprovalEventRepository,
             mem::MemSpecApprovalEventRepository::default()
         ),
+        spec_assertion_results: store!(
+            dyn gyre_ports::SpecAssertionResultRepository,
+            mem::MemSpecAssertionResultRepository::default()
+        ),
         spec_links_store: Arc::new(Mutex::new(Vec::new())),
         budget_configs: store!(
             dyn BudgetRepository,
@@ -1135,46 +1142,53 @@ pub fn build_state(
     })
 }
 
-/// Spawn a background task that evicts stale presence entries every 30 seconds.
+/// Evict stale presence entries (server_last_seen older than 60 seconds).
 ///
-/// An entry is stale if server_last_seen is more than 60 seconds old.
-/// The evicted connection (if still open) receives a `PresenceEvicted` message.
+/// An entry is stale if `server_last_seen` is more than 60 seconds old.
+/// The evicted connection (if still open) receives a `PresenceEvicted` message,
+/// and other workspace subscribers receive a departure `UserPresence`
+/// (HSI §7 Presence Awareness — every removal path must notify others).
+pub(crate) async fn evict_stale_presence(state: &Arc<AppState>) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let stale: Vec<((String, String), u64, String)> = {
+        let map = state.presence.read().await;
+        map.iter()
+            .filter(|(_, entry)| entry.server_last_seen + 60_000 < now_ms)
+            .map(|(key, entry)| (key.clone(), entry.connection_id, entry.workspace_id.clone()))
+            .collect()
+    };
+
+    for ((user_id, session_id), conn_id, workspace_id) in stale {
+        state
+            .presence
+            .write()
+            .await
+            .remove(&(user_id.clone(), session_id.clone()));
+
+        let evict_msg = WsMessage::PresenceEvicted {
+            session_id: session_id.clone(),
+        };
+        if let Ok(payload) = serde_json::to_string(&evict_msg) {
+            let conns = state.ws_connections.read().await;
+            if let Some(tx) = conns.get(&conn_id) {
+                let _ = tx.try_send(payload);
+            }
+        }
+
+        crate::ws::broadcast_presence_departure(state, &user_id, &session_id, &workspace_id).await;
+    }
+}
+
+/// Spawn a background task that evicts stale presence entries every 30 seconds.
 pub fn spawn_presence_eviction(state: Arc<AppState>) {
-    use gyre_common::WsMessage;
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-
-            let stale: Vec<((String, String), u64)> = {
-                let map = state.presence.read().await;
-                map.iter()
-                    .filter(|(_, entry)| entry.server_last_seen + 60_000 < now_ms)
-                    .map(|(key, entry)| (key.clone(), entry.connection_id))
-                    .collect()
-            };
-
-            for ((user_id, session_id), conn_id) in stale {
-                state
-                    .presence
-                    .write()
-                    .await
-                    .remove(&(user_id, session_id.clone()));
-
-                let evict_msg = WsMessage::PresenceEvicted {
-                    session_id: session_id.clone(),
-                };
-                if let Ok(payload) = serde_json::to_string(&evict_msg) {
-                    let conns = state.ws_connections.read().await;
-                    if let Some(tx) = conns.get(&conn_id) {
-                        let _ = tx.try_send(payload);
-                    }
-                }
-            }
+            evict_stale_presence(&state).await;
         }
     });
 }
@@ -1328,6 +1342,41 @@ pub async fn register_default_compute_target(state: &Arc<AppState>) {
             image = DEFAULT_IMAGE,
             "registered default container compute target (M25)"
         );
+    }
+}
+
+/// Materialize the default Tenant entity on first startup
+/// (hierarchy-enforcement.md §1 Bootstrap Behavior).
+///
+/// On an empty database the platform has no Tenant row backing the `"default"`
+/// tenant scope that every tenant-filtered adapter query resolves against —
+/// the scope would be a phantom. This creates it with the spec-mandated
+/// field values: name "Default", slug "default", no OIDC issuer, unlimited
+/// budget (`BudgetConfig::default()`), no workspace cap. The row's id is
+/// `"default"` — the operative single-tenant scope — so it is the real
+/// tenant existing data references, not an orphaned UUID (the spec's
+/// `deterministic_uuid` form is deferred multi-tenant work, §68-70).
+///
+/// Idempotent: a no-op when the default tenant already exists.
+pub async fn bootstrap_default_tenant(state: &Arc<AppState>) {
+    use gyre_domain::budget::BudgetConfig;
+    use gyre_domain::tenant::Tenant;
+
+    let default_id = Id::new("default");
+    if let Ok(Some(_)) = state.tenants.find_by_id(&default_id).await {
+        return; // already bootstrapped
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut tenant = Tenant::new(default_id, "Default", "default", now);
+    tenant.budget = Some(BudgetConfig::default());
+
+    if let Err(e) = state.tenants.create(&tenant).await {
+        tracing::warn!("failed to bootstrap default tenant: {e}");
     }
 }
 
@@ -1600,5 +1649,68 @@ mod tests {
         assert_eq!(json["checks"]["merge_processor"], "ok");
         assert_eq!(json["checks"]["database"], "not_configured");
         assert_eq!(json["checks"]["migrations"], "not_configured");
+    }
+
+    /// task-197 / hierarchy-enforcement §1 Bootstrap Behavior: startup must
+    /// materialize the default Tenant row on an empty database, with the
+    /// spec field values, and be idempotent across restarts.
+    ///
+    /// Exercises the real SQLite `TenantRepository` against the `tenants`
+    /// table (not the mem repo) so the assertions verify the durable row
+    /// production startup writes, and so "not wired" fails visibly: without
+    /// the bootstrap call, `find_by_id("default")` returns None.
+    #[tokio::test]
+    async fn bootstrap_default_tenant_materializes_row_and_is_idempotent() {
+        use gyre_common::Id;
+        use gyre_domain::budget::BudgetConfig;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let storage = gyre_adapters::SqliteStorage::new(tmp.path().to_str().unwrap()).unwrap();
+        // Wire the SQLite adapter into state.tenants exactly as build_state
+        // does in DB-backed mode (store! macro path).
+        let mut base = (*mem::test_state()).clone();
+        base.tenants = Arc::new(storage);
+        let state = Arc::new(base);
+
+        // Empty database: no default tenant yet.
+        assert!(
+            state
+                .tenants
+                .find_by_id(&Id::new("default"))
+                .await
+                .unwrap()
+                .is_none(),
+            "fresh DB must not contain a default tenant before bootstrap"
+        );
+
+        bootstrap_default_tenant(&state).await;
+
+        let tenant = state
+            .tenants
+            .find_by_id(&Id::new("default"))
+            .await
+            .unwrap()
+            .expect("default tenant materialized after bootstrap");
+        assert_eq!(tenant.id, Id::new("default"));
+        assert_eq!(tenant.name, "Default");
+        assert_eq!(tenant.slug, "default");
+        assert_eq!(tenant.oidc_issuer, None);
+        assert_eq!(tenant.max_workspaces, None);
+        assert!(tenant.created_at > 0);
+        // BudgetConfig has no PartialEq — compare serialized form against
+        // Some(BudgetConfig::default()) (all limits unset = unlimited).
+        assert_eq!(
+            serde_json::to_value(tenant.budget).unwrap(),
+            serde_json::to_value(Some(BudgetConfig::default())).unwrap()
+        );
+
+        // Restart against the populated DB: exactly one default tenant remains.
+        bootstrap_default_tenant(&state).await;
+        let tenants = state.tenants.list().await.unwrap();
+        assert_eq!(
+            tenants.iter().filter(|t| t.slug == "default").count(),
+            1,
+            "second bootstrap call must not create a duplicate default tenant"
+        );
     }
 }

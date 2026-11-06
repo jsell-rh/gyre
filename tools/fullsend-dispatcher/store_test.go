@@ -358,3 +358,22 @@ func TestConfirmedUnknownRetryRejectsStaleAndLiveRuns(t *testing.T) {
 		t.Fatal("duplicate confirmation accepted")
 	}
 }
+
+func TestAdapterCrossStageAdmissionBelongsToDurableClaim(t *testing.T) {
+	observer := Job{Key: "observe", Item: "task-1", Agent: "observe", Unmetered: true}
+	verifier := Row{Job: Job{Key: "verify", Item: "task-1"}, Status: "running"}
+	if dispatchEligible(observer, []Row{verifier}, seconds(), false) {
+		t.Fatal("native backend lost item serialization")
+	}
+	if !dispatchEligible(observer, []Row{verifier}, seconds(), true) {
+		t.Fatal("adapter observer blocked by its verifier before durable authorization")
+	}
+	for _, status := range []string{"running", "uncertain", "canceled"} {
+		if dispatchEligible(observer, []Row{{Job: observer, Status: status}}, seconds(), true) {
+			t.Fatalf("same work admitted twice: %s", status)
+		}
+	}
+	if dispatchEligible(observer, []Row{{Job: observer, Status: "waiting", Next: seconds() + 60}}, seconds(), true) {
+		t.Fatal("adapter observation backoff was bypassed")
+	}
+}

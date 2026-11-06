@@ -22,7 +22,6 @@
 
 import { registerLayoutName } from './types/view-spec.ts';
 import ExplorerCanvas from './ExplorerCanvas.svelte';
-import FlowRenderer from './FlowRenderer.svelte';
 
 /**
  * @typedef {Object} LayoutRegistration
@@ -55,8 +54,12 @@ const registry = [
     icon: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/>',
   },
   {
+    // task-065 unified cutover: the separate FlowRenderer tab was merged
+    // into ExplorerCanvas — flow/trace data renders through the canvas's
+    // evaluative lens, so the 'flow' ViewSpec layout resolves to the same
+    // unified canvas component.
     name: 'flow',
-    component: FlowRenderer,
+    component: ExplorerCanvas,
     labelKey: 'moldable_view.tab_flow',
     icon: '<circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><path d="M7 11.5l9-5M7 12.5l9 5"/>',
     requiresRepo: true,
