@@ -32,6 +32,7 @@ pub mod middleware;
 pub mod mirror_sync;
 pub(crate) mod oidc;
 pub mod pre_accept;
+pub mod prompt_assembly;
 pub mod rate_limit;
 pub(crate) mod rbac;
 pub mod retention;
@@ -859,6 +860,15 @@ pub fn build_state(
     // come from the same storage struct, so this store is unused.
     let mem_policy_store = Arc::new(Mutex::new(HashMap::new()));
 
+    // In pure in-memory mode, the meta-spec and meta-spec-binding repos must
+    // share a single binding store so the delete guard in
+    // `MemMetaSpecRepository` sees the bindings the binding repo writes
+    // (port contract: delete fails when bindings reference the meta-spec).
+    // In DB-backed mode both ports come from the same storage struct, so
+    // this store is unused.
+    let mem_meta_spec_binding_store =
+        Arc::new(RwLock::new(Vec::<gyre_domain::MetaSpecBinding>::new()));
+
     Arc::new(AppState {
         auth_token: auth_token.to_string(),
         base_url: base_url.to_string(),
@@ -1044,11 +1054,15 @@ pub fn build_state(
         },
         meta_specs: store!(
             dyn MetaSpecRepository,
-            mem::MemMetaSpecRepository::default()
+            mem::MemMetaSpecRepository::with_binding_store(Arc::clone(
+                &mem_meta_spec_binding_store
+            ))
         ),
         meta_spec_bindings: store!(
             dyn MetaSpecBindingRepository,
-            mem::MemMetaSpecBindingRepository::default()
+            mem::MemMetaSpecBindingRepository::with_store(Arc::clone(
+                &mem_meta_spec_binding_store
+            ))
         ),
         meta_spec_sets: store!(
             dyn MetaSpecSetRepository,

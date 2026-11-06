@@ -61,6 +61,9 @@ pub trait MetaSpecBindingRepository: Send + Sync {
     /// List all bindings for a given spec ID.
     async fn list_by_spec_id(&self, spec_id: &str) -> Result<Vec<MetaSpecBinding>>;
 
+    /// List every binding (stale-pin detection scans the full table).
+    async fn list_all(&self) -> Result<Vec<MetaSpecBinding>>;
+
     /// Delete a binding by ID.
     async fn delete(&self, id: &Id) -> Result<()>;
 

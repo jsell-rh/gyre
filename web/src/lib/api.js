@@ -414,17 +414,17 @@ export const api = {
   // Meta-spec registry (M32 / agent-runtime §2)
   getMetaSpecs: (params = {}) => {
     const qs = new URLSearchParams(params).toString();
-    return request(`/meta-specs-registry${qs ? '?' + qs : ''}`);
+    return request(`/meta-specs${qs ? '?' + qs : ''}`);
   },
-  getMetaSpec: (id) => request(`/meta-specs-registry/${id}`),
+  getMetaSpec: (id) => request(`/meta-specs/${id}`),
   createMetaSpec: (data) =>
-    request('/meta-specs-registry', { method: 'POST', body: JSON.stringify(data) }),
+    request('/meta-specs', { method: 'POST', body: JSON.stringify(data) }),
   updateMetaSpec: (id, data) =>
-    request(`/meta-specs-registry/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    request(`/meta-specs/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteMetaSpec: (id) =>
-    request(`/meta-specs-registry/${id}`, { method: 'DELETE' }),
-  getMetaSpecVersions: (id) => request(`/meta-specs-registry/${id}/versions`),
-  getMetaSpecVersion: (id, ver) => request(`/meta-specs-registry/${id}/versions/${ver}`),
+    request(`/meta-specs/${id}`, { method: 'DELETE' }),
+  getMetaSpecVersions: (id) => request(`/meta-specs/${id}/versions`),
+  getMetaSpecVersion: (id, ver) => request(`/meta-specs/${id}/versions/${ver}`),
   getMetaSpecBlastRadius: (path) => request(`/meta-specs/${encodeURIComponent(path)}/blast-radius`),
   getWorkspaceMetaSpecSet: (id) => request(`/workspaces/${id}/meta-spec-set`),
   setWorkspaceMetaSpecSet: (id, data) =>
@@ -554,7 +554,7 @@ export const api = {
   previewPersonaStatus: (workspaceId, previewId) =>
     request(`/workspaces/${workspaceId}/meta-specs/preview/${previewId}`),
   publishPersona: (_workspaceId, personaId, data) =>
-    request(`/meta-specs-registry/${personaId}`, { method: 'PUT', body: JSON.stringify({ prompt: data.content }) }),
+    request(`/meta-specs/${personaId}`, { method: 'PUT', body: JSON.stringify({ prompt: data.content }) }),
   // Workspace admin (S4.7)
   updateWorkspace: (id, data) =>
     request(`/workspaces/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
