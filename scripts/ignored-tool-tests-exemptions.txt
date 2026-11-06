@@ -11,10 +11,14 @@
 #
 # See: specs/reviews/task-106.md F1, F2 (the findings that created this check)
 #
-# --- task-106 jj adapter entries: FIXED (recorded-fixture tests now run
-# in CI for jj_init/jj_new/jj_describe/jj_log/jj_squash/
-# jj_bookmark_create/jj_undo and the rebase/workspace contract set) —
-# entries deleted per this file's policy. ---
+# --- task-106 jj adapter entries: FIXED — the CI test job installs a
+# pinned jj (0.39.0, jj-vcs release tarball) and sets
+# GYRE_JJ_TESTS_MUST_RUN=1, so the recorded-fixture tests for
+# jj_init/jj_new/jj_describe/jj_log/jj_squash/jj_bookmark_create/
+# jj_undo and the rebase/workspace contract set execute against the
+# real binary in CI and FAIL loudly if it is missing (guard-skip is a
+# hard error there, not a silent pass). Entries deleted per this
+# file's policy. ---
 # --- unowned; fix opportunistically when touching these files ---
 crates/gyre-adapters/src/compute/container.rs:143   # spawn_process — ignored-only coverage
 crates/gyre-adapters/src/compute/container.rs:212   # kill_process — ignored-only coverage

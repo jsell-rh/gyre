@@ -389,12 +389,54 @@ mod tests {
     // and parallel test threads cause intermittent failures without this lock.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    fn jj_available() -> bool {
-        std::process::Command::new("jj")
+    fn binary_available(bin: &str) -> bool {
+        std::process::Command::new(bin)
             .arg("--version")
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
+    }
+
+    /// Recorded-fixture guard: skip (return false) only when the binary
+    /// is genuinely absent — EXCEPT when `must_run` is set, where a
+    /// missing binary panics instead. The CI jj leg sets
+    /// GYRE_JJ_TESTS_MUST_RUN=1 precisely so a broken install step fails
+    /// these tests loudly; without it the whole leg would silently
+    /// degrade to zero-assertion passes (the F-CI self-confirming class
+    /// this guard exists to close).
+    fn fixture_guard_with(bin: &str, must_run: bool) -> bool {
+        let available = binary_available(bin);
+        if !available && must_run {
+            panic!(
+                "GYRE_JJ_TESTS_MUST_RUN is set but `{bin} --version` failed; \
+                 the CI jj leg must fail loudly rather than silently skip \
+                 recorded-fixture tests"
+            );
+        }
+        available
+    }
+
+    fn jj_fixture_guard() -> bool {
+        fixture_guard_with("jj", std::env::var_os("GYRE_JJ_TESTS_MUST_RUN").is_some())
+    }
+
+    /// Unit test: the fixture guard fails loudly (panics) when the CI jj
+    /// leg (GYRE_JJ_TESTS_MUST_RUN) is active and the binary is missing —
+    /// a silent skip there would pass CI with zero assertions executed.
+    #[test]
+    fn fixture_guard_panics_on_missing_binary_when_must_run() {
+        let result = std::panic::catch_unwind(|| fixture_guard_with("/nonexistent/gyre-jj", true));
+        assert!(
+            result.is_err(),
+            "guard must panic when must-run is set and the binary is missing"
+        );
+    }
+
+    /// Unit test: without must-run, a missing binary is a plain skip —
+    /// developer machines without jj still run the rest of the suite.
+    #[test]
+    fn fixture_guard_skips_quietly_without_must_run() {
+        assert!(!fixture_guard_with("/nonexistent/gyre-jj", false));
     }
 
     /// Unit test: JjOpsAdapter is constructible and uses GYRE_JJ_PATH.
@@ -422,7 +464,7 @@ mod tests {
     /// rewrite it).
     #[tokio::test]
     async fn jj_init_colocates_existing_git_repo() {
-        if !jj_available() {
+        if !jj_fixture_guard() {
             return;
         }
         let dir = tempfile::TempDir::new().unwrap();
@@ -483,7 +525,7 @@ mod tests {
     /// changes newest-first with parsed fields.
     #[tokio::test]
     async fn jj_new_creates_described_change_and_log_lists_it() {
-        if !jj_available() {
+        if !jj_fixture_guard() {
             return;
         }
         let dir = tempfile::TempDir::new().unwrap();
@@ -554,7 +596,7 @@ mod tests {
     /// change id stays stable — describe does not create a new change).
     #[tokio::test]
     async fn jj_describe_updates_named_change() {
-        if !jj_available() {
+        if !jj_fixture_guard() {
             return;
         }
         let dir = tempfile::TempDir::new().unwrap();
@@ -591,7 +633,7 @@ mod tests {
     /// back on the pre-`jj_new` change.
     #[tokio::test]
     async fn jj_undo_restores_previous_operation_state() {
-        if !jj_available() {
+        if !jj_fixture_guard() {
             return;
         }
         let dir = tempfile::TempDir::new().unwrap();
@@ -632,7 +674,7 @@ mod tests {
     /// by name afterwards (this is what `jj_git_export` pushes into git).
     #[tokio::test]
     async fn jj_bookmark_create_points_at_change() {
-        if !jj_available() {
+        if !jj_fixture_guard() {
             return;
         }
         let dir = tempfile::TempDir::new().unwrap();
@@ -672,7 +714,7 @@ mod tests {
     /// empty @ that `log --limit 1` would report.
     #[tokio::test]
     async fn jj_squash_into_parent_returns_parent_sha_without_editor() {
-        if !jj_available() {
+        if !jj_fixture_guard() {
             return;
         }
         let dir = tempfile::TempDir::new().unwrap();
@@ -748,8 +790,11 @@ mod tests {
 
     // ── TASK-106 recorded-fixture tests ─────────────────────────────────────
     //
-    // These run in CI (a `jj_available()` precondition skips them only when
-    // the binary is genuinely absent). They pin the external-tool contracts
+    // These run in CI: the test job installs a pinned jj (0.39.0) and
+    // sets GYRE_JJ_TESTS_MUST_RUN=1, so the `jj_fixture_guard()`
+    // precondition fails the tests loudly if the binary is missing
+    // instead of silently skipping them. They pin the external-tool
+    // contracts
     // the adapter depends on, against the real jj binary — the flaw class
     // from specs/reviews/task-106.md F1: jj writes rebase progress to
     // stderr (stdout is empty), and conflict state is an exit-code
@@ -874,7 +919,7 @@ mod tests {
     /// path hits this: their workspace never existed.
     #[tokio::test]
     async fn jj_workspace_forget_absent_workspace_is_ok() {
-        if !jj_available() {
+        if !jj_fixture_guard() {
             return;
         }
         let dir = tempfile::TempDir::new().unwrap();
@@ -899,7 +944,7 @@ mod tests {
     /// with "Revision '<branch>' doesn't exist".
     #[tokio::test]
     async fn jj_workspace_add_resolves_branch_created_after_init() {
-        if !jj_available() {
+        if !jj_fixture_guard() {
             return;
         }
         let dir = tempfile::TempDir::new().unwrap();
@@ -968,7 +1013,7 @@ mod tests {
     /// directory before returning the error.
     #[tokio::test]
     async fn jj_workspace_add_failure_cleans_half_created_dir() {
-        if !jj_available() {
+        if !jj_fixture_guard() {
             return;
         }
         let dir = tempfile::TempDir::new().unwrap();
@@ -1037,7 +1082,7 @@ mod tests {
     /// stderr, `jj resolve --list` exits 2 when clean.
     #[tokio::test]
     async fn jj_rebase_clean_after_target_moves() {
-        if !jj_available() {
+        if !jj_fixture_guard() {
             return;
         }
         let dir = tempfile::TempDir::new().unwrap();
@@ -1128,7 +1173,7 @@ mod tests {
     /// paths on stdout).
     #[tokio::test]
     async fn jj_rebase_conflict_surfaces_files() {
-        if !jj_available() {
+        if !jj_fixture_guard() {
             return;
         }
         let dir = tempfile::TempDir::new().unwrap();
@@ -1178,7 +1223,7 @@ mod tests {
     /// a completed rebase (conflict-as-state, not an error).
     #[tokio::test]
     async fn jj_resolve_list_exit_code_contract() {
-        if !jj_available() {
+        if !jj_fixture_guard() {
             return;
         }
         let dir = tempfile::TempDir::new().unwrap();
@@ -1235,7 +1280,7 @@ mod tests {
     /// that `-r @` would move).
     #[tokio::test]
     async fn jj_rebase_b_moves_whole_stack() {
-        if !jj_available() {
+        if !jj_fixture_guard() {
             return;
         }
         let dir = tempfile::TempDir::new().unwrap();
