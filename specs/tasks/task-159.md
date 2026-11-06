@@ -5,7 +5,7 @@ depends_on: [task-156]
 progress: not-started
 coverage_sections:
   - "meta-spec-reconciliation.md §9 Merge Gate Behavior"
-commits: []
+commits: ["333030908ce0ff64b2810ea0003fc0e28598abf3"]
 ---
 
 ## Spec Excerpt
