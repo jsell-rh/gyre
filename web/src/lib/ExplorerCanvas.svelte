@@ -1,5 +1,5 @@
 <script>
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import { t } from 'svelte-i18n';
   import EmptyState from './EmptyState.svelte';
   import PlaybackControls from '../components/PlaybackControls.svelte';
@@ -16,6 +16,12 @@
   } from './test-reachability.js';
   import { edgePassesFilter, collectEdgeParticipants, nodeFilterOpacity } from './canvas-filters.js';
   import { ZoomInteractionTracker } from './canvas-state.js';
+  import {
+    hasCausalEdges,
+    computeTraceOrder,
+    governingSpecFor,
+    buildTraceSteps,
+  } from './causal-trace.js';
 
   /** @type {{ repoId: string, nodes: any[], edges: any[], activeQuery: import('./types/view-query.ts').ViewQuery | null, filter: 'all'|'endpoints'|'types'|'calls'|'dependencies', lens: 'structural'|'evaluative'|'observable' }} */
   let {
@@ -35,6 +41,7 @@
     assertionResults = [], // [{ line, assertion_text, passed, explanation }] from spec assertion check
     assertionSpecPath = null, // spec path currently being edited (for assertion badge rendering)
     highlightedSpanId = null, // span_id to highlight on canvas (from evaluative tab click)
+    focusRequest = null, // { nodeId, nonce } — pan/zoom camera to a node (e.g. detail-panel trace step click)
     // Architectural timeline (system-explorer.md §6)
     timeline = [],             // ArchitecturalDelta records from graph/timeline endpoint
     timelineActive = false,    // Whether time travel mode is active
@@ -340,9 +347,40 @@
   let ghostPulsePhase = $state(0); // 0..1 pulsing animation
   let ghostAnimCycles = $state(0); // count of completed pulse cycles
 
-  // Trace path numbering state (DFS execution order badges for "Trace from here")
+  // Trace path numbering state (BFS execution order badges for "Trace from here")
   let tracePathOrder = $state(new Map()); // nodeId → step number (1-based)
-  let tracePathEdges = $state([]); // [{fromId, toId, edgeType}] in DFS order
+  let tracePathEdges = $state([]); // [{fromId, toId, edgeType}] in BFS order
+  // Set when "Trace from here" is requested but the graph has no Calls/RoutesTo
+  // edges at all — the spec requires a warning instead of a silent empty trace.
+  let traceWarning = $state(false);
+
+  // Start a causal flow trace from `node` (explorer-canvas.md §6).
+  // Shared by the right-click context menu and the toolbar Trace button.
+  // If the loaded graph contains no causal (Calls/RoutesTo) edges, trace mode
+  // cannot show any flow: warn instead of entering a degenerate trace.
+  function startTraceFromNode(node) {
+    if (!node) return;
+    if (!hasCausalEdges(edges)) {
+      traceWarning = true;
+      return;
+    }
+    traceWarning = false;
+    // Trace from here: show causal flow using Calls + RoutesTo edges.
+    // Depth 15 to capture full reachable subgraph while staying responsive.
+    onInteractiveQuery({
+      scope: { type: 'focus', node: node.qualified_name ?? node.name, edges: ['calls', 'routes_to'], direction: 'outgoing', depth: 15 },
+      // Spec: unreachable nodes dim to 20% opacity (edges dim further via the
+      // query edge filter's ×0.1 factor on unmatched edges).
+      emphasis: { tiered_colors: ['#ef4444', '#f97316', '#eab308', '#22c55e', '#94a3b8'], dim_unmatched: 0.2 },
+      edges: { filter: ['calls', 'routes_to'] },
+      zoom: 'fit',
+      annotation: { title: `Trace from: ${node.name}`, description: `Causal flow showing execution order` },
+      _trace: true,
+    });
+  }
+
+  // Whether a causal flow trace is currently active (the "Clear trace" affordances key off this).
+  let traceActive = $derived(!!activeQuery?._trace);
 
   // Pre-compute incoming call counts to avoid O(N*E) per anomaly check
   let incomingCallCounts = $derived.by(() => {
@@ -916,6 +954,19 @@
     // Access highlightedSpanId to create a dependency
     const _spanId = highlightedSpanId;
     if (lens === 'evaluative') scheduleRedraw();
+  });
+
+  // Pan/zoom the camera to a node on external request (detail-panel trace
+  // step click — explorer-canvas.md §6 step 6). `nonce` lets repeated clicks
+  // on the same step re-fire. The layoutNodes lookup stays TRACKED so a
+  // request arriving before the layout settles re-fires once nodes exist;
+  // the zoom itself is untracked so later layout changes don't re-zoom.
+  $effect(() => {
+    const req = focusRequest;
+    if (!req?.nodeId) return;
+    const ln = layoutNodes.find(l => (l.node?.id ?? l.id) === req.nodeId);
+    if (!ln) return; // not laid out yet — retried when layoutNodes changes
+    untrack(() => zoomToNode(req.nodeId));
   });
 
   // Computed elapsed time string for trace playback display
@@ -2656,10 +2707,13 @@
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(String(stepNum), bx, by);
-        // Show governing spec annotation below badge if space permits
+        // Show governing spec annotation below badge if space permits.
+        // Checks GovernedBy edges too, not just the spec_path field (spec §6
+        // step 5: "annotated with its governing spec (if any)").
         const n = ln.node;
-        if (n?.spec_path && sw > 60 && sh > 30) {
-          const specLabel = n.spec_path.split('/').pop()?.replace('.md', '') ?? '';
+        const govSpec = governingSpecFor(n, edges);
+        if (govSpec && sw > 60 && sh > 30) {
+          const specLabel = govSpec.split('/').pop()?.replace('.md', '') ?? '';
           if (specLabel) {
             const specFs = Math.max(7, Math.min(9, sw * 0.06));
             ctx.fillStyle = 'rgba(34, 197, 94, 0.8)';
@@ -4354,17 +4408,11 @@
     const node = contextMenu.node;
     contextMenu = null;
     ctxMoreOpen = false;
-    if (action === 'trace') {
-      // Trace from here: show causal flow using Calls + RoutesTo edges.
-      // Depth 15 to capture full reachable subgraph while staying responsive.
-      onInteractiveQuery({
-        scope: { type: 'focus', node: node.name ?? node.qualified_name, edges: ['calls', 'routes_to'], direction: 'outgoing', depth: 15 },
-        emphasis: { tiered_colors: ['#ef4444', '#f97316', '#eab308', '#22c55e', '#94a3b8'], dim_unmatched: 0.12 },
-        edges: { filter: ['calls', 'routes_to'] },
-        zoom: 'fit',
-        annotation: { title: `Trace from: ${node.name}`, description: `Causal flow showing execution order` },
-        _trace: true,
-      });
+    if (action === 'clear_trace') {
+      // Exit trace mode (right-click affordance — explorer-canvas.md §6 "Exit trace mode")
+      onInteractiveQuery(null);
+    } else if (action === 'trace') {
+      startTraceFromNode(node);
     } else if (action === 'blast') {
       onInteractiveQuery({
         scope: { type: 'focus', node: node.name ?? node.qualified_name, edges: ['calls', 'implements', 'field_of', 'depends_on'], direction: 'incoming', depth: 10 },
@@ -4453,28 +4501,9 @@
 
   // Build a step-by-step trace list for the detail panel.
   // Returns an array of { step, nodeId, name, type, specPath, edges } sorted by step number.
+  // Spec resolution checks GovernedBy edges, not just the spec_path field.
   function buildTraceStepList() {
-    if (tracePathOrder.size === 0) return [];
-    const nodeMap = new Map();
-    for (const n of nodes) nodeMap.set(n.id, n);
-    const steps = [];
-    for (const [nodeId, stepNum] of tracePathOrder) {
-      const n = nodeMap.get(nodeId);
-      if (!n) continue;
-      // Find edges from this step to the next
-      const outEdges = tracePathEdges.filter(e => e.fromId === nodeId);
-      steps.push({
-        step: stepNum,
-        nodeId,
-        name: n.name ?? n.qualified_name ?? '?',
-        qualifiedName: n.qualified_name ?? '',
-        type: n.node_type ?? '',
-        specPath: n.spec_path ?? null,
-        outEdges: outEdges.map(e => ({ toId: e.toId, edgeType: e.edgeType, toStep: e.toStep })),
-      });
-    }
-    steps.sort((a, b) => a.step - b.step);
-    return steps;
+    return buildTraceSteps(nodes, edges, tracePathOrder, tracePathEdges);
   }
 
   // Navigate breadcrumb with smooth zoom-out animation.
@@ -4822,36 +4851,30 @@
   });
 
   // Compute trace path ordering and connecting edges when a trace query is active.
-  // Uses depth-first ordering to represent call-stack execution order: when A calls B
-  // and B calls C, the order is A(1)→B(2)→C(3) — which matches the actual execution
-  // stack (callee executes before returning to caller to call the next function).
-  // BFS would incorrectly assign all direct callees the same depth-level number.
-  // For functions with multiple sequential callees, children are sorted alphabetically
-  // for determinism (we lack intra-function call ordering from static analysis).
+  // BFS ordering (explorer-canvas.md §6): all direct callees of a node are
+  // numbered before second-level callees, better approximating execution
+  // order than DFS (which numbers entire subtrees before siblings). Siblings
+  // are sorted alphabetically for determinism (static call graphs lack
+  // intra-function call ordering). The traversal itself lives in
+  // causal-trace.js (computeTraceOrder) so it is directly unit-testable.
   $effect(() => {
     // Detect trace queries: focus scope with outgoing direction (Calls/RoutesTo traversal)
     const isTrace = activeQuery?.scope?.type === 'focus' &&
       (activeQuery.scope.direction === 'outgoing' || activeQuery._trace) &&
       queryMatchedWithDepth;
     if (!isTrace) {
-      tracePathOrder = new Map();
-      tracePathEdges = [];
+      if (tracePathOrder.size > 0 || tracePathEdges.length > 0) {
+        tracePathOrder = new Map();
+        tracePathEdges = [];
+        // untrack: with a synchronous rAF mock (tests), drawFrame would
+        // otherwise execute inside this effect's reactive context and its
+        // reads would become effect dependencies, re-triggering the effect.
+        untrack(() => scheduleRedraw());
+      }
       return;
     }
 
-    // Build outgoing adjacency for DFS from matched edges
     const matchedIds = new Set(queryMatchedWithDepth.keys());
-    const outAdj = new Map();
-    for (const e of edges) {
-      const srcId = edgeSrc(e);
-      const tgtId = edgeTgt(e);
-      const et = edgeType(e);
-      if ((et === 'calls' || et === 'routes_to' || et === 'routesto') &&
-          matchedIds.has(srcId) && matchedIds.has(tgtId)) {
-        if (!outAdj.has(srcId)) outAdj.set(srcId, []);
-        outAdj.get(srcId).push({ toId: tgtId, edgeType: et });
-      }
-    }
 
     // Find root node (the focus node)
     const rootNode = activeQuery.scope.node;
@@ -4865,7 +4888,7 @@
     }
 
     if (!rootId || !matchedIds.has(rootId)) {
-      // Fallback: use BFS depth ordering
+      // Fallback: use BFS depth ordering from the query resolver
       const entries = [...queryMatchedWithDepth.entries()].sort((a, b) => a[1] - b[1]);
       const ordered = new Map();
       for (let i = 0; i < entries.length; i++) ordered.set(entries[i][0], i + 1);
@@ -4874,56 +4897,33 @@
       return;
     }
 
-    // BFS traversal to assign execution order — visits all direct calls
-    // of a function before going deeper, better approximating execution
-    // order than DFS (which numbers entire subtrees before siblings).
-    const ordered = new Map();
-    const traceEdges = [];
-    const visited = new Set();
-    let step = 0;
+    // BFS over outgoing Calls/RoutesTo edges (restricted to matched nodes so
+    // the numbers agree with the dimmed subgraph the query selected).
+    const matchedEdges = edges.filter(e => {
+      const srcId = edgeSrc(e);
+      const tgtId = edgeTgt(e);
+      return matchedIds.has(srcId) && matchedIds.has(tgtId);
+    });
+    const { order, pathEdges } = computeTraceOrder(nodes, matchedEdges, rootId);
 
-    const queue = [rootId];
-    visited.add(rootId);
-    step++;
-    ordered.set(rootId, step);
-
-    while (queue.length > 0) {
-      const nodeId = queue.shift();
-
-      const children = outAdj.get(nodeId) ?? [];
-      // Sort children by name for deterministic ordering
-      children.sort((a, b) => {
-        const na = nodes.find(n => n.id === a.toId)?.name ?? '';
-        const nb = nodes.find(n => n.id === b.toId)?.name ?? '';
-        return na.localeCompare(nb);
-      });
-
-      for (const child of children) {
-        if (!visited.has(child.toId)) {
-          visited.add(child.toId);
-          step++;
-          ordered.set(child.toId, step);
-          traceEdges.push({
-            fromId: nodeId, toId: child.toId,
-            edgeType: child.edgeType,
-            fromStep: ordered.get(nodeId),
-            toStep: step
-          });
-          queue.push(child.toId);
-        }
-      }
-    }
-
-    // Add remaining matched nodes not reachable via DFS (disconnected components)
+    // Add remaining matched nodes not reachable via the causal BFS
+    // (disconnected components)
+    let step = order.size;
     for (const nodeId of matchedIds) {
-      if (!ordered.has(nodeId)) {
+      if (!order.has(nodeId)) {
         step++;
-        ordered.set(nodeId, step);
+        order.set(nodeId, step);
       }
     }
 
-    tracePathOrder = ordered;
-    tracePathEdges = traceEdges;
+    tracePathOrder = order;
+    tracePathEdges = pathEdges;
+    // The trace overlay (numbered badges + path arrows) is drawn by
+    // drawFrame; without a redraw request it only appears on the next
+    // unrelated pan/zoom once the camera has settled. untrack keeps
+    // drawFrame's reads (synchronous under a sync rAF mock) out of this
+    // effect's dependency set.
+    untrack(() => scheduleRedraw());
   });
 
   // Sync canvasState zoom
@@ -4954,6 +4954,21 @@
       };
     }
   });
+
+  // Escape anywhere on the page exits trace mode (explorer-canvas.md §6
+  // "Exit trace mode: Press Escape"). The canvas element only sees keydown
+  // while focused — after clicking the toolbar Trace button or a detail-panel
+  // trace step, focus is no longer on the canvas, so the affordance must be
+  // window-level. Inputs (search box) keep their own Escape handling.
+  function onWindowKeyDown(e) {
+    if (e.key !== 'Escape') return;
+    if (!activeQuery?._trace) return;
+    const tag = (e.target?.tagName ?? '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || e.target?.isContentEditable) return;
+    onInteractiveQuery(null);
+  }
+  window.addEventListener('keydown', onWindowKeyDown);
+  onDestroy(() => window.removeEventListener('keydown', onWindowKeyDown));
 
   let destroyed = false;
   onDestroy(() => {
@@ -5027,6 +5042,19 @@
       </button>
       <button class="concept-clear-btn" type="button" onclick={() => { multiSelectedIds = new Set(); scheduleRedraw(); }}>Clear</button>
       <span class="concept-hint">Shift+Click to add/remove</span>
+    </div>
+  {/if}
+
+  <!-- Causal Flow Trace warning: no Calls/RoutesTo edges in the graph
+       (explorer-canvas.md §6 data requirement). Shown instead of entering a
+       degenerate empty trace mode. -->
+  {#if traceWarning}
+    <div class="trace-warning" role="alert" data-testid="trace-warning">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      <span>Call graph not available — run code sync to extract call edges</span>
+      <button class="trace-warning-dismiss" onclick={() => { traceWarning = false; }} title="Dismiss" type="button" aria-label="Dismiss warning">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
     </div>
   {/if}
 
@@ -5147,6 +5175,27 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="vertical-align: -2px; margin-right: 2px"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
       Risk
     </button>
+
+    <!-- Causal Flow Trace (explorer-canvas.md §6): toolbar activation for the
+         selected node + exit affordance when a trace is active. -->
+    {#if traceActive}
+      <button class="tb-btn" class:active={true} onclick={() => { onInteractiveQuery(null); }} title="Exit trace mode (Escape)" type="button" aria-pressed={true} data-testid="toolbar-clear-trace">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="vertical-align: -2px; margin-right: 2px"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/><line x1="4" y1="4" x2="20" y2="20"/></svg>
+        Clear trace
+      </button>
+    {:else}
+      <button
+        class="tb-btn"
+        onclick={() => startTraceFromNode(canvasState?.selectedNode)}
+        disabled={!canvasState?.selectedNode}
+        title={canvasState?.selectedNode ? `Trace causal flow from ${canvasState.selectedNode.name ?? canvasState.selectedNode.qualified_name ?? 'selection'} (Calls/RoutesTo)` : 'Select a node, then trace its causal flow'}
+        type="button"
+        data-testid="toolbar-trace"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="vertical-align: -2px; margin-right: 2px"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+        Trace
+      </button>
+    {/if}
 
     {#if anomalies.length > 0 && !anomalyPanelOpen}
       <button class="tb-btn anomaly-reopen" onclick={() => { anomalyPanelOpen = true; }} title="Show anomalies ({anomalies.length})" type="button">
@@ -5315,6 +5364,19 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
             Blast radius
           </button>
+          <!-- Causal Flow Trace (explorer-canvas.md §6): one of the three
+               spec-named right-click actions alongside View spec / View
+               provenance, so it lives in the primary section, not "More..." -->
+          <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('trace')} data-testid="ctx-trace">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+            Trace from here
+          </button>
+          {#if traceActive}
+            <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('clear_trace')} data-testid="ctx-clear-trace">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/><line x1="4" y1="4" x2="20" y2="20"/></svg>
+              Clear trace
+            </button>
+          {/if}
           {#if contextMenu.node.file_path}
             <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('open_in_code')}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
@@ -5331,10 +5393,6 @@
           </button>
           {#if ctxMoreOpen}
             <div class="ctx-submenu">
-              <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('trace')}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
-                Trace from here
-              </button>
               <button class="ctx-item" role="menuitem" onclick={() => contextMenuAction('history')}>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                 View history
@@ -5700,6 +5758,22 @@
     display: flex; align-items: center; justify-content: space-between;
     padding: 6px 12px; background: #172554; border-bottom: 1px solid #1e3a5f; flex-shrink: 0;
   }
+  .trace-warning {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 12px;
+    background: rgba(120, 53, 15, 0.4);
+    border-bottom: 1px solid rgba(245, 158, 11, 0.4);
+    flex-shrink: 0;
+    font-size: 12px;
+    color: #fbbf24;
+  }
+  .trace-warning-dismiss {
+    display: flex; align-items: center; justify-content: center;
+    margin-left: auto;
+    width: 24px; height: 24px; background: transparent; border: none;
+    border-radius: 4px; color: #94a3b8; cursor: pointer;
+  }
+  .trace-warning-dismiss:hover { background: #1e293b; color: #e2e8f0; }
   .annotation-content { display: flex; align-items: center; gap: 10px; min-width: 0; }
   .annotation-title { font-size: 13px; font-weight: 600; color: #e2e8f0; }
   .annotation-desc { font-size: 11px; color: #94a3b8; }
