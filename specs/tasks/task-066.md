@@ -6,7 +6,7 @@ depends_on:
 progress: not-started
 coverage_sections:
   - "explorer-canvas.md §4 Lens Definitions"
-commits: ["cd154cd23eace1d456714d3a23eca01ffbd50237"]
+commits: ["91188f3b7a362d0334b27014232588d4b2c74fdd"]
 ---
 
 ## Spec Excerpt
