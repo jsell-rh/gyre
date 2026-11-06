@@ -47,3 +47,51 @@ Notes (not findings):
 - `jj_squash_into_parent` flaked twice early in the review run (vim editor killed with signal 15 under harness load), then passed 6+ consecutive times standalone and batched, on both `c1c6dd9e` and `c1c6dd9e^`. Environmental, not a regression.
 
 Verdict: **needs-revision** — F1-F5 are genuinely resolved, but F6-F7 break jj provisioning in the default configuration and on every post-first new-branch spawn respectively, F8 undermines the deferral guarantee this round added, and all three fail silently.
+
+## Round 12
+
+Candidate: `40e61fca` (assigned base `9bef21a4`; branch commits `e6e393f7`
+recovered interrupted source on old base `1ae18d1c`, `69a36916` merged the
+new base, `40e61fca` recorded the commits list). The recovered source equals
+the R10 checkpoint `99252eab` plus the R10/R11 gate repairs (rustfmt reflow,
+clippy annotations, exemption re-pins) — diff inspected; the merge with
+`9bef21a4` (task-197) touches only main.rs/lib.rs bootstrap code with no
+task-106 surface overlap (`configured_repos_path` pre-exists in both
+lineages via task-151 `f31bef8f`). Note: the recovery dropped the Round 10
+record from this file; its content survives in the pipeline attempt history
+and is summarized in the task record.
+
+§4 behavior re-inspected across the full base..HEAD diff and found intact:
+rebase-after-gates on both merge paths (single-entry and atomic group, both
+verified to call `rebase_inflight_agents` only in the gates-passed `else`
+arm with `last_sha`/`merge_commit_sha` as the new base), moved-branch
+destination, conflict-as-state (MR flag + `SpeculativeConflict`/`Escalation`
+with file lists via signed/persisted `emit_event`), Active-only and
+worktree-exists safeguards, audit events on all three outcomes, deferral
+batch semantics with pending-marker replay on every processor cycle.
+
+Checks run at the candidate (evidence: `/tmp/stage/review-evidence/task-106-r12/`):
+`check-rustfmt-diff.py 9bef21a4` → EXIT 0 (also proves all 9 changed files
+parse); `check-inert-enforcement.sh` → EXIT 0 (re-pinned 2014/2036 verified
+to be the actual `evaluate_attestation_abac` sites); arch, ignored-tool-tests,
+relative-path-defaults, mem-port-contracts, dead-message-kinds,
+fail-open-ref-resolution, scope-literal-defaults, byte-slice-truncation,
+forged-scope-fields, in-memory-state-stores, unwired-port-methods,
+conditional-test-guards, abac-exempt-handlers, placeholder-stubs → all EXIT 0.
+Transport-blocked in this sandbox (not code defects; deferred-checks.md lists
+the exact commands for the verifier): cargo test/clippy (static.crates.io
+connection-refused; the interrupted attempt-5 run of this same candidate had
+crate access) and the jj adapter suite (binary absent). rustfmt-diff and the
+R11 suite evidence at content-identical trees stand.
+
+Findings:
+
+- [ ] **R12-F1 (major): the worktree fallback in both rebase paths is not repo-scoped, so a rebase meant for repo A can execute in — and mutate — the agent's repo-B workspace; it also defeats the documented "worktree gone → skip/drop" safeguard.** `find_rebase_targets` (`merge_processor.rs:124-126`) matches `wt.repository_id == repo.id && wt.branch == mr.source_branch` but then falls back to `.or_else(|| worktrees.first())` — any worktree of the agent, in any repo. `replay_pending_rebases` (`:537-539`) repeats the pattern against `pending.repo_id`. Repro: an Active agent holds an Open MR in repo A (worktree record for repo A deleted after MR creation, or MR `source_branch` ≠ the spawn branch) while a repo-B worktree exists on disk; a merge lands on repo A's `main` → `run_rebase` calls `jj_rebase(<repo-B workspace>, "@", "main")` → `jj git import` + `jj rebase -b @ -d main` run against repo B, whose near-universally-named `main` exists — the agent's repo-B in-flight work is rebased onto repo B's main, the repo-A rebase never happens, and the agent is told `baseline_moved` with repo A's `new_base_sha`. The replay-path docstring (`:510-512`: "the worktree removed since deferral. When the deferral is no longer actionable, drop the marker") and the trigger-path safeguard comment ("skip agents whose worktree is gone") both state the opposite of what the fallback does when any other worktree exists. Same flaw class as the R3 F10 repo-scoping bug (fixed for `find_mr_by_author_branch` but not for the worktree lookup); no test covers a multi-worktree agent. Fix direction: scope the fallback to the repo (`.find(|wt| wt.repository_id == repo.id)`), or drop the fallback and skip/drop — and pin with a two-repo worktree test.
+
+Notes (not findings):
+
+- The conflict arm persists `mr.has_conflicts` with `let _ = state.merge_requests.update(&mr).await;` (`merge_processor.rs:353`) — a new site in the exact style of the 5 pre-existing merge_processor sites; `check-silent-result-discard.sh` is red at base and not CI-wired. The events still fire, so the degradation is the MR flag only.
+- `cleanup_jj_workspace` (`api/spawn.rs`) builds the jj-main path from raw `repo.path` (not the F6-absolutized `repo_root`); for legacy relative rows the forget fails at warn (best-effort) while the workspace dir removal uses `wt.path`, which is absolute at rest.
+- The `JjOpsPort` doc comment still opens with "jj operates in colocated mode"; the task-106 layout is standalone shared-checkout workspaces (jj_init keeps colocation for the legacy endpoint). Cosmetic drift.
+
+Verdict: **needs-revision** — R12-F1 only. The §4 behavior itself is complete and previously verified against real jj; the fix is a two-line scoping change plus a pinning test.
