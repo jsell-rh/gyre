@@ -6,7 +6,7 @@ progress: ready-for-review
 review: specs/reviews/task-106.md
 coverage_sections:
   - "source-control.md §4 Automatic Rebasing"
-commits: ["a5b167e33e4e768edafac1881a93e702d95861b2", "e6e393f7f8d610434378e6c96359fe62427fe688"]
+commits: ["a5b167e33e4e768edafac1881a93e702d95861b2", "e6e393f7f8d610434378e6c96359fe62427fe688", "6d15a91fe5ee682660e5fd8216d5a3404d139586"]
 ---
 
 ## Spec Excerpt
@@ -73,40 +73,30 @@ Read `specs/system/source-control.md` §4 for the full spec. The jj adapter is i
 ## Shipped
 
 Automatic jj rebase on target branch movement (source-control.md §4).
-Production behavior is unchanged since round 5; rounds 6–11 were review,
+Production behavior is unchanged since round 5; rounds 6–13 were review,
 compile, and gate repairs.
 
-### Gate-repair round (R10/R11)
+### Gate-repair round (R13/R14, commit `6d15a91f`)
 
-The executor gates flagged three failures at candidate `ac03cce9` vs base
-`1ae18d1c`; all three are repaired in commit `cf800612` (no behavior
-change — formatting, lint annotations, and an exemption line re-pin):
+The executor gates flagged two failures at candidate `c3d83fdb` vs the
+assigned base; both are repaired with no behavior change:
 
-- **rustfmt-diff**: the six candidate-owned Rust files had unformatted
-  changed lines (double blank lines, overlong call chains). Fixed by
-  `rustfmt --edition 2021` on exactly the candidate-owned files
-  (`gyre-adapters/src/jj_ops.rs`, `gyre-ports/src/jj_ops.rs`,
-  `api/spawn.rs`, `lib.rs`, `mem.rs`, `merge_processor.rs`). rustfmt also
-  reflowed pre-existing unformatted regions inside those same files
-  (deterministic default-style output; no rustfmt.toml in-repo) — that
-  churn is confined to files this task already owns in the diff.
-- **clippy-diff**: `clippy::double_must_use` ×5 fired on the new
-  `JjOpsPort` trait methods (async_trait generates a `#[must_use]`
-  future for each method; the trait grew 7→12 methods) — suppressed with
-  the repo-standard `#[allow(clippy::double_must_use)]` on the trait
-  (same annotation as `StoragePort` / `SpecAssertionResultRepo`).
-  `clippy::too_many_arguments` fired on `record_rebase_audit` (8 args) —
-  suppressed with `#[allow(clippy::too_many_arguments)]` (repo-standard
-  annotation, 10+ precedents).
-- **check-inert-enforcement**: the task's +523-line insertion in
-  `merge_processor.rs` drifted the two pre-existing exemption-pinned
-  `evaluate_attestation_abac` sites (base lines 1457/1479 → 2014/2036
-  after this round's rustfmt). The two exemption entries were re-pinned
-  to the new line numbers — entry count unchanged (still 4 repo-wide),
-  sites byte-identical, still owned by the task-077 revision round.
-  The alternative (moving the insertion after the pinned sites) cannot
-  work: the +17/+9 hunks modify existing functions before line 1457 and
-  also shift the sites.
+- **rustfmt-diff**: the R12-F1 test
+  `rebase_skips_agent_with_only_other_repo_worktree` had an unformatted
+  multi-line `if` that fits on one line per default rustfmt style.
+  `rustfmt --edition 2021` on the candidate-owned `merge_processor.rs`
+  changed exactly those three lines (verified: single-hunk diff).
+- **check-inert-enforcement**: the R12 production comment hunks drifted
+  the two pre-existing task-077-owned `evaluate_attestation_abac`
+  exemption pins from 2014/2036 to actual 2022/2044; both entries
+  re-pinned (entry count unchanged at 4 repo-wide, sites byte-identical).
+
+Earlier gate repairs (R10/R11, commit `cf800612`): rustfmt on the six
+candidate-owned Rust files, `#[allow(clippy::double_must_use)]` on
+`JjOpsPort` (async_trait `#[must_use]` futures; same annotation as
+`StoragePort`), `#[allow(clippy::too_many_arguments)]` on
+`record_rebase_audit` (repo-standard), and the same two exemption
+re-pins after the +523-line insertion.
 
 ### Behavior
 
@@ -149,29 +139,22 @@ change — formatting, lint annotations, and an exemption line re-pin):
 
 ### Test evidence
 
-At HEAD `cf800612` on top of base `1ae18d1c` (merged via `ac03cce9`).
-Gate logs + exit codes in `/tmp/stage/review-evidence/task-106-r11/`:
+At HEAD `6d15a91f` (R14 repair on top of the R12 candidate). This
+round's gate logs + exit codes in `/tmp/stage/review-evidence/task-106-r14/`:
 
-- `python3 scripts/check-rustfmt-diff.py 1ae18d1c` → **EXIT 0** (9 Rust
-  files, changed lines clean). Pre-fix: EXIT 1 with unformatted lines in
-  six files (reproduced before the repair).
-- `python3 scripts/check-clippy-diff.py 1ae18d1c` → **EXIT 0** (9 Rust
-  files, 1113 existing warnings outside changes). Pre-fix: 12×
-  double_must_use at `gyre-ports/src/jj_ops.rs:31` (5 on new code) +
-  too_many_arguments at `merge_processor.rs:145`.
+- `python3 scripts/check-rustfmt-diff.py 4871a825` → **EXIT 0** (9 Rust
+  files, changed lines clean). Pre-fix: EXIT 1, unformatted lines
+  7096–7098 (reproduced before the repair).
 - `bash scripts/check-inert-enforcement.sh` → **EXIT 0**. Pre-fix:
-  EXIT 1 with the two drifted sites at 2000/2022.
-- `cargo test -p gyre-server --lib` → **1293/1293 EXIT 0** in 69s
-  (round 9: 1279/1279 — the merged base added tests). Includes all
-  eight task-106 rebase tests and the F9 test
-  `spawn_creates_missing_branch_before_jj_workspace_add`.
-- `cargo test -p gyre-adapters jj` → 15/15 EXIT 0 — **guard-skip**:
-  jj-cli is not installable from this sandbox (crates.io transport
-  blocked; `which jj` → absent), so these ran without the jj binary.
-  The round-5 real-jj evidence (14/14 against real jj 0.39.0) stands for
-  the rebase core; `jj_workspace_forget_absent_workspace_is_ok` needs a
-  real-jj re-run during remote verification. This round's changes to
-  the adapter are formatting-only.
+  EXIT 1 with the two drifted sites at 2022/2044.
+- This round's changes are formatting-only plus an exemption re-pin;
+  the R11 full-suite evidence stands: `cargo test -p gyre-server --lib`
+  → 1293/1293 EXIT 0 (includes all eight task-106 rebase tests and the
+  F9 test); `cargo test -p gyre-adapters jj` → 15/15 EXIT 0 as a
+  **guard-skip** (jj-cli not installable from this sandbox — crates.io
+  transport blocked; round-5 real-jj evidence 14/14 against jj 0.39.0
+  stands; `jj_workspace_forget_absent_workspace_is_ok` needs a real-jj
+  re-run during remote verification).
 
 All builds used `SKIP_WEB_BUILD=1` (documented Rust-only path, committed
 `web/dist/`): npm registry tarball fetches are blocked from this sandbox
