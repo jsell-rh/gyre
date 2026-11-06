@@ -5599,6 +5599,11 @@ mod tests {
                 workspace_id,
                 repo_id,
                 orchestrator_type,
+                match orchestrator_type {
+                    "workspace_orchestrator" => "workspace-orchestrator",
+                    "repo_orchestrator" => "repo-orchestrator",
+                    _ => "worker",
+                },
             )
             .unwrap();
         state

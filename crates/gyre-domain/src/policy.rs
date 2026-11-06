@@ -76,7 +76,7 @@ pub struct Policy {
     pub scope: PolicyScope,
     /// ID of the scoped entity (tenant_id, workspace_id, or repo_id).
     /// `None` means the policy applies to ALL entities at this scope level.
-    pub scope_id: Option<String>,
+    pub scope_id: Option<Id>,
     /// Higher number = evaluated first. Ties broken by scope specificity.
     pub priority: u32,
     /// Effect when all conditions match.
@@ -94,7 +94,7 @@ pub struct Policy {
     /// and cannot be overridden by any Allow regardless of priority.
     /// Only meaningful when `effect == Deny`. See HSI §2.
     pub immutable: bool,
-    pub created_by: String,
+    pub created_by: Id,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -155,7 +155,7 @@ pub fn builtin_policies(created_by: impl Into<String>) -> Vec<Policy> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let by = created_by.into();
+    let by = Id::new(created_by);
 
     vec![
         // The global GYRE_AUTH_TOKEN identity gets unconditional access.
@@ -331,7 +331,7 @@ pub fn trust_policies_for_level(
                     "trust: Block autonomous merge processor — require human MR approval first"
                         .to_string(),
                 scope: PolicyScope::Workspace,
-                scope_id: Some(workspace_id.to_string()),
+                scope_id: Some(Id::new(workspace_id)),
                 priority: 150,
                 effect: PolicyEffect::Deny,
                 conditions: vec![Condition {
@@ -344,7 +344,7 @@ pub fn trust_policies_for_level(
                 enabled: true,
                 built_in: false,
                 immutable: false,
-                created_by: created_by.to_string(),
+                created_by: Id::new(created_by),
                 created_at: now,
                 updated_at: now,
             }]
