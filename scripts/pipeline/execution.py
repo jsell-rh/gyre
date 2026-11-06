@@ -20,6 +20,11 @@ class Retry(RuntimeError):
         self.fresh_model = fresh_model
 
 
+class Attention(Retry):
+    """A deterministic safety failure needs inspection rather than blind retry."""
+    attention = True
+
+
 class Wait(Retry):
     """An expected external observation is pending, rather than failing."""
     retry_delay = 30
