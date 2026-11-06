@@ -115,6 +115,35 @@ class VerificationTests(unittest.TestCase):
             self.assertEqual(value['checks'][0]['attempts'], 2)
             self.assertEqual((root / 'attempt').read_text(), '2')
 
+    def test_uncertain_create_waits_for_the_same_allocation_instead_of_recreating(self):
+        with tempfile.TemporaryDirectory() as directory:
+            s=Store(directory);self.addCleanup(s.close);s.put_task('task-001','g','body',{})
+            work=s.enqueue('verify','task-001','g',{})
+            execution=Execution(s,s.claim('verify','verifier'))
+            identity={'candidate':'candidate','head':'head','base':'head','tree':'tree'}
+            name=None;inventory_calls=0
+            def invoke(*args,**kwargs):
+                nonlocal name
+                if args[:2]==('sandbox','create'):
+                    self.assertIn('--no-tty',args)
+                    name=args[args.index('--name')+1]
+                    raise subprocess.TimeoutExpired('lost create acknowledgement',1)
+                return subprocess.CompletedProcess(args,0,'','')
+            def inventory():
+                nonlocal inventory_calls
+                inventory_calls+=1
+                if inventory_calls in (1,4,5):return []
+                return [{'name':name,'phase':'Provisioning' if inventory_calls==2 else 'Ready','labels':{'gyre.dev/pipeline':s.setting('owner')}}]
+            def remote(*args,**kwargs):
+                value={'offset':0,'log':'','receipt':identity|{'passed':False,'checks':[{'command':COMMANDS[0],'exit_code':1}]},'alive':False}
+                return subprocess.CompletedProcess([],0,'GYRE_VERIFY_POLL '+json.dumps(value),'')
+            with patch.object(execution,'login'),patch.object(execution,'os',side_effect=invoke) as operations,patch.object(execution,'remote',side_effect=remote),patch.object(execution.cancelled,'wait',return_value=False),patch('pipeline.verification.gateway.inventory',side_effect=inventory):
+                receipt=run(execution,Path(directory),identity)
+            self.assertFalse(receipt['passed'])
+            self.assertEqual(sum(c.args[:2]==('sandbox','create') for c in operations.call_args_list),1)
+            self.assertIn('acknowledgement timed out',execution.log.read_text())
+            self.assertEqual(s.compute_used(),0)
+
     def test_verification_competes_for_same_slots_as_agents(self):
         with tempfile.TemporaryDirectory() as directory:
             s = Store(directory)

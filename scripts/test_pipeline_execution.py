@@ -79,6 +79,24 @@ class CrashTest(unittest.TestCase):
             self.store.db.execute("UPDATE work SET state='ready',retry_at=0 WHERE id=?",(work,))
         self.assertIsNotNone(self.store.claim('verify','operator-retry',ident=work))
 
+    def test_adopted_partial_implementation_without_current_log_is_recorded_once(self):
+        from pipeline.fullsend import adopt
+        # A checkpoint exists, but no process has run in this resumed attempt.
+        prior=self.store.directory/'attempts'/self.work/'0';(prior/'bundle').mkdir(parents=True)
+        (prior/'bundle/job.json').write_text(json.dumps({'stage':'implement','task':'task-001','branch':'private'}))
+        body='---\ntitle: Task\nprogress: not-started\ndepends_on: []\nspec_ref: fixture\n---\nRequired behavior.\n'
+        self.store.put_task('task-001','g',body,{'dependencies':[]})
+        outcome={'published':True,'head':'retained-source','valid':False,'agent_exit':1,'branch':'private','task_body':body}
+        (prior/'outcome.json').write_text(json.dumps(outcome))
+        execution=Execution(self.store,self.claim)
+        result=adopt(execution,self.store.task('task-001'))
+        self.assertEqual(result['head'],'retained-source')
+        self.assertIn('Adopted published checkpoint',execution.log_tail())
+        self.assertEqual(json.loads((execution.directory/'adopted-from.json').read_text())['attempt'],0)
+        # Tail absence is diagnostic, never loss of a recovered source receipt.
+        execution.log.unlink()
+        self.assertEqual(execution.log_tail(),'')
+
     def test_terminal_readiness_does_not_hold_dead_compute(self):
         from pipeline.execution import Retry
         execution = Execution(self.store, self.claim)

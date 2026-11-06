@@ -109,7 +109,7 @@ def main():
     identity = {key: job[key] for key in ('candidate', 'base', 'head', 'tree')}
     env = {**os.environ, 'SKIP_WEB_BUILD': '1', 'CARGO_BUILD_JOBS': '2',
            'CARGO_TARGET_DIR': '/tmp/gyre-target', 'CARGO_HOME': '/tmp/cargo',
-           'RUSTUP_HOME': '/usr/local/rustup', 'GYRE_DEV_IMAGE': job['image']}
+           'RUSTUP_HOME': '/usr/local/rustup', 'GYRE_DEV_IMAGE': job['image'], 'GYRE_VERIFY_KEEP_WEB_DIST':'1'}
     try:
         # Retry Git transport in this sandbox; never reallocate for clone errors.
         CHECKOUT.parent.mkdir(parents=True, exist_ok=True)
@@ -148,6 +148,11 @@ def main():
         if integrity:
             value.update(integrity,passed=False,infrastructure=True)
             print('Verification source integrity failed: '+json.dumps(integrity),flush=True)
+        if value.get('passed') and 'probe' not in job:
+            import importlib.util
+            spec=importlib.util.spec_from_file_location('artifacts',STAGE/'pipeline-artifacts.py')
+            artifacts=importlib.util.module_from_spec(spec);spec.loader.exec_module(artifacts)
+            value['publication']=artifacts.publish(CHECKOUT,job['task'],job['publication_branch'])
         atomic(receipt, value)
     except Exception as exc:
         print('verification infrastructure error: ' + str(exc), flush=True)
