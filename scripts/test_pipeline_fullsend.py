@@ -253,7 +253,7 @@ if a[:1]==['-g']:
  v.setdefault('gateways',[]).append(a[1]);a=a[2:]
 v['calls'].append(a)
 if a[:2]==['sandbox','create']:
- n=a[a.index('--name')+1];v['pods'].append({'name':n,'phase':'Ready','labels':{}})
+ n=a[a.index('--name')+1];labels=dict(a[i+1].split('=',1) for i,x in enumerate(a) if x=='--label');v['pods'].append({'name':n,'phase':'Ready','labels':labels})
 elif a[:2]==['sandbox','delete'] and not os.environ.get('HOLD_DELETE'):
  v['pods']=[x for x in v['pods'] if x['name']!=a[2]]
 p.write_text(json.dumps(v))
@@ -290,6 +290,17 @@ else: print('fixture control operation')
         refused=self.invoke('sandbox','create','--name','fs-imp-'+'b'*12,'--','sleep','infinity')
         self.assertEqual(refused.returncode,75)
         self.assertEqual(len(json.loads((self.root/'backend.json').read_text())['pods']),1)
+
+    def test_readiness_retry_adopts_the_same_pending_allocation(self):
+        self.assertEqual(self.invoke('sandbox','create','--name',self.name,'--','sleep','infinity').returncode,0)
+        path=self.root/'backend.json';state=json.loads(path.read_text());state['pods'][0]['phase']='Provisioning';path.write_text(json.dumps(state))
+        self.assertEqual(self.invoke('sandbox','delete',self.name).returncode,75)
+        retry=self.invoke('sandbox','create','--name',self.name,'--','sleep','infinity')
+        self.assertEqual(retry.returncode,0,retry.stderr)
+        state=json.loads(path.read_text())
+        self.assertEqual(sum(c[:2]==['sandbox','create'] for c in state['calls']),1)
+        self.assertEqual(len(state['pods']),1)
+        self.assertEqual(self.store.compute_used(),1)
 
     def test_streaming_deadline_targets_the_real_cli_without_an_orphan_parent(self):
         process = subprocess.Popen([str(self.shim / 'openshell'), 'sandbox', 'exec',
