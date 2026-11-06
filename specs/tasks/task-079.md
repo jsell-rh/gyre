@@ -7,7 +7,7 @@ depends_on:
 progress: not-started
 coverage_sections:
   - "explorer-implementation.md §30 Unit Tests"
-commits: ["477c69538b99a3d093e292b12c9aa951742a76a7", "39adce730a183792089f04905f1af498375a80e8"]
+commits: ["4058b618fb52c49f2b4bbb7179526d415f7fe2c3"]
 ---
 
 ## Spec Excerpt
