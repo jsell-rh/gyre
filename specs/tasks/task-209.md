@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
+commits: ["f7f3b0810106d2f195012e6aa945cd9bba427d2b", "ca1ac78e"]
 ---
 
 ## Spec Excerpt
@@ -121,15 +121,20 @@ Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different file
 
 ## Shipped
 
-All three HSI §12 gaps are implemented in production code. This round
-recovered the interrupted assignment: the implementation checkpoint
-(f7f3b081) was already on the branch; this round resolved the interrupted
-merge of the assigned base e608ac78 into it (mem.rs conflict combined the
-judgment-ledger source wiring with the base's injectable-secrets test
-builder; web/dist was rebuilt from the merged sources, resolving the stale
-hashed-asset conflicts), re-verified every acceptance criterion against the
-merged tree, and recorded the landing in the coverage matrix (row 53 →
-implemented).
+All three HSI §12 gaps are implemented in production code. The
+implementation checkpoint (f7f3b081) landed earlier; subsequent rounds
+recovered interrupted assignments. This round: the previous run died on
+infrastructure before any agent work (GitHub API unreachable at
+pre-flight), and the executor's merge of the assigned base 1ae18d1c
+into the checkpoint (82821de2) left a semantic conflict — the base's
+`graph_extraction.rs` tests still called `NotificationRepository::
+list_for_user` with the pre-task-209 7-arg signature (missing the
+`exclude_types` slice) and `merge_requests.rs` carried a duplicate
+`use gyre_common::Id` — so `cargo test -p gyre-server --lib` did not
+compile. Fixed in ca1ac78e (4 call sites pass `&[]`, matching the
+background-check callers; redundant import dropped), every acceptance
+criterion re-verified against the merged tree, and the coverage matrix
+records the landing (row 53 → implemented).
 
 ### Behavior shipped
 
@@ -165,24 +170,32 @@ implemented).
   unknown notification_type with 400); background de-dup callers pass
   none. `GET /users/me` returns read-only `oidc_issuer`/`last_login_at`.
 
-### Test evidence (post-remerge, on this branch)
+### Test evidence (post-fix ca1ac78e, on this branch)
 
-- `cargo build --all` green (semantic-conflict check for the merge).
 - `cargo test -p gyre-adapters --lib user_profile`: 10 passed (ledger
   merge/filter/pagination, notification exclusion, record_login debounce).
-- `cargo test -p gyre-server --lib` focused: users (11), workspaces +
-  meta_specs + merge_requests (52), auth (36) — all passed, including
-  `human_approval_on_failed_gate_writes_gate_override_event` (+ the
-  `?type=gate` ledger shape it asserts),
+- `cargo test -p gyre-server --lib` focused, after ca1ac78e restored
+  compilation of the merged tree: the 5 §12 write-path tests
+  (`human_approval_on_failed_gate_writes_gate_override_event`,
   `trust_transition_writes_trust_change_audit_event`,
-  `publish_writes_meta_spec_publish_audit_event` (+ `?type=meta-spec`
-  shape), `disabled_preference_excludes_type_from_inbox_and_count`,
-  `get_me_returns_recorded_auth_provider_info`.
-- `cd web && npm ci && npm test`: 65 files, 1589 passed / 41 skipped.
-- `scripts/check-abac-exempt-handlers.sh` OK (89 handlers);
-  `scripts/check-fabricated-scope-defaults.sh` OK. Migration 000056 is
-  the unique next sequence number. Note: `check-tenant-filter.sh`
-  cannot execute under this sandbox's mawk (gawk-only 3-arg `match()`);
-  its logic was replicated manually — the findings are identical to the
-  assigned base e608ac78 (user-scoped tables), i.e. no new violations
-  from this task; CI runs the script under gawk with `|| true`.
+  `publish_writes_meta_spec_publish_audit_event`,
+  `disabled_preference_excludes_type_from_inbox_and_count`,
+  `get_me_returns_recorded_auth_provider_info`) — 5 passed;
+  `graph_extraction` (the repaired call sites, incl.
+  `push_check_creates_priority9_notifications_for_failed_assertions`)
+  — 25 passed; `api::merge_requests` (incl. TASK-167 lineage tests that
+  share the module's `Id` import) — 31 passed.
+- `cd web && npm ci && npm test` (prior round, same merged web sources):
+  65 files, 1589 passed / 41 skipped.
+- `scripts/check-task-commit-attribution.sh`,
+  `scripts/check-migration-versions.sh`,
+  `scripts/check-abac-exempt-handlers.sh` (89 handlers),
+  `scripts/check-fabricated-scope-defaults.sh` OK. The two 000056
+  migration dirs are NOT duplicates under Diesel semantics (versions
+  20261007000056 vs 20261008000056 — full date prefix, see
+  check-migration-versions.sh header). Note:
+  `check-tenant-filter.sh` cannot execute under this sandbox's mawk
+  (gawk-only 3-arg `match()`); its logic was replicated manually —
+  findings identical to the assigned base 1ae18d1c (user-scoped tables),
+  i.e. no new violations from this task; CI runs it under gawk with
+  `|| true`.
