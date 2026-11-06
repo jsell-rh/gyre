@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "realized-model.md §6 Narrative Generation"
-commits: ["9d918c25aa59d54edad7bb8941f8144729a2a88f"]
+commits: ["595c39034a3f2a675218e88d60b5861572378477"]
 ---
 
 ## Spec Excerpt
