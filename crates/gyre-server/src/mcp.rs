@@ -3261,8 +3261,8 @@ mod tests {
         // everything outside the caller's scope, and a client-supplied
         // workspace_id must never widen access.
         let state = test_state();
-        let mk = |entity_id: &str, ws: &str, repo: Option<&str>| {
-            gyre_ports::search::SearchDocument {
+        let mk =
+            |entity_id: &str, ws: &str, repo: Option<&str>| gyre_ports::search::SearchDocument {
                 entity_type: "task".to_string(),
                 entity_id: entity_id.to_string(),
                 title: "needle".to_string(),
@@ -3271,8 +3271,7 @@ mod tests {
                 repo_id: repo.map(|r| r.to_string()),
                 tenant_id: Some("default".to_string()),
                 facets: std::collections::HashMap::new(),
-            }
-        };
+            };
         state
             .search
             .index(mk("a-repo1", "ws-a", Some("repo-1")))
@@ -3300,13 +3299,12 @@ mod tests {
         };
 
         // Admin (global token): unscoped within the tenant — all three docs.
-        let (_status, json) = mcp_post(
-            app.clone(),
-            search_call(json!({ "q": "needle" })),
-        )
-        .await;
+        let (_status, json) = mcp_post(app.clone(), search_call(json!({ "q": "needle" }))).await;
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("Found 3 result(s)"), "admin count wrong: {text}");
+        assert!(
+            text.contains("Found 3 result(s)"),
+            "admin count wrong: {text}"
+        );
 
         // Repo orchestrator scoped to (ws-a, repo-1): only its repo's doc.
         let repo_jwt = state
@@ -3333,7 +3331,10 @@ mod tests {
         )
         .await;
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("Found 1 result(s)"), "repo scope wrong: {text}");
+        assert!(
+            text.contains("Found 1 result(s)"),
+            "repo scope wrong: {text}"
+        );
         assert!(text.contains("a-repo1"), "repo doc missing: {text}");
         assert!(!text.contains("a-repo2"), "other repo leaked: {text}");
         assert!(!text.contains("b-doc"), "other workspace leaked: {text}");
@@ -3370,14 +3371,13 @@ mod tests {
             .kv_set("agent_tokens", "mcp-ws-agent", ws_jwt.clone())
             .await
             .unwrap();
-        let (_status, json) = mcp_post_with_token(
-            app.clone(),
-            search_call(json!({ "q": "needle" })),
-            &ws_jwt,
-        )
-        .await;
+        let (_status, json) =
+            mcp_post_with_token(app.clone(), search_call(json!({ "q": "needle" })), &ws_jwt).await;
         let text = json["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("Found 2 result(s)"), "workspace scope wrong: {text}");
+        assert!(
+            text.contains("Found 2 result(s)"),
+            "workspace scope wrong: {text}"
+        );
         assert!(!text.contains("b-doc"), "other workspace leaked: {text}");
     }
 

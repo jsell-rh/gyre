@@ -231,7 +231,9 @@ impl SearchPort for SqliteStorage {
                         let placeholders = vec!["?"; ids.len()].join(", ");
                         // Repo-less (workspace-level) documents stay visible:
                         // repo scope restricts repos, not the workspace itself.
-                        q = q.sql(format!(" AND (repo_id = '' OR repo_id IN ({placeholders}))"));
+                        q = q.sql(format!(
+                            " AND (repo_id = '' OR repo_id IN ({placeholders}))"
+                        ));
                         for id in ids {
                             q = q.bind::<Text, _>(id.clone());
                         }
@@ -446,7 +448,10 @@ mod tests {
             .unwrap();
 
         let results = storage
-            .search(SearchQuery { query: "jwt".to_string(), ..unscoped("jwt") })
+            .search(SearchQuery {
+                query: "jwt".to_string(),
+                ..unscoped("jwt")
+            })
             .await
             .unwrap();
 
@@ -495,7 +500,10 @@ mod tests {
             .unwrap();
 
         let results = storage
-            .search(SearchQuery { query: "alpha beta".to_string(), ..unscoped("alpha beta") })
+            .search(SearchQuery {
+                query: "alpha beta".to_string(),
+                ..unscoped("alpha beta")
+            })
             .await
             .unwrap();
         // Default AND-of-terms: both terms must appear.
@@ -504,14 +512,20 @@ mod tests {
 
         // Empty query matches nothing (parity with prior adapter behavior).
         let empty = storage
-            .search(SearchQuery { query: "".to_string(), ..unscoped("") })
+            .search(SearchQuery {
+                query: "".to_string(),
+                ..unscoped("")
+            })
             .await
             .unwrap();
         assert!(empty.is_empty());
 
         // Syntax-hostile query must return cleanly, not a MATCH parse error.
         let hostile = storage
-            .search(SearchQuery { query: "\"unterminated ( AND -^:*".to_string(), ..unscoped("") })
+            .search(SearchQuery {
+                query: "\"unterminated ( AND -^:*".to_string(),
+                ..unscoped("")
+            })
             .await
             .unwrap();
         // Every token is quoted into a literal phrase — bare AND/OR/NEAR can
@@ -529,7 +543,10 @@ mod tests {
             .await
             .unwrap();
         let results = storage
-            .search(SearchQuery { query: "running".to_string(), ..unscoped("running") })
+            .search(SearchQuery {
+                query: "running".to_string(),
+                ..unscoped("running")
+            })
             .await
             .unwrap();
         assert_eq!(results.len(), 1, "porter stemmer must match runs~running");
@@ -546,14 +563,22 @@ mod tests {
         storage.index(d2).await.unwrap();
 
         let by_type = storage
-            .search(SearchQuery { query: "widget".to_string(), entity_type: Some("mr".to_string()), ..unscoped("widget") })
+            .search(SearchQuery {
+                query: "widget".to_string(),
+                entity_type: Some("mr".to_string()),
+                ..unscoped("widget")
+            })
             .await
             .unwrap();
         assert_eq!(by_type.len(), 1);
         assert_eq!(by_type[0].entity_id, "m1");
 
         let by_ws = storage
-            .search(SearchQuery { query: "widget".to_string(), workspace_id: Some("ws-a".to_string()), ..unscoped("widget") })
+            .search(SearchQuery {
+                query: "widget".to_string(),
+                workspace_id: Some("ws-a".to_string()),
+                ..unscoped("widget")
+            })
             .await
             .unwrap();
         assert_eq!(by_ws.len(), 1);
@@ -561,7 +586,12 @@ mod tests {
 
         // Combined filter excluding everything.
         let none = storage
-            .search(SearchQuery { query: "widget".to_string(), entity_type: Some("task".to_string()), workspace_id: Some("ws-b".to_string()), ..unscoped("widget") })
+            .search(SearchQuery {
+                query: "widget".to_string(),
+                entity_type: Some("task".to_string()),
+                workspace_id: Some("ws-b".to_string()),
+                ..unscoped("widget")
+            })
             .await
             .unwrap();
         assert!(none.is_empty());
@@ -581,21 +611,32 @@ mod tests {
             .unwrap();
 
         let stale = storage
-            .search(SearchQuery { query: "obsolete".to_string(), ..unscoped("obsolete") })
+            .search(SearchQuery {
+                query: "obsolete".to_string(),
+                ..unscoped("obsolete")
+            })
             .await
             .unwrap();
         assert!(stale.is_empty(), "upsert left a stale row");
 
         let fresh = storage
-            .search(SearchQuery { query: "fresh".to_string(), ..unscoped("fresh") })
+            .search(SearchQuery {
+                query: "fresh".to_string(),
+                ..unscoped("fresh")
+            })
             .await
             .unwrap();
         assert_eq!(fresh.len(), 1);
         assert_eq!(fresh[0].title, "new title");
 
-        gyre_ports::SearchPort::delete(&storage, "task", "t1").await.unwrap();
+        gyre_ports::SearchPort::delete(&storage, "task", "t1")
+            .await
+            .unwrap();
         let gone = storage
-            .search(SearchQuery { query: "fresh".to_string(), ..unscoped("fresh") })
+            .search(SearchQuery {
+                query: "fresh".to_string(),
+                ..unscoped("fresh")
+            })
             .await
             .unwrap();
         assert!(gone.is_empty());
@@ -614,7 +655,10 @@ mod tests {
             .unwrap();
         assert_eq!(storage.reindex_all().await.unwrap(), 2);
         let after = storage
-            .search(SearchQuery { query: "termone".to_string(), ..unscoped("termone") })
+            .search(SearchQuery {
+                query: "termone".to_string(),
+                ..unscoped("termone")
+            })
             .await
             .unwrap();
         assert!(after.is_empty(), "index must be cleared");
@@ -634,7 +678,11 @@ mod tests {
         }
         let storage = SqliteStorage::new(file.path().to_str().unwrap()).unwrap();
         let results = storage
-            .search(SearchQuery { query: "orchestrator".to_string(), entity_type: Some("agent".to_string()), ..unscoped("orchestrator") })
+            .search(SearchQuery {
+                query: "orchestrator".to_string(),
+                entity_type: Some("agent".to_string()),
+                ..unscoped("orchestrator")
+            })
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
@@ -681,19 +729,13 @@ mod tests {
 
         // Admin (unscoped workspaces) in tenant t-1: both t-1 docs, never the
         // other tenant's doc nor the tenant-unresolvable doc.
-        let admin = storage
-            .search(base_query("needle", "t-1"))
-            .await
-            .unwrap();
+        let admin = storage.search(base_query("needle", "t-1")).await.unwrap();
         assert_eq!(admin.len(), 2);
         assert!(admin.iter().all(|r| r.entity_id != "in-c"));
         assert!(admin.iter().all(|r| r.entity_id != "no-ws"));
 
         // Admin in tenant t-2: only that tenant's doc.
-        let other_tenant = storage
-            .search(base_query("needle", "t-2"))
-            .await
-            .unwrap();
+        let other_tenant = storage.search(base_query("needle", "t-2")).await.unwrap();
         assert_eq!(other_tenant.len(), 1);
         assert_eq!(other_tenant[0].entity_id, "in-c");
 

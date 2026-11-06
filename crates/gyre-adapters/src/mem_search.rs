@@ -221,7 +221,10 @@ mod tests {
             .unwrap();
 
         let results = adapter
-            .search(SearchQuery { query: "ABAC".to_string(), ..tenant_query("ABAC") })
+            .search(SearchQuery {
+                query: "ABAC".to_string(),
+                ..tenant_query("ABAC")
+            })
             .await
             .unwrap();
 
@@ -252,7 +255,11 @@ mod tests {
             .unwrap();
 
         let results = adapter
-            .search(SearchQuery { query: "authentication".to_string(), entity_type: Some("task".to_string()), ..tenant_query("authentication") })
+            .search(SearchQuery {
+                query: "authentication".to_string(),
+                entity_type: Some("task".to_string()),
+                ..tenant_query("authentication")
+            })
             .await
             .unwrap();
 
@@ -269,7 +276,10 @@ mod tests {
             .unwrap();
 
         let results = adapter
-            .search(SearchQuery { query: "JWT".to_string(), ..tenant_query("JWT") })
+            .search(SearchQuery {
+                query: "JWT".to_string(),
+                ..tenant_query("JWT")
+            })
             .await
             .unwrap();
 
@@ -290,7 +300,10 @@ mod tests {
             .unwrap();
 
         let results = adapter
-            .search(SearchQuery { query: "QUEUE".to_string(), ..tenant_query("QUEUE") })
+            .search(SearchQuery {
+                query: "QUEUE".to_string(),
+                ..tenant_query("QUEUE")
+            })
             .await
             .unwrap();
 
@@ -315,7 +328,10 @@ mod tests {
             .unwrap();
 
         let results = adapter
-            .search(SearchQuery { query: "new".to_string(), ..tenant_query("new") })
+            .search(SearchQuery {
+                query: "new".to_string(),
+                ..tenant_query("new")
+            })
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
@@ -323,7 +339,10 @@ mod tests {
 
         // Old body should be gone.
         let old_results = adapter
-            .search(SearchQuery { query: "old".to_string(), ..tenant_query("old") })
+            .search(SearchQuery {
+                query: "old".to_string(),
+                ..tenant_query("old")
+            })
             .await
             .unwrap();
         assert!(old_results.is_empty());

@@ -77,10 +77,7 @@ pub async fn derive_search_scope(state: &AppState, auth: &AuthenticatedAgent) ->
     // Agent JWTs carry their scope as OIDC claims (§Access Scoping).
     if is_agent_jwt(auth) {
         if let Some(claims) = &auth.jwt_claims {
-            match claims
-                .get("orchestrator_type")
-                .and_then(|t| t.as_str())
-            {
+            match claims.get("orchestrator_type").and_then(|t| t.as_str()) {
                 // Workspace orchestrator: all repos in its workspace,
                 // nothing outside the workspace.
                 Some("workspace_orchestrator") => {

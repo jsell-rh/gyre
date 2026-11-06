@@ -50,7 +50,7 @@ use tower::ServiceExt;
 const TOKEN: &str = "search-wiring-token";
 
 /// Serializes env-var mutation across tests in this binary.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
 
 /// Point `GYRE_DATABASE_URL` at a temp SQLite file. Pokes the env var while
 /// holding `ENV_LOCK` — safe because this integration test binary runs in its
@@ -134,7 +134,7 @@ async fn seed_workspace(state: &gyre_server::AppState, id: &str, tenant: &str) {
 
 #[tokio::test]
 async fn sqlite_url_wires_fts5_search_port() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.lock().await;
     let (_dir, _url) = sqlite_url();
 
     // ── Port-level: FTS behavior, not substring behavior ──────────────────
@@ -167,11 +167,7 @@ async fn sqlite_url_wires_fts5_search_port() {
     // Porter stemming: "running" stems to "run" and matches indexed "runs".
     // MemSearchAdapter does lowercase `contains`: "…runs nightly…".contains("running")
     // is false — this query returns empty under a mem regression.
-    let stemmed = state
-        .search
-        .search(admin_query("running"))
-        .await
-        .unwrap();
+    let stemmed = state.search.search(admin_query("running")).await.unwrap();
     assert_eq!(
         stemmed.len(),
         1,
@@ -270,7 +266,7 @@ async fn sqlite_url_wires_fts5_search_port() {
 
 #[tokio::test]
 async fn search_is_access_scoped_to_the_authenticated_caller() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.lock().await;
     let (_dir, _url) = sqlite_url();
     let state = build_state(TOKEN, "http://localhost:3000", None);
     abac_middleware::seed_builtin_policies(&state).await;
@@ -311,7 +307,11 @@ async fn search_is_access_scoped_to_the_authenticated_caller() {
         0,
     );
     membership.accepted = true;
-    state.workspace_memberships.create(&membership).await.unwrap();
+    state
+        .workspace_memberships
+        .create(&membership)
+        .await
+        .unwrap();
 
     let app = build_router(Arc::clone(&state));
 
@@ -347,7 +347,10 @@ async fn search_is_access_scoped_to_the_authenticated_caller() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
-    assert_eq!(body["total"], 0, "client workspace_id widened access: {body}");
+    assert_eq!(
+        body["total"], 0,
+        "client workspace_id widened access: {body}"
+    );
     assert!(body["results"].as_array().unwrap().is_empty());
 
     // ── Repo-scoped agent (repo orchestrator): only its repo ───────────────
@@ -368,11 +371,22 @@ async fn search_is_access_scoped_to_the_authenticated_caller() {
         .kv_set("agent_tokens", "agent-repo", repo_agent_jwt.clone())
         .await
         .unwrap();
-    let resp = call_with_token(&app, "GET", "/api/v1/search?q=needle", None, &repo_agent_jwt).await;
+    let resp = call_with_token(
+        &app,
+        "GET",
+        "/api/v1/search?q=needle",
+        None,
+        &repo_agent_jwt,
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     let results = body["results"].as_array().unwrap();
-    assert_eq!(results.len(), 1, "repo-scoped agent must see only its repo: {body}");
+    assert_eq!(
+        results.len(),
+        1,
+        "repo-scoped agent must see only its repo: {body}"
+    );
     assert_eq!(results[0]["entity_id"], "a-repo1");
 
     // Repo-scoped agent passing another workspace id: still zero widening.
@@ -386,7 +400,10 @@ async fn search_is_access_scoped_to_the_authenticated_caller() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
-    assert_eq!(body["total"], 0, "agent widened scope via workspace_id: {body}");
+    assert_eq!(
+        body["total"], 0,
+        "agent widened scope via workspace_id: {body}"
+    );
 
     // ── Workspace orchestrator: all repos in its workspace, nothing outside ─
     let ws_agent_jwt = state
@@ -410,7 +427,11 @@ async fn search_is_access_scoped_to_the_authenticated_caller() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     let results = body["results"].as_array().unwrap();
-    assert_eq!(results.len(), 2, "workspace orchestrator sees all its repos: {body}");
+    assert_eq!(
+        results.len(),
+        2,
+        "workspace orchestrator sees all its repos: {body}"
+    );
     assert!(
         results.iter().all(|r| r["entity_id"] != "b-doc"),
         "workspace orchestrator saw a document outside its workspace: {body}"
@@ -434,7 +455,11 @@ async fn search_is_access_scoped_to_the_authenticated_caller() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     let results = body["results"].as_array().unwrap();
-    assert_eq!(results.len(), 2, "worker agent must see its workspace: {body}");
+    assert_eq!(
+        results.len(),
+        2,
+        "worker agent must see its workspace: {body}"
+    );
     assert!(
         results.iter().all(|r| r["entity_id"] != "b-doc"),
         "worker agent saw a document outside its workspace: {body}"
