@@ -82,3 +82,29 @@ What this round checked and found:
 No material gap remains. Round 2's ten findings stay resolved; the integration-blocking formatting defect is repaired with no behavioral change.
 
 — Verifier, 2026-10-09
+
+# Independent review — task-093 (round 4, verification-repair candidate)
+
+Candidate: `a2cdeaf503e218b87fee56899fb93c22cd4c6a6e` (merge of base `1ae18d1c42bf9c48ae1e3c10369dbc81920664c9` into the task branch). Comparison base: `1ae18d1c`. Verdict: **approved**.
+
+Evidence (exact tree at the candidate SHA, clean; logs under `/tmp/stage/review-evidence/`):
+
+- Focused tests, run fresh on this candidate: `cargo test -p gyre-server api::orchestrator` → **24/24** (`test-orchestrator.txt`, cold build 142m); `api::spawn` → **34/34** (`test-spawn.txt`); `mcp::` → **80/80** (`test-mcp.txt`). Matches the round's claims exactly.
+- Mechanical checks re-run on the candidate: arch, ABAC route registry (both orchestrator routes resolver-registered, frozen exemption count honestly shrunk 52→50), ABAC exempt-handlers (86), MCP write-tools (7 gated), inert-enforcement, migration versions, task-commit attribution — all OK (`script-checks-rerun.txt`). rustfmt changed-lines vs base: clean (`rustfmt-diff.out`).
+- All nine commits in the task's `commits:` frontmatter verified as ancestors of the candidate.
+- Static line-by-line review of the full base→candidate diff (14 files, +1257/−100):
+  - `validate_persona` is real enforcement: returns `Result`, store read failures propagate (no fail-open), missing/unapproved persona fails the spawn **before** any agent row is persisted. Both kill-tests (`orchestrator_spawn_fails_without_persona`, `..._with_unapproved_persona`) assert on the production error strings plus no-persist — structurally kill-proven: with the warn-and-continue variant restored, `unwrap_err()` panics.
+  - Tenant containment (`check_workspace_tenant`) on both REST wrappers, tested same-tenant and cross-tenant with nothing-persisted assertions; the MCP path derives scope from JWT claims (`workspace_orchestrator_scope`/`repo_orchestrator_scope`) so containment is inherent there.
+  - Exactly-one-live (§3.2) holds across every terminal path: terminal-state guards in `fail_agent`/`stop_agent` (idempotent 200 on Failed|Stopped|Dead corpses), a one-live-per-scope gate plus `check_spawn_budget` gate inside `restart_orchestrator`, budget decrement on the stale Abort path, `disconnected_behavior` inheritance, and escalation payloads carrying `replacement_agent_id`/`informational`. Pinned by `second_terminal_transition_does_not_spawn_second_replacement`, `fail_after_stale_death_does_not_spawn_second_replacement`, and the direct contract-violation probe `double_death_handling_entry_yields_one_live_orchestrator`.
+  - `gyre_message_send` restored to the `needs_write` RBAC gate; ReadOnly API-key denial tested through `build_router` with a nothing-persisted assertion, plus an Agent-role positive control.
+  - Exemption-file deltas all honest-direction: abac-exempt-handlers −2 entries, inert-enforcement −2 entries (both deleted with their fixes, as the files instruct), route-registry −2 routes, mcp-write-tools entry removed.
+
+Non-blocking observations (not findings):
+
+- `scripts/check-warn-continue-creation.sh` fails on the candidate with a stale exemption anchor (`abac_middleware.rs:734` vs the `seed_builtin_policies` site at 740 after the base merge) — but it also fails on the assigned base itself (anchor 728 vs actual 730), CI runs it advisory (`|| true`), and the flagged site is unchanged pre-existing code. Follow-up: re-anchor the line number post-merge.
+- The explicit-name duplicate check retains the pre-existing `if let Ok(Some(_))` shape (fail-open only on a store read error, at base identically); the new default-name path (`unique_default_name`) is fail-closed. No realistic path where a read failure yields a successful duplicate create on the same store.
+- Clippy changed-lines was not run in this sandbox (would require another multi-hour cold clippy build); the rustfmt changed-lines gate passed and exact-head GitHub CI remains the host gate. Sandbox cannot bind a TCP listener (capabilities.json), so no live server smoke test — infrastructure restriction, not a code defect.
+
+All round-1 findings (F1–F10) remain resolved with production code and kill-tests on this exact candidate; the verification-repair round's persona enforcement is real, pre-persistence, and fail-closed. No material gap against `platform-model.md` §3 (Workspace Orchestrator, Repo Orchestrator, auto-restart, escalation).
+
+— Independent reviewer, 2026-11-06
