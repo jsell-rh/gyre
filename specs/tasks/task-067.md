@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "explorer-canvas.md §5 Progressive Drill-Down"
-commits: ["5cddbb1fbd26137a04a4f308c59029b7a1171f96", "34a9d4a1f1102a98ab028788c1613709a10e7c3e"]
+commits: ["5cddbb1fbd26137a04a4f308c59029b7a1171f96", "7519d04cec17d1e9f82d965e2b87cef98a0aa241"]
 ---
 
 ## Spec Excerpt
@@ -140,13 +140,26 @@ probes):
   nodes show their own span stats (p50/error-rate); spans on out-of-level
   nodes do not leak into tooltips.
 
-Results (focused runs, sandbox-local via `/tmp/stage/bin/npx vitest`):
+Results (focused runs, sandbox-local via `/tmp/stage/bin/npx vitest`,
+re-run on the recovered source after lease expiry):
 
-- `ExplorerCanvasDrillDown.test.js` → 3/3 passed.
-- ExplorerCanvas + performance + ExplorerViewDrillUrl + ExplorerViewScope +
-  NodeDetailPanel + DrillDown → 237/237 passed.
-- ExplorerView-responsive + RepoMode + WorkspaceHomeArchitecture +
-  canvas-state → 61/61 passed.
+- `ExplorerCanvasDrillDown.test.js` → 3/3 passed (exit 0).
+- `ExplorerCanvas.test.js` + `ExplorerViewDrillUrl.test.js` → 154/154
+  passed (exit 0).
+- Pre-recovery full runs on the identical source tree: ExplorerCanvas +
+  performance + ExplorerViewDrillUrl + ExplorerViewScope + NodeDetailPanel
+  + DrillDown → 237/237; ExplorerView-responsive + RepoMode +
+  WorkspaceHomeArchitecture + canvas-state → 61/61.
+
+### Source recovery
+
+The original final commit `34a9d4a1` was lost to a worker lease expiry;
+the source was recovered verbatim as checkpoint `7519d04c` (its `web/src`
+tree is byte-identical to the current branch head) and merged with the
+base `9bef21a4` at `af05cc66`. The `commits:` frontmatter was remapped
+from the dead SHA to `7519d04c` so review scoping sees the commit that
+actually carries the product surface. Post-recovery focused runs above
+confirm the recovered source behaves identically.
 
 Full `cd web && npm test`, architecture checks and CI are owned by the
 verification stage. Evidence: `/tmp/stage/review-evidence/task-067-implementation.md`.
