@@ -35,6 +35,7 @@ pub mod pre_accept;
 pub mod rate_limit;
 pub(crate) mod rbac;
 pub mod retention;
+pub mod secret_rotation;
 pub mod siem;
 pub(crate) mod signing;
 pub(crate) mod snapshot;

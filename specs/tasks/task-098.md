@@ -3,11 +3,11 @@ title: "Platform Model Secrets Admin API + MCP + CLI"
 spec_ref: "platform-model.md §7 Admin API"
 depends_on:
   - task-097
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "platform-model.md §7 MCP Integration"
   - "platform-model.md §7 Admin API"
-commits: []
+commits: ["1d4a583730b59b652758067ad6819143539769bb", "d44ab7676100568e0a84c74f9c30b28450257d00", "d7640b5532ffeb21ced8aae91d9d4c333110fd26"]
 ---
 
 ## Spec Excerpt
@@ -87,3 +87,122 @@ Agents don't fetch secrets via MCP tools. Secrets are environment variables. The
 ## Agent Instructions
 
 Read `specs/system/platform-model.md` §7 "MCP Integration" and "Admin API" sections. This depends on task-097 (domain types + port) being implemented first. For MCP resources, see how existing resources (spec://, briefing://, etc.) are defined in `gyre-server/src/mcp.rs`. For CLI, see `gyre-cli/src/main.rs`. For admin UI, see how other admin tabs are structured in WorkspaceSettings.svelte or TenantSettings.svelte. Register the new API routes in `gyre-server/src/api/mod.rs`.
+
+## Shipped
+
+Implemented on top of the task-097 `SecretRepository` port. The branch was
+recovered from an interrupted worker lease (checkpoint `d44ab767`, content-
+equal to the previously attributed `b569f988` + `794b018d`); a first repair
+round cleaned the recovered source for CI gates (`1d4a5837`); the final
+round (`d7640b55`) rebased the branch onto upstream main `1ae18d1c`
+(task-167/065/074) and re-verified every focused suite on the merged tree.
+No behavior was added beyond those repairs.
+
+### Behavior
+
+- **Admin API** (`crates/gyre-server/src/api/secrets.rs`):
+  `POST/GET /api/v1/secrets`, `DELETE /api/v1/secrets/:id`,
+  `POST /api/v1/secrets/:id/rotate`. Create is create-or-update on
+  `(scope, scope_id, name)` within the tenant. All handlers derive
+  `tenant_id` from the auth context and validate `scope_id` against the
+  caller's tenant (cross-tenant `scope_id` → 403/404). Responses use a
+  dedicated metadata struct — the plaintext `value` is accepted on
+  create/rotate and never serialized back.
+- **ABAC** (`abac_middleware.rs`): `secret` resource type with
+  `RouteResourceMapping` for all four routes; the
+  `builtin-secret-admin-only` policy (priority 860) denies every non-Admin
+  role, so secret CRUD is Admin-only at the policy layer (Developer and
+  agent tokens are denied; verified by
+  `abac_middleware::tests::secrets_routes_are_admin_only`).
+- **MCP resources** (`mcp.rs`): `secrets://names` (list of names) and
+  `secrets://status` (`{name, scope, expires_at, last_rotated_at, status:`
+  `active|expiring|expired}`), resolved from the caller's agent JWT
+  claims/agent record (tenant from the governing workspace — never a
+  fabricated default). Values are never read: the metadata cascade
+  mirrors `resolve_for_agent` scoping without decryption.
+- **CLI** (`gyre-cli`): `gyre secret set/list/delete/rotate` with
+  `--scope workspace|repo|tenant|task`, `--repo`/`--workspace` name
+  resolution, `--type`, `--expires-in`.
+- **UI**: `SecretsPanel.svelte` tab in Workspace/Repo/Tenant settings —
+  name/scope/type/created/expires/last-rotated table, create/delete/rotate
+  actions, value field write-only.
+- **Rotation job** (`secret_rotation.rs`, wired as the
+  `secret_rotation_check` 5-minute job in `jobs.rs`/`main.rs`): scans all
+  scopes for secrets expiring within 1h (or already expired), notifies
+  Admin/Owner members of the owning workspace via `SecretExpiring`
+  notifications, with duplicate suppression and 24h dismissal windows.
+
+### Cleanup round (`1d4a5837`)
+
+- Replaced `agent_secret_scope`'s 4-tuple return with a named
+  `AgentSecretScope` struct (unnamed-tuple-carrier baseline held at 3).
+- Dropped three needless `&Secret` reborrows in `run_once` (clippy
+  `needless_borrow` on new-file lines — inside CI clippy-diff scope).
+- rustfmt on task-added lines (CI check-rustfmt-diff scope).
+- `caller-scope:ok` annotation on `notify_workspace_admins` (the
+  `workspace_id` is the secret's own governing workspace, not a
+  caller-propagated scope).
+- Re-pointed 7 pre-existing conditional-test-guard exemption line numbers
+  shifted by the new Secrets tab tests (same guards, zero new entries).
+
+### Rebase repair round (`d7640b55`)
+
+- Merged upstream main `1ae18d1c` (task-167 merge dependencies, task-065
+  ExplorerCanvas, task-074 LSP call graph) into the task branch. Conflicts
+  were confined to committed `web/dist` build artifacts (rename/rename on
+  the content-hashed elk bundle, `index.html` asset references); neither
+  side's dist matches the merged web source (ours: secrets admin UI;
+  theirs: explorer rework), so `web/dist` was regenerated with a fresh
+  vite build (`npm ci` + `npm run build`) from the merged `web/src`:
+  `index-DiVi7Qms.js`, `elk.bundled-WuiJDajw.js`, `index-CVMI06-z.css`.
+  CI rebuilds web from source in every workflow, so the committed dist is
+  only the local `SKIP_WEB_BUILD=1` fallback.
+- Only shared-file Rust change was `mcp.rs` with disjoint-region edits
+  (upstream `detect_lineage_deps` signature vs task-098 `secrets://`
+  resources); the merged crate compiles and the full filtered mcp+secret
+  suite passes. Adapters/CLI secret code is byte-identical to the
+  pre-merge verified state (no file in those crates was touched by both
+  sides).
+
+### Test evidence
+
+All suites below re-run green on the merged tree at `d7640b55`
+(pre-merge rounds ran the same suites green at `1d4a5837`):
+
+- `cargo test -p gyre-server --lib -- mcp secret` — 102 passed / 0 failed
+  (api::secrets CRUD lifecycle, admin-only, cross-tenant rejection;
+  secret_rotation expiry/dedup; mcp incl. `secrets://names` cascade
+  names-only, `secrets://status` expiry reporting, no-agent-scope error
+  path; abac secrets_routes_are_admin_only)
+- `cargo test -p gyre-adapters secret` — 17/17 (encryption at rest, wrong
+  key/tamper failures, cascade resolution, finer-scope override, expiry
+  exclusion, tenant isolation)
+- `cargo test -p gyre-cli --bin gyre secret` — 6/6 (arg parsing incl.
+  unknown-scope rejection)
+- `cargo check -p gyre-adapters -p gyre-cli --tests` — clean on the
+  merged tree
+- `npm test` in `web/` — 64 files, 1635 passed / 41 skipped, exit 0
+  (includes SecretsPanel 9/9 and Workspace/Tenant/RepoSettings suites,
+  152/152 when run focused, plus the merged upstream explorer suites)
+- Mechanical gates on the merged tree: check-arch,
+  check-abac-route-registry, check-mcp-write-tools,
+  check-migration-versions, check-dead-message-kinds,
+  check-mem-port-contracts, check-in-memory-state-stores,
+  check-byte-slice-truncation, check-conditional-test-guards,
+  check-dependent-scope-resolution, check-fail-open-ref-resolution,
+  check-scope-literal-defaults, check-fabricated-scope-defaults,
+  check-lossy-secret-conversion, check-inert-enforcement,
+  check-relative-path-defaults, check-forwarded-header-trust,
+  check-forged-scope-fields, check-task-commit-attribution — all pass.
+  check-unnamed-tuple-carriers reports the same 3 pre-existing hits as
+  BOTH merge parents (otlp_receiver.rs:238, mem.rs ConvMap,
+  git_http.rs accumulate_chain_constraints — exemptions already stale
+  before this round, check not CI-wired); the merge adds zero new
+  carriers.
+- Probe logs: /tmp/stage/review-evidence/ (vitest-full.log,
+  vitest-settings-suites.log, cargo-server-mcp-secret.log,
+  cargo-adapters-secret.log, cargo-cli-secret.log,
+  cargo-check-adapters-cli.log, per-gate check logs).
+
+Full workspace suites, all-target Clippy, and GitHub CI are left to the
+verification stage per assignment scope.

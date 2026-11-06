@@ -24,6 +24,13 @@ pub trait SecretRepository: Send + Sync {
     /// Returns `None` if the secret does not exist in `tenant_id`.
     async fn get_value(&self, id: &Id, tenant_id: &str) -> Result<Option<Vec<u8>>>;
 
+    /// Look up a secret's metadata (never its value) by id.
+    ///
+    /// Returns `None` if the secret does not exist in `tenant_id`. Used by
+    /// the Admin API to resolve `DELETE /secrets/{id}` and
+    /// `POST /secrets/{id}/rotate` targets before acting on them.
+    async fn find_by_id(&self, id: &Id, tenant_id: &str) -> Result<Option<Secret>>;
+
     /// List secret metadata (never values) attached to a scope.
     async fn list_by_scope(
         &self,

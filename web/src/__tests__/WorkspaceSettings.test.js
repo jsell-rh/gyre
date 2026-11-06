@@ -28,6 +28,10 @@ vi.mock('../lib/api.js', () => ({
     workspaceAbacPolicies: vi.fn().mockResolvedValue([]),
     auditEvents: vi.fn().mockResolvedValue([]),
     updateWorkspace: vi.fn().mockResolvedValue({}),
+    secretsList: vi.fn().mockResolvedValue([]),
+    secretCreate: vi.fn().mockResolvedValue({}),
+    secretDelete: vi.fn().mockResolvedValue(null),
+    secretRotate: vi.fn().mockResolvedValue({}),
   },
   setAuthToken: vi.fn(),
 }));
@@ -83,10 +87,10 @@ describe('WorkspaceSettings', () => {
     expect(tablist.getAttribute('role')).toBe('tablist');
   });
 
-  it('renders all 7 tabs', () => {
+  it('renders all 8 tabs', () => {
     const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
     const tabs = container.querySelectorAll('[role="tab"]');
-    expect(tabs.length).toBe(7);
+    expect(tabs.length).toBe(8);
     const labels = Array.from(tabs).map(t => t.textContent.trim());
     expect(labels).toContain('General');
     expect(labels).toContain('Trust & Policies');
@@ -94,7 +98,17 @@ describe('WorkspaceSettings', () => {
     expect(labels).toContain('Budget');
     expect(labels).toContain('Compute');
     expect(labels).toContain('LLM Config');
+    expect(labels).toContain('Secrets');
     expect(labels).toContain('Audit');
+  });
+
+  it('Secrets tab loads the scoped secrets panel', async () => {
+    const { container } = render(WorkspaceSettings, { props: { workspace: mockWorkspace } });
+    await fireEvent.click(container.querySelector('#ws-tab-secrets'));
+    const panel = container.querySelector('[data-testid="secrets-panel"]');
+    expect(panel).toBeTruthy();
+    expect(panel.getAttribute('data-scope')).toBe('workspace');
+    expect(api.secretsList).toHaveBeenCalledWith('workspace', 'ws-1');
   });
 
   it('General tab is active by default', () => {
