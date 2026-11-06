@@ -6,7 +6,7 @@ depends_on:
 progress: not-started
 coverage_sections:
   - "explorer-canvas.md §5 Progressive Drill-Down"
-commits: []
+commits: ["5cddbb1fbd26137a04a4f308c59029b7a1171f96"]
 ---
 
 ## Spec Excerpt
