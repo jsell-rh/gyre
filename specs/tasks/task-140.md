@@ -65,7 +65,7 @@ Built-in persona seeding implemented in `151cf7d2` (domain defs + adapters + ser
 
 - Domain: `BUILTIN_PERSONA_DEFS` + `builtin_personas(tenant_id, now)` in `crates/gyre-domain/src/workspace.rs` — the four spec-table personas (`workspace-orchestrator`, `repo-orchestrator`, `accountability`, `security`), prompts embedded via `include_str!("../../../specs/personas/<slug>.md")`, `content_hash` = SHA-256 via `Persona::refresh_content_hash()`, `approval_status: Approved`, approved by the system user, `version: 1`.
 - Server: `seed_builtin_personas` / `seed_builtin_personas_for_tenant` in `crates/gyre-server/src/lib.rs` — check-before-insert via `find_by_slug_and_scope`, so existing/customized personas are never overwritten and seeding is idempotent across restarts.
-- Call sites: server startup (`crates/gyre-server/src/main.rs:55`, after migrations), tenant creation (`crates/gyre-server/src/api/tenants.rs`, every new tenant gets its own scoped copies), and the admin demo-seed path.
+- Call sites: server startup (`crates/gyre-server/src/main.rs:59`, after migrations and default-tenant bootstrap), tenant creation (`crates/gyre-server/src/api/tenants.rs`, every new tenant gets its own scoped copies), and the admin demo-seed path.
 - CLI: `gyre bootstrap` registers the same four personas from the domain defs (pointer-equality test makes the single source of truth mechanical).
 
 ### Repairs on this branch
@@ -74,17 +74,19 @@ Built-in persona seeding implemented in `151cf7d2` (domain defs + adapters + ser
 - **Finding cdd23225** (review): that same `646684f4` checkpoint committed the refill test without compiling it — the `move` closure took ownership of the `AtomicU64` tick, so the later `tick.store(...)` was error E0382, blocking the entire gyre-server lib test target. Fixed in `1319006b`: the tick is shared via `Arc<AtomicU64>` (clone captured by the closure); the test compiles, is rustfmt-clean, and passes.
 - **Finding 93ef2291** (verification gate): rustfmt/clippy failures on four task-changed lines — fixed in `5f5ab82a`, formatting only.
 - **Finding 763d5ad1** (contract): a stray `## Verification Repair` ledger section in this task file was deleted; the task file matches the assigned contract (operational content lives in this Shipped section).
+- **Finding 59dd2c91** (rebase): main advanced under this branch, conflicting in `crates/gyre-server/src/lib.rs` and `main.rs`. Resolved by merge commit `63809a09` as a clean union — main's task-156 additions (`pub mod reconciliation`, `meta_spec_conformance_sweep` job spawn, `approved_content_hash` in `seed_builtin_meta_specs`) came in while all persona seeding survived intact (verified by direct diff of both conflicted files against candidate `b0f24a74` and base `4871a825`; startup ordering `bootstrap_default_tenant → seed_builtin_policies → seed_builtin_meta_specs → seed_builtin_personas` confirmed in `main.rs`).
+- **Finding dda9c1fb** (checkpoint): worker lease expired mid-round; source recovered at `b0f24a74` and re-verified on the merged tree — working tree clean, no unresolved conflicts, persona seeding present at every call site.
 
-### Test evidence (tree `1319006b`, this sandbox)
+### Test evidence
 
-- `cargo test -p gyre-server --lib` — **1260 passed, 0 failed** (full suite; proves the E0382 block is gone and no regression elsewhere).
-- Includes: `rate_limit::tests::refills_to_full_rate_on_new_second` ok, `middleware::tests::rate_limit_exhaustion_returns_429` ok (finding 1aa47b6a), `seed_builtin_personas_*` 3 ok, `create_tenant_seeds_builtin_personas` ok.
-- Prior rounds (documented in review history): `gyre-domain --lib builtin` 2 passed, `gyre-adapters --lib sqlite::workspace::persona` 2 passed, `gyre-cli --bin gyre bootstrap` 15 passed; mechanical gates (arch, attribution, mem-port-contracts, scope-literal, in-memory-state, forged-scope, relative-path, byte-slice, inert-enforcement) all exit 0.
-- Evidence logs: `/tmp/stage/review-evidence/test-server-lib-full.log`, `test-server-rate-limit.log`, `test-server-seed.log`, `test-server-tenant-create.log`.
+- Prior round (tree `1319006b`): `cargo test -p gyre-server --lib` — **1260 passed, 0 failed**, including `rate_limit::tests::refills_to_full_rate_on_new_second`, `middleware::tests::rate_limit_exhaustion_returns_429` (finding 1aa47b6a), `seed_builtin_personas_*` 3 ok, `create_tenant_seeds_builtin_personas` ok; plus `gyre-domain --lib builtin` 2 passed, `gyre-adapters --lib sqlite::workspace::persona` 2 passed, `gyre-cli --bin gyre bootstrap` 15 passed.
+- Resume round (merged tree `63809a09`, this sandbox): full mechanical gate sweep — 89 `scripts/check-*.sh` gates, **failure set byte-identical to the base commit `4871a825`** (35 pre-existing/environmental failures on both trees, 54 passes on both; diff in `/tmp/stage/review-evidence/{head,base}-fails.txt`). The branch and merge introduce zero new gate failures. `check-arch.sh` and `check-task-commit-attribution.sh` explicitly pass.
+- This resumed sandbox **cannot compile Rust**: `static.crates.io` is unreachable (curl exit 000) and the crate cache holds only 258 of the 399 locked crates (missing `cfg-if`, `clap`, `atomic-waker`, …), so `cargo test` fails at dependency download — an infrastructure restriction recorded for remote verification, not a code defect. The merge touched only lines that compile on main (task-156) plus the candidate's already-tested persona code; the compile/test rerun belongs to host verification/CI.
+- Evidence logs (this round): `/tmp/stage/review-evidence/gate-sweep.log`, `gate-sweep-base.log`.
 
 ### Sandbox restrictions
 
-TCP listeners are unsupported in this sandbox (errno 95, `/tmp/stage/capabilities.json`), so the live startup path is verified via the `main.rs:55` wiring plus the router-level tests; live HTTP verification belongs to host verification/CI. Heavy builds on this sandbox's slow disk also made the `tirith` pre-tool hook time out intermittently during this round — environmental, no code impact.
+TCP listeners are unsupported in this sandbox (errno 95, `/tmp/stage/capabilities.json`), and outbound network plus the partial crate cache block any Rust build (see Test evidence) — so the live startup path is verified via the `main.rs:59` wiring plus prior router-level tests; live HTTP and compile/test rerun belong to host verification/CI. No code impact.
 
 ## Agent Instructions
 
