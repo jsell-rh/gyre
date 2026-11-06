@@ -40,9 +40,12 @@ def read(execution, task, receipt):
     observation = module.observe(execution.command, task['data']['pr'], receipt['head'],
                                           receipt['base'], execution.directory)
     latest = json.loads(execution.command('gh','pr','view',task['data']['pr'],'--json',
-                       'headRefOid,statusCheckRollup,state',timeout=30).stdout)
+                       'headRefOid,statusCheckRollup,state,baseRefOid,mergeStateStatus,mergeable',timeout=30).stdout)
     if latest['headRefOid'] != receipt['head']:
         raise Wait('PR changed during CI observation; discard the stale observation')
+    if observation['status'] == 'merge_conflict' and (not module.merge_conflict(latest) or latest['baseRefOid'] != observation['base']):
+        raise Wait('PR conflict or target base changed during observation; recheck before requesting implementation')
+    latest, reconciled = module.reconcile_checks(execution.command,task['data']['pr'],receipt['head'],latest)
     pending, failed, infrastructure = module.check_sets(latest)
     if observation['status'] in ('candidate_failed','baseline_failed') and (not failed or latest['state'] != 'OPEN'):
         raise Wait('Failed CI changed while evidence was collected; observe again before requesting implementation')
@@ -61,6 +64,10 @@ def read(execution, task, receipt):
             raise StaleClaim('published candidate changed during CI observation')
         data = current['data']
         old = data.get('ci') or {}
+        if snapshot['status'] in ('pending','policy_pending','infrastructure'):
+            snapshot['waiting_since'] = (old.get('waiting_since') if old.get('head') == snapshot['head'] else None) or snapshot['checked_at']
+        if reconciled:
+            snapshot['reconciled_checks'] = reconciled
         data['ci'] = snapshot
         execution.store.db.execute('UPDATE tasks SET data=? WHERE name=?',(json.dumps(data),task['name']))
         if old.get('head') != snapshot['head'] or old.get('status') != snapshot['status']:
@@ -70,7 +77,7 @@ def read(execution, task, receipt):
 
 def failure(execution, task, receipt, observation):
     status = observation['status']
-    if status not in ('candidate_failed','baseline_failed','closed'):
+    if status not in ('candidate_failed','baseline_failed','closed','merge_conflict'):
         return None
     finding = observation | {'id':execution.claim['id'],'category':'ci','source':receipt['head']}
     if observation.get('log'):
@@ -78,6 +85,10 @@ def failure(execution, task, receipt, observation):
     if status == 'closed':
         # Human closure is not a request for another implementation/PR.
         raise Wait('Associated PR was closed; awaiting an operator decision')
+    if status == 'merge_conflict':
+        finding.update(category='rebase',published_head=receipt['head'])
+        return observation, {'repair':finding,'candidate':receipt['head'],'candidate_base':receipt['base'],
+                             'review':None,'verified':None}, [finding]
     if status == 'baseline_failed':
         from .stages import baseline_repair
         prerequisite = baseline_repair(execution,observation)
@@ -90,6 +101,20 @@ def failure(execution, task, receipt, observation):
 
 
 def observe(execution, task):
+    labels=json.loads(execution.command('gh','pr','view',task['data']['pr'],'--json','labels',timeout=30).stdout)
+    priority_labels=sorted({label['name'] for label in labels.get('labels',[]) if label['name'].startswith('priority/')})
+    with execution.store.transaction():
+        execution.store._current(execution.claim['id'],execution.claim['token'])
+        current=execution.store.task(task['name'])
+        if current['data'].get('pr') != task['data'].get('pr'):
+            raise StaleClaim('associated PR changed during priority observation')
+        data=current['data']
+        if data.get('priority_labels') != priority_labels:
+            data['priority_labels']=priority_labels
+            execution.store.db.execute('UPDATE tasks SET data=? WHERE name=?',(json.dumps(data),task['name']))
+            execution.store.event('priority_labels_observed',{'labels':priority_labels},task['name'],execution.claim['id'])
+    if execution.claim['input'].get('priority_only'):
+        raise Wait('Watching PR priority labels while implementation handles the recorded finding')
     receipt = execution.claim['input']['published']
     observation = read(execution,task,receipt)
     rejected = failure(execution,task,receipt,observation)
