@@ -116,14 +116,19 @@ async fn find_rebase_targets(
             continue;
         }
         // Safeguard (plan item 5): skip agents whose worktree is gone
-        // (already cleaned up, or never provisioned).
+        // (already cleaned up, or never provisioned). The fallback for a
+        // missing (repo, source_branch) record stays INSIDE the moved repo
+        // (R12 F1): the worktree branch record can drift from the MR's
+        // source branch, but a worktree in a DIFFERENT repo must never be
+        // rebased for this repo's movement — the agent's other-repo
+        // in-flight work would be spliced onto this repo's baseline.
         let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await else {
             continue;
         };
         let Some(wt) = worktrees
             .iter()
             .find(|wt| wt.repository_id == repo.id && wt.branch == mr.source_branch)
-            .or_else(|| worktrees.first())
+            .or_else(|| worktrees.iter().find(|wt| wt.repository_id == repo.id))
         else {
             continue;
         };
@@ -532,10 +537,13 @@ async fn replay_pending_rebases(state: &AppState) {
                 return None;
             }
             let worktrees = state.worktrees.find_by_agent(&agent.id).await.ok()?;
+            // Repo-scoped only (R12 F1): the deferral names this repo; a
+            // worktree in any other repo must never receive it. When the
+            // agent no longer has a worktree in the pending repo, the
+            // deferral is not actionable and the marker is dropped below.
             let wt = worktrees
                 .iter()
-                .find(|wt| wt.repository_id.as_str() == pending.repo_id)
-                .or_else(|| worktrees.first())?;
+                .find(|wt| wt.repository_id.as_str() == pending.repo_id)?;
             if !std::path::Path::new(&wt.path).exists() {
                 return None;
             }
@@ -7031,6 +7039,211 @@ mod tests {
         assert!(
             calls.is_empty(),
             "dead agent must not be rebased, got {calls:?}"
+        );
+    }
+
+    /// R12 F1 (trigger path): the worktree-selection fallback is
+    /// repo-scoped. An Active agent with an Open MR in repo A whose
+    /// (repo A, source_branch) worktree record is absent — deleted after
+    /// MR creation, or the branch record drifted — while an on-disk
+    /// repo-B worktree exists must NOT have the repo-B worktree rebased
+    /// when a merge lands on repo A's main: the agent's other-repo
+    /// in-flight work is unrelated to this repo's baseline movement.
+    /// Pre-fix, `.or_else(|| worktrees.first())` picked any worktree and
+    /// rebased repo B's `@` onto repo B's same-named branch while telling
+    /// the agent `baseline_moved` with repo A's new base SHA.
+    #[tokio::test]
+    async fn rebase_skips_agent_with_only_other_repo_worktree() {
+        let (state, jj, _repo, _inflight_mr) = setup_rebase_fixture().await;
+
+        // The agent's (repo A, feat/inflight) worktree record is gone...
+        state
+            .worktrees
+            .delete(&Id::new("wt-inflight"))
+            .await
+            .unwrap();
+        // ...but the agent has an on-disk worktree in repo B (same branch
+        // name — the near-universal-name hazard from the finding).
+        let other_repo = create_repo_in_workspace(&state, "rebase-other-repo-f1a", "ws-1").await;
+        let other_dir = tempfile::tempdir().unwrap();
+        let other_wt = AgentWorktree::new(
+            Id::new("wt-inflight-other-repo-f1a"),
+            Id::new("agent-inflight"),
+            other_repo.id.clone(),
+            None,
+            "feat/inflight",
+            other_dir.path().to_str().unwrap().to_string(),
+            1000,
+        );
+        state.worktrees.create(&other_wt).await.unwrap();
+        std::mem::forget(other_dir);
+
+        let mut rx = state.message_broadcast_tx.subscribe();
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+
+        let calls = jj.rebase_calls.lock();
+        assert!(
+            calls.is_empty(),
+            "no worktree in the moved repo -> no rebase; the other repo's worktree must not be touched, got {calls:?}"
+        );
+        drop(calls);
+
+        // And no false baseline_moved for repo A's movement.
+        let mut agent_notified = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let gyre_common::message::Destination::Agent(a) = &msg.to {
+                if a.as_str() == "agent-inflight"
+                    && msg.kind.as_str() == "baseline_moved"
+                {
+                    agent_notified = true;
+                }
+            }
+        }
+        assert!(
+            !agent_notified,
+            "agent must not be told baseline_moved for a repo it has no worktree in"
+        );
+    }
+
+    /// R12 F1 (trigger path, positive pin): when the (repo,
+    /// source_branch) worktree record is absent but the agent has another
+    /// worktree in the SAME repo, the fallback rebases that same-repo
+    /// worktree — never a different repo's, regardless of store iteration
+    /// order (the mem store is a HashMap).
+    #[tokio::test]
+    async fn rebase_worktree_fallback_stays_within_moved_repo() {
+        let (state, jj, repo, _inflight_mr) = setup_rebase_fixture().await;
+
+        // Replace the fixture's worktree record with a drifted-branch
+        // record in the SAME repo, and add a same-named worktree in
+        // repo B — the exact ambiguity the fallback must resolve by
+        // repository scoping.
+        state
+            .worktrees
+            .delete(&Id::new("wt-inflight"))
+            .await
+            .unwrap();
+        let drift_dir = tempfile::tempdir().unwrap();
+        let drift_wt = AgentWorktree::new(
+            Id::new("wt-inflight-drift"),
+            Id::new("agent-inflight"),
+            repo.id.clone(),
+            None,
+            "feat/renamed",
+            drift_dir.path().to_str().unwrap().to_string(),
+            1000,
+        );
+        state.worktrees.create(&drift_wt).await.unwrap();
+        std::mem::forget(drift_dir);
+
+        let other_repo = create_repo_in_workspace(&state, "rebase-other-repo-f1b", "ws-1").await;
+        let other_dir = tempfile::tempdir().unwrap();
+        let other_wt = AgentWorktree::new(
+            Id::new("wt-inflight-other-repo-f1b"),
+            Id::new("agent-inflight"),
+            other_repo.id.clone(),
+            None,
+            "feat/inflight",
+            other_dir.path().to_str().unwrap().to_string(),
+            1000,
+        );
+        state.worktrees.create(&other_wt).await.unwrap();
+        std::mem::forget(other_dir);
+
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+
+        let calls = jj.rebase_calls.lock();
+        assert_eq!(
+            calls.len(),
+            1,
+            "the same-repo fallback worktree must be rebased, got {calls:?}"
+        );
+        assert_eq!(
+            calls[0].0,
+            drift_wt.path.clone(),
+            "the rebase must target the moved repo's worktree, not the other repo's"
+        );
+        assert_eq!(calls[0].2, "main");
+    }
+
+    /// R12 F1 (replay path): a pending rebase names its repo. When the
+    /// agent's only remaining worktree is in a DIFFERENT repo, the replay
+    /// drops the marker instead of rebasing the other repo's worktree.
+    /// Pre-fix, `.or_else(|| worktrees.first())` replayed the deferral
+    /// against whatever worktree existed.
+    #[tokio::test]
+    async fn replay_drops_pending_rebase_when_worktree_left_the_repo() {
+        let (state, jj, _repo, _mr) = setup_rebase_fixture().await;
+
+        // First movement: rebase runs, window starts.
+        enqueue_mr(&state, "mr-merged", 100, 1000).await;
+        process_next(&state).await.unwrap();
+        assert_eq!(jj.rebase_calls.lock().len(), 1);
+
+        // The agent's worktree in the pending repo is gone; only an
+        // on-disk repo-B worktree remains.
+        state
+            .worktrees
+            .delete(&Id::new("wt-inflight"))
+            .await
+            .unwrap();
+        let other_repo = create_repo_in_workspace(&state, "rebase-other-repo-f1c", "ws-1").await;
+        let other_dir = tempfile::tempdir().unwrap();
+        let other_wt = AgentWorktree::new(
+            Id::new("wt-inflight-other-repo-f1c"),
+            Id::new("agent-inflight"),
+            other_repo.id.clone(),
+            None,
+            "feat/inflight",
+            other_dir.path().to_str().unwrap().to_string(),
+            1000,
+        );
+        state.worktrees.create(&other_wt).await.unwrap();
+        std::mem::forget(other_dir);
+
+        // Defer a second movement (in-window), then expire the window.
+        let pending = PendingRebase {
+            repo_id: repo_id_of(&state).await.to_string(),
+            target_branch: "main".to_string(),
+            new_base_sha: "b".repeat(40),
+        };
+        state
+            .kv_store
+            .kv_set(
+                JJ_REBASE_PENDING_NS,
+                "agent-inflight",
+                serde_json::to_string(&pending).unwrap(),
+            )
+            .await
+            .unwrap();
+        let now = crate::jobs::now_secs();
+        state
+            .kv_store
+            .kv_set(
+                JJ_REBASE_BACKOFF_NS,
+                "agent-inflight",
+                (now - JJ_REBASE_WINDOW_SECS - 1).to_string(),
+            )
+            .await
+            .unwrap();
+
+        process_next(&state).await.unwrap();
+
+        assert_eq!(
+            jj.rebase_calls.lock().len(),
+            1,
+            "the replay must not rebase another repo's worktree"
+        );
+        assert!(
+            state
+                .kv_store
+                .kv_get(JJ_REBASE_PENDING_NS, "agent-inflight")
+                .await
+                .unwrap()
+                .is_none(),
+            "a deferral with no worktree in the pending repo is not actionable and must be dropped"
         );
     }
 
