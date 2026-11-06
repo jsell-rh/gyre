@@ -51,3 +51,51 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 44 (2026-11-06) — clobber 42 at candidate `f0d73ce3`, product intact
+
+Assigned candidate `f0d73ce3c7bfceef46c8d04970b1d03d8dd6bde5` (base `88bd81bf`). The
+candidate tip is the checkpoint attribution pass ("process: record task-208 branch
+commits"), and its single change rewrites `commits:` from the round-43 restored
+five-SHA list back to four SHAs, dropping `ea006d52bb42e96e6f176b02b5390b6cb56a3116`
+(`build(web): exempt generated dist bundles from whitespace gate (task-208)` — root
+`.gitattributes:4` `web/dist/** -whitespace`). This is the 42nd occurrence of the
+rounds 2-41 clobber class and the exact recurrence the round-43 repair predicted:
+the executor re-uploads the dispatch-time (pre-fix) `scripts/dev-attribution.py` over
+`/tmp/stage/` before running the checkpoint pass, so the pass that produced this
+candidate still used the filter that excludes root `.gitattributes`. The root-cause
+fix is committed on this branch at `67430e1b` but only takes effect once the
+controller's `scripts/dev-attribution.py` advances past this branch. `ea006d52` is a
+verified ancestor (`git merge-base --is-ancestor` exit 0), its change is live in the
+candidate tree, and the task's own Shipped section still names it as a landing commit
+(internal inconsistency). Per the AGENTS.md invariant (unlisted task-labeled
+product-surface commit = invisible to review scoping) this is blocking. Repair is
+mechanical, product untouched: re-append `ea006d52` to `commits:` at a new tip.
+
+Fresh probes at the candidate (evidence `/tmp/stage/review-evidence/task-208-round44-*`):
+
+- Zero product drift since verified candidate `2c0fa361`: `git diff 2c0fa361..f0d73ce3`
+  touches only `scripts/dev-attribution.py`, `scripts/test_dev_attribution.py`,
+  `specs/tasks/task-208.md`.
+- Dead-code grep (`get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs` over
+  `crates/` + `web/src/`) → zero matches; routes/ABAC/`api.js` registrations for
+  `/api/v1/users/me/{agents,tasks,mrs}` absent — the only URI literals left are inside
+  the router 404 regression test `my_stuff_endpoints_are_removed` (`users.rs:948`),
+  which drives real `.oneshot()` GETs and asserts `NOT_FOUND` on all three URIs.
+- `UserProfile.svelte` tabs array is exactly the six permitted tabs; fresh
+  `npm ci` + `npx vitest run src/__tests__/UserProfile.test.js` → **23/23 passed**
+  (exit 0), including the exact-six-tab guard test.
+- Spec amendment and coverage rows intact: `user-management.md` §"My Stuff" Views
+  supersession recorded, M22.8 row struck; coverage row 22 `n/a`, HSI row 54
+  `implemented`.
+- Rust probe blocked by sandbox infrastructure (`static.crates.io` unreachable,
+  curl exit 7; no registry cache, no target dir). `crates/` is byte-identical to
+  `2c0fa361`, whose identical source previously passed
+  `cargo test -p gyre-server my_stuff_endpoints_are_removed` 1/1 (round-35 evidence).
+  Verifier must run `cargo test --all` and full `cd web && npm test`; final
+  integration must rebuild `web/dist` from the merged `web/src` before publishing
+  (branch-tip committed bundle is the base's stale pre-task-208 output per the
+  executor restore-to-base flow — not a code defect in this assignment).
+
+Verdict: **not approved** — solely the attribution clobber; every product acceptance
+criterion holds at this candidate.
