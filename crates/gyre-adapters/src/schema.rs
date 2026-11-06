@@ -472,6 +472,7 @@ diesel::table! {
         command -> Nullable<Text>,
         required_approvals -> Nullable<Integer>,
         persona -> Nullable<Text>,
+        validation_type -> Nullable<Text>,
         required -> Integer,
         gate_phase -> Text,
         timeout_secs -> Nullable<BigInt>,

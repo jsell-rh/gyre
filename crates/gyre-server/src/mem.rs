@@ -165,6 +165,15 @@ impl GitOpsPort for NoopGitOps {
         Ok(None)
     }
 
+    async fn read_file_at_commit(
+        &self,
+        _repo_path: &str,
+        _sha: &str,
+        _file_path: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
     async fn revert_commit(
         &self,
         _repo_path: &str,
@@ -317,6 +326,15 @@ impl GitOpsPort for ConfigurableGitOps {
         &self,
         _repo_path: &str,
         _branch: &str,
+        _file_path: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    async fn read_file_at_commit(
+        &self,
+        _repo_path: &str,
+        _sha: &str,
         _file_path: &str,
     ) -> Result<Option<Vec<u8>>> {
         Ok(None)

@@ -41,6 +41,22 @@ pub struct RemoteJwksEntry {
 /// TTL for cached remote JWKS (5 minutes).
 const REMOTE_JWKS_TTL_SECS: u64 = 300;
 
+
+// -- Gate-agent capability scopes (task-134, agent-gates.md) -------------------
+
+/// OIDC capability granted to an AgentReview gate's reviewer agent: it may
+/// read MR context and submit its verdict, nothing else (§Gate Agent
+/// Lifecycle: "read-only access", "identity-scoped").
+pub const REVIEW_SUBMIT_SCOPE: &str = "review:submit";
+
+/// OIDC capability granted to an AgentValidation gate's validator agent: it
+/// may read MR context to run its domain-specific check, nothing else. The
+/// validation contract is exit-code pass/fail, so this capability carries no
+/// review-submission rights — a validator must not be able to influence
+/// review-based approval surfaces.
+pub const VALIDATION_REPORT_SCOPE: &str = "validation:report";
+
+
 // -- Agent JWT signing (Gyre as OIDC provider) --------------------------------
 
 /// Claims embedded in agent JWTs minted by Gyre's built-in OIDC provider.
@@ -270,6 +286,54 @@ impl AgentSigningKey {
             workspace_id: Some(workspace_id.to_string()),
             repo_id: repo_id.map(|r| r.to_string()),
             orchestrator_type: Some(orchestrator_type.to_string()),
+            wl_pid: None,
+            wl_hostname: None,
+            wl_compute_target: None,
+            wl_stack_hash: None,
+            wl_container_id: None,
+            wl_image_hash: None,
+        };
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+        header.kid = Some(self.kid.clone());
+        jsonwebtoken::encode(&header, &claims, &self.encoding_key)
+            .map_err(|e| format!("JWT mint error: {e}"))
+    }
+
+    /// Mint a scoped agent JWT (task-134 gate-agent protocol).
+    ///
+    /// Gate agents are ephemeral, single-purpose identities. An AgentReview
+    /// gate's reviewer carries [`REVIEW_SUBMIT_SCOPE`] (submit verdict, read
+    /// MR context); an AgentValidation gate's validator carries
+    /// [`VALIDATION_REPORT_SCOPE`] (read MR context, no submission — its
+    /// contract is the process exit code). The capability string is enforced
+    /// exactly (no substring matching) by `git_http` (push denial), the ABAC
+    /// middleware (route allow-list), and `submit_review` (reviewer identity
+    /// binding). `task_id` carries the gate id so the token is traceable to
+    /// the gate run that minted it.
+    pub fn mint_scoped(
+        &self,
+        agent_id: &str,
+        task_id: &str,
+        spawned_by: &str,
+        issuer: &str,
+        ttl_secs: u64,
+        scope: &str,
+    ) -> Result<String, String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let claims = AgentJwtClaims {
+            sub: agent_id.to_string(),
+            iss: issuer.to_string(),
+            iat: now,
+            exp: now + ttl_secs,
+            scope: scope.to_string(),
+            task_id: task_id.to_string(),
+            spawned_by: spawned_by.to_string(),
+            workspace_id: None,
+            repo_id: None,
+            orchestrator_type: None,
             wl_pid: None,
             wl_hostname: None,
             wl_compute_target: None,
