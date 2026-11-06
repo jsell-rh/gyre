@@ -1452,8 +1452,11 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                     .load_chain(&chain_att.id)
                     .await
                     .unwrap_or_default();
-                evaluate_attestation_abac(state, &chain, &chain_att, &mr, &entry, &repo, "merge")
-                    .await;
+                let att_eval = evaluate_attestation_abac(
+                    state, &chain, &chain_att, &mr, &entry, &repo, "merge",
+                )
+                .await;
+                record_abac_decision(state, &att_eval, &chain_att.id, &mr, "merge").await;
                 chain_found = true;
             }
         }
@@ -1474,10 +1477,12 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
                                     .load_chain(&leaf.id)
                                     .await
                                     .unwrap_or_default();
-                                evaluate_attestation_abac(
+                                let att_eval = evaluate_attestation_abac(
                                     state, &chain, leaf, &mr, &entry, &repo, "merge",
                                 )
                                 .await;
+                                record_abac_decision(state, &att_eval, &leaf.id, &mr, "merge")
+                                    .await;
                             }
                         }
                     }
@@ -2508,12 +2513,55 @@ pub(crate) async fn report_cascade_test_result(
     }
 }
 
+/// Append a merge-time attestation ABAC evaluation to the policy decision
+/// audit trail — the same `record_decision` store the ABAC middleware writes
+/// for every HTTP request, so merge-time evaluations are queryable via
+/// `list_decisions` instead of living only in log output.
+///
+/// Best-effort: a failed audit append is logged and the merge proceeds. The
+/// decision trail must never gate a merge; merge-time enforcement semantics
+/// are owned by the task-077 revision round (specs/reviews/task-077.md F5).
+async fn record_abac_decision(
+    state: &AppState,
+    result: &crate::policy_engine::EvalResult,
+    attestation_id: &str,
+    mr: &MergeRequest,
+    action: &str,
+) {
+    // Subject: the MR author whose attestation chain was evaluated. When the
+    // author is unknown, use the merge-processor system identity HSI §2
+    // assigns to merge-time ABAC evaluation.
+    let subject_id = mr
+        .author_agent_id
+        .as_ref()
+        .map(|id| id.as_str().to_string())
+        .unwrap_or_else(|| "merge-processor".to_string());
+    let decision = crate::policy_engine::build_decision(
+        result,
+        &subject_id,
+        "agent",
+        action,
+        "attestation",
+        attestation_id,
+    );
+    if let Err(e) = state.policies.record_decision(&decision).await {
+        tracing::warn!(
+            mr_id = %mr.id,
+            attestation_id = %attestation_id,
+            error = %e,
+            "failed to append merge-time attestation ABAC decision to the audit log"
+        );
+    }
+}
+
 /// TASK-061 (§7.2): Evaluate ABAC policies with attestation chain subject attributes.
 ///
 /// Builds an `AttributeContext` from the attestation chain (chain_depth,
 /// root_signer, constraint_count, tenant_id) and evaluates policies with the
-/// given action and resource_type=attestation. Audit-only — result is logged
-/// but not enforced. Returns the evaluation result for testability.
+/// given action and resource_type=attestation. The result does not gate the
+/// merge (merge-time enforcement semantics are owned by the task-077 revision
+/// round); callers append it to the policy decision audit trail via
+/// `record_abac_decision`.
 async fn evaluate_attestation_abac(
     state: &AppState,
     chain: &[gyre_common::Attestation],
@@ -5076,6 +5124,85 @@ mod tests {
             // chain_depth=2 > 1 → deny policy should match.
             assert_eq!(result.effect, PolicyEffect::Deny);
             assert_eq!(result.matched_policy, Some("deny-deep-chain".to_string()),);
+        }
+
+        /// Merge-time attestation ABAC evaluations must land in the policy
+        /// decision audit trail (`list_decisions`) — not only in log output —
+        /// with the MR author as subject, falling back to the
+        /// merge-processor system identity when the MR has no author agent.
+        /// Guards the task-160 round-8 repair: the evaluation results were
+        /// previously discarded at both merge-processor call sites.
+        #[tokio::test]
+        async fn merge_attestation_abac_decision_recorded_in_audit_trail() {
+            let state = test_state();
+
+            let ws = Workspace::new(
+                Id::new("ws-audit"),
+                Id::new("tenant-audit"),
+                "ws-audit",
+                "ws-audit",
+                0,
+            );
+            state.workspaces.create(&ws).await.unwrap();
+            let repo = gyre_domain::Repository::new(
+                Id::new("repo-audit"),
+                Id::new("ws-audit"),
+                "audit-repo",
+                "/tmp/audit-repo.git",
+                0,
+            );
+            state.repos.create(&repo).await.unwrap();
+
+            // Chain: root (depth=0) + derived (depth=1).
+            let chain = vec![root_attestation("user:test-signer"), derived_attestation(1)];
+            let leaf = chain[1].clone();
+
+            // No author agent: the subject must fall back to the
+            // merge-processor system identity, never a fabricated scope.
+            let mut mr = MergeRequest::new(
+                Id::new("mr-audit"),
+                repo.id.clone(),
+                "audit MR",
+                "feat/audit",
+                "main",
+                1000,
+            );
+            mr.workspace_id = Id::new("ws-audit");
+            let entry = MergeQueueEntry::new(Id::new("entry-audit"), mr.id.clone(), 50, 1000);
+
+            let result =
+                evaluate_attestation_abac(&state, &chain, &leaf, &mr, &entry, &repo, "merge").await;
+            record_abac_decision(&state, &result, &leaf.id, &mr, "merge").await;
+
+            let decisions = state
+                .policies
+                .list_decisions(None, Some("attestation"), 10)
+                .await
+                .unwrap();
+            assert_eq!(decisions.len(), 1, "exactly one decision record expected");
+            let d = &decisions[0];
+            assert_eq!(d.subject_id, "merge-processor");
+            assert_eq!(d.subject_type, "agent");
+            assert_eq!(d.action, "merge");
+            assert_eq!(d.resource_type, "attestation");
+            assert_eq!(d.resource_id, leaf.id);
+            assert_eq!(d.decision, result.effect);
+            assert_eq!(d.matched_policy, None);
+
+            // With an author agent, the recorded subject is the author.
+            mr.author_agent_id = Some(Id::new("agent:worker-audit"));
+            let result =
+                evaluate_attestation_abac(&state, &chain, &leaf, &mr, &entry, &repo, "merge").await;
+            record_abac_decision(&state, &result, &leaf.id, &mr, "merge").await;
+
+            let decisions = state
+                .policies
+                .list_decisions(Some("agent:worker-audit"), Some("attestation"), 10)
+                .await
+                .unwrap();
+            assert_eq!(decisions.len(), 1);
+            assert_eq!(decisions[0].subject_id, "agent:worker-audit");
+            assert_eq!(decisions[0].decision, result.effect);
         }
 
         /// Integration test: shallow chain (depth=0) is allowed when deny policy
