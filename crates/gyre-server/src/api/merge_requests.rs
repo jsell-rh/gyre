@@ -1938,7 +1938,6 @@ mod tests {
     // These exercise detect_lineage_deps / reevaluate_lineage_deps against
     // a REAL on-disk git repository built with git plumbing (commit-tree),
     // through the REST MR-creation surface. No git mocks.
-    use gyre_common::Id;
     use std::sync::Arc;
 
     /// Scaffolding: AppState + bare repo with `main`, plus helpers to add
