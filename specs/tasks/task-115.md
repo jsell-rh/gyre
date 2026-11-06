@@ -10,7 +10,7 @@ coverage_sections:
   - "agent-runtime.md §Phase 1: Spec Approval Triggers Orchestration"
   - "agent-runtime.md §Phase 2: Workspace Orchestrator — Cross-Repo Coordination"
   - "agent-runtime.md §Phase 3: Repo Orchestrator — Task Decomposition"
-commits: ["de294c12051b3c1fe1e295c9847ffc0608dd29e8", "f5df0c01b81a0e72ff454f34a6ac6ffa1620778a", "336dd201779aed45093e5b6fe49cbb6ab9bea85e", "fc7939f7d647bb52b35fe53abed237739886b0f6", "30cc63e7bc35165d3841872c54cdf1492e880840", "79b06a7ae27ba9f1da101b8f824ecb08c831cca1", "7f9f113cf2c00c7ce2366d1204a1ed75893fe97d", "e62a9d7e8943ad0ece7495c2ae9b8f3e5ad57d78", "0a13a2ee8fd20987829dab377cebbe75e2edc768", "e2153b406a60c0565053e1792731eef3d1d1557c"]
+commits: ["de294c12051b3c1fe1e295c9847ffc0608dd29e8", "f5df0c01b81a0e72ff454f34a6ac6ffa1620778a", "336dd201779aed45093e5b6fe49cbb6ab9bea85e", "fc7939f7d647bb52b35fe53abed237739886b0f6", "30cc63e7bc35165d3841872c54cdf1492e880840", "79b06a7ae27ba9f1da101b8f824ecb08c831cca1", "7f9f113cf2c00c7ce2366d1204a1ed75893fe97d", "e62a9d7e8943ad0ece7495c2ae9b8f3e5ad57d78", "0a13a2ee8fd20987829dab377cebbe75e2edc768", "e2153b406a60c0565053e1792731eef3d1d1557c", "88e97e0da311432bc73a7af777417458af863aea"]
 ---
 
 ## Spec Excerpt
@@ -91,6 +91,18 @@ When a delegation task is created, the task scheduler spawns the repo orchestrat
 Read `specs/system/agent-runtime.md` §1 (all of it, Phases 1-8) for full context. The spec approval handler is in `gyre-server/src/api/specs.rs` — grep for `approve`. Message bus types are in `gyre-common/src/message.rs` (MessageKind::SpecApproved already exists). Agent spawning is in `gyre-server/src/api/spawn.rs`. Task types (Delegation, Coordination, Implementation) are defined in `gyre-domain/src/task.rs`. MCP tools are in `gyre-server/src/mcp.rs`. The existing `domain_events.rs` handles event emission patterns.
 
 ## Shipped
+
+Rebase repair (merge commit `88e97e0d` on
+`pipeline/task-115/e91537b9bc6c4ec99f465be1db7e52ad-6`, upstream base
+`9bef21a4`): the controller-initiated merge of upstream left one content
+conflict in `crates/gyre-server/src/main.rs` (import list only). Resolved as
+the union — upstream's `bootstrap_default_tenant` (default-Tenant
+materialization before tenant-scoped seeding, task-197) plus this branch's
+`signal_chain` (task-scheduler spawn, Phase 3). Both symbols verified used in
+the merged file and exported by the auto-merged `lib.rs`; `gyre-server` builds
+clean and all focused suites re-run green on the merged tree (see test
+evidence below). No other conflict; no product behavior changed beyond the
+mechanical union.
 
 Repair round (review finding `52d8b49d`, fix commit `de294c12` on
 `pipeline/task-115/86b8a34e24314f26a52dc202f5efbfc4-1`, assignment base
@@ -183,8 +195,21 @@ sub-task repo/workspace scoping (`f5df0c01`) and the
 `reject_spec` fabricated-tenant fallback (exemption deleted,
 `FROZEN_EXEMPTION_COUNT` 7→6).
 
-### Test evidence (all run fresh this round at `de294c12`)
+### Test evidence
 
+Re-run on the merged tree at `88e97e0d` (rebase repair):
+`cargo test -p gyre-server --lib signal_chain` → **18 passed, 0 failed**;
+`--lib api::specs` → 74 passed; `--lib api::orchestrator` → 7 passed.
+`SKIP_WEB_BUILD=1 cargo build -p gyre-server --bin gyre-server` → clean.
+Invariant gates re-run at `88e97e0d`: `check-arch.sh`,
+`check-fail-open-ref-resolution.sh`, `check-fabricated-scope-defaults.sh`,
+`check-scope-literal-defaults.sh`, `check-in-memory-state-stores.sh`,
+`check-inert-enforcement.sh`, `check-byte-slice-truncation.sh`,
+`check-dead-message-kinds.sh`, `check-unbounded-external-http.sh`, and
+`check-task-commit-attribution.sh` — all OK. Evidence file:
+`/tmp/stage/review-evidence/task-115-evidence.txt`.
+
+Originally run at `de294c12` (repair round):
 `cargo test -p gyre-server --lib signal_chain` → **18 passed, 0 failed**
 (6 new regression tests; two of them verified to fail deterministically
 against the pre-fix code by temporarily reverting the fixes:
