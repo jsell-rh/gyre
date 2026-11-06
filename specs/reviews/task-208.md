@@ -51,3 +51,22 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 40 (2026-11-06) — candidate `71ff0da9`, clobber 40; product surfaces re-verified clean, one process finding
+
+Candidate `71ff0da9a53ec4635431b4300727816a6a9a7cf7` (assigned base `7f51c8a7`, already an ancestor via round-39 merge `fddb1b1e` — no new merge needed this round). The candidate commit's entire diff vs its parent `aecd6847` is a `commits:` frontmatter rewrite in `specs/tasks/task-208.md`.
+
+Product verification (fresh probes at the candidate; evidence: `/tmp/stage/review-evidence/task-208-round40-*`):
+
+- Dead-code grep (`get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs` over `crates/` + `web/src/`) → zero matches. Routes and ABAC registrations for `/api/v1/users/me/{agents,tasks,mrs}` absent; router 404 regression test `my_stuff_endpoints_are_removed` present (`users.rs:948`), driving the real router.
+- `UserProfile.svelte` renders exactly the six permitted tabs; the guard test asserts the exact `data-id` list and fails on any my-stuff reintroduction. `api.js` retains only the permitted `users/me/*` surfaces; remaining endpoints' per-handler-auth ABAC-exempt model untouched (`users.rs` diff from base is purely the three handler deletions plus the regression test).
+- Spec amendment, coverage rows (user-management row 22 → `n/a`; HSI row 54 → `implemented`), M22.8 strike, `e2e-flow.sh` 404 inversion, and `docs/api-reference.md` deletions all verified in place.
+- Fresh `npm ci` + `npx vitest run src/__tests__/UserProfile.test.js` → **23/23 passed**.
+- Rust focused probe blocked by infrastructure (static.crates.io unreachable, empty registry cache — same restriction as round 39, not a code defect). Carry evidence: the route-table files (`users.rs`, `api/mod.rs`, `abac_middleware.rs`) are byte-identical from the round-35 repair tip `129dd1d4` (last successful execution of the probe) through this candidate; `git diff b971cf9a..HEAD -- crates/` is empty. Verifier must still run `cargo test --all` (other gyre-server files changed since round 35 via merged bases) and full `cd web && npm test`.
+- Committed `web/dist/` at the candidate is byte-identical to the assigned base's (`git diff 7f51c8a7..HEAD -- web/dist/` empty): the executor's checkpoint `aecd6847` restored the base's stale pre-task-208 bundle (`index-DtVmBKEH.js`, which contains the forbidden my-stuff client) per the documented restore-to-base flow. Not a candidate diff defect, but the verifier/integration must rebuild dist from the merged `web/src` before publishing — the branch-tip bundle must not ship as-is under `SKIP_WEB_BUILD=1`.
+
+Finding (40th occurrence of the documented clobber class — process, not product):
+
+- [-] **The candidate (the attribution-pass commit itself) dropped `ea006d52bb42e96e6f176b02b5390b6cb56a3116` from `commits:`.** Reproduce: `git show HEAD:specs/tasks/task-208.md` lists `[aecd6847, a11cbf7e, ad1121c5, 98fd096e]`; `git merge-base --is-ancestor ea006d52 HEAD` → exit 0 (verified ancestor); its change is live in the candidate tree (`.gitattributes:4` `web/dist/** -whitespace`); and the task's own Shipped section still names `ea006d52` as a landing commit — an internal inconsistency. The attribution pass's path filter (`crates/`, `web/src`, `web/tests`, `web/dist/`) now covers dist commits (so `aecd6847`/`ad1121c5` are listed) but still excludes root `.gitattributes`; the in-repo gate (`scripts/check-task-commit-attribution.sh:114`, regex `^(crates/|web/src|web/tests)`) shares the blind spot. Per the repo invariant ("an unlisted commit is invisible to review scoping") and 39 rounds of precedent, this is a blocking finding. **Repair (mechanical, product untouched):** append `ea006d52bb42e96e6f176b02b5390b6cb56a3116` to `commits:` (five-SHA list, keeping `aecd6847`). Residual for the process owner (40th occurrence): the attribution pass will re-drop it at the next checkpoint until the `dev-attribution.py`/gate path filter covers root `.gitattributes`.
+
+Verdict: **needs-revision** (the single process finding above; every product acceptance criterion verified clean at this candidate).
