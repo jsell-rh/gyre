@@ -81,11 +81,12 @@ def run(execution, path, identity, probe=None):
         image = store.setting('fullsend_image', json.loads((ROOT / '.fullsend/toolchain.json').read_text())['worker_image'])
         bundle = execution.directory / 'verification-input'
         bundle.mkdir(exist_ok=True)
-        for source in ('pipeline-verify.py', 'dev-static-gate.py', 'check-rustfmt-diff.py', 'check-clippy-diff.py', 'verifier-script-overlay.py'):
+        for source in ('pipeline-verify.py', 'dev-static-gate.py', 'check-rustfmt-diff.py', 'check-clippy-diff.py', 'verifier-script-overlay.py', 'pipeline-artifacts.py'):
             shutil.copyfile(ROOT / 'scripts' / source, bundle / source)
         gate = (ROOT / 'scripts/dev-check.sh').read_text().replace('/tmp/gyre', '/sandbox/workspace/checkout')
         (bundle / 'checks.sh').write_text(gate)
-        job = identity | {'image': image, 'repo_url': store.setting('repo_url', 'https://github.com/jsell-rh/gyre.git')}
+        job = identity | {'image': image, 'repo_url': store.setting('repo_url', 'https://github.com/jsell-rh/gyre.git'),
+                          'task':execution.claim['task'],'publication_branch':f"pipeline/verified/{execution.claim['id']}-{execution.claim['token']}"}
         if probe is not None:
             job['probe'] = probe
         (bundle / 'verify-job.json').write_text(json.dumps(job))
@@ -101,14 +102,30 @@ def run(execution, path, identity, probe=None):
                                   '--cpu', '2', '--memory', store.setting('verification_memory', '8Gi'),
                                   '--label', 'gyre.dev/pipeline=' + store.setting('owner'),
                                   '--label', 'gyre.dev/work=' + execution.claim['id'],
-                                  '--detach', '--', 'sleep', 'infinity', timeout=180, check=False)
+                                  '--no-tty', '--detach', '--', 'sleep', 'infinity', timeout=180, check=False)
         except subprocess.TimeoutExpired:
             created = None
+        if created is not None:
+            with execution.log.open('a') as output:
+                output.write('Verification sandbox create (exit '+str(created.returncode)+'):\n'+created.stdout+created.stderr+'\n')
+        else:
+            with execution.log.open('a') as output:output.write('Verification sandbox create acknowledgement timed out; checking the same allocation.\n')
         observed = next((v for v in gateway.inventory() if v['name'] == name), None)
         if observed and observed['labels'].get('gyre.dev/pipeline') != store.setting('owner'):
             raise RuntimeError('verification sandbox ownership differs')
-        if not observed and (created is None or created.returncode):
-            raise Retry('verification sandbox creation was not confirmed')
+        if not observed and created is not None and created.returncode and 'Created sandbox:' not in (created.stdout+created.stderr):
+            import re
+            message=created.stdout+created.stderr
+            gated=bool(re.search(r'timed out waiting\W+for gated workload Pod',message))
+            error=Retry('Gateway timed out waiting for the verifier workload Pod; retry with backoff' if gated else
+                        'verification sandbox creation was rejected; retained output.log has the CLI diagnostic')
+            error.category='sandbox_provisioning'
+            error.diagnostic={'kind':'gated_pod_timeout' if gated else 'creation_rejected','artifact':str(execution.log)}
+            raise error
+        # A timed-out acknowledgement or an accepted asynchronous creation is
+        # uncertain, not absent. Keep this reservation/name while it becomes
+        # visible/Ready instead of deleting an allocation the autoscaler needs.
+
         execution.wait_ready(name)
         execution.remote(name, 'mkdir', '-p', '/tmp/stage', timeout=30)
         for source in sorted(bundle.iterdir()):
@@ -139,6 +156,8 @@ def run(execution, path, identity, probe=None):
                     temporary=raw.with_suffix('.tmp')
                     temporary.write_text(json.dumps(receipt));temporary.chmod(0o600);temporary.replace(raw)
                     validate_receipt(receipt, identity, [probe] if probe is not None else None)
+                    if receipt.get('passed') and probe is None and not isinstance(receipt.get('publication'),dict):
+                        raise Retry('verification receipt lacks the rebuilt artifact publication')
                     receipt['sandbox'] = name
                     (execution.directory / 'remote-verification.json').write_text(json.dumps(receipt))
                     return receipt

@@ -1,0 +1,95 @@
+"""A broken client connection must not restart or truncate a coding process."""
+import io
+import importlib.util
+import base64
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import TestCase
+from unittest.mock import patch
+
+from pipeline.agent_transport import pi_command, stream
+from pipeline.execution import Execution
+from pipeline.store import Store
+
+SCRIPT=Path(__file__).with_name('pipeline-agent.py').resolve()
+
+
+class AgentTransportTest(TestCase):
+    def test_launch_ack_loss_and_poll_failure_resume_exact_bytes_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);store=Store(root/'state');self.addCleanup(store.close)
+            store.put_task('task-001','g','body',{})
+            work=store.enqueue('implement','task-001','g',{})
+            execution=Execution(store,store.claim('implement','test'))
+            marker=root/'executions'
+            code=f'from pathlib import Path; import sys,time; p=Path({str(marker)!r}); p.write_text(p.read_text()+"run\\n" if p.exists() else "run\\n"); print("first",flush=True); time.sleep(.3); print("last",flush=True); print("diagnostic",file=sys.stderr); sys.exit(7)'
+            launch_lost=False;poll_lost=False
+            def invoke(args,**kwargs):
+                nonlocal launch_lost,poll_lost
+                if args[:2]==['sandbox','upload']:
+                    job=json.loads(Path(args[3]).read_text());job['cwd']=str(root)
+                    (root/'remote').mkdir(exist_ok=True)
+                    (root/'remote/command.json').write_text(json.dumps(job))
+                    return subprocess.CompletedProcess(args,0,'','')
+                command=args[args.index('--')+1:]
+                if command[0]=='mkdir':return subprocess.CompletedProcess(args,0,'','')
+                command=[sys.executable,str(SCRIPT),*command[2:]]
+                command=[str(root/'remote') if x.startswith('/tmp/stage/agent-') else x for x in command]
+                result=subprocess.run(command,capture_output=True,text=True,timeout=5)
+                if 'launch' in command and not launch_lost:
+                    launch_lost=True
+                    raise subprocess.TimeoutExpired('lost launch acknowledgement',1)
+                if 'poll' in command and not poll_lost and json.loads(result.stdout.removeprefix('GYRE_AGENT_POLL ')).get('offset',0)>0:
+                    poll_lost=True
+                    raise subprocess.TimeoutExpired('lost output frame',1)
+                return result
+            out,err=io.BytesIO(),io.BytesIO()
+            with patch('pipeline.agent_transport.sys.stdout',SimpleNamespace(buffer=out)),patch('pipeline.agent_transport.sys.stderr',SimpleNamespace(buffer=err)):
+                exit_code=stream(execution,'sandbox',[sys.executable,'-c',code],5,invoke)
+            self.assertEqual(exit_code,7)
+            self.assertEqual(marker.read_text(),'run\n')
+            self.assertEqual(out.getvalue(),b'first\nlast\n')
+            self.assertEqual(err.getvalue(),b'diagnostic\n')
+            self.assertTrue(launch_lost and poll_lost)
+            self.assertEqual(json.loads((root/'remote/result.json').read_text())['exit_code'],7)
+
+    def test_exit_receipt_cannot_overtake_a_terminal_event_written_between_poll_reads(self):
+        spec=importlib.util.spec_from_file_location('remote_agent',SCRIPT);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'stdout').write_bytes(b'first\n');(root/'stderr').write_bytes(b'')
+            read=module.read_chunk
+            def interleave(root,name,offset):
+                value=read(root,name,offset)
+                if name=='stderr' and not (root/'result.json').exists():
+                    with (root/'stdout').open('ab') as out:out.write(b'agent_end\n')
+                    (root/'result.json').write_text(json.dumps({'exit_code':0}))
+                return value
+            with patch.object(module,'read_chunk',side_effect=interleave):first=module.poll(root,0,0)
+            self.assertIsNone(first['result'])
+            second=module.poll(root,first['offset'],first['stderr_offset'])
+            self.assertEqual(base64.b64decode(first['stdout'])+base64.b64decode(second['stdout']),b'first\nagent_end\n')
+            self.assertEqual(second['result'],{'exit_code':0})
+
+    def test_remote_deadline_kills_the_real_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);pid=root/'pid'
+            code=f'import os,time; from pathlib import Path; Path({str(pid)!r}).write_text(str(os.getpid())); time.sleep(60)'
+            (root/'command.json').write_text(json.dumps({'argv':[sys.executable,'-c',code],'cwd':directory,'timeout':.1}))
+            subprocess.run([sys.executable,str(SCRIPT),'launch',directory],check=True,timeout=5)
+            deadline=time.monotonic()+5
+            while not (root/'result.json').exists() and time.monotonic()<deadline:time.sleep(.02)
+            self.assertEqual(json.loads((root/'result.json').read_text())['exit_code'],124)
+            self.assertFalse(Path('/proc/'+pid.read_text()).exists())
+
+    def test_only_the_pinned_pi_invocation_is_intercepted(self):
+        prefix=['sandbox','exec','--name','assigned','--no-tty','--timeout','20','--']
+        command=['sh','-c','FULLSEND_PI_BIN=x; pi --print --mode json']
+        self.assertEqual(pi_command(prefix+command),command)
+        self.assertIsNone(pi_command(prefix+['sleep','60']))
+        self.assertIsNone(pi_command(prefix+['sh','-c','echo pi --print --mode json']))
