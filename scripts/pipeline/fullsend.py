@@ -73,6 +73,15 @@ def adopt(execution, task):
         execution.branch = job['branch']
         execution.phase('AdoptingPublishedOutcome', head=receipt['head'])
         (execution.directory / 'outcome.json').write_text(json.dumps(receipt))
+        provenance={'work':claim['id'],'attempt':int(path.parent.name),'head':receipt['head']}
+        (execution.directory / 'adopted-from.json').write_text(json.dumps(provenance))
+        with execution.log.open('a') as output:
+            output.write(f"Adopted published checkpoint from attempt {path.parent.name}.\n")
+            previous_log=path.parent/'output.log'
+            if previous_log.exists() and previous_log != execution.log:
+                with previous_log.open('rb') as source:
+                    source.seek(0,2);source.seek(max(0,source.tell()-16000))
+                    output.write(source.read(16000).decode('utf-8',errors='replace'))
         return receipt | {'branch': execution.branch}
     return None
 
@@ -99,6 +108,8 @@ def prepare(execution, task, prompt):
     execution.command('git', 'checkout', '--quiet', '-b', branch, seed, cwd=repo)
     if claim['stage'] == 'implement':
         execution.command('git', 'merge', '--no-edit', claim['input']['base'], cwd=repo, check=False)
+        from .catalog import helper
+        helper('pipeline-artifacts').restore_generated(repo,claim['input']['base'])
     task_path = repo / 'specs/tasks' / (task['name'] + '.md')
     task_path.parent.mkdir(parents=True, exist_ok=True)
     task_path.write_text(task['body'])
@@ -111,7 +122,7 @@ def prepare(execution, task, prompt):
     (bundle / 'bin').mkdir(exist_ok=True)
     for name in ('cargo', 'npm', 'npx'):
         shutil.copy(ROOT / 'scripts/dev-build-command.sh', bundle / 'bin' / name)
-    for name in ('pipeline-remote.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py'):
+    for name in ('pipeline-remote.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'pipeline-agent.py', 'pipeline-artifacts.py'):
         shutil.copyfile(ROOT / 'scripts' / name, bundle / name)
     if claim['stage'] in ('review', 'triage'):
         execution.command(sys.executable, str(bundle / 'dev-review-guard.py'), 'snapshot',
@@ -180,7 +191,7 @@ def prepare(execution, task, prompt):
         raise Retry('Set fullsend_image to the pushed digest built from docker/dev-worker/Dockerfile')
     (cfg / 'harness' / (stage + '.yaml')).write_text(json.dumps(harness))
     value = {'state': str(execution.store.directory), 'work': claim['id'], 'token': claim['token'],
-             'branch': branch, 'gateway': execution.store.setting('gateway', 'gyre-gyre'), 'real_openshell': str(Path(real_cli).resolve())}
+             'branch': branch, 'gateway': execution.store.setting('gateway', 'gyre-gyre'), 'real_openshell': str(Path(real_cli).resolve()), 'durable_agent':True}
     (execution.directory / 'fullsend-context.json').write_text(json.dumps(value))
     shim = execution.directory / 'bin'
     shim.mkdir(exist_ok=True)
@@ -228,8 +239,10 @@ def collect(execution, sandbox, success):
     if not job.exists():
         raise ValueError('fullsend assignment bundle missing')
     # Re-upload trusted checkpoint code after the model has finished.
-    for name in ('pipeline-remote.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'job.json'):
+    for name in ('pipeline-remote.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'pipeline-artifacts.py', 'job.json'):
         source = execution.directory / 'bundle' / name
+        if name == 'pipeline-artifacts.py' and not source.exists():
+            source = ROOT / 'scripts' / name
         execution.os('sandbox', 'upload', sandbox, str(source), '/tmp/stage/' + name, '--no-git-ignore', timeout=120)
     result = execution.os('sandbox', 'exec', '-n', sandbox, '--no-login-shell', '--workdir', '/sandbox/workspace/checkout',
                           '--', 'python3', '/tmp/stage/pipeline-remote.py', 'finalize', '1' if success else '0',

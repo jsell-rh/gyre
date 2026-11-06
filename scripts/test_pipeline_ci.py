@@ -105,6 +105,26 @@ class CIReconciliationTests(unittest.TestCase):
             observe(watch,self.store.task('task-001'))
         self.assertEqual(len(self.store.findings('task-001')),1)
 
+    def test_green_generated_conflict_refreshes_integration_without_a_model_finding(self):
+        self.pr.update(mergeStateStatus='DIRTY',mergeable='CONFLICTING',baseRefOid='e'*40,
+                       statusCheckRollup=[dict(self.checks[0],conclusion='SUCCESS')])
+        observer=self.observer()
+        with patch.object(Execution,'command',side_effect=self.command),patch('pipeline.ci.generated_conflict',return_value=(True,['web/dist/index.html'])) as probe:
+            with self.assertRaises(Wait):observe(observer,self.store.task('task-001'))
+            self.assertEqual(probe.call_count,1)
+            self.store.retry(observer.claim['id'],observer.claim['token'],{},delay=0)
+            observer=self.observer()
+            with self.assertRaises(Wait):observe(observer,self.store.task('task-001'))
+            self.assertEqual(probe.call_count,1,'same head/base classification should be reused')
+        data=self.store.task('task-001')['data']
+        self.assertEqual(data['ci']['status'],'artifact_refresh')
+        self.assertFalse(data.get('repair'))
+        self.assertEqual(data['candidate'],self.candidate)
+        self.assertTrue(data['review']['approved'])
+        self.assertEqual(self.store.findings('task-001'),[])
+        self.assertEqual(discover(self.store,'implement','new-main'),[])
+        self.assertEqual(len(discover(self.store,'verify','new-main')),1)
+
     def test_stale_or_recovered_conflict_is_not_handed_to_implementation(self):
         self.pr.update(mergeStateStatus='DIRTY',mergeable='CONFLICTING',baseRefOid='e'*40)
         for changed in ({'headRefOid':'f'*40},{'baseRefOid':'d'*40},
