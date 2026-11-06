@@ -73,23 +73,29 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('operation', choices=['launch', 'run', 'poll'])
     parser.add_argument('--offset', type=int, default=0)
+    parser.add_argument('--resume-after-stop', action='store_true')
     args = parser.parse_args()
     receipt = STAGE / 'verification.json'
     if args.operation == 'launch':
-        # Stable launch identity makes a lost acknowledgement safe to repeat.
-        identity = STAGE / 'step.exit.process.json'
-        if identity.exists():
-            value = json.loads(identity.read_text())
-            stat = Path(f"/proc/{value['pid']}/stat")
-            if receipt.exists() or (stat.exists() and stat.read_text().rsplit(')', 1)[1].split()[19] == value['start']):
-                return
-            raise RuntimeError('previous verification process disappeared without a receipt')
-        with (STAGE / 'step.log').open('ab', buffering=0) as output:
-            child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), 'run'],
-                                     stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True)
-        stat = Path(f'/proc/{child.pid}/stat').read_text().rsplit(')', 1)[1].split()[19]
-        atomic(identity, {'pid': child.pid, 'start': stat, 'boot': Path('/proc/sys/kernel/random/boot_id').read_text().strip()})
-        return
+        import fcntl
+        with (STAGE/'launch.lock').open('a') as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX)
+            # Stable launch identity makes a lost acknowledgement safe to repeat.
+            identity = STAGE / 'step.exit.process.json'
+            if identity.exists():
+                value = json.loads(identity.read_text())
+                stat = Path(f"/proc/{value['pid']}/stat")
+                if receipt.exists() or (stat.exists() and stat.read_text().rsplit(')', 1)[1].split()[19] == value['start']):
+                    return
+                if not args.resume_after_stop:
+                    raise RuntimeError('previous verification process disappeared without a receipt')
+                identity.rename(STAGE/'step.exit.process.before-restart.json')
+            with (STAGE / 'step.log').open('ab', buffering=0) as output:
+                child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), 'run'],
+                                         stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True)
+            stat = Path(f'/proc/{child.pid}/stat').read_text().rsplit(')', 1)[1].split()[19]
+            atomic(identity, {'pid': child.pid, 'start': stat, 'boot': Path('/proc/sys/kernel/random/boot_id').read_text().strip()})
+            return
     if args.operation == 'poll':
         import base64
         log = STAGE / 'step.log'
@@ -103,12 +109,14 @@ def main():
         stat = Path(f"/proc/{identity['pid']}/stat")
         fields = stat.read_text().rsplit(')', 1)[1].split() if stat.exists() else []
         alive = bool(fields and fields[0] != 'Z' and fields[19] == identity['start'])
-        print('GYRE_VERIFY_POLL ' + json.dumps({'offset': offset, 'log': base64.b64encode(data).decode(), 'receipt': value, 'alive': alive}))
+        import runpy
+        usage=runpy.run_path(str(STAGE/'pipeline-usage.py'))['usage']() if (STAGE/'pipeline-usage.py').exists() else {}
+        print('GYRE_VERIFY_POLL ' + json.dumps({'usage':usage,'offset': offset, 'log': base64.b64encode(data).decode(), 'receipt': value, 'alive': alive}))
         return
     job = json.loads((STAGE / 'verify-job.json').read_text())
     identity = {key: job[key] for key in ('candidate', 'base', 'head', 'tree')}
-    env = {**os.environ, 'SKIP_WEB_BUILD': '1', 'CARGO_BUILD_JOBS': '2',
-           'CARGO_TARGET_DIR': '/tmp/gyre-target', 'CARGO_HOME': '/tmp/cargo',
+    env = {**os.environ, 'SKIP_WEB_BUILD': '1', 'CARGO_BUILD_JOBS': '1', 'RUST_TEST_THREADS': '1',
+           'CARGO_TARGET_DIR': '/sandbox/workspace/.gyre-target', 'CARGO_HOME': '/tmp/cargo',
            'RUSTUP_HOME': '/usr/local/rustup', 'GYRE_DEV_IMAGE': job['image'], 'GYRE_VERIFY_KEEP_WEB_DIST':'1'}
     try:
         # Retry Git transport in this sandbox; never reallocate for clone errors.

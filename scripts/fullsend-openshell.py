@@ -43,7 +43,15 @@ def main():
     # Changing a shim process's environment cannot retarget its parent or HyperShell.
     os.environ['GYRE_OPEN_GATEWAY'] = bound_gateway
     def invoke(arguments, **kwargs):
-        return subprocess.run([config['real_openshell'], '-g', bound_gateway, *arguments], env=env, **kwargs)
+        result=subprocess.run([config['real_openshell'], '-g', bound_gateway, *arguments], env=env, **kwargs)
+        if kwargs.get('capture_output') and result.returncode and any(marker in ((result.stderr or '')+(result.stdout or '')) for marker in ('cached OIDC token has expired','OIDC token refresh failed','Unauthenticated','token is expired')):
+            previous=os.environ.get('OPENSHELL');os.environ['OPENSHELL']=config['real_openshell']
+            try:gateway.login(store.directory,force=True)
+            finally:
+                if previous is None:os.environ.pop('OPENSHELL',None)
+                else:os.environ['OPENSHELL']=previous
+            result=subprocess.run([config['real_openshell'], '-g', bound_gateway, *arguments], env=env, **kwargs)
+        return result
     from pipeline.isolation import github_provider, ensure_github_provider
     persistent=github_provider(store)
     shared_create=['provider','create','--name',persistent,'--type',persistent,'--credential','GH_TOKEN']
@@ -106,6 +114,17 @@ def main():
         if not store.reserve(name, execution.claim['id'], execution.claim['token'], 'sandbox', store.setting('slots', 8),
                              {'engine': 'fullsend', 'logical_token': execution.claim['token'], 'repo': '/sandbox/workspace/checkout'}):
             raise RuntimeError('global sandbox capacity is occupied')
+        from pipeline.compute import profile
+        budget = profile(store, execution.claim['task'], execution.claim['stage'])
+        # Never inherit the gateway's 1 GiB / half-CPU defaults for build work.
+        for flag in ('--cpu','--memory'):
+            while flag in args:
+                index=args.index(flag); del args[index:index+2]
+            args=[a for a in args if not a.startswith(flag+'=')]
+        position=args.index('--') if '--' in args else len(args)
+        args[position:position]=['--cpu',budget['cpu'],'--memory',budget['memory']]
+        record=store.db.execute('SELECT data,state FROM resources WHERE name=?',(name,)).fetchone()
+        store.resource_state(name,record['state'],json.loads(record['data']) | {'compute':budget})
         args = [arg for arg in args if arg != '--keep']
         separator = args.index('--') if '--' in args else len(args)
         args[separator:separator] = ['--label', 'gyre.dev/pipeline=' + store.setting('owner'),

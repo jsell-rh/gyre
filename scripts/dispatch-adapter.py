@@ -204,6 +204,8 @@ def main():
             store.set_setting('dispatcher_engine', 'fullsend-dispatcher')
             result = {}
         elif action == 'rows':
+            from pipeline.runtime import observe
+            observe(store)
             result = {'rows':read_rows(store), 'capacity':store.setting('slots',8), 'settings':configuration(store)}
         elif action == 'recover':
             recover(store); result = {}

@@ -25,6 +25,33 @@ publication/merge, CI observation, and cleanup. Review and verification bind to 
 and upstream base. Failures produce durable findings consumed by implementation.
 Infrastructure failures retry with backoff without changing the task contract.
 
+## Thin workers and runtime recovery
+
+Build-capable assignments request one CPU and 4 GiB RAM. Cargo builds and Rust
+unit tests use one worker; the guarded frontend test command also serializes
+Vitest files. A confirmed OOM raises only that task/stage to 8 GiB for its next
+assignment. An OOM at 8 GiB requires attention; connection failures never raise
+memory. Compute choices and the triggering evidence remain in the ledger.
+
+An optional, read-only Kubernetes runtime observer uses `runtime_kube_context`
+and `runtime_namespace` settings to capture workload termination reasons before
+pods disappear. It only records pods matching existing owned resource records;
+cluster diagnostics are not a prerequisite for healthy gateway execution.
+Without an authoritative OOM and its killed allocation size, no memory escalation
+is inferred. The cockpit reports the actual runtime failure instead of calling
+an OOM a model or generic transport failure.
+
+Agent polling refreshes expired gateway authentication. Failed polls preserve
+process identity and output offsets while the sandbox remains Ready, bounded by
+the assignment deadline. A stopped owned sandbox may restart once per claim;
+trusted temporary inputs are restored and Pi resumes its persisted session.
+Agent spool and build cache live on the workspace volume. Another stop requires
+attention. OOM recovery can salvage source before retiring undersized compute;
+it does not restart the coding process at the insufficient tier. Verification
+also reconnects to its detached process and may resume after an owned restart.
+Infrastructure backoff releases the integration lane so another reviewed
+candidate can advance; claims and exact-source checks still gate publication.
+
 ## Scheduling priority and reserved capacity
 
 The harness uses non-preempting priority classes, inspired by Kubernetes

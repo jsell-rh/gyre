@@ -330,7 +330,7 @@ class Store:
             self.db.execute("UPDATE work SET state=?,failures=?,retry_at=?,ready_since=?,result=?,owner=NULL,expires=NULL,updated=? WHERE id=?",
                             ('attention' if attention else 'retry', failures, retry_at,retry_at, json.dumps(reason), time.time(), ident))
             self.event('needs_attention' if attention else 'retry_scheduled', {'reason': reason, 'delay': delay}, row['task'], ident)
-            if attention and row['stage'] == 'verify':
+            if row['stage'] == 'verify' and (attention or reason.get('category') in ('infrastructure','gateway_transport','sandbox_oom','sandbox_stopped','sandbox_provisioning')):
                 lane=self.setting('integration_lane')
                 if lane and lane['task'] == row['task']:
                     self.db.execute("DELETE FROM settings WHERE key='integration_lane'")

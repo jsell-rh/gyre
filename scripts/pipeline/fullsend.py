@@ -122,7 +122,7 @@ def prepare(execution, task, prompt):
     (bundle / 'bin').mkdir(exist_ok=True)
     for name in ('cargo', 'npm', 'npx'):
         shutil.copy(ROOT / 'scripts/dev-build-command.sh', bundle / 'bin' / name)
-    for name in ('pipeline-remote.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'pipeline-agent.py', 'pipeline-artifacts.py'):
+    for name in ('pipeline-remote.py', 'dev-checkpoint.py', 'dev-review-guard.py', 'dev-attribution.py', 'pipeline-agent.py', 'pipeline-artifacts.py', 'pipeline-usage.py'):
         shutil.copyfile(ROOT / 'scripts' / name, bundle / name)
     if claim['stage'] in ('review', 'triage'):
         execution.command(sys.executable, str(bundle / 'dev-review-guard.py'), 'snapshot',
@@ -182,7 +182,7 @@ def prepare(execution, task, prompt):
                'env': {'runner': {'GYRE_FULLSEND_CONTEXT': str(execution.directory / 'fullsend-context.json'),
                                   'GYRE_PIPELINE_ROOT': str(ROOT)},
                        'sandbox': {'GYRE_PIPELINE_STAGE': stage,
-                                   'CARGO_BUILD_JOBS': '2', 'CARGO_TARGET_DIR': '/tmp/gyre-target',
+                                   'CARGO_BUILD_JOBS': '1', 'RUST_TEST_THREADS': '1', 'CARGO_TARGET_DIR': '/sandbox/workspace/.gyre-target',
                                    'CARGO_HOME': '/tmp/cargo', 'RUSTUP_HOME': '/usr/local/rustup',
                                    'PLAYWRIGHT_BROWSERS_PATH': '/usr/local/share/gyre-playwright',
                                    'GYRE_DEV_REAL_CARGO': '/usr/local/cargo/bin/cargo',
@@ -352,6 +352,13 @@ def execute(execution, cfg, repo, shim, env, runtime='pi'):
                 if time.monotonic() >= deadline:
                     raise Retry('fullsend execution exceeded assignment deadline')
                 execution.cancelled.wait(1)
+        runtime_failure=execution.directory/'runtime-failure.json'
+        if runtime_failure.exists():
+            value=json.loads(runtime_failure.read_text())
+            from .execution import Attention
+            error=(Attention if value.get('attention') else Retry)(value['message'])
+            error.category=value['category'];error.diagnostic=value.get('diagnostic')
+            raise error
         result = execution.directory / 'outcome.json'
         diagnostic = diagnose(execution.directory, process.returncode) if process.returncode or not result.exists() else None
         if result.exists():

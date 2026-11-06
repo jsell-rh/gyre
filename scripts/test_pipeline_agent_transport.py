@@ -40,7 +40,7 @@ class AgentTransportTest(TestCase):
                 command=args[args.index('--')+1:]
                 if command[0]=='mkdir':return subprocess.CompletedProcess(args,0,'','')
                 command=[sys.executable,str(SCRIPT),*command[2:]]
-                command=[str(root/'remote') if x.startswith('/tmp/stage/agent-') else x for x in command]
+                command=[str(root/'remote') if x.startswith(('/tmp/stage/agent-','/sandbox/workspace/.gyre-agent-')) else x for x in command]
                 result=subprocess.run(command,capture_output=True,text=True,timeout=5)
                 if 'launch' in command and not launch_lost:
                     launch_lost=True
@@ -58,6 +58,30 @@ class AgentTransportTest(TestCase):
             self.assertEqual(err.getvalue(),b'diagnostic\n')
             self.assertTrue(launch_lost and poll_lost)
             self.assertEqual(json.loads((root/'remote/result.json').read_text())['exit_code'],7)
+
+    def test_ready_sandbox_survives_more_than_five_minutes_of_poll_loss(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store=Store(directory);self.addCleanup(store.close)
+            store.put_task('task-001','g','body',{})
+            store.enqueue('implement','task-001','g',{})
+            execution=Execution(store,store.claim('implement','test'))
+            now=[100.0];polls=[0];launches=[0]
+            def invoke(args,**kwargs):
+                if args[:2]==['sandbox','upload'] or 'mkdir' in args:return SimpleNamespace(returncode=0,stdout='',stderr='')
+                if 'launch' in args:
+                    launches[0]+=1;return SimpleNamespace(returncode=0,stdout='',stderr='')
+                if 'poll' in args:
+                    polls[0]+=1
+                    if polls[0]<=7:
+                        now[0]+=70;raise subprocess.TimeoutExpired('lost poll',30)
+                    frame={'stdout':'','stderr':'','offset':0,'stderr_offset':0,'result':{'exit_code':0},'alive':False}
+                    return SimpleNamespace(returncode=0,stdout='GYRE_AGENT_POLL '+json.dumps(frame),stderr='')
+                raise AssertionError(args)
+            with patch('pipeline.agent_transport.time.monotonic',side_effect=lambda:now[0]),patch('pipeline.agent_transport.time.sleep'),patch('pipeline.runtime.snapshot',return_value={'phase':'Ready'}):
+                result=stream(execution,'owned',['dummy'],1800,invoke)
+            self.assertEqual(result,0)
+            self.assertEqual(launches[0],1)
+            self.assertGreater(now[0]-100,300)
 
     def test_exit_receipt_cannot_overtake_a_terminal_event_written_between_poll_reads(self):
         spec=importlib.util.spec_from_file_location('remote_agent',SCRIPT);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)

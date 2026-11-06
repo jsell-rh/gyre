@@ -54,7 +54,10 @@ def poll(root,offset,stderr_offset,wait=0):
         err_size=(root/'stderr').stat().st_size if (root/'stderr').exists() else 0
         if offset>=out_size and stderr_offset>=err_size:receipt=final
     running=alive(json.loads(identity.read_text())) if identity.exists() else True
-    return {'stdout':out,'stderr':err,'offset':offset,'stderr_offset':stderr_offset,'result':receipt,'alive':running,'long_poll':True}
+    import runpy
+    helper=Path(__file__).with_name('pipeline-usage.py')
+    usage=runpy.run_path(str(helper))['usage']() if helper.exists() else {}
+    return {'usage':usage,'stdout':out,'stderr':err,'offset':offset,'stderr_offset':stderr_offset,'result':receipt,'alive':running,'long_poll':True}
 
 
 def main():
@@ -64,6 +67,7 @@ def main():
     parser.add_argument('--offset',type=int,default=0)
     parser.add_argument('--stderr-offset',type=int,default=0)
     parser.add_argument('--wait',type=float,default=8)
+    parser.add_argument('--resume-after-stop',action='store_true')
     args=parser.parse_args();root=args.root
     identity=root/'identity.json';result=root/'result.json'
     if args.operation=='launch':
@@ -73,7 +77,15 @@ def main():
             if result.exists():return
             if identity.exists():
                 if alive(json.loads(identity.read_text())):return
-                raise RuntimeError('agent supervisor disappeared without an exit receipt; refusing duplicate execution')
+                if not args.resume_after_stop:
+                    raise RuntimeError('agent supervisor disappeared without an exit receipt; refusing duplicate execution')
+                job=json.loads((root/'command.json').read_text())
+                # The host has proved a stop/start transition. Resume the same
+                # persisted Pi session, preserving source and spool offsets.
+                if len(job['argv'])==3 and job['argv'][:2]==['sh','-c']:
+                    job['argv'][-1]=job['argv'][-1].replace(' --print --mode json ',' --continue --print --mode json ',1)
+                atomic(root/'command.json',job)
+                identity.rename(root/'identity.before-restart.json')
             subprocess.Popen([sys.executable,str(Path(__file__).resolve()),'run',str(root)],
                              stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
         return
