@@ -51,3 +51,15 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 39 (2026-10-08) — recurring attribution clobber at candidate b971cf9a (39th occurrence)
+
+Reviewed candidate `b971cf9a5c10661613a08ef8a4bc3607bd570cfc` (assigned base `4871a825`, already merged at `8e73aeb3` with zero task-208-surface drift).
+
+- **Finding (blocking, same class as rounds 2–38):** the candidate's only change vs its parent `f1405a79` (the round-38 repair tip) is rewriting `commits:` in `specs/tasks/task-208.md` from the fully-attributed four-SHA list back to the two-SHA list, dropping `ad1121c5` (dist regeneration — the commit that keeps the RustEmbed'd `SKIP_WEB_BUILD=1` shipped artifact free of the HSI-§12-forbidden my-stuff surface) and `ea006d52` (root `.gitattributes` whitespace-gate exemption). Both SHAs verified ancestors of the candidate (`git merge-base --is-ancestor` exit 0). The in-repo gate `scripts/check-task-commit-attribution.sh` passes only because its product-surface regex (line 114) excludes `web/dist/` and root `.gitattributes` — the documented blind spot. Per the AGENTS.md invariant, an unlisted task-labeled product-surface commit is invisible to verifier review scoping.
+- **All product surfaces re-verified intact at the candidate (fresh probes, zero drift from the round-37 verified state):** dead-code grep over `crates/` + `web/src/` → zero matches; routes/ABAC for `/api/v1/users/me/{agents,tasks,mrs}` absent; router 404 regression test present (`users.rs:948`); committed bundle `index-CYVJLA6W.js` clean of forbidden identifiers with kept-surface identifiers present; `UserProfile.svelte` renders exactly the six compliant tabs; six-tab guard test present (`UserProfile.test.js:93`); spec amendment, M22.8 strike-through, and coverage reclassifications all in place; `git diff 953fe5a7..b971cf9a` empty across every task-208 surface.
+- **Repair remains mechanical:** restore the four-SHA `commits:` list at the tip; no product code needs to change.
+- Rust focused probe could not run in this sandbox (static.crates.io unreachable — infrastructure restriction recorded for remote verification, not a code defect). Verifier must run `cargo test --all` and `cd web && npm test`.
+- Evidence: `/tmp/stage/review-evidence/task-208-round39-*`.
+
+Verdict: **not approved** — single process finding (attribution clobber); product implementation remains sound.
