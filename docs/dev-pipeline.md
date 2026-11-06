@@ -87,8 +87,17 @@ terminal. Raw observations and reconciliation evidence are retained; missing,
 changed-head, or ambiguous evidence stays pending. GitHub still enforces all
 required checks at merge. A merged PR goes directly to confirmation of its
 original verified tree; its own merge must not start another verification.
-Upstream failures and transient CI infrastructure retain their distinct
-recovery paths. PR readiness is visible separately from a successful review run.
+Confirmed PR conflicts (`DIRTY` plus `CONFLICTING`) become durable rebase
+findings immediately, independently of CI readiness or integration-lane ownership.
+The observer rechecks the open PR, exact published head, and current target base
+before handing off. Implementation resumes the retained published head against
+current main, resolves conflicts, and must obtain fresh review and verification
+before the existing PR can merge. The handoff fences obsolete verification,
+releases integration, and creates one repair assignment; later polls cannot
+create duplicate repairs. Unknown mergeability and genuine policy waits remain
+observations. Upstream failures and transient CI infrastructure retain their
+distinct recovery paths. PR readiness is visible separately from a successful
+review run.
 
 A durable **integration lane** admits one candidate at a time to final
 verification, CI, and merge. Implementation and independent review remain
@@ -414,10 +423,19 @@ can bound verification concurrency independently without changing desired slots.
 The verifier checks the exact assigned head and tree, runs unchanged upstream
 and candidate guards, all-target Clippy, the web build, all Rust tests, and frontend
 tests. GitHub's required checks (including browser E2E) still gate merging. A
-complete source-bound receipt is mandatory; transport loss, missing receipts,
-and timeouts retry as infrastructure. Concrete check failures become durable
-implementation findings. Git retries reuse the allocation. Logs stream to the
-cockpit and remain locally; compute is immediately requested for deletion, with
+complete source-bound receipt is mandatory. Every received receipt is saved
+privately as `remote-verification-raw.json` before validation and sandbox deletion;
+only accepted receipts become `remote-verification.json`. Source-integrity
+failures report changed paths and observed HEAD/tree, stop in Needs attention,
+and release integration for other candidates. A new base cannot bypass that
+hold; operator retry resumes it after inspection. Ordinary transport loss,
+missing receipts, and timeouts retry as infrastructure. Concrete check failures become durable
+implementation findings. When testing upstream's scripts against the candidate,
+the verifier records which upstream-only files it introduces. Restoration removes
+only those unchanged files, leaving candidate deletions intact; modified or
+pre-existing files are never blindly cleaned. This prevents the verifier itself
+from contaminating the exact checkout it later checks. Git retries reuse the
+allocation. Logs stream to the cockpit and remain locally; compute is immediately requested for deletion, with
 unconfirmed deletion charged until authoritative absence. Slots zero drains
 verification too. SQLite, gateway authentication, Git publication, and GitHub
 observation remain in the lightweight local control plane.
