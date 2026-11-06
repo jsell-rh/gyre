@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "explorer-canvas.md §5 Progressive Drill-Down"
-commits: ["5cddbb1fbd26137a04a4f308c59029b7a1171f96", "7519d04cec17d1e9f82d965e2b87cef98a0aa241"]
+commits: ["7519d04cec17d1e9f82d965e2b87cef98a0aa241"]
 ---
 
 ## Spec Excerpt
