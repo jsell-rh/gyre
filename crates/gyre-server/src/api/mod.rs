@@ -22,6 +22,7 @@ pub mod explorer_views;
 pub mod federation;
 pub mod gates;
 pub mod graph;
+pub mod invitations;
 pub mod jj;
 pub mod key_binding;
 pub mod llm_config;
@@ -72,6 +73,12 @@ use compose::{compose_apply, compose_status, compose_teardown};
 use compute::{
     close_tunnel, create_compute_target, delete_compute_target, get_compute_target,
     list_compute_targets, list_tunnels, open_tunnel,
+};
+use invitations::{
+    accept_my_workspace_invitation, bulk_invite_to_tenant, decline_my_workspace_invitation,
+    get_invitation_policy, invite_to_tenant, invite_to_workspace, list_my_invitations,
+    list_tenant_invitations, list_workspace_invitations, revoke_tenant_invitation,
+    revoke_workspace_invitation, update_invitation_policy,
 };
 use discover::{discover_agents, get_agent_card, update_agent_card};
 use gyre_common::Id;
@@ -798,6 +805,9 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route("/api/v1/users/me/agents", get(get_my_agents))
         .route("/api/v1/users/me/tasks", get(get_my_tasks))
         .route("/api/v1/users/me/mrs", get(get_my_mrs))
+        // My workspace invitations (task-110 repair: the invitee's pending-
+        // invitations view, spec §Workspace Invitation Flow steps 3-4)
+        .route("/api/v1/users/me/invitations", get(list_my_invitations))
         // API Tokens (HSI §12) — per-handler auth, ABAC-exempt
         .route(
             "/api/v1/users/me/tokens",
@@ -833,6 +843,44 @@ pub fn api_router() -> Router<Arc<AppState>> {
         .route(
             "/api/v1/workspaces/:id/members/:user_id",
             put(update_member_role).delete(remove_member),
+        )
+        // Tenant invitations (task-110, user-management.md §API > Tenant
+        // Invitations). TenantAdmin-only, enforced per-handler.
+        .route("/api/v1/tenant/invite", post(invite_to_tenant))
+        .route("/api/v1/tenant/invite/bulk", post(bulk_invite_to_tenant))
+        .route(
+            "/api/v1/tenant/invitations",
+            get(list_tenant_invitations),
+        )
+        .route(
+            "/api/v1/tenant/invitations/policy",
+            get(get_invitation_policy).put(update_invitation_policy),
+        )
+        .route(
+            "/api/v1/tenant/invitations/:id",
+            delete(revoke_tenant_invitation),
+        )
+        // Workspace invitations (task-110, user-management.md §API >
+        // Workspace Membership). Owner/Admin enforced per-handler.
+        .route("/api/v1/workspaces/:id/invite", post(invite_to_workspace))
+        // Invitee-facing accept/decline (task-110 repair, spec §API >
+        // Workspace Membership: authenticated invitee accepts THEIR
+        // pending invitation — no token).
+        .route(
+            "/api/v1/workspaces/:id/invite/accept",
+            post(accept_my_workspace_invitation),
+        )
+        .route(
+            "/api/v1/workspaces/:id/invite/decline",
+            post(decline_my_workspace_invitation),
+        )
+        .route(
+            "/api/v1/workspaces/:id/invitations",
+            get(list_workspace_invitations),
+        )
+        .route(
+            "/api/v1/workspaces/:id/invitations/:id",
+            delete(revoke_workspace_invitation),
         )
         // Teams (M22.8)
         .route(
