@@ -24,9 +24,17 @@
 #     (e.g., seeding initial data) where each record is independent.
 #   - Functions that use a transactional domain method for the dependent creation.
 #
-# Exempt a line with: // non-atomic-create:ok — <reason>
-# Pre-existing sites are baselined in scripts/non-atomic-creation-exemptions.txt
-# (`path:line` of the reported function, one per line); never add entries.
+# Exempt a function with: // non-atomic-create:ok - <reason> on a line inside
+# the function body (the check's documented mechanism for intentional
+# sites, inherited from the original mainline check).
+#
+# NOTE: there is deliberately NO baseline exemptions file on a candidate
+# branch. scripts/dev-check.sh freezes every scripts/*-exemptions.txt against
+# the mainline merge parent, so a candidate that creates one fails
+# verification ("new verification exemptions forbidden"). A baseline file
+# can only be introduced by a mainline-side process revision. Until then,
+# every site this check flags must be either fixed or classified with an
+# inline marker carrying its specific reason.
 #
 # See: specs/reviews/task-077.md F2 (workspace creation policy seeding)
 #
@@ -79,7 +87,7 @@ def fix_options():
         "  Fix options:\n"
         "    1. Use a transactional domain service method for the entire creation\n"
         "    2. Wrap all creations in a single database transaction\n"
-        "    3. If intentional: add '// non-atomic-create:ok — <reason>' on each create line\n"
+        "    3. If intentional: add '// non-atomic-create:ok - <reason>' inside the function\n"
         "\n"
     )
 
@@ -158,8 +166,9 @@ def main():
     print("")
     print("Fix: Wrap related entity creations in a single transaction or use a")
     print("     transactional domain service method.")
-    print("     Exempt with: // non-atomic-create:ok — <reason>")
-    print("     Pre-existing sites: scripts/non-atomic-creation-exemptions.txt (frozen baseline)")
+    print("     Exempt with: // non-atomic-create:ok - <reason>")
+    print("     (No baseline file exists on candidate branches; a baseline can")
+    print("     only land on main via a process revision.)")
     print("See: specs/reviews/task-077.md F2 (non-atomic workspace+policy creation)")
     print(f"{total} violation(s) found.")
     return 1

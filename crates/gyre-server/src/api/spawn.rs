@@ -332,6 +332,11 @@ pub(crate) async fn spawn_agent_core(
     req: SpawnAgentRequest,
     auth: &AuthenticatedAgent,
 ) -> Result<SpawnAgentResponse, ApiError> {
+    // non-atomic-create:ok - agent+worktree creation with compensating
+    // rollback: if the worktree record (or the interrogation restrict-Deny)
+    // fails to create, the just-created agent record and its token are
+    // deleted (see both rollback paths below), so a failed spawn leaves no
+    // orphaned entities.
     // Verify repo exists
     let repo = state
         .repos

@@ -54,6 +54,10 @@ pub async fn compose_apply(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<ComposeApplyResponse>), ApiError> {
+    // non-atomic-create:ok - per-item task+agent creation with compensating
+    // rollback: if the agent create fails, the already-created task for that
+    // item is deleted (see the rollback below), so a failed item leaves no
+    // partial records; earlier items are independent and intentionally stay.
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
