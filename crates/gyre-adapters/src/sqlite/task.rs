@@ -150,6 +150,7 @@ struct NewTaskRow<'a> {
     created_at: i64,
     updated_at: i64,
     tenant_id: &'a str,
+    workspace_id: &'a str,
     spec_path: Option<&'a str>,
     spec_ref: Option<&'a str>,
     repo_id: &'a str,
@@ -190,6 +191,7 @@ impl TaskRepository for SqliteStorage {
                 created_at: t.created_at as i64,
                 updated_at: t.updated_at as i64,
                 tenant_id: &tenant,
+                workspace_id: t.workspace_id.as_str(),
                 spec_path: t.spec_path.as_deref(),
                 spec_ref: t.spec_ref.as_deref(),
                 repo_id: t.repo_id.as_str(),
@@ -214,6 +216,7 @@ impl TaskRepository for SqliteStorage {
                     tasks::branch.eq(row.branch),
                     tasks::pr_link.eq(row.pr_link),
                     tasks::updated_at.eq(row.updated_at),
+                    tasks::workspace_id.eq(row.workspace_id),
                     tasks::spec_path.eq(row.spec_path),
                     tasks::spec_ref.eq(row.spec_ref),
                     tasks::repo_id.eq(row.repo_id),
@@ -611,5 +614,52 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    /// Review finding F1 (task-115 round 3): create() must persist the
+    /// task's workspace_id. tasks.workspace_id is TEXT NOT NULL DEFAULT
+    /// 'default', so an insert that omits the column silently re-scopes
+    /// the task into the fabricated 'default' workspace: list_by_workspace
+    /// misses it and find_by_id returns a scope nobody set. The same
+    /// assertion covers the upsert DO UPDATE path (a re-created task must
+    /// move to the new scope, not keep the stale one).
+    #[tokio::test]
+    async fn create_persists_workspace_scope() {
+        let (_tmp, s) = setup();
+        let mut t = make_task("t1", "Workspace-scoped");
+        t.workspace_id = Id::new("ws-42");
+        TaskRepository::create(&s, &t).await.unwrap();
+
+        let found = TaskRepository::find_by_id(&s, &t.id)
+            .await
+            .unwrap()
+            .expect("task survives create");
+        assert_eq!(
+            found.workspace_id, t.workspace_id,
+            "create must persist the caller's workspace scope, not the column default"
+        );
+        assert_eq!(
+            TaskRepository::list_by_workspace(&s, &Id::new("ws-42"))
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "newly created task must be visible in its workspace"
+        );
+
+        // Upsert path: re-creating the same id under a different workspace
+        // must carry the new scope through the DO UPDATE set.
+        t.workspace_id = Id::new("ws-99");
+        t.updated_at = 2000;
+        TaskRepository::create(&s, &t).await.unwrap();
+        let found = TaskRepository::find_by_id(&s, &t.id)
+            .await
+            .unwrap()
+            .expect("task survives upsert");
+        assert_eq!(
+            found.workspace_id,
+            Id::new("ws-99"),
+            "upsert DO UPDATE must set workspace_id"
+        );
     }
 }

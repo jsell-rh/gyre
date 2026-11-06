@@ -774,8 +774,8 @@ async fn decompose_delegation(
     // 1. Read the delegation task's approved spec. `spec_ref` carries the
     //    pinned "path@sha" from Phase 2; when it is absent, fall back to
     //    the bare `spec_path` + the ledger's current SHA for tasks created
-    //    by other paths (e.g. MCP task.create). A missing ledger SHA is a
-    //    hard failure — never an empty one: pinning "path@" would decompose
+    //    by other paths (e.g. MCP task.create). A missing or empty SHA is
+    //    a hard failure — never an empty one: pinning "path@" would decompose
     //    against a blob that cannot be identified, converting "cannot
     //    determine the approved blob" into "empty blob is fine" (the same
     //    failure class the fail-open-ref-resolution invariant bans). The
@@ -784,6 +784,13 @@ async fn decompose_delegation(
     let (spec_path, spec_sha) = match task.spec_ref.as_deref() {
         Some(r) if r.contains('@') => {
             let (path, sha) = r.split_once('@').unwrap();
+            if sha.is_empty() {
+                anyhow::bail!(
+                    "delegation task {} has a malformed spec_ref {r:?} with an \
+                     empty SHA; cannot pin the approved blob for decomposition",
+                    task.id
+                );
+            }
             (path.to_string(), sha.to_string())
         }
         _ => match task.spec_path.as_deref() {
@@ -822,11 +829,11 @@ async fn decompose_delegation(
     };
 
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
-    let spec_content = if spec_sha.is_empty() {
-        None
-    } else {
-        crate::spec_registry::read_git_file(&git_bin, &repo.path, &spec_sha, &spec_path).await
-    };
+    // spec_sha is guaranteed non-empty by the resolution above; an
+    // unreadable blob (None) degrades to the deterministic decomposition
+    // inside `decompose`, which warns rather than failing.
+    let spec_content =
+        crate::spec_registry::read_git_file(&git_bin, &repo.path, &spec_sha, &spec_path).await;
 
     // 2. Decompose. Judgment comes from the LLM when configured (the spec
     //    says "the orchestrator is an LLM"); when `state.llm` is None
@@ -2045,6 +2052,49 @@ mod tests {
         assert!(
             subs.is_empty(),
             "no sub-tasks pinned to a malformed empty-SHA spec_ref"
+        );
+    }
+
+    /// Review finding F2 (task-115 round 3): the sibling branch of
+    /// `delegation_without_resolvable_sha_stays_blocked`. A spec_ref that
+    /// carries a `@` but an EMPTY SHA (e.g. "specs/foo.md@", reachable via
+    /// POST /api/v1/tasks or MCP task.create, which do not shape-validate
+    /// spec_ref) must fail the same way: no decomposition against a blob
+    /// that cannot be identified, claim released to Blocked, no sub-tasks
+    /// pinned to the malformed "path@" spec_ref.
+    #[tokio::test]
+    async fn delegation_with_empty_sha_spec_ref_stays_blocked() {
+        let state = chain_state().await;
+
+        let mut t = Task::new(Id::new("del-emptysha"), "Delegation with empty-SHA spec_ref", 0);
+        t.task_type = Some(TaskType::Delegation);
+        t.repo_id = Id::new("r-1");
+        t.workspace_id = Id::new("ws-1");
+        t.spec_path = Some("specs/system/auth.md".to_string());
+        t.spec_ref = Some("specs/system/auth.md@".to_string());
+        state.tasks.create(&t).await.unwrap();
+
+        scheduler_run_once(&state).await.unwrap();
+
+        let after = state
+            .tasks
+            .find_by_id(&Id::new("del-emptysha"))
+            .await
+            .unwrap()
+            .expect("task survives");
+        assert_eq!(
+            after.status,
+            TaskStatus::Blocked,
+            "delegation with a malformed empty-SHA spec_ref is released for retry, not completed"
+        );
+        let tasks = state.tasks.list().await.unwrap();
+        let subs: Vec<_> = tasks
+            .iter()
+            .filter(|t| t.parent_task_id.as_ref() == Some(&Id::new("del-emptysha")))
+            .collect();
+        assert!(
+            subs.is_empty(),
+            "no sub-tasks fabricated from an unpinnable empty-SHA spec_ref"
         );
     }
 
