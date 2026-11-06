@@ -2,13 +2,13 @@
 title: "Implement tenant & workspace invitation flow"
 spec_ref: "user-management.md §Tenant-Level User Onboarding"
 depends_on: []
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "user-management.md §Tenant-Level User Onboarding"
   - "user-management.md §Workspace Invitation Flow"
   - "user-management.md §Invitation Expiry"
   - "user-management.md §Tenant Invitations"
-commits: []
+commits: ["8cf7e5bc625ad7635a46055d00896e892fe4b9eb", "93c2d7d005530a19d164b67a49247fab8823b3bf", "54f7379a8570789e19553890bc59946945410c62", "024b8825778c0c099a61b26e0a06eebd5dcafe7a", "e3cb3304c40627c4137c60840cfe327299bf9c63", "727a7b49e589fc16dde026ec084739166c8923b8", "030354c64674fb570e4dd85cb5acf9a3ac8b93a5", "145f499b11993781082524a95e1119b054854c31", "ba97de27786a8a2758e29ff282597f55c2755c9b", "4345788f601038d4cbcca896ae1e4c4cf3cf3c72", "9a8e75c1ab97d4c4d8c711ad85f4448116c55eac"]
 ---
 
 ## Spec Excerpt
@@ -97,3 +97,87 @@ pub enum InvitationStatus { Pending, Accepted, Declined, Expired, Revoked }
 ## Agent Instructions
 
 Read `specs/system/user-management.md` §Tenant-Level User Onboarding through §Invitation Expiry for full requirements. The existing workspace member endpoints are in `gyre-server/src/api/workspaces.rs` (or grep for `POST /api/v1/workspaces`). User creation is in `gyre-domain/src/user.rs`. Auth handling is in `gyre-server/src/auth.rs`. Route registration is in `gyre-server/src/api/mod.rs`. ABAC route mappings are in `gyre-server/src/abac_middleware.rs`. Check migration numbering with `ls crates/gyre-adapters/src/sqlite/migrations/ | tail -5`.
+## Shipped
+
+**Rebase-resolution round: merge of upstream `9bef21a4` onto candidate
+`f60123f5`.** The branch arrived with an interrupted merge whose only
+unmerged path was `docs/server-config.md` — both sides had appended
+env-var rows at the end of the table. Resolved by keeping BOTH sides:
+our task-110 `GYRE_INVITE_EXPIRY_INTERVAL_SECS` row plus upstream's
+`GO_CALLGRAPH_BIN` (task-072) and `PYRIGHT_LANGSERVER_BIN` (task-074)
+rows. The resolved file is byte-identical to
+`9bef21a4:docs/server-config.md` except for exactly that one inserted
+row (verified by diff before staging). All other paths auto-merged;
+this round's manual resolution touches documentation only — zero Rust
+code — and the invitation implementation is intact in the merged tree
+(`transition_status` present in the ports, the SQLite/Postgres
+invitation adapters, and `mem.rs`; invite routes still registered in
+`api/mod.rs`). Evidence log:
+`/tmp/stage/review-evidence/task-110-rebase-round-2.md`.
+
+**Sandbox restriction this round (not a code defect):** the focused
+test re-run (`cargo test -p gyre-server --lib api::invitations`)
+timed out twice at the tool level while compiling, after which the
+sandbox's shell supervisor (tirith) blocked every shell command for
+the remainder of the assignment window — so the test re-run and the
+`git commit` of the resolved merge could not be executed here. The
+working tree holds the fully resolved, staged merge; the commit and
+test re-run remain for the executor checkpoint / host verification.
+Per assignment instructions this transport restriction is recorded
+rather than treated as a failure.
+
+### Shipped behavior (task-110, prior rounds)
+
+- **Tenant invitations:** domain entities
+  (`gyre-domain/src/invitation.rs`), ports
+  (`gyre-ports/src/invitation.rs`), SQLite/Postgres migration
+  `2026-10-08-000056_invitations` + adapters, and the five specced
+  endpoints: single invite, bulk invite, list with status filter,
+  revoke, magic-link accept/decline. Tokens are CSPRNG-generated and
+  stored only as SHA-256 hashes. Per-tenant `InvitationPolicy`
+  endpoints configure expiry; an hourly background job
+  (`GYRE_INVITE_EXPIRY_INTERVAL_SECS`) marks past-due `Pending`
+  invitations `Expired`.
+- **Workspace invitations:** invite (by `user_id`, `username`, or
+  `email`, per spec), list, revoke, token accept/decline, plus the
+  authenticated invitee surface: `GET /api/v1/users/me/invitations`,
+  `POST /api/v1/workspaces/{id}/invite/accept` and `/invite/decline`
+  (caller must be the invited user; no pending invitation → 404).
+  In-app notification to the invitee carries `kind:
+  workspace_invitation` with `accept_url`/`decline_url`.
+- **Single-use race safety:** `transition_status(id, from, to,
+  accepted_at)` enforces conditional status claims inside the write
+  (SQLite/Postgres conditional `UPDATE`, mem check-and-set); accept
+  claims Pending→Accepted before creating user/memberships, decline,
+  revoke, and expiry use the same transition, so terminal statuses
+  are never overwritten by racing writers.
+- **Authorization:** all routes registered in `api/mod.rs` with ABAC
+  resolver mappings and per-handler enforcement; HTTP-layer negative
+  tests prove non-admins get 403 (tenant invite) and non-members get
+  403 (workspace invite) through the full routing chain.
+- **Docs:** `docs/api-reference.md` covers all invitation routes and
+  selectors; `docs/server-config.md` documents
+  `GYRE_INVITE_EXPIRY_INTERVAL_SECS`.
+
+### Test evidence (prior rounds, re-verified at earlier heads of this
+same Rust lineage)
+
+- `cargo test -p gyre-server --lib api::invitations` — 18 passed / 0
+  failed (lifecycle suite, invitee-surface tests, HTTP 403
+  negative-authz, concurrent-claim exactly-one-winner).
+- `cargo test -p gyre-adapters invitation` — 3 passed / 0 failed
+  (round-trip single-use claim; wrong-source-status transition
+  rejected).
+- `cargo test -p gyre-server --lib abac_middleware` — 9/0;
+  `cargo test -p gyre-server --lib mem::` — 10/0; full
+  `cargo test -p gyre-server --lib` — 1263/0;
+  `cargo test --offline -p gyre-domain --lib invitation` — 4/0.
+- `bash scripts/check-task-commit-attribution.sh` — exit 0 at the
+  prior merge head.
+- This round's merge resolution changes no Rust code, so the above
+  remains the operative evidence for the implementation; the
+  re-run-at-head is deferred to host verification per the sandbox
+  restriction noted above. No TCP listener is bindable in this
+  sandbox (accept() errno 95, /tmp/stage/capabilities.json), so the
+  live-server HTTP smoke also remains for host verification / CI at
+  the PR head.

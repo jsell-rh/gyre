@@ -180,6 +180,8 @@ diesel::table! {
         display_name -> Nullable<Text>,
         timezone -> Nullable<Text>,
         locale -> Nullable<Text>,
+        tenant_id -> Nullable<Text>,
+        global_role -> Text,
     }
 }
 
@@ -350,6 +352,39 @@ diesel::table! {
         accepted -> Integer,
         accepted_at -> Nullable<BigInt>,
         created_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    tenant_invitations (id) {
+        id -> Text,
+        tenant_id -> Text,
+        email -> Text,
+        invited_by -> Text,
+        role -> Text,
+        workspace_ids -> Text,
+        workspace_roles -> Text,
+        status -> Text,
+        token_hash -> Text,
+        expires_at -> BigInt,
+        created_at -> BigInt,
+        accepted_at -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
+    workspace_invitations (id) {
+        id -> Text,
+        tenant_id -> Text,
+        workspace_id -> Text,
+        user_id -> Text,
+        invited_by -> Text,
+        role -> Text,
+        status -> Text,
+        token_hash -> Text,
+        expires_at -> BigInt,
+        created_at -> BigInt,
+        accepted_at -> Nullable<BigInt>,
     }
 }
 
@@ -692,6 +727,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     personas,
     teams,
     workspace_memberships,
+    tenant_invitations,
+    workspace_invitations,
     notifications,
     policies,
     policy_decisions,

@@ -19,6 +19,16 @@ fn json_to_roles(s: &str) -> Vec<UserRole> {
     strs.iter().filter_map(|s| UserRole::from_str(s)).collect()
 }
 
+fn parse_global_role(s: &str) -> gyre_domain::GlobalRole {
+    use gyre_domain::GlobalRole;
+    match s {
+        "TenantAdmin" => GlobalRole::TenantAdmin,
+        // Unknown or legacy values read back as Member — the safe scope,
+        // never a silent escalation.
+        _ => GlobalRole::Member,
+    }
+}
+
 #[derive(Queryable, Selectable)]
 #[diesel(table_name = users)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -33,6 +43,8 @@ struct UserRow {
     display_name: Option<String>,
     timezone: Option<String>,
     locale: Option<String>,
+    tenant_id: Option<String>,
+    global_role: String,
 }
 
 impl From<UserRow> for User {
@@ -55,6 +67,8 @@ impl From<UserRow> for User {
         if let Some(loc) = r.locale {
             u.locale = loc;
         }
+        u.tenant_id = r.tenant_id.map(Id::new);
+        u.global_role = parse_global_role(&r.global_role);
         u
     }
 }
@@ -72,6 +86,8 @@ struct UserRecord<'a> {
     display_name: Option<&'a str>,
     timezone: Option<&'a str>,
     locale: Option<&'a str>,
+    tenant_id: Option<&'a str>,
+    global_role: &'a str,
 }
 
 #[derive(Insertable)]
@@ -102,6 +118,8 @@ impl UserRepository for PgStorage {
                 display_name: Some(u.display_name.as_str()),
                 timezone: Some(u.timezone.as_str()),
                 locale: Some(u.locale.as_str()),
+                tenant_id: u.tenant_id.as_ref().map(|t| t.as_str()),
+                global_role: u.global_role.as_str(),
             };
             diesel::insert_into(users::table)
                 .values(&record)
@@ -171,6 +189,8 @@ impl UserRepository for PgStorage {
                     users::display_name.eq(Some(u.display_name.as_str())),
                     users::timezone.eq(Some(u.timezone.as_str())),
                     users::locale.eq(Some(u.locale.as_str())),
+                    users::tenant_id.eq(u.tenant_id.as_ref().map(|t| t.as_str())),
+                    users::global_role.eq(u.global_role.as_str()),
                 ))
                 .execute(&mut *conn)
                 .context("update user")?;

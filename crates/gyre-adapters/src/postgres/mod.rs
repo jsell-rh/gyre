@@ -18,6 +18,7 @@ pub mod compute_target;
 pub mod container_audit;
 pub mod conversation;
 pub mod dependency;
+pub mod invitation;
 pub mod kv_store;
 pub mod llm_config;
 pub mod merge_queue;
