@@ -6,7 +6,7 @@ depends_on:
 progress: not-started
 coverage_sections:
   - "human-system-interface.md §3 Design Principle: The Built Software Is Always Alive"
-commits: []
+commits: ["c17b6c95e66824fd3b72b21f95b9b95f2a284ec6"]
 ---
 
 ## Spec Excerpt
