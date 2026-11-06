@@ -51,3 +51,19 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 42 (2026-11-06) — candidate `2c0fa361` NOT approved: attribution clobber 41, product intact
+
+Assigned base `88bd81bfcda47da2366c8080c13e69d062682559` (merged at `354c0d7c`, verified ancestor, zero task-208-surface drift — `git diff 88bd81bf..HEAD` touches exactly the task-208 surfaces). Candidate `2c0fa361522cc2372353af96ebcb371a7f0b4041` is a checkpoint attribution-pass commit whose single change rewrites `commits:` from the five-SHA list restored by the round-41 repair (`2c31924a`) back to four SHAs, dropping `ea006d52bb42e96e6f176b02b5390b6cb56a3116` (`build(web): exempt generated dist bundles from whitespace gate (task-208)` — root `.gitattributes:4` `web/dist/** -whitespace`). The dropped SHA is a task-208-labeled commit, a verified ancestor of the candidate (`git merge-base --is-ancestor` exit 0), and its change is live in the candidate tree; the task's own Shipped section still names it as a landing commit (internal inconsistency). Same documented class as clobbers 2–40: the attribution pass's path filter (`crates/`, `web/src`, `web/tests`, `web/dist/`) excludes root `.gitattributes`, and the in-repo gate `scripts/check-task-commit-attribution.sh:114` (regex `^(crates/|web/src|web/tests)`) shares the blind spot, passing exit 0 at this candidate. Per the repo invariant "an unlisted commit is invisible to review scoping" this is blocking. Repair is mechanical, product untouched: restore the five-SHA `commits:` list (keep `aecd6847`, re-append `ea006d52`) at a new tip.
+
+Product surfaces re-verified fresh at this exact candidate (evidence: `/tmp/stage/review-evidence/task-208-round42-*`):
+
+- Dead-code grep (`get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs` over `crates/` + `web/src/`) → zero matches.
+- Routes and ABAC registrations for `/api/v1/users/me/{agents,tasks,mrs}` absent; the only URIs in the tree are the literals inside the regression test `my_stuff_endpoints_are_removed` (`users.rs:948`), a real router test that drives `.oneshot()` GETs on all three URIs and asserts `StatusCode::NOT_FOUND`.
+- `UserProfile.svelte` renders exactly the six permitted tabs (info, tokens, memberships, ledger, notif-prefs, notifications) with the exact-list guard test at `UserProfile.test.js:93`.
+- Spec amendment and coverage rows in place: `user-management.md` §"My Stuff" Views records the supersession; coverage `user-management.md` row 22 `n/a` with note, row 23 task-assigned (task-114); HSI coverage row 54 `implemented`.
+- Fresh `npm ci` + `npx vitest run src/__tests__/UserProfile.test.js` → **23/23 passed**.
+
+Infrastructure restrictions recorded for remote verification (not code defects): static.crates.io unreachable (curl exit 7; no registry cache or `target/`), so the Rust focused probe could not execute here; `git diff 71ff0da9..HEAD -- crates/` is empty and `71ff0da9`'s `crates/` was identical to the round-35 source where `cargo test -p gyre-server my_stuff_endpoints_are_removed` executed and passed (1/1), so that executed probe carries at this exact source. Verifier must still run `cargo test --all` and `cd web && npm test`. The committed `web/dist/` at the candidate is byte-identical to the assignment base (executor restore-to-base flow) and its stale bundle (`index-DtVmBKEH.js`) still contains forbidden identifiers while `web/src` is clean; final integration must rebuild and publish dist remotely from the merged `web/src`.
+
+Verdict: **not approved** (single finding: the attribution clobber; `/tmp/stage/verdict.json`).
