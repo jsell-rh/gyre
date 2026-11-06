@@ -95,11 +95,15 @@ def run(execution, path, identity, probe=None):
         execution.phase('Provisioning', sandbox=name, engine='verification')
         # The reservation precedes create, so even an uncertain response is
         # owned and charged. Readiness polling retains the same allocation.
+        resources=[]
+        for setting,flag in (('verification_cpu','--cpu'),('verification_memory','--memory')):
+            configured=store.setting(setting)
+            if configured is not None:resources.extend([flag,str(configured)])
         try:
             created = execution.os('sandbox', 'create', '--name', name, '--from', image,
                                   '--policy', str(ROOT / '.fullsend/policies/worker.yaml'),
                                   '--provider', store.setting('verification_provider', 'github'), '--no-auto-providers',
-                                  '--cpu', '2', '--memory', store.setting('verification_memory', '8Gi'),
+                                  *resources,
                                   '--label', 'gyre.dev/pipeline=' + store.setting('owner'),
                                   '--label', 'gyre.dev/work=' + execution.claim['id'],
                                   '--no-tty', '--detach', '--', 'sleep', 'infinity', timeout=180, check=False)
