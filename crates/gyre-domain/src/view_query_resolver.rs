@@ -6161,4 +6161,133 @@ mod tests {
         assert!(!result.matched_node_names.contains(&"Unrelated".to_string()));
         assert!(result.warnings.is_empty());
     }
+
+    // ── Highlight emphasis validation (spec §30: emphasis = highlight, heat, tiered_colors) ──
+
+    #[test]
+    fn test_highlight_emphasis_color_validation() {
+        // Invalid color in highlight.matched must be rejected by validate()
+        // with an error naming the highlight.matched field.
+        let mut query = base_query();
+        query.emphasis.highlight = Some(gyre_common::view_query::Highlight {
+            matched: Some(gyre_common::view_query::HighlightStyle {
+                color: Some("not-a-color".to_string()),
+                label: None,
+            }),
+        });
+        let errors = query.validate();
+        assert!(
+            errors.iter().any(|e| e.contains("highlight.matched")),
+            "invalid highlight color must produce an error naming highlight.matched, got: {:?}",
+            errors
+        );
+
+        // Every accepted color form passes: hex, named CSS, rgb function.
+        for valid in ["#ef4444", "tomato", "rgb(255, 0, 0)"] {
+            let mut query = base_query();
+            query.emphasis.highlight = Some(gyre_common::view_query::Highlight {
+                matched: Some(gyre_common::view_query::HighlightStyle {
+                    color: Some(valid.to_string()),
+                    label: Some("Untested".to_string()),
+                }),
+            });
+            let errors = query.validate();
+            assert!(
+                errors.is_empty(),
+                "valid highlight color '{valid}' should pass, got: {:?}",
+                errors
+            );
+        }
+
+        // Highlight with no matched style is legal — nothing to validate.
+        let mut query = base_query();
+        query.emphasis.highlight = Some(gyre_common::view_query::Highlight::default());
+        assert!(query.validate().is_empty());
+    }
+
+    // ── Group resolution edge case: patterns are scoped to the result set ──
+
+    #[test]
+    fn test_group_resolution_restricted_to_result_set() {
+        // A group pattern that also matches a node OUTSIDE the scope's result
+        // set must not pull that node into the group — groups are overlays on
+        // the scoped subgraph, not scope extensions.
+        let nodes = vec![
+            make_node("n1", "AuthService", NodeType::Type),
+            make_node("n2", "auth_handler", NodeType::Function),
+        ];
+        let mut query = base_query();
+        query.scope = Scope::Filter {
+            node_types: vec!["type".to_string()],
+            computed: None,
+            name_pattern: None,
+        };
+        query.groups = vec![gyre_common::view_query::ViewGroup {
+            name: "auth".to_string(),
+            // Substring "auth" matches both nodes by name, but only n1 is in scope.
+            nodes: vec!["auth".to_string()],
+            color: None,
+            label: None,
+        }];
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.matched_nodes, 1, "scope is types only");
+        assert_eq!(
+            result.groups_resolved[0].matched, 1,
+            "group must not include out-of-scope nodes"
+        );
+        assert!(result.groups_resolved[0]
+            .nodes
+            .contains(&"pkg.AuthService".to_string()));
+        assert!(!result.groups_resolved[0]
+            .nodes
+            .contains(&"pkg.auth_handler".to_string()));
+    }
+
+    // ── Narrative ordering: ordered annotations need unambiguous orders ──
+
+    #[test]
+    fn test_narrative_duplicate_order_rejected() {
+        // Narrative steps are ordered annotations; two steps claiming the same
+        // order are ambiguous and must be rejected by validate().
+        let mut query = base_query();
+        query.narrative = vec![
+            NarrativeStep {
+                node: "Alpha".to_string(),
+                text: "first".to_string(),
+                order: Some(1),
+            },
+            NarrativeStep {
+                node: "Beta".to_string(),
+                text: "second".to_string(),
+                order: Some(1),
+            },
+        ];
+        let errors = query.validate();
+        assert!(
+            errors.iter().any(|e| e.contains("Duplicate narrative step order")),
+            "duplicate narrative order must be rejected, got: {:?}",
+            errors
+        );
+
+        // Distinct orders validate cleanly.
+        let mut query = base_query();
+        query.narrative = vec![
+            NarrativeStep {
+                node: "Alpha".to_string(),
+                text: "first".to_string(),
+                order: Some(1),
+            },
+            NarrativeStep {
+                node: "Beta".to_string(),
+                text: "second".to_string(),
+                order: Some(2),
+            },
+        ];
+        let errors = query.validate();
+        assert!(
+            errors.is_empty(),
+            "distinct narrative orders should validate, got: {:?}",
+            errors
+        );
+    }
 }
