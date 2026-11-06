@@ -2,7 +2,7 @@
 title: "Merge dependencies — branch lineage auto-detection"
 spec_ref: "merge-dependencies.md §2. Auto-Detected: Branch Lineage"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "merge-dependencies.md §2. Auto-Detected: Branch Lineage"
 commits: ["6d665d59b6da61bf643ae0875d8fc1dfe0f4efc9", "eede92716ecc3498a859515dd8022c267afb3f97", "27e8e0ad8730c135301b4e48c6b9fc009ba4d1d6", "e390c781981a4ed1463a32e8bf42a06cbbd87761", "15ecde9c5a55dad0fb24aa787ed94712492a9294"]
