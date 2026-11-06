@@ -361,8 +361,7 @@ pub async fn enforce_push_constraints(
         task_spec_sha.as_deref(),
         task_generation,
     );
-    let _ = &binding_result;
-    if false {
+    if !binding_result.valid {
         emit_context_binding_rejection(
             state,
             &binding_result,
