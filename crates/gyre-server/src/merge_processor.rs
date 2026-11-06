@@ -7093,9 +7093,7 @@ mod tests {
         let mut agent_notified = false;
         while let Ok(msg) = rx.try_recv() {
             if let gyre_common::message::Destination::Agent(a) = &msg.to {
-                if a.as_str() == "agent-inflight"
-                    && msg.kind.as_str() == "baseline_moved"
-                {
+                if a.as_str() == "agent-inflight" && msg.kind.as_str() == "baseline_moved" {
                     agent_notified = true;
                 }
             }
