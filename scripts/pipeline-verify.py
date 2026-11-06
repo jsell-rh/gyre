@@ -118,7 +118,8 @@ def main():
     job = json.loads((STAGE / 'verify-job.json').read_text())
     identity = {key: job[key] for key in ('candidate', 'base', 'head', 'tree')}
     env = {**os.environ, 'SKIP_WEB_BUILD': '1', 'CARGO_BUILD_JOBS': '1', 'RUST_TEST_THREADS': '1',
-           'CARGO_TARGET_DIR': '/sandbox/workspace/.gyre-target', 'CARGO_HOME': '/tmp/cargo',
+           'CARGO_PROFILE_DEV_DEBUG': '0', 'CARGO_PROFILE_TEST_DEBUG': '0',
+           'CARGO_TARGET_DIR': '/sandbox/workspace/.gyre-target', 'CARGO_HOME': '/sandbox/workspace/.cargo', 'NPM_CONFIG_CACHE': '/sandbox/workspace/.npm',
            'RUSTUP_HOME': '/usr/local/rustup', 'GYRE_DEV_IMAGE': job['image'], 'GYRE_VERIFY_KEEP_WEB_DIST':'1'}
     try:
         # Retry Git transport in this sandbox; never reallocate for clone errors.

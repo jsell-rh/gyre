@@ -29,7 +29,9 @@ Infrastructure failures retry with backoff without changing the task contract.
 
 Build-capable assignments request one CPU and 4 GiB RAM. Cargo builds and Rust
 unit tests use one worker; the guarded frontend test command also serializes
-Vitest files. A confirmed OOM raises only that task/stage to 8 GiB for its next
+Vitest files. Thin-worker dev/test builds omit DWARF debug symbols (test
+behavior and debug assertions remain enabled) to reduce memory and workspace
+footprint. A confirmed OOM raises only that task/stage to 8 GiB for its next
 assignment. An OOM at 8 GiB requires attention (including across main advances and partial checkpoints); connection failures never raise
 memory. Compute choices and the triggering evidence remain in the ledger.
 

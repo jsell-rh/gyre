@@ -182,8 +182,9 @@ def prepare(execution, task, prompt):
                'env': {'runner': {'GYRE_FULLSEND_CONTEXT': str(execution.directory / 'fullsend-context.json'),
                                   'GYRE_PIPELINE_ROOT': str(ROOT)},
                        'sandbox': {'GYRE_PIPELINE_STAGE': stage,
-                                   'CARGO_BUILD_JOBS': '1', 'RUST_TEST_THREADS': '1', 'CARGO_TARGET_DIR': '/sandbox/workspace/.gyre-target',
-                                   'CARGO_HOME': '/tmp/cargo', 'RUSTUP_HOME': '/usr/local/rustup',
+                                   'CARGO_BUILD_JOBS': '1', 'RUST_TEST_THREADS': '1',
+                                   'CARGO_PROFILE_DEV_DEBUG': '0', 'CARGO_PROFILE_TEST_DEBUG': '0', 'CARGO_TARGET_DIR': '/sandbox/workspace/.gyre-target',
+                                   'CARGO_HOME': '/sandbox/workspace/.cargo', 'NPM_CONFIG_CACHE': '/sandbox/workspace/.npm', 'RUSTUP_HOME': '/usr/local/rustup',
                                    'PLAYWRIGHT_BROWSERS_PATH': '/usr/local/share/gyre-playwright',
                                    'GYRE_DEV_REAL_CARGO': '/usr/local/cargo/bin/cargo',
                                    'GYRE_DEV_REAL_NPM': '/usr/bin/npm', 'GYRE_DEV_REAL_NPX': '/usr/bin/npx'}}}
