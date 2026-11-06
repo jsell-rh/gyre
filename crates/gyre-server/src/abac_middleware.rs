@@ -397,6 +397,11 @@ impl ResourceResolver {
                     None,
                 ),
                 RouteResourceMapping::api(
+                    "/api/v1/workspaces/:id/merge-policy",
+                    "workspace",
+                    None,
+                ),
+                RouteResourceMapping::api(
                     "/api/v1/workspaces/:id/members",
                     "workspace_member",
                     None,

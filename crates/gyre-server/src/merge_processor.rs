@@ -4,8 +4,8 @@ use tracing::{error, info, warn};
 
 use gyre_common::Id;
 use gyre_domain::{
-    AnalyticsEvent, GateStatus, MergeQueueEntry, MergeQueueEntryStatus, MergeRequest, MergeResult,
-    MrStatus, TaskPriority,
+    AnalyticsEvent, GateResult, GateStatus, MergeQueueEntry, MergeQueueEntryStatus, MergeRequest,
+    MergeResult, MrStatus, TaskPriority,
 };
 use uuid::Uuid;
 
@@ -134,6 +134,72 @@ async fn trip_circuit_breaker(
     }
 
     Ok(())
+}
+
+/// Record the §9 meta-spec drift warning as a gate result on the MR
+/// (meta-spec-reconciliation.md §9).
+///
+/// The gate result carries `GateStatus::Passed` — the warning is
+/// informational and never blocks a merge by itself (§9: "warn, don't
+/// block"); blocking is decided by the workspace merge policy in the
+/// caller. Idempotent across merge-processor retry cycles: an existing
+/// drift gate result for the MR is updated in place instead of duplicated.
+async fn record_meta_spec_drift_warning(
+    state: &AppState,
+    mr: &MergeRequest,
+    drift: &crate::reconciliation::MetaSpecDrift,
+) {
+    let output = crate::reconciliation::format_meta_spec_drift_warning(drift);
+    let now = crate::api::now_secs();
+
+    let existing = state
+        .gate_results
+        .list_by_mr_id(mr.id.as_str())
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|r| r.gate_id.as_str() == crate::reconciliation::META_SPEC_DRIFT_GATE_ID);
+
+    let saved = match existing {
+        Some(r) => {
+            state
+                .gate_results
+                .update_status(
+                    &r.id.to_string(),
+                    GateStatus::Passed,
+                    Some(now),
+                    Some(now),
+                    Some(output.clone()),
+                )
+                .await
+        }
+        None => {
+            let result = GateResult {
+                id: Id::new(Uuid::new_v4().to_string()),
+                gate_id: Id::new(crate::reconciliation::META_SPEC_DRIFT_GATE_ID.to_string()),
+                mr_id: mr.id.clone(),
+                status: GateStatus::Passed,
+                output: Some(output.clone()),
+                started_at: Some(now),
+                finished_at: Some(now),
+            };
+            state.gate_results.save(&result).await
+        }
+    };
+    if let Err(e) = saved {
+        warn!(
+            mr_id = %mr.id,
+            error = %e,
+            "failed to record meta-spec drift gate result"
+        );
+    }
+
+    warn!(
+        mr_id = %mr.id,
+        produced_set = %drift.produced_set_sha,
+        current_set = %drift.current_set_sha,
+        "meta-spec drift detected (warn only, merge proceeds)"
+    );
 }
 
 /// Check if all `depends_on` for the given MR have status `Merged`.
@@ -594,6 +660,53 @@ async fn merge_atomic_group(
             "merge queue paused for repo, leaving atomic group queued"
         );
         return Ok(());
+    }
+
+    // meta-spec-reconciliation.md §9 — drift gate for every group member
+    // before the transactional merge starts. A strict-policy block leaves
+    // all members queued (retried each cycle until reconciled or relaxed);
+    // warn-only drift records a gate result per member and the group merges.
+    for ge in &group_entries {
+        let member_mr = match state
+            .merge_requests
+            .find_by_id(&ge.merge_request_id)
+            .await
+        {
+            Ok(Some(m)) => m,
+            _ => continue,
+        };
+        let Some(drift) = crate::reconciliation::mr_meta_spec_drift(state, &member_mr).await
+        else {
+            continue;
+        };
+        let policy =
+            crate::merge_policy::merge_policy_or_default(state, &member_mr.workspace_id).await;
+        if policy.require_current_meta_spec_set {
+            let reason = format!(
+                "meta-spec drift: code produced under meta-spec set {}, current is {} \
+                 (require_current_meta_spec_set)",
+                drift.produced_set_sha, drift.current_set_sha
+            );
+            warn!(
+                group = %group_name,
+                mr_id = %member_mr.id,
+                produced_set = %drift.produced_set_sha,
+                current_set = %drift.current_set_sha,
+                "meta-spec drift blocked atomic group merge (strict workspace policy)"
+            );
+            for ge2 in &group_entries {
+                let _ = state
+                    .merge_queue
+                    .update_status(
+                        &ge2.id,
+                        MergeQueueEntryStatus::Queued,
+                        Some(reason.clone()),
+                    )
+                    .await;
+            }
+            return Ok(());
+        }
+        record_meta_spec_drift_warning(state, &member_mr, &drift).await;
     }
 
     // Record the target branch HEAD before starting, for rollback.
@@ -1136,6 +1249,44 @@ async fn process_next(state: &AppState) -> anyhow::Result<()> {
             .update_status(&entry.id, MergeQueueEntryStatus::Queued, None)
             .await?;
         return Ok(());
+    }
+
+    // meta-spec-reconciliation.md §9 — meta-spec drift merge gate.
+    //
+    // The MR's provenance attestation records the meta-spec set SHA under
+    // which the code was produced; compare it against the workspace's
+    // current set. Default: warn only — a `[WARN] meta-spec-drift` gate
+    // result is recorded and the merge proceeds (§9: "warn, don't block").
+    // When the workspace merge policy sets `require_current_meta_spec_set`,
+    // the drift converts to a hard block: the entry stays queued until the
+    // code is reconciled under the current set or the policy is relaxed.
+    // MRs without an attestation (or workspaces without a bound set) skip
+    // the check gracefully.
+    if let Some(drift) = crate::reconciliation::mr_meta_spec_drift(state, &mr).await {
+        let policy =
+            crate::merge_policy::merge_policy_or_default(state, &mr.workspace_id).await;
+        if policy.require_current_meta_spec_set {
+            let reason = format!(
+                "meta-spec drift: code produced under meta-spec set {}, current is {} \
+                 (require_current_meta_spec_set)",
+                drift.produced_set_sha, drift.current_set_sha
+            );
+            warn!(
+                entry_id = %entry.id,
+                mr_id = %mr.id,
+                produced_set = %drift.produced_set_sha,
+                current_set = %drift.current_set_sha,
+                "meta-spec drift blocked merge (strict workspace policy)"
+            );
+            // The entry was claimed as Processing above; put it back so it
+            // is retried once the drift is reconciled or the policy relaxed.
+            state
+                .merge_queue
+                .update_status(&entry.id, MergeQueueEntryStatus::Queued, Some(reason))
+                .await?;
+            return Ok(());
+        }
+        record_meta_spec_drift_warning(state, &mr, &drift).await;
     }
 
     // Note: Atomic group readiness (step 4c) is already verified in the

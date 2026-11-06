@@ -380,6 +380,96 @@ pub async fn get_workspace_presence(
     Ok(Json(entries))
 }
 
+// ---------------------------------------------------------------------------
+// Workspace merge policy (meta-spec-reconciliation.md §9)
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct MergePolicyResponse {
+    pub require_current_meta_spec_set: bool,
+}
+
+impl From<crate::merge_policy::WorkspaceMergePolicy> for MergePolicyResponse {
+    fn from(p: crate::merge_policy::WorkspaceMergePolicy) -> Self {
+        Self {
+            require_current_meta_spec_set: p.require_current_meta_spec_set,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct UpdateMergePolicyRequest {
+    pub require_current_meta_spec_set: Option<bool>,
+}
+
+/// GET /api/v1/workspaces/:id/merge-policy
+///
+/// Returns the workspace merge policy — the §9 strict-mode switch for the
+/// meta-spec drift merge gate. Default: warn only.
+pub async fn get_merge_policy(
+    State(state): State<Arc<AppState>>,
+    auth: AuthenticatedAgent,
+    Path(id): Path<String>,
+) -> Result<Json<MergePolicyResponse>, ApiError> {
+    let workspace_id = Id::new(&id);
+
+    // Verify workspace exists and the caller's tenant owns it.
+    let ws = state
+        .workspaces
+        .find_by_id(&workspace_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {id} not found")))?;
+    if !auth.roles.contains(&UserRole::Admin) && ws.tenant_id != Id::new(&auth.tenant_id) {
+        return Err(ApiError::NotFound(format!("workspace {id} not found")));
+    }
+
+    let policy = crate::merge_policy::get_merge_policy(&state, &workspace_id).await?;
+    Ok(Json(policy.into()))
+}
+
+/// PUT /api/v1/workspaces/:id/merge-policy (Admin only)
+///
+/// Update the workspace merge policy (partial update). Admin-only: the
+/// strict-mode flag converts the §9 meta-spec drift warning into a hard
+/// merge block — a governance control that determines whether in-flight MRs
+/// can merge during reconciliation, so non-Admin callers (Developers,
+/// Agents) must not be able to flip it (same NEW-26 rule as the meta-spec-set
+/// binding).
+pub async fn set_merge_policy(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    auth: AuthenticatedAgent,
+    Json(req): Json<UpdateMergePolicyRequest>,
+) -> Result<Json<MergePolicyResponse>, ApiError> {
+    // Admin-only: see doc comment above.
+    if !auth.roles.contains(&UserRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "only Admin role may update workspace merge policy".to_string(),
+        ));
+    }
+
+    let workspace_id = Id::new(&id);
+
+    // Verify workspace exists and the caller's tenant owns it.
+    let ws = state
+        .workspaces
+        .find_by_id(&workspace_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {id} not found")))?;
+    if ws.tenant_id != Id::new(&auth.tenant_id) {
+        return Err(ApiError::NotFound(format!("workspace {id} not found")));
+    }
+
+    // Apply partial update.
+    let mut policy = crate::merge_policy::get_merge_policy(&state, &workspace_id).await?;
+    if let Some(require) = req.require_current_meta_spec_set {
+        policy.require_current_meta_spec_set = require;
+    }
+    crate::merge_policy::set_merge_policy(&state, &workspace_id, &policy).await?;
+
+    Ok(Json(policy.into()))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::mem::test_state;

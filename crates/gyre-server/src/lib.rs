@@ -25,6 +25,7 @@ pub mod llm_helpers;
 pub mod llm_rate_limit;
 pub(crate) mod mcp;
 pub(crate) mod mem;
+pub mod merge_policy;
 pub mod merge_processor;
 pub(crate) mod messages;
 pub mod metrics;
