@@ -3,12 +3,12 @@ title: "Canonical Navigation — Scope-Aware Content Routing"
 spec_ref: "ui-navigation.md §2, §3, §7, §10"
 depends_on:
   - task-082
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "ui-navigation.md §2 Workspace Home"
   - "ui-navigation.md §3 Repo Mode"
   - "ui-navigation.md §10 Cross-Workspace View"
-commits: []
+commits: ["3eff386beabdf30095bf5b0f9569b1df4ef3ab33", "f46b2f8f9ad32fb65f0731c37b58ba8f85987023", "270b8fdf1b00d448adb2097c2639f2d548e8d397", "1077f0819b9d08ab1b0d291222827becffb8f2f8"]
 ---
 
 ## Authority and Scope
@@ -62,3 +62,92 @@ loaders before editing. Reuse working behavior. Do not introduce the permanent
 sidebar, legacy scope breadcrumb control, or Architecture-as-default routing
 from the superseded plan. Do not mark unrelated partial navigation features
 verified as a side effect of this task.
+
+## Shipped
+
+Scope-aware content routing on the canonical workspace-home / repo-mode
+navigation (no sidebar; the superseded 6×3 matrix is not restored). The
+acceptance checkboxes above are left unchecked intentionally: the assigned
+contract prose is immutable from the implementation side, and satisfaction
+is claimed here, per section, with the verifying evidence below.
+
+- **Cross-workspace (§10):** `CrossWorkspaceHome` renders all five sections
+  from real per-workspace API results — Decisions via `api.myNotifications()`
+  (response shape `{notifications:[...]}` fixed), Workspaces list with health,
+  Specs via `specsForWorkspace(null)` with `workspace_id`/`repo_id` on every
+  row, Briefing via per-workspace `getWorkspaceBriefing` client-side
+  aggregation, Agent Rules via `getMetaSpecs(scope=Global)`. Item clicks call
+  `goToEntityDetail`, which resolves the entity's repo, derives the owning
+  workspace from `workspace_id`/repo lookup, switches `currentWorkspace` to
+  it (error toast when the workspace is not in the caller's membership — no
+  fabricated scope identity), persists the selection, and reloads scoped
+  data. Tenant settings (`/all/settings`) and tenant agent-rules stay
+  admin-gated (`onSettings`/`onManageAgentRules` undefined for non-admins).
+- **Workspace home (§2):** every section loader in `WorkspaceHome.svelte`
+  queries with the selected workspace's id behind one generation guard
+  (`wsLoadGen`) — the workspace-change effect bumps it once; delayed
+  old-scope responses (success or failure) are discarded. Agent Rules merges
+  `getMetaSpecs(scope=Workspace&scope_id=:id)` with ALL tenant
+  `scope=Global` rules, grouped by kind with Tenant/Workspace scope badges
+  and 🔒 on required; a failed lookup surfaces as error + Retry, never an
+  empty successful set. Settings/rule management use the canonical routes
+  `/workspaces/:slug/settings` and `/workspaces/:slug/agent-rules`.
+- **Repo mode (§3/§7):** `goToRepo` defaults to the Specs tab; all tabs are
+  URL-addressable via `/workspaces/:slug/r/:repo/:tab` (`parseUrl`/`urlFor`
+  implement the §7 table incl. multi-segment spec paths and entity detail
+  routes); popstate restores workspace, repo (with `repoIdCache` + API
+  resolution fallback), and tab. The Architecture tab has the
+  Graph | Briefing control-bar sub-tab (`?subTab=briefing` deep link);
+  repo Briefing is narrowed server-side (`?repo_id=` on GET briefing and in
+  the `briefing/ask` body; `assemble_briefing` filters MRs, tasks,
+  cross-workspace links, spec-assertion notifications, and completed agents
+  by `agent.repo_id`; the REST handler 404s unknown repos and 403s
+  cross-workspace repos; MCP resource delegates unchanged at workspace
+  scope). Repo Decisions (`Inbox.svelte` scope=repo) filters client-side on
+  exact `repo_id` so workspace-only notifications (`repo_id: NULL`) never
+  appear under a repo. Drawer/section navigation at repo scope stays in the
+  repo (Briefing → Architecture sub-tab, not workspace home).
+- **Scope transitions (§4 requirements):** client-side navigation with
+  pushState/popstate throughout; `WorkspaceHome`, `Inbox`, and `Briefing`
+  each carry generation guards so a delayed old-scope response cannot
+  overwrite the new scope's content; workspace lookup failures surface as
+  error toasts/states (cross-workspace unknown-workspace toast, Agent Rules
+  error + Retry, per-section load errors) rather than empty success.
+
+Verification (rebase round at merge commit `1077f081`, bringing the
+branch onto assigned base `9bef21a4`; evidence:
+`/tmp/stage/review-evidence/task-083-merge-9bef21a4.txt`):
+
+- Merge conflicts resolved: all conflicts were `web/dist` build artifacts
+  (rename/rename on the hashed elk chunk, `index.html` content); resolved
+  by full rebuild from the merged source (`npm ci` locked versions,
+  `npm run build` → EXIT=0, fresh `elk.bundled-DJ2z4W7x.js` /
+  `index-J4HjbaJB.js`). No source conflicts (grep for conflict markers
+  across `web/src`, `crates`, `docs`, `scripts`, `specs` → no matches);
+  the base's deletions (`FlowCanvas.svelte`, `ExplorerFilterPanel.svelte`,
+  related tests) were verified as deliberate base-side changes the task
+  branch never modified (no modify/delete conflicts), and the merged
+  source builds cleanly through them.
+- Focused probes after resolution: the 17 navigation- and Inbox-related
+  test files (Inbox, api, BidirectionalNav, ScopeTransitions, NoSidebar,
+  CrossWorkspaceHome, WorkspaceHome ×5, WorkspaceDrawerSectionNav,
+  RepoMode ×2, ExplorerViewScope, ExplorerViewDrillUrl, Briefing) →
+  **266 passed / 0 failed** (41 pre-existing skips). Merge-integrity
+  probe: `scripts/check-abac-route-registry.sh` on the merged tree → OK
+  (the base touched `mcp.rs`; no duplicate resolver entries introduced).
+- Prior rounds' evidence (review fixes F1–F3 at head `2ff2e596`, full
+  frontend suite 1598 passed / 0 failed, cargo `api::graph::tests` 28,
+  `briefing` 24, `graph_integration` 37, all 0 failed; earlier rebase
+  round `38134ff8` onto base `5df14f344` with the same 266/0 focused
+  navigation probe) covers the task-side source merged here; this
+  round's diff is the rebase resolution plus the dist rebuild. Full
+  suites, architecture checks, and exact-head GitHub CI remain owned by
+  verification and publication. Host verification items are unchanged:
+  Playwright e2e needs a TCP listener (errno 95 in this sandbox, see
+  `/tmp/stage/capabilities.json`).
+
+Contract note for the reviewer: an earlier attempt ticked the acceptance
+checkboxes in this file, which the pipeline's `requirement_parts` treats as
+contract prose and flags as a contract change. The assigned text is restored
+byte-for-byte here; only `progress:`, `commits:`, and this `## Shipped`
+section (an operational section) differ from the assignment.

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, waitFor } from '@testing-library/svelte';
+import { render, waitFor, fireEvent } from '@testing-library/svelte';
 
 vi.mock('../lib/api.js', () => ({
   api: {
@@ -10,6 +10,9 @@ vi.mock('../lib/api.js', () => ({
     allRepos: vi.fn().mockResolvedValue([]),
     repoGraph: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     getGraphConcept: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
+    getWorkspaceBriefing: vi.fn().mockResolvedValue({
+      completed: [], in_progress: [], cross_workspace: [], exceptions: [], metrics: null,
+    }),
   },
 }));
 
@@ -95,5 +98,55 @@ describe('ExplorerView scope branching', () => {
     await waitFor(() => {
       expect(container.innerHTML).not.toContain('Architecture');
     });
+  });
+});
+
+describe('Architecture sub-tab control (repo scope, ui-navigation.md §3)', () => {
+  // Regression: a drawer Briefing click while the Architecture tab is
+  // already active must switch the rendered content, not just rewrite the
+  // ?subTab= URL param. App drives the sub-tab through the archSubTab prop
+  // (single source of truth); the URL param alone only seeds a fresh mount.
+  it('switches to Briefing content when the archSubTab prop changes to briefing', async () => {
+    const api = (await import('../lib/api.js')).api;
+    const props = {
+      scope: { type: 'repo', workspaceId: 'ws-1', repoId: 'repo-1' },
+      archSubTab: 'graph',
+    };
+    const { container, rerender } = render(ExplorerView, { props });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="arch-subtab-briefing"]')).toBeTruthy();
+    });
+    // Graph is the visible sub-tab; no Briefing content rendered.
+    expect(container.querySelector('[data-testid="arch-briefing"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="arch-subtab-briefing"]').classList.contains('active')
+    ).toBe(false);
+
+    // App state change after the drawer click (repoArchSubTab → 'briefing')
+    // must drive the content switch.
+    await rerender({ ...props, archSubTab: 'briefing' });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="arch-briefing"]')).toBeTruthy();
+    });
+    // The Briefing sub-tab fetches the real repo-scoped narrative.
+    await waitFor(() => expect(api.getWorkspaceBriefing).toHaveBeenCalledWith('ws-1', null, 'repo-1'));
+  });
+
+  it('control-bar buttons report sub-tab changes to the parent', async () => {
+    const onArchSubTabChange = vi.fn();
+    const { container } = render(ExplorerView, {
+      props: {
+        scope: { type: 'repo', workspaceId: 'ws-1', repoId: 'repo-1' },
+        archSubTab: 'graph',
+        onArchSubTabChange,
+      },
+    });
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="arch-subtab-graph"]')).toBeTruthy();
+    });
+    await fireEvent.click(container.querySelector('[data-testid="arch-subtab-briefing"]'));
+    expect(onArchSubTabChange).toHaveBeenCalledWith('briefing');
+    await fireEvent.click(container.querySelector('[data-testid="arch-subtab-graph"]'));
+    expect(onArchSubTabChange).toHaveBeenCalledWith('graph');
   });
 });
