@@ -134,30 +134,39 @@ Tests are written at two levels:
   filtered aggregation, limit-ignored aggregation, entity_type/workspace
   filter restriction, non-matching query aggregates nothing.
 
-### Execution status (round 9)
+### Execution status (round 10 — checkpoint recovery)
 
-This sandbox cannot reach crates.io (TCP connection refused to
-index/static.crates.io; no cached registry, no prebuilt target/), so
-`cargo test -p gyre-server --test search_wiring` and the adapter suites
-could not be executed here — an infrastructure restriction, not a code
-defect. Remote verification must run:
+The worker lease expired after round 9; the source was recovered as
+checkpoint commit fe303595 and merged with the current base 7f8b5d9c
+(merge e572e17d). Integrity was verified this round by diffing every
+task-153 product file between the round-9 head 6da69d14 and the recovered
+HEAD: all of them are byte-identical, so the implementation described
+above — including the round-9 rustfmt repair of the gyre-ports re-export —
+is intact. The only task-file difference added by the recovery itself is a
+one-line `#[allow(clippy::double_must_use)]` on the `SearchPort` trait
+(async_trait generates must_use futures), which is rustfmt-clean.
+
+Because the original frontmatter SHAs (6da69d14, 60493e27, 27503257,
+774499be) are unreachable after checkpoint recovery, the task's `commits:`
+list was refreshed to the recovered scoped commit
+`fe3035959c9d4690a122719a6220b6bd835f0b52` via the controller's
+attribution tool (commit 586a322b).
+
+This sandbox still cannot reach crates.io (no registry cache, no vendored
+deps, no prebuilt target/ — HTTP 000 to index/static.crates.io), so the
+suites above could not be executed here — an infrastructure restriction,
+not a code defect. Remote verification must run:
 
     cargo test -p gyre-server --test search_wiring
     cargo test -p gyre-adapters search
 
-Offline checks that ran this round and pass: `rustfmt --check` on
-crates/gyre-ports/src/lib.rs, `python3 scripts/check-rustfmt-diff.py
-d81b0fe4ab93abff06089432e4a8fca5be6e5d31` (exit 0, 9 Rust files clean),
-and `check-task-commit-attribution.sh` after adding this round's commit
-to the frontmatter (raw logs: /tmp/stage/review-evidence/). Earlier
-rounds' logs remain in the same directory (`*-round8.log` and older).
+Offline checks that ran this round against the recovered HEAD and pass
+(raw logs in /tmp/stage/review-evidence/*-round10.*):
 
-### Round 9 review repair
-
-Review finding fbb29ab8: the one-line `pub use search::{...}` re-export
-added to `crates/gyre-ports/src/lib.rs` by task commit 774499be was 103
-chars, over rustfmt's 100-col max_width, so the CI Format job
-(check-rustfmt-diff.py) failed on any PR carrying the diff. Fixed in
-commit 6da69d14 by wrapping the use item as rustfmt suggests; the
-repo's changed-lines policy now passes against the review base
-d81b0fe4. No production behavior changed.
+- `python3 scripts/check-rustfmt-diff.py 7f8b5d9c` — exit 0, changed Rust
+  lines clean.
+- `scripts/check-task-commit-attribution.sh` — OK after the attribution
+  refresh above.
+- `scripts/check-abac-route-registry.sh` — OK; both new routes resolve in
+  the ABAC registry (abac_middleware.rs:378-379).
+- `scripts/check-arch.sh` — OK.
