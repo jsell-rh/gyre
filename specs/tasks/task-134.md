@@ -144,12 +144,20 @@ and the review-round TTL repair `72c5bb03`).
 
 ### Test evidence
 
-This sandbox, branch `pipeline/task-134/4bf5857a…-1` (this round's head
-`72c5bb03`, evidence in `/tmp/stage/review-evidence/task-134-verification.md`):
-gate_executor 37/37 (including both new TTL regression tests and both e2e
-review tests, which run here — this sandbox permits loopback HTTP),
-task134_review_probe 7/7. Both TTL regression tests were verified to FAIL
-against the pre-fix fixed-TTL code (mutation check, output captured in the
-evidence file). `cargo test --all` and the full mechanical-check suite are
-owned by verification and publication; the focused suites above cover the
-only module touched this round (`gate_executor.rs`).
+Checkpoint-resume round (branch
+`pipeline/task-134/4ecf63ad79d04047a63252562b978574-3`, head `d679e3e8`, the
+merge of recovered candidate `b3678e27` with base `7f8b5d9c`; the previous
+round died on a `git clone` infrastructure timeout before any work ran —
+evidence in
+`/tmp/stage/review-evidence/task-134-checkpoint-verification.md`). No code
+change was required: the recovered task-134 source is byte-identical to the
+checkpoint candidate across `gyre-common/src`, `gate_executor.rs`,
+`api/gates.rs`, and `tests/task134_review_probe.rs` (the merge brought only
+upstream task-156/reconciliation content), and all focused suites re-ran
+green on the merged tree — gate_executor 37/37 (including both TTL
+regression tests and both e2e review tests), task134_review_probe 7/7,
+api::gates 6/6, plus the merge-touched surfaces api::merge_requests 30/30
+and git_http 38/38. The earlier TTL mutation check (both regression tests
+FAIL against the pre-fix fixed-TTL code) is documented in the prior round's
+evidence. `cargo test --all` and the full mechanical-check suite are owned
+by verification and publication.
