@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "user-management.md §Session Management"
-commits: ["5fc4fb1a1e470599b94208c7b7b06e1d3d7f3c8e", "2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d"]
+commits: ["5fc4fb1a1e470599b94208c7b7b06e1d3d7f3c8e", "2e1d71a89f82bd938262b41fd2ecc66be220f482", "66582a887e6caaf605c85ad05a2b8320791079fd", "f41c1d83fc063d61a99dabbea5bd0ae6f602c52f", "4886ec076fdb44441c5090e66b7cd17389f9a70d", "0564d4e5b6f95c82bc20dd7cdd64a35ab46fe713"]
 ---
 
 ## Spec Excerpt
@@ -91,7 +91,7 @@ Session management is implemented end-to-end against `user-management.md` §Sess
 
 - **Domain:** `UserSession` in `gyre-domain/src/user_profile.rs` with all spec fields (id, user_id, token_hash, ip_address, user_agent, created_at, last_active_at, expires_at, revoked); only the SHA-256 of the API key is stored (`hash_api_key`), never plaintext. `is_active(now)` = not revoked and not expired.
 - **Port:** `SessionRepository` in `gyre-ports/src/user_profile.rs` — create (duplicate-id fails), list_for_user, find_by_id, find_by_token_hash, find_by_credential_and_device, touch (slides TTL), revoke (owner-scoped), revoke_all_for_user, delete_expired_before (never deletes revoked rows — they are the durable sign-out record).
-- **Adapters:** SQLite + PostgreSQL + mem implementations against shared migration `2026-10-08-000056_user_sessions` (next unused sequence number, portable SQL); diesel schema registered.
+- **Adapters:** SQLite + PostgreSQL + mem implementations against shared migration `2026-10-08-000057_user_sessions` (next unused sequence number after the rebase consumed 000056, portable SQL); diesel schema registered.
 - **Auth integration (`auth.rs`):** on successful API-key auth, the session for (credential, IP, User-Agent) is found or minted; `last_active_at` + sliding `expires_at` are refreshed at most once per `SESSION_TOUCH_THROTTLE_SECS` (60s); a revoked session for the device rejects auth with 401; `credential_revoked` rejects the key when every session for it is revoked ("sign out everywhere", including never-seen devices). IP comes from `ConnectInfo` socket peer (no forwarded-header trust, CWE-348). Both the HTTP extractor and the WS ticket path enforce the same per-device rule.
 - **API (`api/users.rs` + `api/mod.rs`):** `GET /users/me/sessions` (active only, no token hash exposed), `DELETE /users/me/sessions/:id` (404 on foreign id), `POST /users/me/sessions/revoke-all`, plus TenantAdmin variants `GET|DELETE /users/:user_id/sessions[...]` with Admin-role per-handler checks (ABAC-exempt routes), target-user existence 404s.
 - **Background cleanup:** `spawn_session_cleanup` (daily) deletes only unrevoked sessions expired >30 days.
@@ -100,6 +100,13 @@ Session management is implemented end-to-end against `user-management.md` §Sess
 - `cargo test -p gyre-adapters --lib -- sqlite::user_profile::tests::session` — 8 passed (roundtrip, duplicate-id, device-match on all four fields, newest-match, TTL slide, owner-scoped revoke, revoke-all scope, retention-never-deletes-revoked).
 - `cargo test -p gyre-server --lib -- session` — 12 passed, covering: session listed after auth; revoking one session rejects the credential; revoking one device does not sign out other devices; revoke-all signs out everywhere; foreign-session revoke is 404; TenantAdmin view/revoke; non-Admin forbidden; admin revoke-all; unknown-user 404; throttled touch; expired-session re-mint; sign-out survives retention cleanup.
 - All mechanical checks pass: arch, ABAC route registry + exempt handlers, migration versions + SQL portability, inert enforcement, mem port contracts, in-memory state stores, lossy secret conversion, forwarded-header trust, scope-literal/fabricated-scope defaults (after re-pinning the exemption line numbers that commit 66582a88 had shifted +37 — same 24/8 frozen sites, none added).
+
+### Review repair: duplicate migration version (commit `0564d4e5`)
+
+- Review finding (attempt `e88a5646`): the rebase onto base `9bef21a4`/`88bd81bf` collided the candidate's `2026-10-08-000056_user_sessions` with the base's `2026-10-08-000056_spec_assertion_results` — both map to Diesel version `20261008000056`, so only the alphabetically first would ever run and `user_sessions` would be silently dropped on fresh databases (the exact audit-only failure class). `check-migration-versions.sh` failed (exit 1).
+- Fix: pure directory rename to `2026-10-08-000057_user_sessions` (next unused 6-digit sequence); migration SQL byte-identical; `embed_migrations!` globs the directory, so no code reference changes (no Rust source referenced the old path).
+- Verified in this sandbox: `check-migration-versions.sh` → OK (exit 0, evidence `/tmp/stage/review-evidence/migration-version-check-output.txt`); `check-migration-sql-portability.sh` → OK (exit 0).
+- Deferred to remote verification (sandbox transport restriction, not a code defect): the Rust probes (`cargo test -p gyre-adapters --lib -- sqlite::user_profile::tests::session`, `cargo test -p gyre-server --lib -- session`, and the `no_duplicate_migration_version_prefixes` guard test) — crates.io and static.crates.io are unreachable from this sandbox (connection refused, sinkholed to 198.18.0.7; github.com reachable), so no Rust compilation is possible here. Evidence: `/tmp/stage/review-evidence/rust-probe-blocked.txt`. The rename changes no Rust source and no SQL, so the previously recorded 8/8 + 12/12 probe results remain applicable to the identical content; only the migration directory name differs.
 
 ### Rebase repair (merge into `75ada1c`)
 
