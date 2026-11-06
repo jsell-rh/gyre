@@ -24,6 +24,7 @@ let streamUnread = 0;
 let streamExpansion = "default";
 let errorText = "";
 let retryAllPending = false;
+let slotsDraft = null;
 
 function e(tag, props = {}, ...children) {
   const node = document.createElement(tag);
@@ -95,7 +96,7 @@ async function post(path, body) {
   return result;
 }
 async function slots(value) {
-  try { await post("/api/slots", { value }); errorText = ""; await poll(); }
+  try { await post("/api/slots", { value }); slotsDraft = null; errorText = ""; await poll(); }
   catch (error) { errorText = String(error.message || error); render(); }
 }
 async function retry(name) {
@@ -117,6 +118,8 @@ async function retryAll() {
 }
 
 function renderHealth() {
+  // Polling must not replace the controls while someone is editing or applying.
+  if (document.activeElement?.closest("#sandbox-controls")) return;
   const s = snapshot || {};
   const online = s.online;
   const value = s.slots ?? 0;
@@ -129,12 +132,22 @@ function renderHealth() {
     e("span", { class: "sep", text: "|" }),
     e("span", { text: `${s.eligible ?? 0} dependency-eligible · ${s.counts?.deferred ?? 0} queued · ${s.counts?.failed ?? 0} failed · ${s.counts?.merged ?? 0} upstream complete · ${s.confirmed_merges ?? 0} shipped by controller` }),
     e("span", { class: "health-spacer" }),
-    e("span", { class: "stepper" },
-      e("span", { text: "sandboxes " }),
-      e("button", { onclick: () => slots(Math.max(0, value - 1)), text: "−" }),
-      e("span", { class: "val", text: value }),
-      e("button", { onclick: () => slots(Math.min(1000, value + 1)), text: "+" }),
-      e("button", { onclick: () => slots(value === 0 ? 4 : 0), text: value === 0 ? "Resume" : "Drain" })),
+    e("form", { id: "sandbox-controls", class: "stepper", onsubmit: (event) => {
+      event.preventDefault();
+      const input = event.currentTarget.elements.namedItem("sandboxes");
+      if (!input.reportValidity()) return;
+      const requested = input.valueAsNumber;
+      document.activeElement?.blur();
+      slots(requested);
+    } },
+      e("label", { for: "sandbox-count", text: "sandboxes " }),
+      e("button", { type: "button", onclick: (event) => { event.currentTarget.blur(); slots(Math.max(0, value - 1)); }, text: "−" }),
+      e("input", { id: "sandbox-count", name: "sandboxes", class: "val", type: "number", min: 0, max: 1000, step: 1, required: true,
+        value: slotsDraft ?? value, oninput: (event) => { slotsDraft = event.target.value; },
+        onkeydown: (event) => { if (event.key === "Escape") { slotsDraft = null; event.target.blur(); renderHealth(); } } }),
+      e("button", { type: "submit", text: "Apply" }),
+      e("button", { type: "button", onclick: (event) => { event.currentTarget.blur(); slots(Math.min(1000, value + 1)); }, text: "+" }),
+      e("button", { type: "button", onclick: (event) => { event.currentTarget.blur(); slots(value === 0 ? 4 : 0); }, text: value === 0 ? "Resume" : "Drain" })),
     errorText || s.error ? e("span", { class: "dev-health-error", text: errorText || s.error }) : "",
   );
 }
@@ -218,6 +231,8 @@ function renderOverview() {
       ? `Final integration: ${s.dispatch.integration.task} owns verification, CI, and merge. Other candidates queue here; implementation and review remain parallel.`
       : "Final integration admits one candidate at a time. Implementation and review remain parallel." }),
     e("p", { class: "muted", text: s.resources?.inventory_ready ? `Remote resource inventory current · ${s.resources.used} charged · ${s.resources.deletion_pending} awaiting deletion` : "Admission waits for a complete remote sandbox inventory." }),
+    (s.dispatch?.integration_waiting || []).length ? e("p", { class: "muted", text: `Integration lane yielded while waiting for external CI or policy: ${s.dispatch.integration_waiting.join(", ")}. Observation continues; merge checks remain required.` }) : null,
+    gate.inference?.condition && gate.inference.condition !== "Ready" ? e("p", { class: "dev-health-error", text: `${gate.inference.condition} · ${gate.inference.expires > Date.now()/1000 ? `retry in ${until(gate.inference.expires)}` : "awaiting next probe"}` }) : null,
     gate.inventory_error ? e("p", { class: "muted", text: `Inventory: ${gate.inventory_error}` }) : null,
     gate.gateway_auth?.using_cached ? e("p", { class: "muted", text: `Gateway refresh is retrying with backoff; cached login is still working. Next refresh ${until(gate.gateway_auth.retry_at)}.` }) : null,
     s.dispatch?.only_task ? e("p", { text: `Dispatch restricted to ${s.dispatch.only_task}. Eligible counts include tasks excluded by this restriction.` }) : null,

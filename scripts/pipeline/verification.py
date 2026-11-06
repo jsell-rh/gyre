@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import time
 
-from .execution import ROOT, Retry, Wait, gateway
+from .execution import ROOT, Retry, Wait, Attention, gateway
 
 COMMANDS = [['bash', '/tmp/stage/checks.sh'], ['cargo', 'test', '--all', '--quiet'],
             ['npm', 'test', '--', '--no-file-parallelism']]
@@ -25,8 +25,14 @@ def validate_receipt(receipt, identity, commands=None):
     commands = COMMANDS if commands is None else commands
     if not isinstance(receipt, dict) or any(receipt.get(key) != expected for key, expected in identity.items()):
         raise Retry('verification receipt differs from the assigned source')
+    if receipt.get('error_kind') == 'source_integrity' or receipt.get('error') == 'verification changed its assigned source':
+        paths=receipt.get('dirty_paths') or []
+        error=Attention('Verification source integrity failed; retained receipt lists changed paths: '+', '.join(str(path) for path in paths)[:1000])
+        error.category='verification_source_integrity'
+        error.diagnostic={key:receipt.get(key) for key in ('dirty_paths','dirty_path_count','observed_head','observed_tree')}
+        raise error
     if receipt.get('infrastructure'):
-        raise Retry('remote verification infrastructure unavailable; retained log has details')
+        raise Retry('remote verification infrastructure unavailable; inspect remote-verification-raw.json and output.log')
     records = receipt.get('checks')
     if not isinstance(records, list) or not 1 <= len(records) <= len(commands):
         raise Retry('verification receipt lacks its mandatory checks')
@@ -75,7 +81,7 @@ def run(execution, path, identity, probe=None):
         image = store.setting('fullsend_image', json.loads((ROOT / '.fullsend/toolchain.json').read_text())['worker_image'])
         bundle = execution.directory / 'verification-input'
         bundle.mkdir(exist_ok=True)
-        for source in ('pipeline-verify.py', 'dev-static-gate.py', 'check-rustfmt-diff.py', 'check-clippy-diff.py'):
+        for source in ('pipeline-verify.py', 'dev-static-gate.py', 'check-rustfmt-diff.py', 'check-clippy-diff.py', 'verifier-script-overlay.py'):
             shutil.copyfile(ROOT / 'scripts' / source, bundle / source)
         gate = (ROOT / 'scripts/dev-check.sh').read_text().replace('/tmp/gyre', '/sandbox/workspace/checkout')
         (bundle / 'checks.sh').write_text(gate)
@@ -126,6 +132,12 @@ def run(execution, path, identity, probe=None):
                 failures = 0
                 if value['receipt'] is not None:
                     receipt = value['receipt']
+                    # Preserve even a rejected/invalid receipt before validation
+                    # and before finally retires the sandbox. This is evidence,
+                    # never an accepted verification receipt.
+                    raw=execution.directory / 'remote-verification-raw.json'
+                    temporary=raw.with_suffix('.tmp')
+                    temporary.write_text(json.dumps(receipt));temporary.chmod(0o600);temporary.replace(raw)
                     validate_receipt(receipt, identity, [probe] if probe is not None else None)
                     receipt['sandbox'] = name
                     (execution.directory / 'remote-verification.json').write_text(json.dumps(receipt))

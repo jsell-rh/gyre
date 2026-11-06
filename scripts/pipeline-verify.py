@@ -50,6 +50,25 @@ def git(*args):
     return subprocess.check_output(['git', *args], cwd=CHECKOUT, text=True, timeout=180).strip()
 
 
+def source_integrity(identity):
+    fields = subprocess.check_output(['git','status','--porcelain=v1','-z','--untracked-files=all'],cwd=CHECKOUT).split(b'\0')
+    paths=[]
+    index=0
+    while index < len(fields):
+        entry=fields[index];index+=1
+        if not entry:continue
+        paths.append(os.fsdecode(entry[3:]))
+        if b'R' in entry[:2] or b'C' in entry[:2]:
+            paths.append(os.fsdecode(fields[index]));index+=1
+    unexpected=sorted({path for path in paths if not path.startswith('web/dist/')})
+    head,tree=git('rev-parse','HEAD'),git('rev-parse','HEAD^{tree}')
+    if unexpected or head != identity['head'] or tree != identity['tree']:
+        return {'error_kind':'source_integrity','error':'verification changed its assigned source',
+                'dirty_paths':unexpected[:100],'dirty_path_count':len(unexpected),
+                'observed_head':head,'observed_tree':tree}
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('operation', choices=['launch', 'run', 'poll'])
@@ -125,9 +144,10 @@ def main():
         checks_receipt = STAGE / 'verification-checks.json'
         run_checks(commands, checks_receipt, identity, env)
         value = json.loads(checks_receipt.read_text())
-        dirty = git('status', '--porcelain').splitlines()
-        if any('web/dist/' not in line for line in dirty) or git('rev-parse', 'HEAD^{tree}') != job['tree'] or git('rev-parse', 'HEAD') != job['head']:
-            value.update(passed=False, infrastructure=True, error='verification changed its assigned source')
+        integrity = source_integrity(identity)
+        if integrity:
+            value.update(integrity,passed=False,infrastructure=True)
+            print('Verification source integrity failed: '+json.dumps(integrity),flush=True)
         atomic(receipt, value)
     except Exception as exc:
         print('verification infrastructure error: ' + str(exc), flush=True)
