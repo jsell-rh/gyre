@@ -20,6 +20,7 @@ from pipeline.credentials import load
 from pipeline.eligibility import eligible
 from pipeline.execution import ROOT, gateway
 from pipeline.store import Store, StaleClaim, STAGES
+from pipeline.settings import configuration, save_configuration
 
 pipeline = helper('dev-pipeline')
 COMPUTE = {'triage', 'implement', 'review', 'verify'}
@@ -186,21 +187,24 @@ def main():
     store = Store(args.state)
     load(store)
     try:
-        request = json.load(sys.stdin) if action in ('authorize','launch','retry','cancel','history') else None
+        request = json.load(sys.stdin) if action in ('authorize','launch','retry','cancel','history','settings-save') else None
         if action == 'config':
             result = {'adapter_backend': True, 'scope':scope(store), 'watch':True, 'plain':args.plain,
                 'concurrency':store.setting('slots',8), 'poll_interval':max(1, int(args.interval)),
                 'auth_retry':15, 'auth_check_interval':60, 'backoff':5, 'backoff_max':900,
                 'repo':store.setting('repository','jsell-rh/gyre'), 'state_dir':str(store.directory/'dispatcher'),
+                'settings_file':str(store.directory/'pipeline.sqlite3'), 'settings':configuration(store),
                 'supervisor_lock':str(store.directory/'supervisor.lock'), 'log_dir':str(store.directory/'dispatcher/logs'),
                 'gateway_name':store.setting('gateway','gyre-gyre'),
                 'environment':{'OPENSHELL_GATEWAY':store.setting('gateway','gyre-gyre'), 'OPENSHELL_GATEWAY_ENDPOINT':None}}
+        elif action == 'settings-save':
+            result = save_configuration(store, request)
         elif action == 'activate':
             store.set_setting('only_task', args.task)
             store.set_setting('dispatcher_engine', 'fullsend-dispatcher')
             result = {}
         elif action == 'rows':
-            result = {'rows':read_rows(store), 'capacity':store.setting('slots',8)}
+            result = {'rows':read_rows(store), 'capacity':store.setting('slots',8), 'settings':configuration(store)}
         elif action == 'recover':
             recover(store); result = {}
         elif action in ('authorize','launch'):

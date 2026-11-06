@@ -44,6 +44,25 @@ def main():
     os.environ['GYRE_OPEN_GATEWAY'] = bound_gateway
     def invoke(arguments, **kwargs):
         return subprocess.run([config['real_openshell'], '-g', bound_gateway, *arguments], env=env, **kwargs)
+    from pipeline.isolation import github_provider, ensure_github_provider
+    persistent=github_provider(store)
+    shared_create=['provider','create','--name',persistent,'--type',persistent,'--credential','GH_TOKEN']
+    shared_update=['provider','update',persistent,'--credential','GH_TOKEN']
+    if args in (shared_create,shared_update):
+        ensure_github_provider(store,cli=config['real_openshell'])
+        print('Instance GitHub provider ready (unchanged credentials are retained)')
+        store.close()
+        return 0
+    from pipeline.agent_transport import pi_command, stream
+    command=pi_command(args) if config.get('durable_agent') else None
+    if command:
+        name=option(args,'--name')
+        if not name:raise ValueError('agent transport requires its assigned sandbox')
+        row=store.db.execute('SELECT * FROM resources WHERE name=?',(name,)).fetchone()
+        if not row or row['work']!=execution.claim['id'] or row['token']!=execution.claim['token']:
+            raise ValueError('agent transport sandbox belongs to another claim')
+        timeout=min(int(option(args,'--timeout') or 14400),store.setting('model_timeout',14400))
+        return stream(execution,name,command,timeout,invoke)
     provider_create = args[:2] == ['provider', 'create']
     provider_delete = args[:2] == ['provider', 'delete']
     provider_name = option(args, '--name') if provider_create else (args[2] if provider_delete and len(args) > 2 else None)
@@ -67,6 +86,23 @@ def main():
         old = store.db.execute('SELECT * FROM resources WHERE name=?', (name,)).fetchone()
         if old and old['state'] == 'absent':
             raise RuntimeError('fullsend attempted to recreate a deleted sandbox in the same assignment; retry through the controller')
+        if old and old['work']==execution.claim['id'] and old['token']==execution.claim['token']:
+            observed=invoke(['sandbox','get',name,'--output','json'],capture_output=True,text=True,timeout=30)
+            if observed.returncode==0:
+                start=re.search(r'(?m)^\s*(?=\{)',observed.stdout)
+                value=json.loads(observed.stdout[start.start():]) if start else {}
+                labels=value.get('labels',{})
+                if labels.get('gyre.dev/pipeline')!=store.setting('owner') or labels.get('gyre.dev/work')!=execution.claim['id']:
+                    raise ValueError('existing sandbox has different ownership labels')
+                phase=value.get('phase','').lower()
+                if phase in ('ready','pending','provisioning','creating'):
+                    # Fullsend retries create after a readiness timeout. Adopt
+                    # the same allocation and let its next readiness poll wait;
+                    # a duplicate create would fail immediately and discard it.
+                    print('Created sandbox: '+name)
+                    store.close()
+                    return 0
+                raise RuntimeError('existing sandbox reached terminal infrastructure state; cleanup before retry')
         if not store.reserve(name, execution.claim['id'], execution.claim['token'], 'sandbox', store.setting('slots', 8),
                              {'engine': 'fullsend', 'logical_token': execution.claim['token'], 'repo': '/sandbox/workspace/checkout'}):
             raise RuntimeError('global sandbox capacity is occupied')
