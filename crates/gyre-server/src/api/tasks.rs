@@ -85,6 +85,8 @@ pub struct TaskResponse {
     pub depends_on: Vec<String>,
     pub workspace_id: String,
     pub repo_id: String,
+    /// Deployment generation — incremented on reassignment (§2.4 replay prevention).
+    pub generation: u32,
 }
 
 impl From<Task> for TaskResponse {
@@ -108,6 +110,7 @@ impl From<Task> for TaskResponse {
             depends_on: t.depends_on.into_iter().map(|id| id.to_string()).collect(),
             workspace_id: t.workspace_id.to_string(),
             repo_id: t.repo_id.to_string(),
+            generation: t.generation,
         }
     }
 }
@@ -298,7 +301,13 @@ pub async fn update_task(
         task.priority = parse_task_priority(&p)?;
     }
     if let Some(agent_id) = req.assigned_to {
-        task.assigned_to = Some(Id::new(agent_id));
+        let new_assignee = Id::new(agent_id);
+        // §2.4 replay prevention: reassignment bumps the deployment generation,
+        // invalidating SignedInputs pinned to the previous generation.
+        if task.assigned_to.as_ref() != Some(&new_assignee) {
+            task.generation = task.generation.saturating_add(1);
+        }
+        task.assigned_to = Some(new_assignee);
     }
     if let Some(branch) = req.branch {
         task.branch = Some(branch);
