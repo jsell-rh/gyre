@@ -1767,6 +1767,7 @@ fn explorer_tool_definitions() -> Vec<ToolDefinition> {
 ///
 /// SDK is the default path when the script exists. Opt-out via `GYRE_EXPLORER_SDK=0`.
 /// Falls back to native LlmPort when the SDK script doesn't exist or is explicitly disabled.
+#[allow(clippy::too_many_arguments)]
 async fn run_explorer_agent_sdk(
     state: &AppState,
     repo_id: &str,
@@ -1853,10 +1854,7 @@ async fn run_explorer_agent_sdk(
         // have full context. The assistant entry includes the emitted view
         // query so later turns know what was applied to the canvas.
         let assistant_full = match &view_query {
-            Some(q) => format!(
-                "{}\n\n<view_query>{}</view_query>",
-                assistant_text, q
-            ),
+            Some(q) => format!("{}\n\n<view_query>{}</view_query>", assistant_text, q),
             None => assistant_text.clone(),
         };
         conversation_history.push(ConversationMessage {
@@ -1873,9 +1871,9 @@ async fn run_explorer_agent_sdk(
             break;
         };
 
-        let check_result = graph
-            .as_ref()
-            .and_then(|(nodes, edges)| self_check_dry_run(&query_json, nodes, edges, selected_node_id));
+        let check_result = graph.as_ref().and_then(|(nodes, edges)| {
+            self_check_dry_run(&query_json, nodes, edges, selected_node_id)
+        });
 
         match check_result {
             Some(dr) => {
@@ -1900,9 +1898,7 @@ async fn run_explorer_agent_sdk(
                         },
                     };
                     sender
-                        .send(Message::Text(
-                            serialize_msg(&view_msg).unwrap_or_default().into(),
-                        ))
+                        .send(Message::Text(serialize_msg(&view_msg).unwrap_or_default()))
                         .await?;
                     break;
                 }
@@ -1940,9 +1936,7 @@ async fn run_explorer_agent_sdk(
                         },
                     };
                     sender
-                        .send(Message::Text(
-                            serialize_msg(&view_msg).unwrap_or_default().into(),
-                        ))
+                        .send(Message::Text(serialize_msg(&view_msg).unwrap_or_default()))
                         .await?;
                     break;
                 }
@@ -1951,15 +1945,17 @@ async fn run_explorer_agent_sdk(
                     if !send_status(sender, STATUS_REFINING).await {
                         anyhow::bail!("WebSocket connection lost during SDK self-check");
                     }
-                    current_question = (
-                        "Your <view_query> block is not a valid view query — it failed to \
+                    current_question =
+                        ("Your <view_query> block is not a valid view query — it failed to \
                          parse against the View Query Grammar (wrong field names or types). \
-                         Output a corrected <view_query> block."
-                    )
-                        .to_string();
+                         Output a corrected <view_query> block.")
+                            .to_string();
                     continue;
                 }
-                warn!("SDK view query failed to parse after {} refinements; rejecting", refinement_count);
+                warn!(
+                    "SDK view query failed to parse after {} refinements; rejecting",
+                    refinement_count
+                );
                 stream_text(
                     sender,
                     "\n\n*Warning: Generated view query had invalid structure and was not applied.*",
@@ -1980,13 +1976,14 @@ async fn run_explorer_agent_sdk(
 /// history and does NOT forward the view query — both are the caller's
 /// (self-check loop's) responsibility, so the query can be dry-run and refined
 /// before the frontend ever sees it (spec §11).
+#[allow(clippy::too_many_arguments)]
 async fn run_sdk_subprocess_once(
     repo_id: &str,
     sdk_script_path: &str,
     user_question: &str,
     canvas_state: &gyre_common::view_query::CanvasState,
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    conversation_history: &mut Vec<ConversationMessage>,
+    conversation_history: &[ConversationMessage],
     model: &str,
     system_prompt: &str,
     server_url: &str,
@@ -3830,8 +3827,7 @@ fn self_check_dry_run(
         serde_json::from_value::<gyre_common::view_query::ViewQuery>(query_json.clone()).ok()?;
     let validation_errors = query.validate();
     let validation_warnings = query.warnings();
-    let mut dr =
-        gyre_domain::view_query_resolver::dry_run(&query, nodes, edges, selected_node_id);
+    let mut dr = gyre_domain::view_query_resolver::dry_run(&query, nodes, edges, selected_node_id);
     for err in validation_errors {
         dr.warnings.push(format!("Validation: {}", err));
     }

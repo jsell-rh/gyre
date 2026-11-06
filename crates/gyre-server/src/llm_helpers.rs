@@ -39,7 +39,6 @@ pub async fn resolve_llm_model_with_default(
     {
         return (cfg.model_name, cfg.max_tokens);
     }
-    let model =
-        std::env::var("GYRE_LLM_MODEL").unwrap_or_else(|_| fallback_default.to_string());
+    let model = std::env::var("GYRE_LLM_MODEL").unwrap_or_else(|_| fallback_default.to_string());
     (model, None)
 }
