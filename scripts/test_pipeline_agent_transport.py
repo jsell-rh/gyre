@@ -116,6 +116,21 @@ class AgentTransportTest(TestCase):
             self.assertEqual(received,data)
             self.assertEqual(frame['result'],{'exit_code':0})
 
+    def test_confirmed_stop_can_resume_a_gracefully_interrupted_supervisor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);marker=root/'resumed'
+            (root/'command.json').write_text(json.dumps({'argv':[sys.executable,'-c',f"from pathlib import Path; Path({str(marker)!r}).write_text('once')"],'cwd':directory,'timeout':5}))
+            (root/'identity.json').write_text(json.dumps({'pid':99999999,'start':'0','boot':'gone'}))
+            (root/'result.json').write_text(json.dumps({'exit_code':130}))
+            subprocess.run([sys.executable,str(SCRIPT),'launch',directory,'--resume-after-stop'],check=True,timeout=5)
+            deadline=time.monotonic()+5
+            while not (root/'result.json').exists() and time.monotonic()<deadline:time.sleep(.02)
+            self.assertEqual(marker.read_text(),'once')
+            self.assertEqual(json.loads((root/'result.json').read_text())['exit_code'],0)
+            subprocess.run([sys.executable,str(SCRIPT),'launch',directory,'--resume-after-stop'],check=True,timeout=5)
+            self.assertEqual(json.loads((root/'result.json').read_text())['exit_code'],0)
+            self.assertTrue((root/'result.before-restart.json').exists())
+
     def test_remote_deadline_kills_the_real_process(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);pid=root/'pid'

@@ -63,6 +63,28 @@ class VerificationTests(unittest.TestCase):
             self.assertFalse((execution.directory/'remote-verification.json').exists())
             self.assertTrue(any(c.args[:2]==('sandbox','delete') for c in commands.call_args_list))
 
+    def test_lost_launch_ack_reuses_the_same_verifier_allocation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store=Store(directory);self.addCleanup(store.close)
+            store.put_task('task-001','g','body',{})
+            store.enqueue('verify','task-001','g',{})
+            execution=Execution(store,store.claim('verify','verifier'))
+            identity={'candidate':'candidate','head':'head','base':'head','tree':'tree'}
+            receipt=identity|{'passed':False,'checks':[{'command':COMMANDS[0],'exit_code':1}]}
+            launches=[]
+            def transport(name,*args,**kwargs):
+                if 'launch' in args:
+                    launches.append(name)
+                    if len(launches)==1:raise subprocess.TimeoutExpired('lost acknowledgement',30)
+                output='GYRE_VERIFY_POLL '+json.dumps({'offset':0,'log':'','receipt':receipt,'alive':False}) if 'poll' in args else ''
+                return subprocess.CompletedProcess([],0,output,'')
+            with patch.object(execution,'login'),patch.object(execution,'wait_ready'),patch.object(execution.cancelled,'wait',return_value=False),patch.object(execution,'remote',side_effect=transport),patch.object(execution,'os',return_value=subprocess.CompletedProcess([],0,'','')) as calls,patch('pipeline.verification.gateway.inventory',return_value=[]):
+                observed=run(execution,Path(directory),identity)
+            self.assertFalse(observed['passed'])
+            self.assertEqual(len(launches),2)
+            self.assertEqual(len(set(launches)),1)
+            self.assertEqual(sum(c.args[:2]==('sandbox','create') for c in calls.call_args_list),1)
+
     def test_source_guard_uses_actual_paths_not_substring_whitelists(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)

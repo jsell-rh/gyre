@@ -84,7 +84,12 @@ def main():
         root.mkdir(parents=True,exist_ok=True,mode=0o700)
         with (root/'launch.lock').open('a') as lock:
             fcntl.flock(lock,fcntl.LOCK_EX)
-            if result.exists():return
+            if result.exists():
+                exited=json.loads(result.read_text()).get('exit_code')
+                resumable=(args.resume_after_stop and exited in (74,130,137,143) and identity.exists()
+                           and not alive(json.loads(identity.read_text())))
+                if not resumable:return
+                result.rename(root/'result.before-restart.json')
             if identity.exists():
                 if alive(json.loads(identity.read_text())):return
                 if not args.resume_after_stop:

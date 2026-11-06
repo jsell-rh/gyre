@@ -135,13 +135,15 @@ def run(execution, path, identity, probe=None):
         execution.remote(name, 'mkdir', '-p', '/tmp/stage', timeout=30)
         for source in sorted(bundle.iterdir()):
             execution.os('sandbox', 'upload', name, str(source), '/tmp/stage/' + source.name, '--no-git-ignore', timeout=180)
-        execution.remote(name, 'python3', '/tmp/stage/pipeline-verify.py', 'launch', timeout=30)
         execution.phase('Verifying', sandbox=name, engine='verification')
-        offset, failures = 0, 0
+        offset, failures, launched = 0, 0, False
         deadline = time.monotonic() + store.setting('verification_timeout', 10800)
         while time.monotonic() < deadline:
             execution.current()
             try:
+                if not launched:
+                    execution.remote(name,'python3','/tmp/stage/pipeline-verify.py','launch',timeout=30)
+                    launched=True
                 result = execution.remote(name, 'python3', '/tmp/stage/pipeline-verify.py', 'poll', '--offset', str(offset), timeout=30)
                 value = decode_poll(result.stdout)
                 if value.get('usage'):
