@@ -51,3 +51,22 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Review round at candidate `34e01d27` (attribution clobber, 36th occurrence of the rounds 2–35 class)
+
+Verdict: **needs-revision** — one process finding (attribution clobber at the candidate tip); every product-surface criterion re-verified clean.
+
+**Finding (blocking):** the candidate tip commit `34e01d27` ("process: record task-208 branch commits") has exactly one change — it rewrites `commits:` in `specs/tasks/task-208.md` from the fully-attributed four-SHA list (restored by the round-36 repair) back to `["a11cbf7e", "98fd096e"]`, dropping `ad1121c5093cd2f1f2b3824ed88352ac4e181fd9` (dist regeneration that removed the HSI-§12-forbidden my-stuff surface from the RustEmbed'd `SKIP_WEB_BUILD=1` shipped artifact — the round-1 F1 fix) and `ea006d52bb42e96e6f176b02b5390b6cb56a3116` (`.gitattributes` whitespace-gate exemption). Both are task-208-labeled product-surface commits and verified ancestors of the candidate. Per the repo invariant, every task-labeled product-surface commit MUST be recorded in `commits:` — the verifier scopes each review round to that list, so the dropped dist-regen fix would be invisible to verification. Same class as clobbers 2–35: the checkpoint attribution pass's path filter (`crates/`, `web/src`, `web/tests`) excludes `web/dist/` and root `.gitattributes`; `scripts/check-task-commit-attribution.sh` (line 114) shares the blind spot. Repair is mechanical: restore the four-SHA list at a new tip; product code untouched.
+
+Probes run at the exact candidate (worktree clean, HEAD = `34e01d27`; evidence `/tmp/stage/review-evidence/r38-*.txt`):
+
+- `git show 34e01d27 -- specs/tasks/task-208.md` → the two-SHA `commits:` rewrite (r38-02).
+- Ancestry: `git merge-base --is-ancestor` → YES for all four SHAs and the assigned base `1ae18d1c` (r38-03); dropped-commit stats r38-04/r38-05.
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib my_stuff_endpoints_are_removed` → **1 passed / 0 failed** (r38-10).
+- `cd web && npm ci && npx vitest run src/__tests__/UserProfile.test.js` → **23/23 passed** (r38 vitest/npm-ci).
+- Dead-code grep (`get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs` over `crates/` + `web/src/`) → zero matches (r38-06); route/ABAC registrations for `/api/v1/users/me/{agents,tasks,mrs}` absent (r38-07).
+- Committed dist bundle (`index-CYVJLA6W.js`, post-merge regeneration): forbidden identifiers (`my-agents|my-tasks|my-mrs|users/me/agents|users/me/tasks|users/me/mrs`) → zero matches; kept-surface identifiers (`users/me/tokens`, `users/me/judgments`) present (r38-08).
+- `UserProfile.svelte` tabs array is exactly info/tokens/memberships/ledger/notif-prefs/notifications (r38 tabs).
+- Spec amendment intact: `user-management.md` §"My Stuff" Views records the supersession, M22.8 completeness row struck Removed; coverage `user-management.md` row 22 `n/a`, HSI row 54 `implemented` (r38-09).
+
+Verifier must still run `cargo test --all` and `cd web && npm test`.
