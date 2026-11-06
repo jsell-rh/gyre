@@ -379,6 +379,7 @@ mod tests {
     /// - non-ASCII identifier (`résumé` in `src/café.ts` → `add`) — the
     ///   UTF-8 framing regression: a code-unit-based Content-Length gate
     ///   silently dropped every edge for such files
+    ///
     /// Top-level import/re-export references must NOT become edges (they
     /// are not calls), so e.g. there is no `src/app` → `src/math.add` edge
     /// and no edge to `mul` (only its re-export references it).
