@@ -184,6 +184,9 @@
 
   // Evaluative lens: trace data from most recent MR
   let traceData = $state(null);
+  // HSI §3 Layer 1: MR gate evaluation records for the current repo —
+  // [{ mrId, spec_ref, gates }] — drive the Evaluative-lens green/red edges.
+  let gateRecords = $state([]);
   let predictAffectedSpecs = $state([]);
   let predictEstimatedCost = $state(null);
   let predictConfidence = $state(null);
@@ -856,12 +859,13 @@
   }
 
   async function loadGraph(repoId) {
-    if (!repoId) { graph = null; traceData = null; return; }
+    if (!repoId) { graph = null; traceData = null; gateRecords = []; return; }
     loading = true;
     graph = null;
     graphError = null;
     selectedNode = null;
     traceData = null;
+    gateRecords = [];
     graphWarnings = [];
     graphWarningsDismissed = false;
     try {
@@ -874,6 +878,8 @@
       restoreBreadcrumbFromHash(graph);
       // Load trace data for evaluative lens (best-effort, non-blocking)
       loadTraceData(repoId);
+      // Load MR gate records for evaluative-lens edge colors (HSI §3 Layer 1)
+      loadGateData(repoId);
     } catch (e) {
       showToast($t('explorer_view.graph_error', { values: { error: e.message } }), { type: 'error' });
       graphError = e.message;
@@ -931,6 +937,30 @@
         } catch { /* no trace for this MR, try next */ }
       }
     } catch { /* trace loading is best-effort */ }
+  }
+
+  /**
+   * HSI §3 Layer 1: load MR gate evaluation records for the current repo.
+   * Each MR's spec_ref links its gate results to the graph nodes the spec
+   * governs; the Evaluative lens colors edges green (all passed) / red (any
+   * failed). Best-effort and non-blocking, like trace loading.
+   */
+  async function loadGateData(repoId) {
+    try {
+      const mrs = await api.mergeRequests({ repo_id: repoId, per_page: 10 });
+      const mrList = mrs?.merge_requests ?? mrs ?? [];
+      const records = [];
+      for (const mr of mrList) {
+        if (!mr?.spec_ref) continue;
+        try {
+          const gates = await api.mrGates(mr.id);
+          if (Array.isArray(gates) && gates.length > 0) {
+            records.push({ mrId: mr.id, spec_ref: mr.spec_ref, gates });
+          }
+        } catch { /* no gates for this MR, skip */ }
+      }
+      gateRecords = records;
+    } catch { /* gate loading is best-effort */ }
   }
 
   function onRepoChange(e) {
@@ -1442,6 +1472,7 @@
                 timeline={graphTimeline ?? []}
                 timelineActive={timelineScrubActive}
                 timelineScrubIndex={timelineScrubIndex}
+                {gateRecords}
                 onTimelineToggle={() => {
                   timelineScrubActive = !timelineScrubActive;
                   if (!timelineScrubActive) timelineScrubIndex = -1;

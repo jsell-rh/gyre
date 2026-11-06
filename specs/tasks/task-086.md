@@ -3,10 +3,10 @@ title: "HSI Explorer Liveness Indicators (Two Layers)"
 spec_ref: "human-system-interface.md §3 Design Principle"
 depends_on:
   - task-065
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §3 Design Principle: The Built Software Is Always Alive"
-commits: []
+commits: ["ece16807"]
 ---
 
 ## Spec Excerpt
@@ -49,16 +49,83 @@ commits: []
 
 ## Acceptance Criteria
 
-- [ ] Nodes with active agents display a pulsing glow animation
-- [ ] Glow starts on `RunStarted` and stops on `RunFinished` for relevant nodes
-- [ ] Recently modified nodes (last hour) show a fading highlight ring
-- [ ] Highlight ring fades over time (not instant on/off)
-- [ ] When Evaluative lens is active, edges show green/red gate status colors
-- [ ] Gate status colors are NOT shown in Structural lens (default)
-- [ ] Layer 2 scaffolding: play icon appears on nodes with trace data
-- [ ] Canvas performance is not degraded by liveness indicators
-- [ ] `npm test` passes in `web/`
+- [x] Nodes with active agents display a pulsing glow animation
+- [x] Glow starts on `RunStarted` and stops on `RunFinished` for relevant nodes
+- [x] Recently modified nodes (last hour) show a fading highlight ring
+- [x] Highlight ring fades over time (not instant on/off)
+- [x] When Evaluative lens is active, edges show green/red gate status colors
+- [x] Gate status colors are NOT shown in Structural lens (default)
+- [x] Layer 2 scaffolding: play icon appears on nodes with trace data
+- [x] Canvas performance is not degraded by liveness indicators
+- [x] `npm test` passes in `web/`
 
 ## Agent Instructions
 
 Read `specs/system/human-system-interface.md` §3 "Design Principle: The Built Software Is Always Alive" for the two-layer design. The ExplorerCanvas component is at `web/src/lib/ExplorerCanvas.svelte`. For Layer 1, you need WebSocket message subscriptions — check how the existing WebSocket connection is set up in the frontend. For `ArchitecturalDelta` records, check `specs/system/realized-model.md` §3. For gate results, check `specs/system/agent-gates.md`. The trace endpoint `GET /api/v1/merge-requests/:id/trace` exists (registered at line 327 in api/mod.rs). Focus on Layer 1 completion and Layer 2 scaffolding — the full animated trace visualization (particles, time scrubbing) is a complex follow-on task.
+
+## Shipped
+
+Both liveness layers of HSI §3 are implemented in production frontend code
+(commit ece16807, frontend-only — no Rust changes):
+
+### Layer 1 — SDLC activity
+
+- **Active agent glow** — new `web/src/lib/liveness.svelte.js` exports a
+  reactive `activeRuns` map plus `createLivenessTracker(wsStore,
+  { fetchTask })`, wired in `App.svelte` to the shared workspace WebSocket
+  store. The tracker listens for Telemetry-tier bus messages
+  (`kind: "run_started"` / `"run_finished"`, payload `{ agent_id, task_id? }`
+  — the messages the server broadcasts to workspace subscribers via the
+  `record_activity` MCP tool / ActivityEvent WS path) and resolves the run's
+  task → spec via `GET /api/v1/tasks/:id` (`spec_path` field, best-effort,
+  guarded against a run finishing mid-fetch). `ExplorerCanvas` maps each
+  active run's spec to graph nodes (spec_path/spec_paths basename match plus
+  `governed_by` edges to a matching spec node) and pulses those nodes with a
+  sky-400 glow (2s sine cycle). The render loop stays alive only while a
+  glowing node is actually on screen; the redraw is deferred to a macrotask
+  so the mount flush is never drawn into synchronously.
+- **Recent-change fading ring** — on canvas data changes,
+  `computeRecentChanges` folds the repo's `ArchitecturalDelta` records
+  (already loaded from `GET /repos/:id/graph/timeline`) into a per-node map
+  of change times for deltas within the last hour (delta timestamps are
+  epoch seconds; `nodes_added`/`nodes_modified` entries matched by
+  qualified_name; count-only and unparseable deltas skipped). Draw-time
+  `recentChangeAlpha` fades the amber ring linearly from full opacity to
+  zero over exactly 60 minutes — never an instant off; a 60-second interval
+  nudges a redraw while unfaded rings exist (no per-frame timer).
+- **Gate status edges (Evaluative lens only)** — `ExplorerView` loads the
+  repo's recent MRs and their gate results (`GET /merge-requests/:id/gates`)
+  best-effort into `gateRecords` (`{ mrId, spec_ref, gates }`), passed to the
+  canvas. `computeNodeGateStatus` maps each MR's `spec_ref` ("path.md@sha")
+  to the nodes its spec governs — a failed gate wins over passing ones;
+  pending/running-only sets prove nothing and are ignored. In the
+  Evaluative lens, `drawEdges` colors an edge green when both endpoints
+  have all gates passed and red when either endpoint has a failed gate; the
+  `nodeGateStatus` derivation is gated on `lens === 'evaluative'`, so the
+  default Structural lens never computes or renders gate colors.
+
+### Layer 2 — trace play icon (scaffolding)
+
+- Nodes with linked trace spans (the `nodeSpanStats` index over
+  `GET /merge-requests/:id/trace` data, already loaded for the Evaluative
+  lens) render a ▶ play badge at the node's bottom-right corner. Clicking
+  it (hit-test shares `playIconRect` with the drawer, so the clickable
+  region is exactly the drawn region) switches to the Evaluative lens and
+  starts the existing span-tree particle playback from the beginning.
+
+### Test evidence
+
+- `web/src/__tests__/liveness.test.js` (28 tests) — tracker lifecycle
+  (start/finish/in-flight-finish/ignore-rules/destroy), spec-ref filename
+  extraction, node mapping (spec_path, spec_paths, governed_by, deleted
+  edges), recent-change window/fade/staleness, gate status precedence, and
+  edge gate-status logic.
+- `web/src/__tests__/ExplorerCanvasLiveness.test.js` (14 tests) — draw-path
+  pins through the real component: glow drawn for active runs and stopped
+  after run_finished, ring alpha matched to the expected fade term at 10/30
+  and 50 minutes and absent at 90 minutes, green/red gate edges present in
+  the Evaluative lens and absent (with legend) in Structural for the same
+  records, play icon presence/absence, and click-▶ → Evaluative + playing
+  (pause glyph in the playback bar).
+- Full suite: `npm test` in `web/` — 65 files, 1665 tests passed
+  (evidence: /tmp/stage/review-evidence/web-npm-test.log).
