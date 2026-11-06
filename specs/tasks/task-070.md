@@ -4,7 +4,7 @@ spec_ref: "explorer-implementation.md §7–8, §10–11"
 depends_on:
   - task-068
   - task-069
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "explorer-implementation.md §7 LLM Agent (Claude Agent SDK)"
   - "explorer-implementation.md §8 Agent Configuration"
