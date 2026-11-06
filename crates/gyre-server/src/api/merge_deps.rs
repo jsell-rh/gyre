@@ -796,7 +796,17 @@ mod tests {
         // Mint an agent JWT and register it in the agent_tokens store.
         let agent_jwt = state
             .agent_signing_key
-            .mint("agent-42", "task-1", "system", &state.base_url, 3600)
+            .mint(
+                "agent-42",
+                "task-1",
+                "system",
+                &state.base_url,
+                3600,
+                "t1",
+                "ws-1",
+                "repo-42",
+                "merge-deps",
+            )
             .unwrap();
         state
             .kv_store

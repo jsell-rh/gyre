@@ -170,15 +170,55 @@ async fn restart_orchestrator(state: &AppState, dead: &gyre_domain::Agent, now: 
     }
 
     // Scoped JWT for the replacement (same tier and scope as the dead one).
+    // §1 Token Scoping: tenant and repo name resolved from the live stores
+    // so the replacement's scope list is minted from real hierarchy context.
+    // An unresolvable workspace means the tenant scope cannot be determined —
+    // skip the re-mint (the replacement cannot authenticate until a token
+    // exists) and log, rather than fabricating a "default" tenant identity
+    // (task-097 F3 class).
+    let tenant_id = match state
+        .workspaces
+        .find_by_id(&dead.workspace_id)
+        .await
+        .ok()
+        .flatten()
+    {
+        Some(ws) => ws.tenant_id.to_string(),
+        None => {
+            warn!(
+                agent_id = %replacement.id,
+                workspace_id = %dead.workspace_id,
+                "restart: tenant scope cannot be determined (workspace unresolvable); \
+                 skipping orchestrator JWT re-mint"
+            );
+            return;
+        }
+    };
+    let repo_name = if let Some(rid) = dead.repo_id.as_ref() {
+        state
+            .repos
+            .find_by_id(rid)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| r.name)
+    } else {
+        None
+    };
     let token = state.agent_signing_key.mint_orchestrator(
         &replacement.id.to_string(),
         dead.spawned_by.as_deref().unwrap_or("system"),
         &state.base_url,
         state.agent_jwt_ttl_secs,
+        &tenant_id,
         &dead.workspace_id.to_string(),
         dead.repo_id.as_ref().map(|r| r.to_string()).as_deref(),
+        repo_name.as_deref(),
         &dead.orchestrator_type.to_string(),
     );
+
+    // Register the replacement's token so the auth middleware accepts it —
+    // an unstored JWT leaves the restarted orchestrator unable to authenticate.
     match token {
         Ok(t) => {
             let _ = state
