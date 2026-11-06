@@ -57,3 +57,59 @@ Repair commit: `06df8bfb02cbf0c50059c580f1f87860708543ff` (plus process-only `f5
 **Non-findings (checked, not material):** (a) `check-scope-literal-defaults.sh` invoked no-arg by pre-commit/`dev-check.sh`/CI scans nothing (vacuous OK) and CI keeps `|| true` — pre-existing task-099 wiring at the comparison base, outside this task's diff and this task's file ownership; the F1 repair itself is verified with the `crates/` path. Worth a follow-up task for the task-099 owner. (b) pg `notification.rs::resolve` is a pure update (no read terminal) — correctly outside the checked set. (c) The three task scripts hardcode their scan roots, so their no-arg pre-commit/CI invocations are sound (unlike the arg-taking scope script). (d) task file round-3 section says "bail! stub" for pg `resolve_for_agent` — accurate.
 
 Evidence: `/tmp/stage/review-evidence/task-160-round4/` — zero-exemption scan, exemption-set vs live-violation diff, mutation outputs (record_usage, resolve_for_agent, activity.rs default-literal, hierarchy Option), ablation (109 vs 111), clean-HEAD lint runs.
+
+
+## Round 9 — final independent review of candidate a8769d5d (verdict: approve)
+
+Candidate `a8769d5dc9ba0a6bc91d2826202162c90d17f1db` (round-8 repair b82af6b4 +
+frontmatter process commit), base `0e889626`. Review checkout clean at the exact
+candidate. Evidence: `/tmp/stage/review-evidence/task-160-final/`.
+
+**Round-7 verification findings repaired for real.** The retained failure log
+(exemption-freeze + inert-enforcement on merge_processor.rs:1455/1477) is
+resolved without any re-pin: both `evaluate_attestation_abac` call sites bind
+the `EvalResult` and append a `PolicyDecision` through the new
+`record_abac_decision` helper (`state.policies.record_decision` — the same
+audit trail the ABAC middleware writes), with a real test
+(`merge_attestation_abac_decision_recorded_in_audit_trail`) proving the records
+land in `list_decisions` with subject fallback merge-processor → MR author.
+Both exemption entries are deleted; every `scripts/*-exemptions.txt` is now a
+strict subset of base's (verified file-by-file: zero entries only-in-candidate;
+inert 4→2, fabricated-scope 5→4, scope-literal 22→10).
+
+**Task contract re-verified at the exact candidate:**
+- All three scripts exist, executable, usage-commented, wired blocking in
+  pre-commit AND CI (no `|| true`; CI advisory lints visibly contrast).
+- Clean-HEAD runs: check-hierarchy exit 0; check-tenant-filter exit 0
+  (109 read methods on tenant-column tables / 0 violations; base merge
+  75ada1c4 removed the activity adapters, 111→109 is expected);
+  check-api-auth exit 0; plus arch / inert-enforcement /
+  fabricated-scope / scope-literal / abac-route-registry /
+  abac-exempt-handlers / rustfmt-diff-vs-base all exit 0.
+- Mutation kills (isolated worktree, removed after): Option<Id> on
+  Task.workspace_id → exit 1; field deletion → exit 1; tenant-filter removal
+  from sqlite/repository.rs find_by_id → exit 1 naming file:line; abac
+  middleware layer removal → exit 1; AuthenticatedAgent removal from
+  git_receive_pack → exit 1.
+- Enabling repairs are real: adapter tenant filters stamp the storage's
+  tenant (verified in sqlite/notification.rs + saved_view.rs diffs, with
+  tests re-scoped to tenant-matching handles); specs.rs reject-fanout
+  resolves tenant from the workspace scope row and skips+logs on failure
+  (b297d1b2 diff); emit_event/emit_telemetry no longer fabricate
+  `Id::new("default")` (lib.rs diff).
+- Coverage matrix rows 10/14/27 marked implemented with evidence; rows 5/23/28
+  remain honestly task-assigned to task-197/task-161 (no side-effect closure).
+
+**Deferred to verification (sandbox transport restriction, not a code
+defect):** no route to static.crates.io and the registry cache is incomplete
+(49 crates), so `cargo test --all`, `cargo test -p gyre-server --lib
+merge_processor`, and `cargo test -p gyre-adapters --test tenant_isolation`
+could not execute in the review sandbox. Static support: rustfmt parsed all 31
+changed files clean; every API the new code and test reference was verified to
+exist with matching signatures (build_decision, record_decision,
+list_decisions with a real filter implementation, all domain constructors).
+
+**Non-blocking observation:** coverage row 28's note text ("No dedicated
+tenant_isolation.rs") predates this task's file; the row is correctly still
+open/task-assigned to task-161, so this is stale prose in an open row, not a
+hollow closure — left for the task-161 owner to reconcile.
