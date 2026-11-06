@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "authorization-provenance.md §2.4 Context Binding (Replay Prevention)"
-commits: ["0fc3651223fecb43f926752d6196753864e3c593", "57e04abc81ec1d5d380de6c013a633cee4a03b24", "13cbb9c646da7fecec39b1070cf501de622b017e", "dce5c6a5eef16c506409ed9bde3f12f8373800a6", "add4ba14aa2190356f82ed2de95d2bdcd21ed974"]
+commits: ["265cb5d2eade8aab0d9063856d6607a746a82a9b", "2a3907082535dbf9f4a84d5cb40ae9bc4ed6c905"]
 ---
 
 ## Spec Excerpt
