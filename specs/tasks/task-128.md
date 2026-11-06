@@ -176,56 +176,64 @@ deny. All five §Policy Examples are encoded as verbatim evaluation tests
 `spec_example_persona_management`, `spec_example_viewer_no_spawn`,
 `spec_example_gate_approved_persona`, `spec_example_default_deny`).
 
-Test evidence (focused suites at this head, logs under
-`/tmp/stage/review-evidence/task-128-resume-verification.txt`):
-`policy_engine::tests` 31/31; `abac_middleware::tests` 23/23 (attribute
-extraction proven end-to-end through live tower oneshot requests:
-membership-sourced workspace_role, team_ids, entity-lookup
-owner/approval_status/tenant via scope chain, persona attributes,
-env.ip/budget_remaining/main_health); `auth::tests` 36/36;
-`api::policies` 12/12; `sqlite::policy` 4/4.
+Test evidence (focused suites run in an earlier round at attributed
+commit `6df5dd5`, whose entire task-128 surface is byte-identical to
+this head — see resume note below): `policy_engine::tests` 31/31;
+`abac_middleware::tests` 23/23 (attribute extraction proven end-to-end
+through live tower oneshot requests: membership-sourced workspace_role,
+team_ids, entity-lookup owner/approval_status/tenant via scope chain,
+persona attributes, env.ip/budget_remaining/main_health); `auth::tests`
+36/36; `api::policies` 12/12; `sqlite::policy` 4/4. One earlier failing
+test, `spec_resource_tenant_resolves_via_scope_chain`, was a test-premise
+bug (a non-matching Allow at 810 cannot outrank the builtin Developer
+Allow at 800): it now uses a cross-tenant Deny at 810
+(`resource.tenant_id NotEquals $subject.tenant_id`), so only a real
+scope-chain lookup (tenant t-1 != "default") makes the deny fire.
 
-Resume note: the resumed run found one failing test in the checkpoint —
-`spec_resource_tenant_resolves_via_scope_chain` asserted 403 but got 200.
-Root cause was a test-premise bug, not implementation: the policy was a
-same-tenant Allow at priority 810; since `member_jwt()` carries no
-`tenant_id` claim, the condition fails and the builtin developer Allow at
-800 grants regardless of the resource tenant — so a non-matching Allow can
-never discriminate tenant fabrication. Fixed by converting the test to a
-cross-tenant Deny at 810 (`resource.tenant_id NotEquals $subject.tenant_id`):
-only a real scope-chain lookup (tenant t-1 ≠ "default") makes the deny fire;
-a fabricated or missing tenant falls through to the builtin Allow → 200.
+### Resume round: checkpoint recovery and base merge 7f8b5d9c
 
-### Merge resolution and web dist repair (this round)
+This round resumed after a worker lease expiry. Source was recovered via
+checkpoint `29ad56fb`; the merge of base `7f8b5d9c` (task-156
+reconciliation surface) completed at head `8e932152` with no unresolved
+conflicts and a clean tree — no merge/rebase repair was needed. The merge
+touches no task-128 surface: `git diff --stat` is empty over every task
+file (domain/ports/adapters policy, mem policy, policy_engine, abac,
+abac_middleware, auth, api/policies) between `6df5dd5`, `29ad56fb`, and
+`HEAD`, and `web/` is unchanged by the merge. The only merged change
+inside a test dependency is the mem.rs `MetaSpecRepository` same-version
+archive guard (task-156 surface, not exercised by any ABAC/policy/auth
+test).
 
-The branch began this round mid-merge (base `d81b0fe4` into
-`pipeline/task-128/aebe1d1e8fd74f2db4b9256c488704c9-1`) with one
-unresolved conflict, `web/dist/assets/elk.bundled-BsE3YpI5.js`, and the
-review finding that the previously committed production asset
-`elk.bundled-C7RdDx88.js` was an unresolved nested merge conflict (a JS
-syntax error shipped under `SKIP_WEB_BUILD=1`). Resolution: rebuilt
-`web/dist` from the merged web source (`npm ci` + `npm run build` with the
-locked dependencies). The merged `web/src` is byte-identical to base
-`d81b0fe4`'s `web/src` (empty diff; `package.json`, `package-lock.json`,
-`vite.config.js` also identical), so the rebuild is a faithful build of the
-merged source. The corrupt `elk.bundled-C7RdDx88.js` and stale
-`index-CLIRvdnY.js` are gone; the new dist is marker-free and
-self-consistent (evidence: `/tmp/stage/review-evidence/task-128-dist-rebuild.txt`).
-The earlier exemption-file conflicts (`lossy-secret-conversion`,
-`fabricated-scope-defaults`) recorded against candidate 853ca54c are absent
-at this head — both scripts pass (`check-lossy-secret-conversion.sh`,
-`check-fabricated-scope-defaults.sh`, `check-scope-literal-defaults.sh` all
-OK), and a repo-wide conflict-marker scan is clean.
+Static verification at this head (evidence:
+`/tmp/stage/review-evidence/task-1....txt`): all acceptance-criteria
+structures present (Policy fields incl. `immutable`/`built_in`,
+PolicyScope, PolicyEffect, 8 ConditionOp variants, ConditionValue,
+dynamic-reference resolution, PolicyRepository, SQLite adapter, the five
+§Policy Example tests); all 20 repo invariant scripts pass (check-arch,
+check-abac-route-registry, check-abac-exempt-handlers,
+check-task-commit-attribution, migration checks, security-pattern
+checks); repo-wide conflict-marker scan clean.
 
-Web unit tests at the merged tree: 1623 passed / 41 skipped / 1 failed —
-the single failure is `ExplorerCanvas-performance.test.js`'s jsdom
-wall-clock guard (15s threshold). Proven environmental, not a regression:
-the identical test fails at the pristine approved base `d81b0fe4` in this
-sandbox (16.3s elapsed, same locked `node_modules`; evidence:
-`/tmp/stage/review-evidence/task-128-perf-test-environmental.txt`).
-Recorded as infrastructure evidence for remote verification; no code
-change made and no assertion weakened.
+This sandbox cannot reach crates.io or any mirror (github.com and
+registry.npmjs.org only), so cargo cannot resolve the 399-package
+lockfile and the focused Rust suites could not be re-run here — recorded
+as infrastructure evidence for remote verification, not a code defect
+(evidence:
+`/tmp/stage/review-evidence/transport-restriction-cargo-offline.txt`).
 
-Full `cargo test --all` and GitHub CI remain verification/publication gates.
-This sandbox cannot bind a TCP listener — no live HTTP server probe;
-middleware behavior is covered by the in-process tower tests above.
+### Prior round: web dist repair (historical context retained for review)
+
+An earlier round resolved a conflicted merge (base `d81b0fe4`) by
+rebuilding `web/dist` from the merged web source (`npm ci` + `npm run
+build`, locked dependencies); the rebuilt dist is marker-free and
+self-consistent, and this round's merge left `web/` byte-identical. Web
+unit tests at that tree: 1623 passed / 41 skipped / 1 failed — the single
+failure is `ExplorerCanvas-performance.test.js`'s jsdom wall-clock
+guard, proven environmental (the identical test fails at the pristine
+approved base `d81b0fe4` in the same sandbox). No code change made and
+no assertion weakened.
+
+Full `cargo test --all` and GitHub CI remain verification/publication
+gates. The implement sandbox cannot bind a TCP listener — no live HTTP
+server probe; middleware behavior is covered by the in-process tower
+tests above.
