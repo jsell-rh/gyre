@@ -1,6 +1,6 @@
 # Spec Coverage Summary
 
-**Last updated:** 2026-10-10
+**Last updated:** 2026-11-04
 
 | Spec | Total | n/a | Not Started | Assigned | Implemented | Verified | Coverage |
 |------|-------|-----|-------------|----------|-------------|----------|----------|
@@ -9,7 +9,7 @@
 | admin-panel.md | 0 | 0 | 0 | 0 | 0 | 0 | 0% |
 | agent-gates.md | 25 | 9 | 0 | 16 | 0 | 0 | 0% |
 | agent-runtime.md | 33 | 1 | 0 | 32 | 0 | 0 | 0% |
-| analytics.md | 12 | 0 | 0 | 12 | 0 | 0 | 0% |
+| analytics.md | 12 | 0 | 0 | 7 | 5 | 0 | 41% |
 | authorization-provenance.md | 47 | 7 | 0 | 1 | 12 | 27 | 97% |
 | business-continuity.md | 10 | 4 | 0 | 0 | 5 | 1 | 100% |
 | dependency-graph.md | 19 | 3 | 0 | 5 | 2 | 9 | 68% |
@@ -44,4 +44,4 @@
 | user-management.md | 36 | 10 | 0 | 26 | 0 | 0 | 0% |
 | view-query-grammar.md | 16 | 0 | 0 | 16 | 0 | 0 | 0% |
 | vision.md | 14 | 14 | 0 | 0 | 0 | 0 | 0% |
-| **TOTAL** | **802** | **219** | **0** | **310** | **110** | **163** | **46%** |
+| **TOTAL** | **802** | **219** | **0** | **305** | **115** | **163** | **47%** |

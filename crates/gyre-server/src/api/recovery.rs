@@ -110,7 +110,10 @@ fn gate_type_to_str(t: &GateType) -> &'static str {
     }
 }
 
-async fn post_merge_gates(state: &AppState, repo_id: &str) -> Result<Vec<PostMergeGateDto>, ApiError> {
+async fn post_merge_gates(
+    state: &AppState,
+    repo_id: &str,
+) -> Result<Vec<PostMergeGateDto>, ApiError> {
     let gates = state
         .quality_gates
         .list_by_repo_id_and_phase(repo_id, GatePhase::PostMerge)
@@ -218,20 +221,33 @@ pub async fn repo_status(
     let gates = post_merge_gates(&state, &repo_id).await?;
 
     // main_green: run post-merge gates against current default-branch HEAD.
+    // Fail closed: an unresolvable HEAD means branch health cannot be
+    // determined — report not-green, never an empty-string SHA (task-095
+    // R3-F3: an empty SHA made gates run against the server cwd and
+    // report green).
     let main_green = if gates.is_empty() {
         None
     } else {
-        let head_sha = crate::git_refs::resolve_ref(
+        match crate::git_refs::resolve_ref(
             &repo.path,
             &format!("refs/heads/{}", repo.default_branch),
         )
         .await
-        .unwrap_or_default();
-        Some(
-            crate::gate_executor::run_post_merge_gates(&state, &repo, &head_sha)
-                .await
-                .is_ok(),
-        )
+        {
+            Some(head_sha) => Some(
+                crate::gate_executor::run_post_merge_gates(&state, &repo, &head_sha)
+                    .await
+                    .is_ok(),
+            ),
+            None => {
+                tracing::warn!(
+                    repo_id = %repo.id,
+                    branch = %repo.default_branch,
+                    "recovery: default-branch HEAD unresolvable; reporting main_green=false"
+                );
+                Some(false)
+            }
+        }
     };
 
     Ok(Json(QueueStatusResponse {
@@ -272,12 +288,18 @@ pub async fn revert_mr(
     }
 
     // Resolve the merge commit: the target branch HEAD (the merge landed it).
-    let merge_sha = crate::git_refs::resolve_ref(
-        &repo.path,
-        &format!("refs/heads/{}", mr.target_branch),
-    )
-    .await
-    .unwrap_or_default();
+    // Fail closed: without a resolved HEAD there is no merge commit to
+    // revert — propagating the failure instead of reverting against an
+    // empty-string SHA.
+    let merge_sha =
+        crate::git_refs::resolve_ref(&repo.path, &format!("refs/heads/{}", mr.target_branch))
+            .await
+            .ok_or_else(|| {
+                ApiError::Conflict(format!(
+            "target branch '{}' no longer resolves; cannot determine the merge commit to revert",
+            mr.target_branch
+        ))
+            })?;
 
     let revert_commit_sha = state
         .git_ops
@@ -381,5 +403,8 @@ pub async fn set_post_merge_gates(
 
     let gates = post_merge_gates(&state, &repo_id).await?;
 
-    Ok((StatusCode::OK, Json(PostMergeGatesResponse { repo_id, gates })))
+    Ok((
+        StatusCode::OK,
+        Json(PostMergeGatesResponse { repo_id, gates }),
+    ))
 }

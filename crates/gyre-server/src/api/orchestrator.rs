@@ -51,9 +51,12 @@ fn is_live(a: &gyre_domain::Agent) -> bool {
     )
 }
 
-/// Soft persona validation (§3.1): warn and continue when the seeded persona
-/// meta-spec is missing or unapproved - never block the spawn path on it.
-async fn validate_persona(state: &AppState, name: &str) {
+/// Advisory persona status check (§3.1): warn and continue when the seeded
+/// persona meta-spec is missing or unapproved - the spawn path is never
+/// blocked on it (persona approval gates usage audits, not orchestration
+/// capacity). Named for what it does: it warns, it does not validate-and-
+/// reject, so callers cannot mistake it for an enforcement gate.
+async fn warn_unapproved_persona(state: &AppState, name: &str) {
     let filter = MetaSpecFilter {
         kind: Some(MetaSpecKind::Persona),
         ..Default::default()
@@ -132,18 +135,30 @@ async fn spawn_orchestrator(
     // children (authorization-provenance.md §4.5).
     bootstrap_agent_keypair(state, &agent.id.to_string(), now).await;
 
-    // Auto-track spawn.
+    // Auto-track spawn (analytics.md §Auto-Emitted Events).
+    let persona_name = match orchestrator_type {
+        OrchestratorType::Worker => "default-worker",
+        OrchestratorType::WorkspaceOrchestrator => "workspace-orchestrator",
+        OrchestratorType::RepoOrchestrator => "repo-orchestrator",
+    };
     let ev = AnalyticsEvent::new(
         new_id(),
         "agent.spawned",
         Some(agent.id.to_string()),
         serde_json::json!({
+            // Orchestrators are not task-bound (the JWT task_id claim is the
+            // orchestrator's own id only for gyre_agent_complete compat) —
+            // the spec's task_id property is null here, not a fabricated id.
+            "task_id": serde_json::Value::Null,
+            "compute_target": "local",
+            "persona": persona_name,
             "orchestrator_type": orchestrator_type.to_string(),
             "workspace_id": workspace_id.to_string(),
             "repo_id": repo_id.map(|r| r.to_string()),
         }),
         now,
-    );
+    )
+    .with_scope(None, None, Some(workspace_id), repo_id);
     let _ = state.analytics.record(&ev).await;
 
     budget::increment_active_agents(state, &workspace_id.to_string()).await;
@@ -184,7 +199,7 @@ pub(crate) async fn spawn_workspace_orchestrator_core(
         .await
         .map_err(ApiError::TooManyRequests)?;
 
-    validate_persona(state, "workspace-orchestrator").await;
+    warn_unapproved_persona(state, "workspace-orchestrator").await;
 
     let name = req
         .name
@@ -205,12 +220,32 @@ pub(crate) async fn spawn_workspace_orchestrator_core(
 ///
 /// Spawn the single workspace orchestrator for a workspace.
 /// Returns 409 Conflict when a live workspace orchestrator already exists.
+/// Enforces tenant containment: the workspace's tenant must match the
+/// caller's tenant (task-093 F2) — spawning mints a workspace-scoped
+/// orchestrator JWT, so `auth.agent_id` bookkeeping alone is not
+/// authorization.
 pub async fn spawn_workspace_orchestrator(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
     Path(workspace_id): Path<String>,
     Json(req): Json<SpawnOrchestratorRequest>,
 ) -> Result<(StatusCode, Json<SpawnOrchestratorResponse>), ApiError> {
+    // Cross-tenant containment (task-093 F2): load the workspace and compare
+    // its tenant against the caller's tenant before minting a
+    // workspace-scoped orchestrator JWT.
+    let ws_id = Id::new(workspace_id.clone());
+    let workspace = state
+        .workspaces
+        .find_by_id(&ws_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {workspace_id} not found")))?;
+    if workspace.tenant_id.as_str() != auth.tenant_id {
+        return Err(ApiError::Forbidden(
+            "Cross-tenant orchestrator spawn denied".to_string(),
+        ));
+    }
+
     let (agent, token) =
         spawn_workspace_orchestrator_core(&state, &workspace_id, req, &auth.agent_id).await?;
 
@@ -280,7 +315,7 @@ pub(crate) async fn spawn_repo_orchestrator_core(
         .await
         .map_err(ApiError::TooManyRequests)?;
 
-    validate_persona(state, "repo-orchestrator").await;
+    warn_unapproved_persona(state, "repo-orchestrator").await;
 
     let name = req
         .name
@@ -301,6 +336,8 @@ pub(crate) async fn spawn_repo_orchestrator_core(
 ///
 /// Spawn the single repo orchestrator for a repo. Returns 409 Conflict when
 /// a live repo orchestrator already exists for that repo.
+/// Enforces tenant containment (task-093 F3) in addition to the ABAC
+/// policy check: the repo's workspace tenant must match the caller's tenant.
 pub async fn spawn_repo_orchestrator(
     State(state): State<Arc<AppState>>,
     auth: AuthenticatedAgent,
@@ -311,6 +348,30 @@ pub async fn spawn_repo_orchestrator(
     crate::abac::check_repo_abac(&state, &repo_id, &auth)
         .await
         .map_err(ApiError::Forbidden)?;
+
+    // Tenant containment (task-093 F3): check_repo_abac alone is not
+    // containment — the policy engine is permissive when no per-repo
+    // policies are stored ("No policies = unrestricted") and bypasses for
+    // global tokens / API keys. Load the repo, resolve its workspace's
+    // tenant, and compare against the caller's tenant.
+    let rid = Id::new(repo_id.clone());
+    let repo = state
+        .repos
+        .find_by_id(&rid)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
+    let workspace = state
+        .workspaces
+        .find_by_id(&repo.workspace_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace for repo {repo_id} not found")))?;
+    if workspace.tenant_id.as_str() != auth.tenant_id {
+        return Err(ApiError::Forbidden(
+            "Cross-tenant orchestrator spawn denied".to_string(),
+        ));
+    }
 
     let (agent, token) =
         spawn_repo_orchestrator_core(&state, &repo_id, req, &auth.agent_id).await?;
@@ -574,5 +635,34 @@ mod tests {
                 .any(|m| m.kind == gyre_common::message::MessageKind::Escalation),
             "expected an Escalation message in the workspace orchestrator inbox"
         );
+    }
+
+    #[tokio::test]
+    async fn orchestrator_spawn_emits_agent_spawned_analytics_event() {
+        // analytics.md §Auto-Emitted Events: the orchestrator spawn path
+        // reports its tier via the persona property.
+        let state = test_state();
+        seed(&state).await;
+
+        let (agent, _token) =
+            spawn_workspace_orchestrator_core(&state, "ws-1", req(None), "user-1")
+                .await
+                .unwrap();
+
+        let events = state
+            .analytics
+            .query(Some("agent.spawned"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "one agent.spawned event expected");
+        let ev = &events[0];
+        assert_eq!(ev.agent_id.as_deref(), Some(agent.id.as_str()));
+        assert_eq!(ev.properties["persona"], "workspace-orchestrator");
+        assert_eq!(ev.properties["orchestrator_type"], "workspace_orchestrator");
+        assert_eq!(ev.properties["compute_target"], "local");
+        // Orchestrators are not task-bound: task_id must be null, not the
+        // agent's own id (regression: previously fabricated from agent.id).
+        assert!(ev.properties["task_id"].is_null());
+        assert_eq!(ev.workspace_id.as_deref(), Some("ws-1"));
     }
 }

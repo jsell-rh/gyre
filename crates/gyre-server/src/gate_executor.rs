@@ -96,6 +96,52 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
         "gate execution complete"
     );
 
+    // Auto-track gate outcome (analytics.md §Auto-Emitted Events).
+    let gate_type_str = format!("{:?}", gate.gate_type);
+    let duration_secs = finished_at.saturating_sub(started_at);
+    let (event_name, props) = if status == GateStatus::Failed {
+        (
+            "gate.failed",
+            serde_json::json!({
+                "gate_id": gate.id.to_string(),
+                "gate_type": gate_type_str,
+                "mr_id": mr_id.to_string(),
+                "output_snippet": truncate_bytes(&output, 512),
+            }),
+        )
+    } else {
+        (
+            "gate.passed",
+            serde_json::json!({
+                "gate_id": gate.id.to_string(),
+                "gate_type": gate_type_str,
+                "mr_id": mr_id.to_string(),
+                "duration_secs": duration_secs,
+            }),
+        )
+    };
+    let scope = state
+        .merge_requests
+        .find_by_id(&mr_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|mr| (mr.workspace_id, mr.repository_id));
+    let ev = gyre_domain::AnalyticsEvent::new(
+        gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+        event_name,
+        None,
+        props,
+        finished_at,
+    )
+    .with_scope(
+        None,
+        None,
+        scope.as_ref().map(|(ws, _)| ws),
+        scope.as_ref().map(|(_, repo)| repo),
+    );
+    let _ = state.analytics.record(&ev).await;
+
     // Emit GateFailure event so the MR's author agent can react immediately.
     if status == GateStatus::Failed {
         let gate_type_str = format!("{:?}", gate.gate_type);
@@ -108,23 +154,37 @@ async fn run_gate(state: Arc<AppState>, result_id: Id, gate: gyre_domain::Qualit
             .map(|mr| (mr.spec_ref, Some(mr.workspace_id)))
             .unwrap_or((None, None));
         let gate_agent_id = format!("gate-agent:{}", gate.id);
-        let ws_id = workspace_id.unwrap_or_else(|| gyre_common::Id::new("default"));
-        state
-            .emit_event(
-                Some(ws_id.clone()),
-                gyre_common::message::Destination::Workspace(ws_id),
-                gyre_common::message::MessageKind::GateFailure,
-                Some(serde_json::json!({
-                    "mr_id": mr_id.to_string(),
-                    "gate_name": gate.name,
-                    "gate_type": gate_type_str,
-                    "status": "Failed",
-                    "output": output,
-                    "spec_ref": spec_ref,
-                    "gate_agent_id": gate_agent_id,
-                })),
-            )
-            .await;
+        // Never fabricate a "default" workspace scope on lookup failure
+        // (task-097 F3): if the MR's workspace cannot be determined, skip
+        // the event emission and log — an invented identity would
+        // re-target the message at whatever workspace is literally named
+        // "default".
+        match workspace_id {
+            Some(ws_id) => {
+                state
+                    .emit_event(
+                        Some(ws_id.clone()),
+                        gyre_common::message::Destination::Workspace(ws_id),
+                        gyre_common::message::MessageKind::GateFailure,
+                        Some(serde_json::json!({
+                            "mr_id": mr_id.to_string(),
+                            "gate_name": gate.name,
+                            "gate_type": gate_type_str,
+                            "status": "Failed",
+                            "output": output,
+                            "spec_ref": spec_ref,
+                            "gate_agent_id": gate_agent_id,
+                        })),
+                    )
+                    .await;
+            }
+            None => {
+                tracing::warn!(
+                    mr_id = %mr_id,
+                    "gate_executor: MR workspace unresolvable; skipping GateFailure event"
+                );
+            }
+        }
     }
 
     // Notify MR author when gate fails (HSI §2).
@@ -911,21 +971,17 @@ async fn run_command_in_dir(
         command.current_dir(dir);
     }
 
-    let result = match tokio::time::timeout(
-        Duration::from_secs(timeout_secs),
-        command.output(),
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(_) => {
-            warn!(cmd = %cmd, timeout_secs, "gate command timed out");
-            return (
-                GateStatus::Failed,
-                format!("timed out after {timeout_secs}s"),
-            );
-        }
-    };
+    let result =
+        match tokio::time::timeout(Duration::from_secs(timeout_secs), command.output()).await {
+            Ok(r) => r,
+            Err(_) => {
+                warn!(cmd = %cmd, timeout_secs, "gate command timed out");
+                return (
+                    GateStatus::Failed,
+                    format!("timed out after {timeout_secs}s"),
+                );
+            }
+        };
 
     match result {
         Ok(output) => {
@@ -1045,12 +1101,9 @@ async fn run_post_merge_gate_commands(
         match &gate.gate_type {
             GateType::TestCommand | GateType::LintCommand => {
                 let timeout = gate.timeout_secs.unwrap_or(AGENT_GATE_TIMEOUT_SECS);
-                let (status, output) = run_command_in_dir(
-                    gate.command.as_deref().unwrap_or("true"),
-                    cwd,
-                    timeout,
-                )
-                .await;
+                let (status, output) =
+                    run_command_in_dir(gate.command.as_deref().unwrap_or("true"), cwd, timeout)
+                        .await;
                 if status == GateStatus::Failed {
                     if gate.required {
                         return Err(format!(
@@ -1744,5 +1797,92 @@ mod tests {
             observed, "payments-api",
             "{{repo_name}} must be templated to the repository name"
         );
+    }
+
+    // ─── Auto-emitted analytics events (analytics.md §Auto-Emitted Events) ────
+
+    async fn analytics_events(
+        state: &Arc<crate::AppState>,
+        name: &str,
+    ) -> Vec<gyre_domain::AnalyticsEvent> {
+        // state.analytics is an Arc<dyn AnalyticsRepository>; method calls
+        // resolve through the trait object without importing the trait here.
+        state.analytics.query(Some(name), None, 10).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn passing_gate_emits_gate_passed_analytics_event() {
+        // gate.passed must carry gate_id, gate_type, mr_id, duration_secs.
+        let state = crate::mem::test_state();
+        let gate = make_gate(GateType::TestCommand, Some("true".to_string()));
+        let mr_id = make_mr_id();
+        let result_id = Id::new(Uuid::new_v4().to_string());
+
+        // Store a pending result first (run_gate updates it).
+        state
+            .gate_results
+            .save(&GateResult {
+                id: result_id.clone(),
+                gate_id: gate.id.clone(),
+                mr_id: mr_id.clone(),
+                status: GateStatus::Pending,
+                output: None,
+                started_at: None,
+                finished_at: None,
+            })
+            .await
+            .unwrap();
+
+        run_gate(state.clone(), result_id, gate.clone(), mr_id.clone()).await;
+
+        let events = analytics_events(&state, "gate.passed").await;
+        assert_eq!(events.len(), 1, "one gate.passed event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["gate_id"], gate.id.to_string());
+        assert_eq!(ev.properties["gate_type"], "TestCommand");
+        assert_eq!(ev.properties["mr_id"], mr_id.to_string());
+        assert!(
+            ev.properties["duration_secs"].as_u64().is_some(),
+            "duration_secs must be present"
+        );
+    }
+
+    #[tokio::test]
+    async fn failing_gate_emits_gate_failed_analytics_event() {
+        // gate.failed must carry gate_id, gate_type, mr_id, output_snippet.
+        let state = crate::mem::test_state();
+        let gate = make_gate(GateType::TestCommand, Some("false".to_string()));
+        let mr_id = make_mr_id();
+        let result_id = Id::new(Uuid::new_v4().to_string());
+
+        state
+            .gate_results
+            .save(&GateResult {
+                id: result_id.clone(),
+                gate_id: gate.id.clone(),
+                mr_id: mr_id.clone(),
+                status: GateStatus::Pending,
+                output: None,
+                started_at: None,
+                finished_at: None,
+            })
+            .await
+            .unwrap();
+
+        run_gate(state.clone(), result_id, gate.clone(), mr_id.clone()).await;
+
+        let events = analytics_events(&state, "gate.failed").await;
+        assert_eq!(events.len(), 1, "one gate.failed event expected");
+        let ev = &events[0];
+        assert_eq!(ev.properties["gate_id"], gate.id.to_string());
+        assert_eq!(ev.properties["gate_type"], "TestCommand");
+        assert_eq!(ev.properties["mr_id"], mr_id.to_string());
+        assert!(
+            ev.properties["output_snippet"].as_str().is_some(),
+            "output_snippet must be present (failure output)"
+        );
+        // No gate.passed event for a failing gate.
+        let passed = analytics_events(&state, "gate.passed").await;
+        assert!(passed.is_empty(), "failed gate must not emit gate.passed");
     }
 }
