@@ -195,40 +195,44 @@ type historyDone struct {
 	err   error
 }
 type Model struct {
-	sortDescending                      bool
-	filter, historyFilter, filterBefore string
-	filtering, helpOpen                 bool
-	helpScroll, sortMode                int
-	gPending                            time.Time
-	confirmScroll                       int
-	signIn                              *signInSession
-	signInActive                        bool
-	signInCancel                        context.CancelFunc
-	signInText, signInInput             string
-	signInScroll                        int
-	signInPending                       string
-	signInPrompt                        *gatewayPrompt
-	signInChoice                        int
-	signInResult                        string
-	signInDiagnostics                   bool
-	pendingCancel                       *Row
-	cancelChoice                        int
-	pendingRetry                        *Row
-	issueGrouping                       bool
-	showCompleted                       bool
-	historyIssue                        *Row
-	historyRows                         []Row
-	historyLoading                      bool
-	engine                              *Engine
-	ctx                                 context.Context
-	cancel                              context.CancelFunc
-	state                               Snapshot
-	width, height, index, scroll        int
-	selected, screen, notice, logText   string
-	logs                                logViewState
-	noticeUntil                         time.Time
-	plainColor                          bool
-	exit                                int
+	configReturn                             string
+	configIndex, configChoice, configCursor  int
+	configEditing, configSaving              bool
+	configInput, configError, configExpected string
+	sortDescending                           bool
+	filter, historyFilter, filterBefore      string
+	filtering, helpOpen                      bool
+	helpScroll, sortMode                     int
+	gPending                                 time.Time
+	confirmScroll                            int
+	signIn                                   *signInSession
+	signInActive                             bool
+	signInCancel                             context.CancelFunc
+	signInText, signInInput                  string
+	signInScroll                             int
+	signInPending                            string
+	signInPrompt                             *gatewayPrompt
+	signInChoice                             int
+	signInResult                             string
+	signInDiagnostics                        bool
+	pendingCancel                            *Row
+	cancelChoice                             int
+	pendingRetry                             *Row
+	issueGrouping                            bool
+	showCompleted                            bool
+	historyIssue                             *Row
+	historyRows                              []Row
+	historyLoading                           bool
+	engine                                   *Engine
+	ctx                                      context.Context
+	cancel                                   context.CancelFunc
+	state                                    Snapshot
+	width, height, index, scroll             int
+	selected, screen, notice, logText        string
+	logs                                     logViewState
+	noticeUntil                              time.Time
+	plainColor                               bool
+	exit                                     int
 }
 
 func (m Model) Init() tea.Cmd { return tick() }
@@ -418,6 +422,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.setNotice("Cancel requested. Waiting for Fullsend to stop and finish cleanup.")
 		}
+	case settingsDone:
+		m.configSaving = false
+		if v.err != nil {
+			m.configError = v.err.Error()
+		} else {
+			m.configEditing = false
+			m.configError = ""
+			m.setNotice(v.message)
+		}
 	case retryDone:
 		if v.err != nil {
 			m.setNotice(v.err.Error())
@@ -425,6 +438,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setNotice("Retry requested for " + v.key + ". Starts when eligible and a worker slot is free.")
 		}
 	case tea.KeyMsg:
+		if m.screen == "configuration" && !m.helpOpen {
+			return m.updateConfiguration(v)
+		}
 		if m.pendingCancel != nil {
 			switch v.String() {
 			case "esc", "h":
@@ -565,14 +581,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancel()
 			m.exit = 130
 			return m, tea.Quit
-		case "tab", "c":
+		case ",":
+			m.configReturn = m.screen
+			m.screen = "configuration"
+		case "tab", "shift+tab", "c":
 			if m.screen == "" && m.historyIssue == nil {
 				var prior *Row
 				if len(rows) > 0 {
 					r := rows[m.index]
 					prior = &r
 				}
-				if v.String() == "tab" {
+				if (v.String() == "tab" && m.issueGrouping) || (v.String() == "shift+tab" && !m.issueGrouping) {
+					m.configReturn = m.screen
+					m.screen = "configuration"
+				} else if v.String() == "tab" || v.String() == "shift+tab" {
 					m.issueGrouping = !m.issueGrouping
 				} else {
 					m.showCompleted = !m.showCompleted
@@ -994,6 +1016,9 @@ func (m Model) View() string {
 		lines = append(lines, m.scrollPane(content, start, count, w)...)
 		lines = append(lines, m.scrollIndicator(start, min(len(content), start+count), len(content)), "", m.style("j/k scroll   h / esc / ? close   q detach", "8", false))
 		return m.frame(lines, w, h)
+	}
+	if m.screen == "configuration" {
+		return m.configurationView(lines, w, h)
 	}
 	if m.screen == "signin" {
 		lines = append(lines, m.style("Gateway  /  Sign in", "7", true), "")

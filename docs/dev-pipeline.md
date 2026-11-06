@@ -255,6 +255,23 @@ live output. The bordered pane shows follow state, active modes, and line/column
 ranges, including on short terminals. Full logs remain available rather than
 only the last 64 KiB.
 
+The terminal's **Configuration** tab is the third tab (`Tab`/`Shift-Tab`), or
+press `,` from a run/list view. Select a setting with `j`/`k`, press Enter to
+edit, Enter to save, and Escape to discard. It edits the same private SQLite
+ledger as the browser and CLI, with no HyperShell preference file. External
+changes refresh automatically; an edit based on an older value is rejected
+rather than overwriting another controller's change.
+
+- Capacity, pause state, verification reservations, and per-stage concurrency
+  affect new admission. Existing workers finish. An empty stage limit inherits
+  total capacity; limits never bypass global admission or reservations.
+- Agent and verification deadlines apply to new assignments, in seconds.
+- Retry base and ceiling affect future exponential-backoff schedules, retaining
+  jitter. Existing wake times and explicit stage-specific delays remain intact.
+- Model, repository, gateway, and last successful gateway health check are
+  read-only. The pinned model must agree with inference routing and admission;
+  credentials remain outside the editor.
+
 `serve --plain` selects text output. Stop the supervisor with Ctrl-C;
 already claimed stages finish independently. Restarting `serve` adopts their
 leases and discovers pending work. `pause` stops new model-stage dispatch while
