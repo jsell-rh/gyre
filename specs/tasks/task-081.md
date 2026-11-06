@@ -7,7 +7,7 @@ depends_on:
 progress: not-started
 coverage_sections:
   - "explorer-canvas.md §6 Causal Flow Trace (Structural Lens Feature)"
-commits: []
+commits: ["09580636d385d9a0d731d7edd0b26e1c672f02c8"]
 ---
 
 ## Spec Excerpt
