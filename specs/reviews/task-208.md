@@ -51,3 +51,30 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 38 (candidate `953fe5a7`) — NOT approved: attribution clobber recurrence (37th of the rounds 2–37 class)
+
+Assigned candidate: `953fe5a79319e19923f33c101d577268193a8dba`; assigned base `7f8b5d9cbdff735f15f513f007fbb12c4d4fe545` (already an ancestor via merge `aa670261`).
+
+**Finding (blocks approval):** the candidate commit `953fe5a7` ("process: record task-208 branch commits") has exactly one change — it rewrites the task's `commits:` frontmatter from the fully-attributed four-SHA list (present at its parent `3538960a`, the round-37 repair tip) back to `["a11cbf7e", "98fd096e"]`, dropping:
+
+- `ad1121c5093cd2f1f2b3824ed88352ac4e181fd9` — "build(web): regenerate dist without my-stuff profile tabs (task-208)", the F1 fix that removed the HSI §12-forbidden my-stuff surface from the RustEmbed'd `SKIP_WEB_BUILD=1` shipped bundle, and
+- `ea006d52bb42e96e6f176b02b5390b6cb56a3116` — "build(web): exempt generated dist bundles from whitespace gate (task-208)".
+
+Both are task-208-labeled product-surface commits (touching `web/dist/` — the shipped artifact on the documented Rust-only build path — and root `.gitattributes`) and both are verified ancestors of HEAD (`git merge-base --is-ancestor` exit 0). Same documented class as clobbers 2–37: the checkpoint attribution pass's path filter (`crates/`, `web/src`, `web/tests`) excludes `web/dist/` and root `.gitattributes`; the in-repo gate shares the blind spot. This violates the repo invariant that every task-labeled product-surface commit must be recorded in `commits:` — an unlisted commit is invisible to review scoping.
+
+**All other task-208 surfaces verified intact at the candidate** (the candidate touches only `specs/tasks/task-208.md`; fresh probes this round):
+
+- Dead-code grep (`get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs` over `crates/` + `web/src/`) → zero matches.
+- Routes and ABAC registrations for `/api/v1/users/me/{agents,tasks,mrs}` absent from `api/mod.rs` / `abac_middleware.rs`; router 404 regression test `my_stuff_endpoints_are_removed` present (`users.rs:948`).
+- `UserProfile.svelte` tab array is exactly the six HSI §12-compliant tabs.
+- Committed dist bundle `index-CYVJLA6W.js`: forbidden identifiers (`my-agents|my-tasks|my-mrs|users/me/agents|users/me/tasks|users/me/mrs`) → zero matches; kept-surface identifiers present (`users/me/tokens` ×3, `users/me/judgments`).
+- Spec amendments intact: `user-management.md` §"My Stuff" Views supersession record, M22.8 completeness row struck to Removed, M22 milestone annotations; coverage `user-management.md` row 22 → `n/a`, HSI row 54 → `implemented`.
+- Focused web probe: `npm ci` + `npx vitest run src/__tests__/UserProfile.test.js` → 23/23 passed.
+- Focused Rust probe (`SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib my_stuff_endpoints_are_removed`) could not run: `index.crates.io`/`static.crates.io` unreachable in this sandbox and no registry cache exists — an infrastructure restriction recorded for remote verification, not a code defect. The candidate is byte-identical to its parent on every Rust source (`git diff 953fe5a7^ 953fe5a7 --name-only` = `specs/tasks/task-208.md` only), the state at which the test source last passed; the verifier must still run `cargo test --all`.
+
+**Repair path (mechanical, product untouched):** restore `commits:` to the full four-SHA list at a new tip; verify all four SHAs remain ancestors. Residual for the process owner (37th occurrence): the checkpoint attribution pass (`dev-attribution.py` path filter) will likely re-clobber at the next checkpoint; the in-repo gate's `web/dist/` blind spot remains.
+
+Evidence: `/tmp/stage/review-evidence/task-208-round38-*` (candidate show-diff, ancestry checks, changed-file list, dead-code/routes/ABAC/dist greps, coverage-row checks, vitest output, cargo network-restriction log, npm-ci log).
+
+Verdict: **not approved** — one finding (attribution clobber). No product-code defect found this round.
