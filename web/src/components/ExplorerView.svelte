@@ -1,5 +1,5 @@
 <script>
-  import { getContext, onDestroy } from 'svelte';
+  import { getContext, onDestroy, untrack } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import { entityName } from '../lib/entityNames.svelte.js';
@@ -55,11 +55,20 @@
   // ExplorerCanvas tracks canvas-level interactions (click, drill) in
   // canvasState.recent_interactions.  ExplorerView adds higher-level
   // interactions (search, load_view) so the LLM has full context.
-  function pushInteraction(label) {
+  function pushInteraction(record) {
     const existing = explorerCanvasState?.recent_interactions ?? [];
-    const updated = [...existing, label].slice(-10);
+    const updated = [...existing, record].slice(-10);
     explorerCanvasState = { ...explorerCanvasState, recent_interactions: updated };
   }
+
+  // §10 Interaction Context: the active view query is part of the canvas
+  // state sent with each message, so the LLM knows what view is currently
+  // applied ("what about this one?" can build on the active query).
+  $effect(() => {
+    const q = activeViewQuery;
+    const cs = untrack(() => explorerCanvasState);
+    explorerCanvasState = { ...cs, active_query: q };
+  });
 
   // ── Dynamic welcome suggestions (vision.md Principle 6: challenge ceremony) ──
   // Compute context-aware suggestions from the graph so the user doesn't need
@@ -687,6 +696,8 @@
         return;
       }
       activeViewQuery = parsed;
+      // §10: user-composed JSON queries are query interactions
+      pushInteraction({ action: 'query', detail: parsed.scope.type });
     } catch (e) {
       queryEditorError = `Invalid JSON: ${e.message}`;
     }
@@ -1397,9 +1408,8 @@
                 nodes={effectiveGraph.nodes ?? []}
                 edges={effectiveGraph.edges ?? []}
                 activeQuery={activeViewQuery}
-                filter={explorerFilter}
-                lens={explorerLens}
-                filters={null}
+                bind:filter={explorerFilter}
+                bind:lens={explorerLens}
                 bind:canvasState={explorerCanvasState}
                 onNodeDetail={(n) => {
                   detailNode = n;
@@ -1422,7 +1432,7 @@
                     detailNode = n;
                   }
                 }}
-                onInteractiveQuery={(q) => { activeViewQuery = q; }}
+                onInteractiveQuery={(q) => { activeViewQuery = q; pushInteraction({ action: 'query', detail: 'interactive' }); }}
                 ghostOverlays={mergedGhostOverlays}
                 {traceData}
                 queryResult={viewQueryResult}
@@ -1634,7 +1644,7 @@
                   edges={graph.edges ?? []}
                   onClose={() => { detailNode = null; highlightedSpanId = null; }}
                   onNavigate={(n) => { detailNode = n; }}
-                  onInteractiveQuery={(q) => { activeViewQuery = q; }}
+                  onInteractiveQuery={(q) => { activeViewQuery = q; pushInteraction({ action: 'query', detail: 'interactive' }); }}
                   lens={explorerLens}
                   traceSpans={traceData?.spans ?? []}
                   onSpanSelect={(span) => { highlightedSpanId = span?.span_id ?? null; }}
@@ -1952,10 +1962,11 @@
                 <ExplorerChat
                   repoId={selectedRepoId}
                   canvasState={explorerCanvasState}
-                  onViewQuery={(q) => { activeViewQuery = q; pushInteraction(`view:${q?.scope?.type ?? 'query'}`); }}
+                  onViewQuery={(q) => { activeViewQuery = q; pushInteraction({ action: 'query', detail: q?.scope?.type ?? 'query' }); }}
                   onOpenSpec={(path) => openSpecEditor(path)}
                   savedViews={explorerSavedViews}
                   onSavedViewsUpdate={(views) => { explorerSavedViews = views; }}
+                  onLoadView={(view) => pushInteraction({ action: 'query', preset: view?.name ?? null })}
                   {graphHints}
                   graphNodes={graph?.nodes ?? []}
                   graphEdges={graph?.edges ?? []}

@@ -190,6 +190,30 @@ const MAX_TOOL_TURNS: usize = 8;
 /// Per spec: 3 dedicated refinement turns for the self-check loop.
 /// These are tracked independently from tool-use turns.
 const MAX_REFINEMENT_TURNS: usize = 3;
+/// Explorer status protocol values (spec: explorer-implementation.md §6).
+/// The Status message's `status` field MUST be one of exactly these three
+/// values — the frontend status indicator maps only these (ExplorerChat.svelte);
+/// any other string is silently dropped and the indicator goes stale.
+const STATUS_THINKING: &str = "thinking";
+const STATUS_REFINING: &str = "refining";
+const STATUS_READY: &str = "ready";
+
+/// Normalize a status string from the SDK subprocess to the three-value
+/// status protocol. The bundled SDK script emits spec-conformant values, but
+/// the subprocess is swappable (`GYRE_EXPLORER_SDK_PATH`), so an alternate
+/// script's free-form statuses ("Analyzing...", "Synthesizing answer...")
+/// must not leak onto the wire off-contract. Unknown values map to `thinking`
+/// (the "agent is working" default).
+fn normalize_status(raw: &str) -> &'static str {
+    let lowered = raw.trim().to_lowercase();
+    if lowered.contains(STATUS_REFINING) {
+        STATUS_REFINING
+    } else if lowered.contains(STATUS_READY) {
+        STATUS_READY
+    } else {
+        STATUS_THINKING
+    }
+}
 
 /// Max messages per session before requiring reconnect (prevents unbounded history).
 /// Set high enough for deep conversational exploration (100 back-and-forth turns).
@@ -743,7 +767,7 @@ async fn handle_explorer_session(
                 }
 
                 // Send thinking status
-                send_status(&mut sender, "thinking").await;
+                send_status(&mut sender, STATUS_THINKING).await;
 
                 // Reset cancel signal for this run
                 let _ = cancel_tx.send(false);
@@ -856,7 +880,7 @@ async fn handle_explorer_session(
 
                 // Include graph data age so the UI can display freshness
                 let age = cache_time.elapsed().as_secs();
-                send_status_full(&mut sender, "ready", None, Some(age)).await;
+                send_status_full(&mut sender, STATUS_READY, None, Some(age)).await;
             }
 
             ExplorerClientMessage::SaveView {
@@ -1945,7 +1969,7 @@ async fn run_explorer_agent_sdk(
                             }
                             "status" => {
                                 if let Some(status) = msg.get("status").and_then(|s| s.as_str()) {
-                                    if !send_status(sender, status).await {
+                                    if !send_status(sender, normalize_status(status)).await {
                                         break; // Client disconnected
                                     }
                                 }
@@ -2014,6 +2038,99 @@ async fn run_explorer_agent_sdk(
     });
 
     Ok(())
+}
+
+/// Fallback when no LLM is configured — generate template-based view queries
+/// from simple keyword matching. Better than a dead-end "not configured" message.
+fn build_canvas_context_json(
+    canvas_state: &gyre_common::view_query::CanvasState,
+    cached_nodes: Option<&Vec<gyre_common::graph::GraphNode>>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut ctx = serde_json::Map::new();
+    if let Some(ref sel) = canvas_state.selected_node {
+        // Enrich selected node context with graph data for better LLM reasoning
+        let mut node_ctx = json!({
+            "name": sel.qualified_name.as_deref().unwrap_or(&sel.name),
+            "type": sel.node_type,
+            "id": sel.id,
+        });
+        // Look up full node details from the graph cache
+        if let Some(graph_nodes) = cached_nodes {
+            if let Some(full_node) = graph_nodes.iter().find(|n| n.id.to_string() == sel.id) {
+                if !full_node.file_path.is_empty() {
+                    node_ctx["file_path"] = json!(full_node.file_path);
+                }
+                if full_node.line_start > 0 {
+                    node_ctx["line_start"] = json!(full_node.line_start);
+                }
+                if let Some(ref sp) = full_node.spec_path {
+                    node_ctx["spec_path"] = json!(sp);
+                }
+                if let Some(c) = full_node.complexity {
+                    node_ctx["complexity"] = json!(c);
+                }
+                if let Some(tc) = full_node.test_coverage {
+                    node_ctx["test_coverage"] = json!(tc);
+                }
+            }
+        }
+        ctx.insert("selected_node".to_string(), node_ctx);
+    }
+    // §10: the LLM receives the current zoom level. serde default is 0.0,
+    // which means "frontend did not send one" — omit rather than emit 0.
+    if canvas_state.zoom_level > 0.0 {
+        ctx.insert("zoom_level".to_string(), json!(canvas_state.zoom_level));
+    }
+    if !canvas_state.visible_tree_groups.is_empty() {
+        ctx.insert(
+            "visible_groups".to_string(),
+            json!(canvas_state.visible_tree_groups),
+        );
+    }
+    // §10: the active edge-type filter (e.g. "calls"), when set.
+    if let Some(ref filter) = canvas_state.active_filter {
+        if !filter.is_empty() {
+            ctx.insert("active_filter".to_string(), json!(filter));
+        }
+    }
+    if let Some(ref lens) = canvas_state.active_lens {
+        if !lens.is_empty() {
+            ctx.insert("active_lens".to_string(), json!(lens));
+        }
+    }
+    if !canvas_state.recent_interactions.is_empty() {
+        let last_10: Vec<_> = canvas_state
+            .recent_interactions
+            .iter()
+            .rev()
+            .take(10)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|i| {
+                let mut m = serde_json::Map::new();
+                m.insert("action".to_string(), json!(i.action));
+                if let Some(ref node) = i.node {
+                    m.insert("node".to_string(), json!(node));
+                }
+                if let Some(ref detail) = i.detail {
+                    m.insert("detail".to_string(), json!(detail));
+                }
+                if let Some(to_level) = i.to_level {
+                    m.insert("to_level".to_string(), json!(to_level));
+                }
+                if let Some(ref preset) = i.preset {
+                    m.insert("preset".to_string(), json!(preset));
+                }
+                serde_json::Value::Object(m)
+            })
+            .collect();
+        ctx.insert("recent_interactions".to_string(), json!(last_10));
+    }
+    if let Some(ref aq) = canvas_state.active_query {
+        ctx.insert("active_query".to_string(), aq.clone());
+    }
+    ctx
 }
 
 /// Fallback when no LLM is configured — generate template-based view queries
@@ -2392,7 +2509,7 @@ async fn run_explorer_agent(
                 "Non-admin attempted SDK explorer path — falling through to native LLM"
             );
         } else {
-            send_status_with_path(sender, "thinking", Some("sdk")).await;
+            send_status_with_path(sender, STATUS_THINKING, Some("sdk")).await;
             return run_explorer_agent_sdk(
                 state,
                 repo_id,
@@ -2410,7 +2527,7 @@ async fn run_explorer_agent(
     }
 
     // Send agent path indicator for native LLM path
-    send_status_with_path(sender, "thinking", Some("native")).await;
+    send_status_with_path(sender, STATUS_THINKING, Some("native")).await;
 
     let llm = match &state.llm {
         Some(llm) => llm.clone(),
@@ -2591,78 +2708,11 @@ async fn run_explorer_agent(
     }
     let tools = explorer_tool_definitions();
 
-    // Build user message with structured canvas context as JSON
-    // (structured format lets the LLM parse interaction sequences semantically)
-    let canvas_json = {
-        let mut ctx = serde_json::Map::new();
-        if let Some(ref sel) = canvas_state.selected_node {
-            // Enrich selected node context with graph data for better LLM reasoning
-            let mut node_ctx = json!({
-                "name": sel.qualified_name.as_deref().unwrap_or(&sel.name),
-                "type": sel.node_type,
-                "id": sel.id,
-            });
-            // Look up full node details from the graph cache
-            if let Some(ref graph_nodes) = cached_nodes {
-                if let Some(full_node) = graph_nodes.iter().find(|n| n.id.to_string() == sel.id) {
-                    if !full_node.file_path.is_empty() {
-                        node_ctx["file_path"] = json!(full_node.file_path);
-                    }
-                    if full_node.line_start > 0 {
-                        node_ctx["line_start"] = json!(full_node.line_start);
-                    }
-                    if let Some(ref sp) = full_node.spec_path {
-                        node_ctx["spec_path"] = json!(sp);
-                    }
-                    if let Some(c) = full_node.complexity {
-                        node_ctx["complexity"] = json!(c);
-                    }
-                    if let Some(tc) = full_node.test_coverage {
-                        node_ctx["test_coverage"] = json!(tc);
-                    }
-                }
-            }
-            ctx.insert("selected_node".to_string(), node_ctx);
-        }
-        if !canvas_state.visible_tree_groups.is_empty() {
-            ctx.insert(
-                "visible_groups".to_string(),
-                json!(canvas_state.visible_tree_groups),
-            );
-        }
-        if let Some(ref lens) = canvas_state.active_lens {
-            if !lens.is_empty() {
-                ctx.insert("active_lens".to_string(), json!(lens));
-            }
-        }
-        if !canvas_state.recent_interactions.is_empty() {
-            let last_10: Vec<_> = canvas_state
-                .recent_interactions
-                .iter()
-                .rev()
-                .take(10)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .map(|i| {
-                    let mut m = serde_json::Map::new();
-                    m.insert("action".to_string(), json!(i.action));
-                    if let Some(ref node) = i.node {
-                        m.insert("node".to_string(), json!(node));
-                    }
-                    if let Some(ref detail) = i.detail {
-                        m.insert("detail".to_string(), json!(detail));
-                    }
-                    serde_json::Value::Object(m)
-                })
-                .collect();
-            ctx.insert("recent_interactions".to_string(), json!(last_10));
-        }
-        if let Some(ref aq) = canvas_state.active_query {
-            ctx.insert("active_query".to_string(), aq.clone());
-        }
-        ctx
-    };
+    // Structured canvas context for the LLM (<canvas_state> block). Carries
+    // the §10 interaction-context fields the spec says the LLM receives:
+    // selected_node, zoom_level, visible_groups, active_filter, active_lens,
+    // active_query, recent_interactions.
+    let canvas_json = build_canvas_context_json(canvas_state, cached_nodes.as_ref());
     let canvas_summary = if canvas_json.is_empty() {
         String::new()
     } else {
@@ -2827,21 +2877,9 @@ async fn run_explorer_agent(
 
         // Send a status update so the user sees feedback during LLM inference
         // (which can take 3-15 seconds). Without this the UI appears frozen.
-        let status_text = if tool_turn_count > 0 {
-            "Analyzing..."
-        } else {
-            "Thinking..."
-        };
-        let status_msg = ExplorerServerMessage::Status {
-            status: status_text.to_string(),
-            agent_path: None,
-            graph_data_age_secs: None,
-        };
-        let _ = sender
-            .send(Message::Text(
-                serialize_msg(&status_msg).unwrap_or_default().into(),
-            ))
-            .await;
+        // Both first-turn (thinking) and tool-turn (analyzing) phases map to
+        // the spec's "thinking" status — the working state before refinement.
+        let _ = send_status(sender, STATUS_THINKING).await;
 
         // Timeout on LLM calls to prevent blocking the session indefinitely.
         // If the client disconnects, subsequent send() calls will fail and break the loop.
@@ -2997,7 +3035,7 @@ async fn run_explorer_agent(
                         // tool-use architecture for refinement (rather than a plain
                         // user text message which breaks the tool-use flow).
                         refinement_count += 1;
-                        send_status(sender, "refining").await;
+                        send_status(sender, STATUS_REFINING).await;
 
                         // Synthetic tool_use ID for the dry-run self-check
                         let synthetic_tool_id = format!("selfcheck_{}", refinement_count);
@@ -3110,7 +3148,7 @@ async fn run_explorer_agent(
             break;
         }
 
-        if !send_status(sender, "refining").await {
+        if !send_status(sender, STATUS_REFINING).await {
             break; // Client disconnected
         }
 
@@ -3165,17 +3203,9 @@ async fn run_explorer_agent(
         tool_turn_count += 1;
         if tool_turn_count >= MAX_TOOL_TURNS {
             info!("Explorer agent hit max tool turns ({MAX_TOOL_TURNS}), forcing final response");
-            // Notify the user that we're synthesizing the final answer
-            let status_msg = ExplorerServerMessage::Status {
-                status: "Synthesizing answer...".to_string(),
-                agent_path: None,
-                graph_data_age_secs: None,
-            };
-            let _ = sender
-                .send(Message::Text(
-                    serialize_msg(&status_msg).unwrap_or_default().into(),
-                ))
-                .await;
+            // Notify the user that we're synthesizing the final answer.
+            // Synthesis is the final refinement pass — spec status "refining".
+            let _ = send_status(sender, STATUS_REFINING).await;
             // Force one final response without tools so the LLM synthesizes.
             // Add a nudge to ensure a view query is emitted, not just text.
             let mut final_history = conversation_history.clone();
@@ -3473,9 +3503,11 @@ fn build_system_prompt() -> String {
 ## Context
 User messages may include a <canvas_state> JSON block showing what's currently selected/visible:
 - "selected_node": { name, type, id } — the user clicked on this node, $selected resolves to it
+- "zoom_level": 2.3 — current canvas zoom level (how far the user has zoomed in)
 - "visible_groups": [...] — tree groups currently expanded on screen
+- "active_filter": "calls" — the currently active edge-type filter, when one is applied
 - "active_lens": "structural"|"evaluative" — current analysis mode
-- "recent_interactions": [{ action, node?, detail? }, ...] — the user's recent click/zoom/query history (up to 10 entries, newest last)
+- "recent_interactions": [{ action, node?, detail?, to_level?, preset? }, ...] - the user's recent click/zoom/query history (up to 10 entries, newest last). zoom_in/zoom_out carry to_level; query actions carry the preset name when one was used
 - "active_query": {...} — the currently applied view query
 
 ## $clicked vs $selected
@@ -3746,6 +3778,54 @@ This shows all callers of TaskPort."#;
     }
 
     #[test]
+    fn test_status_values_match_spec_protocol() {
+        // Spec §6: status is exactly "thinking" | "refining" | "ready".
+        // The frontend (ExplorerChat.svelte) maps only these three strings —
+        // any other value is silently dropped and the indicator goes stale.
+        assert_eq!(STATUS_THINKING, "thinking");
+        assert_eq!(STATUS_REFINING, "refining");
+        assert_eq!(STATUS_READY, "ready");
+    }
+
+    #[test]
+    fn test_status_message_serializes_spec_values() {
+        // The Status wire message must carry exactly the spec value — verify
+        // end-to-end through the serializer, not just the constants.
+        for status in [STATUS_THINKING, STATUS_REFINING, STATUS_READY] {
+            let msg = ExplorerServerMessage::Status {
+                status: status.to_string(),
+                agent_path: None,
+                graph_data_age_secs: None,
+            };
+            let json = serialize_msg(&msg).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed["type"], "status");
+            assert_eq!(parsed["status"], status);
+        }
+    }
+
+    #[test]
+    fn test_normalize_status_maps_known_values() {
+        // Bundled SDK script values pass through unchanged.
+        assert_eq!(normalize_status("thinking"), STATUS_THINKING);
+        assert_eq!(normalize_status("refining"), STATUS_REFINING);
+        assert_eq!(normalize_status("ready"), STATUS_READY);
+    }
+
+    #[test]
+    fn test_normalize_status_maps_off_contract_values() {
+        // Historical free-form literals and alternate-SDK values must never
+        // leak off-contract onto the wire — they map to a valid spec status.
+        assert_eq!(normalize_status("Analyzing..."), STATUS_THINKING);
+        assert_eq!(normalize_status("Thinking..."), STATUS_THINKING);
+        assert_eq!(normalize_status("Synthesizing answer..."), STATUS_THINKING);
+        assert_eq!(normalize_status("Refining query..."), STATUS_REFINING);
+        assert_eq!(normalize_status("  READY "), STATUS_READY);
+        assert_eq!(normalize_status(""), STATUS_THINKING);
+        assert_eq!(normalize_status("something else"), STATUS_THINKING);
+    }
+
+    #[test]
     fn test_client_message_deserialization() {
         // Verify the server correctly deserializes the expected message format.
         let msg_json =
@@ -3755,6 +3835,68 @@ This shows all callers of TaskPort."#;
             ExplorerClientMessage::Message { text, canvas_state } => {
                 assert_eq!(text, "What is TaskPort?");
                 assert!((canvas_state.zoom_level - 1.5).abs() < f64::EPSILON);
+            }
+            _ => panic!("Expected Message variant"),
+        }
+    }
+
+    #[test]
+    fn test_canvas_state_section_10_full_deserialization() {
+        // The exact interaction-context shape from view-query-grammar.md §10:
+        // every field the frontend must send with each user message.
+        let msg_json = r#"{"type":"message","text":"what about this one?","canvas_state":{
+            "selected_node": {"id": "uuid-1", "name": "TaskPort", "node_type": "interface"},
+            "zoom_level": 2.3,
+            "visible_tree_groups": ["gyre-server", "gyre-domain"],
+            "active_filter": "calls",
+            "active_lens": "structural",
+            "active_query": {"type": "blast_radius", "node": "TaskPort"},
+            "recent_interactions": [
+                {"action": "click", "node": "TaskPort::find_by_id"},
+                {"action": "zoom_in", "to_level": 2.3},
+                {"action": "query", "preset": "blast_radius"}
+            ]
+        }}"#;
+        let msg: ExplorerClientMessage = serde_json::from_str(msg_json).unwrap();
+        match msg {
+            ExplorerClientMessage::Message { canvas_state, .. } => {
+                let sel = canvas_state
+                    .selected_node
+                    .expect("selected_node must deserialize");
+                assert_eq!(sel.id, "uuid-1");
+                assert_eq!(sel.name, "TaskPort");
+                assert_eq!(sel.node_type, "interface");
+                assert!((canvas_state.zoom_level - 2.3).abs() < f64::EPSILON);
+                assert_eq!(
+                    canvas_state.visible_tree_groups,
+                    vec!["gyre-server", "gyre-domain"]
+                );
+                assert_eq!(canvas_state.active_filter.as_deref(), Some("calls"));
+                assert_eq!(canvas_state.active_lens.as_deref(), Some("structural"));
+                assert_eq!(
+                    canvas_state.active_query.as_ref().unwrap()["type"],
+                    "blast_radius"
+                );
+                assert_eq!(
+                    canvas_state.active_query.as_ref().unwrap()["node"],
+                    "TaskPort"
+                );
+                assert_eq!(canvas_state.recent_interactions.len(), 3);
+
+                let click = &canvas_state.recent_interactions[0];
+                assert_eq!(click.action, "click");
+                assert_eq!(click.node.as_deref(), Some("TaskPort::find_by_id"));
+                assert!(click.to_level.is_none() && click.preset.is_none());
+
+                let zoom = &canvas_state.recent_interactions[1];
+                assert_eq!(zoom.action, "zoom_in");
+                assert!((zoom.to_level.unwrap() - 2.3).abs() < f64::EPSILON);
+                assert!(zoom.node.is_none());
+
+                let query = &canvas_state.recent_interactions[2];
+                assert_eq!(query.action, "query");
+                assert_eq!(query.preset.as_deref(), Some("blast_radius"));
+                assert!(query.node.is_none());
             }
             _ => panic!("Expected Message variant"),
         }
@@ -3827,6 +3969,75 @@ This shows all callers of TaskPort."#;
             prompt.contains("EVERY claim must be traceable"),
             "System prompt should require grounded claims"
         );
+    }
+
+    #[test]
+    fn test_canvas_context_json_surfaces_section_10_fields() {
+        // The LLM boundary: every §10 field the spec says the LLM receives
+        // must survive into the <canvas_state> block. Regression guard for
+        // the silent drops of zoom_level and active_filter (deserialized
+        // correctly but never surfaced to the LLM).
+        let msg_json = r#"{"type":"message","text":"what about this?","canvas_state":{
+            "selected_node": {"id": "uuid-1", "name": "TaskPort", "node_type": "interface"},
+            "zoom_level": 2.3,
+            "visible_tree_groups": ["gyre-server", "gyre-domain"],
+            "active_filter": "calls",
+            "active_lens": "structural",
+            "active_query": {"type": "blast_radius", "node": "TaskPort"},
+            "recent_interactions": [
+                {"action": "click", "node": "TaskPort::find_by_id"},
+                {"action": "zoom_in", "to_level": 2.3},
+                {"action": "query", "preset": "blast_radius"}
+            ]
+        }}"#;
+        let msg: ExplorerClientMessage = serde_json::from_str(msg_json).unwrap();
+        let canvas_state = match msg {
+            ExplorerClientMessage::Message { canvas_state, .. } => canvas_state,
+            _ => panic!("Expected Message variant"),
+        };
+        let ctx = build_canvas_context_json(&canvas_state, None);
+        let v = serde_json::Value::Object(ctx);
+
+        assert_eq!(v["zoom_level"], json!(2.3), "zoom_level must reach the LLM");
+        assert_eq!(
+            v["active_filter"],
+            json!("calls"),
+            "active_filter must reach the LLM"
+        );
+        assert_eq!(v["selected_node"]["name"], json!("TaskPort"));
+        assert_eq!(v["visible_groups"], json!(["gyre-server", "gyre-domain"]));
+        assert_eq!(v["active_lens"], json!("structural"));
+        assert_eq!(v["active_query"]["type"], json!("blast_radius"));
+        assert_eq!(v["recent_interactions"].as_array().unwrap().len(), 3);
+
+        // Empty/absent optionals are omitted, not emitted as nulls/zeros.
+        let bare: ExplorerClientMessage =
+            serde_json::from_str(r#"{"type":"message","text":"hi","canvas_state":{}}"#).unwrap();
+        let bare_state = match bare {
+            ExplorerClientMessage::Message { canvas_state, .. } => canvas_state,
+            _ => panic!("Expected Message variant"),
+        };
+        let bare_ctx = build_canvas_context_json(&bare_state, None);
+        assert!(bare_ctx.get("zoom_level").is_none());
+        assert!(bare_ctx.get("active_filter").is_none());
+        assert!(bare_ctx.get("active_lens").is_none());
+        assert!(bare_ctx.get("selected_node").is_none());
+    }
+
+    #[test]
+    fn test_system_prompt_documents_section_10_fields() {
+        let prompt = build_system_prompt();
+        for field in [
+            "zoom_level",
+            "active_filter",
+            "active_lens",
+            "selected_node",
+        ] {
+            assert!(
+                prompt.contains(field),
+                "system prompt must document the {field} canvas_state field"
+            );
+        }
     }
 
     // ── parse_view_query_from_text with malformed JSON ──────────────────────
@@ -3963,11 +4174,12 @@ Done."#;
     #[test]
     fn test_system_default_views_are_valid() {
         let defaults = system_default_views();
-        assert_eq!(defaults.len(), 6, "Should have 6 system default views");
+        assert_eq!(defaults.len(), 7, "Should have 7 system default views");
 
         let expected_names = [
             "Architecture Overview",
             "Test Coverage Gaps",
+            "High-Risk Untested Code",
             "Hot Paths",
             "Blast Radius (click)",
             "Spec Coverage",
