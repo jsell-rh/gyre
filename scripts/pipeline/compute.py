@@ -23,6 +23,8 @@ def record_oom(store, task, stage, observed_gib, evidence):
             store.db.execute('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', (key,json.dumps(desired)))
             store.event('compute_memory_escalated', {'stage':stage,'observed_gib':observed_gib,'next_gib':desired,'evidence':evidence},task)
             error = Retry(f'Sandbox OOM at {observed_gib:g} GiB; next {stage} assignment uses {desired} GiB with one build job')
+        if observed_gib < 8:
+            error.retry_delay = 0  # New resource configuration, not another identical failed attempt.
         error.category = 'sandbox_oom'
         error.diagnostic = evidence
     return error

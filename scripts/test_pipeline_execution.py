@@ -25,6 +25,19 @@ class CrashTest(unittest.TestCase):
         self.work = self.store.enqueue('implement', 'task-001', 'g', {})
         self.claim = self.store.claim('implement', 'actor')
 
+    def test_maximum_memory_attention_cannot_be_bypassed_by_checkpoint_or_new_main(self):
+        from pipeline.execution import Attention
+        execution=Execution(self.store,self.claim)
+        (execution.directory/'recovery.json').write_text('{}')
+        def exhausted(*_):
+            error=Attention('OOM at maximum tier');error.category='sandbox_oom';raise error
+        with patch.dict(cli.HANDLERS,{'implement':exhausted}):
+            cli.run_claim(self.store,self.claim)
+        self.assertEqual(self.store.db.execute('SELECT state FROM work WHERE id=?',(self.work,)).fetchone()[0],'attention')
+        next_work=self.store.enqueue('implement','task-001','g',{'base':'advanced-main'})
+        self.assertIsNone(self.store.claim('implement','cannot-bypass',ident=next_work))
+        self.assertTrue(self.store.runtime_held({'task':'task-001','stage':'implement','generation':'g'}))
+
     def test_inventory_cannot_release_inflight_creation(self):
         self.store.reserve('inflight', self.work, self.claim['token'], 'sandbox', 1)
         with patch.object(cli.gateway if hasattr(cli, 'gateway') else __import__('pipeline.execution', fromlist=['gateway']).gateway, 'login'), patch('pipeline.execution.gateway.inventory', return_value=[]):

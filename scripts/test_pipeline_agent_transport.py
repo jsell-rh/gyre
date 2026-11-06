@@ -100,6 +100,22 @@ class AgentTransportTest(TestCase):
             self.assertEqual(base64.b64decode(first['stdout'])+base64.b64decode(second['stdout']),b'first\nagent_end\n')
             self.assertEqual(second['result'],{'exit_code':0})
 
+    def test_finished_producer_drains_every_chunk_before_being_reported_dead(self):
+        spec=importlib.util.spec_from_file_location('remote_agent',SCRIPT);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);data=b'x'*200000
+            (root/'stdout').write_bytes(data);(root/'stderr').write_bytes(b'')
+            (root/'result.json').write_text(json.dumps({'exit_code':0}))
+            (root/'identity.json').write_text(json.dumps({'pid':99999999,'start':'0','boot':'gone'}))
+            offset=0;received=b''
+            for _ in range(5):
+                frame=module.poll(root,offset,0)
+                received+=base64.b64decode(frame['stdout']);offset=frame['offset']
+                if frame['result'] is not None:break
+                self.assertTrue(frame['alive'],'finished spool was mistaken for a lost process')
+            self.assertEqual(received,data)
+            self.assertEqual(frame['result'],{'exit_code':0})
+
     def test_remote_deadline_kills_the_real_process(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);pid=root/'pid'

@@ -42,14 +42,16 @@ def main():
     # Refresh the private alias even for a worker started before the cutover.
     # Changing a shim process's environment cannot retarget its parent or HyperShell.
     os.environ['GYRE_OPEN_GATEWAY'] = bound_gateway
+    def refresh(force=False):
+        previous=os.environ.get('OPENSHELL');os.environ['OPENSHELL']=config['real_openshell']
+        try:gateway.login(store.directory,force=force,max_age=120)
+        finally:
+            if previous is None:os.environ.pop('OPENSHELL',None)
+            else:os.environ['OPENSHELL']=previous
     def invoke(arguments, **kwargs):
         result=subprocess.run([config['real_openshell'], '-g', bound_gateway, *arguments], env=env, **kwargs)
         if kwargs.get('capture_output') and result.returncode and any(marker in ((result.stderr or '')+(result.stdout or '')) for marker in ('cached OIDC token has expired','OIDC token refresh failed','Unauthenticated','token is expired')):
-            previous=os.environ.get('OPENSHELL');os.environ['OPENSHELL']=config['real_openshell']
-            try:gateway.login(store.directory,force=True)
-            finally:
-                if previous is None:os.environ.pop('OPENSHELL',None)
-                else:os.environ['OPENSHELL']=previous
+            refresh(force=True)
             result=subprocess.run([config['real_openshell'], '-g', bound_gateway, *arguments], env=env, **kwargs)
         return result
     from pipeline.isolation import github_provider, ensure_github_provider
@@ -180,6 +182,12 @@ def main():
         sys.stdout.write(result.stdout)
         sys.stderr.write(result.stderr)
     else:
+        # Upload/bootstrap exec replaces this process to preserve streams. Refresh
+        # before that boundary rather than discovering expiry after allocation and
+        # discarding a perfectly good sandbox. The shared login lock coalesces it.
+        import time
+        if time.time()-gateway.auth_status(store.directory,bound_gateway).get('refreshed_at',0)>120:
+            refresh()
         # Fullsend's deadline must kill the actual streaming CLI, not a
         # Python parent whose orphan keeps its stdout pipe open forever.
         store.close()

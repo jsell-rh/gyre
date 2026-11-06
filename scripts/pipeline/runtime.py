@@ -27,7 +27,7 @@ def observe(store, force=False):
                 evidence={'pod_uid':meta['uid'],'reason':terminal.get('reason'),'exit_code':terminal.get('exitCode'),
                           'finished_at':terminal.get('finishedAt'),'resources':pod['spec']['containers'][0].get('resources',{}),'observed_at':time.time()}
                 with store.transaction():
-                    row=store.db.execute("SELECT * FROM resources WHERE name=? AND kind='sandbox' AND state<>'absent'",(name,)).fetchone()
+                    row=store.db.execute("SELECT * FROM resources WHERE name=? AND kind='sandbox' AND state IN ('intent','present')",(name,)).fetchone()
                     if not row:continue
                     data=json.loads(row['data'])
                     if data.get('runtime',{}).get('pod_uid')==meta['uid']:continue

@@ -109,6 +109,8 @@ def main():
         stat = Path(f"/proc/{identity['pid']}/stat")
         fields = stat.read_text().rsplit(')', 1)[1].split() if stat.exists() else []
         alive = bool(fields and fields[0] != 'Z' and fields[19] == identity['start'])
+        if not alive and receipt.exists() and offset>=log.stat().st_size:
+            value=json.loads(receipt.read_text())
         import runpy
         usage=runpy.run_path(str(STAGE/'pipeline-usage.py'))['usage']() if (STAGE/'pipeline-usage.py').exists() else {}
         print('GYRE_VERIFY_POLL ' + json.dumps({'usage':usage,'offset': offset, 'log': base64.b64encode(data).decode(), 'receipt': value, 'alive': alive}))

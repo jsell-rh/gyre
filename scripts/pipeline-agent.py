@@ -54,6 +54,16 @@ def poll(root,offset,stderr_offset,wait=0):
         err_size=(root/'stderr').stat().st_size if (root/'stderr').exists() else 0
         if offset>=out_size and stderr_offset>=err_size:receipt=final
     running=alive(json.loads(identity.read_text())) if identity.exists() else True
+    # Exit can occur between the receipt read and the process liveness read.
+    # A finished producer can also have many unread chunks. Neither case is
+    # a lost process: drain its final spool before returning the exit receipt.
+    if not running and result.exists():
+        final=json.loads(result.read_text())
+        out_size=(root/'stdout').stat().st_size if (root/'stdout').exists() else 0
+        err_size=(root/'stderr').stat().st_size if (root/'stderr').exists() else 0
+        if offset>=out_size and stderr_offset>=err_size:receipt=final
+        else:running=True
+
     import runpy
     helper=Path(__file__).with_name('pipeline-usage.py')
     usage=runpy.run_path(str(helper))['usage']() if helper.exists() else {}

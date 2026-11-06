@@ -131,6 +131,13 @@ class Store:
             return self.db.execute('SELECT id FROM work WHERE stage=? AND task=? AND generation=? AND input_key=?',
                                    (stage, task, generation, key)).fetchone()['id']
 
+    @staticmethod
+    def runtime_hold_key(task, stage, generation):
+        return f'runtime_hold:{task}:{stage}:{generation}'
+
+    def runtime_held(self, work):
+        return bool(self.setting(self.runtime_hold_key(work['task'],work['stage'],work['generation'])))
+
     def claim(self, stage, owner, concurrency=1, lease_seconds=90, now=None, task=None, eligible=None,
               ident=None, capacity=None):
         now = time.time() if now is None else now
@@ -169,6 +176,7 @@ class Store:
             row = next((row for row in rows
                         if (not compute or not self.db.execute(
                             "SELECT 1 FROM resources r JOIN work w ON w.id=r.work WHERE w.task=? AND r.state<>'absent'", (row['task'],)).fetchone())
+                        and not self.runtime_held(row)
                         and self.integration_available(dict(row))
                         and valid_priority(row)
                         and (eligible is None or eligible(dict(row)))), None)
@@ -330,6 +338,9 @@ class Store:
             self.db.execute("UPDATE work SET state=?,failures=?,retry_at=?,ready_since=?,result=?,owner=NULL,expires=NULL,updated=? WHERE id=?",
                             ('attention' if attention else 'retry', failures, retry_at,retry_at, json.dumps(reason), time.time(), ident))
             self.event('needs_attention' if attention else 'retry_scheduled', {'reason': reason, 'delay': delay}, row['task'], ident)
+            if attention and reason.get('category') in ('sandbox_oom','sandbox_stopped','gateway_transport'):
+                self.db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',
+                    (self.runtime_hold_key(row['task'],row['stage'],row['generation']),json.dumps(reason)))
             if row['stage'] == 'verify' and (attention or reason.get('category') in ('infrastructure','gateway_transport','sandbox_oom','sandbox_stopped','sandbox_provisioning')):
                 lane=self.setting('integration_lane')
                 if lane and lane['task'] == row['task']:

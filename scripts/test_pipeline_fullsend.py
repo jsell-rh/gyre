@@ -346,7 +346,16 @@ else: print('fixture control operation')
         self.assertEqual(json.loads((self.root/'backend.json').read_text())['gateways'],[alias,alias])
         streamed=self.invoke('sandbox','upload',self.name,'fixture','/tmp/fixture')
         self.assertEqual(streamed.returncode,0,streamed.stderr)
-        self.assertEqual(json.loads((self.root/'backend.json').read_text())['gateways'],[alias,alias,alias])
+        self.assertEqual(set(json.loads((self.root/'backend.json').read_text())['gateways']),{alias})
+
+    def test_streamed_bootstrap_refreshes_auth_before_replacing_the_process(self):
+        result=self.invoke('sandbox','upload',self.name,'fixture','/tmp/fixture')
+        self.assertEqual(result.returncode,0,result.stderr)
+        calls=json.loads((self.root/'backend.json').read_text())['calls']
+        login=next(i for i,c in enumerate(calls) if c[:2]==['gateway','login'])
+        upload=next(i for i,c in enumerate(calls) if c[:2]==['sandbox','upload'])
+        self.assertLess(login,upload)
+        self.assertEqual(sum(c[:2]==['sandbox','upload'] for c in calls),1)
 
     def test_cancellation_allows_cleanup_transport_but_forbids_new_compute(self):
         self.store.set_setting(f"cancel:{self.work}:{self.claim['token']}",True)
