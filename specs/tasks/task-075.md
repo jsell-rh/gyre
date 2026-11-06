@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "lsp-call-graph.md §5 Per-Language Implementation (TypeScript)"
   - "lsp-call-graph.md §10 Implementation Phases (Phase 4)"
-commits: ["1fff426c5629e8254af95fb50c77c6a5af18fa2b", "43837ee9f59c28529e4381c721b11f7122d900d2", "ecf3ea5b2735ec6de2a2edbd40a4981f28c1a2e5", "fe02e97b44f5112d1b1a6d909aacb58300756407"]
+commits: ["fe02e97b44f5112d1b1a6d909aacb58300756407", "1fff426c5629e8254af95fb50c77c6a5af18fa2b", "43837ee9f59c28529e4381c721b11f7122d900d2", "ecf3ea5b2735ec6de2a2edbd40a4981f28c1a2e5"]
 ---
 
 ## Spec Excerpt
