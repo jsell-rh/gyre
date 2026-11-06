@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "spec-lifecycle.md §Configuration"
-commits: ["caadfea4b4707d80b0217f8ebd8771e195180fb7", "a9b7d4945979728e7461906fc5532000013b07c9", "483559c07e9276be64746e96fa5fde1c005c0250", "8cf379a075e2ecb069fc3084f0edbcd298a7400b", "219b976d5634ab1a393c2a18b88d8b108eaf00d1", "8f512ea3ce235e80fd0e751b4ed625ce22ccaa16", "be0b113d055d0a2e690b1cb47c5fde53420bfb00", "8fce2a130fb6b2d75d840ab4445cf411186512db", "e74159d30c0ea5f639597e3c9e366335ebce2e28"]
+commits: ["caadfea4b4707d80b0217f8ebd8771e195180fb7", "a9b7d4945979728e7461906fc5532000013b07c9", "483559c07e9276be64746e96fa5fde1c005c0250", "8cf379a075e2ecb069fc3084f0edbcd298a7400b", "219b976d5634ab1a393c2a18b88d8b108eaf00d1", "8f512ea3ce235e80fd0e751b4ed625ce22ccaa16", "be0b113d055d0a2e690b1cb47c5fde53420bfb00", "8fce2a130fb6b2d75d840ab4445cf411186512db", "e74159d30c0ea5f639597e3c9e366335ebce2e28", "0dbe7863b4677f170458f24b1f6d76565a26ce24"]
 ---
 
 ## Spec Excerpt
@@ -101,7 +101,8 @@ behavior exactly: watched `["specs/system/", "specs/development/"]`, ignored
 field-level defaults keep a partial JSON payload from zeroing unspecified
 fields; `is_watched()` applies ignored-over-watched precedence.
 
-**Persistence** (migration `2026-10-08-000056_spec_lifecycle_configs`):
+**Persistence** (migration `2026-10-08-000057_spec_lifecycle_configs`,
+renumbered from 000056 by the review repair below):
 separate `spec_lifecycle_configs` table (`repo_id` PK, `config` JSON TEXT),
 portable SQL for both SQLite and PostgreSQL through the shared embedded
 migrations dir. Diesel adapters (SQLite + Postgres) implement the
@@ -135,49 +136,57 @@ three priority selects; loads via `api.repoSpecLifecycle`, saves via
 **Contract-repair round (finding 569e4bd2):** the prior candidate
 `b1526c71` closed the acceptance-criteria checkboxes as `[x]`, which
 `scripts/dev-contract.py:requirement_parts` counts as a change to the
-assigned requirements (checkboxes are contract prose; only `Shipped` /
-`Review` are operational sections excluded from the contract hash). Same
-failure mode as task-170's documented repair. That round restored the
-assigned contract — the task file keeps its original `[ ]` checkboxes and
-carries status via `progress:` plus this section, matching completed tasks
-task-189/task-212 on main. Contract-hash equivalence proven with
-`dev-contract.py.requirement_parts`: base == this file's final form (True),
-base == checkbox-flipped form (False).
+assigned requirements. That round restored the assigned contract — the
+task file keeps its original `[ ]` checkboxes and carries status via
+`progress:` plus this section, matching completed tasks on main.
 
-**Rebase repair round:** merged the new assignment base `ed57c723`
-(task-201 persistent search backend) into the branch as `2bb4d127`. The
-only conflicts were `web/dist` build artifacts — a rename/rename on the
-elk chunk (both sides' staged blobs byte-identical, `bfe42bf9`; the
-conflict was purely the content-hashed filename) and `index.html` asset
-references. Resolved by rebuilding `web/dist` from the merged source
-(`npm ci` + `vite build`), yielding a self-consistent artifact set
-(`index-D2h9x6eS.js`, `index-73iubGlx.css`, `elk.bundled-BR0HWlJG.js`).
-The merge touched no task-109 surface: `git diff c7658cc 2bb4d127 --
-<spec_lifecycle files> git_http.rs RepoSettings.svelte` is empty — all
-auto-merged files (`lib.rs`, `mem.rs`, `middleware.rs`, `api/*.rs`) come
-from the already-verified base.
+**Rebase repair round:** merged the assignment base `ed57c723`
+(task-201 persistent search backend) into the branch as `2bb4d127`;
+conflicts were only `web/dist` build artifacts, resolved by rebuilding
+`web/dist` from the merged source. The merge touched no task-109
+surface (diff over spec_lifecycle files, `git_http.rs`,
+`RepoSettings.svelte` is empty).
 
-**Test evidence** (focused probes re-run at merged HEAD `2bb4d127` on
-this branch, recorded under `/tmp/stage/review-evidence/task-109/`):
+**Migration renumber repair (finding 7ac79a6a, commit `0dbe7863`):** the
+migration originally shipped as `2026-10-08-000056_spec_lifecycle_configs`,
+sharing Diesel version `20261008000056` with
+`2026-10-08-000056_spec_assertion_results` from the assigned base — Diesel
+runs only one migration per version, so the `spec_lifecycle_configs` table
+was silently never created on fresh databases and per-repo config degraded
+to defaults. Renumbered to the next unused sequence (`000057`); no schema
+change — the migrations dir is embedded wholesale
+(`embed_migrations!("migrations")`), so only the directory name and its
+header comment changed. `scripts/check-migration-versions.sh`,
+`scripts/check-migration-sql-portability.sh`, and the guard test
+`no_duplicate_migration_version_prefixes` all exit 0 at the repair commit.
+
+**Test evidence** (focused probes re-run at the migration-renumber
+repair commit `0dbe7863` on this branch, recorded under
+`/tmp/stage/review-evidence/task-109/`):
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-domain --lib spec_lifecycle` — 5/5
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib spec_lifecycle` — 4/4
-  (unconfigured defaults, round-trip, upsert overwrite, per-repo isolation)
+  (unconfigured defaults, round-trip, upsert overwrite, per-repo isolation —
+  against a real fresh SQLite DB, proving the renumbered migration creates
+  the table)
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-adapters --lib
+  no_duplicate_migration_version_prefixes` — 1/1
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib spec_lifecycle` — 7/7
   (API 5 incl. Agent-role 403 with a real JWT on the assigned
-  `/settings/spec-lifecycle` path; hook 2: `enabled=false` creates no tasks
-  and custom `watched_paths` fully replace defaults with
-  `default_priority_new: Critical` landing on the created task — end-to-end
-  against a real bare git repo with real pushed commits)
+  `/settings/spec-lifecycle` path — these construct a fresh SQLite-backed
+  server, so GET/PUT now exercise the renumbered migration end-to-end;
+  hook 2: `enabled=false` creates no tasks and custom `watched_paths`
+  fully replace defaults with `default_priority_new: Critical` landing on
+  the created task — end-to-end against a real bare git repo with real
+  pushed commits)
 - `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib
   'git_http::tests::parse_spec_changes'` — 9/9 and
   `'git_http::tests::classify_spec_change'` — 6/6 (config-driven filtering,
   custom paths, ignored-override, configured priorities)
-- `cd web && npm ci && npx vitest run
-  src/__tests__/RepoSettings.test.js` — 56/56
-- Post-merge spot checks at `2bb4d127` (recorded alongside the above):
-  arch, ABAC route registry, migration versions, mem port contracts, and
-  in-memory state stores all exit 0 — the merged route/migration surface
-  from `ed57c723` combines cleanly with this task's registrations.
+- `scripts/check-migration-versions.sh` and
+  `scripts/check-migration-sql-portability.sh` — both exit 0
+- Web UI tests are unchanged by this repair (the rename touches no
+  `web/` source); the prior round's `npx vitest run
+  src/__tests__/RepoSettings.test.js` — 56/56 stands.
 
 `cargo test --all`, the remaining mechanical checks, and exact-head GitHub
 checks are owned by the verification stage per assignment instructions;
