@@ -771,9 +771,21 @@ pub async fn git_receive_pack(
             } else {
                 None
             };
+            // Channel fan-out after in-app create (user-management.md
+            // §Delivery Channels). The closure clones the state Arc so the
+            // boxed future is 'static.
+            let fanout_state = std::sync::Arc::clone(&state_clone);
+            let on_created = move |notif: &gyre_common::Notification| {
+                let state = std::sync::Arc::clone(&fanout_state);
+                let notif = notif.clone();
+                futures_util::FutureExt::boxed(async move {
+                    crate::notification_dispatcher::dispatch_to_channels(&state, &notif).await;
+                })
+            };
             let divergence_ports = Some(crate::graph_extraction::DivergencePorts {
                 notification_repo: state_clone.notifications.as_ref(),
                 membership_repo: state_clone.workspace_memberships.as_ref(),
+                on_created: Some(Box::new(on_created)),
             });
             // §9 spec-assertion notifications are scoped by the repo's
             // workspace — every push type notifies, not just agent pushes.
@@ -1522,55 +1534,53 @@ async fn process_spec_lifecycle(
                 Err(e) => warn!(title, "spec-lifecycle: failed to create task: {e}"),
                 Ok(()) => {
                     info!(title, "spec-lifecycle: created task for spec change");
-                    // Look up workspace_id from repo for proper scoping.
-                    // A lookup failure means the scope cannot be determined —
-                    // skip the workspace-scoped emission rather than
-                    // fabricating a "default" identity (task-097 F3 class).
-                    let ws_id = match state.repos.find_by_id(&gyre_common::Id::new(repo_id)).await {
-                        Ok(Some(repo)) => repo.workspace_id,
-                        Ok(None) => {
-                            warn!(
-                                repo_id,
-                                "spec-lifecycle: repo not found; skipping task events"
-                            );
-                            continue;
-                        }
-                        Err(e) => {
-                            warn!(
-                                repo_id,
-                                "spec-lifecycle: failed to resolve repo workspace: {e}"
-                            );
-                            continue;
-                        }
-                    };
-                    let change_kind = match status_char {
-                        'A' => "added",
-                        'M' => "modified",
-                        'D' => "deleted",
-                        'R' => "renamed",
-                        _ => "unknown",
-                    };
-                    state
-                        .emit_event(
-                            Some(ws_id.clone()),
-                            gyre_common::message::Destination::Workspace(ws_id.clone()),
-                            gyre_common::message::MessageKind::SpecChanged,
-                            Some(serde_json::json!({
-                                "repo_id": repo_id,
-                                "spec_path": path,
-                                "change_kind": change_kind,
-                                "task_id": task_id.to_string(),
-                            })),
-                        )
-                        .await;
-                    state
-                        .emit_event(
-                            Some(ws_id.clone()),
-                            gyre_common::message::Destination::Workspace(ws_id),
-                            gyre_common::message::MessageKind::TaskCreated,
-                            Some(serde_json::json!({"task_id": task_id.to_string()})),
-                        )
-                        .await;
+                    // Look up workspace_id from repo for proper scoping. A
+                    // missing repo means the scope cannot be determined —
+                    // skip the workspace-scoped event emission and log
+                    // rather than fabricating a "default" workspace (see
+                    // scripts/check-fabricated-scope-defaults.sh).
+                    if let Some(ws_id) = state
+                        .repos
+                        .find_by_id(&gyre_common::Id::new(repo_id))
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|r| r.workspace_id)
+                    {
+                        let change_kind = match status_char {
+                            'A' => "added",
+                            'M' => "modified",
+                            'D' => "deleted",
+                            'R' => "renamed",
+                            _ => "unknown",
+                        };
+                        state
+                            .emit_event(
+                                Some(ws_id.clone()),
+                                gyre_common::message::Destination::Workspace(ws_id.clone()),
+                                gyre_common::message::MessageKind::SpecChanged,
+                                Some(serde_json::json!({
+                                    "repo_id": repo_id,
+                                    "spec_path": path,
+                                    "change_kind": change_kind,
+                                    "task_id": task_id.to_string(),
+                                })),
+                            )
+                            .await;
+                        state
+                            .emit_event(
+                                Some(ws_id.clone()),
+                                gyre_common::message::Destination::Workspace(ws_id),
+                                gyre_common::message::MessageKind::TaskCreated,
+                                Some(serde_json::json!({"task_id": task_id.to_string()})),
+                            )
+                            .await;
+                    } else {
+                        warn!(
+                            repo_id,
+                            "spec-lifecycle: cannot resolve workspace for repo — skipping event emission"
+                        );
+                    }
 
                     // Cross-workspace spec change notification (priority 4):
                     // Find inbound cross-workspace links targeting this spec path
@@ -1608,8 +1618,6 @@ async fn notify_cross_workspace_dependents(
     if inbound_links.is_empty() {
         return;
     }
-
-    let now = crate::api::now_secs();
 
     // Collect unique source repo IDs from inbound links.
     let mut notified_workspaces: std::collections::HashSet<String> =
@@ -1667,7 +1675,6 @@ async fn notify_cross_workspace_dependents(
                 continue;
             }
 
-            let notif_id = gyre_common::Id::new(uuid::Uuid::new_v4().to_string());
             let display = link.target_display.as_deref().unwrap_or(changed_spec_path);
             let title = format!("Cross-workspace spec changed: {display}");
             let source_repo_name = state
@@ -1677,26 +1684,24 @@ async fn notify_cross_workspace_dependents(
                 .ok()
                 .flatten()
                 .map(|r| r.name.clone())
-                .unwrap_or_else(|| source_repo_id[..8.min(source_repo_id.len())].to_string());
+                .unwrap_or_else(|| source_repo_id.chars().take(8).collect());
             let body = format!(
                 "{display} changed in repo {source_repo_name}. Your spec {} depends on it. Review for impact.",
                 link.source_path
             );
-            let mut notif = gyre_common::Notification::new(
-                notif_id,
+            // Channel fan-out per user-management.md §Delivery Channels.
+            crate::notifications::notify_rich(
+                state,
                 dep_repo.workspace_id.clone(),
                 member.user_id,
                 gyre_common::NotificationType::CrossWorkspaceSpecChange,
                 title,
                 dep_workspace.tenant_id.to_string(),
-                now as i64,
-            );
-            notif.body = Some(body);
-            notif.entity_ref = Some(changed_spec_path.to_string());
-
-            if let Err(e) = state.notifications.create(&notif).await {
-                tracing::warn!("spec-lifecycle: failed cross-workspace notification: {e}");
-            }
+                Some(body),
+                Some(changed_spec_path.to_string()),
+                None,
+            )
+            .await;
         }
     }
 }

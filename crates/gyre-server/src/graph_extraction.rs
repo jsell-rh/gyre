@@ -42,6 +42,11 @@ pub struct AgentPushContext {
     pub tenant_id: String,
 }
 
+/// Post-create delivery-channel fan-out callback (email/webhook/slack per
+/// user-management.md §Delivery Channels). `None` in port-level tests.
+pub type ChannelFanoutCallback =
+    Box<dyn Fn(&Notification) -> futures_util::future::BoxFuture<'static, ()> + Send + Sync>;
+
 /// Workspace/tenant identity for push-scoped notifications (system-explorer §9).
 ///
 /// Derived at each extraction call site from the repo's own workspace, so
@@ -61,6 +66,9 @@ pub struct PushNotificationScope {
 pub struct DivergencePorts<'a> {
     pub notification_repo: &'a dyn NotificationRepository,
     pub membership_repo: &'a dyn WorkspaceMembershipRepository,
+    /// Post-create channel fan-out (email/webhook/slack per
+    /// user-management.md §Delivery Channels). `None` in port-level tests.
+    pub on_created: Option<ChannelFanoutCallback>,
 }
 
 /// Identity/scope parameters for a divergence check.
@@ -617,12 +625,13 @@ pub async fn check_divergence(
         notif.body = Some(body.clone());
         notif.entity_ref = Some(spec_ref.to_string());
         notif.repo_id = Some(repo_id.as_str().to_string());
-
         if let Err(e) = ports.notification_repo.create(&notif).await {
             warn!(
                 user_id = %member.user_id,
                 "failed to create divergence notification: {e}"
             );
+        } else if let Some(on_created) = ports.on_created.as_ref() {
+            on_created(&notif).await;
         }
     }
 
@@ -1213,10 +1222,11 @@ async fn check_spec_assertions_on_push(
                     user_id = %member.user_id,
                     "failed to create spec assertion notification: {e}"
                 );
+            } else if let Some(on_created) = ports.on_created.as_ref() {
+                on_created(&notif).await;
             }
         }
     }
-
     Ok(())
 }
 
@@ -1841,6 +1851,7 @@ mod tests {
         let ports = DivergencePorts {
             notification_repo: &notif_repo,
             membership_repo: &membership_repo,
+            on_created: None,
         };
 
         check_spec_assertions_on_push(

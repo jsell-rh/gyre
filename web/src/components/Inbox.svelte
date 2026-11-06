@@ -58,6 +58,7 @@
     SuggestedSpecLink: 'default',
     TaskCreated: 'info',
     BudgetWarning: 'warning',
+    SecurityFinding: 'danger',
   };
 
   // Human-readable type labels — derived from i18n
@@ -88,6 +89,7 @@
       let data = Array.isArray(raw) ? raw : (raw?.notifications ?? []);
       // Normalize PascalCase notification types from the server to snake_case
       const typeNormMap = {
+        TaskCreated: 'task_created',
         AgentCompleted: 'agent_completed',
         AgentFailed: 'agent_failed',
         SpecPendingApproval: 'spec_approval',
@@ -98,10 +100,13 @@
         MrNeedsReview: 'mr_needs_review',
         GateFailure: 'gate_failure',
         SuggestedSpecLink: 'suggested_link',
-        TaskCreated: 'task_created',
         BudgetWarning: 'budget_warning',
         SpecChanged: 'spec_changed',
         MetaSpecDrift: 'meta_spec_drift',
+        PersonaApprovalRequested: 'persona_approval_requested',
+        MergeQueuePaused: 'merge_queue_paused',
+        BudgetExhausted: 'budget_exhausted',
+        SecurityFinding: 'security_finding',
         SpecAssertionFailure: 'spec_assertion_failure',
       };
       data = data.map(n => ({

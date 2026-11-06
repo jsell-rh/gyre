@@ -455,6 +455,9 @@ pub async fn create_notifications_for_error_findings(
                     error = %e,
                     "spec_patrol: failed to create notification"
                 );
+            } else {
+                // Channel fan-out per user-management.md §Delivery Channels.
+                crate::notification_dispatcher::dispatch_to_channels(state, &notif).await;
             }
         }
     }

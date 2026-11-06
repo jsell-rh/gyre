@@ -123,7 +123,7 @@ impl From<Persona> for PersonaResponse {
 }
 
 pub async fn create_persona(
-    _auth: crate::auth::AuthenticatedAgent,
+    auth: crate::auth::AuthenticatedAgent,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreatePersonaRequest>,
 ) -> Result<(StatusCode, Json<PersonaResponse>), ApiError> {
@@ -142,9 +142,29 @@ pub async fn create_persona(
     persona.temperature = req.temperature;
     persona.max_tokens = req.max_tokens;
     persona.budget = req.budget;
+    // The creator owns the persona (its approval notifications route to the
+    // owner per user-management.md §Who Gets Notified). Use the
+    // authenticated user's id — `auth.agent_id` is only the display name
+    // for JWT/API-key auth (and "system" for the global dev token), which
+    // is not a real user inbox. Callers without a user identity (dev/
+    // agent tokens) fall back to the "system" inbox so the approval
+    // request stays visible rather than dropped.
+    persona.owner = Some(
+        auth.user_id
+            .as_ref()
+            .map(|id| format!("user:{id}"))
+            .unwrap_or_else(|| "system".to_string()),
+    );
     // Recompute hash now that capabilities are set.
     persona.refresh_content_hash();
     state.personas.create(&persona).await?;
+
+    // Persona is created Pending; notify its owner that approval is
+    // requested (user-management.md §Who Gets Notified: "Persona approval
+    // requested" → Persona's `owner`).
+    crate::notification_dispatcher::notify_persona_approval_requested(state.as_ref(), &persona)
+        .await;
+
     Ok((StatusCode::CREATED, Json(PersonaResponse::from(persona))))
 }
 
