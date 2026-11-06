@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, fireEvent } from '@testing-library/svelte';
 import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
 import NodeDetailPanel from '../lib/NodeDetailPanel.svelte';
+import { traceStepTargetNode } from '../lib/trace-navigation.js';
 
 // ── Mock canvas context ──────────────────────────────────────────────────
 let mockCtx;
@@ -396,7 +397,117 @@ describe('ExplorerCanvas — focusRequest camera control', () => {
   });
 });
 
-// ── Detail panel trace step list ─────────────────────────────────────────
+// ── Trace activation populates the detail panel (spec §6 step 6) ────────
+
+describe('ExplorerCanvas — trace activation populates the detail panel', () => {
+  const SELECTED_A = { selectedNode: { id: 'a', name: 'a', node_type: 'function', qualified_name: 'app.svc.a' } };
+
+  it('toolbar Trace emits the start node enriched with the full step list once the trace computes', async () => {
+    const onInteractiveQuery = vi.fn();
+    const onNodeDetail = vi.fn();
+    const { container, rerender } = render(ExplorerCanvas, {
+      props: { nodes: TRACE_NODES, edges: TRACE_EDGES, canvasState: SELECTED_A, onInteractiveQuery, onNodeDetail },
+    });
+    fireEvent.click(container.querySelector('[data-testid="toolbar-trace"]'));
+    expect(onInteractiveQuery).toHaveBeenCalledTimes(1);
+    const query = onInteractiveQuery.mock.calls[0][0];
+
+    // Feed the query back as activeQuery (what ExplorerView does via
+    // onInteractiveQuery → activeViewQuery) and let the trace effect run.
+    await rerender({ activeQuery: query });
+    await flushFrames();
+
+    const enriched = onNodeDetail.mock.calls.map(c => c[0]).find(n => n?._traceSteps?.length > 0);
+    expect(enriched, 'detail panel received the trace step list on activation').toBeTruthy();
+    expect(enriched.id).toBe('a');
+    expect(enriched._traceStep).toBe(1);
+    expect(enriched._traceTotal).toBe(5);
+    // BFS order over the diamond: a b c d e (z unreachable — not in the list)
+    expect(enriched._traceSteps.map(s => s.nodeId)).toEqual(['a', 'b', 'c', 'd', 'e']);
+    // Step annotation: a is governed by specs/platform-model.md via its
+    // governed_by edge (spec §6 step 5)
+    expect(enriched._traceSteps[0].specPath).toBe('specs/platform-model.md');
+  });
+
+  it('right-click "Trace from here" emits the enriched start node too', async () => {
+    const onInteractiveQuery = vi.fn();
+    const onNodeDetail = vi.fn();
+    const node = { id: 'mod-a', node_type: 'module', name: 'svc', qualified_name: 'svc', file_path: 'svc.rs', line_start: 1, line_end: 10, visibility: 'public', spec_confidence: 'none', test_node: false };
+    const callee = { id: 'fn-b', node_type: 'function', name: 'handler', qualified_name: 'svc.handler', file_path: 'svc.rs', line_start: 12, line_end: 20, visibility: 'public', spec_confidence: 'none', test_node: false };
+    const { container, rerender } = render(ExplorerCanvas, {
+      props: {
+        nodes: [node, callee],
+        edges: [
+          { id: 'c1', source_id: 'mod-a', target_id: 'fn-b', edge_type: 'contains' },
+          { id: 'c2', source_id: 'mod-a', target_id: 'fn-b', edge_type: 'calls' },
+        ],
+        onInteractiveQuery,
+        onNodeDetail,
+      },
+    });
+    await new Promise(r => setTimeout(r, 50));
+    const canvas = container.querySelector('canvas.treemap-canvas');
+    canvas.dispatchEvent(new MouseEvent('contextmenu', { clientX: 450, clientY: 300, bubbles: true }));
+    await new Promise(r => setTimeout(r, 20));
+    fireEvent.click(container.querySelector('[data-testid="ctx-trace"]'));
+    expect(onInteractiveQuery).toHaveBeenCalledTimes(1);
+
+    await rerender({ activeQuery: onInteractiveQuery.mock.calls[0][0] });
+    await flushFrames();
+
+    const enriched = onNodeDetail.mock.calls.map(c => c[0]).find(n => n?._traceSteps?.length > 0);
+    expect(enriched, 'detail panel received the trace step list on activation').toBeTruthy();
+    // Right-click does not select the node — the emission must not depend on selection
+    expect(enriched.id).toBe('mod-a');
+    expect(enriched._traceSteps.map(s => s.nodeId)).toEqual(['mod-a', 'fn-b']);
+  });
+
+  it('does not re-emit on effect re-runs (data reloads keep the current detail selection)', async () => {
+    const onInteractiveQuery = vi.fn();
+    const onNodeDetail = vi.fn();
+    const { container, rerender } = render(ExplorerCanvas, {
+      props: { nodes: TRACE_NODES, edges: TRACE_EDGES, canvasState: SELECTED_A, onInteractiveQuery, onNodeDetail },
+    });
+    fireEvent.click(container.querySelector('[data-testid="toolbar-trace"]'));
+    await rerender({ activeQuery: onInteractiveQuery.mock.calls[0][0] });
+    await flushFrames();
+    expect(onNodeDetail.mock.calls.filter(c => c[0]?._traceSteps?.length > 0).length).toBe(1);
+
+    // Same-content query object (e.g. the graph reloaded and the host
+    // re-set the active query): the effect re-runs but must not clobber
+    // the user's current detail selection with a re-emission.
+    await rerender({ activeQuery: traceQueryFrom(TRACE_NODES[0]) });
+    await flushFrames();
+    expect(onNodeDetail.mock.calls.filter(c => c[0]?._traceSteps?.length > 0).length).toBe(1);
+  });
+
+  it('a new trace from a different node replaces the emission', async () => {
+    const onInteractiveQuery = vi.fn();
+    const onNodeDetail = vi.fn();
+    const { container, rerender } = render(ExplorerCanvas, {
+      props: { nodes: TRACE_NODES, edges: TRACE_EDGES, canvasState: SELECTED_A, onInteractiveQuery, onNodeDetail },
+    });
+    fireEvent.click(container.querySelector('[data-testid="toolbar-trace"]'));
+    await rerender({ activeQuery: onInteractiveQuery.mock.calls[0][0] });
+    await flushFrames();
+    expect(onNodeDetail.mock.calls.some(c => c[0]?.id === 'a' && c[0]?._traceSteps)).toBe(true);
+
+    // Clear the trace, select c, trace again: the panel must show c's trace
+    fireEvent.click(container.querySelector('[data-testid="toolbar-clear-trace"]'));
+    await rerender({ activeQuery: null });
+    await flushFrames();
+    await rerender({ canvasState: { selectedNode: { id: 'c', name: 'c', node_type: 'function', qualified_name: 'app.svc.c' } } });
+    fireEvent.click(container.querySelector('[data-testid="toolbar-trace"]'));
+    await rerender({ activeQuery: onInteractiveQuery.mock.calls[2][0] });
+    await flushFrames();
+
+    const enriched = onNodeDetail.mock.calls.map(c => c[0]).filter(n => n?._traceSteps?.length > 0).pop();
+    expect(enriched.id).toBe('c');
+    expect(enriched._traceSteps.map(s => s.nodeId)).toEqual(['c', 'e']);
+  });
+});
+
+// ── Detail panel trace step list ──────────────────────────────────────
 
 describe('NodeDetailPanel — causal flow trace step list', () => {
   const STEP_NODE = {
@@ -470,5 +581,76 @@ describe('NodeDetailPanel — causal flow trace step list', () => {
       props: { node: STEP_NODE, nodes: TRACE_NODES, edges: TRACE_EDGES },
     });
     expect(container.querySelector('.trace-step-list')).toBeFalsy();
+  });
+});
+
+// ── Step list persistence across navigation clicks (spec §6 step 6) ─────
+
+describe('trace step navigation keeps the step list in the detail panel', () => {
+  const STEP_NODE = {
+    id: 'a', node_type: 'function', name: 'a', qualified_name: 'app.svc.a',
+    file_path: 'app/svc.py', line_start: 1, line_end: 9,
+    visibility: 'public', spec_confidence: 'none', test_node: false,
+  };
+
+  const TRACE_STEPS = [
+    { step: 1, nodeId: 'a', name: 'a', qualifiedName: 'app.svc.a', type: 'function', specPath: 'specs/platform-model.md', outEdges: [{ toId: 'b', edgeType: 'calls', toStep: 2 }] },
+    { step: 2, nodeId: 'b', name: 'b', qualifiedName: 'app.svc.b', type: 'function', specPath: null, outEdges: [] },
+    { step: 3, nodeId: 'c', name: 'c', qualifiedName: 'app.svc.c', type: 'function', specPath: null, outEdges: [] },
+  ];
+
+  it('traceStepTargetNode carries the steps onto the navigation target', () => {
+    const detailNode = { ...STEP_NODE, _traceSteps: TRACE_STEPS };
+    const step = TRACE_STEPS[1]; // click step 2 (node b)
+    const target = traceStepTargetNode(detailNode, step, TRACE_NODES);
+    expect(target).toBeTruthy();
+    expect(target.id).toBe('b');
+    // The full step list travels onto the target so the panel keeps
+    // rendering it after the navigation.
+    expect(target._traceSteps).toBe(TRACE_STEPS);
+    expect(target._traceStep).toBe(2);
+    expect(target._traceTotal).toBe(3);
+  });
+
+  it('traceStepTargetNode returns the raw target when the panel had no steps', () => {
+    const target = traceStepTargetNode(STEP_NODE, TRACE_STEPS[1], TRACE_NODES);
+    expect(target).toBeTruthy();
+    expect(target.id).toBe('b');
+    expect(target._traceSteps).toBeUndefined();
+  });
+
+  it('traceStepTargetNode returns null for an unknown node', () => {
+    expect(traceStepTargetNode(STEP_NODE, { nodeId: 'nope', step: 1 }, TRACE_NODES)).toBeNull();
+  });
+
+  it('the step list survives a step click (panel re-render with the navigated node)', () => {
+    // Replicates the ExplorerView onTraceStepNavigate wiring with the real
+    // traceStepTargetNode: clicking a step replaces the panel's node with
+    // the resolved target. The list must still render afterwards.
+    const onTraceStepNavigate = vi.fn();
+    const rendered = render(NodeDetailPanel, {
+      props: { node: { ...STEP_NODE, _traceSteps: TRACE_STEPS }, nodes: TRACE_NODES, edges: TRACE_EDGES, onTraceStepNavigate },
+    });
+    expect(rendered.container.querySelectorAll('.trace-step-item').length).toBe(3);
+
+    // Click step 2 — the panel dispatches the step to the host handler
+    fireEvent.click(rendered.container.querySelectorAll('.trace-step-item')[1]);
+    expect(onTraceStepNavigate).toHaveBeenCalledTimes(1);
+    const step = onTraceStepNavigate.mock.calls[0][0];
+    const detailNode = { ...STEP_NODE, _traceSteps: TRACE_STEPS };
+    const target = traceStepTargetNode(detailNode, step, TRACE_NODES);
+    expect(target.id).toBe('b');
+
+    // ExplorerView sets detailNode = target — the panel re-renders with it.
+    // The actual regression: the raw graph node carried no _traceSteps, so
+    // this re-render unmounted the list and a second click was impossible.
+    rendered.rerender({ node: target });
+    const items = rendered.container.querySelectorAll('.trace-step-item');
+    expect(items.length).toBe(3);
+    expect(items[1].classList.contains('trace-current')).toBe(true);
+
+    // A second step is still clickable — the trace can be walked from the panel
+    fireEvent.click(items[2]);
+    expect(onTraceStepNavigate).toHaveBeenCalledTimes(2);
   });
 });

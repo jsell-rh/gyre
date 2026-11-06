@@ -4,6 +4,7 @@
   import { api } from '../lib/api.js';
   import { entityName } from '../lib/entityNames.svelte.js';
   import { computeTimelineDeltaStats, computeTimelineGhostOverlays } from '../lib/timeline-utils.js';
+  import { traceStepTargetNode } from '../lib/trace-navigation.js';
   import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
   import ExplorerChat from '../lib/ExplorerChat.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -1653,8 +1654,11 @@
                   onNavigate={(n) => { detailNode = n; }}
                   onTraceStepNavigate={(step) => {
                     // Show the step's node in the detail panel and pan/zoom
-                    // the canvas to it (explorer-canvas.md §6 step 6).
-                    const target = (graph.nodes ?? []).find(n => n.id === step.nodeId);
+                    // the canvas to it (explorer-canvas.md §6 step 6). The
+                    // step list is carried onto the target so the panel
+                    // keeps showing the full clickable trace across
+                    // navigation clicks.
+                    const target = traceStepTargetNode(detailNode, step, graph.nodes ?? []);
                     if (target) detailNode = target;
                     traceFocusNonce += 1;
                     traceFocusRequest = { nodeId: step.nodeId, nonce: traceFocusNonce };

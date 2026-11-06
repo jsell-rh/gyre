@@ -368,6 +368,17 @@
   // Set when "Trace from here" is requested but the graph has no Calls/RoutesTo
   // edges at all — the spec requires a warning instead of a silent empty trace.
   let traceWarning = $state(false);
+  // Node that started the current trace. Plain (non-reactive) vars: written by
+  // event handlers, read by the trace effect once the query round-trips back
+  // as the activeQuery prop — keeping them untracked means the activating
+  // click itself cannot trigger an intermediate effect run that would clear
+  // them before the query lands (effects are batched with the query update in
+  // production, but staying untracked removes the ordering assumption).
+  let traceStartNodeId = null;
+  // Dedupe guard for detail-panel emission: the trace effect re-runs on data
+  // reloads while a trace is active; re-emitting would clobber the user's
+  // current detail selection.
+  let lastTraceDetailEmittedFor = null;
 
   // Start a causal flow trace from `node` (explorer-canvas.md §6).
   // Shared by the right-click context menu and the toolbar Trace button.
@@ -380,6 +391,8 @@
       return;
     }
     traceWarning = false;
+    traceStartNodeId = node.id;
+    lastTraceDetailEmittedFor = null;
     // Trace from here: show causal flow using Calls + RoutesTo edges.
     // Depth 15 to capture full reachable subgraph while staying responsive.
     onInteractiveQuery({
@@ -4633,6 +4646,31 @@
     return buildTraceSteps(nodes, edges, tracePathOrder, tracePathEdges);
   }
 
+  // Emit the trace start node to the detail panel, enriched with the full
+  // numbered step list (explorer-canvas.md §6 step 6: the detail panel shows
+  // the trace when trace mode activates — via the toolbar Trace button or
+  // right-click "Trace from here" — not only after a subsequent canvas
+  // click). Called from the trace effect once the BFS order is computed.
+  // Deduped per start node so effect re-runs (data reloads) keep the user's
+  // current detail selection; a new "Trace from here" resets the guard.
+  function emitTraceDetailFromEffect(order, pathEdges) {
+    if (!traceStartNodeId) return;
+    if (lastTraceDetailEmittedFor === traceStartNodeId) return;
+    const stepNum = order.get(traceStartNodeId);
+    if (stepNum == null) return;
+    const startNode = nodes.find(n => n.id === traceStartNodeId);
+    if (!startNode) return;
+    lastTraceDetailEmittedFor = traceStartNodeId;
+    untrack(() => {
+      onNodeDetail({
+        ...startNode,
+        _traceStep: stepNum,
+        _traceTotal: order.size,
+        _traceSteps: buildTraceSteps(nodes, edges, order, pathEdges),
+      });
+    });
+  }
+
   // Navigate breadcrumb with smooth zoom-out animation.
   // index=-1 means go to root, otherwise go to breadcrumb[index].
   function navigateBreadcrumb(index) {
@@ -4997,6 +5035,8 @@
       (activeQuery.scope.direction === 'outgoing' || activeQuery._trace) &&
       queryMatchedWithDepth;
     if (!isTrace) {
+      traceStartNodeId = null;
+      lastTraceDetailEmittedFor = null;
       if (tracePathOrder.size > 0 || tracePathEdges.length > 0) {
         tracePathOrder = new Map();
         tracePathEdges = [];
@@ -5028,6 +5068,7 @@
       for (let i = 0; i < entries.length; i++) ordered.set(entries[i][0], i + 1);
       tracePathOrder = ordered;
       tracePathEdges = [];
+      emitTraceDetailFromEffect(ordered, []);
       return;
     }
 
@@ -5052,6 +5093,9 @@
 
     tracePathOrder = order;
     tracePathEdges = pathEdges;
+    // Populate the detail panel with the trace step list as soon as the
+    // trace activates (spec §6 step 6), not only after a later canvas click.
+    emitTraceDetailFromEffect(order, pathEdges);
     // The trace overlay (numbered badges + path arrows) is drawn by
     // drawFrame; without a redraw request it only appears on the next
     // unrelated pan/zoom once the camera has settled. untrack keeps
