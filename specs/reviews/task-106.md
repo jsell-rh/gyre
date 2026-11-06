@@ -47,3 +47,29 @@ Notes (not findings):
 - `jj_squash_into_parent` flaked twice early in the review run (vim editor killed with signal 15 under harness load), then passed 6+ consecutive times standalone and batched, on both `c1c6dd9e` and `c1c6dd9e^`. Environmental, not a regression.
 
 Verdict: **needs-revision** — F1-F5 are genuinely resolved, but F6-F7 break jj provisioning in the default configuration and on every post-first new-branch spawn respectively, F8 undermines the deferral guarantee this round added, and all three fail silently.
+
+## Round 10
+
+Candidate: `ac03cce9` (assigned base `1ae18d1c`; task commits `676e5196`,
+`7b11ab82`). The merge brought base into the task branch without touching any
+task-106 file (diff `7e724b3a..ac03cce9` on the six task files is empty), so
+the production behavior is exactly the R2–R9-reviewed state, including the R9
+test-compile fix (`use gyre_ports::GitOpsPort;` present at
+`api/spawn.rs:2050`). The §4 behavior itself (rebase-after-gates on both merge
+paths, moved-branch destination, conflict-as-state, deferral/replay batch
+semantics, jj workspace layout, F1–F12 fixes) re-inspected in the diff and
+found intact; no new behavioral defects.
+
+Findings — all three are reproducible mechanical-gate failures of the
+candidate against its assigned base (evidence: `/tmp/stage/review-evidence/task-106-r10/`):
+
+- [ ] **R10-F1 (major, process/code): the candidate ships red mechanical gates — `python3 scripts/check-rustfmt-diff.py 1ae18d1c` exits 1.** Six candidate-owned files have unformatted changed lines: `gyre-adapters/src/jj_ops.rs` (58, 218, 261, 301-303, 337-341, 446 — e.g. the double blank line at :57-58), `gyre-ports/src/jj_ops.rs` (28, 102-106 — collapsible single-line signatures), `api/spawn.rs` (625-629, 683, 2048, 2192-2193, 2217, 2307), `lib.rs` (1673), `mem.rs` (422-423, 527), `merge_processor.rs` (235, 275, 310, 314, 377-378, 395-400). These lines are in the task-branch delta vs the assigned base, so the review gate (and any CI run comparing against the branch point) fails; the same list appears in the executor's retained gate log (`/tmp/stage/findings.log`). Reproduced independently, exit 1 (rustfmt-diff.out). Fix: `cargo fmt` on the touched files — no semantic change.
+- [ ] **R10-F2 (major, process/code): `check-clippy-diff` fails on candidate-changed lines.** (a) 12 × `clippy::double_must_use` at `gyre-ports/src/jj_ops.rs:31` — line 31 (`#[async_trait]`) is inside diff hunk `+18,16`; the diff grew the trait from 7 to 12 methods, so 5 warnings are on genuinely new code (reproduced with a focused `cargo clippy -p gyre-ports --all-features --lib -- -W clippy::all`; the identical warning also fires 7× at base line 21, but there it sits on unchanged lines, so only the candidate trips the changed-lines gate). (b) `clippy::too_many_arguments` at `merge_processor.rs:145` — the new `record_rebase_audit` takes 8 args (confirmed by source read; workspace-wide clippy is wrapper-rejected in this sandbox, so (b) rests on the executor gate log plus source inspection — both changed-line gates fail). Fix: `#[allow(clippy::double_must_use)]` on the trait (or per the repo's convention of choice) and a struct/builder (or allow) for `record_rebase_audit`'s 8 args.
+- [ ] **R10-F3 (major, process): `check-inert-enforcement.sh` regresses from green-at-base to red-at-candidate via exemption line drift.** The candidate's +523-line insertion at the top of `merge_processor.rs` (hunk `@@ -37,6 +37,523`) plus later hunks shift the two pre-existing, exemption-pinned `evaluate_attestation_abac` sites from base lines 1457/1479 to candidate lines 2000/2022 (1457+543=2000, 1479+543=2022; `git blame` attributes both to `d7940e85`, pre-existing). `scripts/inert-enforcement-exemptions.txt` still pins 1457/1479 (byte-identical to base), so the gate fails at the candidate (exit 1, 2 sites) while passing at base (exit 0, verified in a throwaway worktree at `1ae18d1c`). AGENTS.md lists this check among the mechanically enforced invariants (pre-commit + CI); shipping a red gate violates the standing constraints even though the flagged sites themselves are pre-existing debt owned by task-077. Fix: update the two exemption entries' line numbers (count unchanged — not growth), or place the new code after the pinned sites, or fix the underlying F5 hazard.
+
+Notes (not findings):
+
+- The gyre-server test suite could not be re-run in this sandbox: the cargo cache lacks `tinyvec` (url/idna chain needed by the test profile) and static.crates.io is connection-refused. The R9 claim (1279/1279 at `676e5196`) is consistent with the unchanged task files since, but must be re-verified remotely, along with `cargo test -p gyre-adapters jj` against a real jj binary (jj is not installable here; the F11 `jj_workspace_forget_absent_workspace_is_ok` test has still never run against real jj). These are transport restrictions, not code defects.
+- The rustfmt/clippy/inert-enforcement findings above were all reproduced without the network, so they do not depend on the blocked suite.
+
+Verdict: **needs-revision** — the §4 behavior is complete and previously verified, but the candidate fails three mechanical gates against its assigned base (rustfmt-diff exit 1; clippy-diff warnings on changed lines; inert-enforcement regression via exemption drift). All three fixes are small and non-semantic; approval requires a green gate run at the candidate.
