@@ -6045,4 +6045,120 @@ mod tests {
             result.warnings
         );
     }
+
+    // ── Narrative resolution tests (spec §30) ──────────────────────────────
+
+    #[test]
+    fn test_narrative_resolution_counts_resolved_steps() {
+        let nodes = vec![
+            make_node("n1", "Alpha", NodeType::Function),
+            make_node("n2", "BetaService", NodeType::Function),
+        ];
+        let mut query = base_query();
+        query.narrative = vec![
+            NarrativeStep {
+                node: "Alpha".to_string(),
+                text: "start here".to_string(),
+                order: Some(1),
+            },
+            NarrativeStep {
+                node: "BetaService".to_string(),
+                text: "then this".to_string(),
+                order: Some(2),
+            },
+        ];
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.narrative_resolved, 2);
+        assert!(
+            result.warnings.is_empty(),
+            "fully resolved narrative must not warn, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_narrative_unresolved_steps_warn_with_names() {
+        let nodes = vec![make_node("n1", "Alpha", NodeType::Function)];
+        let mut query = base_query();
+        query.narrative = vec![
+            NarrativeStep {
+                node: "Alpha".to_string(),
+                text: "resolves".to_string(),
+                order: Some(1),
+            },
+            NarrativeStep {
+                node: "Ghost".to_string(),
+                text: "missing".to_string(),
+                order: Some(2),
+            },
+            NarrativeStep {
+                node: "Phantom".to_string(),
+                text: "also missing".to_string(),
+                order: Some(3),
+            },
+        ];
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.narrative_resolved, 1);
+        let warning = result
+            .warnings
+            .iter()
+            .find(|w| w.contains("Unresolved narrative steps"));
+        assert!(
+            warning.is_some(),
+            "unresolved narrative steps must warn, got: {:?}",
+            result.warnings
+        );
+        let w = warning.unwrap();
+        assert!(w.contains("Ghost"), "warning must name each unresolved node: {w}");
+        assert!(w.contains("Phantom"), "warning must name each unresolved node: {w}");
+        assert!(!w.contains("Alpha"), "resolved steps must not be listed: {w}");
+    }
+
+    // ── $selected scope edge cases (spec §30) ──────────────────────────────
+
+    #[test]
+    fn test_selected_no_selection_warns_interactive_not_empty() {
+        let nodes = vec![make_node("n1", "Foo", NodeType::Type)];
+        let mut query = base_query();
+        query.scope = Scope::Focus {
+            node: "$selected".to_string(),
+            edges: vec![],
+            direction: "outgoing".to_string(),
+            depth: 5,
+        };
+        let result = dry_run(&query, &nodes, &[], None);
+        assert_eq!(result.matched_nodes, 0);
+        assert!(
+            result.warnings.iter().any(|w| w.contains("click a node")),
+            "$selected with no selection should show the interactive hint, got: {:?}",
+            result.warnings
+        );
+        assert!(
+            !result.warnings.iter().any(|w| w.contains("Scope matched 0 nodes")),
+            "interactive scopes must not double-report as an empty-scope warning, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn test_selected_with_selection_resolves_focus() {
+        let nodes = vec![
+            make_node("n1", "Root", NodeType::Function),
+            make_node("n2", "Child", NodeType::Function),
+            make_node("n3", "Unrelated", NodeType::Function),
+        ];
+        let edges = vec![make_edge("e1", "n1", "n2", EdgeType::Calls)];
+        let mut query = base_query();
+        query.scope = Scope::Focus {
+            node: "$selected".to_string(),
+            edges: vec!["calls".to_string()],
+            direction: "outgoing".to_string(),
+            depth: 2,
+        };
+        let result = dry_run(&query, &nodes, &edges, Some("n1"));
+        assert_eq!(result.matched_nodes, 2, "selected node + outgoing callee");
+        assert!(result.matched_node_names.contains(&"Child".to_string()));
+        assert!(!result.matched_node_names.contains(&"Unrelated".to_string()));
+        assert!(result.warnings.is_empty());
+    }
 }
