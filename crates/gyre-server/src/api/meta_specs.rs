@@ -226,6 +226,13 @@ pub async fn put_meta_spec_set(
     // workspace. Allowing non-Admin callers (Developers, Agents) to modify these
     // bindings would let agents rewrite the rules they operate under (NEW-26).
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin",
+            "PUT /api/v1/workspaces/:id/meta-spec-set",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "only Admin role may update workspace meta-spec-set bindings".to_string(),
         ));
@@ -1092,6 +1099,13 @@ pub async fn create_meta_spec_registry(
     // principal creating governing content could pre-write the persona a
     // reconciliation wave later re-reads.
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin",
+            "POST /api/v1/meta-specs-registry",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "only Admin role may create meta-spec registry entries".to_string(),
         ));
@@ -1163,6 +1177,13 @@ pub async fn update_meta_spec_registry(
     // personas/principles/process). A non-Admin approval would forge the §6
     // reconciliation trigger with content the caller wrote.
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin",
+            "PUT /api/v1/meta-specs-registry/:id",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "only Admin role may update meta-spec registry entries".to_string(),
         ));
@@ -1294,6 +1315,13 @@ pub async fn delete_meta_spec_registry(
     // docs/api-reference.md marks DELETE Admin-only): deleting a registry
     // entry removes governing content every bound workspace depends on.
     if !auth.roles.contains(&gyre_domain::UserRole::Admin) {
+        crate::rbac::record_rbac_denied(
+            &state,
+            &auth,
+            "Admin",
+            "DELETE /api/v1/meta-specs-registry/:id",
+        )
+        .await;
         return Err(ApiError::Forbidden(
             "only Admin role may delete meta-spec registry entries".to_string(),
         ));

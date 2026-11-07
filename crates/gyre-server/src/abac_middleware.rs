@@ -866,6 +866,17 @@ pub async fn abac_middleware(
                 matched_policy = ?result.matched_policy,
                 "ABAC denied request"
             );
+            // task-104: AbacDenied audit event (observability.md §Audit
+            // Event Types) — the policy engine rejected the request.
+            record_abac_denied(
+                &state,
+                &auth,
+                resource_type,
+                action,
+                result.matched_policy.as_deref(),
+                &pattern,
+            )
+            .await;
             (
                 StatusCode::FORBIDDEN,
                 Json(json!({"error": "insufficient permissions"})),
@@ -873,6 +884,51 @@ pub async fn abac_middleware(
                 .into_response()
         }
     }
+}
+
+/// Record an `AbacDenied` audit event (observability.md §Audit Event Types:
+/// ABAC policy rejects request) with the spec'd detail fields: agent_id,
+/// policy_id, resource, action, claims.
+///
+/// Shared by the ABAC middleware and per-handler ABAC enforcement
+/// (e.g. git smart-HTTP push) so every policy denial lands in the audit
+/// trail regardless of which layer rejected the request.
+pub async fn record_abac_denied(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    resource: &str,
+    action: &str,
+    policy_id: Option<&str>,
+    endpoint: &str,
+) {
+    let event = gyre_domain::AuditEvent::new(
+        gyre_common::Id::new(uuid::Uuid::new_v4().to_string()),
+        gyre_domain::AuditEventType::AbacDenied,
+        if auth.agent_id.is_empty() {
+            None
+        } else {
+            Some(gyre_common::Id::new(auth.agent_id.clone()))
+        },
+        auth.user_id.clone(),
+        None,
+        None,
+        None,
+        "policy".to_string(),
+        None,
+        gyre_domain::AuditOutcome::Blocked,
+        serde_json::json!({
+            "agent_id": auth.agent_id,
+            "policy_id": policy_id,
+            "resource": resource,
+            "action": action,
+            "claims": auth.jwt_claims,
+            "endpoint": endpoint,
+        }),
+        None,
+        None,
+        crate::api::now_secs(),
+    );
+    crate::api::audit::emit_server_audit_event(state, event).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1014,6 +1070,79 @@ pub mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn abac_denial_records_abac_denied_audit_event() {
+        // task-104: an ABAC policy rejection must land in the audit store
+        // with the spec'd detail fields (agent_id, policy_id, resource,
+        // action, claims).
+        use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
+        use axum::routing::post;
+
+        let state = make_test_state_with_jwt();
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+        });
+        init_resolver();
+
+        async fn ok_handler() -> StatusCode {
+            StatusCode::OK
+        }
+        let app = Router::new()
+            .route("/api/v1/tasks", post(ok_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                abac_middleware,
+            ))
+            .with_state(state.clone());
+
+        let token = sign_test_jwt(
+            &serde_json::json!({
+                "sub": "ro-sub",
+                "preferred_username": "readonly-user",
+                "realm_access": { "roles": ["readonly"] }
+            }),
+            3600,
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let events = gyre_ports::AuditRepository::query(
+            &*state.audit,
+            &gyre_ports::AuditQueryFilter {
+                event_type: Some("abac_denied".to_string()),
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(events.len(), 1, "one abac_denied event");
+        let e = &events[0];
+        assert_eq!(e.detail["agent_id"], "readonly-user");
+        assert_eq!(e.detail["resource"], "task");
+        assert_eq!(e.detail["action"], "write");
+        assert_eq!(e.detail["endpoint"], "/api/v1/tasks");
+        assert!(
+            e.detail["policy_id"].as_str().is_some(),
+            "the denying policy must be named, got {:?}",
+            e.detail["policy_id"]
+        );
+        // The caller's JWT claims travel with the denial for forensics.
+        assert_eq!(e.detail["claims"]["sub"], "ro-sub");
+        assert_eq!(e.outcome, gyre_domain::AuditOutcome::Blocked);
     }
 
     #[tokio::test(flavor = "multi_thread")]
