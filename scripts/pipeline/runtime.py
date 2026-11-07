@@ -84,9 +84,10 @@ def ensure_workspace(execution, name, invoke=None):
     store=execution.store
     context,namespace=store.setting('runtime_kube_context'),store.setting('runtime_namespace')
     if not context or not namespace:return  # Other backends provision storage at the gateway.
-    required=30
+    from .compute import WORKSPACE_GIB
+    required=WORKSPACE_GIB
     row=store.db.execute('SELECT * FROM resources WHERE name=?',(name,)).fetchone()
-    if not row or row['work']!=execution.claim['id'] or row['token']!=execution.claim['token']:
+    if not row or row['work']!=execution.claim['id'] or row['token']!=execution.claim['token'] or row['state'] not in ('intent','present'):
         raise Attention('refuse workspace provisioning after sandbox ownership changed')
     if json.loads(row['data']).get('workspace_ready_gib',0)>=required:return
     execution.phase('ProvisioningStorage',sandbox=name,workspace_gib=required)
@@ -139,7 +140,7 @@ def reclaim_build_cache(execution, name, invoke):
     """After stopping an agent, free generated output so Git can save source."""
     from .execution import Attention
     row=execution.store.db.execute('SELECT * FROM resources WHERE name=?',(name,)).fetchone()
-    if not row or row['work']!=execution.claim['id'] or row['token']!=execution.claim['token']:
+    if not row or row['work']!=execution.claim['id'] or row['token']!=execution.claim['token'] or row['state'] not in ('intent','present'):
         raise Attention('refuse cache reclamation after sandbox ownership changed')
     code="import pathlib,shutil\np=pathlib.Path('/sandbox/workspace/.gyre-target')\nif p.is_symlink(): raise RuntimeError('refuse symlinked build cache')\nif p.exists(): shutil.rmtree(p)"
     result=invoke(['sandbox','exec','-n',name,'--','python3','-c',code],capture_output=True,text=True,timeout=120)

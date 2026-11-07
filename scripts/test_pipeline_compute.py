@@ -44,6 +44,9 @@ class ComputeTests(unittest.TestCase):
                 self.assertEqual(error.category,'sandbox_storage')
                 self.assertEqual(error.diagnostic['source'],'statvfs')
                 self.assertEqual(profile(self.store,'task-001','implement')['memory'],'4Gi')
+        self.store.retry(self.work,self.execution.claim['token'],{'category':error.category},attention=True)
+        newer=self.store.enqueue('implement','task-001','g',{'candidate':'new-checkpoint','base':'new-main'})
+        self.assertIsNone(self.store.claim('implement','actor',ident=newer))
 
     def test_storage_reclamation_removes_only_owned_generated_output(self):
         import subprocess,sys

@@ -1,12 +1,13 @@
 """Per-task compute budgets. Escalation requires an observed OOM, never a timeout."""
 import json
 
+WORKSPACE_GIB=30
 
 def profile(store, task, stage):
     memory = store.setting(f'compute_memory:{task}:{stage}', 4)
     if memory not in (4, 8):
         raise ValueError('unsupported compute memory tier')
-    return {'cpu': '1', 'memory': f'{memory}Gi', 'memory_gib': memory, 'build_jobs': 1, 'workspace_gib':30}
+    return {'cpu': '1', 'memory': f'{memory}Gi', 'memory_gib': memory, 'build_jobs': 1, 'workspace_gib':WORKSPACE_GIB}
 
 
 def record_oom(store, task, stage, observed_gib, evidence):
