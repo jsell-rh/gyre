@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §3 Default Views (Automatic, No LLM)"
-commits: ["3463e2858d8b2cfc022dca05140aa44f041a3d15", "8e025c2570ee8df5919dfc4b298d9c48978c599e"]
+commits: ["8e025c2570ee8df5919dfc4b298d9c48978c599e", "3463e2858d8b2cfc022dca05140aa44f041a3d15"]
 ---
 
 ## Spec Excerpt
