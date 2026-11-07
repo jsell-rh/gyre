@@ -84,15 +84,9 @@ pub async fn request_impersonation(
         ));
     }
 
-    // Rate limit: max one active impersonation session per admin.
-    if impersonation::active_session_for_admin(&state, admin_id.as_str())
-        .await?
-        .is_some()
-    {
-        return Err(ApiError::Conflict(
-            "admin already has an active impersonation session".to_string(),
-        ));
-    }
+    // Rate limit (max one active impersonation session per admin) is
+    // enforced inside create_request, under the session-write lock it
+    // shares with the approval critical section.
 
     let admin = state
         .users
@@ -1499,5 +1493,117 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(events[0].detail["actions_taken"], 8);
+    }
+
+    /// Two concurrent approvals of the same request must yield exactly
+    /// one session, one token and one `ImpersonationStarted` event: the
+    /// session-creation critical section is serialized by the session
+    /// write lock. The yielding adapter makes the unlocked
+    /// read-modify-write genuinely interleave (as on a real async
+    /// backend); without the lock, both approvals load the request as
+    /// Pending and both mint live tokens — two impersonation sessions
+    /// for one consent, violating the max-1-active-per-admin constraint.
+    #[tokio::test]
+    async fn concurrent_approvals_create_exactly_one_session() {
+        let state = test_state();
+        let admin_key =
+            seed_user(&state, "admin-6", "Admin Six", vec![UserRole::Admin], false).await;
+        let target_key = seed_user(
+            &state,
+            "target-6",
+            "Target Six",
+            vec![UserRole::Developer],
+            true,
+        )
+        .await;
+
+        // Admin requests impersonation; target reads the code from the
+        // notification.
+        let resp = app(&state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/impersonate")
+                    .header("Authorization", format!("Bearer {admin_key}"))
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"target_user_id": "target-6"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let request_id = body_json(resp).await["request_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let notifs = body_json(
+            app(&state)
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/users/me/notifications")
+                        .header("Authorization", format!("Bearer {target_key}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap(),
+        )
+        .await;
+        let code = notifs["notifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["notification_type"] == "ImpersonationRequest")
+            .map(|n| {
+                serde_json::from_str::<serde_json::Value>(n["body"].as_str().unwrap()).unwrap()
+                    ["approval_code"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .unwrap();
+
+        // Swap in the yielding adapter so the two concurrent approvals
+        // interleave on the request load/save (the sync mem adapter
+        // cannot reproduce the race).
+        let mut yielding_state = (*state).clone();
+        yielding_state.kv_store = Arc::new(YieldingKvStore::new(state.kv_store.clone()));
+        let state = Arc::new(yielding_state);
+
+        let caller = Id::new("target-6");
+        let spawn_approve = |code: String| {
+            let state = state.clone();
+            let request_id = request_id.clone();
+            let caller = caller.clone();
+            tokio::spawn(async move {
+                impersonation::approve_request(&state, &request_id, &caller, &code).await
+            })
+        };
+        let (a, b) = (
+            spawn_approve(code.clone()),
+            spawn_approve(code.clone()),
+        );
+        let results = [a.await.unwrap(), b.await.unwrap()];
+
+        let ok = results.iter().filter(|r| r.is_ok()).count();
+        assert_eq!(ok, 1, "exactly one approval must succeed");
+        let conflicts = results
+            .iter()
+            .filter(|r| matches!(r, Err(ApiError::Conflict(_))))
+            .count();
+        assert_eq!(conflicts, 1, "the losing approval must conflict");
+
+        // Exactly one live session and one ImpersonationStarted event —
+        // not two tokens for one consent.
+        let sessions = state.kv_store.kv_list(SESSION_NAMESPACE).await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        let events = state
+            .audit
+            .query(&audit_filter("impersonation_started"))
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
     }
 }

@@ -248,7 +248,23 @@ pub async fn create_request(
         expires_at: now + REQUEST_TTL_SECS,
         status: ImpersonationRequestStatus::Pending,
     };
-    save_request(state, &req).await?;
+    // Max one active impersonation session per admin (rate limit). The
+    // check and the request save run inside the session-write lock — the
+    // same lock that serializes approval's session-creation critical
+    // section — so a concurrent approval cannot open a session between
+    // this read and the save (an unlocked gap would let the admin stack
+    // an approvable request against a session opened in the gap). The
+    // lock is released before notification delivery.
+    {
+        let _guard = SESSION_WRITE_LOCK.lock().await;
+        if let Some(active) = active_session_for_admin(state, admin.id.as_str()).await? {
+            return Err(ApiError::Conflict(format!(
+                "admin already has an active impersonation session (started {})",
+                active.started_at
+            )));
+        }
+        save_request(state, &req).await?;
+    }
 
     // Deliver the code to the target user (never to the requesting admin).
     deliver_approval_code(state, target, &req, &code).await;
@@ -268,6 +284,20 @@ pub async fn approve_request(
     caller_user_id: &Id,
     code: &str,
 ) -> Result<(ImpersonationSession, String, u64), ApiError> {
+    // The session-creation critical section (request load → Pending
+    // check → max-1-active check → session save → request-status save)
+    // runs under the session-write lock. Without it, two concurrent
+    // approvals of the same request both load it as Pending, both pass
+    // the rate limit and both save live sessions — two impersonation
+    // tokens minted for one consent and two ImpersonationStarted events,
+    // violating the max-1-active-session-per-admin constraint. The lock
+    // is shared with create_request's rate-limit read, deny_request's
+    // transition, the action counter and end_session, so the whole
+    // request/session state machine is serialized (single-process lock;
+    // the kv store stays the record of truth). Released before token
+    // minting, audit emission and notification delivery.
+    let _guard = SESSION_WRITE_LOCK.lock().await;
+
     let mut req = load_request(state, request_id).await?.ok_or_else(|| {
         ApiError::NotFound(format!("impersonation request {request_id} not found"))
     })?;
@@ -339,6 +369,8 @@ pub async fn approve_request(
     req.status = ImpersonationRequestStatus::Approved;
     save_request(state, &req).await?;
 
+    drop(_guard);
+
     let token = state
         .agent_signing_key
         .mint_impersonation(
@@ -385,6 +417,10 @@ pub async fn deny_request(
     request_id: &str,
     caller_user_id: &Id,
 ) -> Result<(), ApiError> {
+    // Serialized with approve's critical section (same lock) so a
+    // concurrent approve/deny pair cannot both pass the Pending check
+    // and overwrite each other's terminal status.
+    let _guard = SESSION_WRITE_LOCK.lock().await;
     let mut req = load_request(state, request_id).await?.ok_or_else(|| {
         ApiError::NotFound(format!("impersonation request {request_id} not found"))
     })?;
@@ -496,7 +532,13 @@ pub async fn expire_sessions(state: &AppState) -> anyhow::Result<u64> {
     }
 
     // Mark stale pending requests so approve rejects them with a clear
-    // conflict instead of relying solely on the expiry check.
+    // conflict instead of relying solely on the expiry check. The
+    // read-modify-write runs under the same write lock as approve's
+    // critical section, so the sweep cannot overwrite a request that a
+    // concurrent approve just marked Approved (and vice versa). The
+    // session-ending loop above acquires and releases the lock per
+    // session, so taking it here cannot deadlock.
+    let _guard = SESSION_WRITE_LOCK.lock().await;
     let requests = state
         .kv_store
         .kv_list(REQUEST_NAMESPACE)
