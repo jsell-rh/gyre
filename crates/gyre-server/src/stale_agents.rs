@@ -37,6 +37,14 @@ pub async fn run_once(state: &AppState) -> anyhow::Result<()> {
                 let _ = agent.transition_status(AgentStatus::Dead);
                 let _ = state.agents.update(&agent).await;
 
+                // Agent lifecycle audit event (observability.md §Audit Event Types):
+                // the stale detector marked this agent Dead. pid_alive is null
+                // when no PID was ever attested (liveness unknown, not assumed).
+                let pid_alive =
+                    crate::agent_audit::attested_pid_alive(state, &agent.id.to_string()).await;
+                crate::agent_audit::emit_dead(state, &agent, agent.last_heartbeat, pid_alive)
+                    .await;
+
                 // Clean up worktrees
                 if let Ok(worktrees) = state.worktrees.find_by_agent(&agent.id).await {
                     for wt in worktrees {
@@ -270,4 +278,86 @@ pub fn spawn_stale_agent_detector(state: Arc<AppState>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::mem::test_state;
+    use gyre_common::Id;
+    use gyre_domain::{Agent, AgentStatus, DisconnectedBehavior};
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    #[tokio::test]
+    async fn stale_detector_emits_agent_dead_audit_event() {
+        // observability.md §Audit Event Types: when the stale detector marks
+        // an agent Dead, an AgentDead event must record the last heartbeat
+        // time and PID liveness. Without an attestation pid_alive is null
+        // (unknown), never fabricated.
+        let state = test_state();
+        let now = now_secs();
+        let mut agent = Agent::new(Id::new("agent-stale-audit"), "stale-audit-agent", now);
+        agent.transition_status(AgentStatus::Active).ok();
+        agent.last_heartbeat = Some(now - 120);
+        agent.disconnected_behavior = DisconnectedBehavior::Abort;
+        state.agents.create(&agent).await.unwrap();
+
+        super::run_once(&state).await.unwrap();
+
+        // The agent actually transitioned to Dead.
+        let dead = state
+            .agents
+            .find_by_id(&Id::new("agent-stale-audit"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(dead.status, AgentStatus::Dead);
+
+        let events = crate::agent_audit::recorded_events(&state, "agent_dead").await;
+        assert_eq!(events.len(), 1, "exactly one agent_dead event");
+        let ev = &events[0];
+        assert_eq!(ev.resource_id.as_deref(), Some("agent-stale-audit"));
+        assert_eq!(ev.detail["last_heartbeat_at"], now - 120);
+        assert!(ev.detail["pid_alive"].is_null(), "no attestation → unknown");
+    }
+
+    #[tokio::test]
+    async fn stale_detector_reports_pid_liveness_in_agent_dead_event() {
+        // With an attested PID, the AgentDead event must carry the measured
+        // liveness: a dead PID (an exited child) reports false, proving the
+        // value is measured rather than assumed.
+        let state = test_state();
+        let now = now_secs();
+        let mut agent = Agent::new(Id::new("agent-stale-pid"), "stale-pid-agent", now);
+        agent.transition_status(AgentStatus::Active).ok();
+        agent.last_heartbeat = Some(now - 120);
+        agent.disconnected_behavior = DisconnectedBehavior::Abort;
+        state.agents.create(&agent).await.unwrap();
+
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead_pid = child.id();
+        child.wait().unwrap();
+        let att =
+            crate::workload_attestation::attest_agent("agent-stale-pid", Some(dead_pid), "local", "");
+        state
+            .kv_store
+            .kv_set(
+                "workload_attestations",
+                "agent-stale-pid",
+                serde_json::to_string(&att).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        super::run_once(&state).await.unwrap();
+
+        let events = crate::agent_audit::recorded_events(&state, "agent_dead").await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].detail["pid_alive"], false);
+    }
 }

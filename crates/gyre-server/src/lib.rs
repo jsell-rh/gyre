@@ -4,6 +4,7 @@ pub(crate) mod abac;
 pub mod abac_middleware;
 pub mod abandoned_branch;
 pub mod api;
+pub mod agent_audit;
 pub mod attestation;
 pub mod audit_simulator;
 pub(crate) mod auth;
