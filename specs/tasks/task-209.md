@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b", "dc7ab7c7e64fe3b8b4285924e6af1541a898fe27"]
+commits: ["ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
 ---
 
 ## Spec Excerpt
