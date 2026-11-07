@@ -6,7 +6,7 @@ depends_on:
 progress: complete
 coverage_sections:
   - "explorer-canvas.md §4 Lens Definitions"
-commits: ["7a3d96f01f6846c6184db0d5b82855f2a4c30c34", "9fcf9f28120915dae7feb267fe4bce9a83974279", "3b37be901ab245b5dd82a94e611fac2c066e2b99", "96cd52a977b7b2f79dab55b5af9e7dcb60c92117"]
+commits: ["7a3d96f01f6846c6184db0d5b82855f2a4c30c34", "9fcf9f28120915dae7feb267fe4bce9a83974279", "3b37be901ab245b5dd82a94e611fac2c066e2b99", "96cd52a977b7b2f79dab55b5af9e7dcb60c92117", "1b09c7e020035a48822527681d2b3659cbf53905"]
 ---
 
 ## Spec Excerpt
