@@ -52,3 +52,34 @@ Non-findings (checked, judged out of scope or acceptable):
 Summary: the envelope work itself is thorough and correct — all 14 fields flow end-to-end (domain → port → all three adapters → migration → API → SIEM → web) with genuine filter parity and real tests, and the migration's legacy-data fold is verified correct on real SQLite. But the migration breaks the PostgreSQL deployment path outright (F1), and the two new provenance attributes the spec added for forensic value (`source_ip`, plus workspace/repo attribution) are caller-forgeable in exactly the way the neighboring NEW-31 binding exists to prevent (F2, F3). Revision required.
 
 — Verifier, 2026-09-30
+
+## Round 2 — revision review (candidate 0b045ff4, base 1ae18d1c)
+
+Candidate delta vs base is exactly the F1–F4 revision round (the 14-field envelope itself was already merged into the base via `defec35a` and re-verified unchanged at HEAD): portable rewrite of migration 000054 + a real fold regression test, `validate_workspace_scope`/`validate_repo_scope` in `api/audit.rs`, new `trusted_proxy.rs` + `ConnectInfo` wiring in `main.rs`, manual `outcome` filter parsing, exemption-file shrinkage with frozen counts lowered (2→0, 2→0, 5→1 — the sanctioned shrink direction, never growth), and a web/dist restore-to-base after the checkpoint merge committed conflict markers.
+
+Independent probes on the exact candidate (logs: `/tmp/stage/review-evidence/`):
+
+- `cargo test -p gyre-server --lib api::audit` → **12 passed, 0 failed** — includes mutually differential assertions: own-tenant workspace 201 vs cross-tenant 403 vs unknown 404 (F2 fails if removed); socket-peer source_ip 203.0.113.9 with forged XFF ignored vs XFF 198.51.100.7 honored only from a trusted-proxy peer (one of the two necessarily fails if the F3 gate is removed or widened); forged body `agent_id` ignored on the full JWT path (NEW-31); failed-closed `source_ip: null` without socket info; `?outcome=succes` → 400 `{"error": ...}` ApiError shape (F4); legacy path/pid fold.
+- `cargo test -p gyre-server --lib trusted_proxy` → **9 passed, 0 failed** (CIDR masking, malformed-entry fail-closed, rightmost-untrusted XFF, all-trusted-chain fallback, untrusted-peer-cannot-buy-trust).
+- `cargo test -p gyre-domain --lib audit` → **8 passed, 0 failed**; `cargo test -p gyre-server --lib siem::` → **7 passed, 0 failed** (workspaceId/resourceType/outcome in CEF + syslog JSON).
+- `cargo test -p gyre-adapters --lib migration_000054` → **1 passed, 0 failed** — drives the REAL embedded up.sql through the real diesel runner (un-marks 000054, re-applies onto a recreated legacy-shape table seeded with JSON-hostile paths `/tmp/we"ird\pa\nth\t`, non-object details, null path/pid variants) and asserts the folded JSON parses back to merge-patch semantics. Real migration execution, not mirrored logic.
+- `cargo test -p gyre-adapters --lib sqlite::audit` → **11 passed, 0 failed** (all 9 filter dimensions).
+- Mechanical: `check-migration-sql-portability`, `check-migration-versions` (000054 fits 000053<000054<000055), `check-forwarded-header-trust`, `check-forged-scope-fields`, `check-arch`, `check-mem-port-contracts`, `check-task-commit-attribution`, `check-abac-route-registry` — all OK.
+- web/dist repair: `git diff 1ae18d1c..0b045ff4 -- web/dist` empty; `node --check` on both bundles OK; zero conflict markers. Web sources unchanged vs base, so the restored base build matches current sources.
+
+Verified fixes:
+
+- **F1 fixed.** up.sql/down.sql rewritten with portable constructs only (CASE WHEN + `substr`/`length`/`||`/`replace`/`CAST`/`COALESCE`); NULL propagation through `||` is guarded by `CASE WHEN ... IS NULL` branches on every nullable source; backslash literals rely on `standard_conforming_strings` (PG default since 9.1, documented in-file). The prior json_patch/json_extract forms are gone (portability grep green). Down migration is shape-restoring only (path/pid come back NULL, folded keys remain readable inside `detail`) — an acceptable, documented trade for portability. *Deferred check for verification:* no PostgreSQL server exists in the review sandbox; run the server with `GYRE_DATABASE_URL=postgres://...` to confirm the migration executes (the original F1 failure mode was a PG startup abort). Manual construct review + SQLite execution + dialect grep all support portability.
+- **F2 fixed.** `record_audit_event` looks up every caller-supplied `workspace_id` (tenant compare → 403/404) and `repo_id` (repo's workspace tenant compare + workspace/repo consistency → 403/404) before persisting; `agent_id`/`user_id` are bound server-side from auth. `resource_type`/`resource_id`/`detail`/`session_id` remain free-form — correct per spec (they are labels/payloads, not scoping identities), and round 1 already judged the query-time counterpart acceptable.
+- **F3 fixed.** New `trusted_proxy.rs`: socket peer (`ConnectInfo`, wired via `into_make_service_with_connect_info` in `main.rs`) is the source of truth; XFF/X-Real-Ip honored only when the peer matches `GYRE_TRUSTED_PROXIES` (empty default = direct), parsed rightmost-untrusted, malformed proxy entries skipped (never widened), fails closed to `None` without socket info. Documented in `docs/server-config.md` + `docs/api-reference.md`.
+- **F4 fixed.** `outcome` parsed manually → repo ApiError shape; message names the field and bad value.
+
+Non-findings:
+
+- Exemption-file edits only shrink lists and lower frozen counts (2→0, 5→1) with the fix protocol documented in-file — the sanctioned direction; the one remaining portability entry (000013 down.sql `INSERT OR IGNORE`) is pre-existing debt, unchanged by this candidate.
+- 403-vs-404 on scope probes follows the repo's documented per-handler authorization convention (AGENTS.md), consistent with every other scoped handler.
+- Task frontmatter `commits:` (4fe453df, 99de714b, 9e70fa7f — pre-rebase checkpoints) vs the shipped section naming 7f1e7362 (web/dist repair): `check-task-commit-attribution.sh` passes; web/dist is generated artifacts restored byte-identical to base, and this review scoped the full base→candidate diff regardless.
+
+Verdict: **approved**. All four revision findings are fixed in production code with differential tests that fail if the behavior is removed; the envelope contract (14 fields, `AuditOutcome`, nullable `agent_id`, migration, 9-dimension query filters, SIEM fields) holds end-to-end at HEAD.
+
+— Reviewer, round 2
