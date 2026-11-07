@@ -74,6 +74,12 @@ def diagnose(directory, runner_exit=None):
         receipt = json.loads(outcome.read_text()) if outcome.exists() else {}
     except ValueError:
         receipt = {}
+    transport_lost=False
+    for path in directory.glob('agent-transport-*-state.json'):
+        try:
+            state=json.loads(path.read_text())
+            transport_lost=transport_lost or state.get('phase')=='lost'
+        except (OSError,ValueError):pass
     if receipt.get('source_valid') is False:
         category, summary = 'review_source_guard', 'Review changed protected source; discard its checkpoint and start a clean review'
     elif timeout:
@@ -83,6 +89,8 @@ def diagnose(directory, runner_exit=None):
         category, summary = 'sandbox_provisioning', 'Sandbox provisioning failed before the model started; retry infrastructure with backoff'
     elif 'transport error' in runner_message or 'deadline has elapsed' in runner_message:
         category, summary = 'gateway_transport', 'Gateway transport failed while preparing or collecting the assignment'
+    elif transport_lost:
+        category, summary = 'gateway_transport', 'Gateway reconnection budget exhausted; retained agent output is incomplete'
     elif terminal == 'error' and errors and re.search(r'\b429\b|rate.?limit', errors[-1], re.I):
         category, summary = 'inference_rate_limit', 'Inference returned HTTP 429; retry with backoff'
     elif terminal == 'error' and errors and re.search(r'\b(?:401|403)\b', errors[-1]):
