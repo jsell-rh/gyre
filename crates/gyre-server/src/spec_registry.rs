@@ -27,59 +27,8 @@ pub struct SpecManifest {
     #[serde(default)]
     pub defaults: ManifestDefaults,
     pub specs: Vec<SpecEntry>,
-    /// Concept views of the knowledge graph (realized-model.md §4).
-    /// A manifest without a `concepts:` key parses with an empty vec.
     #[serde(default)]
     pub concepts: Vec<ConceptDef>,
-}
-
-/// A concept view declared in the manifest's `concepts:` block
-/// (realized-model.md §4). Converts to the domain `ConceptView` type.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ConceptDef {
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default)]
-    pub include: Vec<ConceptInclude>,
-}
-
-/// One `- types: [...]` / `- traits: [...]` / ... entry in a concept's
-/// `include:` sequence of single-key maps.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct ConceptInclude {
-    #[serde(default)]
-    pub types: Vec<String>,
-    #[serde(default)]
-    pub traits: Vec<String>,
-    #[serde(default)]
-    pub modules: Vec<String>,
-    #[serde(default)]
-    pub endpoints: Vec<String>,
-    #[serde(default)]
-    pub specs: Vec<String>,
-}
-
-impl From<&ConceptDef> for gyre_common::graph::ConceptView {
-    fn from(def: &ConceptDef) -> Self {
-        let mut view = gyre_common::graph::ConceptView {
-            name: def.name.clone(),
-            description: def.description.clone(),
-            include_types: vec![],
-            include_traits: vec![],
-            include_modules: vec![],
-            include_endpoints: vec![],
-            include_specs: vec![],
-        };
-        for inc in &def.include {
-            view.include_types.extend(inc.types.iter().cloned());
-            view.include_traits.extend(inc.traits.iter().cloned());
-            view.include_modules.extend(inc.modules.iter().cloned());
-            view.include_endpoints.extend(inc.endpoints.iter().cloned());
-            view.include_specs.extend(inc.specs.iter().cloned());
-        }
-        view
-    }
 }
 
 /// Default policies applied to all specs unless overridden per-entry.
@@ -102,11 +51,9 @@ impl Default for ManifestDefaults {
         }
     }
 }
-
 fn default_true() -> bool {
     true
 }
-
 /// Link type between specs — drives mechanical enforcement.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -757,6 +704,60 @@ pub async fn sync_spec_ledger(
             "spec-registry: file under specs/ is not registered in manifest.yaml — \
              add it to specs/manifest.yaml to enable lifecycle tracking"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Concept views (realized-model.md §4)
+// ---------------------------------------------------------------------------
+
+/// A concept view declared in the manifest's `concepts:` block
+/// (realized-model.md §4). Converts to the domain `ConceptView` type.
+/// A manifest without a `concepts:` key parses with an empty vec.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConceptDef {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub include: Vec<ConceptInclude>,
+}
+
+/// One `- types: [...]` / `- traits: [...]` / ... entry in a concept's
+/// `include:` sequence of single-key maps.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ConceptInclude {
+    #[serde(default)]
+    pub types: Vec<String>,
+    #[serde(default)]
+    pub traits: Vec<String>,
+    #[serde(default)]
+    pub modules: Vec<String>,
+    #[serde(default)]
+    pub endpoints: Vec<String>,
+    #[serde(default)]
+    pub specs: Vec<String>,
+}
+
+impl From<&ConceptDef> for gyre_common::graph::ConceptView {
+    fn from(def: &ConceptDef) -> Self {
+        let mut view = gyre_common::graph::ConceptView {
+            name: def.name.clone(),
+            description: def.description.clone(),
+            include_types: vec![],
+            include_traits: vec![],
+            include_modules: vec![],
+            include_endpoints: vec![],
+            include_specs: vec![],
+        };
+        for inc in &def.include {
+            view.include_types.extend(inc.types.iter().cloned());
+            view.include_traits.extend(inc.traits.iter().cloned());
+            view.include_modules.extend(inc.modules.iter().cloned());
+            view.include_endpoints.extend(inc.endpoints.iter().cloned());
+            view.include_specs.extend(inc.specs.iter().cloned());
+        }
+        view
     }
 }
 
