@@ -156,7 +156,11 @@ pub async fn get_span_payload(
 ) -> Result<(StatusCode, Json<SpanPayloadResponse>), ApiError> {
     // Find the trace containing this span. Traces are capped at one per MR,
     // so scanning the MRs' traces finds at most one match.
-    let mrs = state.merge_requests.list().await.map_err(ApiError::Internal)?;
+    let mrs = state
+        .merge_requests
+        .list()
+        .await
+        .map_err(ApiError::Internal)?;
     let mut found = None;
     for mr in &mrs {
         let trace = state
@@ -172,7 +176,8 @@ pub async fn get_span_payload(
         }
     }
 
-    let (trace, mr) = found.ok_or_else(|| ApiError::NotFound("no trace for this span".to_string()))?;
+    let (trace, mr) =
+        found.ok_or_else(|| ApiError::NotFound("no trace for this span".to_string()))?;
 
     // Authorization: the span's MR belongs to a workspace, and the
     // workspace belongs to a tenant. Compare against the caller's tenant.
@@ -410,11 +415,7 @@ mod tests {
             mr_id: mr.id.clone(),
             gate_run_id: Id::new("gr-replaced"),
             commit_sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
-            spans: vec![make_span(
-                "ws-default-span-new",
-                Some("{\"new\":1}"),
-                None,
-            )],
+            spans: vec![make_span("ws-default-span-new", Some("{\"new\":1}"), None)],
             captured_at: 2000,
         };
         state.traces.store(&trace).await.unwrap();

@@ -911,33 +911,27 @@ env:
             .unwrap();
         state
             .graph_store
-            .create_node(node(
-                "n-db",
-                NodeType::Module,
-                "users",
-                "db::users",
-            ))
+            .create_node(node("n-db", NodeType::Module, "users", "db::users"))
             .await
             .unwrap();
 
-        let span =
-            |span_id: &str, kind: SpanKind, op: &str, attrs: &[(&str, &str)]| TraceSpan {
-                span_id: span_id.to_string(),
-                parent_span_id: None,
-                operation_name: op.to_string(),
-                service_name: "svc".to_string(),
-                kind,
-                start_time: 1,
-                duration_us: 2,
-                attributes: attrs
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect(),
-                input_summary: None,
-                output_summary: None,
-                status: SpanStatus::Ok,
-                graph_node_id: None,
-            };
+        let span = |span_id: &str, kind: SpanKind, op: &str, attrs: &[(&str, &str)]| TraceSpan {
+            span_id: span_id.to_string(),
+            parent_span_id: None,
+            operation_name: op.to_string(),
+            service_name: "svc".to_string(),
+            kind,
+            start_time: 1,
+            duration_us: 2,
+            attributes: attrs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            input_summary: None,
+            output_summary: None,
+            status: SpanStatus::Ok,
+            graph_node_id: None,
+        };
 
         let trace = GateTrace {
             id: Id::new("t-link"),

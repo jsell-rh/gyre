@@ -3749,7 +3749,11 @@ mod trace_contract_tests {
         }
     }
 
-    fn trace(mr: &str, gate_run: &str, spans: Vec<gyre_common::TraceSpan>) -> gyre_common::GateTrace {
+    fn trace(
+        mr: &str,
+        gate_run: &str,
+        spans: Vec<gyre_common::TraceSpan>,
+    ) -> gyre_common::GateTrace {
         gyre_common::GateTrace {
             id: Id::new(format!("{mr}-trace")),
             mr_id: Id::new(mr),
@@ -3780,10 +3784,12 @@ mod trace_contract_tests {
             .await
             .unwrap()
             .is_none());
-        assert!(TraceRepository::get_span_payload(&repo, &Id::new("gr-1"), "s1")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            TraceRepository::get_span_payload(&repo, &Id::new("gr-1"), "s1")
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         TraceRepository::store(
             &repo,
@@ -3883,8 +3889,14 @@ mod trace_contract_tests {
             .unwrap()
             .expect("trace stored");
         let s = &got.spans[0];
-        assert_eq!(s.input_summary.as_deref().map(str::len), Some(MAX_SUMMARY_BYTES));
-        assert_eq!(s.output_summary.as_deref().map(str::len), Some(MAX_SUMMARY_BYTES));
+        assert_eq!(
+            s.input_summary.as_deref().map(str::len),
+            Some(MAX_SUMMARY_BYTES)
+        );
+        assert_eq!(
+            s.output_summary.as_deref().map(str::len),
+            Some(MAX_SUMMARY_BYTES)
+        );
         let p = TraceRepository::get_span_payload(&repo, &Id::new("gr-t"), "s-t")
             .await
             .unwrap()
