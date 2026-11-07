@@ -1742,6 +1742,218 @@ async fn test_saved_views_crud() {
     assert!(user_views.is_empty(), "Expected no user views after delete");
 }
 
+/// PUT/DELETE /api/v1/repos/{id}/views/{view_id} — ownership enforcement.
+///
+/// Only the view creator (or an Admin) may update or delete a saved view.
+/// Two distinct registered agents share the tenant; agent B must be rejected
+/// with 403 on agent A's view while succeeding on its own view via the same
+/// endpoints — proving the rejection comes from the ownership check, not from
+/// general access denial. System default views must never be deletable.
+#[tokio::test]
+async fn test_saved_views_ownership_enforcement() {
+    let ctx = Ctx::new().await;
+    let repo_id = create_repo(&ctx, "proj-views-own").await;
+
+    // Register two distinct agents (same tenant, Agent role — not Admin).
+    let reg_a = ctx
+        .post_json(
+            "/api/v1/agents",
+            json!({
+                "name": format!("views-owner-a-{}", uuid::Uuid::new_v4()),
+                "status": "Active"
+            }),
+        )
+        .await;
+    assert!(reg_a.status().is_success(), "agent A registration failed");
+    let body_a: Value = reg_a.json().await.unwrap();
+    // RegisterAgentResponse flattens the AgentResponse fields to the top
+    // level (#[serde(flatten)]) alongside auth_token.
+    let token_a = body_a["auth_token"].as_str().unwrap();
+    let agent_a_id = body_a["id"].as_str().unwrap();
+
+    let reg_b = ctx
+        .post_json(
+            "/api/v1/agents",
+            json!({
+                "name": format!("views-owner-b-{}", uuid::Uuid::new_v4()),
+                "status": "Active"
+            }),
+        )
+        .await;
+    assert!(reg_b.status().is_success(), "agent B registration failed");
+    let body_b: Value = reg_b.json().await.unwrap();
+    let token_b = body_b["auth_token"].as_str().unwrap();
+    let agent_b_id = body_b["id"].as_str().unwrap();
+    assert_ne!(agent_a_id, agent_b_id, "the two callers must be distinct");
+
+    let views_path = format!("/api/v1/repos/{repo_id}/views");
+
+    // Agent A creates a view.
+    let resp = ctx
+        .client
+        .post(ctx.url(&views_path))
+        .bearer_auth(token_a)
+        .json(&json!({
+            "name": "Agent A View",
+            "description": "created by agent A",
+            "query": {"scope": {"type": "all"}}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "agent A must be able to create a view");
+    let view: Value = resp.json().await.unwrap();
+    let view_id = view["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        view["created_by"].as_str().unwrap(),
+        agent_a_id,
+        "created_by must record the creating agent's identity"
+    );
+
+    // Agent A (the creator) updates its own view — allowed.
+    let resp = ctx
+        .client
+        .put(ctx.url(&format!("{views_path}/{view_id}")))
+        .bearer_auth(token_a)
+        .json(&json!({"name": "Agent A View v2"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "creator must be able to update own view"
+    );
+    let updated: Value = resp.json().await.unwrap();
+    assert_eq!(updated["name"].as_str().unwrap(), "Agent A View v2");
+
+    // Agent B (not the creator, not an Admin) updates agent A's view — 403.
+    let resp = ctx
+        .client
+        .put(ctx.url(&format!("{views_path}/{view_id}")))
+        .bearer_auth(token_b)
+        .json(&json!({"name": "Hijacked"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "non-creator must not update another agent's view"
+    );
+    let err = resp.text().await.unwrap();
+    assert!(
+        err.contains("creator or an Admin"),
+        "403 must come from the ownership check, got: {err}"
+    );
+
+    // Agent B deletes agent A's view — 403.
+    let resp = ctx
+        .client
+        .delete(ctx.url(&format!("{views_path}/{view_id}")))
+        .bearer_auth(token_b)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "non-creator must not delete another agent's view"
+    );
+    let err = resp.text().await.unwrap();
+    assert!(
+        err.contains("creator or an Admin"),
+        "403 must come from the ownership check, got: {err}"
+    );
+
+    // Control: agent B uses the same endpoints for its OWN view and succeeds —
+    // proves the 403s above are ownership-specific, not general access denial.
+    let resp = ctx
+        .client
+        .post(ctx.url(&views_path))
+        .bearer_auth(token_b)
+        .json(&json!({
+            "name": "Agent B View",
+            "query": {"scope": {"type": "all"}}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "agent B must be able to create a view");
+    let view_b: Value = resp.json().await.unwrap();
+    let view_b_id = view_b["id"].as_str().unwrap().to_string();
+    assert_eq!(view_b["created_by"].as_str().unwrap(), agent_b_id);
+
+    let resp = ctx
+        .client
+        .put(ctx.url(&format!("{views_path}/{view_b_id}")))
+        .bearer_auth(token_b)
+        .json(&json!({"name": "Agent B View v2"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "agent B must be able to update own view"
+    );
+
+    let resp = ctx
+        .client
+        .delete(ctx.url(&format!("{views_path}/{view_b_id}")))
+        .bearer_auth(token_b)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        204,
+        "agent B must be able to delete own view"
+    );
+
+    // Agent A (the creator) deletes its own view — allowed.
+    let resp = ctx
+        .client
+        .delete(ctx.url(&format!("{views_path}/{view_id}")))
+        .bearer_auth(token_a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        204,
+        "creator must be able to delete own view"
+    );
+
+    // System default views cannot be deleted by anyone — the is_system guard
+    // fires before the ownership check.
+    let resp = ctx.get(&views_path).await;
+    assert_eq!(resp.status(), 200);
+    let views: Vec<Value> = resp.json().await.unwrap();
+    let system_view = views
+        .iter()
+        .find(|v| v["is_system"].as_bool() == Some(true))
+        .expect("system default views must be seeded on first list");
+    let system_id = system_view["id"].as_str().unwrap();
+    let resp = ctx
+        .client
+        .delete(ctx.url(&format!("{views_path}/{system_id}")))
+        .bearer_auth(token_a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "system default views must not be deletable"
+    );
+    let err = resp.text().await.unwrap();
+    assert!(
+        err.contains("System default views cannot be deleted"),
+        "got: {err}"
+    );
+}
+
 /// MCP graph_summary tool returns valid summary.
 #[tokio::test]
 async fn test_mcp_graph_summary() {
