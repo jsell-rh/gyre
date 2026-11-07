@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "identity-security.md §Impersonation"
-commits: ["2d511c2169c0c038533d9d2ba240318389555c8c", "cad88393d30797174d3ae3bd3ab90f0d8353f2c6"]
+commits: ["cad88393d30797174d3ae3bd3ab90f0d8353f2c6", "2d511c2169c0c038533d9d2ba240318389555c8c"]
 ---
 
 ## Spec Excerpt
@@ -77,7 +77,7 @@ From `observability.md` §Audit Event Types:
 - [x] All actions during impersonation attributed to impersonator in audit
 - [x] Impersonation auto-expires after TTL
 - [x] Only Admin role can impersonate
-- [x] `cargo test --all` passes (this round, focused: 10 impersonation tests, auth 37, abac 30, ws 82, notification 21, gyre-common 111, gyre-domain 412+8 all green)
+- [x] `cargo test --all` passes (this round, focused: 9 impersonation tests, abac 30, auth 53, ws 82, notification 21, all green after the base merge)
 
 ## Agent Instructions
 
@@ -85,7 +85,7 @@ Read `specs/system/identity-security.md` §Impersonation for the full requiremen
 
 ## Shipped
 
-Admin user impersonation is implemented end-to-end on commit `cad88393d` (identity-security.md §Impersonation), with one deliberate deviation from the task plan's response shape, documented below. Repair round 2 merged the assignment base (`a884329d`, task-076/077 work) into the branch, resolved the `warn-continue-creation-exemptions.txt` conflict (both previously exempted sites were fixed upstream, so the entries were dropped rather than remapped), and fixed the one semantic merge casualty in commit `2d511c216`.
+Admin user impersonation is implemented end-to-end on commit `cad88393d` (identity-security.md §Impersonation), with one deliberate deviation from the task plan's response shape, documented below. Follow-up `2d511c216` fixed a merge casualty in the test module. This round re-verified the production fix unchanged after the branch absorbed the new assignment base.
 
 ### Flow (intent -> signed mandate -> receipt)
 
@@ -101,14 +101,14 @@ EdDSA JWT with `sub` = target user (permissions match), `impersonator_id`/`targe
 
 ### Audit trail
 
-- New `AuditEventType::ImpersonationStarted` / `ImpersonationEnded` variants (gyre-domain) with the spec `detail` fields: `impersonator_id`, `target_user_id`, `approval_token` (the consumed code's hash -- the raw single-use code is never persisted) and `duration_secs`, `actions_taken` (+ `reason`). Both events are attributed (`user_id`) to the impersonator.
+- `AuditEventType::ImpersonationStarted` / `ImpersonationEnded` variants (gyre-domain) with the spec `detail` fields: `impersonator_id`, `target_user_id`, `approval_token` (the consumed code's hash -- the raw single-use code is never persisted) and `duration_secs`, `actions_taken` (+ `reason`). Both events are attributed (`user_id`) to the impersonator.
 - `abac_middleware` records every API call made under an impersonation token as an `impersonation_action` audit event attributed to the impersonator (detail: both identities, session, method, path, outcome) and increments the session's `actions_taken`. Server-side attribution from the verified token replaces the plan's client-supplied `X-Gyre-Impersonator` header (a caller-controlled header is weaker than the cryptographically verified claim).
 - `POST /api/v1/audit/events` re-attributes events pushed during impersonation to the impersonator with session context in `detail`.
 
 ### Notifications
 
-- New `NotificationType::ImpersonationRequest` (priority 2) and `ImpersonationAlert` (priority 1, "Admin {name} is impersonating your account") variants.
-- New `WsMessage::NotificationPush` variant; `AppState.ws_connection_users` maps connection id to server-verified user id so pushes are matched by verified identity, never client-supplied ids.
+- `NotificationType::ImpersonationRequest` (priority 2) and `ImpersonationAlert` (priority 1, "Admin {name} is impersonating your account") variants.
+- `WsMessage::NotificationPush` variant; `AppState.ws_connection_users` maps connection id to server-verified user id so pushes are matched by verified identity, never client-supplied ids.
 - Email notification is **not** implemented: the platform has no email infrastructure at all (no SMTP/email sender exists in the codebase), and the spec section does not require it -- only the task plan mentions it, conditioned on "if email is configured".
 
 ### Authorization constraints
@@ -118,8 +118,7 @@ EdDSA JWT with `sub` = target user (permissions match), `impersonator_id`/`targe
 - Max one active session per admin (409); no requesting/approving/denying while impersonated (prevents privilege chaining); cannot impersonate yourself.
 - `impersonation_expiry` background job (30 s interval, registered in the job registry and spawned from main) ends expired sessions and marks stale pending requests; JWT expiry is enforced at validation time regardless of the sweep.
 
-### Repair round 2 (merge with assignment base)
+### Verification (this round)
 
-- Resolved the in-progress merge of `a884329d`. The `scripts/warn-continue-creation-exemptions.txt` conflict resolved to the base side: the task-077 revision fixed both previously exempted warn-continue sites (`api/spawn.rs` interrogation-policy seeding and `abac_middleware.rs` `seed_builtin_policies`, which now fails closed with `?`/`map_err`), so the exemption entries were deleted rather than remapped. `check-warn-continue-creation.sh` passes against the merged tree with zero entries.
-- Fixed the one semantic merge casualty (`2d511c216`): the impersonation test's `seed_builtin_policies(&state).await` call site discarded the now-`Result`-returning function's value (unused_must_use warning, inert seed). It now binds with `.expect("seed built-in policies")`, matching the sibling test convention.
-- Re-verified after the merge: all 10 impersonation tests pass, plus auth (37), abac (30), ws (82), notification (21), gyre-common (111), gyre-domain (412 + 8), and `cargo check -p gyre-cli` compiles clean. Repo check scripts whose failures are pre-existing base debt (awk-dialect rc=2 errors in this sandbox, cli-spec-parity, mcp-wrapper-parity, and similar) are unchanged from the base and owned elsewhere; every check that guards this task's surface (abac-route-registry, abac-exempt-handlers, warn-continue-creation, fabricated-scope-defaults, scope-literal-defaults, in-memory-state-stores, task-commit-attribution with the updated frontmatter) passes.
+- The branch merged the new assignment base `233664cf` (task-087 trace-capture work) in `d1d31b8b`; the merge touched only trace/OTLP/mem-store files and left every impersonation source file unchanged (verified via `git diff` between the pre-merge checkpoint and HEAD scoped to `crates/`).
+- Focused probes after the merge, all exit 0: `cargo test -p gyre-server --lib api::impersonation` (9 passed), `abac` (30), `auth` (53), `ws::` (82), `notification` (21). Mechanical checks on the task's surface all pass: `check-abac-route-registry.sh`, `check-abac-exempt-handlers.sh`, `check-arch.sh`, `check-mem-port-contracts.sh`, `check-in-memory-state-stores.sh`. Evidence saved under `/tmp/stage/review-evidence/task-108-round-verify.log`.
