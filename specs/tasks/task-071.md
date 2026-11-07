@@ -102,18 +102,18 @@ The components already exist and are substantial. This is an audit + gap-fill ta
 
 Audit + gap-fill against spec §18–19, §26 (frontend half — the server
 handler, MCP tools, SDK wiring, and self-check loop shipped under
-task-068/069/070, all `complete`).
+task-068/069/070, all `complete`). This round restored the retained
+source checkpoint (merge fdadc0874 carries `318e8120` onto the assigned
+branch), re-audited every §18/§19 responsibility against the merged
+code, and re-ran the focused suites green.
 
-### Audit result (§18 ExplorerChat, §19 ExplorerView)
-
-Every specced responsibility was verified present in production code:
+### Behavior (audited in production code)
 
 - **Connection**: `connect()` opens `WS /api/v1/repos/:repo_id/explorer`,
   exchanging the Bearer token for a single-use ticket via
   `POST /api/v1/ws-ticket` (browsers cannot set Authorization headers on
   WS upgrades; the server prefers the ticket flow and supports the
-  Bearer header for non-browser clients — shipped and reviewed under
-  task-069).
+  Bearer header for non-browser clients — shipped under task-069).
 - **User messages** carry the §10 wire `canvas_state` via
   `toWireCanvasState()` (selected_node, zoom_level, visible_tree_groups,
   active_filter, active_lens, active_query, recent_interactions);
@@ -134,30 +134,26 @@ Every specced responsibility was verified present in production code:
 - **Status indicators**: header status dot + label for
   Connecting/Thinking.../Refining query.../Ready/Error/Disconnected,
   thinking-indicator with Cancel while waiting.
+- **Reconnection**: exponential backoff (base 1s, cap 5 attempts) with
+  manual reconnect; the retained fix re-arms the backoff timer when a
+  socket drops inside the `CONNECT_DEBOUNCE_MS` window so a fast
+  disconnect cannot permanently kill auto-reconnect.
 - **ExplorerView wiring**: `bind:canvasState={explorerCanvasState}` on
   ExplorerCanvas feeds `canvasState` into ExplorerChat;
-  `onViewQuery` sets `activeViewQuery` (rendered back into the canvas as
+  `onViewQuery` sets `activeViewQuery` (rendered into the canvas as
   `activeQuery`); an `$effect` mirrors `activeViewQuery` into
   `canvasState.active_query` so the LLM sees the applied view.
 
-### Defect found and fixed
-
-**Reconnect swallow**: if the socket dropped within
-  `CONNECT_DEBOUNCE_MS` (2s) of the last connect attempt, the backoff
-  timer fired, `connect()` returned early on the debounce, and nothing
-  rescheduled — auto-reconnect died silently until manual reconnect.
-  `scheduleReconnect()` now re-arms the timer while the debounce window
-  is active (`web/src/lib/ExplorerChat.svelte`).
-
 ### Test evidence
 
-- New `web/src/__tests__/ExplorerChat-component.test.js`: 19
-  mounted-component tests (real render, mocked WebSocket + ticket
-  fetch) covering every acceptance criterion above. The fast-drop
-  reconnect test was verified to FAIL against the unfixed component and
-  pass with the fix; the MAX_RECONNECTS cap test asserts reconnects
-  stop after 5 attempts.
-- The pre-existing `ExplorerChat.test.js` (108 tests) is protocol-mirror
-  coverage and passes unchanged; the mounted suite complements it with
-  tests that fail when the component itself breaks.
-- `cd web && npm test`: **65 files, 1645 passed, 41 skipped** — green.
+- `ExplorerChat-component.test.js` (19 mounted-component tests, real
+  render with mocked WebSocket + ticket-auth fetch) covers every
+  acceptance criterion above, including the fast-drop reconnect case
+  (verified to fail against the unfixed component) and the
+  MAX_RECONNECTS cap.
+- `ExplorerChat.test.js` (110 protocol tests) passes unchanged.
+- Focused run: `npx vitest run ExplorerChat-component ExplorerChat` —
+  2 files, 129 tests passed.
+- Full AC run at branch HEAD fdadc0874: `cd web && npm test` —
+  **68 files, 1687 passed, 41 skipped** — green (evidence:
+  /tmp/stage/review-evidence/task-071-web-tests.txt).
