@@ -7,7 +7,7 @@ progress: ready-for-review
 coverage_sections:
   - "lsp-call-graph.md §5 Per-Language Implementation (Rust)"
   - "lsp-call-graph.md §10 Implementation Phases (Phase 2)"
-commits: ["0ae61233004a471788036e6b923d51afcc147db2"]
+commits: ["0ae61233004a471788036e6b923d51afcc147db2", "01617175ef0f76ff0682de1094e335b6bea3f441"]
 ---
 
 ## Spec Excerpt
@@ -123,51 +123,48 @@ branch history.
   (`gyre-server/src/graph_extraction.rs`): Cargo.toml repo → Rust Pass 2
   edges resolve and persist in the graph store.
 
-### Rebase-resolution round re-verification
+### Merge-repair rounds
 
-The base refresh (merge of main @ 7da7bbff, carrying task-074's pyright
-Python driver) conflicted with this branch in two files; resolved and
-re-verified rather than re-implemented. Evidence under
-`/tmp/stage/review-evidence/task-073/`:
+Two base refreshes were resolved in branch history without re-implementing
+the verified Rust client (production code `call_graph_rust.rs`,
+`call_graph_resolve.rs`, `rust_extractor.rs` byte-identical to the verified
+candidate throughout). Evidence under `/tmp/stage/review-evidence/task-073/`:
 
-- `crates/gyre-adapters/src/call_graph.rs`: kept the native rust-analyzer
-  client dispatch for Rust (the task-073 deliverable; the base's
-  rust-callgraph.sh arm pointed at scripts this branch deleted) and took
-  the base's Python arm (python-callgraph.sh → pyright LSP), matching the
-  merged tree where python-callgraph.py is gone.
-- `specs/coverage/system/lsp-call-graph.md`: rows merged per-language —
-  Rust facts from task-073 (native client, validated), Python facts from
-  task-074 (pyright, validated); Phase 2 and Phase 3 both recorded
-  complete in row 10.
-- Rust Pass 2 production code untouched by the rebase:
-  `call_graph_rust.rs`, `call_graph_resolve.rs`, `rust_extractor.rs`
-  byte-identical to the verified candidate e29b94db (git diff empty).
-  No dangling references to the deleted rust-callgraph/py scripts
-  anywhere in crates/, scripts/, .github/, docker/.
-- Sandbox again had no working rust-analyzer on PATH (rustup shim without
-  the component; component download and the release-asset CDN blocked).
-  Rebuilt from source at 55effabb (2026-11-06) and ran the real-binary
-  test via `RUST_ANALYZER_BIN`:
-  `cargo test -p gyre-adapters --lib call_graph_rust` — 6/6 in 6.01s with
-  `real_rust_analyzer_extracts_known_call_edges` RAN (no skip line),
-  asserting the exact three fixture edges.
-- `cargo test -p gyre-adapters --lib call_graph`: 13/13 (includes the
-  merged tree's pyright and TS driver tests from main).
-- `cargo test -p gyre-server graph_extraction`: 27/27 including
-  `sync_rust_repo_persists_calls_edges_in_graph_store`, plus
-  `test_push_triggers_graph_extraction` (integration target).
-- `cargo fmt --check -p gyre-adapters -p gyre-server`: clean.
+- **Rebase round (merge of main @ 7da7bbff, task-074's pyright driver):**
+  `crates/gyre-adapters/src/call_graph.rs` kept the native rust-analyzer
+  dispatch for Rust and took the base's Python arm;
+  `specs/coverage/system/lsp-call-graph.md` rows merged per-language with
+  Phase 2/3 recorded complete. No dangling references to the deleted
+  rust-callgraph/py scripts. Real-binary fixture test re-verified against
+  a from-source rust-analyzer (55effabb) via `RUST_ANALYZER_BIN`.
+- **Verification-repair round (merge of base 233664cf8, task-087):** the
+  verification gate failed to compile the gyre-server lib test target
+  (E0369): the base carried task-076's change of
+  `extract_and_persist_call_graph` to return `Pass2Outcome`, but this
+  branch's `sync_rust_repo_persists_calls_edges_in_graph_store` still
+  asserted the old `usize` return. Commit 01617175e adapted the assertion
+  to `outcome.edges_persisted` (same repair as 4e5980654 applied to the TS
+  sibling) and pinned the §7 provenance metadata tag on the Rust leg like
+  the Go/TS legs. Test-only change.
+
+Current-round probes (sandbox, `/tmp/stage/bin/cargo`):
+
+- `cargo check -p gyre-server --all-targets`: compiles clean (only the
+  pre-existing `unused Result` warning in `tests/search_wiring.rs:124`,
+  present on the merge commit before the fix).
+- `cargo test -p gyre-server --lib`: 1349 passed, 0 failed — including
+  all 28 `graph_extraction` tests with the repaired Rust pipeline test.
+- `cargo test -p gyre-adapters --lib call_graph`: 13/13, including
+  `real_rust_analyzer_extracts_known_call_edges` running (not skipped)
+  against a working rust-analyzer in this sandbox.
+- `cargo fmt --check -p gyre-server -p gyre-adapters`: clean.
 
 ### Notes for review
 
 - Full workspace suites, all-target Clippy, architecture checks, and
-  GitHub CI are owned by the verification stage. The rebase merge brought
-  main's task-074/075-adjacent changes (pyright Python driver, TS driver
-  tests, Dockerfile toolchains) alongside this branch's Rust client; the
-  only Rust-relevant merge change was dispatch/doc-text reconciliation,
-  verified above.
-- Full-checkout extraction not re-run this round (from-source
-  rust-analyzer would need longer than the 180s budget to load the Gyre
-  workspace); graceful budget-bounded degradation plus the real-binary
-  fixture edge assertions cover the contract. Release binaries per spec
-  §9 are not expected to hit this.
+  GitHub CI are owned by the verification stage; this round only repaired
+  the gate's compile failure.
+- Full-checkout extraction not re-run (loading the whole Gyre workspace
+  exceeds the 180s budget); graceful budget-bounded degradation plus the
+  real-binary fixture edge assertions cover the contract. Release binaries
+  per spec §9 are not expected to hit this.
