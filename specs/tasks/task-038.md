@@ -3,7 +3,7 @@ title: "Explorer Keyboard Shortcuts"
 spec_ref: "explorer-implementation.md §Phase 4: Polish, system-explorer.md §1"
 depends_on: 
   - task-029
-progress: ready-for-review
+progress: complete
 coverage_sections: []
 commits: ["91abab172430c3037cd7e5ed5d97589933232839"]
 ---
