@@ -98,6 +98,25 @@ pub struct GraphSummary {
     /// Count of nodes modified in the last 7 days (based on last_modified_at)
     #[serde(default)]
     pub recent_changes_7d: usize,
+    /// Call graph completeness metrics (lsp-call-graph.md §7–8): per-pass
+    /// `Calls`-edge counts and whether Pass 2 (semantic extraction) has
+    /// completed for the current graph state.
+    #[serde(default)]
+    pub call_graph: CallGraphMetrics,
+}
+
+/// Call graph completeness metrics for [`GraphSummary`]
+/// (specs/system/lsp-call-graph.md §7–8).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct CallGraphMetrics {
+    /// Live `Calls` edges from Pass 1 (syntax analysis) — no Pass 2 metadata tag.
+    pub call_edges_pass1: usize,
+    /// Live `Calls` edges from Pass 2 (semantic, type-checker analysis) —
+    /// tagged with `gyre_common::call_graph::PASS2_EDGE_METADATA`.
+    pub call_edges_pass2: usize,
+    /// Whether Pass 2 has run and completed for the current graph state
+    /// (see [`is_call_graph_complete`]).
+    pub call_graph_complete: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1725,11 +1744,74 @@ pub fn count_distinct_parent_modules(
 // ── Dry-run ──────────────────────────────────────────────────────────────────
 
 /// Run a complete dry-run of a view query, producing match counts and warnings.
+/// Whether a view query's result depends on `calls` edges
+/// (specs/system/lsp-call-graph.md §8) — focus/concept traversal along
+/// `calls`, a top-level `calls` edge filter, call-graph computed expressions
+/// (`$callers`/`$callees`/`$reachable` with `calls`), or call-count heat/badge
+/// metrics. These are the queries whose answers are unreliable while the
+/// call graph is incomplete.
+fn query_uses_calls_edges(query: &ViewQuery) -> bool {
+    let edge_list_has_calls =
+        |edges: &[String]| edges.iter().any(|e| e.eq_ignore_ascii_case("calls"));
+    let call_metric = |metric: &str| {
+        metric == "incoming_calls" || metric == "outgoing_calls" || metric == "call_count"
+    };
+
+    let scope_uses = match &query.scope {
+        Scope::Focus { edges, .. } => edge_list_has_calls(edges),
+        Scope::Concept { expand_edges, .. } => edge_list_has_calls(expand_edges),
+        Scope::Filter {
+            computed: Some(expr),
+            ..
+        } => {
+            expr.contains("$callers(")
+                || expr.contains("$callees(")
+                || (expr.contains("$reachable(") && expr.contains("calls"))
+        }
+        _ => false,
+    };
+    let emphasis_uses = query
+        .emphasis
+        .heat
+        .as_ref()
+        .is_some_and(|h| call_metric(&h.metric))
+        || query
+            .emphasis
+            .badges
+            .as_ref()
+            .and_then(|b| b.metric.as_ref())
+            .is_some_and(|m| call_metric(m));
+
+    scope_uses || emphasis_uses || edge_list_has_calls(&query.edges.filter)
+}
+
 pub fn dry_run(
     query: &ViewQuery,
     nodes: &[GraphNode],
     edges: &[GraphEdge],
     selected_node_id: Option<&str>,
+) -> DryRunResult {
+    // Call graph completeness unknown — callers that can determine it
+    // (MCP / explorer tools, which read the durable Pass 2 marker) use
+    // [`dry_run_with_call_graph`] so the incompleteness warning fires only
+    // on positive knowledge that Pass 2 has not completed.
+    dry_run_with_call_graph(query, nodes, edges, selected_node_id, None)
+}
+
+/// [`dry_run`] with explicit call graph completeness knowledge
+/// (specs/system/lsp-call-graph.md §8).
+///
+/// `call_graph_complete` is `Some(false)` when the caller knows Pass 2
+/// (semantic call extraction) has not completed for the current graph state,
+/// `Some(true)` when it has, and `None` when unknown. When the query
+/// traverses `calls` edges and the graph is known incomplete, a warning is
+/// emitted so blast-radius results are not mistaken for complete.
+pub fn dry_run_with_call_graph(
+    query: &ViewQuery,
+    nodes: &[GraphNode],
+    edges: &[GraphEdge],
+    selected_node_id: Option<&str>,
+    call_graph_complete: Option<bool>,
 ) -> DryRunResult {
     let mut warnings = Vec::new();
 
@@ -1800,6 +1882,21 @@ pub fn dry_run(
                     .to_string(),
             );
         }
+    }
+
+    // lsp-call-graph.md §8: warn when the query traverses `calls` edges but
+    // Pass 2 (semantic extraction) has not completed for the current graph
+    // state. Pass 1 resolves only a fraction of call sites syntactically, so
+    // blast-radius/coupling results computed from partial call data
+    // underreport the true impact.
+    if call_graph_complete == Some(false) && query_uses_calls_edges(query) {
+        warnings.push(
+            "Call graph incomplete — blast radius may be underreported. Semantic call \
+             analysis (Pass 2) has not completed for this graph yet; `calls` edges reflect \
+             partial syntax-only data. Counts of callers/callees will grow once Pass 2 \
+             finishes."
+                .to_string(),
+        );
     }
 
     if result_set.is_empty() {
@@ -2192,14 +2289,54 @@ pub fn dry_run(
 
 // ── Graph summary ────────────────────────────────────────────────────────────
 
+/// Whether the call graph is complete for the current graph state
+/// (specs/system/lsp-call-graph.md §8).
+///
+/// `pass2_completed_at` is the completion time of the last Pass 2 run
+/// (from the durable `CallGraphRunRecord` marker), or `None` when Pass 2 has
+/// never completed. The call graph is complete when Pass 2 completed at or
+/// after the most recent Pass 1 extraction: Pass 2 runs fire-and-forget after
+/// Pass 1 persists, so a `last_seen_at` newer than the marker means a fresh
+/// push landed whose call edges have not been semantically resolved yet.
+pub fn is_call_graph_complete(pass2_completed_at: Option<u64>, nodes: &[GraphNode]) -> bool {
+    let Some(completed_at) = pass2_completed_at else {
+        return false;
+    };
+    nodes
+        .iter()
+        .filter(|n| n.deleted_at.is_none())
+        .map(|n| n.last_seen_at)
+        .max()
+        .is_none_or(|latest_seen| completed_at >= latest_seen)
+}
+
 /// Compute a condensed summary of a repo's knowledge graph.
 pub fn compute_graph_summary(
     repo_id: &str,
     nodes: &[GraphNode],
     edges: &[GraphEdge],
+    call_graph_complete: bool,
 ) -> GraphSummary {
     let active_nodes: Vec<&GraphNode> = nodes.iter().filter(|n| n.deleted_at.is_none()).collect();
     let active_edges: Vec<&GraphEdge> = edges.iter().filter(|e| e.deleted_at.is_none()).collect();
+
+    // Call graph completeness (lsp-call-graph.md §7–8): split live `Calls`
+    // edges by provenance — Pass 1 (syntax, untagged) vs Pass 2 (semantic,
+    // tagged). Both passes emit the same `EdgeType::Calls` variant.
+    let call_edges_pass2 = active_edges
+        .iter()
+        .filter(|e| gyre_common::call_graph::is_pass2_calls_edge(e))
+        .count();
+    let call_edges_pass1 = active_edges
+        .iter()
+        .filter(|e| e.edge_type == EdgeType::Calls)
+        .count()
+        .saturating_sub(call_edges_pass2);
+    let call_graph = CallGraphMetrics {
+        call_edges_pass1,
+        call_edges_pass2,
+        call_graph_complete,
+    };
 
     // Count by type
     let mut node_counts: HashMap<String, usize> = HashMap::new();
@@ -2467,6 +2604,7 @@ pub fn compute_graph_summary(
         risk_indicators,
         anomaly_summary,
         recent_changes_7d,
+        call_graph,
     }
 }
 
@@ -3064,7 +3202,7 @@ mod tests {
             make_edge("e1", "n2", "n3", EdgeType::Calls),
             make_edge("e2", "t1", "n2", EdgeType::Calls),
         ];
-        let summary = compute_graph_summary("repo1", &nodes, &edges);
+        let summary = compute_graph_summary("repo1", &nodes, &edges, false);
         assert_eq!(*summary.node_counts.get("type").unwrap_or(&0), 1);
         assert_eq!(*summary.node_counts.get("function").unwrap_or(&0), 3);
         assert_eq!(*summary.edge_counts.get("calls").unwrap_or(&0), 2);
@@ -4365,7 +4503,7 @@ mod tests {
             make_edge("e3", "f3", "t1", EdgeType::FieldOf),
             make_edge("e4", "f4", "t2", EdgeType::FieldOf),
         ];
-        let summary = compute_graph_summary("repo1", &nodes, &edges);
+        let summary = compute_graph_summary("repo1", &nodes, &edges, false);
         assert!(
             !summary.top_types_by_fields.is_empty(),
             "Should have top types"
@@ -4395,7 +4533,7 @@ mod tests {
             make_edge("e1", "t1", "n1", EdgeType::Calls),
             make_edge("e2", "t2", "n2", EdgeType::Calls),
         ];
-        let summary = compute_graph_summary("repo1", &nodes, &edges);
+        let summary = compute_graph_summary("repo1", &nodes, &edges, false);
         assert_eq!(summary.test_coverage.test_functions, 2);
         // Reachable: BFS from t1 reaches {t1,n1}; from t2 reaches {t2,n2}. Total = 4.
         assert_eq!(summary.test_coverage.reachable_from_tests, 4);
@@ -5812,7 +5950,7 @@ mod tests {
             make_edge("e2", "n2", "n3", EdgeType::Calls),
             make_edge("e3", "n1", "n4", EdgeType::Calls),
         ];
-        let summary = compute_graph_summary("repo1", &nodes, &edges);
+        let summary = compute_graph_summary("repo1", &nodes, &edges, false);
         assert!(!summary.top_functions_by_calls.is_empty());
         assert!(
             summary.top_functions_by_calls[0].contains("hot_fn (2)"),
@@ -6302,6 +6440,138 @@ mod tests {
             errors.is_empty(),
             "distinct narrative orders should validate, got: {:?}",
             errors
+        );
+    }
+
+    #[test]
+    fn test_graph_summary_call_graph_metrics() {
+        // lsp-call-graph.md §7–8: `Calls` edges are the same EdgeType variant
+        // in both passes; provenance is the Pass 2 metadata tag.
+        let nodes = vec![
+            make_node("n1", "caller_a", NodeType::Function),
+            make_node("n2", "caller_b", NodeType::Function),
+            make_node("n3", "hot_fn", NodeType::Function),
+        ];
+        let mut pass1_a = make_edge("e1", "n1", "n3", EdgeType::Calls);
+        pass1_a.metadata = None;
+        let mut pass1_b = make_edge("e2", "n2", "n3", EdgeType::Calls);
+        pass1_b.metadata = None;
+        let mut pass2 = make_edge("e3", "n1", "n3", EdgeType::Calls);
+        pass2.metadata = Some(gyre_common::call_graph::PASS2_EDGE_METADATA.to_string());
+        let summary = compute_graph_summary("repo1", &nodes, &[pass1_a, pass1_b, pass2], false);
+        assert_eq!(summary.call_graph.call_edges_pass1, 2);
+        assert_eq!(summary.call_graph.call_edges_pass2, 1);
+        assert!(!summary.call_graph.call_graph_complete);
+
+        let complete = compute_graph_summary("repo1", &nodes, &[], true);
+        assert!(complete.call_graph.call_graph_complete);
+        assert_eq!(complete.call_graph.call_edges_pass1, 0);
+        assert_eq!(complete.call_graph.call_edges_pass2, 0);
+    }
+
+    #[test]
+    fn test_is_call_graph_complete() {
+        let mut nodes = vec![
+            make_node("n1", "foo", NodeType::Function),
+            make_node("n2", "bar", NodeType::Function),
+        ];
+        // No marker at all → Pass 2 never completed.
+        assert!(!is_call_graph_complete(None, &nodes));
+        // Marker at/after the latest Pass 1 persist (last_seen_at = 1000) → complete.
+        assert!(is_call_graph_complete(Some(1000), &nodes));
+        assert!(is_call_graph_complete(Some(2000), &nodes));
+        // Marker older than the latest extraction → a newer push landed whose
+        // call edges are not yet semantically resolved → incomplete.
+        assert!(!is_call_graph_complete(Some(999), &nodes));
+        // Soft-deleted nodes do not keep the graph permanently incomplete.
+        nodes[1].deleted_at = Some(1500);
+        nodes[1].last_seen_at = 5000;
+        assert!(is_call_graph_complete(Some(2000), &nodes));
+    }
+
+    #[test]
+    fn test_dry_run_call_graph_incomplete_warning() {
+        let nodes = vec![
+            make_node("n1", "caller_a", NodeType::Function),
+            make_node("n3", "hot_fn", NodeType::Function),
+        ];
+        let edges = vec![make_edge("e1", "n1", "n3", EdgeType::Calls)];
+        let blast_radius_query = ViewQuery {
+            scope: Scope::Focus {
+                node: "hot_fn".to_string(),
+                edges: vec!["calls".to_string()],
+                direction: "incoming".to_string(),
+                depth: 5,
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+
+        // Known-incomplete + calls traversal → warning (spec §8).
+        let result =
+            dry_run_with_call_graph(&blast_radius_query, &nodes, &edges, None, Some(false));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Call graph incomplete")),
+            "expected incompleteness warning, got: {:?}",
+            result.warnings
+        );
+
+        // Complete call graph → no warning.
+        let result = dry_run_with_call_graph(&blast_radius_query, &nodes, &edges, None, Some(true));
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Call graph incomplete")),
+            "complete call graph must not warn, got: {:?}",
+            result.warnings
+        );
+
+        // Unknown status (plain dry_run) → no warning: the warning requires
+        // positive knowledge that Pass 2 has not completed.
+        let result = dry_run(&blast_radius_query, &nodes, &edges, None);
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Call graph incomplete")),
+            "unknown status must not warn, got: {:?}",
+            result.warnings
+        );
+
+        // Known-incomplete but the query does not traverse calls edges →
+        // no warning (nothing call-graph-dependent in the result).
+        let containment_query = ViewQuery {
+            scope: Scope::Focus {
+                node: "hot_fn".to_string(),
+                edges: vec!["contains".to_string()],
+                direction: "incoming".to_string(),
+                depth: 5,
+            },
+            emphasis: Default::default(),
+            edges: Default::default(),
+            zoom: Default::default(),
+            annotation: Default::default(),
+            groups: vec![],
+            callouts: vec![],
+            narrative: vec![],
+        };
+        let result = dry_run_with_call_graph(&containment_query, &nodes, &edges, None, Some(false));
+        assert!(
+            !result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Call graph incomplete")),
+            "non-calls query must not warn, got: {:?}",
+            result.warnings
         );
     }
 }

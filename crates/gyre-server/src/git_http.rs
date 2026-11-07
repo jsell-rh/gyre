@@ -791,6 +791,10 @@ pub async fn git_receive_pack(
                 divergence_ports,
                 Arc::clone(&state_clone.spec_assertion_results),
                 notification_scope,
+                Arc::new(crate::graph_extraction::CallGraphTelemetry {
+                    kv: Arc::clone(&state_clone.kv_store),
+                    metrics: Arc::clone(&state_clone.metrics),
+                }),
             )
             .await;
         }
@@ -2840,6 +2844,12 @@ pub(crate) async fn process_breaking_changes(
     policy: &gyre_domain::DependencyPolicy,
     now: u64,
 ) {
+    // non-atomic-create:ok - per-dependent push side effects: the
+    // BreakingChange record is the durable artifact (created first, failure
+    // skips the dependent); the policy-gated auto-task is a best-effort
+    // advisory record whose failure is warn-and-continue so one dependent's
+    // task-creation failure does not drop the remaining dependents'
+    // records and notifications.
     use gyre_common::Id;
     use gyre_domain::{BreakingChange, DependencyStatus, TaskPriority};
 

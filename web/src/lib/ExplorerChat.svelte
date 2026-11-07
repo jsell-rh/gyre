@@ -782,6 +782,9 @@
                     type="button"
                   >
                     <span class="saved-view-name">{view.name}</span>
+                    {#if view.is_system}
+                      <span class="saved-view-system-badge" title="System default view — cannot be deleted">System</span>
+                    {/if}
                     {#if view.created_at}
                       <span class="saved-view-date">{formatTime(view.created_at)}</span>
                     {/if}
@@ -1205,6 +1208,19 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .saved-view-system-badge {
+    flex-shrink: 0;
+    margin-left: var(--space-2);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--color-text-muted);
+    background: color-mix(in srgb, var(--color-text-muted) 12%, transparent);
+    border-radius: var(--radius-sm, 4px);
+    padding: 1px 5px;
   }
 
   .saved-view-date {
