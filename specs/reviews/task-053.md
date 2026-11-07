@@ -128,3 +128,62 @@ sensitive.
 - Mechanical checks pass: mirrored-logic-tests-js,
   tautological-assertions-js, assertionless-tests,
   task-commit-attribution.
+
+## R5 — complete, 0 findings (contract-repair round, merged base)
+
+Candidate `92ce142bb` (assigned diff: base `36620aed` → 4 files —
+`ExplorerCanvas.svelte` pinch-anchor fix, performance test rewrite,
+task/review docs). Independent re-verification on the merged tree
+(clean tree, `npm ci`, evidence in
+`/tmp/stage/review-evidence/task-053-r5/`):
+
+- Focused suite: performance + responsive tests **27/27 pass**; seven
+  other explorer files **284/284 pass** (no merge regressions).
+- Mutation re-verification, each with source restored afterwards
+  (SHA `c728ac9b…` re-checked after every run):
+  - `isVisible()` → `return true`: culling test FAILS (4502 fills vs
+    bound 60).
+  - leaf label guard → `if (true)`: LOD test FAILS (3471 labels vs 0);
+    guard → `if (false)`: high-zoom half FAILS (0 labels vs >10) — both
+    directions sensitive.
+  - all four semantic-zoom gates removed: semantic test FAILS (3473
+    fills vs bound 50). Note: removing only the `< 0.6` gate alone is
+    NOT caught — functions in [0.3, 0.6) are also gated by the `< 1.0`
+    line, so that single gate is behaviorally redundant for the tested
+    regime; full removal is caught, matching the R4 claim.
+  - bundling condition → `if (false)`: both bundling tests FAIL (0
+    bundle labels).
+  - pinch anchoring removed: pinch test FAILS (19.5 world units drift
+    vs 0.5 tolerance).
+- Pinch fix independently verified correct: solves the anchored zoom
+  on `targetCam` with identical math to `applyZoomAtMouse` — the
+  pre-fix `screenToWorld()`-based correction was identically zero
+  because `cam.zoom` does not change between the two reads.
+- Camera readback verified real, not mirrored logic:
+  `drawMinimap()` strokes the world-space viewport rect
+  (`strokeStyle '#60a5fa'`) once per frame; `readCamera()` decodes it
+  consistently with the production `screenToWorld`. The world-point
+  preservation oracles exercise the production transform, not a test
+  copy of the decision logic.
+- Part B surface re-confirmed present (media queries 768/1024/1025,
+  `chatCollapsed` + matchMedia widen-reset, `ontouch*` handlers);
+  responsive tests are real click-interaction tests.
+- `check-task-commit-attribution` and
+  `check-aspirational-test-names` pass.
+
+### Verifier notes (non-blocking)
+
+- The JS test-quality mechanical checks
+  (`check-mirrored-logic-tests-js` et al.) abort with exit 2 under
+  this sandbox's mawk (gawk-only 3-arg `match($0, /re/, m)`, error
+  hidden by `2>/dev/null`). The scripts are byte-identical at base
+  and candidate — pre-existing tooling, not a candidate defect. Both
+  changed test files were manually verified free of the
+  mirrored-logic/tautology/dead-code/comparative-claim anti-patterns.
+  Run these checks in a gawk environment.
+- The "within 100ms" benchmark test asserts a 15s jsdom CPU regression
+  guard; the browser AC targets (<100ms render, >30fps) are not
+  measurable in jsdom — documented in the test file, with the
+  mutation-sensitive per-frame draw-work bounds as the enforceable
+  proxy. A real-browser fps measurement remains a verifier-stage
+  option.
