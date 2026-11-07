@@ -8,7 +8,7 @@ coverage_sections:
   - "ui-navigation.md §2 Workspace Home"
   - "ui-navigation.md §3 Repo Mode"
   - "ui-navigation.md §10 Cross-Workspace View"
-commits: ["7e5cdaba110cbc9de3f5a9f6ad79303897ce7776", "7c2b975731bfd631f3e6b91da5d40790c196108f", "796c800da477a8cd45aeb60ca9ec7665a11938b8", "45a3f5e4f2c9d844dd417401e4946ab0da85c857", "13d856c82e77a1cd2e414ff5383e843774ff028d"]
+commits: ["7e5cdaba110cbc9de3f5a9f6ad79303897ce7776", "7c2b975731bfd631f3e6b91da5d40790c196108f", "796c800da477a8cd45aeb60ca9ec7665a11938b8", "45a3f5e4f2c9d844dd417401e4946ab0da85c857", "13d856c82e77a1cd2e414ff5383e843774ff028d", "77e9299b36bf8514c2d2f38b871595ff340936df"]
 ---
 
 ## Authority and Scope
@@ -114,38 +114,36 @@ is claimed here, per section, with the verifying evidence below.
   error toasts/states (cross-workspace unknown-workspace toast, Agent Rules
   error + Retry, per-section load errors) rather than empty success.
 
-Verification (current round, review-repair of the two findings on
-candidate `9af70150d` at review checkpoint `716f4c48`, assigned base
-`233664cf`):
+Verification (current round: rebase repair onto task-084 base `4d6759a0`,
+repair id `dbc943c2`):
 
-- Finding 1 (test gap): the myNotifications response-shape fix
-  (`{notifications:[...]}` envelope from `users.rs` get_my_notifications)
-  had no regression test — every mock in `CrossWorkspaceHome.test.js`
-  resolved a bare array, so the pre-fix `data?.items` read passed the
-  whole suite. Commit `7e5cdaba` adds two tests mocking the real envelope
-  (with `limit`/`offset`) that assert the decision items render and the
-  empty state is not shown for a non-empty array. Mutation probe
-  (evidence `/tmp/stage/review-evidence/README.md`): reverting the
-  component to `data?.items` fails exactly those 2 tests (2 failed | 36
-  passed).
-- Finding 2 (code): ExplorerView's initial-read `$effect` deleted the
-  `?subTab` param after seeding the Architecture sub-tab, so reload/copy
-  of a deep-linked `architecture?subTab=briefing` URL reopened the Graph
-  sub-tab. Commit `7c2b9757` removes the deletion (App's
-  `setRepoArchSubTab` already mirrors the rendered sub-tab into the URL,
-  per docs/ui.md "deep-linkable via ?subTab=briefing") and adds a
-  regression test rendering the real ExplorerView at repo scope with an
-  App-mimicking `onArchSubTabChange`; the param survives the mount.
-  Mutation probe: restoring the deletion fails exactly that test
-  (1 failed | 7 passed).
+- Prior review rounds closed two findings on candidate `9af70150d` — the
+  myNotifications `{notifications:[...]}` envelope regression tests
+  (`7e5cdaba`, mutation probe: reverting to `data?.items` fails exactly
+  those 2 tests) and the `?subTab` deep-link param retention fix
+  (`7c2b9757`, mutation probe: restoring the deletion fails exactly that
+  test). Evidence retained under `/tmp/stage/review-evidence/README.md`
+  from that round.
+- This round rebased the candidate onto task-084's base
+  (`4d6759a0`, HSI Policies ↔ Trust Level Integration UI), which added a
+  `policies` tab to `WorkspaceSettings` while this branch had added a
+  `repos` tab. Conflict resolution (merge commit `77e9299b3`):
+  `TAB_IDS` takes the union (general, trust, policies, teams, budget,
+  repos, compute, llm, audit); the test file keeps this branch's Repos
+  tab tests, adopts base's `Trust Level tab` describe title, and the
+  auto-merged tab-count test was corrected from 8 to 9 tabs (the union
+  renders nine). Keyboard-navigation expectations (ArrowRight
+  general→trust, ArrowLeft/End wrap to audit) remain valid under the
+  merged order.
 - Fixed-state probes (`npx vitest run`, locked deps via `npm ci`):
-  `CrossWorkspaceHome` + `ExplorerViewScope` → 46 passed / 0 failed;
-  broader focused navigation suites (AppShell, CrossWorkspaceHome,
-  ExplorerViewScope, ExplorerViewDrillUrl, ExplorerView-responsive,
-  RepoMode, RepoModeHeader) → 174 passed / 0 failed. `web/dist` was not
-  rebuilt here (final integration rebuilds it remotely); full suites,
-  all-target Clippy, and exact-head GitHub CI remain owned by
-  verification and publication.
+  `WorkspaceSettings.test.js` → 71 passed / 0 failed (both sides'
+  tests pass against the union); focused navigation suites (AppShell,
+  CrossWorkspaceHome, ExplorerViewScope, ExplorerViewDrillUrl,
+  ExplorerView-responsive, RepoMode, RepoModeHeader) → 174 passed /
+  0 failed. `web/dist` was not rebuilt here (the executor restores
+  generated assets from the assignment base and final integration
+  rebuilds them remotely); full suites, all-target Clippy, and
+  exact-head GitHub CI remain owned by verification and publication.
 
 Contract note for the reviewer: an earlier attempt ticked the acceptance
 checkboxes in this file, which the pipeline's `requirement_parts` treats as
