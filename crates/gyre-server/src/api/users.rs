@@ -442,9 +442,13 @@ pub async fn invite_member(
     let membership = WorkspaceMembership::new(new_id(), user_id, ws_id, role, caller_id, now);
     state.workspace_memberships.create(&membership).await?;
 
-    // Notify the invited user (TrustSuggestion priority 8 — workspace-scope action needed).
-    let notif = Notification::new(
-        new_id(),
+    // Notify the invited user (TrustSuggestion priority 8 — workspace-scope action
+    // needed). Routed through notify_rich (the codebase's notification helper):
+    // a notification is a courtesy side-effect, not a dependent record of the
+    // membership — its failure must not fail the invite, and notify_rich
+    // logs-and-continues internally.
+    crate::notifications::notify_rich(
+        &state,
         membership.workspace_id.clone(),
         membership.user_id.clone(),
         NotificationType::TrustSuggestion,
@@ -453,9 +457,11 @@ pub async fn invite_member(
             membership.workspace_id
         ),
         auth.tenant_id.clone(),
-        now as i64,
-    );
-    let _ = state.notifications.create(&notif).await;
+        None,
+        None,
+        None,
+    )
+    .await;
 
     Ok((
         StatusCode::CREATED,
