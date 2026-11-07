@@ -5,7 +5,7 @@ depends_on: [task-156]
 progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §8 Tenant-Scope Meta-Spec Changes"
-commits: ["5ef42f5c3cef7360a801154841399d98b49b5fc7", "381962ab9cedd8ed2c574adf2d7a09e7878310e8", "3c22bfa874c70968192207603815adbddec5f6df"]
+commits: ["5ef42f5c3cef7360a801154841399d98b49b5fc7", "381962ab9cedd8ed2c574adf2d7a09e7878310e8", "3c22bfa874c70968192207603815adbddec5f6df", "b7eaa775ceb61c3da7b9802e1b1c17a627b74ace"]
 ---
 
 ## Spec Excerpt
@@ -181,9 +181,51 @@ Two findings from the independent review of candidate `d29f06ed7`:
   Fixed with `.expect("seed built-in policies")`, matching the sibling
   tests' pattern.
 
-### Test evidence (at HEAD `5ef42f5c3`; prior rounds at `381962ab9`)
+### Review repair (round aa6fdd18, commit `b7eaa775c`)
 
-At HEAD `5ef42f5c3` (this repair round):
+One finding from the independent review of candidate `bac70a024`:
+
+- **Rustfmt violations on lines this task introduced (style)** —
+  `python3 scripts/check-rustfmt-diff.py 233664cf8` (assigned base)
+  exited 1, flagging non-canonical regions in `reconciliation.rs`,
+  `api/meta_specs.rs`, `api/specs.rs`, `constraint_check.rs`,
+  `abac_middleware.rs`, and `sqlite/meta_spec_set.rs`; `git blame`
+  attributes every flagged line to this task's feature commit
+  `3c22bfa8`. The gate passed at the pushed head only because HEAD^1
+  was a docs-only commit; on integration against the main baseline it
+  fails. Repair is mechanical rustfmt on the six files. The reformat
+  shifts a pre-existing exempted site (`specs.rs` `tenant_id`
+  fallback, fabricated-scope-defaults) from line 959 to 957; that
+  exemption entry was re-pinned to the same site (count unchanged at
+  the frozen 5, no new entries — disclosed in the commit message).
+  Verified offline: rustfmt gate green against assigned base
+  `233664cf8`, job base `4d6759a0b`, and `HEAD^1`; whitespace-stripped
+  token comparison proves the change is formatting-only (only
+  rustfmt canonical normalizations: trailing commas, closure braces,
+  one import reorder); every reformatted statement contains a line
+  authored by this task's commits, so no unrelated debt was touched;
+  20 mechanical checks green. Not compiled in this sandbox (crates.io
+  unreachable — same restriction as prior rounds; see
+  `/tmp/stage/review-evidence/build-restriction-round-aa6fdd18-repair.txt`);
+  remote verification must run the deferred Rust checks.
+
+### Test evidence (at HEAD `b7eaa775c`; prior rounds at `5ef42f5c3`)
+
+At HEAD `b7eaa775c` (this repair round — formatting-only):
+
+- `cargo test` could NOT run in this repair sandbox — crates.io
+  unreachable (connection refused), no cached registry or target dir;
+  see
+  `/tmp/stage/review-evidence/build-restriction-round-aa6fdd18-repair.txt`.
+  The change is verified formatting-only by whitespace-stripped token
+  comparison plus rustfmt parse (see
+  `/tmp/stage/review-evidence/rustfmt-repair-verification-round-aa6fdd18.txt`).
+- `python3 scripts/check-rustfmt-diff.py 233664cf8` (assigned base),
+  `4d6759a0b` (job base), and `HEAD^1` — all clean.
+- 20 mechanical checks green offline (see
+  `/tmp/stage/review-evidence/mechanical-checks-round-aa6fdd18-repair.txt`).
+
+At HEAD `5ef42f5c3` (prior round):
 
 - `cargo test` could NOT run in this repair sandbox — crates.io
   unreachable (connection refused on `index.crates.io:443` and
