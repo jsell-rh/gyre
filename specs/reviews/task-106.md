@@ -47,3 +47,60 @@ Notes (not findings):
 - `jj_squash_into_parent` flaked twice early in the review run (vim editor killed with signal 15 under harness load), then passed 6+ consecutive times standalone and batched, on both `c1c6dd9e` and `c1c6dd9e^`. Environmental, not a regression.
 
 Verdict: **needs-revision** — F1-F5 are genuinely resolved, but F6-F7 break jj provisioning in the default configuration and on every post-first new-branch spawn respectively, F8 undermines the deferral guarantee this round added, and all three fail silently.
+
+## Round 18 (verification-repair approval)
+
+Candidate `a6cd94b64` (base `66a5fc67`). Production behavior unchanged
+since round 5; the only new commits (`e088a007`, `bf2c2308`, `a6cd94b64`)
+are CI and verification-gate repairs.
+
+R17 fix verified independently (attempt `b0106e8a`'s two failures share
+one root cause — re-pinned exemption entries — and both conditions now
+pass):
+
+- Candidate-mode `check-inert-enforcement.sh` → EXIT 0 (the two task-077
+  baseline `evaluate_attestation_abac` sites carry inline
+  `// enforcement:ok` markers at the exact call lines).
+- Base-overlay simulation (`git restore --source=66a5fc67 -- scripts/`,
+  then run the check against the merged tree) → EXIT 0 — the exact
+  upstream-verifier condition that failed; the base script honors the
+  inline markers, and the base's stale line-pins 1457/1479 land on
+  innocuous lines (no false exemption).
+- Exemption freeze: no ADDED entries vs base in any of the 34
+  `scripts/*-exemptions.txt` files — only deletions (sanctioned).
+- `rustfmt --edition 2021 --check merge_processor.rs` → clean (the
+  `#[rustfmt::skip]` keeps the marker rustfmt-stable); crate compiles.
+
+Core behavior re-verified independently:
+
+- Both merge paths call `rebase_inflight_agents` only in the post-merge
+  gates' `else` branch (F3 holds). Target filtering (same target branch,
+  MR Open/Approved, Active agent, worktree exists, merged authors
+  excluded, repo-scoped worktree fallback), conflict-as-state
+  (`has_conflicts`, SpeculativeConflict + Escalation with file list),
+  `baseline_moved` with `new_base_sha` via `emit_event` (signs, persists,
+  WS-broadcasts), audit events on all three outcomes, deferral/replay
+  semantics (backoff only after terminal outcome; Err keeps the pending
+  marker on both paths; replay on every processor cycle).
+- Mutation probe: with `rebase_inflight_agents` disabled, 10 of the 13
+  task-106 rebase tests FAIL — the tests are load-bearing, not
+  self-confirming. (Restored; tree pristine at the candidate.)
+- `cargo test -p gyre-server --lib merge_processor` → 62 passed;
+  `cargo test -p gyre-adapters --lib` → 368 passed, 6 ignored
+  (pre-existing, outside jj); `cargo test -p gyre-ports` → ok.
+- CI leg: with `GYRE_JJ_TESTS_MUST_RUN=1` and jj missing, the fixture
+  test panics loudly (verified EXIT 101); without it, tests skip cleanly.
+- All repo check scripts pass; task-commit attribution passes;
+  `ConfigurableJjOps` is `#[cfg(test)]`.
+
+Restrictions (not code defects): no jj binary in this review sandbox, so
+the 13 recorded-fixture adapter tests skip locally — they run in CI
+against pinned jj 0.39.0 (R16 leg), and their contracts were verified
+empirically against real jj in rounds 2-5. npm registry fetches are
+blocked (EACCES), so all builds used `SKIP_WEB_BUILD=1` (documented
+Rust-only path). Probe logs: `/tmp/stage/review-evidence/task-106-r18/`.
+
+Verdict: **approved** — no findings. The R17 repair is comment/attribute
+and exemption-deletion only; the failed verification conditions pass in
+both candidate and base-overlay modes, and the §4 behavior stands on
+independent evidence.
