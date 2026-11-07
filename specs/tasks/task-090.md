@@ -63,17 +63,17 @@ The lenses compose — you can view the domain model (structural) with test cove
 
 ## Acceptance Criteria
 
-- [x] Lens selector visible in Explorer toolbar (Structural, Evaluative, Observable)
-- [x] Structural lens is the default and shows knowledge graph nodes/edges
-- [x] Evaluative lens overlays test coverage, gate status, and spec approval on nodes
-- [x] Test coverage shown as color-coded badge (green/yellow/red)
-- [x] Gate status shown as edge colors (green=pass, red=fail)
-- [x] Spec approval status shown as icon on spec-linked nodes
-- [x] Lenses compose: Evaluative adds decorations on top of Structural layout
-- [x] Observable lens is disabled with "Coming soon" tooltip
-- [x] Lens selection persisted in URL query params (`?lens=evaluative`)
-- [x] Switching lenses does not re-layout the graph (only changes visual encodings)
-- [x] `npm test` passes in `web/`
+- [ ] Lens selector visible in Explorer toolbar (Structural, Evaluative, Observable)
+- [ ] Structural lens is the default and shows knowledge graph nodes/edges
+- [ ] Evaluative lens overlays test coverage, gate status, and spec approval on nodes
+- [ ] Test coverage shown as color-coded badge (green/yellow/red)
+- [ ] Gate status shown as edge colors (green=pass, red=fail)
+- [ ] Spec approval status shown as icon on spec-linked nodes
+- [ ] Lenses compose: Evaluative adds decorations on top of Structural layout
+- [ ] Observable lens is disabled with "Coming soon" tooltip
+- [ ] Lens selection persisted in URL query params (`?lens=evaluative`)
+- [ ] Switching lenses does not re-layout the graph (only changes visual encodings)
+- [ ] `npm test` passes in `web/`
 
 ## Agent Instructions
 
@@ -86,7 +86,7 @@ The three-lens architecture (HSI §3) is complete in the Explorer: Structural
 ledger, and `GraphNode.test_coverage`), and Observable (disabled placeholder
 per spec "future"). The lens substrate (toolbar toggle, structural base,
 trace-particle evaluative, observable banner) already existed from task-065;
-this task closes the HSI §3 gaps that remained: the evaluative overlays for
+this task closed the remaining HSI §3 gaps: the evaluative overlays for
 test coverage / gate outcomes / spec approval, and URL persistence of the
 lens selection.
 
@@ -131,11 +131,12 @@ lens selection.
   GovernedBy targets, soft-deleted edges ignored), gate pass/fail
   resolution (fail wins), approval status from ledger history, composed
   decorations, URL param read/write.
-- `web/src/__tests__/ExplorerCanvas.test.js` — 8 lens component tests:
-  evaluative legend entries, coverage badge drawn green at 85% (and NOT in
-  structural lens), gate edge/ring colors (differential red/green stroke
-  assertions), approval icons ✓/⏳/✗ (and absent in structural lens), and
-  lens switching preserves node label positions exactly (no re-layout).
+- `web/src/__tests__/ExplorerCanvas.test.js` — 8 lens component tests
+  (within the 157-test suite): evaluative legend entries, coverage badge
+  drawn green at 85% (and NOT in structural lens), gate edge/ring colors
+  (differential red/green stroke assertions), approval icons ✓/⏳/✗ (and
+  absent in structural lens), and lens switching preserves node label
+  positions exactly (no re-layout).
 - `web/src/__tests__/ExplorerViewLensUrl.test.js` — 5 tests: structural
   default has no param, switching to evaluative persists
   `?lens=evaluative`, switching back drops it, deep-link restore, and the
@@ -143,29 +144,34 @@ lens selection.
 - `cargo test -p gyre-server --lib api::gates` — 7 passed (incl.
   `list_spec_approvals_includes_rejection_fields`).
 
-### Re-verification after contract restore (round 12)
+### Re-verification after contract restore (round 13)
 
 The executor again restored the assigned task document (repair id
-f538a7adcf454b3f8531a0f9f7d6a60b, assigned base 30a14669, candidate head
-9daed13a) — the only working-tree delta is the task document itself.
-Resolved this round:
+`4c71002f1ec54160b9da4ef48cb88973`, assigned base 30a14669, candidate
+head 9ff1173) — the only working-tree delta was the task document
+itself. Resolved this round:
 
 - **No production code changes.** The three-lens implementation
   (lens-rendering.js, ExplorerCanvas/ExplorerView evaluative overlays,
-  gates.rs rejection fields) is intact at HEAD from product-surface commit
-  0766a167, an ancestor of this branch head. Later ExplorerCanvas changes
-  (task-053 performance work) preserved the evaluative decorations —
-  verified by inspection and by the full component suite below.
+  gates.rs rejection fields) is intact at HEAD from product-surface
+  commit 0766a167, an ancestor of this branch head. Later ExplorerCanvas
+  changes (task-053 performance work) preserved the evaluative
+  decorations — verified by inspection and by the component suite below.
 - **Fresh focused probes on this branch after `npm ci`:**
   `npx vitest run` on the lens unit/URL test files — 32/32 passed
-  (lens-rendering 27, ExplorerViewLensUrl 5; task090-lens-tests-r12.log,
+  (lens-rendering 27, ExplorerViewLensUrl 5; task090-lens-tests-r13.log,
   exit 0); `ExplorerCanvas.test.js` — 157/157 passed
-  (task090-vitest-explorercanvas-r12.log, exit 0);
+  (task090-vitest-explorercanvas-r13.log, exit 0);
   `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib api::gates` — 7 passed
-  (task090-cargo-gates-r12.log, exit 0; no web/dist churn). Logs retained
+  (task090-cargo-gates-r13.log, exit 0; no web/dist churn). Logs retained
   under /tmp/stage/review-evidence with exit codes.
-- Frontmatter restored (progress ready-for-review, acceptance boxes
-  checked, product-surface commit 0766a167 attributed;
-  scripts/check-task-commit-attribution.sh passes — process-type commits
-  are out of its scope); the working tree is clean apart from this task
-  document.
+- **Assigned task text preserved byte-identical.** The acceptance criteria
+  checkboxes are left unchecked exactly as assigned — marking them is a
+  protected-task-text change that triggered the repeated contract
+  restores; acceptance is decided by independent review, not by
+  self-checking the boxes. Frontmatter restored (progress
+  ready-for-review, product-surface commit 0766a167 attributed in
+  `commits:`), which keeps
+  `scripts/check-task-commit-attribution.sh` satisfied; process-type
+  commits are out of its scope. The working tree is clean apart from this
+  task document.
