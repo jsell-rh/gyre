@@ -51,3 +51,26 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 65 (2026-11-07) — recurring attribution clobber on candidate `4d7569ec6`; verdict needs-revision
+
+Assignment: candidate `4d7569ec6259163a1011aae706a3f188f3aa5d31`, assigned base `21e0d6560bb6334a9fb8e0e1fc7f9e6891174290` (task-035, already merged at `61c79a285` with zero task-208-surface drift).
+
+**Finding (decisive, process): the candidate commit itself is the r64 clobber, recurring verbatim.** Its only change vs parent `93e54a25f` rewrites `specs/tasks/task-208.md` `commits:` from the six-SHA list restored by the r64 repair (`e75ba60a9`) back to five, dropping `ea006d52bb42e96e6f176b02b5390b6cb56a3116` (`build(web): exempt generated dist bundles from whitespace gate (task-208)`, root `.gitattributes`-only, live effect `web/dist/** -whitespace` at `.gitattributes:4`). Exit-coded ancestry: `git merge-base --is-ancestor ea006d52 HEAD` → 0; `git merge-base --is-ancestor ea006d52 21e0d6560` → 1 — i.e. task-208-labeled branch product surface, now invisible to review scoping, violating the AGENTS.md attribution invariant.
+
+**Root cause re-confirmed on this attempt:** the executor-staged `/tmp/stage/dev-attribution.py` is again the pre-fix version — `diff` vs the fixed in-repo `scripts/dev-attribution.py` shows exactly the missing `path == '.gitattributes' or` product-surface line. Prior-round repairs replaced the sandbox-local staged copy, which does not persist across attempts; the durable fix must land wherever `/tmp/stage` is populated from (process owner). Repair is mechanical: frontmatter-only restore via the fixed in-repo `scripts/dev-attribution.py task-208` (computes exactly the six SHAs; verified idempotent at the tip in r64).
+
+**Product surface — fresh probes on this exact candidate, all green (carried forward unchanged since the r64-verified state):**
+
+- Dead-code grep `get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs` over `crates/` + `web/src/` → zero matches (remaining `my-agents|my-tasks|my-mrs` refs in `web/src/` are only the forbidden-id list inside the six-tab guard test itself).
+- No route registrations (`api/mod.rs`) and no ABAC mappings (`abac_middleware.rs`) for `/api/v1/users/me/{agents,tasks,mrs}`; the only URI references in `crates/` are the 404 regression test literals (`users.rs:956-958`).
+- `UserProfile.svelte` renders exactly the six compliant tabs (info, tokens, memberships, ledger, notif-prefs, notifications); the exact-six-tab guard test is present (`UserProfile.test.js:93-100`).
+- Spec amendment and coverage rows in place: `user-management.md` §"My Stuff" supersession text, M22.8 row struck Removed, coverage `user-management.md` row 22 `n/a`, HSI row 54 `implemented`.
+- `python3 scripts/test_dev_attribution.py` → 2/2 OK.
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib my_stuff_endpoints_are_removed` → `api::users::tests::my_stuff_endpoints_are_removed ... ok` (1/1).
+- `cd web && npm ci` then `npx vitest run src/__tests__/UserProfile.test.js` → 23/23 passed.
+- Worktree clean after all probes (no source edits by review).
+
+The verifier must still run `cargo test --all` and `cd web && npm test`. Evidence: `/tmp/stage/review-evidence/r65/` (candidate clobber diff, frontmatter state at HEAD vs parent, ancestry matrix, staged-vs-inrepo dev-attribution diff, product greps, tabs/spec listing, dev-attribution tests, cargo focused test, frontend test log).
+
+Verdict: **needs-revision** — single mechanical finding (frontmatter clobber); no product defect.
