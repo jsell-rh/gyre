@@ -18,8 +18,8 @@ use gyre_ports::{
     DependencyRepository, KvJsonStore, LlmConfigRepository, MergeQueueRepository,
     MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository, PersonaRepository,
     RepoRepository, ReviewRepository, SpawnLogEntry, SpawnLogRepository, TaskRepository,
-    TenantRepository, UserRepository, UserWorkspaceStateRepository, WorkspaceRepository,
-    WorktreeRepository,
+    TenantMetaSpecSetRepository, TenantRepository, UserRepository, UserWorkspaceStateRepository,
+    WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -2835,6 +2835,35 @@ impl MetaSpecSetRepository for MemMetaSpecSetRepository {
     }
 }
 
+/// In-memory `TenantMetaSpecSetRepository` — same contract as
+/// `MemMetaSpecSetRepository`, keyed by tenant id. Kept in a separate store
+/// so a tenant and a workspace that happen to share an id string never
+/// shadow each other's set (mirrors the two DB tables).
+#[derive(Default)]
+pub struct MemTenantMetaSpecSetRepository {
+    store: Arc<Mutex<HashMap<String, String>>>,
+}
+
+#[async_trait]
+impl TenantMetaSpecSetRepository for MemTenantMetaSpecSetRepository {
+    async fn get(&self, tenant_id: &Id) -> Result<Option<String>> {
+        Ok(self.store.lock().await.get(tenant_id.as_str()).cloned())
+    }
+
+    async fn upsert(&self, tenant_id: &Id, json: &str) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(tenant_id.as_str().to_string(), json.to_string());
+        Ok(())
+    }
+
+    async fn delete(&self, tenant_id: &Id) -> Result<()> {
+        self.store.lock().await.remove(tenant_id.as_str());
+        Ok(())
+    }
+}
+
 // ── MemLlmConfigRepository ────────────────────────────────────────────────────
 
 type LlmConfigKey = (Option<String>, String); // (workspace_id, function_key)
@@ -3426,6 +3455,7 @@ fn test_state_inner(
         meta_specs: Arc::new(MemMetaSpecRepository::default()),
         meta_spec_bindings: Arc::new(MemMetaSpecBindingRepository::default()),
         meta_spec_sets: Arc::new(MemMetaSpecSetRepository::default()),
+        tenant_meta_spec_sets: Arc::new(MemTenantMetaSpecSetRepository::default()),
         messages: Arc::new(MemMessageRepository::default()),
         message_dispatch_tx: {
             let (tx, rx) = tokio::sync::mpsc::channel(256);

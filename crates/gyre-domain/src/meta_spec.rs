@@ -1,8 +1,8 @@
 //! Meta-spec registry domain types (agent-runtime spec §2).
 //!
 //! Meta-specs are DB-backed persona/principle/standard/process definitions that
-//! govern how agents operate. They are versioned, approval-gated, and scoped to
-//! Global or a specific Workspace.
+//! govern how agents operate. They are versioned, approval-gated, and scoped
+//! to Global, a specific Tenant, or a specific Workspace.
 
 use gyre_common::Id;
 use serde::{Deserialize, Serialize};
@@ -53,9 +53,15 @@ impl fmt::Display for MetaSpecKind {
 }
 
 /// The scope at which a meta-spec applies.
+///
+/// The associated entity ID lives in `MetaSpec::scope_id` (the scope enum is
+/// stored as a plain string column, mirroring the existing Workspace design):
+/// Tenant-scoped meta-specs carry the tenant ID in `scope_id`, Workspace-
+/// scoped ones the workspace ID; Global meta-specs have `scope_id = None`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MetaSpecScope {
     Global,
+    Tenant,
     Workspace,
 }
 
@@ -63,6 +69,7 @@ impl MetaSpecScope {
     pub fn as_str(&self) -> &'static str {
         match self {
             MetaSpecScope::Global => "Global",
+            MetaSpecScope::Tenant => "Tenant",
             MetaSpecScope::Workspace => "Workspace",
         }
     }
@@ -70,6 +77,7 @@ impl MetaSpecScope {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "Global" => Some(MetaSpecScope::Global),
+            "Tenant" => Some(MetaSpecScope::Tenant),
             "Workspace" => Some(MetaSpecScope::Workspace),
             _ => None,
         }
@@ -123,7 +131,9 @@ pub struct MetaSpec {
     pub kind: MetaSpecKind,
     pub name: String,
     pub scope: MetaSpecScope,
-    /// For Workspace-scoped meta-specs: the workspace ID. None for Global.
+    /// The entity the meta-spec is scoped to: the workspace ID for
+    /// Workspace-scoped meta-specs, the tenant ID for Tenant-scoped ones.
+    /// None for Global.
     pub scope_id: Option<String>,
     /// The prompt content injected into agent context.
     pub prompt: String,

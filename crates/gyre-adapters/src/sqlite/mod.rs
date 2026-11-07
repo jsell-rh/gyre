@@ -239,6 +239,7 @@ mod tests {
             "tenants",
             "messages",
             "meta_spec_sets",
+            "tenant_meta_spec_sets",
             "gate_traces",
             "trace_spans",
             "conversations",
