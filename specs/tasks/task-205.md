@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "realized-model.md §4. Concept Views"
-commits: ["5d2c217b691ca6a6f3aea11205bad0fc8396a7f9", "a95c9df6f51de1d9b7d9424e091ca2e16f2d1954", "9aea8b653eb82b01f6cc715d3c964908410de98f", "e475fd802eb7eb68441b09eb5e630ad35aaa65a8", "8597bbec8fd1e7d2120736cb6e798373b2d32084", "0779ae15d6dcb17307d52e9cf694b38f75106c67", "e8b09b48e0ce4660918e22e0fdf392f993fae888", "3501ed421966653f03a3323d49967afcbbcd0a52", "d38ed2f9641ea29abda0ed80a1c157b70cd14722", "e4b55cdab1db1460297a327fac313e18efe0a712", "b88725880feef95d020e3e115a93064adbc95043", "d75afe7c1e3d163f64d5ad42a1edf8588cbb7a07", "2076ba76e29b8474c009daaa4147451ba49aa31f", "4052081908cf27a9d7abec9923fe24ee850f1a88", "860d06502d94bea226facb13620055e8f30b433a", "fcd83271fbb7b8dacaadf7709e4e67a892c26a1d"]
+commits: ["a95c9df6f51de1d9b7d9424e091ca2e16f2d1954", "9aea8b653eb82b01f6cc715d3c964908410de98f", "b88725880feef95d020e3e115a93064adbc95043", "d75afe7c1e3d163f64d5ad42a1edf8588cbb7a07", "4052081908cf27a9d7abec9923fe24ee850f1a88", "fcd83271fbb7b8dacaadf7709e4e67a892c26a1d", "2076ba76e29b8474c009daaa4147451ba49aa31f", "5d2c217b691ca6a6f3aea11205bad0fc8396a7f9", "0b121301770b0745bc9f1de88301adf51b6d5e20", "4a67c296a15a78b900083122c0ea5e305a9ea10d", "da4ad02a50d91e51b6a5ec8bab9797651ee985fd", "c88fc0962dd51127a8b855c40abe97a4058802f1"]
 review: specs/reviews/task-205.md
 ---
 
@@ -190,57 +190,89 @@ Real work only — no substring stand-in for the manifest projection.
 - Glob matcher + projection live in `gyre-common` (`glob_match`,
   `ConceptView::project`); no new crate dependencies; 16 new tests including
   integration tests a mutation probe confirms fail under substring revert.
-- Coverage row realized-model.md §4 flipped to `implemented` within task
-  scope (the R1 review's own coverage edit is re-made here, not carried
-  over), and row 10's stale substring note updated.
 
-### Verification repair (commit 5d2c217b6)
+### Contract and scope repair (assignment 739e6754)
 
-The verification gate (`checks.sh`) exited 1: the task-205 checkpoint had
-inserted the concept-parsing types above the frozen legacy-debt anchors in
-`spec_registry.rs`, shifting `SpecLedger`/`SpecApprovalHistory`/
-`SpecLinksStore` (218/220/249 → 271/273/302) and the exempted 4-tuple in
-`sync_spec_ledger` (643 → 696), then renumbered the matching entries in
-`in-memory-state-stores-exemptions.txt` and
-`unnamed-tuple-carrier-exemptions.txt`. The gate forbids new exemption
-entries and resets the exemption files to the comparison base before
-running the checks, so the shifted aliases failed
-`check-in-memory-state-stores.sh`.
+- Repaired the round-5e13404a contract violation: that checkpoint had
+  removed the assigned `## Repair round` section, which is protected task
+  prose. The assigned task document is restored verbatim (including that
+  section); this round's notes live under `## Shipped` as an operational
+  subheading rather than a new top-level section, so the contract prose is
+  unchanged.
+- Re-owned the realized-model.md §4 coverage flip within task scope (R2
+  finding: review changed source code, and review cannot approve its own
+  source or verifier edits). The flip previously lived only in
+  verification-repair commit 0b1213017, which the restored assigned
+  frontmatter dropped; commits da4ad02a5 (reset to pre-flip) and c88fc0962
+  (re-apply the byte-identical audited content) now carry it as implementer
+  work, and 0b1213017 / 4a67c296a are recorded in `commits:` so the full
+  branch history is review-scoped.
+- Attribution repair: 5d2c217b6 (frozen-exemption-anchor fix, product
+  surface) recorded in `commits:` — `check-task-commit-attribution.sh`
+  failed at the restored 6-SHA frontmatter and passes again.
+- Re-verification at this round's HEAD (this sandbox now permits TCP
+  `accept(2)` and crates.io, lifting both restrictions that blocked earlier
+  rounds; code is unchanged from 4a67c296a — this round touches specs/ only):
+  - `cargo build --all` (SKIP_WEB_BUILD=1) → OK, 0 errors.
+  - `cargo test -p gyre-server --lib -- api::graph::tests mcp::tests
+    spec_registry::tests` → 154 passed, 0 failed, including
+    `graph_concept_returns_manifest_projection_not_substring`,
+    `graph_concept_undefined_concept_returns_404`,
+    `graph_concept_repo_without_manifest_returns_404`,
+    `workspace_graph_concept_unions_manifest_projections`, and
+    `mcp_graph_concept_manifest_projection_not_substring`.
+  - `cargo test -p gyre-common --lib` → 120 passed, 0 failed.
+  - `cargo test -p gyre-server --test graph_integration` → 37 passed, 0
+    failed on a real TCP listener — the suite that failed 35/35 under the
+    previous sandbox's `accept(2)` EOPNOTSUPP restriction now passes
+    uniformly, confirming that failure was infrastructure, not code.
+  - Shell gates (full list in
+    /tmp/stage/review-evidence/task205-contract-repair-gates.md):
+    check-arch, check-abac-route-registry, check-abac-exempt-handlers,
+    check-mcp-write-tools, check-mem-port-contracts,
+    check-dead-message-kinds, check-in-memory-state-stores,
+    check-task-commit-attribution and 13 others — all pass;
+    check-unnamed-tuple-carriers fails identically at the base commit
+    (pre-existing, outside the verification gate).
+  - No production code changed this round; `web/dist` untouched.
 
-Repair: moved `ConceptDef`/`ConceptInclude`/`From<&ConceptDef>` below all
-anchored lines (after `sync_spec_ledger`; the block is order-independent in
-the module), compensated the 2-line `concepts` field on `SpecManifest` by
-dropping the 2 blank lines around `default_true()`, and restored both
-exemption files to byte-identical base content. Every anchored line keeps
-its base number (aliases at 218/220/249, the 4-tuple at 643 — asserted by
-grep). `check-in-memory-state-stores.sh` passes;
-`check-unnamed-tuple-carriers.sh` reports only the 3 violations that
-already fail identically on the base commit (not part of the verification
-gate). No exemptions added, none removed; the code change is a pure move.
+## Repair round (checkpoint d415416e, exit 130)
 
-### Evidence and deferred verification
+The interrupted assignment left the implementation complete and an R1 review
+on record (`specs/reviews/task-205.md`, verdict `complete`); what died mid-run
+was investigation of a 35/35 `graph_integration` failure. Root-caused this
+round as sandbox infrastructure, not code: `accept(2)` returns `EOPNOTSUPP`
+(errno 95) in this runtime for every stack (Python `socket.accept` and a
+minimal Rust/tokio `TcpListener::accept` probe both fail identically; `bind`
+and `connect` succeed). Every test in that binary serves HTTP over a real
+listener, so all 35 fail uniformly — including pre-existing tests untouched
+by this task. Evidence: `/tmp/stage/review-evidence/task205-sandbox-tcp-accept-restriction.txt`
+(probe source, outputs, and the exact host/CI commands required).
 
-- This round's sandbox is offline (`PI_OFFLINE=1`; crates.io unreachable,
-no cached cargo registry), so `cargo build`/`cargo test` probes could not
-run here. The move was validated by `rustfmt --check` (full parse +
-format-clean on `spec_registry.rs`) plus the line-anchor assertions above;
-the moved block is byte-identical to the previously built and tested code
-(R1 round: `cargo build --all` OK; `cargo test -p gyre-server --lib --
-api::graph::tests mcp::tests spec_registry::tests` → 142 passed;
-`cargo test -p gyre-common --lib` → 98 passed). Re-run locally/remote:
-  - `cargo build --all`
-  - `cargo test -p gyre-server --lib -- spec_registry::tests api::graph::tests`
-  - `cargo test -p gyre-common --lib`
-  - `cargo test -p gyre-server --test graph_integration` (TCP-listener tests;
-    the prior round's sandbox blocked `accept(2)` with `EOPNOTSUPP` — an
-    infrastructure restriction, recorded then, not a code defect)
-- Shell gates re-run and passing at 5d2c217b6: check-arch,
-  check-abac-route-registry, check-abac-exempt-handlers, check-mcp-write-tools,
-  check-mem-port-contracts, check-dead-message-kinds, check-byte-slice-truncation,
-  check-relative-path-defaults, check-fail-open-ref-resolution,
-  check-fabricated-scope-defaults, check-lossy-secret-conversion,
-  check-scope-literal-defaults, check-inert-enforcement,
-  check-forwarded-header-trust, check-forged-scope-fields,
-  check-unbounded-external-http, check-migration-versions,
-  check-migration-sql-portability, check-task-commit-attribution,
-  check-in-memory-state-stores.
+Repairs shipped in `2076ba76`:
+
+- `scripts/check-task-commit-attribution.sh` failed at the merged HEAD
+  because the merge base itself (`f4acb4eb`, landed task-189) is a
+  task-labeled product-surface commit absent from task-189's frontmatter
+  (which listed only the pre-squash pipeline SHAs). Recorded `f4acb4eb` in
+  `specs/tasks/task-189.md` `commits:` — the check's documented remedy; no
+  exemptions added, exemption file untouched. Gate now passes.
+- `web/dist` churn reverted to the merge-base state: the hashed-file swap
+  came from the embedded `npm run build` during checkpoint compiles, not
+  from any web change (branch has zero `web/src`/`web/tests`/`package.json`
+  delta; bundle string-literals are identical — only minifier-renamed
+  identifiers differ). Task branches do not ship dist rebuilds.
+
+Re-verification at repaired HEAD (`2076ba76`):
+
+- `cargo build --all` OK.
+- `cargo test -p gyre-server --lib -- api::graph::tests mcp::tests
+  spec_registry::tests` → 142 passed (all 12 concept tests included).
+- `cargo test -p gyre-common --lib` → 98 passed (4 concept_tests included).
+- `scripts/check-arch.sh`, `check-abac-route-registry.sh`,
+  `check-mcp-write-tools.sh`, `check-mem-port-contracts.sh`,
+  `check-dead-message-kinds.sh`, `check-task-commit-attribution.sh` — all pass.
+- TCP-listener integration tests (`cargo test -p gyre-server --test
+  graph_integration`) cannot run in this sandbox (accept(2) restriction
+  above); the exact commands are recorded in the evidence file for host
+  verification and GitHub CI.
