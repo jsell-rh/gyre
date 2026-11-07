@@ -126,3 +126,118 @@ The R2 scope note ("Circuit Breaker, CLI, UI are not implemented on main, assign
 ### Verdict
 
 **Needs-revision.** R3-F1 is a functional correctness defect in the headline §6 CLI feature (manual revert of a specific MR) with zero test coverage; R3-F2 means the circuit breaker — the other headline feature of `5aaded21` — cannot fire in the workflow the recovery protocol itself prescribes; R3-F3 is a fail-open health signal on the human decision path; R3-F4 must be corrected so the review record matches what actually landed. The R1/R2 findings themselves remain fixed on integrated main.
+
+## Round 4 — review of candidate `4488624b` (post-merge-repair lineage)
+
+Review target: candidate `4488624b3fe429060f8f8859740009ba426f34f1` on base
+`4d6759a0` (31 files, +2161/−172). All six frontmatter commits resolve in this
+object store; the final commit aligns `commits:` to the assigned SHAs.
+
+### R1–R3 findings — resolution status on this candidate
+
+- **F4/R2-1 (gates against wrong tree) — holds.** `run_post_merge_gates`
+  (gate_executor.rs:966) creates a detached worktree at `head_sha` via
+  `GitOpsPort::create_detached_worktree`, runs all gate commands inside it,
+  deregisters on pass AND fail paths; server-cwd fallback is warn-logged
+  (mem-mode only). Real-git test `post_merge_gates_run_against_head_sha_tree`
+  in suite.
+- **R2-2 (no-FF true merge) / R2-3 (`revert_commit_sha`) — hold** (re-verified
+  R3; unchanged by this diff).
+- **R3-F1 (manual revert reverts branch HEAD) — FIXED.** `MergeRequest.merge_commit_sha`
+  persisted at merge time on both the single-entry path (merge_processor.rs:814,
+  :1777) and per atomic-group member (:835), migration `2026-09-30-000056_merge_commit_sha`
+  (portable SQL, no version collision). `revert_mr` (api/recovery.rs:259) rejects
+  non-Merged MRs, returns Forbidden on `mr.repository_id != repo.id`, returns
+  Conflict when no merge commit is recorded, and reverts the recorded SHA —
+  pinned by four tests incl. a call-recording git double asserting the exact
+  SHA passed to `revert_commit`.
+- **R3-F2 (breaker keyed by discarded identity) — FIXED.** `revert_breaker_key`
+  keys on `spec_ref` (fallback mr id); `trip_circuit_breaker` cancels entries of
+  EVERY MR sharing the key; remediation task instructs spec carry-over;
+  `enqueue` (api/merge_queue.rs:73) rejects non-Open/Approved MRs; the selection
+  loop and `merge_atomic_group` fail entries referencing non-mergeable MRs;
+  `process_next_fails_entry_for_reverted_mr` pins no silent re-merge.
+- **R3-F3 (main_green fails open) — FIXED.** Unresolvable HEAD → `main_green:
+  false` (api/recovery.rs:227-247); test uses a non-git directory with an
+  always-pass gate to prove the server-cwd fallback cannot read green.
+  `fail-open-ref-resolution-exemptions.txt` is empty at frozen count 0.
+- **R3-F4 (attribution/resolver drift) — FIXED.** Duplicate resolver entries
+  removed (frozen duplicate count 22→17, shrink-only); `post-merge-gates`
+  mapping corrected to `"gate"` in the live (first) entry; all six assigned
+  commits present in frontmatter; `check-task-commit-attribution.sh` green.
+- **R4-F1 (revert semantics) — present and genuine.** `git2_ops.rs:641`
+  implements `git revert -m 1` as a real three-way merge
+  (ancestor=tree(M), ours=tip, theirs=tree(M^1)) with conflict detection that
+  reports paths and leaves the branch untouched; real-git test
+  `test_revert_commit_conflict_leaves_branch_untouched` (merge A, merge B
+  touching the same file, revert A → Conflict, tip unchanged). Both recovery
+  paths treat `RevertResult::Conflict` as stay-paused + human escalation with
+  NO side effects — pinned by `post_merge_recovery_revert_conflict_stays_paused_without_side_effects`
+  and `manual_revert_conflict_is_409_without_side_effects`.
+
+### Recovery protocol — independent trace (all 8 steps real)
+
+Pause (KV `merge_queue_pause` + `MergeQueuePaused` workspace event, honored
+before both merge paths), revert, gate re-run on the revert SHA, resume-on-
+pass / escalation-on-fail (stay paused), `Merged`→`Reverted` with recorded
+revert SHA, `MrReverted` bus event to `Destination::Agent(author)` (MCP SSE
+relays bus messages) + persisted notification with spawner fallback,
+remediation task `MR {id} reverted: {reason}` (High), gate results invalidated
+to Pending. Atomic-group variant reverts every group merge newest-first and
+applies steps 4–7 per member. Merge-time attestation ABAC Deny fails the
+queue entry before `merge_branches` (inert-enforcement fix) and records the
+decision in the policy-decision audit trail.
+
+### Probes run (evidence: /tmp/stage/review-evidence/)
+
+- All 18 mechanical gates green (arch, abac-route-registry, abac-exempt-
+  handlers, dead-message-kinds, migration-versions, migration-sql-portability,
+  mcp-write-tools, byte-slice-truncation, fail-open-ref-resolution (0
+  exemptions), inert-enforcement, fabricated-scope-defaults (count lowered
+  5→4, dead entry deleted), forwarded-header-trust, lossy-secret-conversion,
+  scope-literal-defaults, unbounded-external-http, relative-path-defaults,
+  in-memory-state-stores, mem-port-contracts, task-commit-attribution).
+- Standalone rustc probe (`probe_policy_pair.rs`, engine subset replicated
+  verbatim): attested arm → Allow via `builtin-attested-authorization`;
+  unattested arm → Deny via `builtin-require-signed-authorization`; pre-fix
+  engine reproduces the unattributed-default-deny signature; system subject
+  bypasses the immutable deny. All PASS (exit 0).
+- Focused cargo suites BLOCKED by transport: no crates.io egress in this
+  runtime (HTTP 000; no registry cache, no vendor dir, empty target dir).
+  Restriction, not a code defect. Verifier must run:
+  `cargo test -p gyre-server --lib merge_processor`,
+  `cargo test -p gyre-server --lib recovery`,
+  `cargo test -p gyre-server --lib abac_middleware`,
+  `cargo test -p gyre-adapters --lib` (real-git revert tests),
+  `cargo check -p gyre-server --all-targets` + `cargo fmt --check -p gyre-server`.
+
+### Non-blocking observations (recorded for their owners, not task-095 defects)
+
+1. The immutable `builtin:require-signed-authorization` deny cannot fire for
+   chain-less merges: the attestation-scoped evaluation only runs when a
+   chain is located (merge_processor.rs:1670-1762, git_http.rs push path is
+   explicitly audit-only). The §7.2 "mandatory for all non-system pushes and
+   merges" unattested arm is unwired — pre-existing at base (the evaluation
+   result was discarded entirely), strictly improved by this candidate
+   (Deny now fails the entry on the evaluated path), and owned by the
+   authorization-provenance milestone, not §6. Do not conflate scopes (see
+   R2/R3 scope notes and the task-096 duplication flag).
+2. Recovery reverts target `repo.default_branch` while merges land on
+   `mr.target_branch`; an MR targeting a non-default branch would get its
+   inverse patch committed to the default branch. Pre-existing at base (same
+   call shape in base's recovery), outside §6's "merged to main" framing;
+   worth a guard (`mr.target_branch == repo.default_branch` or revert on
+   `mr.target_branch`) in a future hardening round.
+3. R4–R6 round records referenced by the shipped notes are not present in
+   this file (it ended at R3); this round's record restores continuity.
+
+### Verdict
+
+**Approved.** Every acceptance criterion is implemented in production code
+with genuine logic (real three-way-merge reverts with conflict detection,
+KV-persisted pause, recorded merge SHAs, spec-keyed breaker, fail-closed
+health signal), the tests read as real (fakes that can fail and record call
+arguments; assertions on observable state, not mirrored logic), all prior
+review findings are verifiably fixed in this tree, and all mechanical gates
+pass. Rust-suite execution is deferred to deterministic verification due to
+the recorded transport restriction.
