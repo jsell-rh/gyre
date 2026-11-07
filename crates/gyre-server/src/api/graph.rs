@@ -2462,6 +2462,7 @@ mod tests {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current()
                 .block_on(crate::abac_middleware::seed_builtin_policies(&state))
+                .expect("seed built-in ABAC policies")
         });
         let (ws_id, _repo_id) = setup_workspace_and_repo(&state).await;
 
