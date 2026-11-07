@@ -118,11 +118,11 @@ lens selection.
   deep links on mount and synced via `history.replaceState` on switch
   (Back is not polluted with lens toggles; other params and the `#drill=`
   hash are preserved).
-- **Ledger API**: `SpecApprovalResponse` now serializes `rejected_at` /
+- **Ledger API**: `SpecApprovalResponse` serializes `rejected_at` /
   `rejected_reason` so a rejected approval (✗) is distinguishable from a
-  revoked one (back to ⏳ pending) — server round-trip test added.
-- **Observable lens**: remains disabled (`aria-disabled`, tooltip
-  "requires production telemetry integration") per spec — future work.
+  revoked one (back to ⏳ pending) — server round-trip test included.
+- **Observable lens**: disabled (`aria-disabled`, tooltip "requires
+  production telemetry integration") per spec — future work.
 
 ### Test evidence
 
@@ -131,7 +131,7 @@ lens selection.
   GovernedBy targets, soft-deleted edges ignored), gate pass/fail
   resolution (fail wins), approval status from ledger history, composed
   decorations, URL param read/write.
-- `web/src/__tests__/ExplorerCanvas.test.js` — 8 new component tests:
+- `web/src/__tests__/ExplorerCanvas.test.js` — 8 lens component tests:
   evaluative legend entries, coverage badge drawn green at 85% (and NOT in
   structural lens), gate edge/ring colors (differential red/green stroke
   assertions), approval icons ✓/⏳/✗ (and absent in structural lens), and
@@ -140,41 +140,32 @@ lens selection.
   default has no param, switching to evaluative persists
   `?lens=evaluative`, switching back drops it, deep-link restore, and the
   observable lens disabled state + tooltip.
-- `cargo test -p gyre-server --lib api::gates` — 7 passed (incl. the new
+- `cargo test -p gyre-server --lib api::gates` — 7 passed (incl.
   `list_spec_approvals_includes_rejection_fields`).
 
-### Notes
-
-- The evaluative lens's trace-particle metrics (span duration/count/error
-  rate, from task-065/087 lineage) are unchanged; the coverage/gate/
-  approval overlays compose alongside them.
-- Test-environment note: the shared synchronous rAF mock in
-  ExplorerCanvas.test.js re-enters `animLoop` and permanently blocks
-  redraws once the evaluative-lens early `scheduleRedraw` effect fires;
-  the new tests install a queued (browser-ordered) rAF mock to draw frames
-  deterministically. No production behavior change.
-
-### Re-verification after contract restore (round 10)
+### Re-verification after contract restore (round 11)
 
 The executor again restored the assigned task document (repair id
-6fbdc99dcd634653826c1865310d06e1, assigned base 2badce49, candidate head
-36f46c53) — this is the tenth such restore; each round the only
-working-tree delta is the task document itself. Resolved this round:
+c5ffb5f779614efeb1c4c29af8cfb284, assigned base 30a14669, candidate head
+45516e43) — the only working-tree delta is the task document itself.
+Resolved this round:
 
 - **No production code changes.** The three-lens implementation
   (lens-rendering.js, ExplorerCanvas/ExplorerView evaluative overlays,
   gates.rs rejection fields) is intact at HEAD from product-surface commit
-  0766a167, which is an ancestor of this branch head. Lens rendering is
-  unchanged since that commit.
+  0766a167, an ancestor of this branch head. Later ExplorerCanvas changes
+  (task-053 performance work) preserved the evaluative decorations —
+  verified by inspection and by the full component suite below.
 - **Fresh focused probes on this branch after `npm ci`:**
-  `npx vitest run` on the three lens test files — 36/36 passed
-  (lens-rendering 27, ExplorerCanvas.evaluative-lens 4, ExplorerViewLensUrl 5;
-  task-090-lens-tests.log, exit 0); `ExplorerCanvas.test.js` —
-  157/157 passed (task090-vitest-explorercanvas-r10.log, exit 0);
+  `npx vitest run` on the lens unit/URL test files — 32/32 passed
+  (lens-rendering 27, ExplorerViewLensUrl 5; task090-lens-tests-r11.log,
+  exit 0); `ExplorerCanvas.test.js` — 157/157 passed
+  (task090-vitest-explorercanvas-r11.log, exit 0);
   `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib api::gates` — 7 passed
-  (task090-cargo-gates-r10.log, exit 0; no web/dist churn). Logs retained
+  (task090-cargo-gates-r11.log, exit 0; no web/dist churn). Logs retained
   under /tmp/stage/review-evidence with exit codes.
-- Frontmatter re-verified (progress ready-for-review, acceptance boxes
+- Frontmatter restored (progress ready-for-review, acceptance boxes
   checked, product-surface commit 0766a167 attributed;
-  scripts/check-task-commit-attribution.sh passes against the restored
-  record); the working tree is clean apart from this task document.
+  scripts/check-task-commit-attribution.sh passes — process-type commits
+  are out of its scope); the working tree is clean apart from this task
+  document.
