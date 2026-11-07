@@ -2,7 +2,7 @@
 title: "System Default Views Seeding"
 spec_ref: "explorer-implementation.md §System Default Views"
 depends_on: []
-progress: ready-for-review
+progress: complete
 coverage_sections: []
 commits: ["b0bb30824e81dd07705733f63ea7b8b3b152d91d"]
 ---
