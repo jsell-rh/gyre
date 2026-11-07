@@ -23,7 +23,9 @@ impl WsCtx {
         let base_url = format!("http://127.0.0.1:{port}");
 
         let state = build_state(TOKEN, &base_url, None);
-        abac_middleware::seed_builtin_policies(&state).await;
+        abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed built-in policies");
         let app = build_router(Arc::clone(&state));
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
