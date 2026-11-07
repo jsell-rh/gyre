@@ -114,37 +114,43 @@ is claimed here, per section, with the verifying evidence below.
   error toasts/states (cross-workspace unknown-workspace toast, Agent Rules
   error + Retry, per-section load errors) rather than empty success.
 
-Verification (rebase round at merge commit `1077f081`, bringing the
-branch onto assigned base `9bef21a4`; evidence:
-`/tmp/stage/review-evidence/task-083-merge-9bef21a4.txt`):
+Verification (merge-continuation round at merge commit `9c41bce0`,
+checkpoint `937a0409` merged onto assigned base `1d9547de` by the executor
+via 'ort' auto-merge, zero conflicts; evidence:
+`/tmp/stage/review-evidence/task-083-merge-1d9547de.txt`):
 
-- Merge conflicts resolved: all conflicts were `web/dist` build artifacts
-  (rename/rename on the hashed elk chunk, `index.html` content); resolved
-  by full rebuild from the merged source (`npm ci` locked versions,
-  `npm run build` → EXIT=0, fresh `elk.bundled-DJ2z4W7x.js` /
-  `index-J4HjbaJB.js`). No source conflicts (grep for conflict markers
-  across `web/src`, `crates`, `docs`, `scripts`, `specs` → no matches);
-  the base's deletions (`FlowCanvas.svelte`, `ExplorerFilterPanel.svelte`,
-  related tests) were verified as deliberate base-side changes the task
-  branch never modified (no modify/delete conflicts), and the merged
-  source builds cleanly through them.
-- Focused probes after resolution: the 17 navigation- and Inbox-related
+- Why this round exists: the previous attempt aborted at the pipeline's own
+  pre-flight (GitHub API connectivity check failed: transport error,
+  deadline elapsed) — infrastructure, not a code defect; the agent never
+  started and a source checkpoint was taken. This round verified the
+  checkpointed source merged onto the new assigned base is sound.
+- Source overlap between the task branch and the base merge: none — the task
+  branch changes `api/graph.rs`, `mcp.rs`, `docs/ui.md`, and `web/src`
+  navigation components; the base brings only `explorer_ws.rs`,
+  `llm_helpers.rs` (task-070), and `specs/tasks/task-070.md` on the source
+  side. Conflict-marker scan across `web/src`, `crates`, `specs`, `docs`:
+  no matches. `web/dist` was not rebuilt this round (assignment
+  instruction); final integration rebuilds it remotely.
+- Focused probes on the merged tree: the 18 navigation- and Inbox-related
   test files (Inbox, api, BidirectionalNav, ScopeTransitions, NoSidebar,
   CrossWorkspaceHome, WorkspaceHome ×5, WorkspaceDrawerSectionNav,
-  RepoMode ×2, ExplorerViewScope, ExplorerViewDrillUrl, Briefing) →
-  **266 passed / 0 failed** (41 pre-existing skips). Merge-integrity
-  probe: `scripts/check-abac-route-registry.sh` on the merged tree → OK
-  (the base touched `mcp.rs`; no duplicate resolver entries introduced).
+  RepoMode ×2, ExplorerViewScope, ExplorerViewDrillUrl, Briefing, AppShell)
+  → **337 passed / 0 failed** (41 pre-existing skips). Merge-integrity
+  probes: `scripts/check-abac-route-registry.sh` → OK, and
+  `scripts/check-mcp-write-tools.sh` → OK (8 write-capable tools gated).
+  Compile probe: `SKIP_WEB_BUILD=1 cargo check -p gyre-server` → clean.
 - Prior rounds' evidence (review fixes F1–F3 at head `2ff2e596`, full
   frontend suite 1598 passed / 0 failed, cargo `api::graph::tests` 28,
   `briefing` 24, `graph_integration` 37, all 0 failed; earlier rebase
-  round `38134ff8` onto base `5df14f344` with the same 266/0 focused
-  navigation probe) covers the task-side source merged here; this
-  round's diff is the rebase resolution plus the dist rebuild. Full
-  suites, architecture checks, and exact-head GitHub CI remain owned by
-  verification and publication. Host verification items are unchanged:
-  Playwright e2e needs a TCP listener (errno 95 in this sandbox, see
-  `/tmp/stage/capabilities.json`).
+  rounds `38134ff8` onto base `5df14f344` and `1077f081` onto base
+  `9bef21a4`, each with a 266/0 focused navigation probe and clean dist
+  rebuild) covers the task-side source merged here; this round's diff is
+  only the base merge. Full suites, architecture checks, all-target
+  Clippy, and exact-head GitHub CI remain owned by verification and
+  publication. This sandbox now reports TCP listener support and an
+  installed chromium headless shell (`/tmp/stage/capabilities.json`), a
+  change from prior rounds' errno 95; Playwright e2e was not run here (it
+  needs a built, seeded server and stays with verification).
 
 Contract note for the reviewer: an earlier attempt ticked the acceptance
 checkboxes in this file, which the pipeline's `requirement_parts` treats as
