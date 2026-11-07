@@ -33,6 +33,7 @@ pub mod push_gate;
 pub mod quality_gate;
 pub mod repository;
 pub mod review;
+pub mod rollout_policy;
 pub mod search;
 pub mod secret;
 pub mod spawn_log;

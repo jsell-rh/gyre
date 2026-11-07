@@ -17,9 +17,9 @@ use gyre_ports::{
     AuditQueryFilter, AuditRepository, BudgetRepository, BudgetUsageRepository, CostRepository,
     DependencyRepository, KvJsonStore, LlmConfigRepository, MergeQueueRepository,
     MergeRequestRepository, MetaSpecSetRepository, NetworkPeerRepository, PersonaRepository,
-    RepoRepository, ReviewRepository, SpawnLogEntry, SpawnLogRepository, TaskRepository,
-    TenantRepository, UserRepository, UserWorkspaceStateRepository, WorkspaceRepository,
-    WorktreeRepository,
+    RepoRepository, ReviewRepository, RolloutPolicyRepository, SpawnLogEntry, SpawnLogRepository,
+    TaskRepository, TenantRepository, UserRepository, UserWorkspaceStateRepository,
+    WorkspaceRepository, WorktreeRepository,
 };
 #[cfg(test)]
 use gyre_ports::{GitOpsPort, JjChange, JjOpsPort};
@@ -2835,6 +2835,33 @@ impl MetaSpecSetRepository for MemMetaSpecSetRepository {
     }
 }
 
+// ── MemRolloutPolicyRepository ──────────────────────────────────────────────
+
+#[derive(Default)]
+pub struct MemRolloutPolicyRepository {
+    store: Arc<Mutex<HashMap<String, String>>>,
+}
+
+#[async_trait]
+impl RolloutPolicyRepository for MemRolloutPolicyRepository {
+    async fn get(&self, workspace_id: &Id) -> Result<Option<String>> {
+        Ok(self.store.lock().await.get(workspace_id.as_str()).cloned())
+    }
+
+    async fn upsert(&self, workspace_id: &Id, json: &str) -> Result<()> {
+        self.store
+            .lock()
+            .await
+            .insert(workspace_id.as_str().to_string(), json.to_string());
+        Ok(())
+    }
+
+    async fn delete(&self, workspace_id: &Id) -> Result<()> {
+        self.store.lock().await.remove(workspace_id.as_str());
+        Ok(())
+    }
+}
+
 // ── MemLlmConfigRepository ────────────────────────────────────────────────────
 
 type LlmConfigKey = (Option<String>, String); // (workspace_id, function_key)
@@ -3425,6 +3452,7 @@ fn test_state_inner(
         meta_specs: Arc::new(MemMetaSpecRepository::default()),
         meta_spec_bindings: Arc::new(MemMetaSpecBindingRepository::default()),
         meta_spec_sets: Arc::new(MemMetaSpecSetRepository::default()),
+        rollout_policies: Arc::new(MemRolloutPolicyRepository::default()),
         messages: Arc::new(MemMessageRepository::default()),
         message_dispatch_tx: {
             let (tx, rx) = tokio::sync::mpsc::channel(256);

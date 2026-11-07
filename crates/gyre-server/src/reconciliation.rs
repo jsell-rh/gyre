@@ -29,7 +29,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use gyre_common::{Id, Notification, NotificationType};
-use gyre_domain::{TaskPriority, TaskStatus, TaskType};
+use gyre_domain::{MergeQueueEntry, RolloutPolicy, RolloutStrategy, TaskPriority, TaskStatus, TaskType};
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::AppState;
@@ -360,6 +361,15 @@ pub struct ReconciliationSummary {
 /// when an open task with the same (workspace, repo, title) already exists
 /// — a pending task elsewhere never suppresses this repo's reconciliation.
 ///
+/// §7 rollout policy: the workspace's rollout policy governs how the wave
+/// proceeds — `Immediate` creates every task at once, `Rolling` creates
+/// only the first `max_concurrent_agents` tasks and defers the rest (the
+/// follow-up batches are created by `maybe_advance_rolling_rollout` as each
+/// batch completes), and `Background` creates every task but leaves them
+/// inert in Backlog (no `task_type`, so they cannot trigger agent spawning
+/// — the repo orchestrator decides when to engage them). Task priority is
+/// the policy's `ReconciliationPriority` mapped onto `TaskPriority`.
+///
 /// Emits `ReconciliationStarted` (custom Event-tier kind, §11) when work is
 /// created and `ReconciliationCompleted` (existing `MessageKind`) via the
 /// shared helper — which also creates priority-6 `MetaSpecDrift`
@@ -382,6 +392,10 @@ pub async fn run_reconciliation(
         changed = changed_paths.len(),
         "reconciliation: controller started"
     );
+
+    // §7: the workspace's rollout policy governs how this wave proceeds.
+    let policy = get_workspace_rollout_policy(state, &ws_id).await;
+    let task_priority = policy.priority.task_priority();
 
     // Existing open tasks — the dedup set (same pattern as spec-lifecycle).
     let existing_tasks = state.tasks.list().await.unwrap_or_default();
@@ -440,11 +454,21 @@ pub async fn run_reconciliation(
         }
     }
 
+    // Build the wave's candidate list (§6 step 2: one task per repo per
+    // changed spec, deduplicated against open tasks).
+    let mut candidates: Vec<ReconciliationCandidate> = Vec::new();
     for ms in &changed_specs {
         // §6 flow step 4 / task spec: title "Align code with updated {kind} {name} v{version}".
         let title = format!(
             "Align code with updated {} {} v{}",
             ms.kind, ms.name, ms.version
+        );
+        let description = format!(
+            "Auto-created by the meta-spec reconciliation controller \
+             (meta-spec-reconciliation.md §6).\nMeta-spec: {} ({}) v{}\n\
+             Content hash: {}\nRe-run affected work under the updated rules; \
+             no-op outcome (code already conforms) is valid.",
+            ms.name, ms.kind, ms.version, ms.content_hash
         );
 
         for repo in &repos {
@@ -464,43 +488,86 @@ pub async fn run_reconciliation(
                 continue;
             }
 
-            let task_id = Id::new(uuid::Uuid::new_v4().to_string());
-            let mut task = gyre_domain::Task::new(task_id.clone(), &title, now);
-            task.priority = TaskPriority::Medium;
-            task.labels = vec![RECONCILIATION_LABEL.to_string(), "auto-created".to_string()];
-            task.description = Some(format!(
-                "Auto-created by the meta-spec reconciliation controller \
-                 (meta-spec-reconciliation.md §6).\nMeta-spec: {} ({}) v{}\n\
-                 Content hash: {}\nRe-run affected work under the updated rules; \
-                 no-op outcome (code already conforms) is valid.",
-                ms.name, ms.kind, ms.version, ms.content_hash
-            ));
-            task.workspace_id = ws_id.clone();
-            task.repo_id = repo.id.clone();
-            task.spec_path = Some(ms.name.clone());
-            // §6 flow step 5: the repo orchestrator spawns the reconciliation
-            // agent — delegation is the signal-chain discriminator for that.
-            task.task_type = Some(TaskType::Delegation);
+            candidates.push(ReconciliationCandidate {
+                repo_id: repo.id.clone(),
+                title: title.clone(),
+                spec_path: ms.name.clone(),
+                description: description.clone(),
+            });
+        }
+    }
 
-            match state.tasks.create(&task).await {
-                Err(e) => {
-                    warn!(title, repo_id = %repo.id, error = %e, "reconciliation: failed to create task")
-                }
-                Ok(()) => {
+    // §7 strategy dispatch.
+    match policy.strategy {
+        RolloutStrategy::Immediate | RolloutStrategy::Background => {
+            // §7 Immediate: "Create all reconciliation tasks immediately.
+            // Budget limits still apply." §7 Background: "Create tasks but
+            // leave them in Backlog. Reconciliation competes with feature
+            // work for agent time. Repo orchestrator decides priority."
+            // Mechanical difference: Immediate tasks carry the Delegation
+            // task_type (§6 step 5 — the repo-orchestrator spawning signal);
+            // Background tasks are created WITHOUT a task_type, so they
+            // cannot trigger agent spawning (enforced in spawn_agent_core)
+            // and sit in Backlog until the orchestrator explicitly engages
+            // them — the orchestrator decides priority, not the controller.
+            let delegation = policy.strategy == RolloutStrategy::Immediate;
+            for cand in candidates {
+                if create_reconciliation_task(
+                    state,
+                    &ws_id,
+                    &cand,
+                    task_priority.clone(),
+                    delegation,
+                    now,
+                )
+                .await
+                {
                     summary.tasks_created += 1;
-                    info!(title, repo_id = %repo.id, "reconciliation: created reconciliation task");
-                    state
-                        .emit_event(
-                            Some(ws_id.clone()),
-                            gyre_common::message::Destination::Workspace(ws_id.clone()),
-                            gyre_common::message::MessageKind::TaskCreated,
-                            Some(serde_json::json!({
-                                "task_id": task_id.to_string(),
-                                "reason": "meta-spec-reconciliation",
-                            })),
-                        )
-                        .await;
                 }
+            }
+        }
+        RolloutStrategy::Rolling => {
+            // §7 Rolling: "Create tasks in batches. Wait for each batch to
+            // complete before starting the next. Batch size =
+            // max_concurrent_agents." The first batch is created here; the
+            // remainder is persisted (kv-backed, restart-safe) and each
+            // follow-up batch is created by `maybe_advance_rolling_rollout`
+            // when the previous batch reaches terminal status.
+            let batch_size = policy.max_concurrent_agents.max(1) as usize;
+            let mut iter = candidates.into_iter();
+            let first_batch: Vec<ReconciliationCandidate> =
+                iter.by_ref().take(batch_size).collect();
+            let remaining: Vec<PendingRolloutTask> =
+                iter.map(PendingRolloutTask::from_candidate).collect();
+
+            for cand in first_batch {
+                if create_reconciliation_task(
+                    state,
+                    &ws_id,
+                    &cand,
+                    task_priority.clone(),
+                    true,
+                    now,
+                )
+                .await
+                {
+                    summary.tasks_created += 1;
+                }
+            }
+
+            if !remaining.is_empty() {
+                let pending = PendingRollout {
+                    workspace_id: ws_id.to_string(),
+                    batch_size: policy.max_concurrent_agents.max(1),
+                    remaining,
+                };
+                persist_pending_rollout(state, &ws_id, &pending).await;
+                info!(
+                    workspace_id = %ws_id,
+                    deferred = pending.remaining.len(),
+                    batch_size,
+                    "reconciliation: rolling rollout — first batch created, remainder deferred"
+                );
             }
         }
     }
@@ -516,6 +583,7 @@ pub async fn run_reconciliation(
                     "workspace_id": ws_id.to_string(),
                     "tasks_created": summary.tasks_created,
                     "tasks_skipped": summary.tasks_skipped,
+                    "strategy": policy.strategy.as_str(),
                 })),
             )
             .await;
@@ -524,7 +592,9 @@ pub async fn run_reconciliation(
         // terminal-status event, not a creation-time event. The wave-start
         // event above is ReconciliationStarted; wave completion is detected
         // by `maybe_emit_reconciliation_completed` when the last open
-        // reconciliation task goes terminal.
+        // reconciliation task goes terminal (for a rolling rollout that is
+        // the LAST batch's completion — `on_reconciliation_task_terminal`
+        // advances the rollout before the completion check).
     }
 
     // §11 metrics: gyre_reconciliation_tasks_total{workspace, status}.
@@ -538,10 +608,367 @@ pub async fn run_reconciliation(
         workspace_id = %ws_id,
         created = summary.tasks_created,
         skipped = summary.tasks_skipped,
+        strategy = policy.strategy.as_str(),
         "reconciliation: controller finished"
     );
 
     summary
+}
+
+/// One unit of reconciliation work: a task to create for a specific repo
+/// under a specific changed meta-spec (title/description carry the §6
+/// format; the candidate list is strategy input).
+struct ReconciliationCandidate {
+    repo_id: Id,
+    title: String,
+    spec_path: String,
+    description: String,
+}
+
+/// Create one reconciliation task from a candidate.
+///
+/// `delegation` sets the §6 step-5 signal (repo-orchestrator spawning);
+/// Background-strategy tasks are created without it (§7: "leave them in
+/// Backlog... repo orchestrator decides priority"). Returns true when the
+/// task was created.
+async fn create_reconciliation_task(
+    state: &Arc<AppState>,
+    ws_id: &Id,
+    cand: &ReconciliationCandidate,
+    priority: TaskPriority,
+    delegation: bool,
+    now: u64,
+) -> bool {
+    let task_id = Id::new(uuid::Uuid::new_v4().to_string());
+    let mut task = gyre_domain::Task::new(task_id.clone(), &cand.title, now);
+    // §7: task priority is the rollout policy's ReconciliationPriority
+    // mapped onto the Task priority the repo orchestrator orders by.
+    task.priority = priority;
+    task.labels = vec![RECONCILIATION_LABEL.to_string(), "auto-created".to_string()];
+    task.description = Some(cand.description.clone());
+    task.workspace_id = ws_id.clone();
+    task.repo_id = cand.repo_id.clone();
+    task.spec_path = Some(cand.spec_path.clone());
+    // §6 flow step 5: the repo orchestrator spawns the reconciliation
+    // agent — delegation is the signal-chain discriminator for that.
+    // Background (§7) passes `delegation = false` to leave the task inert.
+    task.task_type = if delegation { Some(TaskType::Delegation) } else { None };
+
+    match state.tasks.create(&task).await {
+        Err(e) => {
+            warn!(title = %cand.title, repo_id = %cand.repo_id, error = %e, "reconciliation: failed to create task");
+            false
+        }
+        Ok(()) => {
+            info!(title = %cand.title, repo_id = %cand.repo_id, "reconciliation: created reconciliation task");
+            state
+                .emit_event(
+                    Some(ws_id.clone()),
+                    gyre_common::message::Destination::Workspace(ws_id.clone()),
+                    gyre_common::message::MessageKind::TaskCreated,
+                    Some(serde_json::json!({
+                        "task_id": task_id.to_string(),
+                        "reason": "meta-spec-reconciliation",
+                    })),
+                )
+                .await;
+            true
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// §7 — Rollout policy
+// ---------------------------------------------------------------------------
+
+/// KV namespace for pending rolling-rollout state. The kv store is
+/// port-backed (SQLite/Postgres in DB mode), so a deferred batch survives a
+/// restart instead of orphaning the remainder of the wave.
+const ROLLOUT_PENDING_NS: &str = "rollout_pending";
+
+/// Load a workspace's effective rollout policy (§7). An unset policy is the
+/// spec default ("Rolling strategy, Normal priority, auto_merge: false") —
+/// not an error. A corrupt or unreadable row falls back to the same default
+/// with a warning: the default is the safe, spec-mandated configuration, and
+/// a damaged row must not brick reconciliation for the workspace.
+pub async fn get_workspace_rollout_policy(
+    state: &Arc<AppState>,
+    workspace_id: &Id,
+) -> RolloutPolicy {
+    match state.rollout_policies.get(workspace_id).await {
+        Ok(Some(json)) => match serde_json::from_str::<RolloutPolicy>(&json) {
+            Ok(policy) => policy,
+            Err(e) => {
+                warn!(
+                    workspace_id = %workspace_id,
+                    error = %e,
+                    "rollout policy: corrupt stored policy, using spec default"
+                );
+                RolloutPolicy::default()
+            }
+        },
+        Ok(None) => RolloutPolicy::default(),
+        Err(e) => {
+            warn!(
+                workspace_id = %workspace_id,
+                error = %e,
+                "rollout policy: load failed, using spec default"
+            );
+            RolloutPolicy::default()
+        }
+    }
+}
+
+/// One deferred reconciliation task of a rolling rollout (§7). The task is
+/// fully materialized at trigger time (title/description embed the changed
+/// meta-spec version), so batch creation does not depend on the registry
+/// still holding the same versions when the batch runs.
+#[derive(Serialize, Deserialize)]
+struct PendingRolloutTask {
+    repo_id: String,
+    title: String,
+    spec_path: String,
+    description: String,
+}
+
+impl PendingRolloutTask {
+    fn from_candidate(c: ReconciliationCandidate) -> Self {
+        Self {
+            repo_id: c.repo_id.to_string(),
+            title: c.title,
+            spec_path: c.spec_path,
+            description: c.description,
+        }
+    }
+
+    fn into_candidate(self) -> ReconciliationCandidate {
+        ReconciliationCandidate {
+            repo_id: Id::new(self.repo_id),
+            title: self.title,
+            spec_path: self.spec_path,
+            description: self.description,
+        }
+    }
+}
+
+/// Persisted remainder of a rolling rollout (§7): the tasks not yet created,
+/// plus the batch size captured from the policy at trigger time.
+#[derive(Serialize, Deserialize)]
+struct PendingRollout {
+    workspace_id: String,
+    batch_size: u32,
+    remaining: Vec<PendingRolloutTask>,
+}
+
+async fn persist_pending_rollout(state: &Arc<AppState>, ws_id: &Id, pending: &PendingRollout) {
+    let json = match serde_json::to_string(pending) {
+        Ok(j) => j,
+        Err(e) => {
+            warn!(workspace_id = %ws_id, error = %e, "rolling rollout: failed to serialize pending state");
+            return;
+        }
+    };
+    if let Err(e) = state
+        .kv_store
+        .kv_set(ROLLOUT_PENDING_NS, ws_id.as_str(), json)
+        .await
+    {
+        warn!(workspace_id = %ws_id, error = %e, "rolling rollout: failed to persist pending state");
+    }
+}
+
+/// Create the next batch of a rolling rollout when the previous batch has
+/// completed (§7 Rolling: "Wait for each batch to complete before starting
+/// the next").
+///
+/// A batch is in flight while the workspace has ANY non-terminal
+/// reconciliation task — the batch boundary is "no open reconciliation
+/// work", so an earlier wave's still-running tasks also hold the next batch
+/// back (a workspace still reconciling is not ready for more).
+///
+/// The policy is re-read on every advance: if the admin switched the
+/// workspace to a non-Rolling strategy mid-rollout, the remainder is flushed
+/// at once — the admin's latest configuration governs (§7: admins configure
+/// rollout policies).
+///
+/// Called from `on_reconciliation_task_terminal` after any reconciliation
+/// task reaches a terminal status, BEFORE the wave-completion check, so a
+/// follow-up batch suppresses the completion event until the whole rollout
+/// is done (§11: "all reconciliation tasks for a workspace are done").
+pub async fn maybe_advance_rolling_rollout(state: &Arc<AppState>, workspace_id: &Id) {
+    // Cheap early exit: no pending state → no rolling rollout in flight.
+    let raw = match state
+        .kv_store
+        .kv_get(ROLLOUT_PENDING_NS, workspace_id.as_str())
+        .await
+    {
+        Ok(Some(json)) => json,
+        _ => return,
+    };
+    let mut pending: PendingRollout = match serde_json::from_str(&raw) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(
+                workspace_id = %workspace_id,
+                error = %e,
+                "rolling rollout: corrupt pending state, dropping it"
+            );
+            let _ = state
+                .kv_store
+                .kv_remove(ROLLOUT_PENDING_NS, workspace_id.as_str())
+                .await;
+            return;
+        }
+    };
+    if pending.remaining.is_empty() {
+        let _ = state
+            .kv_store
+            .kv_remove(ROLLOUT_PENDING_NS, workspace_id.as_str())
+            .await;
+        return;
+    }
+
+    // A batch is in flight while any non-terminal reconciliation task exists.
+    let open_reconciliation = state
+        .tasks
+        .list_by_workspace(workspace_id)
+        .await
+        .map(|tasks| {
+            tasks.iter().any(|t| {
+                t.labels.iter().any(|l| l == RECONCILIATION_LABEL)
+                    && !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled)
+            })
+        })
+        .unwrap_or(false);
+    if open_reconciliation {
+        return;
+    }
+
+    // Re-read the policy: a mid-rollout strategy switch flushes the rest.
+    let policy = get_workspace_rollout_policy(state, workspace_id).await;
+    let batch_size = if policy.strategy == RolloutStrategy::Rolling {
+        pending.batch_size.max(1) as usize
+    } else {
+        usize::MAX
+    };
+    let task_priority = policy.priority.task_priority();
+    let now = crate::api::now_secs();
+
+    // Existing open tasks — same dedup rule as `run_reconciliation`.
+    let existing_tasks = state.tasks.list().await.unwrap_or_default();
+
+    let mut created: usize = 0;
+    let mut kept: Vec<PendingRolloutTask> = Vec::new();
+    for pending_task in std::mem::take(&mut pending.remaining) {
+        // Already in flight (e.g. a concurrent wave created the same
+        // task): drop from the remainder instead of duplicating it.
+        let covered = existing_tasks.iter().any(|t| {
+            t.title == pending_task.title
+                && t.workspace_id == *workspace_id
+                && t.repo_id.as_str() == pending_task.repo_id
+                && !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled)
+        });
+        if covered {
+            continue;
+        }
+        if created < batch_size {
+            let cand = pending_task.into_candidate();
+            if create_reconciliation_task(
+                state, workspace_id, &cand, task_priority.clone(), true, now,
+            )
+            .await
+            {
+                created += 1;
+            }
+        } else {
+            kept.push(pending_task);
+        }
+    }
+
+    if kept.is_empty() {
+        let _ = state
+            .kv_store
+            .kv_remove(ROLLOUT_PENDING_NS, workspace_id.as_str())
+            .await;
+        info!(
+            workspace_id = %workspace_id,
+            created,
+            "rolling rollout: no deferred work left"
+        );
+    } else {
+        pending.remaining = kept;
+        persist_pending_rollout(state, workspace_id, &pending).await;
+        info!(
+            workspace_id = %workspace_id,
+            created,
+            deferred = pending.remaining.len(),
+            "rolling rollout: next batch created"
+        );
+    }
+
+    if created > 0 {
+        record_reconciliation_metrics(state, workspace_id.as_str(), created as u64, 0);
+    }
+}
+
+/// Shared terminal-transition hook for reconciliation / drift-review tasks.
+///
+/// Called by every surface that moves a task to a terminal status (REST task
+/// update, REST repo deletion, MCP `update_task`). Order matters: the
+/// rolling rollout advances FIRST so a follow-up batch keeps the wave open,
+/// then the §11 wave-completion events fire only when nothing remains.
+pub async fn on_reconciliation_task_terminal(state: &Arc<AppState>, workspace_id: &Id) {
+    maybe_advance_rolling_rollout(state, workspace_id).await;
+    maybe_emit_reconciliation_completed(state, workspace_id).await;
+    maybe_emit_drift_resolved(state, workspace_id).await;
+}
+
+/// §7 auto_merge: when the workspace's rollout policy sets `auto_merge`, a
+/// reconciliation MR merges automatically once its gates pass.
+///
+/// Enforcement point: MR creation (agent completion — the §6 step-6 "MRs are
+/// opened automatically" path). The MR is enqueued into the merge queue,
+/// which triggers gate execution; the merge processor merges a queued entry
+/// only after all gates pass (merge_processor step 4b). Gate passage is
+/// still required — only the merge trigger is automatic. With the default
+/// `auto_merge: false`, the MR waits for a human/agent enqueue.
+pub async fn maybe_auto_enqueue_reconciliation_mr(
+    state: &Arc<AppState>,
+    mr: &gyre_domain::MergeRequest,
+    task: &gyre_domain::Task,
+) {
+    if !task.labels.iter().any(|l| l == RECONCILIATION_LABEL) {
+        return;
+    }
+    let policy = get_workspace_rollout_policy(state, &mr.workspace_id).await;
+    if !policy.auto_merge {
+        return;
+    }
+
+    let entry = MergeQueueEntry::new(
+        Id::new(uuid::Uuid::new_v4().to_string()),
+        mr.id.clone(),
+        // Same default priority as an explicit POST /merge-queue enqueue.
+        50,
+        crate::api::now_secs(),
+    );
+    if let Err(e) = state.merge_queue.enqueue(&entry).await {
+        warn!(
+            mr_id = %mr.id,
+            error = %e,
+            "rollout policy auto_merge: failed to enqueue reconciliation MR"
+        );
+        return;
+    }
+    // Trigger quality-gate execution for the enqueued MR (same as the
+    // explicit enqueue handler) — the merge processor merges once they pass.
+    crate::gate_executor::trigger_gates_for_mr(state.clone(), mr.id.clone(), mr.repository_id.clone())
+        .await;
+    info!(
+        mr_id = %mr.id,
+        workspace_id = %mr.workspace_id,
+        "rollout policy auto_merge: reconciliation MR enqueued — merges when gates pass"
+    );
 }
 
 /// Diff two meta-spec sets and return the paths whose pinned version changed.
@@ -1094,6 +1521,428 @@ mod tests {
                 .await
                 .len(),
             2
+        );
+    }
+
+    // -- §7: rollout policy --------------------------------------------------
+
+    async fn set_policy(state: &Arc<AppState>, ws_id: &str, policy: &gyre_domain::RolloutPolicy) {
+        let json = serde_json::to_string(policy).unwrap();
+        state
+            .rollout_policies
+            .upsert(&Id::new(ws_id), &json)
+            .await
+            .unwrap();
+    }
+
+    async fn pending_rollout_state(
+        state: &Arc<AppState>,
+        ws_id: &str,
+    ) -> Option<serde_json::Value> {
+        state
+            .kv_store
+            .kv_get("rollout_pending", ws_id)
+            .await
+            .unwrap()
+            .map(|raw| serde_json::from_str(&raw).unwrap())
+    }
+
+    /// Drive every open reconciliation task in a workspace to Done through
+    /// the legal transition chain (the same chain the REST/MCP task writers
+    /// enforce), then run the shared terminal hook.
+    async fn finish_all_reconciliation_tasks(state: &Arc<AppState>, ws_id: &str) {
+        let tasks = state
+            .tasks
+            .list_by_workspace(&Id::new(ws_id))
+            .await
+            .unwrap();
+        for mut t in tasks {
+            if !t.labels.iter().any(|l| l == RECONCILIATION_LABEL) {
+                continue;
+            }
+            if matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled) {
+                continue;
+            }
+            if t.status == TaskStatus::Backlog {
+                t.transition_status(TaskStatus::InProgress).unwrap();
+            }
+            if t.status == TaskStatus::Blocked {
+                t.transition_status(TaskStatus::InProgress).unwrap();
+            }
+            if t.status == TaskStatus::InProgress {
+                t.transition_status(TaskStatus::Review).unwrap();
+            }
+            t.transition_status(TaskStatus::Done).unwrap();
+            state.tasks.update(&t).await.unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unset_policy_is_the_spec_default() {
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-policy-default").await;
+
+        let policy = get_workspace_rollout_policy(&state, &ws.id).await;
+        assert_eq!(policy.strategy, gyre_domain::RolloutStrategy::Rolling);
+        assert_eq!(policy.priority, gyre_domain::ReconciliationPriority::Normal);
+        assert!(!policy.auto_merge);
+        assert!(policy.max_concurrent_agents >= 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn immediate_strategy_creates_all_tasks_at_once() {
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-imm").await;
+        for i in 0..3 {
+            make_repo(&state, &format!("repo-imm-{i}"), "ws-imm").await;
+        }
+        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        set_policy(
+            &state,
+            "ws-imm",
+            &gyre_domain::RolloutPolicy {
+                strategy: gyre_domain::RolloutStrategy::Immediate,
+                max_concurrent_agents: 1, // would batch if the strategy were Rolling
+                priority: gyre_domain::ReconciliationPriority::Normal,
+                auto_merge: false,
+            },
+        )
+        .await;
+
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+
+        // All 3 tasks exist immediately — no deferral.
+        assert_eq!(summary.tasks_created, 3);
+        let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
+        assert_eq!(tasks.len(), 3);
+        assert!(tasks.iter().all(|t| t.task_type == Some(TaskType::Delegation)));
+        assert!(pending_rollout_state(&state, "ws-imm").await.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rolling_strategy_creates_batches_and_advances_on_completion() {
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-roll").await;
+        for i in 0..3 {
+            make_repo(&state, &format!("repo-roll-{i}"), "ws-roll").await;
+        }
+        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        set_policy(
+            &state,
+            "ws-roll",
+            &gyre_domain::RolloutPolicy {
+                strategy: gyre_domain::RolloutStrategy::Rolling,
+                max_concurrent_agents: 2,
+                priority: gyre_domain::ReconciliationPriority::Normal,
+                auto_merge: false,
+            },
+        )
+        .await;
+
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+
+        // First batch only: 2 of 3 tasks, the third deferred.
+        assert_eq!(summary.tasks_created, 2);
+        let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
+        assert_eq!(tasks.len(), 2);
+        let pending = pending_rollout_state(&state, "ws-roll").await;
+        let pending = pending.expect("rolling rollout must persist the deferred remainder");
+        assert_eq!(pending["remaining"].as_array().unwrap().len(), 1);
+
+        // While the first batch is open, advancing creates nothing.
+        maybe_advance_rolling_rollout(&state, &ws.id).await;
+        assert_eq!(
+            open_tasks_with_label(&state, RECONCILIATION_LABEL)
+                .await
+                .len(),
+            2
+        );
+
+        // Batch 1 completes → the terminal hook creates batch 2.
+        finish_all_reconciliation_tasks(&state, "ws-roll").await;
+        on_reconciliation_task_terminal(&state, &ws.id).await;
+        let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
+        // 2 terminal + 1 open from batch 2.
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(
+            tasks
+                .iter()
+                .filter(|t| !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled))
+                .count(),
+            1,
+            "batch 2 must create exactly the deferred task"
+        );
+        let still_pending = pending_rollout_state(&state, "ws-roll").await;
+        assert!(
+            still_pending.is_none(),
+            "creating the final batch consumes the deferred remainder — nothing left to track"
+        );
+
+        // While batch 2 is open, no completion event yet (§11 fires only
+        // when ALL reconciliation tasks are done).
+        let completed = count_completed_messages(&state, &ws.id).await;
+        assert_eq!(completed, 0, "wave not complete while batch 2 is open");
+
+        // Batch 2 completes → rollout finished: no pending state, wave
+        // completion fires exactly once.
+        finish_all_reconciliation_tasks(&state, "ws-roll").await;
+        on_reconciliation_task_terminal(&state, &ws.id).await;
+        assert!(
+            pending_rollout_state(&state, "ws-roll").await.is_none(),
+            "finished rollout must clear its pending state"
+        );
+        assert_eq!(
+            count_completed_messages(&state, &ws.id).await,
+            1,
+            "ReconciliationCompleted must fire exactly once, at the end of the rollout"
+        );
+
+        // No further batches appear.
+        on_reconciliation_task_terminal(&state, &ws.id).await;
+        assert_eq!(
+            open_tasks_with_label(&state, RECONCILIATION_LABEL)
+                .await
+                .len(),
+            3
+        );
+    }
+
+    async fn count_completed_messages(state: &Arc<AppState>, ws_id: &Id) -> usize {
+        state
+            .messages
+            .list_by_workspace(ws_id, Some("reconciliation_completed"), None, None, None, Some(50))
+            .await
+            .unwrap()
+            .len()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn background_strategy_leaves_tasks_inert_in_backlog() {
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-bg").await;
+        for i in 0..2 {
+            make_repo(&state, &format!("repo-bg-{i}"), "ws-bg").await;
+        }
+        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        set_policy(
+            &state,
+            "ws-bg",
+            &gyre_domain::RolloutPolicy {
+                strategy: gyre_domain::RolloutStrategy::Background,
+                max_concurrent_agents: 5,
+                priority: gyre_domain::ReconciliationPriority::Normal,
+                auto_merge: false,
+            },
+        )
+        .await;
+
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+
+        // §7 Background: tasks are created but left in Backlog, WITHOUT the
+        // delegation signal — they cannot trigger agent spawning until the
+        // repo orchestrator explicitly engages them (spawn_agent_core
+        // rejects tasks without a task_type).
+        assert_eq!(summary.tasks_created, 2);
+        let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
+        assert_eq!(tasks.len(), 2);
+        assert!(tasks.iter().all(|t| t.status == TaskStatus::Backlog));
+        assert!(
+            tasks.iter().all(|t| t.task_type.is_none()),
+            "Background tasks must not carry the Delegation spawning signal"
+        );
+        assert!(pending_rollout_state(&state, "ws-bg").await.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rollout_policy_priority_maps_to_task_priority() {
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-prio").await;
+        make_repo(&state, "repo-prio", "ws-prio").await;
+        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        set_policy(
+            &state,
+            "ws-prio",
+            &gyre_domain::RolloutPolicy {
+                strategy: gyre_domain::RolloutStrategy::Immediate,
+                max_concurrent_agents: 5,
+                priority: gyre_domain::ReconciliationPriority::High,
+                auto_merge: false,
+            },
+        )
+        .await;
+
+        run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+
+        let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].priority, TaskPriority::High);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rolling_strategy_switch_flushes_remaining_on_advance() {
+        // An admin switching the policy mid-rollout governs: the deferred
+        // remainder is created at once on the next advance.
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-switch").await;
+        for i in 0..3 {
+            make_repo(&state, &format!("repo-sw-{i}"), "ws-switch").await;
+        }
+        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        set_policy(
+            &state,
+            "ws-switch",
+            &gyre_domain::RolloutPolicy {
+                strategy: gyre_domain::RolloutStrategy::Rolling,
+                max_concurrent_agents: 1,
+                priority: gyre_domain::ReconciliationPriority::Normal,
+                auto_merge: false,
+            },
+        )
+        .await;
+
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        assert_eq!(summary.tasks_created, 1);
+        assert_eq!(
+            pending_rollout_state(&state, "ws-switch")
+                .await
+                .unwrap()["remaining"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // Admin switches to immediate; batch 1 completes.
+        set_policy(
+            &state,
+            "ws-switch",
+            &gyre_domain::RolloutPolicy {
+                strategy: gyre_domain::RolloutStrategy::Immediate,
+                max_concurrent_agents: 1,
+                priority: gyre_domain::ReconciliationPriority::Normal,
+                auto_merge: false,
+            },
+        )
+        .await;
+        finish_all_reconciliation_tasks(&state, "ws-switch").await;
+        on_reconciliation_task_terminal(&state, &ws.id).await;
+
+        // The whole remainder flushed at once — not in batches of 1.
+        let open = open_tasks_with_label(&state, RECONCILIATION_LABEL)
+            .await
+            .into_iter()
+            .filter(|t| !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled))
+            .count();
+        assert_eq!(open, 2, "strategy switch must flush the deferred remainder");
+        assert!(pending_rollout_state(&state, "ws-switch").await.is_none());
+    }
+
+    // -- §7: auto_merge ------------------------------------------------------
+
+    async fn make_reconciliation_mr(
+        state: &Arc<AppState>,
+        ws_id: &str,
+        repo_id: &str,
+    ) -> (gyre_domain::MergeRequest, gyre_domain::Task) {
+        let mut task = gyre_domain::Task::new(Id::new("task-mr-auto"), "Align code", now());
+        task.labels = vec![RECONCILIATION_LABEL.to_string()];
+        task.workspace_id = Id::new(ws_id);
+        task.repo_id = Id::new(repo_id);
+        state.tasks.create(&task).await.unwrap();
+
+        let mut mr = gyre_domain::MergeRequest::new(
+            Id::new("mr-auto"),
+            Id::new(repo_id),
+            "Reconcile backend-developer v4",
+            "reconcile/abc/spec",
+            "main",
+            now(),
+        );
+        mr.workspace_id = Id::new(ws_id);
+        state.merge_requests.create(&mr).await.unwrap();
+        (mr, task)
+    }
+
+    async fn queued_entries_for(state: &Arc<AppState>, mr_id: &str) -> usize {
+        state
+            .merge_queue
+            .list_queue()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.merge_request_id.as_str() == mr_id)
+            .count()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn auto_merge_enqueues_reconciliation_mr_when_enabled() {
+        let state = test_state();
+        make_workspace(&state, "ws-am-on").await;
+        let repo = make_repo(&state, "repo-am-on", "ws-am-on").await;
+        set_policy(
+            &state,
+            "ws-am-on",
+            &gyre_domain::RolloutPolicy {
+                strategy: gyre_domain::RolloutStrategy::Rolling,
+                max_concurrent_agents: 5,
+                priority: gyre_domain::ReconciliationPriority::Normal,
+                auto_merge: true,
+            },
+        )
+        .await;
+        let (mr, task) = make_reconciliation_mr(&state, "ws-am-on", repo.id.as_str()).await;
+
+        maybe_auto_enqueue_reconciliation_mr(&state, &mr, &task).await;
+
+        assert_eq!(
+            queued_entries_for(&state, mr.id.as_str()).await,
+            1,
+            "auto_merge must enqueue the reconciliation MR (it then merges when gates pass)"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn auto_merge_disabled_leaves_mr_unenqueued() {
+        let state = test_state();
+        make_workspace(&state, "ws-am-off").await;
+        let repo = make_repo(&state, "repo-am-off", "ws-am-off").await;
+        // Default policy: auto_merge = false.
+        let (mr, task) = make_reconciliation_mr(&state, "ws-am-off", repo.id.as_str()).await;
+
+        maybe_auto_enqueue_reconciliation_mr(&state, &mr, &task).await;
+
+        assert_eq!(
+            queued_entries_for(&state, mr.id.as_str()).await,
+            0,
+            "default policy must leave the MR for a human/agent-triggered enqueue"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn auto_merge_ignores_non_reconciliation_mrs() {
+        let state = test_state();
+        make_workspace(&state, "ws-am-other").await;
+        let repo = make_repo(&state, "repo-am-other", "ws-am-other").await;
+        set_policy(
+            &state,
+            "ws-am-other",
+            &gyre_domain::RolloutPolicy {
+                strategy: gyre_domain::RolloutStrategy::Rolling,
+                max_concurrent_agents: 5,
+                priority: gyre_domain::ReconciliationPriority::Normal,
+                auto_merge: true,
+            },
+        )
+        .await;
+        let (mr, mut task) = make_reconciliation_mr(&state, "ws-am-other", repo.id.as_str()).await;
+        task.labels = vec!["feature".to_string()];
+
+        maybe_auto_enqueue_reconciliation_mr(&state, &mr, &task).await;
+
+        assert_eq!(
+            queued_entries_for(&state, mr.id.as_str()).await,
+            0,
+            "auto_merge applies to reconciliation MRs only"
         );
     }
 
