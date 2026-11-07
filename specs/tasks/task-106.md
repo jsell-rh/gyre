@@ -6,7 +6,7 @@ progress: ready-for-review
 review: specs/reviews/task-106.md
 coverage_sections:
   - "source-control.md §4 Automatic Rebasing"
-commits: ["e088a007daf767a8b1c818366057bb335a540124", "6d15a91fe5ee682660e5fd8216d5a3404d139586", "a5b167e33e4e768edafac1881a93e702d95861b2", "e6e393f7f8d610434378e6c96359fe62427fe688"]
+commits: ["bf2c2308bc21276dce979d37b10c78c16d0bb174", "e088a007daf767a8b1c818366057bb335a540124", "6d15a91fe5ee682660e5fd8216d5a3404d139586", "a5b167e33e4e768edafac1881a93e702d95861b2", "e6e393f7f8d610434378e6c96359fe62427fe688"]
 ---
 
 ## Spec Excerpt
@@ -73,69 +73,47 @@ Read `specs/system/source-control.md` §4 for the full spec. The jj adapter is i
 ## Shipped
 
 Automatic jj rebase on target branch movement (source-control.md §4).
-Production behavior is unchanged since round 5; rounds 6–14 were review,
-compile, and gate repairs; round 16 repaired the CI execution gap for the
-jj recorded-fixture tests.
+Production behavior is unchanged since round 5; later rounds were
+review, compile, CI, and verification-gate repairs.
 
-### CI repair round (R16, commit `e088a007`)
+### Verification repair round (R17, commit `bf2c2308`)
 
-Review finding F-CI (major): the CI test job installed no jj, so all 13
-jj recorded-fixture tests in `jj_ops.rs` guard-skipped with zero
-assertions executed on every CI run — and
-`jj_workspace_forget_absent_workspace_is_ok` had never run against a
-real jj binary in any recorded round. The exemption-file comment
-claiming the fixture tests "now run in CI" was false. Repaired with no
-production-behavior change:
+The executor verification run (attempt `b0106e8a`, `bash
+/tmp/stage/checks.sh`, EXIT 1) failed on two gates with one root cause:
+the R13/R14 repair had re-pinned the two pre-existing task-077-owned
+`evaluate_attestation_abac` exemption entries in
+`scripts/inert-enforcement-exemptions.txt` (base pins 1457/1479 →
+2022/2044) after task-106 insertions shifted the sites' line numbers.
 
-- **ci.yml test job**: installs pinned jj-vcs 0.39.0
-  (x86_64-unknown-linux-musl release tarball; asset name and archive-root
-  layout verified against the release workflow at that tag via the
-  GitHub API; version asserted with a `jj --version` grep) and runs
-  `cargo nextest run --all` with `GYRE_JJ_TESTS_MUST_RUN=1`.
-- **Fail-on-guard-skip** (`jj_ops.rs`): `jj_available()` is replaced by
-  `jj_fixture_guard()` — without the env var a missing jj still skips
-  quietly (developer machines unchanged), but under
-  `GYRE_JJ_TESTS_MUST_RUN` a missing jj PANICS with an explanatory
-  message, so a broken CI install step fails the leg loudly instead of
-  silently degrading it to zero-assertion passes. Two new unit tests pin
-  the guard contract itself
-  (`fixture_guard_panics_on_missing_binary_when_must_run`,
-  `fixture_guard_skips_quietly_without_must_run`).
-- The false exemption-file comment is rewritten to state the actual
-  mechanism, which this change makes true.
+- The **exemption freeze** forbids entries the assignment base does not
+  contain — "including replacement entries that leave the count
+  unchanged" — so the re-pinned lines counted as new exemptions.
+- The **upstream-verifier pass** runs `check-inert-enforcement.sh` with
+  the entire `scripts/` tree restored from the base (verifier overlay),
+  so the base's line-pinned entries no longer matched the shifted
+  sites: 2 inert-site errors.
 
-Evidence: `/tmp/stage/review-evidence/task-106-r16/` — skip path
-`cargo test -p gyre-adapters jj` EXIT 0 (13 fixture tests skip here, no
-jj installable in this sandbox); must-run path
-`GYRE_JJ_TESTS_MUST_RUN=1 cargo test -p gyre-adapters jj` EXIT 101 with
-all 13 fixture tests failing loudly at the guard (the fail-on-skip
-behavior proven on a machine where jj is genuinely absent). The
-real-binary 15/15 run — including the never-executed forget test — is
-now the CI test job's behavior on every run; exact-head GitHub checks
-confirm it during verification (this sandbox cannot fetch the jj
-release CDN or crates.io; see the round's 00-infra-restrictions.md).
+Repair (no behavior change): the two baseline sites now carry the
+checker's documented inline `// enforcement:ok — task-077 F5 baseline
+site` markers at the exact call lines in `merge_processor.rs`
+(drift-immune; honored by both the base and candidate versions of the
+check script), and the corresponding file entries are deleted
+(deletion is the sanctioned direction; same two sites, count
+unchanged, fixes still owned by task-077's revision round). A
+`#[rustfmt::skip]` on the second call keeps its trailing marker on the
+call line, where the checker matches it and where rustfmt would
+otherwise relocate the comment below the opening paren.
 
-### Gate-repair round (R13/R14, commit `6d15a91f`)
+### Prior repair rounds (behavior-preserving)
 
-The executor gates flagged two failures at candidate `c3d83fdb` vs the
-assigned base; both are repaired with no behavior change:
-
-- **rustfmt-diff**: the R12-F1 test
-  `rebase_skips_agent_with_only_other_repo_worktree` had an unformatted
-  multi-line `if` that fits on one line per default rustfmt style.
-  `rustfmt --edition 2021` on the candidate-owned `merge_processor.rs`
-  changed exactly those three lines (verified: single-hunk diff).
-- **check-inert-enforcement**: the R12 production comment hunks drifted
-  the two pre-existing task-077-owned `evaluate_attestation_abac`
-  exemption pins from 2014/2036 to actual 2022/2044; both entries
-  re-pinned (entry count unchanged at 4 repo-wide, sites byte-identical).
-
-Earlier gate repairs (R10/R11, commit `cf800612`): rustfmt on the six
-candidate-owned Rust files, `#[allow(clippy::double_must_use)]` on
-`JjOpsPort` (async_trait `#[must_use]` futures; same annotation as
-`StoragePort`), `#[allow(clippy::too_many_arguments)]` on
-`record_rebase_audit` (repo-standard), and the same two exemption
-re-pins after the +523-line insertion.
+- **R16 (`e088a007`)**: CI test job installs pinned jj-vcs 0.39.0 and
+  runs `cargo nextest run --all` with `GYRE_JJ_TESTS_MUST_RUN=1`;
+  `jj_fixture_guard()` panics on a missing jj under that env var so a
+  broken install fails loudly instead of guard-skipping 13 fixture
+  tests to zero-assertion passes.
+- **R10–R14 (`cf800612`, `6d15a91f`)**: rustfmt on candidate-owned
+  files, clippy `#[allow]` annotations matching repo precedent
+  (`JjOpsPort` double_must_use, `record_rebase_audit` too_many_arguments).
 
 ### Behavior
 
@@ -178,26 +156,26 @@ re-pins after the +523-line insertion.
 
 ### Test evidence
 
-At HEAD `e088a007` (R16 CI repair on top of the R14 repair). This
-round's probe logs + exit codes in
-`/tmp/stage/review-evidence/task-106-r16/`:
+At HEAD `bf2c2308` (R17 verification repair). This round's probe logs +
+exit codes in `/tmp/stage/review-evidence/task-106-r17/`:
 
-- `cargo test -p gyre-adapters jj` → **EXIT 0**, 17/17 (13 fixture tests
-  skip — no jj installable from this sandbox: the jj release CDN and
-  crates.io are both transport-blocked; round-5 real-jj evidence 14/14
-  against jj 0.39.0 stands, and the CI test job now installs that exact
-  version and runs all 13 for real on every push).
-- `GYRE_JJ_TESTS_MUST_RUN=1 cargo test -p gyre-adapters jj` → **EXIT
-  101**, 4 passed / 13 failed — every fixture test panics at the guard
-  with "GYRE_JJ_TESTS_MUST_RUN is set but `jj --version` failed" — the
-  fail-on-guard-skip contract, proven on a machine where jj is genuinely
-  absent.
-- `python3 scripts/check-rustfmt-diff.py 88bd81bf` → **EXIT 0**;
-  `bash scripts/check-ignored-tool-tests.sh` → **EXIT 0**;
-  `bash scripts/check-inert-enforcement.sh` → **EXIT 0**.
-- The R11 full-suite evidence stands: `cargo test -p gyre-server --lib`
-  → 1293/1293 EXIT 0 (includes all eight task-106 rebase tests and the
-  F9 test).
+- `bash scripts/check-inert-enforcement.sh` (candidate exemptions
+  file) → **EXIT 0**.
+- Upstream-overlay simulation: `git restore --source=<base> --worktree
+  -- scripts/` then `bash scripts/check-inert-enforcement.sh` →
+  **EXIT 0** — the exact condition that failed in the verification run
+  (base's line-pinned exemptions against the merged tree) now passes
+  via the inline markers, which the base script version honors.
+- Exemption-freeze simulation (entries vs assignment base
+  `66a5fc67`, every `scripts/*-exemptions.txt`): **no added entries** —
+  only deletions, the sanctioned direction.
+- `rustfmt --edition 2021 --check crates/gyre-server/src/merge_processor.rs`
+  → **clean** (the `#[rustfmt::skip]` keeps the marked statement
+  rustfmt-stable).
+- `SKIP_WEB_BUILD=1 cargo check -p gyre-server` → **EXIT 0** (comment-
+  and-attribute-only change; the R11 `cargo test -p gyre-server --lib`
+  1293/1293 evidence stands, and R16's real-jj CI leg runs the 13
+  fixture tests on every push).
 
 All builds used `SKIP_WEB_BUILD=1` (documented Rust-only path, committed
 `web/dist/`): npm registry tarball fetches are blocked from this sandbox
