@@ -52,3 +52,76 @@ Comparison base 66422bd4 (per controller scope); task source at HEAD 0b74e20 ide
 ## Verdict
 
 **complete** — F1 resolved with evidence; no new findings. All round-1 verified behavior (§9 five tools over MCP incl. the envelope round-trip, §22 graph_summary six fields + real BFS test coverage, §23 dryrun resolution + boundary-tested warnings) stands, re-probed at HEAD where source changed. Source at final HEAD f134e8a is byte-identical to the evidence HEAD 0b74e20 (f134e8a touches only this review file), so round-2 probes remain valid.
+
+## Round 3 (task-076 contract merge verification)
+
+Comparison base a884329d (main, task-076 head) → candidate a7527f6d (merge HEAD
+a376cbbb merging main into the retained round-2 checkpoint bf4b2e1a, plus two
+`task-068:`/`process:` doc commits). `git diff a884329d..a7527f6d` touches only
+specs/tasks/task-068.md — the merge resolved all production code to main's side,
+so this round verifies (a) the merge correctly adopts the evolved contract
+everywhere task-068 owns, and (b) the §9/§22/§23 behavior still holds at the
+merged tree.
+
+### Merge-resolution audit
+
+- `handle_graph_summary` (mcp.rs:2137) and `handle_graph_query_dryrun`
+  (mcp.rs:2169), and the inline explorer handlers (explorer_ws.rs:2903,
+  :3424–3449), all source call-graph completeness via
+  `graph_extraction::call_graph_complete_for_repo` (durable Pass 2 KV marker)
+  and pass it into `compute_graph_summary` (4-arg) / `dry_run_with_call_graph`
+  — exactly the lsp-call-graph.md §7–8 contract main introduced. Diffing the
+  task-068-owned files bf4b2e1a→a7527f6d shows only that contract adoption
+  plus unrelated main-side work; no task-068 functionality dropped.
+- All six §22 fields, the §23 DryRunResult shape + `{"query":…, "result":…}`
+  envelope, and the three §23 warning classes (empty scope, >200 cluttered,
+  >20 too-broad group) are unchanged and real; the BFS test-coverage
+  computation remains a multi-source BFS over outgoing `Calls` edges with
+  soft-deleted edges excluded (`build_adjacency`).
+- needs_write RBAC gate still excludes the five read-only graph tools;
+  `scripts/explorer-agent.mjs` still allowlists the `mcp__gyre__*` names with
+  Bearer-token `mcpServers.gyre`.
+
+### Probes (2026-10-12 round, this sandbox; evidence in
+/tmp/stage/review-evidence/t68-summary.md and siblings)
+
+- `cargo test -p gyre-domain view_query_resolver` → 127/0.
+- `cargo test -p gyre-server --lib mcp` → 81/0; `mcp_graph` subset → 12/0,
+  including the task-076 contract tests over task-068's handlers
+  (`mcp_graph_summary_call_graph_metrics_tool_call`,
+  `mcp_graph_query_dryrun_call_graph_warning_tool_call`).
+- **TCP twins now runnable here**: this sandbox's measured capabilities permit
+  loopback accept (python probe: ACCEPT-OK), so
+  `cargo test -p gyre-server --test graph_integration` ran → 37/0, including
+  all five listener-based MCP twins (`test_mcp_graph_summary/_dryrun/_nodes/
+  _edges/_search`) over real loopback HTTP through the router. This closes the
+  verification gap rounds 1–2 delegated to host CI.
+- Static gates: arch, mcp-write-tools, migration-versions,
+  byte-slice-truncation, task-commit-attribution — all exit 0.
+
+### Test-quality spot checks
+
+`mcp_graph_summary_tool_call` asserts exact values (test_functions=1,
+reachable=2, unreachable=1) against a real store with a seeded test→fn_a
+Calls edge; domain boundary tests pin 200/201 clutter, 25/5 group breadth,
+and unresolved callouts/narrative by name — these fail when the behavior
+breaks, not self-confirming.
+
+### Non-findings (observations)
+
+- The refreshed Shipped text states the TCP twins "cannot run in this sandbox
+  (loopback accept() seccomp-blocked)". That was true of the earlier review
+  sandbox but is stale for this one — capabilities.json reports the listener
+  probe supported and the twins ran and passed here. Infrastructure statement,
+  not a code defect; the substance (twins pass) is now directly evidenced.
+- `test_coverage.reachable_from_tests`/`unreachable` count
+  Function|Method|Endpoint nodes only (TestGaps-scope alignment, documented
+  in-source); test seeds count as reachable, consistent with the §22 example
+  arithmetic (180+85=265). Pre-existing round-1/2 behavior, unchanged.
+
+### Verdict (round 3)
+
+**approved** — the merge correctly adopts the task-076 call-graph contract
+across everything task-068 owns without dropping §9/§22/§23 behavior; all
+focused suites and all five TCP twins pass in this sandbox; static gates
+pass; no findings.
