@@ -51,3 +51,21 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 54 (repair round 54 — candidate `df877ec7`, clobber 48)
+
+Assignment: candidate `df877ec718fb64a23193a253559c9ce9e5bde2c2` on base `a884329d71182b59aba3868a9291f2ee2f4282a0` (task-076, already merged at `5a3c2916f`). All probes at the candidate tip (= HEAD), evidence in `/tmp/stage/review-evidence/r54/`.
+
+Product verification (all green, zero drift since the round-53 verified tip `f6d243dad` — `git diff f6d243dad..HEAD` over every task-208 surface is empty):
+
+- Dead-code grep (`get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs` over `crates/` + `web/src/`) → zero matches; route and ABAC registrations for `/api/v1/users/me/{agents,tasks,mrs}` absent (both exit 1).
+- Router 404 regression test present (`users.rs:954`); `SKIP_WEB_BUILD=1 cargo test -p gyre-server my_stuff_endpoints_are_removed` → **1/1 passed** at this exact source.
+- `UserProfile.svelte` tabs array is exactly the six compliant tabs (info, tokens, memberships, ledger, notif-prefs, notifications).
+- Spec amendment + coverage matrices in place (`user-management.md` supersession at lines 456/611; coverage row 22 `n/a` with supersession note).
+- Fresh `npm ci` + `npx vitest run src/__tests__/UserProfile.test.js` → **23/23 passed**; `scripts/test_dev_attribution.py` → 2/2 OK.
+
+Finding (reproduced on the assigned candidate — 48th occurrence of the rounds 2–53 clobber class):
+
+- [-] The candidate's **only** change vs parent `cfab5570f` rewrites `commits:` from the restored six-SHA list back to five SHAs, dropping `ea006d52bb42e96e6f176b02b5390b6cb56a3116` (`build(web): exempt generated dist bundles from whitespace gate (task-208)` — root `.gitattributes` `web/dist/** -whitespace`, live at `.gitattributes`). Verified: `ea006d52` is an ancestor of HEAD (merge-base --is-ancestor exit 0) and NOT an ancestor of the assigned base (exit 1), so it is branch product surface that becomes invisible to review scoping per the AGENTS.md invariant. The fixed in-repo `scripts/dev-attribution.py` (line 26, `path == '.gitattributes'`) computes exactly the six-SHA list on this branch; the executor-staged `/tmp/stage/dev-attribution.py` still lacks that line (grep exit 1), so each checkpoint pass re-drops the SHA until the staged script advances. The assignment body's `commits:` list carried the same clobbered five-SHA list because it was generated from the clobbered task file; the canonical invariant is AGENTS.md plus the fixed in-repo gate logic.
+
+Verdict: **needs-revision** (process repair only — restore the six-SHA `commits:` list via the fixed in-repo pass; product is clean and needs no change). The verifier must still run `cargo test --all` and `cd web && npm test`. The branch-tip committed dist bundle remains the assignment base's stale pre-task-208 output per the executor restore-to-base flow; final integration rebuilds and publishes dist remotely from the merged `web/src` — not a code defect.
