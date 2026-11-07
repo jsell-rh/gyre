@@ -7,25 +7,68 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "explorer-implementation.md §30 Unit Tests"
-commits: ["e4dd7a62751896b1ad02fc978bc610e65dae134d", "4058b618fb52c49f2b4bbb7179526d415f7fe2c3"]
+commits: ["4058b618f", "e4dd7a627", "d3ccb81ad"]
 ---
 
 ## Shipped
 
-Explorer unit tests for `explorer-implementation.md` §30, completing the source recovered from the interrupted run (commit 4058b618) and re-verified across review rounds. An audit found most spec-required tests already present (scope types `all`/`filter`/`focus`/`test_gaps`/`concept`/`diff`, dry-run warnings for empty/cluttered/broad-group/unresolved-callout scopes, graph summary counts + top types by fields + test-coverage counts, group exact/substring matching, saved views CRUD + system-default seeding + system-view delete protection). The gaps were closed with real tests; no production code changed anywhere in this task. Acceptance is recorded here rather than by editing the assigned criteria list (contract repair 34ae63f2).
+Explorer unit tests for `explorer-implementation.md` §30, delivered on the retained
+source checkpoint (contract repair `requirements_changed`). The checkpoint
+(`4058b618f`, rustfmt-repaired in `e4dd7a627`) carried the full test additions;
+this round resolved the pending merge against the task-068 base `ad417f8a5`
+(`d3ccb81ad`) — both sides had appended distinct tests to the resolver's test
+module, and the resolution keeps both suites losslessly (141 unique tests, 0 lost
+from either parent, 0 duplicates) while adopting task-068's resolver API changes
+(`compute_graph_summary` 5-arg signature, `dry_run_with_call_graph`, per-pass
+call-edge metrics) with all cross-crate call sites consistent. No production code
+changed in this task beyond the merge adaptation.
 
-### New tests
+### Test coverage shipped
 
-- **View query resolver** (`crates/gyre-domain/src/view_query_resolver.rs`): heat emphasis metric values for `incoming_calls` (non-Calls edges excluded), `complexity`/`churn`/`test_coverage` (missing-data nodes excluded where the metric requires data), `test_fragility` (distinct-test counting), trace metrics warn-and-zero (never fabricate OTLP values); `tiered_colors` populates BFS `node_depths`; highlight color validation (invalid rejected naming `highlight.matched`; hex/named/rgb accepted); callout prefix match (clean) vs substring match (precision warning); narrative resolution counts, unresolved-step warnings naming each missing node, duplicate-order rejection; `$selected` with no selection yields the interactive hint without a spurious empty-scope warning, `$selected` with a selection resolves focus; group patterns restricted to the scope's result set (groups are overlays, not scope extensions).
-- **Saved views ownership** (`crates/gyre-server/tests/graph_integration.rs`, `test_saved_views_ownership_enforcement`): two distinct Agent-role callers in one tenant — non-creator update AND delete of another agent's view return 403 with the ownership-check message, while the same endpoints succeed for the caller's own view (proving the 403 is ownership-specific, not general access denial); `created_by` records the creating agent; system default views reject deletion with the system-view message. The test reads the registration response via its flattened top-level fields (`RegisterAgentResponse` uses `#[serde(flatten)]`).
+- **View query resolver** (`crates/gyre-domain/src/view_query_resolver.rs`): scope
+types `all`/`filter`/`focus` (depth/direction)/`test_gaps`/`concept`/`diff`;
+emphasis heat metrics (`incoming_calls` excluding non-Calls edges,
+`complexity`/`churn`/`test_coverage` with missing-data exclusion,
+`test_fragility` distinct-test counting, trace metrics warn-and-zero — never
+fabricate OTLP values), `tiered_colors` BFS `node_depths`, highlight color
+validation (invalid rejected naming `highlight.matched`; hex/named/rgb accepted);
+callout exact/prefix/substring matching with precision warnings; narrative
+resolution counts, unresolved-step warnings naming each missing node,
+duplicate-order rejection; `$selected`/`$clicked` with and without a selection;
+group patterns restricted to the scope's result set (groups are overlays, not
+scope extensions).
+- **Dry-run warnings**: empty scope, cluttered/many-node scope, broad group,
+unresolved callouts, partial match, unresolved narrative steps, interactive
+no-selection hint (no spurious empty-scope double report), call-graph
+incomplete gating (only on positive knowledge + calls traversal).
+- **Graph summary**: node/edge counts, top types by fields, top functions by
+calls, test-coverage counts, per-pass `Calls`-edge provenance metrics,
+`is_call_graph_complete` marker-vs-extraction ordering.
+- **Test coverage gap detection**: BFS-from-tests reachability
+(`test_computed_test_unreachable*`, `test_intersect_where_and_test_unreachable`,
+`test_scope_test_gaps*`).
+- **Saved views** (`crates/gyre-server/tests/graph_integration.rs`): CRUD,
+system-default seeding, system-view delete protection, and ownership enforcement
+(two distinct Agent callers in one tenant — non-creator update AND delete return
+403 ownership-specific while the same endpoints succeed for the creator).
 
 ### Test evidence
 
-- **Verification repair this round** (finding 1a62c878, `checks.sh` exit 1 at 112e98af): the only failing gate was the rustfmt changed-lines check — `assert!`/`assert_eq!` calls wider than rustfmt's default `fn_call_width=60` (no repo rustfmt.toml; `use_small_heuristics="Default"`) in the task-079 test additions. Fixed in commit e4dd7a62 by applying the rustfmt-formatted wrapping to exactly the flagged regions (whole-file rustfmt diff contained only those hunks; no token or behavior changes, no old debt touched). Reproduced exit 1 before, exit 0 after with `python3 scripts/check-rustfmt-diff.py 1d9547de`. All other gates in the same verification log already passed (clippy changed lines clean, all `scripts/check-*.sh` OK, web build succeeded; Svelte warnings are pre-existing noise unrelated to this task). Log: `/tmp/stage/review-evidence/rustfmt-repair.log`.
-- `cargo test -p gyre-domain --lib view_query_resolver` — **138 passed, 0 failed**, executed in the attempt-2 sandbox at this exact logical source state (the reformat moves no tokens, so the result carries over). In this round's sandbox it is **not executable**: crates.io egress (index.crates.io and static.crates.io) is connection-refused (curl exit 7) and the box has no cargo registry cache or vendored sources, so the dependency closure cannot be fetched — a selective block (github.com and registry.npmjs.org reachable), an infrastructure restriction for remote verification, not a code defect. Logs: `/tmp/stage/review-evidence/focused-tests.log`, `/tmp/stage/review-evidence/EVIDENCE.md`, `/tmp/stage/review-evidence/rustfmt-repair.log`.
-- `cargo test -p gyre-server --test graph_integration test_saved_views` — not executable in this sandbox (same transport restriction). Every assertion was cross-checked line-by-line against the `saved_views.rs` handlers (ownership/system-view 403 messages and ordering, `created_by` assignment, status codes, ABAC exemption + agent-token auth preconditions). Re-execution is deferred to the remote verification environment.
-- Web spot check (task adds no web code): `npm ci` then `vitest run ExplorerCanvas.test.js ExplorerViewScope.test.js` — **155 passed, 0 failed**, matching the attempt-2 result. Log: `/tmp/stage/review-evidence/web-spot-check.log`.
-- Full `cargo test --all` and `cd web && npm test` are verification-stage gates and were not repeated here.
+- Merge-resolution proof, rustfmt parse/format check (exit 0), and the acceptance
+criteria audit: `/tmp/stage/review-evidence/` (`EVIDENCE.md`, `merge-resolution.log`,
+`rustfmt-check.log`).
+- Web spot check (this round, locked `npm ci`): `vitest run ExplorerCanvas.test.js
+ExplorerViewScope.test.js` — **155 passed, 0 failed** (`web-spot-check.log`).
+- `cargo test -p gyre-domain --lib view_query_resolver` (138 tests at the
+checkpoint state) and `cargo test -p gyre-server --test graph_integration
+test_saved_views` are **not executable in this sandbox**: crates.io egress is
+connection-refused (curl exit 7, selective filter — github.com and
+registry.npmjs.org reachable) with no registry cache or vendored sources
+(`cargo-transport-restriction.log`). The merge adds only the 3 approved task-068
+tests and moves no tokens (rustfmt exit 0). Re-execution deferred to remote
+verification.
+- Full `cargo test --all` and `cd web && npm test` are verification-stage gates
+and were not repeated here.
 
 ## Spec Excerpt
 
