@@ -59,3 +59,71 @@ All 3 R2 findings were addressed by commit `f5159b14`:
 - All mechanical checks pass: mirrored-logic-tests-js, tautological-assertions-js, dead-test-variables-js, comparative-test-claims-js, aspirational-test-names, dead-components (4 pre-existing, none from TASK-053), conditional-test-guards, dead-test-code, noop-callbacks.
 - Pre-existing test failures in `ExplorerViewAskViewSpec.test.js` (Vite parse error on large ExplorerView.svelte) and `MoldableViewNodeTypeFilter.test.js` are unrelated to TASK-053.
 - Acceptance criteria verified: viewport culling, LOD text reduction, edge bundling, responsive CSS breakpoints, chat collapse/expand, matchMedia viewport sync, touch gestures, timing regression guards.
+
+## R4 — needs-revision, 5 findings (candidate 46946da1c)
+
+Independent review of candidate `46946da1c` (docs-only "Shipped" notes commit;
+implementation inherited from base via squash-merge PR #627). Mutation analysis
+performed on `ExplorerCanvas.svelte` with restore-after-each-probe (tree
+verified clean; control mutation — removing the background fill — changed
+fillRect 26204→26202, proving mutations compile and take effect). Evidence
+saved under `/tmp/stage/review-evidence/` (SUMMARY.md + logs).
+
+### Findings
+
+- [-] **F1 (test): All 15 performance tests pass with viewport culling disabled.**
+  `isVisible()` mutated to `return true` (verified applied) → draw output
+  byte-identical (fillRect 26204), 15/15 pass. Tests only render the initial
+  auto-fit camera where the entire 10k-node graph is visible — culling culls
+  nothing in the tested state, and no test sets a zoomed/panned camera. The
+  "<50000 fillRect" bounds pass with culling fully off. AC "Off-screen nodes
+  are culled from rendering" has no test that fails when culling is removed.
+
+- [-] **F2 (test): LOD tests pass with both low-zoom simplification mechanisms
+  disabled.** Label guard (line 3257) forced `if (true)` AND semantic-zoom
+  gates (lines 2482–2485) removed → output identical (fillText=596), 15/15
+  pass. The comparative small-vs-large fillText-per-node test passes due to
+  summary tree-group aggregation and per-node label richness differences in
+  the fixtures, not the LOD guards. AC "Low-zoom levels use simplified node
+  rendering (no text labels)" has no mutation-sensitive coverage.
+
+- [-] **F3 (test): Edge-bundling test cannot distinguish bundled from
+  capped-individual rendering.** With bundling disabled (line 3511 →
+  `if (false)`), moveTo=200 vs 788 bundled — both far below the asserted
+  bound of `edges.length` (19900), because individual-edge rendering is
+  independently capped at `maxEdges=1500`. 15/15 pass with bundling off.
+
+- [-] **F4 (test): No pan/zoom or touch interaction is ever simulated.** The
+  plan requires the benchmark to "measure pan/zoom frame rate"; beyond the
+  documented jsdom fps limitation, no mechanism-level proxy exists (e.g.,
+  zoomed-camera draw-call bounds). Touch handlers (lines 4854–4906, real
+  pinch-zoom implementation) have zero test coverage.
+
+- [-] **F5 (process): "Shipped" notes and R3 verification claims are
+  contradicted by mutation evidence.** The notes claim the tests verify
+  "culling-bounded draw calls", "LOD text reduction", "bundled-vs-individual
+  edge rendering", and that "every acceptance criterion still holds" — each
+  Part A mechanism can be individually disabled with the suite green. R3's
+  "Exercises the component's actual LOD behavior via the :3283 guard. ✓" is
+  disproven (that exact guard mutated → identical output, no failure).
+
+### What was verified as sound
+
+- Part B (responsive layout) is real and well-tested: production CSS/JS
+  present; responsive tests are genuinely interaction-based and
+  mutation-sensitive (disabling collapse onclick fails 4/8; disabling the
+  matchMedia widen-reset fails 1/8).
+- Part A production code exists and is real (culling math, LOD guards,
+  semantic zoom, bundled edges, maxEdges cap, text-width cache, non-reactive
+  camera so pan/zoom never retriggers layout).
+- All claimed test runs reproduce: 23/23 focused, 284/284 explorer regression.
+
+### Required fixes
+
+Make the performance tests exercise states where the mechanisms bind: set a
+zoomed-in/panned camera and assert draw-call reduction (kills F1), force a
+low-zoom state with individually-drawn leaves and assert fillText reduction
+(kills F2), assert a moveTo count that distinguishes bundled from
+capped-individual mode (kills F3), and add at least one camera-interaction
+test (wheel or pinch) plus a touch-handler test (kills F4). Correct or
+qualify the "Shipped"/R3 verification claims (kills F5).
