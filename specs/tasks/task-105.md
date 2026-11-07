@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "observability.md §Log Retention & Compression"
-commits: ["4597330e9528db2a379b420a8f07d2c8f8408038"]
+commits: ["4597330e9528db2a379b420a8f07d2c8f8408038", "eda138a7bcccf283512c072474e4dd07893a3640"]
 ---
 
 ## Spec Excerpt
@@ -89,13 +89,20 @@ The forwarder reads through `since_timestamp`, which decompresses in the adapter
 
 ### Round 2: contract repair + base merge
 
-- The assigned task document was restored by the executor (acceptance-criteria checkboxes left unchecked as assigned — protected text); the production fix above is preserved unchanged. Only source conflict resolved: merge of assignment base `a884329d7` (task-076) into this branch — one textual conflict in `crates/gyre-adapters/src/sqlite/audit.rs` (base had no counterpart for the new compression tests; kept our side). Merge commit `615182576`.
+- The assigned task document was restored by the executor (acceptance-criteria checkboxes left unchecked as assigned — protected text); the production fix above is preserved unchanged. Only source conflict resolved: merge of assignment base `a884329d7` (task-076) into this branch — one textual conflict in `crates/gyre-adapters/src/sqlite/audit.rs` (base had no counterpart for the new compression tests; kept our side). Merge commit `615182576`. A later merge of assignment base `233664cf8` (task-087) was clean (merge commit `68dacd0ac`).
+
+### Round 3: review repair
+
+Commit `eda138a7b` fixes both review findings on the merged head:
+
+- **F1 (CI-blocking):** removed the unused `use gyre_domain::AuditOutcome;` import inside `forward_cycle_sends_decompressed_detail_for_compressed_events` (siem.rs) — the unused_imports warning sat on a changed line, which turns the CI clippy-diff gate red.
+- **F2 (eviction policy):** `AgentLogBuffer::trim_to_cap` now evicts lines in overall age order — from the front of the cold segment first (it holds the oldest lines), then from the front of `hot`. Previously it drained only hot lines, so with a cold segment at the 10k cap every newly appended line was immediately discarded and replay served only stale cold lines until the 30-day purge freed space. The cold rebuild reuses the length-prefixed frame machinery shared with `purge_older_than` (via `ColdSegment::decode`); a corrupt segment is kept with a warning rather than dropped. Regression test: `line_cap_evicts_oldest_when_cold_segment_is_at_cap` (fails on the pre-fix code — the first draft of this test caught a second facet of the same bug: draining hot first also discards the fresh line when hot is shorter than the surplus).
 
 ### Test evidence
 
-Post-merge probes on branch head `615182576` (command lines, exit codes, and output tails saved under `/tmp/stage/review-evidence/`):
+Post-repair probes on branch head `eda138a7b` (command lines, exit codes, and output tails saved under `/tmp/stage/review-evidence/`):
 
-- `cargo test -p gyre-adapters --lib` — 356 passed, incl. the 4 compression tests (round-trip transparency, byte-ratio reality, idempotency + limit bounding, since_timestamp decompression).
-- `cargo test -p gyre-server --lib` — 1349 passed, incl. the 10 `log_compression` tests (transparency + idempotency, incremental folding, unprefixed/multiline round-trip, whole-segment and mixed-segment purge, line cap, `run_once` end-to-end with the mem audit repo) and the SIEM wire test.
-- Mechanical checks on the merged tree: check-arch, check-abac-route-registry, check-mcp-write-tools, check-dead-message-kinds, check-migration-versions, check-task-commit-attribution — all OK.
+- `cargo test -p gyre-server --lib` — 1360 passed, incl. the 11 `log_compression` tests (now also `line_cap_evicts_oldest_when_cold_segment_is_at_cap`) and the SIEM wire test.
+- `python3 scripts/check-clippy-diff.py 233664cf8` — exit 0 on the repaired head (the F1 warning class is gone).
+- Earlier post-merge probes on `615182576`: `cargo test -p gyre-adapters --lib` — 356 passed, incl. the 4 audit-detail compression tests; mechanical checks (check-arch, check-abac-route-registry, check-mcp-write-tools, check-dead-message-kinds, check-migration-versions, check-task-commit-attribution) — all OK.
 - One test-design note (from round 1): an earlier draft of the SIEM test asserted tiny log lines shrink under zstd — they do not (frame overhead exceeds savings on ~30-byte inputs); the test uses realistic repetitive payloads so the byte-ratio assertions reflect real compression.
