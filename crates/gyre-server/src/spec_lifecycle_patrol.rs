@@ -314,9 +314,7 @@ async fn spec_has_live_task(
                 continue;
             }
             let task_repo = task.repo_id.as_str();
-            if task_repo.is_empty()
-                || entry_repo.is_none()
-                || task_repo == entry_repo.unwrap_or("")
+            if task_repo.is_empty() || entry_repo.is_none() || task_repo == entry_repo.unwrap_or("")
             {
                 return Ok(true);
             }
