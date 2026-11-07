@@ -50,3 +50,28 @@ Test suites run: `cargo test -p gyre-server --lib api::workspaces` (12 passed), 
 ### Verdict
 
 needs-revision — F5 means the task's central deliverable (Supervised trust actually requiring human merge approval, per HSI §2 Mechanical Implementation) is not enforced end-to-end: the Deny policy is created but never consulted. F6 is the same silent-restriction-loss class R1 F1 established, surviving in an adjacent handler. F7/F8 are coverage gaps on fix-introduced branches and an explicit acceptance criterion.
+
+## Round: R3
+
+**Reviewer:** Independent review (candidate `ab19b38abb77ffb3c90c97c169fbd239e05c0f28`, base `9bef21a41729a6b696b48a587b1f2e619d0f6ff2`)
+**Spec ref:** human-system-interface.md §9–13 (Trust Gradient), abac-policy-engine.md
+**Evidence:** /tmp/stage/review-evidence/review-round-record.md (and per-probe logs alongside)
+
+### Prior-round verification
+
+- The previous durable finding (merge_requests lineage test 401 — missed Bearer header after `AuthenticatedAgent` was added to `transition_mr_status`) is FIXED: `cargo test -p gyre-server --lib api::merge_requests` → 31/31 pass.
+- F9 fail-closed repair verified by negative probe: reverting `supervised_trust_hold`'s `Err` arm to fail-open (`return None`) fails BOTH `policy_store_read_failure_holds_*_fail_closed` tests — they genuinely kill the defect.
+- F5 merge-time enforcement verified by negative probe: disabling `supervised_trust_hold` fails the 4 supervised-hold unit tests.
+- Full server lib suite 1298/1298; all 19 mechanical gates rc=0; fmt and `clippy -p gyre-server --all-targets` clean; `gyre-domain` suite passes; trust transition is a real single diesel transaction with tested 409; strict `TrustLevel::parse` (400 on typo); immutable-Deny-first evaluation present with override-proof test; prefix guard on policy CRUD present; exemption files only lost entries this round (stricter); the non-atomic-creation script rewrite is a faithful python3 port for mawk hosts, not a weakening.
+
+### Findings
+
+- [ ] **F10: Candidate leaves its own tree red — two integration tests fail deterministically because the (spec-correct) F5 Supervised merge hold is not accounted for in their workspace setup.** `cargo test -p gyre-server --tests --no-fail-fast`:
+  - `e2e_ralph_loop::full_ralph_loop_via_gyre` (crates/gyre-server/tests/e2e_ralph_loop.rs:320): asserts MR "merged" after enqueue; gets "open".
+  - `git_integration::merge_queue_auto_merges_mr_and_commit_on_main` (crates/gyre-server/tests/git_integration.rs:682): same assert shape; gets "open".
+
+  Root cause (proven by probe): both tests create workspaces WITHOUT `trust_level` — the entity/migration default is Supervised, which seeds `trust:require-human-mr-review` — and neither test ever sets the MR to approved, yet both expect autonomous merge. The F5 merge-time gate (commit `1b07c83b`, in this candidate's delta; absent at base) correctly holds the merge for human approval, so the MRs stay Open. Attribution probe: with `supervised_trust_hold` disabled, `e2e_ralph_loop` passes (1 passed, 5.11s); with the candidate's production behavior it fails. The candidate touched both test files (for the `seed_builtin_policies` -> `Result` signature change) but did not update the merge expectation. This violates the acceptance criterion "`cargo test --all` passes" — the same failure class as the prior round's merge_requests regression (a correct enforcement change shipped without sweeping its test fallout). Fix: create the test workspaces with `"trust_level": "Guided"`/`"Autonomous"`, or approve the MR via `PUT /api/v1/merge-requests/:id/status` before expecting the merge.
+
+### Verdict
+
+needs-revision — F10 only. The feature itself (trust gradient, atomic transitions, immutable-Deny-first, prefix guards, merge-time enforcement with fail-closed semantics) is real, negatively probed, and spec-conformant; the sole blocker is the two stale integration tests that the F5 enforcement change made deterministically red.
