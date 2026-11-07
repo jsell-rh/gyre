@@ -8,7 +8,7 @@ coverage_sections:
   - "ui-navigation.md §2 Workspace Home"
   - "ui-navigation.md §3 Repo Mode"
   - "ui-navigation.md §10 Cross-Workspace View"
-commits: ["7e5cdaba110cbc9de3f5a9f6ad79303897ce7776", "7c2b975731bfd631f3e6b91da5d40790c196108f", "796c800da477a8cd45aeb60ca9ec7665a11938b8", "45a3f5e4f2c9d844dd417401e4946ab0da85c857", "13d856c82e77a1cd2e414ff5383e843774ff028d"]
+commits: ["7e5cdaba110cbc9de3f5a9f6ad79303897ce7776", "7c2b975731bfd631f3e6b91da5d40790c196108f", "796c800da477a8cd45aeb60ca9ec7665a11938b8", "45a3f5e4f2c9d844dd417401e4946ab0da85c857", "13d856c82e77a1cd2e414ff5383e843774ff028d", "c38c8e00398862f4f49c526105b493cb9f9e922c"]
 ---
 
 ## Authority and Scope
@@ -73,25 +73,31 @@ is claimed here, per section, with the verifying evidence below.
 
 - **Cross-workspace (§10):** `CrossWorkspaceHome` renders all five sections
   from real per-workspace API results — Decisions via `api.myNotifications()`
-  (response shape `{notifications:[...]}` fixed), Workspaces list with health,
-  Specs via `specsForWorkspace(null)` with `workspace_id`/`repo_id` on every
-  row, Briefing via per-workspace `getWorkspaceBriefing` client-side
-  aggregation, Agent Rules via `getMetaSpecs(scope=Global)`. Item clicks call
-  `goToEntityDetail`, which resolves the entity's repo, derives the owning
-  workspace from `workspace_id`/repo lookup, switches `currentWorkspace` to
-  it (error toast when the workspace is not in the caller's membership — no
-  fabricated scope identity), persists the selection, and reloads scoped
-  data. Tenant settings (`/all/settings`) and tenant agent-rules stay
-  admin-gated (`onSettings`/`onManageAgentRules` undefined for non-admins).
+  (response shape `{notifications:[...]}`), Workspaces list with health,
+  Specs via per-workspace `specsForWorkspace(ws.id)` aggregation
+  (`Promise.allSettled`, the same pattern as Briefing) with
+  `workspace_id`/`workspace_name` attribution backfilled on every row,
+  Briefing via per-workspace `getWorkspaceBriefing`, Agent Rules via
+  `getMetaSpecs(scope=Global)`. Item clicks call `goToEntityDetail`, which
+  resolves the entity's repo, derives the owning workspace from
+  `workspace_id`/repo lookup, switches `currentWorkspace` to it (error toast
+  when the workspace is not in the caller's membership — no fabricated scope
+  identity), persists the selection, and reloads scoped data. The Specs
+  stat-card counts derive from the same scoped list. Tenant settings
+  (`/all/settings`) and tenant agent-rules stay admin-gated
+  (`onSettings`/`onManageAgentRules` undefined for non-admins).
 - **Workspace home (§2):** every section loader in `WorkspaceHome.svelte`
   queries with the selected workspace's id behind one generation guard
   (`wsLoadGen`) — the workspace-change effect bumps it once; delayed
-  old-scope responses (success or failure) are discarded. Agent Rules merges
-  `getMetaSpecs(scope=Workspace&scope_id=:id)` with ALL tenant
-  `scope=Global` rules, grouped by kind with Tenant/Workspace scope badges
-  and 🔒 on required; a failed lookup surfaces as error + Retry, never an
-  empty successful set. Settings/rule management use the canonical routes
-  `/workspaces/:slug/settings` and `/workspaces/:slug/agent-rules`.
+  old-scope responses (success or failure) are discarded. The Specs query is
+  enforced server-side: GET `/api/v1/specs?workspace_id=` filters ledger
+  entries to those the workspace owns — directly via `workspace_id` or via
+  the owning repo — so no workspace home renders another workspace's specs.
+  Agent Rules merges `getMetaSpecs(scope=Workspace&scope_id=:id)` with ALL
+  tenant `scope=Global` rules, grouped by kind with Tenant/Workspace scope
+  badges and 🔒 on required; a failed lookup surfaces as error + Retry,
+  never an empty successful set. Settings/rule management use the canonical
+  routes `/workspaces/:slug/settings` and `/workspaces/:slug/agent-rules`.
 - **Repo mode (§3/§7):** `goToRepo` defaults to the Specs tab; all tabs are
   URL-addressable via `/workspaces/:slug/r/:repo/:tab` (`parseUrl`/`urlFor`
   implement the §7 table incl. multi-segment spec paths and entity detail
@@ -114,36 +120,32 @@ is claimed here, per section, with the verifying evidence below.
   error toasts/states (cross-workspace unknown-workspace toast, Agent Rules
   error + Retry, per-section load errors) rather than empty success.
 
-Verification (current round: rebase repair onto task-084 base `4d6759a0`,
-repair id `dbc943c2`):
+### Verification
 
-- Prior review rounds closed two findings on candidate `9af70150d` — the
-  myNotifications `{notifications:[...]}` envelope regression tests
-  (`7e5cdaba`, mutation probe: reverting to `data?.items` fails exactly
-  those 2 tests) and the `?subTab` deep-link param retention fix
-  (`7c2b9757`, mutation probe: restoring the deletion fails exactly that
-  test). Evidence retained under `/tmp/stage/review-evidence/README.md`
-  from that round.
-- This round rebased the candidate onto task-084's base
-  (`4d6759a0`, HSI Policies ↔ Trust Level Integration UI), which added a
-  `policies` tab to `WorkspaceSettings` while this branch had added a
-  `repos` tab. Conflict resolution (merge commit `77e9299b3`):
-  `TAB_IDS` takes the union (general, trust, policies, teams, budget,
-  repos, compute, llm, audit); the test file keeps this branch's Repos
-  tab tests, adopts base's `Trust Level tab` describe title, and the
-  auto-merged tab-count test was corrected from 8 to 9 tabs (the union
-  renders nine). Keyboard-navigation expectations (ArrowRight
-  general→trust, ArrowLeft/End wrap to audit) remain valid under the
-  merged order.
-- Fixed-state probes (`npx vitest run`, locked deps via `npm ci`):
-  `WorkspaceSettings.test.js` → 71 passed / 0 failed (both sides'
-  tests pass against the union); focused navigation suites (AppShell,
-  CrossWorkspaceHome, ExplorerViewScope, ExplorerViewDrillUrl,
-  ExplorerView-responsive, RepoMode, RepoModeHeader) → 174 passed /
-  0 failed. `web/dist` was not rebuilt here (the executor restores
-  generated assets from the assignment base and final integration
-  rebuilds them remotely); full suites, all-target Clippy, and
-  exact-head GitHub CI remain owned by verification and publication.
+- Specs-scope repair (`c38c8e003`, closing review finding `1d994c8f`):
+  `list_specs` honors `?workspace_id=` (Rust test
+  `list_specs_honors_workspace_id_scope`: ws-a sees its own + repo-scoped
+  entries, ws-b only its own, unscoped listing unchanged; mutation probe —
+  disabling the filter fails exactly that test) and the `/all` Specs section
+  fetches per accessible workspace (vitest regression
+  `fetches specs per accessible workspace, not the unscoped list`; mutation
+  probe — reverting the component to `specsForWorkspace(null)` fails exactly
+  that test). Also renamed the mismatched `.rules-version` CSS to
+  `.rule-version` (finding 2, cosmetic).
+- Focused probes at the current head (`npx vitest run`, locked deps):
+  CrossWorkspaceHome → 38 passed / 0 failed; WorkspaceHome,
+  WorkspaceHomeSections, WorkspaceHomeArchitecture, WorkspaceHomeScopeDrill,
+  WorkspaceDrawerSectionNav, ScopeTransitions, SpecDashboard → 94 passed /
+  0 failed; AppShell, RepoMode, RepoModeHeader → 116 passed / 0 failed;
+  `cargo test -p gyre-server --lib api::specs::tests` → 52 passed /
+  0 failed. Earlier rounds' evidence (myNotifications envelope,
+  `?subTab` deep link, task-084 base rebase with the 9-tab
+  `WorkspaceSettings` union → 71 passed) is retained under
+  `/tmp/stage/review-evidence/README.md`.
+- `web/dist` was not rebuilt here (the executor restores generated assets
+  from the assignment base and final integration rebuilds them remotely);
+  full suites, all-target Clippy, and exact-head GitHub CI remain owned by
+  verification and publication.
 
 Contract note for the reviewer: an earlier attempt ticked the acceptance
 checkboxes in this file, which the pipeline's `requirement_parts` treats as
