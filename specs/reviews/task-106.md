@@ -47,3 +47,82 @@ Notes (not findings):
 - `jj_squash_into_parent` flaked twice early in the review run (vim editor killed with signal 15 under harness load), then passed 6+ consecutive times standalone and batched, on both `c1c6dd9e` and `c1c6dd9e^`. Environmental, not a regression.
 
 Verdict: **needs-revision** — F1-F5 are genuinely resolved, but F6-F7 break jj provisioning in the default configuration and on every post-first new-branch spawn respectively, F8 undermines the deferral guarantee this round added, and all three fail silently.
+
+## Round 17
+
+Candidate under review: `2c2be275` (assigned base `88bd81bf`). Production
+behavior unchanged since round 5; this round re-verified the full diff
+independently, including the R16 CI-repair commit (`e088a007`) which is the
+only behavior-adjacent change since R14.
+
+Verified working (no findings):
+
+- **Rebase trigger wiring**: both merge paths call `rebase_inflight_agents`
+  as the last step, in the `else` of the post-merge-gate failure branch
+  (single-entry `merge_processor.rs` `Ok(MergeResult::Merged)` arm; atomic
+  group after `run_post_merge_gates` Ok) — the F3 ordering holds. Target
+  selection: same target branch, MR Open/Approved, agent Active, worktree
+  present, merged authors excluded, worktree selection repo-scoped on both
+  trigger and replay paths (R12 F1).
+- **`jj_rebase` adapter**: `jj git import` then `jj rebase -b @ -d <moved
+  branch>`; conflict detection via the `jj resolve --list` exit-code
+  contract (0 = conflicted with files on stdout, 2 = clean) — no text
+  scraping for the decision. Port trait + mem double (`ConfigurableJjOps`)
+  record every call.
+- **Deferral semantics**: backoff written only after a terminal outcome;
+  in-window movements set the pending marker (newest base wins); replay
+  runs on every processor cycle (F12) and an infra Err keeps the marker
+  (F8). All pinned by tests that were run this round.
+- **Spawn/cleanup**: shared jj checkout + per-agent workspaces, branch
+  creation before provisioning (F9), legacy relative `repo.path`
+  absolutization (F6), idempotent `jj_workspace_forget` on every teardown
+  path (stale_agents, delete_worktree).
+- **R16 CI repair**: `ci.yml` installs pinned jj 0.39.0 (asset URL verified
+  to exist: github.com answers 302 naming exactly
+  `jj-v0.39.0-x86_64-unknown-linux-musl.tar.gz`) and runs
+  `cargo nextest run --all` under `GYRE_JJ_TESTS_MUST_RUN=1`;
+  `jj_fixture_guard` verified on both paths locally — without the env var
+  a missing jj skips quietly (17/17 pass, 0.01s), with it every one of the
+  13 fixture tests panics at the guard (`cargo test -p gyre-adapters jj`
+  EXIT 101) on this genuinely jj-less machine. The rewritten
+  ignored-tool-tests exemption comment now states the actual mechanism,
+  which the CI change makes true.
+
+Probe evidence (`/tmp/stage/review-evidence/task-106-r17/`):
+
+- `cargo test -p gyre-server --lib rebase` → EXIT 0, 16/16 (all 14 task-106
+  rebase tests); `--lib merge_processor` → 62/62; `--lib spawn` → 43/43;
+  full `--lib` → 1320/1320 EXIT 0.
+- `cargo test -p gyre-adapters` → 364 passed + 6 pre-existing ignored
+  (compute/llm only, none in jj_ops.rs).
+- Mechanical gates all EXIT 0: rustfmt-diff (vs base), arch, ABAC route
+  registry, ignored-tool-tests, inert-enforcement, relative-path-defaults,
+  mem-port-contracts, dead-message-kinds, task-commit-attribution.
+- **Mutation probe**: disabling the single-entry-path
+  `rebase_inflight_agents` call makes
+  `merge_triggers_rebase_of_inflight_agents` FAIL (EXIT 101) — the tests
+  are behavior-pinned, not self-confirming. Source restored and verified
+  byte-identical to the candidate afterwards.
+- Infra restriction (not a defect): the jj release CDN
+  (release-assets.githubusercontent.com) and crates.io are
+  connection-refused from this sandbox, so the 13 recorded-fixture tests
+  cannot run against a real jj binary here; real-binary execution is the
+  CI test job's behavior on every push (verifier to confirm on the exact
+  head: the 13 fixture tests passing, not skipped, under
+  GYRE_JJ_TESTS_MUST_RUN=1).
+
+Notes (not findings):
+
+- Plan item 3's "set the conflict state on the agent's MergeQueueEntry" is
+  realized as the MR-level `has_conflicts = Some(true)` flag (consumed by
+  the API layer) plus SpeculativeConflict/Escalation events with the file
+  list; the queue entry is a transient projection of the MR, and this
+  mapping is documented in the task's Shipped section and was accepted
+  across rounds 3–15.
+- An agent holding two Open MRs targeting the same branch yields two
+  RebaseTargets in one trigger; the second hits the fresh backoff window
+  and defers, replaying later as a no-op rebase onto the same base —
+  benign noise, no correctness impact.
+
+Verdict: **approved** — independent evidence supports the task contract;
+no open findings.
