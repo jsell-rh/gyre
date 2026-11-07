@@ -841,7 +841,7 @@ async fn resolve_source_commit_sha(state: &Arc<AppState>, mr_id: &Id) -> String 
 /// Truncate a string to at most `limit` bytes on a UTF-8 char boundary.
 /// External process output may be multibyte — a fixed byte index would
 /// panic ("byte index N is not a char boundary").
-fn truncate_bytes(s: &str, limit: usize) -> &str {
+pub(crate) fn truncate_bytes(s: &str, limit: usize) -> &str {
     if s.len() <= limit {
         return s;
     }
@@ -911,21 +911,17 @@ async fn run_command_in_dir(
         command.current_dir(dir);
     }
 
-    let result = match tokio::time::timeout(
-        Duration::from_secs(timeout_secs),
-        command.output(),
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(_) => {
-            warn!(cmd = %cmd, timeout_secs, "gate command timed out");
-            return (
-                GateStatus::Failed,
-                format!("timed out after {timeout_secs}s"),
-            );
-        }
-    };
+    let result =
+        match tokio::time::timeout(Duration::from_secs(timeout_secs), command.output()).await {
+            Ok(r) => r,
+            Err(_) => {
+                warn!(cmd = %cmd, timeout_secs, "gate command timed out");
+                return (
+                    GateStatus::Failed,
+                    format!("timed out after {timeout_secs}s"),
+                );
+            }
+        };
 
     match result {
         Ok(output) => {
@@ -1045,12 +1041,9 @@ async fn run_post_merge_gate_commands(
         match &gate.gate_type {
             GateType::TestCommand | GateType::LintCommand => {
                 let timeout = gate.timeout_secs.unwrap_or(AGENT_GATE_TIMEOUT_SECS);
-                let (status, output) = run_command_in_dir(
-                    gate.command.as_deref().unwrap_or("true"),
-                    cwd,
-                    timeout,
-                )
-                .await;
+                let (status, output) =
+                    run_command_in_dir(gate.command.as_deref().unwrap_or("true"), cwd, timeout)
+                        .await;
                 if status == GateStatus::Failed {
                     if gate.required {
                         return Err(format!(

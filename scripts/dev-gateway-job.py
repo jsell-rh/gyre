@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import time
 import re
+import hashlib
 
 
 def invoke(args, timeout=30):
@@ -18,7 +19,23 @@ def invoke(args, timeout=30):
     return result.stdout
 
 
-def login(state):
+def gateway_name():
+    return os.environ.get('GYRE_OPEN_GATEWAY', 'gyre-gyre')
+
+
+def auth_path(state, name):
+    return Path(state) / ('gateway-auth-'+hashlib.sha256(name.encode()).hexdigest()[:12]+'.json')
+
+
+def auth_status(state, name=None):
+    try:
+        return json.loads(auth_path(state,name or gateway_name()).read_text())
+    except (OSError,ValueError):
+        return {}
+
+
+def login(state, force=False, max_age=300):
+    """Coalesce refreshes, retry with backoff, and retain usable cached auth."""
     with (state / "gateway-login.lock").open("a") as lock:
         deadline = time.monotonic() + 30
         while True:
@@ -29,7 +46,50 @@ def login(state):
                 if time.monotonic() >= deadline:
                     raise TimeoutError("gateway authentication lock timed out")
                 time.sleep(0.1)
-        invoke(["gateway", "login", "gyre-gyre"])
+        name=gateway_name()
+        status=auth_status(state,name)
+        now=time.time()
+        def probe():
+            # whoami can describe a local identity without exercising access.
+            # This bounded, read-only request proves the credential is usable.
+            invoke(['-g',name,'sandbox','list','--output','json','--page-size','1'],timeout=15)
+        def save(value):
+            path=auth_path(state,name)
+            temporary=path.with_suffix('.tmp')
+            temporary.write_text(json.dumps(value));temporary.chmod(0o600);temporary.replace(path)
+        if status.get('retry_at',0)>now:
+            if not force:
+                try:
+                    probe()
+                    return
+                except (RuntimeError,OSError,subprocess.TimeoutExpired):
+                    pass
+            raise RuntimeError(f"Gateway login refresh backing off; retry in {int(status['retry_at']-now)+1}s")
+        if not force and now-status.get('refreshed_at',0)<max_age:
+            try:
+                probe()
+                return
+            except (RuntimeError,OSError,subprocess.TimeoutExpired):
+                pass
+        try:
+            invoke(['gateway','login',name])
+            probe()
+        except (RuntimeError,OSError,subprocess.TimeoutExpired) as exc:
+            failures=status.get('failures',0)+1
+            delay=min(300,5*2**min(failures-1,6))
+            value=status | {'gateway':name,'failures':failures,'retry_at':time.time()+delay,
+                            'error_kind':type(exc).__name__,'using_cached':False}
+            if not force:
+                try:
+                    probe()
+                    value['using_cached']=True
+                    save(value)
+                    return
+                except (RuntimeError,OSError,subprocess.TimeoutExpired):
+                    pass
+            save(value)
+            raise RuntimeError(f'Gateway login refresh failed ({type(exc).__name__}); retry in {delay}s') from exc
+        save({'gateway':name,'refreshed_at':time.time(),'failures':0,'retry_at':0,'using_cached':False})
 
 
 def decode_page(value):
@@ -69,7 +129,7 @@ def inventory():
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("sandbox inventory exceeded its overall deadline")
-        args = ["-g", "gyre-gyre", "sandbox", "list", "--output", "json", "--page-size", "100"]
+        args = ["-g", gateway_name(), "sandbox", "list", "--output", "json", "--page-size", "100"]
         if token:
             args += ["--page-token", token]
         output = invoke(args, timeout=min(30, remaining))
@@ -104,7 +164,7 @@ def main():
         else:
             if not args.sandbox:
                 parser.error("delete requires --sandbox")
-            invoke(["-g", "gyre-gyre", "sandbox", "delete", args.sandbox], timeout=90)
+            invoke(["-g", gateway_name(), "sandbox", "delete", args.sandbox], timeout=90)
             result = {"ok": True}
     except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
         result = {"ok": False, "error": str(exc)}

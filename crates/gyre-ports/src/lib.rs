@@ -3,7 +3,6 @@
 //! Ports are pure interfaces. Implementations live in `gyre-adapters`.
 //! Domain logic depends only on these traits, never on concrete adapters.
 
-pub mod activity;
 pub mod agent;
 pub mod agent_tracking;
 pub mod analytics;
@@ -47,6 +46,7 @@ pub mod secret;
 pub mod spawn_log;
 pub mod spec_approval;
 pub mod spec_approval_event_repo;
+pub mod spec_assertion_result_repo;
 pub mod spec_ledger_repo;
 pub mod spec_policy_repo;
 pub mod storage;
@@ -61,7 +61,6 @@ pub mod user_workspace_state;
 pub mod workspace;
 pub mod workspace_membership;
 
-pub use activity::{ActivityQuery, ActivityRepository};
 pub use agent::AgentRepository;
 pub use agent_tracking::{AgentCommitRepository, WorktreeRepository};
 pub use analytics::{AnalyticsRepository, CostRepository};
@@ -108,6 +107,7 @@ pub use secret::SecretRepository;
 pub use spawn_log::{SpawnLogEntry, SpawnLogRepository};
 pub use spec_approval::SpecApprovalRepository;
 pub use spec_approval_event_repo::SpecApprovalEventRepository;
+pub use spec_assertion_result_repo::SpecAssertionResultRepository;
 pub use spec_ledger_repo::SpecLedgerRepository;
 pub use spec_policy_repo::SpecPolicyRepository;
 pub use storage::StoragePort;

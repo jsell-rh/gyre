@@ -23,7 +23,9 @@ impl WsCtx {
         let base_url = format!("http://127.0.0.1:{port}");
 
         let state = build_state(TOKEN, &base_url, None);
-        abac_middleware::seed_builtin_policies(&state).await;
+        abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed built-in policies");
         let app = build_router(Arc::clone(&state));
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
@@ -394,6 +396,87 @@ async fn explorer_ws_rate_limiting() {
 }
 
 #[tokio::test]
+async fn explorer_ws_status_progression() {
+    let ctx = WsCtx::new().await;
+    let repo_id = ctx.repo_id().await;
+    let (mut sink, mut stream) = ctx.connect(&repo_id).await;
+
+    // No LLM is configured in tests, so the agent takes the no-LLM fallback
+    // path. Expected wire sequence for a message turn (spec §6):
+    //   status(thinking) [from the session loop]
+    //   status(thinking, agent_path=native) [from run_explorer_agent]
+    //   text(done=true) + view_query [from handle_no_llm_fallback]
+    //   status(ready) [from the session loop after the agent completes]
+    // Every observed status value MUST be one of the three spec values —
+    // the frontend maps only those (ExplorerChat.svelte) and silently drops
+    // anything else, leaving the status indicator stale.
+    sink.send(Message::Text(
+        json!({
+            "type": "message",
+            "text": "what is the blast radius of TaskPort?",
+            "canvas_state": {}
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+
+    let mut saw_text_done = false;
+    let mut saw_view_query = false;
+    let mut saw_ready = false;
+    let mut observed_statuses: Vec<String> = Vec::new();
+
+    for _ in 0..30 {
+        let Some(msg) = WsCtx::read_msg(&mut stream).await else {
+            break;
+        };
+        match msg["type"].as_str() {
+            Some("status") => {
+                let status = msg["status"].as_str().unwrap_or_default().to_string();
+                assert!(
+                    status == "thinking" || status == "refining" || status == "ready",
+                    "Off-contract status value on the wire: {status:?} (spec §6: \
+                     thinking | refining | ready)"
+                );
+                observed_statuses.push(status.clone());
+                if status == "ready" {
+                    saw_ready = true;
+                    // ready is the terminal status for the turn
+                    break;
+                }
+            }
+            Some("text") => {
+                if msg["done"] == serde_json::json!(true) {
+                    saw_text_done = true;
+                }
+            }
+            Some("view_query") => {
+                saw_view_query = true;
+            }
+            _ => {} // warnings, pings, etc.
+        }
+    }
+
+    assert!(
+        !observed_statuses.is_empty(),
+        "Should receive at least one status message"
+    );
+    assert!(
+        observed_statuses.iter().any(|s| s == "thinking"),
+        "Should see thinking status while the agent works, got {observed_statuses:?}"
+    );
+    assert!(
+        saw_ready,
+        "Should see terminal ready status, got {observed_statuses:?}"
+    );
+    assert!(saw_text_done, "Should receive final text (done=true)");
+    assert!(
+        saw_view_query,
+        "Should receive a view_query for blast-radius question"
+    );
+}
+
+#[tokio::test]
 async fn explorer_ws_save_view_validation() {
     let ctx = WsCtx::new().await;
     let repo_id = ctx.repo_id().await;
@@ -417,4 +500,62 @@ async fn explorer_ws_save_view_validation() {
     assert!(msg.is_some());
     let msg = msg.unwrap();
     assert_eq!(msg["type"], "error", "Invalid query should produce error");
+}
+
+#[tokio::test]
+async fn explorer_ws_session_limit_is_per_server_instance() {
+    // The per-user concurrent session limit is a property of a server
+    // instance (AppState), not of the OS process. Two servers in the same
+    // process must not evict each other's sessions even for the same
+    // authenticated user - the global dev token authenticates every
+    // connection as the same ("default", "system") principal.
+    let ctx_a = WsCtx::new().await;
+    let ctx_b = WsCtx::new().await;
+    let repo_a = ctx_a.repo_id().await;
+    let repo_b = ctx_b.repo_id().await;
+
+    // Fill server A up to the per-user cap (default: 3 concurrent sessions).
+    let (mut sink1, mut stream1) = ctx_a.connect(&repo_a).await;
+    let (_sink2, _stream2) = ctx_a.connect(&repo_a).await;
+    let (_sink3, _stream3) = ctx_a.connect(&repo_a).await;
+
+    // A same-user connection on server B (same process) must NOT evict
+    // server A's oldest session.
+    let (_sink_b, _stream_b) = ctx_b.connect(&repo_b).await;
+    // Give a buggy (process-global) registry time to process the eviction
+    // before probing session 1.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    sink1
+        .send(Message::Text(json!({"type": "list_views"}).to_string()))
+        .await
+        .unwrap();
+    let msg = WsCtx::read_msg_skip_warnings(&mut stream1).await;
+    assert!(
+        msg.as_ref().is_some_and(|m| m["type"] == "views"),
+        "Session on server A must survive a same-user connection on server B; \
+         got {:?}",
+        msg
+    );
+
+    // Within ONE server the cap is still enforced: a 4th connection evicts
+    // the oldest session with a "replaced" error.
+    let (_sink4, _stream4) = ctx_a.connect(&repo_a).await;
+    let mut eviction = None;
+    for _ in 0..10 {
+        match WsCtx::read_msg(&mut stream1).await {
+            Some(m) if m["type"] == "error" => {
+                eviction = Some(m);
+                break;
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    let m = eviction.expect("4th connection on the same server should evict the oldest session");
+    assert!(
+        m["message"].as_str().unwrap().contains("replaced"),
+        "evicted session should report replacement, got: {}",
+        m["message"]
+    );
 }

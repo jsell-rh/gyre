@@ -15,15 +15,22 @@ jobs:
   dev-controller:
     name: Development controller
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/fullsend-dispatcher/go.mod
+          cache-dependency-path: tools/fullsend-dispatcher/go.sum
+      - run: go test -race ./...
+        working-directory: tools/fullsend-dispatcher
       - run: python3 -m unittest discover -s scripts -p 'test_dev*.py'
       - run: python3 -m unittest discover -s scripts -p 'test_pipeline*.py'
       - run: node --test scripts/dashboard/test/*.test.mjs
+      - run: node --test scripts/test/*.test.mjs
 
   fmt:
     name: Format
@@ -91,6 +98,8 @@ jobs:
         run: bash scripts/check-unbounded-external-http.sh || true
       - name: Unwired port-method lint (advisory)
         run: bash scripts/check-unwired-port-methods.sh || true
+      - name: Sandbox sweep artifact lint
+        run: bash scripts/check-sandbox-sweep-artifacts.sh
       - name: ABAC route registry lint
         run: bash scripts/check-abac-route-registry.sh
       - name: Migration version uniqueness lint

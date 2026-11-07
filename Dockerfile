@@ -42,6 +42,11 @@ RUN find crates -name "*.rs" -exec touch {} +
 
 RUN cargo build --release -p gyre-server -p gyre-cli
 
+# ── pyright language server (Python Pass 2, task-074) ────────────────────────
+# Pinned to the release the driver was verified against (1.1.414).
+FROM node:22-bookworm-slim AS pyright
+RUN npm install -g pyright@1.1.414
+
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 
@@ -62,6 +67,29 @@ COPY --from=builder /build/target/release/gyre         /usr/local/bin/gyre
 
 # Copy SPA assets if present (build separately with npm/vite)
 # COPY web/dist /app/web/dist
+
+# Pass 2 semantic extraction prerequisites (specs/system/lsp-call-graph.md §11):
+# the Go toolchain (packages.Load shells out to `go list`) and the committed
+# go-callgraph CHA binary. Rust/TS toolchains are task-073/075 scope.
+COPY --from=golang:1.24-bookworm-slim /usr/local/go /usr/local/go
+ENV PATH="/usr/local/go/bin:${PATH}"
+COPY scripts/go-callgraph/go-callgraph /usr/local/bin/gyre-go-callgraph
+ENV GO_CALLGRAPH_BIN=/usr/local/bin/gyre-go-callgraph
+
+# Python Pass 2 (task-074): node runs the LSP driver script, pyright provides
+# pyright-langserver, and python3 lets pyright resolve the analyzed repo's
+# interpreter. The driver scripts live under the server's working directory
+# (/app), where the adapter's workspace discovery finds them.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libstdc++6 \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
+COPY --from=pyright /usr/local/lib/node_modules/pyright /usr/local/lib/node_modules/pyright
+RUN ln -s /usr/local/lib/node_modules/pyright/langserver.index.js /usr/local/bin/pyright-langserver \
+    && ln -s /usr/local/lib/node_modules/pyright/index.js /usr/local/bin/pyright
+COPY scripts/python-callgraph.sh scripts/python-callgraph-pyright.mjs /app/scripts/
+ENV PYRIGHT_LANGSERVER_BIN=/usr/local/bin/pyright-langserver
 
 # Default data directory
 RUN mkdir -p /data && chown gyre:gyre /data

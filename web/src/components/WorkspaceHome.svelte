@@ -119,6 +119,7 @@
     BudgetWarning: 'budget_warning',
     SpecChanged: 'spec_changed',
     MetaSpecDrift: 'meta_spec_drift',
+    SpecAssertionFailure: 'spec_assertion_failure',
   };
 
   function typeLabel(type) {
@@ -1640,6 +1641,24 @@
                     <ExplorerCanvas
                       nodes={archGraph.nodes ?? []}
                       edges={archGraph.edges ?? []}
+                      onNodeDetail={(node) => {
+                        // Single-click → detail panel with repo metadata
+                        // (ui-layout.md §5 Workspace Scope: "Click a repo node →
+                        // detail panel shows repo metadata").
+                        if (!node) return;
+                        openDetailPanel?.({ type: 'repo', id: node.repo_id ?? node.id, data: node });
+                      }}
+                      onScopeDrill={(node) => {
+                        // Double-click → drill to next C4 level = repo scope
+                        // (ui-layout.md §3 Drill-Down: scope change, breadcrumb
+                        // updates, URL changes via pushState — App.goToRepo).
+                        const repo = repos.find(r => r.id === node.repo_id);
+                        if (repo) {
+                          onSelectRepo?.(repo, 'architecture');
+                        } else {
+                          toastError(`"${node.name ?? node.id}" is not a repository in this workspace.`);
+                        }
+                      }}
                     />
                   </div>
                 {/if}

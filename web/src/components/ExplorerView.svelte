@@ -1,5 +1,5 @@
 <script>
-  import { getContext, onDestroy } from 'svelte';
+  import { getContext, onDestroy, untrack } from 'svelte';
   import { t } from 'svelte-i18n';
   import { api } from '../lib/api.js';
   import { entityName } from '../lib/entityNames.svelte.js';
@@ -55,11 +55,20 @@
   // ExplorerCanvas tracks canvas-level interactions (click, drill) in
   // canvasState.recent_interactions.  ExplorerView adds higher-level
   // interactions (search, load_view) so the LLM has full context.
-  function pushInteraction(label) {
+  function pushInteraction(record) {
     const existing = explorerCanvasState?.recent_interactions ?? [];
-    const updated = [...existing, label].slice(-10);
+    const updated = [...existing, record].slice(-10);
     explorerCanvasState = { ...explorerCanvasState, recent_interactions: updated };
   }
+
+  // §10 Interaction Context: the active view query is part of the canvas
+  // state sent with each message, so the LLM knows what view is currently
+  // applied ("what about this one?" can build on the active query).
+  $effect(() => {
+    const q = activeViewQuery;
+    const cs = untrack(() => explorerCanvasState);
+    explorerCanvasState = { ...cs, active_query: q };
+  });
 
   // ── Dynamic welcome suggestions (vision.md Principle 6: challenge ceremony) ──
   // Compute context-aware suggestions from the graph so the user doesn't need
@@ -205,7 +214,13 @@
         assertionsLoading = true;
         api.checkSpecAssertions(selectedRepoId, specPath, content)
           .then(result => { specAssertionResults = result?.assertions ?? []; })
-          .catch(() => { specAssertionResults = []; })
+          .catch(() => {
+            // Live check unavailable — fall back to the results persisted by
+            // the last push's knowledge-graph check (§9).
+            api.getSpecAssertionResults(selectedRepoId, specPath)
+              .then(result => { specAssertionResults = result?.assertions ?? []; })
+              .catch(() => { specAssertionResults = []; });
+          })
           .finally(() => { assertionsLoading = false; });
       }
       // Auto-highlight governed code on canvas (spec→code navigation, Vision §3)
@@ -681,6 +696,8 @@
         return;
       }
       activeViewQuery = parsed;
+      // §10: user-composed JSON queries are query interactions
+      pushInteraction({ action: 'query', detail: parsed.scope.type });
     } catch (e) {
       queryEditorError = `Invalid JSON: ${e.message}`;
     }
@@ -739,11 +756,30 @@
     }
   }
 
+  /** Read the drilled repo name from the current URL (?repo=name), or null.
+   *  Scope drill per ui-layout.md §3: selectRepo pushes this param; reading
+   *  it back makes the drilled state deep-linkable on reload/refresh and
+   *  lets popstate (browser Back/Forward) keep the view in sync with the
+   *  URL instead of drifting. */
+  function drilledRepoFromUrl() {
+    try {
+      const param = new URL(window.location.href).searchParams.get('repo');
+      return param || null;
+    } catch {
+      return null;
+    }
+  }
+
   function selectRepo(repo) {
-    // In workspace-scope mode, selecting a repo loads its graph in this view
+    // In workspace-scope mode, selecting a repo loads its graph in this view.
+    // Scope drill per ui-layout.md §3: URL updates via pushState (no reload),
+    // so the drilled state is deep-linkable and Back returns to the repo list.
     selectedRepoId = repo.id;
     showingRepoGraph = true;
     clearConceptSearch();
+    const url = new URL(window.location.href);
+    url.searchParams.set('repo', repo.name ?? repo.id);
+    window.history.pushState(window.history.state, '', url.toString());
     loadGraph(repo.id);
   }
 
@@ -752,7 +788,61 @@
     selectedRepoId = '';
     graph = null;
     graphError = null;
+    // Pop the drill URL entry pushed by selectRepo (Back from drilled state)
+    const url = new URL(window.location.href);
+    if (url.searchParams.has('repo')) {
+      url.searchParams.delete('repo');
+      window.history.pushState(window.history.state, '', url.toString());
+    }
   }
+
+  // Restore the drilled repo from ?repo= once the workspace repo list is
+  // available (repo name -> id resolution needs the loaded list). Runs only
+  // at workspace scope with a drill param present; the mount-time restore
+  // deliberately does NOT push another history entry - the URL is already
+  // the drilled one.
+  let drillRestored = false;
+  $effect(() => {
+    if (drillRestored || scopeType !== 'workspace' || wsReposLoading || !wsRepos.length) return;
+    const name = drilledRepoFromUrl();
+    if (!name) return;
+    const repo = wsRepos.find(r => (r.name ?? r.id) === name);
+    if (!repo) return;
+    drillRestored = true;
+    selectedRepoId = repo.id;
+    showingRepoGraph = true;
+    clearConceptSearch();
+    loadGraph(repo.id);
+  });
+
+  // Browser Back/Forward (popstate): keep the view in sync with the URL.
+  // App-level popstate handles mode changes; this handles the drill param
+  // within the explorer view. Back from a drilled state (param gone) returns
+  // to the repo list; Forward re-enters the drilled graph.
+  $effect(() => {
+    const onPopstate = () => {
+      if (scopeType !== 'workspace') return;
+      const name = drilledRepoFromUrl();
+      if (!name) {
+        if (showingRepoGraph) {
+          showingRepoGraph = false;
+          selectedRepoId = '';
+          graph = null;
+          graphError = null;
+        }
+        return;
+      }
+      const repo = wsRepos.find(r => (r.name ?? r.id) === name);
+      if (repo && (!showingRepoGraph || selectedRepoId !== repo.id)) {
+        selectedRepoId = repo.id;
+        showingRepoGraph = true;
+        clearConceptSearch();
+        loadGraph(repo.id);
+      }
+    };
+    window.addEventListener('popstate', onPopstate);
+    return () => window.removeEventListener('popstate', onPopstate);
+  });
 
   async function loadRepos() {
     reposLoading = true;
@@ -1315,12 +1405,12 @@
               {/if}
               <ExplorerCanvas
                 repoId={selectedRepoId}
+                rootLabel={repos.find(r => r.id === selectedRepoId)?.name ?? ''}
                 nodes={effectiveGraph.nodes ?? []}
                 edges={effectiveGraph.edges ?? []}
                 activeQuery={activeViewQuery}
-                filter={explorerFilter}
-                lens={explorerLens}
-                filters={null}
+                bind:filter={explorerFilter}
+                bind:lens={explorerLens}
                 bind:canvasState={explorerCanvasState}
                 onNodeDetail={(n) => {
                   detailNode = n;
@@ -1343,7 +1433,7 @@
                     detailNode = n;
                   }
                 }}
-                onInteractiveQuery={(q) => { activeViewQuery = q; }}
+                onInteractiveQuery={(q) => { activeViewQuery = q; pushInteraction({ action: 'query', detail: 'interactive' }); }}
                 ghostOverlays={mergedGhostOverlays}
                 {traceData}
                 queryResult={viewQueryResult}
@@ -1555,7 +1645,7 @@
                   edges={graph.edges ?? []}
                   onClose={() => { detailNode = null; highlightedSpanId = null; }}
                   onNavigate={(n) => { detailNode = n; }}
-                  onInteractiveQuery={(q) => { activeViewQuery = q; }}
+                  onInteractiveQuery={(q) => { activeViewQuery = q; pushInteraction({ action: 'query', detail: 'interactive' }); }}
                   lens={explorerLens}
                   traceSpans={traceData?.spans ?? []}
                   onSpanSelect={(span) => { highlightedSpanId = span?.span_id ?? null; }}
@@ -1873,10 +1963,11 @@
                 <ExplorerChat
                   repoId={selectedRepoId}
                   canvasState={explorerCanvasState}
-                  onViewQuery={(q) => { activeViewQuery = q; pushInteraction(`view:${q?.scope?.type ?? 'query'}`); }}
+                  onViewQuery={(q) => { activeViewQuery = q; pushInteraction({ action: 'query', detail: q?.scope?.type ?? 'query' }); }}
                   onOpenSpec={(path) => openSpecEditor(path)}
                   savedViews={explorerSavedViews}
                   onSavedViewsUpdate={(views) => { explorerSavedViews = views; }}
+                  onLoadView={(view) => pushInteraction({ action: 'query', preset: view?.name ?? null })}
                   {graphHints}
                   graphNodes={graph?.nodes ?? []}
                   graphEdges={graph?.edges ?? []}
@@ -2764,6 +2855,8 @@
   }
   .toolchain-warning-dismiss:hover { opacity: 1; background: rgba(245, 158, 11, 0.2); }
 
+  /* Slide-in per ui-layout.md §3 Drill-Down: 200ms ease-out from the right.
+     Width 0→target animates the slide; min-width animates in lockstep. */
   .explorer-detail-area {
     width: 320px;
     min-width: 280px;
@@ -2772,6 +2865,7 @@
     display: flex;
     flex-direction: column;
     border-left: 1px solid var(--color-border);
+    transition: width 200ms ease-out, min-width 200ms ease-out;
   }
 
   .explorer-chat-area {
@@ -2816,6 +2910,7 @@
   }
 
   /* ── Spec Editor slide-out panel ───────────────────────────────── */
+  /* Slide-in per ui-layout.md §3 Drill-Down: 200ms ease-out from the right. */
   .spec-editor-panel {
     width: 420px;
     min-width: 320px;
@@ -2825,6 +2920,7 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    transition: width 200ms ease-out, min-width 200ms ease-out;
   }
 
   .spec-editor-header {

@@ -50,7 +50,9 @@ impl Ctx {
         let base_url = format!("http://127.0.0.1:{port}");
 
         let state = build_state(TOKEN, &base_url, None);
-        abac_middleware::seed_builtin_policies(&state).await;
+        abac_middleware::seed_builtin_policies(&state)
+            .await
+            .expect("seed built-in policies");
         let app = build_router(Arc::clone(&state));
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
@@ -966,14 +968,45 @@ async fn admin_retention_list_and_update() {
     let resp = ctx.get("/api/v1/admin/retention").await;
     assert!(resp.status().is_success());
 
-    // Update retention policies (takes Vec<RetentionPolicy> with data_type and max_age_days)
+    // Update retention policies. The body must be a complete, valid list:
+    // all 7 spec data types, each exactly once, with sane values — a
+    // partial or invalid list is rejected with 400 (retention.rs F4).
     let put_resp = ctx
         .put(
             "/api/v1/admin/retention",
-            json!([{"data_type": "activity", "max_age_days": 30}]),
+            json!([
+                { "data_type": "activity_events", "max_age_days": 60 },
+                { "data_type": "agent_logs", "max_age_days": 14 },
+                { "data_type": "audit_events", "max_age_days": 180 },
+                { "data_type": "snapshots", "max_age_days": u64::MAX, "snapshot_tiers": { "keep_24h": 24, "keep_7d": 7, "keep_4w": 4 } },
+                { "data_type": "attestations", "max_age_days": u64::MAX },
+                { "data_type": "notifications", "max_age_days": 365, "max_age_days_read": 90 },
+                { "data_type": "analytics_events", "max_age_days": 90 }
+            ]),
         )
         .await;
     assert!(put_resp.status().is_success());
+
+    // The update took effect: GET reflects the new value.
+    let updated = ctx.get("/api/v1/admin/retention").await;
+    assert!(updated.status().is_success());
+    let j: serde_json::Value = updated.json().await.unwrap();
+    let activity = j
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["data_type"] == "activity_events")
+        .unwrap();
+    assert_eq!(activity["max_age_days"], 60);
+
+    // An invalid list (unknown data_type) is rejected and changes nothing.
+    let bad = ctx
+        .put(
+            "/api/v1/admin/retention",
+            json!([{ "data_type": "activity", "max_age_days": 30 }]),
+        )
+        .await;
+    assert_eq!(bad.status(), 400);
 }
 
 #[tokio::test]
@@ -1578,7 +1611,9 @@ async fn cors_includes_server_port() {
 
     let base_url = format!("http://127.0.0.1:{port}");
     let state = build_state(TOKEN, &base_url, None);
-    abac_middleware::seed_builtin_policies(&state).await;
+    abac_middleware::seed_builtin_policies(&state)
+        .await
+        .expect("seed built-in policies");
     let app = build_router(Arc::clone(&state));
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 

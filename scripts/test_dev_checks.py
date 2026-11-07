@@ -46,6 +46,7 @@ class CheckIntegrityTest(unittest.TestCase):
         for name in ("check-rustfmt-diff.py", "check-clippy-diff.py"):
             (self.stage / name).write_text("raise SystemExit(0)\n")
         (self.stage / 'dev-static-gate.py').write_text(Path(__file__).with_name('dev-static-gate.py').read_text())
+        (self.stage / 'verifier-script-overlay.py').write_text(Path(__file__).with_name('verifier-script-overlay.py').read_text())
         # Only filesystem locations are redirected; the actual gate runner is
         # executed, including Git restoration and the exemption comparison.
         self.runner = self.stage / "dev-check.sh"
@@ -68,6 +69,32 @@ class CheckIntegrityTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(check.read_text(), "exit 0\n", "candidate tree was not restored after failure")
         self.assertEqual(self.git("status", "--porcelain"), "")
+
+    def test_candidate_deleted_upstream_script_does_not_contaminate_checkout(self):
+        old=self.work/'scripts/python-callgraph.py'
+        old.write_text('print("old extractor")\n')
+        self.commit('upstream extractor')
+        old.unlink()
+        self.commit('candidate removes obsolete extractor')
+        result=subprocess.run(['bash',str(self.runner)],capture_output=True,text=True,env=self.env)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertFalse(old.exists())
+        self.assertEqual(self.git('status','--porcelain'),'')
+
+    def test_overlay_does_not_erase_unexpected_mutation_of_a_restored_file(self):
+        old=self.work/'scripts/python-callgraph.py'
+        old.write_text('print("old extractor")\n')
+        self.commit('upstream extractor')
+        old.unlink()
+        self.commit('candidate removes extractor')
+        helper=self.stage/'verifier-script-overlay.py';manifest=self.stage/'overlay.json'
+        import sys
+        subprocess.run([sys.executable,str(helper),'begin',str(manifest)],cwd=self.work,check=True)
+        old.write_text('unexpected generated source\n')
+        result=subprocess.run([sys.executable,str(helper),'finish',str(manifest)],cwd=self.work,capture_output=True,text=True)
+        self.assertEqual(result.returncode,77)
+        self.assertIn('modified',result.stdout)
+        self.assertEqual(old.read_text(),'unexpected generated source\n')
 
     def test_whitespace_failure_requests_implementation_repair(self):
         (self.work / "review.md").write_text("review with trailing whitespace  \n")
@@ -103,6 +130,19 @@ class CheckIntegrityTest(unittest.TestCase):
         self.assertEqual(result.returncode, 81, result.stdout + result.stderr)
         self.assertIn('GYRE_BASELINE_FAILURE_JSON', result.stdout)
         self.assertEqual(self.git('status', '--porcelain'), '')
+
+    def test_candidate_download_failure_is_infrastructure_without_baseline_probe(self):
+        probe = self.root / 'network-probe.py'
+        probe.write_text('import sys\nfrom pathlib import Path\n'
+                         f'p=Path({str(self.root / "invocations")!r})\n'
+                         'p.write_text(p.read_text()+"called\\n" if p.exists() else "called\\n")\n'
+                         'print("error: Could not connect to server", file=sys.stderr)\nraise SystemExit(1)\n')
+        import sys
+        result = subprocess.run([sys.executable, str(self.stage / 'dev-static-gate.py'), self.git('rev-parse', 'HEAD'),
+                                 sys.executable, str(probe)], cwd=self.work, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 77, result.stdout + result.stderr)
+        self.assertEqual((self.root / 'invocations').read_text(), 'called\n')
+        self.assertNotIn('GYRE_BASELINE_FAILURE_JSON', result.stdout)
 
 
 if __name__ == "__main__":

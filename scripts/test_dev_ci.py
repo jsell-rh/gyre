@@ -70,6 +70,58 @@ class GitHubChecksTest(unittest.TestCase):
         self.assertEqual(self.observe(), {'status': 'infrastructure', 'runs': [10]})
         self.assertEqual(len(self.calls), 1)
 
+    def test_completed_failure_is_not_hidden_by_a_pending_sibling_check(self):
+        self.pr['statusCheckRollup']=[self.check('FAILURE'),self.check(None,'IN_PROGRESS')]
+        self.logs={'10':'tests/e2e/app.spec.js:4:1 › broken feature\n'}
+        observed=self.observe()
+        self.assertEqual(observed['status'],'candidate_failed')
+        self.assertIn('broken feature',Path(observed['candidate_log']).read_text())
+
+    def test_missing_or_unknown_completed_conclusion_is_not_a_code_failure(self):
+        for conclusion in (None,'UNKNOWN','ACTION_REQUIRED'):
+            self.pr['statusCheckRollup']=[self.check(conclusion)]
+            self.assertEqual(self.observe()['status'],'pending')
+
+    def test_confirmed_merge_conflicts_are_actionable_independently_of_ci_readiness(self):
+        self.pr.update(mergeStateStatus='DIRTY',mergeable='CONFLICTING',baseRefOid='c'*40)
+        for checks in ([],[self.check()],[self.check(None,'IN_PROGRESS')],[self.check('FAILURE')]):
+            with self.subTest(checks=checks):
+                self.pr['statusCheckRollup']=checks
+                observed=self.observe()
+                self.assertEqual(observed['status'],'merge_conflict')
+                self.assertEqual(observed['head'],self.head)
+                self.assertEqual(observed['base'],'c'*40)
+                self.assertEqual(observed['verified_base'],self.base)
+        self.pr.update(mergeable='UNKNOWN',statusCheckRollup=[])
+        self.assertEqual(self.observe()['status'],'pending')
+
+    def test_contradictory_status_requires_current_exact_head_workflow_and_job(self):
+        check = self.check('SUCCESS','IN_PROGRESS') | {'completedAt':'2026-11-05T11:07:44Z'}
+        self.pr['statusCheckRollup'] = [check]
+        workflow = {'id':10,'head_sha':self.head,'status':'completed','conclusion':'success','run_attempt':1}
+        job = {'id':100,'run_id':10,'head_sha':self.head,'name':'e2e','run_attempt':1,
+               'status':'in_progress','conclusion':'success','completed_at':check['completedAt']}
+        def run(*args,**kwargs):
+            value = workflow if args[-1].endswith('/runs/10') else job
+            return subprocess.CompletedProcess(args,0,json.dumps(value),'')
+        fixed, evidence = ci.reconcile_checks(run,'https://github.com/example/repo/pull/1',self.head,self.pr)
+        self.assertEqual(ci.check_sets(fixed),([],[],[]))
+        self.assertEqual(evidence[0]['head'],self.head)
+        self.assertEqual(check['status'],'IN_PROGRESS')  # preserve the raw observation
+        for target,field,value in [(workflow,'head_sha',self.base),(workflow,'status','in_progress'),
+                                   (workflow,'run_attempt',2),(job,'head_sha',self.base),
+                                   (job,'completed_at',None),(job,'conclusion','failure'),
+                                   (job,'run_id',11),(job,'name','different-check')]:
+            with self.subTest(field=field,value=value):
+                previous=target[field];target[field]=value
+                unresolved,evidence=ci.reconcile_checks(run,'https://github.com/example/repo/pull/1',self.head,self.pr)
+                self.assertEqual(len(ci.check_sets(unresolved)[0]),1)
+                self.assertEqual(evidence,[])
+                target[field]=previous
+        check['conclusion']='FAILURE';job['conclusion']='failure'
+        failed,_=ci.reconcile_checks(run,'https://github.com/example/repo/pull/1',self.head,self.pr)
+        self.assertEqual(len(ci.check_sets(failed)[1]),1)
+
     def test_repair_evidence_separates_current_candidate_from_old_baseline(self):
         self.pr['statusCheckRollup'] = [self.check('FAILURE')]
         self.baseline = [{'head_sha': self.base, 'workflow_id': 5, 'status': 'completed',

@@ -160,6 +160,32 @@ enum Commands {
         #[arg(long)]
         workspace: Option<String>,
     },
+
+    /// Full-text search across all entities (specs, tasks, MRs, commits, agents)
+    Search {
+        /// Search query — supports quoted phrases and facet:value syntax
+        /// (e.g. "merge queue" type:spec status:approved)
+        query: Option<String>,
+        /// Filter by entity type (spec, task, mr, commit, agent)
+        #[arg(long, short = 't')]
+        r#type: Option<String>,
+        /// Filter by status
+        #[arg(long)]
+        status: Option<String>,
+        /// Filter by workspace slug
+        #[arg(long, short = 'w')]
+        workspace: Option<String>,
+        /// Only results since this time (e.g., 7d, 2026-03-01)
+        #[arg(long)]
+        since: Option<String>,
+        /// Autocomplete mode — return suggestions for the given prefix
+        #[arg(long)]
+        suggest: Option<String>,
+        /// Maximum results to return
+        #[arg(long, default_value = "20")]
+        limit: usize,
+    },
+
     /// Show system trace for a merge request
     Trace {
         /// Merge request ID
@@ -185,6 +211,15 @@ enum Commands {
     Repo {
         #[command(subcommand)]
         command: RepoCommands,
+    },
+    /// Budget governance: show usage and set limits
+    ///
+    /// The budget governance boundary is the workspace — repo scope (the
+    /// default) resolves the current repo's owning workspace and operates on
+    /// that workspace's budget (platform-model.md §5 CLI).
+    Budget {
+        #[command(subcommand)]
+        command: BudgetCommands,
     },
 }
 
@@ -418,6 +453,72 @@ enum DepsCommands {
     Acknowledge {
         /// Breaking change ID
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum BudgetCommands {
+    /// Show budget limits and real-time usage.
+    ///
+    /// With no flags, resolves the current repo's owning workspace from the
+    /// git remote and shows that workspace's budget — there is no separate
+    /// repo-level budget store; repo scope maps to the owning workspace.
+    /// `--workspace` scopes to a workspace (named via --workspace-name, else
+    /// inferred from the git remote). `--tenant` shows the tenant-wide
+    /// summary (Admin only).
+    Show {
+        /// Show workspace-level usage (the named/current workspace)
+        #[arg(long, conflicts_with = "tenant")]
+        workspace: bool,
+        /// Show tenant-level usage summary (Admin only)
+        #[arg(long, conflicts_with = "workspace")]
+        tenant: bool,
+        /// Workspace slug to target (with --workspace; without it, the
+        /// workspace is inferred from the git remote)
+        #[arg(long)]
+        workspace_name: Option<String>,
+        /// Repository name whose owning workspace to target (validated
+        /// against the resolved workspace; requires --workspace-name or a
+        /// gyre git remote)
+        #[arg(long)]
+        repo: Option<String>,
+    },
+    /// Set budget limits (Admin only).
+    ///
+    /// With no flags, sets limits on the current repo's owning workspace
+    /// (resolved from the git remote — repo scope maps to the owning
+    /// workspace; there is no repo-level budget store). `--workspace`
+    /// targets a workspace named via --workspace-name (or inferred from the
+    /// git remote). Omitted limits keep their current values. Setting
+    /// tenant-level limits is not supported by the server API.
+    Set {
+        /// Set limits on a workspace (the named/current one)
+        #[arg(long, conflicts_with = "tenant")]
+        workspace: bool,
+        /// Tenant scope (not supported for set — no tenant-level set endpoint)
+        #[arg(long, conflicts_with = "workspace")]
+        tenant: bool,
+        /// Max LLM tokens per day
+        #[arg(long)]
+        llm_tokens: Option<u64>,
+        /// Max LLM cost per day (USD)
+        #[arg(long)]
+        llm_cost: Option<f64>,
+        /// Max concurrent agents
+        #[arg(long)]
+        max_agents: Option<u32>,
+        /// Max agent lifetime in seconds
+        #[arg(long)]
+        max_agent_lifetime_secs: Option<u64>,
+        /// Workspace slug to target (with --workspace; without it, the
+        /// workspace is inferred from the git remote)
+        #[arg(long)]
+        workspace_name: Option<String>,
+        /// Repository name whose owning workspace to target (validated
+        /// against the resolved workspace; requires --workspace-name or a
+        /// gyre git remote)
+        #[arg(long)]
+        repo: Option<String>,
     },
 }
 
@@ -937,6 +1038,93 @@ async fn main() -> Result<()> {
                     let confidence = n["spec_confidence"].as_str().unwrap_or("None");
                     let spec = n["spec_path"].as_str().unwrap_or("-");
                     println!("{ntype:<12} {name:<30} {qname:<50} {confidence:<10} {spec}");
+                }
+            }
+        }
+
+        Commands::Search {
+            query,
+            r#type,
+            status,
+            workspace,
+            since,
+            suggest,
+            limit,
+        } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+
+            let status_filter = status.as_deref().map(str::trim).filter(|s| !s.is_empty());
+            let since_cutoff = match since.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                Some(s) => Some(parse_since(s).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "invalid --since value '{s}' (expected <N><s|m|h|d|w> such as 7d, or a date like 2026-03-01)"
+                    )
+                })?),
+                None => None,
+            };
+
+            // Autocomplete: the dedicated /search/suggest endpoint
+            // (search.md §API, task-153) is not implemented yet; fall back
+            // to a regular search over the prefix and keep title-prefix
+            // matches (see `collect_suggestions`).
+            let q = match suggest.as_deref() {
+                Some(p) if !p.trim().is_empty() => p.trim().to_string(),
+                _ => query.as_deref().unwrap_or_default().trim().to_string(),
+            };
+
+            if q.is_empty() {
+                println!("No search query given. Usage: gyre search <query> [--type spec] [--status approved] [--workspace slug] [--since 7d] [--suggest prefix] [--limit N]");
+            } else {
+                let workspace_id = match &workspace {
+                    Some(slug) => Some(api.resolve_workspace_slug(slug).await?),
+                    None => None,
+                };
+                // `--type`/`--workspace` are enforced server-side
+                // (entity_type / workspace_id params on GET /api/v1/search).
+                // `--status`/`--since` filter client-side against live
+                // entity state, so over-fetch candidates before filtering;
+                // the server caps any limit at 100, which bounds how many
+                // candidates a filtered search can scan.
+                let filtering = status_filter.is_some() || since_cutoff.is_some();
+                let fetch_limit = if filtering { limit.max(100) } else { limit };
+                let entity_type = r#type.as_deref().map(str::trim).filter(|t| !t.is_empty());
+                let mut response = api
+                    .search(&q, entity_type, workspace_id.as_deref(), fetch_limit)
+                    .await?;
+
+                if filtering {
+                    // Search index facets freeze at create time (the index
+                    // write sites run only on entity creation), so resolve
+                    // live status/recency per result before filtering.
+                    let mut kept: Vec<client::SearchResult> = Vec::new();
+                    let mut unresolvable = 0usize;
+                    for r in &response.results {
+                        let live = live_entity_state(&api, r).await;
+                        if live.unavailable {
+                            unresolvable += 1;
+                        }
+                        if result_matches_filters(status_filter, since_cutoff, &live) {
+                            kept.push(r.clone());
+                        }
+                    }
+                    if unresolvable > 0 {
+                        eprintln!(
+                            "note: {unresolvable} result(s) excluded — live status/recency \
+                             could not be resolved for their entity type (spec/commit have \
+                             no detail endpoint yet, or the record was deleted)"
+                        );
+                    }
+                    response.total = kept.len();
+                    kept.truncate(limit);
+                    response.results = kept;
+                }
+
+                if let Some(prefix) = suggest.as_deref() {
+                    print_search_suggestions(prefix, &response);
+                } else {
+                    print_search_results(&response);
                 }
             }
         }
@@ -1479,6 +1667,69 @@ async fn main() -> Result<()> {
                 }
             },
         },
+
+        Commands::Budget { command } => {
+            let cfg = config::Config::load()?;
+            let token = cfg.require_token()?;
+            let api = client::GyreClient::new(cfg.server.clone(), token.to_string());
+
+            match command {
+                BudgetCommands::Show {
+                    workspace: _,
+                    tenant,
+                    workspace_name,
+                    repo,
+                } => {
+                    if tenant {
+                        let summary = api.budget_summary().await?;
+                        print_tenant_budget_summary(&summary);
+                    } else {
+                        // Repo scope maps to the owning workspace: resolve the
+                        // workspace from --workspace-name or the git remote
+                        // (same helpers `gyre explore`/`gyre deps` use).
+                        let ws_id = resolve_budget_workspace(
+                            &api,
+                            workspace_name.as_deref(),
+                            repo.as_deref(),
+                        )
+                        .await?;
+                        let budget = api.get_workspace_budget(&ws_id).await?;
+                        print_workspace_budget(&budget);
+                    }
+                }
+
+                BudgetCommands::Set {
+                    workspace: _,
+                    tenant,
+                    llm_tokens,
+                    llm_cost,
+                    max_agents,
+                    max_agent_lifetime_secs,
+                    workspace_name,
+                    repo,
+                } => {
+                    if tenant {
+                        anyhow::bail!(
+                            "tenant-level budget limits cannot be set: the server API only \
+                             supports setting workspace budgets (PUT /api/v1/workspaces/:id/budget)"
+                        );
+                    }
+                    // run_budget_set validates --llm-cost before any network
+                    // I/O, then resolves the workspace and fetch-merge-puts.
+                    let updated = run_budget_set(
+                        &api,
+                        workspace_name.as_deref(),
+                        repo.as_deref(),
+                        llm_tokens,
+                        llm_cost,
+                        max_agents,
+                        max_agent_lifetime_secs,
+                    )
+                    .await?;
+                    print_workspace_budget(&updated);
+                }
+            }
+        }
     }
 
     Ok(())
@@ -1547,7 +1798,9 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
             );
         }
         if args.admin_user.is_some() {
-            anyhow::bail!("--dev cannot be combined with --admin-user (dev mode uses static tokens)");
+            anyhow::bail!(
+                "--dev cannot be combined with --admin-user (dev mode uses static tokens)"
+            );
         }
         if args.oidc_issuer.is_some() {
             anyhow::bail!("--dev cannot be combined with --oidc-issuer (dev mode skips OIDC)");
@@ -1558,7 +1811,10 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
 
     let repo_name = args.repo.clone().unwrap_or_else(|| "main".to_string());
     let tenant_name = args.tenant.clone().unwrap_or_else(|| "dev".to_string());
-    let workspace_name = args.workspace.clone().unwrap_or_else(|| "default".to_string());
+    let workspace_name = args
+        .workspace
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
     let repo_path = args.repo_path.as_deref().map(std::path::PathBuf::from);
 
     let api = client::GyreClient::new(args.server.clone(), args.token.clone());
@@ -1576,7 +1832,10 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
     if health["status"].as_str() != Some("ok") {
         anyhow::bail!("server health check returned unexpected status: {health}");
     }
-    println!("  Server healthy (version {}).", health["version"].as_str().unwrap_or("?"));
+    println!(
+        "  Server healthy (version {}).",
+        health["version"].as_str().unwrap_or("?")
+    );
 
     let mut step = StepTracker::new("create tenant");
 
@@ -1592,7 +1851,10 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
         }
         Err(create_err) => match api.find_tenant_by_slug(&tenant_slug).await {
             Ok(Some(existing)) => {
-                println!("  Tenant '{}' already exists ({}) - reusing", existing.name, existing.id);
+                println!(
+                    "  Tenant '{}' already exists ({}) - reusing",
+                    existing.name, existing.id
+                );
                 existing
             }
             _ => return Err(step.fail(create_err)),
@@ -1617,9 +1879,11 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
                     agent_name: Some(created.user.username.clone()),
                 };
                 cfg.save()?;
-                println!("  Admin user '{}' created; credentials saved to {}",
+                println!(
+                    "  Admin user '{}' created; credentials saved to {}",
                     created.user.username,
-                    config::Config::path().display());
+                    config::Config::path().display()
+                );
                 // Continue authenticating as the new admin via its API key.
                 client_api =
                     client::GyreClient::new(args.server.clone(), created.api_key.key.clone());
@@ -1634,7 +1898,9 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
                     .filter(|t| !t.is_empty());
                 match reuse {
                     Some(token) => {
-                        println!("  Admin user '{username}' already exists - reusing saved credentials");
+                        println!(
+                            "  Admin user '{username}' already exists - reusing saved credentials"
+                        );
                         summary.admin_username = Some(username.to_string());
                         client_api = client::GyreClient::new(args.server.clone(), token);
                     }
@@ -1674,7 +1940,10 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
     step.advance("register repo");
 
     // ── Step 4: add repo (resume: reuse existing by name) ──
-    let repo = match client_api.create_repo(&summary.workspace_id, &repo_name).await {
+    let repo = match client_api
+        .create_repo(&summary.workspace_id, &repo_name)
+        .await
+    {
         Ok(r) => {
             println!("  Repo '{}' created ({})", r.name, r.id);
             r
@@ -1684,7 +1953,10 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
             .await
         {
             Ok(Some(existing)) => {
-                println!("  Repo '{}' already exists ({}) - reusing", existing.name, existing.id);
+                println!(
+                    "  Repo '{}' already exists ({}) - reusing",
+                    existing.name, existing.id
+                );
                 existing
             }
             _ => return Err(step.fail(create_err)),
@@ -1712,7 +1984,10 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
                     )
                     .await
                     .map_err(|e| step.fail(e))?;
-                client_api.approve_persona(&created.id).await.map_err(|e| step.fail(e))?;
+                client_api
+                    .approve_persona(&created.id)
+                    .await
+                    .map_err(|e| step.fail(e))?;
             }
         }
         summary.personas_registered.push(persona.slug.to_string());
@@ -1726,15 +2001,24 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
     // ── Step 6: spec registry (report-only; sync happens on push) ──
     match &repo_path {
         Some(path) if path.join("specs").join("manifest.yaml").exists() => {
-            println!("  Spec manifest found at {} - ledger syncs on push to the default branch",
-                path.join("specs").join("manifest.yaml").display());
+            println!(
+                "  Spec manifest found at {} - ledger syncs on push to the default branch",
+                path.join("specs").join("manifest.yaml").display()
+            );
         }
-        _ => println!("  No spec manifest found - spec registry stays empty until specs are pushed"),
+        _ => {
+            println!("  No spec manifest found - spec registry stays empty until specs are pushed")
+        }
     }
     if args.starter_kit {
-        let target = repo_path
-            .clone()
-            .unwrap_or_else(|| std::path::PathBuf::from(&repo_name));
+        // A bare `repo_name` here would default to a RELATIVE path resolved
+        // against the process cwd (task-099 F6) — the starter kit must land
+        // at an explicit, operator-visible location instead.
+        let target = repo_path.clone().ok_or_else(|| {
+            step.fail(anyhow::anyhow!(
+                "--starter-kit needs --repo-path: pass the directory to write the kit into"
+            ))
+        })?;
         bootstrap::write_starter_kit(&target)?;
         println!("  Starter kit written to {}", target.display());
     }
@@ -1753,7 +2037,10 @@ async fn run_bootstrap(args: BootstrapArgs) -> Result<()> {
     if summary.gates_configured.is_empty() {
         println!("  No default gates detected (no Cargo.toml or check-arch.sh in repo path)");
     } else {
-        println!("  Gates configured: {}", summary.gates_configured.join(", "));
+        println!(
+            "  Gates configured: {}",
+            summary.gates_configured.join(", ")
+        );
     }
     step.advance("spawn repo orchestrator");
 
@@ -1803,6 +2090,302 @@ fn infer_repo_from_git_remote() -> Option<(String, String)> {
         }
     }
     None
+}
+
+/// Resolve the workspace whose budget a `gyre budget` command operates on.
+///
+/// Repo scope maps to the owning workspace (the budget governance boundary
+/// is the workspace; there is no repo-keyed budget store). Resolution reuses
+/// the exact helpers `gyre explore`/`gyre deps` use:
+/// - `--workspace-name <slug>` → `resolve_workspace_slug`
+/// - `--repo <name>` (with a slug or a gyre git remote) → the repo is resolved
+///   inside the workspace to validate it owns the budget target
+/// - no flags → workspace slug inferred from the git remote
+async fn resolve_budget_workspace(
+    api: &client::GyreClient,
+    workspace_name: Option<&str>,
+    repo: Option<&str>,
+) -> Result<String> {
+    match (workspace_name, repo) {
+        (Some(slug), repo_name) => {
+            let wid = api.resolve_workspace_slug(slug).await?;
+            if let Some(name) = repo_name {
+                // Validate the repo belongs to the named workspace.
+                api.resolve_repo_name(&wid, name).await?;
+            }
+            Ok(wid)
+        }
+        (None, Some(name)) => {
+            // Same as `gyre explore --repo`: infer the workspace from the git
+            // remote, then resolve the repo name within it.
+            let (ws_slug, _) = infer_repo_from_git_remote().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "could not infer workspace from git remote. \
+                     Use --workspace-name <slug> --repo <name> to specify."
+                )
+            })?;
+            let wid = api.resolve_workspace_slug(&ws_slug).await?;
+            api.resolve_repo_name(&wid, name).await?;
+            Ok(wid)
+        }
+        (None, None) => {
+            let (ws_slug, _) = infer_repo_from_git_remote().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "could not infer workspace from git remote. \
+                     Run from a gyre-cloned repository, or pass --workspace-name <slug>."
+                )
+            })?;
+            api.resolve_workspace_slug(&ws_slug).await
+        }
+    }
+}
+
+/// Merge `gyre budget set` updates into the current config so unmentioned
+/// limits keep their values (the server PUT replaces the whole config).
+fn merge_budget_updates(
+    current: &client::BudgetConfig,
+    updates: &client::SetBudgetRequest,
+) -> client::SetBudgetRequest {
+    client::SetBudgetRequest {
+        max_tokens_per_day: updates.max_tokens_per_day.or(current.max_tokens_per_day),
+        max_cost_per_day: updates.max_cost_per_day.or(current.max_cost_per_day),
+        max_concurrent_agents: updates
+            .max_concurrent_agents
+            .or(current.max_concurrent_agents),
+        max_agent_lifetime_secs: updates
+            .max_agent_lifetime_secs
+            .or(current.max_agent_lifetime_secs),
+    }
+}
+
+/// Validate the `--llm-cost` input of `gyre budget set` before any request
+/// is sent. Non-finite values (NaN/Infinity) must be rejected because
+/// serde_json serializes them as `null`, which the server would store as
+/// "no limit" — silently clearing a financial governance cap instead of
+/// setting one. Negative amounts are rejected because a cap below zero
+/// can never be exceeded by non-negative usage. A finite ZERO cap is
+/// VALID: it explicitly disables all spending for the day — the server
+/// stores it, the over-budget check blocks any usage above it, and the
+/// CLI display renders it as an explicit `(zero cap)` rather than `none`.
+fn validate_llm_cost(cost: f64) -> anyhow::Result<()> {
+    if !cost.is_finite() {
+        anyhow::bail!(
+            "invalid --llm-cost {cost}: the cost limit must be a finite amount in USD \
+             (NaN or Infinity would be serialized as null and silently clear the limit)"
+        );
+    }
+    if cost < 0.0 {
+        anyhow::bail!(
+            "invalid --llm-cost {cost}: the cost limit must be a non-negative amount in USD \
+             (zero is valid and disables spending)"
+        );
+    }
+    Ok(())
+}
+
+/// Execute `gyre budget set`: validate the requested updates, resolve the
+/// target workspace, then fetch-merge-put (the server PUT replaces the
+/// whole config, so unmentioned limits keep their current values).
+/// Validation runs before any network I/O, so rejected --llm-cost input
+/// can never reach the server — in particular it can never produce the
+/// PUT that mutates the budget.
+async fn run_budget_set(
+    api: &client::GyreClient,
+    workspace_name: Option<&str>,
+    repo: Option<&str>,
+    llm_tokens: Option<u64>,
+    llm_cost: Option<f64>,
+    max_agents: Option<u32>,
+    max_agent_lifetime_secs: Option<u64>,
+) -> anyhow::Result<client::BudgetResponse> {
+    if let Some(cost) = llm_cost {
+        validate_llm_cost(cost)?;
+    }
+    let updates = client::SetBudgetRequest {
+        max_tokens_per_day: llm_tokens,
+        max_cost_per_day: llm_cost,
+        max_concurrent_agents: max_agents,
+        max_agent_lifetime_secs,
+    };
+    if updates == client::SetBudgetRequest::default() {
+        anyhow::bail!(
+            "no limits given: use --llm-tokens, --llm-cost, --max-agents \
+             or --max-agent-lifetime-secs"
+        );
+    }
+    let ws_id = resolve_budget_workspace(api, workspace_name, repo).await?;
+    let current = api.get_workspace_budget(&ws_id).await?;
+    let merged = merge_budget_updates(&current.config, &updates);
+    api.set_workspace_budget(&ws_id, &merged).await
+}
+
+/// "123456 / 500000 (24.7%)" vs "123456 / none" — usage vs limit with
+/// utilization when a limit is set. A zero cap has no utilization ratio to
+/// report (0/0), so it is displayed explicitly instead of as NaN: a zero
+/// cap blocks all usage, so any usage above it is over cap.
+fn budget_usage_line(used: u64, limit: Option<u64>) -> String {
+    match limit {
+        Some(0) => {
+            if used > 0 {
+                format!("{used} / 0 (over cap)")
+            } else {
+                format!("{used} / 0 (zero cap)")
+            }
+        }
+        Some(max) => format!("{used} / {max} ({:.1}%)", used as f64 / max as f64 * 100.0),
+        None => format!("{used} / none"),
+    }
+}
+
+fn budget_cost_line(used: f64, limit: Option<f64>) -> String {
+    match limit {
+        Some(0.0) => {
+            if used > 0.0 {
+                format!("${used:.2} / $0.00 (over cap)")
+            } else {
+                format!("${used:.2} / $0.00 (zero cap)")
+            }
+        }
+        Some(max) => format!("${used:.2} / ${max:.2} ({:.1}%)", used / max * 100.0),
+        None => format!("${used:.2} / none"),
+    }
+}
+
+fn budget_limit_line<T: std::fmt::Display>(limit: Option<T>) -> String {
+    match limit {
+        Some(v) => v.to_string(),
+        None => "none".to_string(),
+    }
+}
+
+fn budget_cost_limit_line(limit: Option<f64>) -> String {
+    match limit {
+        Some(v) => format!("${v:.2}"),
+        None => "none".to_string(),
+    }
+}
+
+/// Print a workspace budget: limits + real-time usage
+/// (`gyre budget show`, `gyre budget set` result).
+fn print_workspace_budget(budget: &client::BudgetResponse) {
+    println!("Budget for {} {}", budget.entity_type, budget.entity_id);
+    println!();
+    println!("Limits:");
+    println!(
+        "  max tokens per day:     {}",
+        budget_limit_line(budget.config.max_tokens_per_day)
+    );
+    println!(
+        "  max cost per day:       {}",
+        budget_cost_limit_line(budget.config.max_cost_per_day)
+    );
+    println!(
+        "  max concurrent agents:  {}",
+        budget_limit_line(budget.config.max_concurrent_agents)
+    );
+    println!(
+        "  max agent lifetime:     {}",
+        budget_limit_line(
+            budget
+                .config
+                .max_agent_lifetime_secs
+                .map(|s| format!("{s}s"))
+        )
+    );
+    println!("Usage today (since {}):", budget.usage.period_start);
+    println!(
+        "  tokens used:   {}",
+        budget_usage_line(
+            budget.usage.tokens_used_today,
+            budget.config.max_tokens_per_day
+        )
+    );
+    println!(
+        "  cost today:    {}",
+        budget_cost_line(budget.usage.cost_today, budget.config.max_cost_per_day)
+    );
+    println!(
+        "  active agents: {}",
+        budget_usage_line(
+            budget.usage.active_agents as u64,
+            budget.config.max_concurrent_agents.map(|a| a as u64),
+        )
+    );
+}
+
+/// Print the tenant-wide budget summary: tenant totals plus a per-workspace
+/// table (`gyre budget show --tenant`).
+fn print_tenant_budget_summary(summary: &client::TenantBudgetSummary) {
+    println!("Tenant budget");
+    println!();
+    println!("Limits:");
+    println!(
+        "  max tokens per day:     {}",
+        budget_limit_line(summary.tenant_config.max_tokens_per_day)
+    );
+    println!(
+        "  max cost per day:       {}",
+        budget_cost_limit_line(summary.tenant_config.max_cost_per_day)
+    );
+    println!(
+        "  max concurrent agents:  {}",
+        budget_limit_line(summary.tenant_config.max_concurrent_agents)
+    );
+    println!(
+        "  max agent lifetime:     {}",
+        budget_limit_line(
+            summary
+                .tenant_config
+                .max_agent_lifetime_secs
+                .map(|s| format!("{s}s"))
+        )
+    );
+    println!("Usage today (since {}):", summary.tenant_usage.period_start);
+    println!(
+        "  tokens used:   {}",
+        budget_usage_line(
+            summary.tenant_usage.tokens_used_today,
+            summary.tenant_config.max_tokens_per_day
+        )
+    );
+    println!(
+        "  cost today:    {}",
+        budget_cost_line(
+            summary.tenant_usage.cost_today,
+            summary.tenant_config.max_cost_per_day
+        )
+    );
+    println!(
+        "  active agents: {}",
+        budget_usage_line(
+            summary.tenant_usage.active_agents as u64,
+            summary
+                .tenant_config
+                .max_concurrent_agents
+                .map(|a| a as u64),
+        )
+    );
+    println!();
+    if summary.workspaces.is_empty() {
+        println!("No workspace budgets configured.");
+        return;
+    }
+    println!("Workspaces:");
+    println!(
+        "{:<38} {:>12} {:>18} {:>14} {:>10}",
+        "ID", "TOKENS", "TOKENS LIMIT", "COST TODAY", "AGENTS"
+    );
+    println!("{}", "-".repeat(96));
+    for ws in &summary.workspaces {
+        println!(
+            "{:<38} {:>12} {:>18} {:>14} {:>10}",
+            ws.entity_id,
+            ws.usage.tokens_used_today,
+            budget_limit_line(ws.config.max_tokens_per_day),
+            format!("${:.2}", ws.usage.cost_today),
+            ws.usage.active_agents
+        );
+    }
 }
 
 /// List notifications, resolving workspace slug and parsing priority range.
@@ -2181,6 +2764,277 @@ fn print_spec_links_table(links: &[serde_json::Value]) {
                 println!("             reason: {reason}");
             }
         }
+    }
+}
+
+/// Render search results as a readable table (search.md §CLI):
+/// one line per result with entity type, title, id, and snippet.
+fn print_search_results(results: &client::SearchResponse) {
+    if results.results.is_empty() {
+        println!("No results for '{}'.", results.query);
+        return;
+    }
+    println!(
+        "Search results for '{}' ({} shown of {} total):",
+        results.query,
+        results.results.len(),
+        results.total
+    );
+    println!("{}", "-".repeat(80));
+    for r in &results.results {
+        let snippet = r.snippet.replace(['\n', '\r'], " ");
+        println!("[{}] {} ({})", r.entity_type, r.title, r.entity_id);
+        if !snippet.is_empty() {
+            println!("      {snippet}");
+        }
+    }
+}
+
+/// Current UNIX time in seconds.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Days from civil date to days since the UNIX epoch (Howard Hinnant's
+/// algorithm — no chrono dependency needed for one date parse).
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64; // [0, 399]
+    let mp = (m + 9) % 12; // [0, 11]
+    let doy = (153 * mp as u64 + 2) / 5 + d as u64 - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146097 + doe as i64 - 719468
+}
+
+/// Parse a relative `--since` duration (`7d`, `12h`, `30m`, `2w`, `45s`)
+/// against `now` (UNIX seconds), returning the cutoff. `now` is a
+/// parameter so tests are deterministic.
+fn parse_since_relative(s: &str, now: u64) -> Option<u64> {
+    let s = s.trim();
+    let mut chars = s.chars();
+    // Relative: <count><unit> where unit ∈ {s, m, h, d, w}. Split on the
+    // last char, not a byte index — a multibyte unit must not panic.
+    let unit = chars.next_back()?;
+    let digits = chars.as_str();
+    let count: u64 = digits.parse().ok()?;
+    let secs = match unit {
+        's' => count,
+        'm' => count.checked_mul(60)?,
+        'h' => count.checked_mul(3600)?,
+        'd' => count.checked_mul(86_400)?,
+        'w' => count.checked_mul(604_800)?,
+        _ => return None,
+    };
+    now.checked_sub(secs)
+}
+
+/// Parse a `--since` argument (search.md §Query Language `since:` facet):
+/// either a relative duration or an ISO date, against `now`.
+fn parse_since_at(s: &str, now: u64) -> Option<u64> {
+    parse_since_relative(s, now).or_else(|| parse_since_date(s))
+}
+
+/// ISO date branch of `--since` (e.g. `2026-03-01` → UTC midnight).
+/// Kept separate from the relative parser so each stays testable in
+/// isolation; `parse_since_at` dispatches on shape.
+fn parse_since_date(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let mut parts = s.splitn(3, '-');
+    let (y, m, d) = (parts.next()?, parts.next()?, parts.next()?);
+    // Strictly zero-padded ISO 8601 calendar date: YYYY-MM-DD. Variable
+    // widths (2026-3-1) are rejected rather than guessed at.
+    if y.len() != 4 || m.len() != 2 || d.len() != 2 {
+        return None;
+    }
+    if !y.bytes().all(|b| b.is_ascii_digit())
+        || !m.bytes().all(|b| b.is_ascii_digit())
+        || !d.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let y: i64 = y.parse().ok()?;
+    let m: u32 = m.parse().ok()?;
+    let d: u32 = d.parse().ok()?;
+    if !is_valid_civil_date(y, m, d) {
+        return None;
+    }
+    let days = days_from_civil(y, m, d);
+    if days < 0 {
+        return None;
+    }
+    Some(days as u64 * 86_400)
+}
+
+/// True when (y, m, d) is a real calendar date (rejects Feb 30, Apr 31,
+/// month 13, ...). Years before 1970 are out of domain for `--since`.
+fn is_valid_civil_date(y: i64, m: u32, d: u32) -> bool {
+    if y < 1970 || !(1..=12).contains(&m) {
+        return false;
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let max_d = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ => {
+            // February.
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+    };
+    (1..=max_d).contains(&d)
+}
+
+/// Parse a `--since` value against the current clock: relative (`7d`)
+/// or ISO date (`2026-03-01`).
+fn parse_since(s: &str) -> Option<u64> {
+    parse_since_at(s, now_secs())
+}
+
+/// Live status/recency of a search result, resolved from the entity's
+/// detail endpoint. The search index is written only at entity creation,
+/// so its `status` facet freezes at the create-time value; `--status` and
+/// `--since` must consult the live record.
+#[derive(Debug, Clone, PartialEq)]
+struct LiveEntityState {
+    /// Current status string (task/mr/agent states; empty when unknown).
+    status: String,
+    /// Most recent activity timestamp (UNIX secs; 0 when unknown).
+    updated_at: u64,
+    /// True when neither field could be resolved for this entity type.
+    unavailable: bool,
+}
+
+/// Fetch the live state behind one search result. Entity types the CLI
+/// cannot query (spec/commit — no detail endpoint on the current API)
+/// return `unavailable`, and the filter treats them conservatively
+/// (see `result_matches_filters`).
+async fn live_entity_state(api: &client::GyreClient, r: &client::SearchResult) -> LiveEntityState {
+    match r.entity_type.as_str() {
+        "task" => match api.get_task(&r.entity_id).await {
+            Ok(t) => LiveEntityState {
+                status: t.status,
+                updated_at: t.updated_at,
+                unavailable: false,
+            },
+            // The entity may have been deleted after indexing; a missing
+            // record can no longer match a status/recency filter.
+            Err(_) => LiveEntityState {
+                status: String::new(),
+                updated_at: 0,
+                unavailable: true,
+            },
+        },
+        "mr" => match api.get_mr(&r.entity_id).await {
+            Ok(mr) => LiveEntityState {
+                status: mr.status,
+                updated_at: mr.updated_at,
+                unavailable: false,
+            },
+            Err(_) => LiveEntityState {
+                status: String::new(),
+                updated_at: 0,
+                unavailable: true,
+            },
+        },
+        "agent" => match api.get_agent(&r.entity_id).await {
+            Ok(a) => {
+                // Agents carry no updated_at; recency is the later of
+                // spawn time and last heartbeat.
+                let updated_at = a.spawned_at.max(a.last_heartbeat.unwrap_or(0));
+                LiveEntityState {
+                    status: a.status,
+                    updated_at,
+                    unavailable: false,
+                }
+            }
+            Err(_) => LiveEntityState {
+                status: String::new(),
+                updated_at: 0,
+                unavailable: true,
+            },
+        },
+        // spec/commit: no detail endpoint to resolve live state from.
+        _ => LiveEntityState {
+            status: String::new(),
+            updated_at: 0,
+            unavailable: true,
+        },
+    }
+}
+
+/// Decide whether one search result passes the `--status`/`--since`
+/// filters, given its live state.
+///
+/// Semantics:
+/// - `--status S`: keep results whose live status equals `S`
+///   (case-insensitive). Results whose live status cannot be resolved
+///   (entity type has no detail endpoint, or the record is gone) are
+///   dropped — an unknown status is not a match.
+/// - `--since T`: keep results with a known last-activity timestamp
+///   at or after `T`. Unknown timestamps drop only when a timestamp
+///   filter is active.
+fn result_matches_filters(
+    status_filter: Option<&str>,
+    since_cutoff: Option<u64>,
+    live: &LiveEntityState,
+) -> bool {
+    // Unresolvable live state (no detail endpoint for the entity type, or
+    // the record is gone) can never satisfy a status or recency claim.
+    if (status_filter.is_some() || since_cutoff.is_some()) && live.unavailable {
+        return false;
+    }
+    if let Some(want) = status_filter {
+        if live.status.to_lowercase() != want.to_lowercase() {
+            return false;
+        }
+    }
+    if let Some(cutoff) = since_cutoff {
+        if live.updated_at < cutoff {
+            return false;
+        }
+    }
+    true
+}
+
+/// Collect autocomplete suggestions for `prefix`: results whose title starts
+/// with the prefix (case-insensitive). The server's search endpoint matches
+/// by substring anywhere in the title or body, so the prefix filter for
+/// autocomplete is applied client-side.
+fn collect_suggestions<'a>(
+    prefix: &str,
+    results: &'a client::SearchResponse,
+) -> Vec<(&'a str, &'a str, &'a str)> {
+    let p = prefix.to_lowercase();
+    results
+        .results
+        .iter()
+        .filter(|r| r.title.to_lowercase().starts_with(&p))
+        .map(|r| {
+            (
+                r.entity_type.as_str(),
+                r.title.as_str(),
+                r.entity_id.as_str(),
+            )
+        })
+        .collect()
+}
+
+/// Render autocomplete suggestions for `prefix` in `type  title  (id)` form.
+fn print_search_suggestions(prefix: &str, results: &client::SearchResponse) {
+    let matches = collect_suggestions(prefix, results);
+    if matches.is_empty() {
+        println!("No suggestions for '{}'.", prefix);
+        return;
+    }
+    for (entity_type, title, entity_id) in &matches {
+        println!("{entity_type}    {title}    ({entity_id})");
     }
 }
 
@@ -2960,6 +3814,281 @@ mod tests {
         }
     }
 
+    // ── Search command tests ────────────────────────────────────────────────
+
+    #[test]
+    fn cli_search_parses() {
+        let args = Cli::try_parse_from(["gyre", "search", "identity security"]);
+        assert!(args.is_ok());
+        if let Commands::Search {
+            query,
+            r#type,
+            status,
+            workspace,
+            since,
+            suggest,
+            limit,
+        } = args.unwrap().command
+        {
+            assert_eq!(query.as_deref(), Some("identity security"));
+            assert!(r#type.is_none());
+            assert!(status.is_none());
+            assert!(workspace.is_none());
+            assert!(since.is_none());
+            assert!(suggest.is_none());
+            assert_eq!(limit, 20);
+        } else {
+            panic!("Expected Search");
+        }
+    }
+
+    #[test]
+    fn cli_search_faceted_parses() {
+        let args = Cli::try_parse_from([
+            "gyre",
+            "search",
+            "--type",
+            "spec",
+            "--status",
+            "approved",
+            "--workspace",
+            "platform-team",
+            "--since",
+            "7d",
+            "--limit",
+            "5",
+            "ABAC",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Search {
+            query,
+            r#type,
+            status,
+            workspace,
+            since,
+            suggest,
+            limit,
+        } = args.unwrap().command
+        {
+            assert_eq!(query.as_deref(), Some("ABAC"));
+            assert_eq!(r#type.as_deref(), Some("spec"));
+            assert_eq!(status.as_deref(), Some("approved"));
+            assert_eq!(workspace.as_deref(), Some("platform-team"));
+            assert_eq!(since.as_deref(), Some("7d"));
+            assert!(suggest.is_none());
+            assert_eq!(limit, 5);
+        } else {
+            panic!("Expected Search");
+        }
+    }
+
+    #[test]
+    fn cli_search_suggest_parses() {
+        let args = Cli::try_parse_from(["gyre", "search", "--suggest", "iden"]);
+        if let Commands::Search { query, suggest, .. } = args.unwrap().command {
+            assert!(query.is_none());
+            assert_eq!(suggest.as_deref(), Some("iden"));
+        } else {
+            panic!("Expected Search");
+        }
+    }
+
+    #[test]
+    fn parse_since_relative_units() {
+        // Fixed `now` keeps the arithmetic observable.
+        let now = 1_000_000_000u64;
+        assert_eq!(parse_since_at("45s", now), Some(now - 45));
+        assert_eq!(parse_since_at("30m", now), Some(now - 1_800));
+        assert_eq!(parse_since_at("12h", now), Some(now - 43_200));
+        assert_eq!(parse_since_at("7d", now), Some(now - 604_800));
+        assert_eq!(parse_since_at("2w", now), Some(now - 1_209_600));
+    }
+
+    #[test]
+    fn parse_since_relative_rejects_junk() {
+        let now = 1_000_000_000u64;
+        // Unknown unit, empty, bare unit, negative, float, and overflow
+        // (a count whose seconds exceed `now` itself) all fail.
+        assert_eq!(parse_since_at("7x", now), None);
+        assert_eq!(parse_since_at("", now), None);
+        assert_eq!(parse_since_at("d", now), None);
+        assert_eq!(parse_since_at("-3d", now), None);
+        assert_eq!(parse_since_at("1.5d", now), None);
+        assert_eq!(parse_since_at("999999999999999999999d", now), None);
+    }
+
+    #[test]
+    fn parse_since_multibyte_unit_does_not_panic() {
+        // Regression: a byte-index split panicked on multibyte input
+        // (`--since é`). It must be a clean parse error, not a crash.
+        let now = 1_000_000_000u64;
+        assert_eq!(parse_since_at("é", now), None);
+        assert_eq!(parse_since_at("7é", now), None);
+        assert_eq!(parse_since_at("café", now), None);
+    }
+
+    #[test]
+    fn parse_since_relative_before_epoch_fails() {
+        // A duration longer than elapsed time since the epoch cannot be
+        // represented as a cutoff; it must be an error, not a wraparound.
+        assert_eq!(parse_since_at("999999w", 1_000_000_000), None);
+    }
+
+    #[test]
+    fn parse_since_iso_date() {
+        // 2026-03-01T00:00:00Z == 1772323200 (verified independently).
+        assert_eq!(parse_since_at("2026-03-01", 0), Some(1_772_323_200));
+        // Leap-year day is a valid date.
+        assert_eq!(parse_since_at("2024-02-29", 0), Some(1_709_164_800));
+    }
+
+    #[test]
+    fn parse_since_iso_date_rejects_invalid() {
+        assert_eq!(parse_since_at("2026-02-30", 0), None); // Feb has 28 days
+        assert_eq!(parse_since_at("2026-13-01", 0), None); // month 13
+        assert_eq!(parse_since_at("2026-04-31", 0), None); // Apr has 30 days
+        assert_eq!(parse_since_at("2023-02-29", 0), None); // not a leap year
+        assert_eq!(parse_since_at("1969-12-31", 0), None); // before epoch
+        assert_eq!(parse_since_at("2026-3-1", 0), None); // not zero-padded
+    }
+
+    #[test]
+    fn result_matches_status_filter() {
+        let live = LiveEntityState {
+            status: "in_progress".into(),
+            updated_at: 1_000,
+            unavailable: false,
+        };
+        // Exact and case-insensitive matches pass; other statuses fail.
+        assert!(result_matches_filters(Some("in_progress"), None, &live));
+        assert!(result_matches_filters(Some("In_Progress"), None, &live));
+        assert!(!result_matches_filters(Some("done"), None, &live));
+        // No filter passes everything.
+        assert!(result_matches_filters(None, None, &live));
+    }
+
+    #[test]
+    fn result_matches_since_filter() {
+        let live = LiveEntityState {
+            status: String::new(),
+            updated_at: 1_000,
+            unavailable: false,
+        };
+        assert!(result_matches_filters(None, Some(1_000), &live)); // boundary: at cutoff
+        assert!(result_matches_filters(None, Some(999), &live));
+        assert!(!result_matches_filters(None, Some(1_001), &live));
+    }
+
+    #[test]
+    fn result_matches_filters_compose_with_and() {
+        let live = LiveEntityState {
+            status: "approved".into(),
+            updated_at: 5_000,
+            unavailable: false,
+        };
+        assert!(result_matches_filters(Some("approved"), Some(4_000), &live));
+        // Status matches but recency does not → dropped.
+        assert!(!result_matches_filters(
+            Some("approved"),
+            Some(6_000),
+            &live
+        ));
+        // Recency matches but status does not → dropped.
+        assert!(!result_matches_filters(Some("open"), Some(4_000), &live));
+    }
+    #[test]
+    fn result_matches_filters_drop_unavailable_state() {
+        // Unresolvable live state (no detail endpoint / deleted entity)
+        // can never satisfy a status or recency claim.
+        let live = LiveEntityState {
+            status: String::new(),
+            updated_at: 0,
+            unavailable: true,
+        };
+        assert!(!result_matches_filters(Some("approved"), None, &live));
+        assert!(!result_matches_filters(None, Some(1), &live));
+        // Without filters, nothing consults live state.
+        assert!(result_matches_filters(None, None, &live));
+    }
+    #[test]
+    fn suggest_filters_to_title_prefix() {
+        let results = client::SearchResponse {
+            query: "iden".into(),
+            total: 3,
+            results: vec![
+                client::SearchResult {
+                    entity_type: "spec".into(),
+                    entity_id: "system/identity-security.md".into(),
+                    title: "Identity & Security".into(),
+                    snippet: String::new(),
+                    score: 3.0,
+                    facets: Default::default(),
+                },
+                client::SearchResult {
+                    entity_type: "task".into(),
+                    entity_id: "task-042".into(),
+                    title: "Coincidental iden-tifier cleanup".into(),
+                    snippet: String::new(),
+                    score: 1.0,
+                    facets: Default::default(),
+                },
+                client::SearchResult {
+                    entity_type: "spec".into(),
+                    entity_id: "system/identity.md".into(),
+                    title: "identity model".into(),
+                    snippet: String::new(),
+                    score: 2.0,
+                    facets: Default::default(),
+                },
+            ],
+        };
+        let suggestions = collect_suggestions("iden", &results);
+        assert_eq!(
+            suggestions,
+            vec![
+                ("spec", "Identity & Security", "system/identity-security.md"),
+                ("spec", "identity model", "system/identity.md"),
+            ]
+        );
+    }
+
+    #[test]
+    fn suggest_prefix_is_case_insensitive() {
+        let results = client::SearchResponse {
+            query: "IDEN".into(),
+            total: 1,
+            results: vec![client::SearchResult {
+                entity_type: "spec".into(),
+                entity_id: "system/identity.md".into(),
+                title: "identity model".into(),
+                snippet: String::new(),
+                score: 2.0,
+                facets: Default::default(),
+            }],
+        };
+        assert_eq!(
+            collect_suggestions("IDEN", &results),
+            vec![("spec", "identity model", "system/identity.md")]
+        );
+    }
+
+    #[test]
+    fn suggest_no_prefix_match_reports_none() {
+        let results = client::SearchResponse {
+            query: "xyz".into(),
+            total: 1,
+            results: vec![client::SearchResult {
+                entity_type: "task".into(),
+                entity_id: "task-001".into(),
+                title: "unrelated".into(),
+                snippet: String::new(),
+                score: 1.0,
+                facets: Default::default(),
+            }],
+        };
+        assert!(collect_suggestions("xyz", &results).is_empty());
+    }
+
     // ── Trace command tests ─────────────────────────────────────────────────
 
     #[test]
@@ -3203,6 +4332,445 @@ mod tests {
         } else {
             panic!("Expected Deps Acknowledge");
         }
+    }
+
+    // ── Budget command tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn cli_budget_show_bare_parses() {
+        // `gyre budget show` — default (repo) scope, resolved to the owning
+        // workspace at runtime.
+        let args = Cli::try_parse_from(["gyre", "budget", "show"]);
+        assert!(args.is_ok());
+        if let Commands::Budget {
+            command:
+                BudgetCommands::Show {
+                    workspace,
+                    tenant,
+                    workspace_name,
+                    repo,
+                },
+        } = args.unwrap().command
+        {
+            assert!(!workspace);
+            assert!(!tenant);
+            assert_eq!(workspace_name, None);
+            assert_eq!(repo, None);
+        } else {
+            panic!("Expected Budget Show");
+        }
+    }
+
+    #[test]
+    fn cli_budget_show_workspace_parses() {
+        let args = Cli::try_parse_from([
+            "gyre",
+            "budget",
+            "show",
+            "--workspace",
+            "--workspace-name",
+            "platform",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Budget {
+            command:
+                BudgetCommands::Show {
+                    workspace,
+                    tenant,
+                    workspace_name,
+                    repo: _,
+                },
+        } = args.unwrap().command
+        {
+            assert!(workspace);
+            assert!(!tenant);
+            assert_eq!(workspace_name.as_deref(), Some("platform"));
+        } else {
+            panic!("Expected Budget Show with --workspace");
+        }
+    }
+
+    #[test]
+    fn cli_budget_show_tenant_parses() {
+        let args = Cli::try_parse_from(["gyre", "budget", "show", "--tenant"]);
+        assert!(args.is_ok());
+        if let Commands::Budget {
+            command:
+                BudgetCommands::Show {
+                    workspace,
+                    tenant,
+                    workspace_name: _,
+                    repo: _,
+                },
+        } = args.unwrap().command
+        {
+            assert!(!workspace);
+            assert!(tenant);
+        } else {
+            panic!("Expected Budget Show with --tenant");
+        }
+    }
+
+    #[test]
+    fn cli_budget_show_workspace_and_tenant_conflict() {
+        // --workspace and --tenant are mutually exclusive scope selectors.
+        let args = Cli::try_parse_from(["gyre", "budget", "show", "--workspace", "--tenant"]);
+        assert!(args.is_err());
+    }
+
+    #[test]
+    fn cli_budget_show_repo_parses() {
+        let args = Cli::try_parse_from([
+            "gyre",
+            "budget",
+            "show",
+            "--workspace-name",
+            "platform",
+            "--repo",
+            "gyre",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Budget {
+            command:
+                BudgetCommands::Show {
+                    workspace: _,
+                    tenant: _,
+                    workspace_name,
+                    repo,
+                },
+        } = args.unwrap().command
+        {
+            assert_eq!(workspace_name.as_deref(), Some("platform"));
+            assert_eq!(repo.as_deref(), Some("gyre"));
+        } else {
+            panic!("Expected Budget Show with --workspace-name --repo");
+        }
+    }
+
+    #[test]
+    fn cli_budget_set_tokens_parses() {
+        // Spec: `gyre budget set --llm-tokens 500000`
+        let args = Cli::try_parse_from(["gyre", "budget", "set", "--llm-tokens", "500000"]);
+        assert!(args.is_ok());
+        if let Commands::Budget {
+            command:
+                BudgetCommands::Set {
+                    tenant,
+                    llm_tokens,
+                    llm_cost,
+                    max_agents,
+                    max_agent_lifetime_secs,
+                    workspace_name: _,
+                    repo: _,
+                    workspace: _,
+                },
+        } = args.unwrap().command
+        {
+            assert!(!tenant);
+            assert_eq!(llm_tokens, Some(500000));
+            assert_eq!(llm_cost, None);
+            assert_eq!(max_agents, None);
+            assert_eq!(max_agent_lifetime_secs, None);
+        } else {
+            panic!("Expected Budget Set with --llm-tokens");
+        }
+    }
+
+    #[test]
+    fn cli_budget_set_workspace_cost_parses() {
+        // Spec: `gyre budget set --workspace --llm-cost 100.00`
+        let args = Cli::try_parse_from([
+            "gyre",
+            "budget",
+            "set",
+            "--workspace",
+            "--llm-cost",
+            "100.00",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Budget {
+            command:
+                BudgetCommands::Set {
+                    workspace,
+                    tenant,
+                    llm_cost,
+                    ..
+                },
+        } = args.unwrap().command
+        {
+            assert!(workspace);
+            assert!(!tenant);
+            assert_eq!(llm_cost, Some(100.0));
+        } else {
+            panic!("Expected Budget Set with --workspace --llm-cost");
+        }
+    }
+
+    #[test]
+    fn cli_budget_set_all_limits_parses() {
+        let args = Cli::try_parse_from([
+            "gyre",
+            "budget",
+            "set",
+            "--llm-tokens",
+            "500000",
+            "--llm-cost",
+            "100.00",
+            "--max-agents",
+            "10",
+            "--max-agent-lifetime-secs",
+            "3600",
+        ]);
+        assert!(args.is_ok());
+        if let Commands::Budget {
+            command:
+                BudgetCommands::Set {
+                    llm_tokens,
+                    llm_cost,
+                    max_agents,
+                    max_agent_lifetime_secs,
+                    ..
+                },
+        } = args.unwrap().command
+        {
+            assert_eq!(llm_tokens, Some(500000));
+            assert_eq!(llm_cost, Some(100.0));
+            assert_eq!(max_agents, Some(10));
+            assert_eq!(max_agent_lifetime_secs, Some(3600));
+        } else {
+            panic!("Expected Budget Set with all limits");
+        }
+    }
+
+    #[test]
+    fn merge_budget_updates_preserves_unmentioned_limits() {
+        // The server PUT replaces the whole config, so `gyre budget set`
+        // fetch-merges: provided limits override, others keep current values.
+        let current = client::BudgetConfig {
+            max_tokens_per_day: Some(100000),
+            max_cost_per_day: Some(50.0),
+            max_concurrent_agents: Some(5),
+            max_agent_lifetime_secs: Some(1800),
+        };
+        let updates = client::SetBudgetRequest {
+            max_tokens_per_day: Some(500000),
+            max_cost_per_day: None,
+            max_concurrent_agents: None,
+            max_agent_lifetime_secs: None,
+        };
+        let merged = merge_budget_updates(&current, &updates);
+        assert_eq!(merged.max_tokens_per_day, Some(500000)); // overridden
+        assert_eq!(merged.max_cost_per_day, Some(50.0)); // preserved
+        assert_eq!(merged.max_concurrent_agents, Some(5)); // preserved
+        assert_eq!(merged.max_agent_lifetime_secs, Some(1800)); // preserved
+    }
+
+    // ── `gyre budget set` input-validation regressions (review repair) ─────
+    //
+    // Non-finite --llm-cost must be rejected before any network I/O:
+    // serde_json serializes NaN/Infinity as null, so a PUT carrying it
+    // would silently CLEAR the cost limit instead of setting one. The
+    // command-path tests below drive run_budget_set (the exact flow the
+    // `budget set` handler calls) against a real loopback HTTP server and
+    // assert that rejected input produces no requests at all — in
+    // particular no budget-mutating PUT.
+
+    const BUDGET_SET_WORKSPACES_JSON: &str =
+        r#"[{"id":"ws-123","name":"platform","slug":"platform"}]"#;
+    const BUDGET_SET_RESPONSE_JSON: &str = r#"{
+        "entity_type": "workspace",
+        "entity_id": "ws-123",
+        "config": {
+            "max_tokens_per_day": 500000,
+            "max_cost_per_day": 100.0,
+            "max_concurrent_agents": 10,
+            "max_agent_lifetime_secs": 3600
+        },
+        "usage": {
+            "entity_type": "workspace",
+            "entity_id": "ws-123",
+            "tokens_used_today": 123456,
+            "cost_today": 12.5,
+            "active_agents": 3,
+            "period_start": 1790000000
+        }
+    }"#;
+
+    /// Mock server scripting the full `budget set --workspace-name platform`
+    /// request sequence: slug resolution, budget GET (fetch-merge-put),
+    /// budget PUT. Captures every request that actually arrives.
+    fn spawn_budget_set_server() -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<client::test_http::CapturedRequest>>>,
+    ) {
+        client::test_http::spawn_mock_http_server_sequence(vec![
+            ("200 OK".to_string(), BUDGET_SET_WORKSPACES_JSON.to_string()),
+            ("200 OK".to_string(), BUDGET_SET_RESPONSE_JSON.to_string()),
+            ("200 OK".to_string(), BUDGET_SET_RESPONSE_JSON.to_string()),
+        ])
+    }
+
+    #[tokio::test]
+    async fn budget_set_rejects_nonfinite_llm_cost_before_any_request() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let (base, captured) = spawn_budget_set_server();
+            let api = client::GyreClient::new(base, "tok".to_string());
+            let err = run_budget_set(&api, Some("platform"), None, None, Some(bad), None, None)
+                .await
+                .expect_err("non-finite --llm-cost must be rejected");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("--llm-cost") && msg.contains("finite"),
+                "error should name the flag and finiteness: {msg}"
+            );
+            // No request may reach the server — rejected input must never
+            // produce a PUT (or even the workspace-resolution GET).
+            assert!(
+                captured.lock().unwrap().is_empty(),
+                "non-finite --llm-cost produced HTTP requests"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn budget_set_rejects_negative_llm_cost_before_any_request() {
+        // A negative cost cap can never be exceeded by non-negative usage
+        // and is rejected before any network I/O. Zero is NOT rejected here:
+        // a finite zero cap is a valid way to disable spending (see
+        // budget_set_zero_cost_disables_spending_and_preserves_limits).
+        for bad in [-5.0] {
+            let (base, captured) = spawn_budget_set_server();
+            let api = client::GyreClient::new(base, "tok".to_string());
+            let err = run_budget_set(&api, Some("platform"), None, None, Some(bad), None, None)
+                .await
+                .expect_err("negative --llm-cost must be rejected");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("--llm-cost") && msg.contains("negative"),
+                "error should name the flag and negativity: {msg}"
+            );
+            assert!(
+                captured.lock().unwrap().is_empty(),
+                "negative --llm-cost produced HTTP requests"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn budget_set_valid_cost_puts_merged_body_and_preserves_limits() {
+        let (base, captured) = spawn_budget_set_server();
+        let api = client::GyreClient::new(base, "tok".to_string());
+        let updated = run_budget_set(&api, Some("platform"), None, None, Some(75.0), None, None)
+            .await
+            .expect("finite --llm-cost must be accepted");
+        assert_eq!(updated.entity_id, "ws-123");
+
+        let reqs = captured.lock().unwrap();
+        assert_eq!(
+            reqs.len(),
+            3,
+            "expected slug-resolve GET, budget GET, budget PUT"
+        );
+        assert_eq!(
+            reqs[0].request_line,
+            "GET /api/v1/workspaces?slug=platform HTTP/1.1"
+        );
+        assert_eq!(
+            reqs[1].request_line,
+            "GET /api/v1/workspaces/ws-123/budget HTTP/1.1"
+        );
+        assert_eq!(
+            reqs[2].request_line,
+            "PUT /api/v1/workspaces/ws-123/budget HTTP/1.1"
+        );
+        // Fetch-merge-put: the new cost is sent, every unmentioned limit
+        // keeps the value from the GET (server replaces the whole config).
+        assert_eq!(
+            reqs[2].body,
+            "{\"max_tokens_per_day\":500000,\"max_cost_per_day\":75.0,\"max_concurrent_agents\":10,\"max_agent_lifetime_secs\":3600}"
+        );
+    }
+
+    #[tokio::test]
+    async fn budget_set_zero_cost_disables_spending_and_preserves_limits() {
+        // A finite ZERO cost cap is valid (review repair 02b87ba4): it
+        // explicitly disables all spending for the day. The command must
+        // PUT max_cost_per_day=0 — not reject the input, and not let
+        // Option/or-merge turn Some(0.0) into the previous value or None —
+        // while every unmentioned limit keeps its GET value.
+        let (base, captured) = spawn_budget_set_server();
+        let api = client::GyreClient::new(base, "tok".to_string());
+        let updated = run_budget_set(&api, Some("platform"), None, None, Some(0.0), None, None)
+            .await
+            .expect("finite zero --llm-cost must be accepted");
+        assert_eq!(updated.entity_id, "ws-123");
+
+        let reqs = captured.lock().unwrap();
+        assert_eq!(
+            reqs.len(),
+            3,
+            "expected slug-resolve GET, budget GET, budget PUT"
+        );
+        assert_eq!(
+            reqs[2].request_line,
+            "PUT /api/v1/workspaces/ws-123/budget HTTP/1.1"
+        );
+        // The zero cap must be serialized as 0.0 (a null here would
+        // silently clear the limit instead of disabling spending), and the
+        // other limits must be preserved from the fetch-merge-put GET.
+        assert_eq!(
+            reqs[2].body,
+            "{\"max_tokens_per_day\":500000,\"max_cost_per_day\":0.0,\"max_concurrent_agents\":10,\"max_agent_lifetime_secs\":3600}"
+        );
+    }
+
+    // ── zero-cap display regressions (review repair) ─────────────────────
+    //
+    // A zero cap has no utilization ratio (0/0); it must not render as
+    // NaN%. A zero cap blocks all usage, so usage above it is over cap.
+
+    #[test]
+    fn budget_usage_line_zero_limit_is_bounded_not_nan() {
+        let line = budget_usage_line(0, Some(0));
+        assert!(!line.contains("NaN"), "zero cap rendered NaN: {line}");
+        assert!(
+            line.contains("zero cap"),
+            "expected explicit zero-cap display: {line}"
+        );
+        let over = budget_usage_line(5, Some(0));
+        assert!(!over.contains("NaN"), "zero cap rendered NaN: {over}");
+        assert!(
+            over.contains("over cap"),
+            "usage above zero cap must say over cap: {over}"
+        );
+        // Non-zero paths are unchanged.
+        assert_eq!(
+            budget_usage_line(123456, Some(500000)),
+            "123456 / 500000 (24.7%)"
+        );
+        assert_eq!(budget_usage_line(7, None), "7 / none");
+    }
+
+    #[test]
+    fn budget_cost_line_zero_limit_is_bounded_not_nan() {
+        let line = budget_cost_line(0.0, Some(0.0));
+        assert!(!line.contains("NaN"), "zero cap rendered NaN: {line}");
+        assert!(
+            line.contains("zero cap"),
+            "expected explicit zero-cap display: {line}"
+        );
+        let over = budget_cost_line(1.5, Some(0.0));
+        assert!(!over.contains("NaN"), "zero cap rendered NaN: {over}");
+        assert!(
+            over.contains("over cap"),
+            "usage above zero cap must say over cap: {over}"
+        );
+        // Non-zero paths are unchanged.
+        assert_eq!(
+            budget_cost_line(12.5, Some(100.0)),
+            "$12.50 / $100.00 (12.5%)"
+        );
+        assert_eq!(budget_cost_line(3.0, None), "$3.00 / none");
     }
 
     #[test]

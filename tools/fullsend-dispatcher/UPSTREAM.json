@@ -1,0 +1,18 @@
+{
+  "repository": "https://github.com/openshift-online/hypershell",
+  "commit": "938329503312cddd3620ac02fda81f2aa44f390f",
+  "path": ".hypershell/execute-sdlc/dispatcher",
+  "license": "Apache-2.0",
+  "local_changes": "Adapter backend port, namespace isolation, physical-capacity admission, and CI readiness display for Gyre. Adopted upstream log presentation and navigation without HyperShell review/approval workflow changes. Configuration tab uses scoped, validated Gyre ledger writes and live adapter snapshots rather than HyperShell preferences/runtime overlays.",
+  "adapted_fixes": [
+    "dbe5edc62b168eaa677a8e0bfc40f01f37782951",
+    "afcfe97899786b05ddd633143b96b4a443c71aa5",
+    "97b2013e283d2334925bb9b2162abd85d577fbe0",
+    "6370f1b1c75505f68c8af5be2d260521f41d196f",
+    "30888d60fd7be3b451ae356d8aaa904f9b47a2d5",
+    "d8c8977b5b76fc17a1a084a32b4d47189ebc6efc",
+    "ea950c94ed5b58a4dc3eebbe3d2376d6c853d41b",
+    "d96615b7e163f7e6f61def39da246949ec648d71",
+    "bd805b9d947333d387b47526d5f1abec259ca0bb"
+  ]
+}
