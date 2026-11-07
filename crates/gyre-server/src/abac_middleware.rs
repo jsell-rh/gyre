@@ -731,36 +731,39 @@ fn domain_builtin_policies() -> Vec<Policy> {
 }
 
 /// Seed built-in M34 policies into the policy store at startup. Idempotent.
-pub async fn seed_builtin_policies(state: &Arc<AppState>) {
+///
+/// Fail-closed (task-093 verification round 4): a built-in policy that fails
+/// to seed is a restriction the system believes is in place but is not —
+/// the specs/reviews/task-077.md F6 flaw class. The m34 set includes the
+/// default-deny policy, so continuing past a seeding failure would run the
+/// server unrestricted. Seeding errors therefore propagate and abort the
+/// caller (startup). Idempotency is preserved by the existence check: a
+/// policy that is already stored is skipped, never re-created.
+pub async fn seed_builtin_policies(state: &Arc<AppState>) -> anyhow::Result<()> {
     let mut policies = m34_builtin_policies();
     policies.extend(domain_builtin_policies());
     for policy in policies {
         match state.policies.find_by_id(&policy.id.to_string()).await {
             Ok(None) => {
-                if let Err(e) = state.policies.create(&policy).await {
-                    tracing::warn!(
-                        policy_id = %policy.id,
-                        err = %e,
-                        "Failed to seed built-in ABAC policy"
-                    );
-                } else {
-                    tracing::debug!(
-                        policy_id = %policy.id,
-                        name = %policy.name,
-                        "Seeded built-in ABAC policy"
-                    );
-                }
+                tracing::debug!(
+                    policy_id = %policy.id,
+                    name = %policy.name,
+                    "Seeding built-in ABAC policy"
+                );
+                state.policies.create(&policy).await.map_err(|e| {
+                    e.context(format!("failed to seed built-in policy {}", policy.id))
+                })?;
             }
             Ok(Some(_)) => {} // already exists → idempotent
             Err(e) => {
-                tracing::warn!(
-                    policy_id = %policy.id,
-                    err = %e,
-                    "Error checking built-in policy existence"
-                );
+                return Err(e.context(format!(
+                    "failed to look up built-in policy {} for seeding",
+                    policy.id
+                )));
             }
         }
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -915,7 +918,9 @@ pub mod tests {
     fn setup_state_with_policies() -> Arc<AppState> {
         let state = test_state();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state))
+                .unwrap()
         });
         state
     }
@@ -943,7 +948,9 @@ pub mod tests {
 
         let state_base = make_test_state_with_jwt();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state_base))
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state_base))
+                .unwrap()
         });
         init_resolver();
 
@@ -987,7 +994,9 @@ pub mod tests {
 
         let state_base = make_test_state_with_jwt();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state_base))
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state_base))
+                .unwrap()
         });
         init_resolver();
 
@@ -1066,7 +1075,9 @@ pub mod tests {
 
         let state_base = make_test_state_with_jwt();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state_base))
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state_base))
+                .unwrap()
         });
         init_resolver();
 
@@ -1135,8 +1146,8 @@ pub mod tests {
         let state = test_state();
         tokio::task::block_in_place(|| {
             let h = tokio::runtime::Handle::current();
-            h.block_on(seed_builtin_policies(&state));
-            h.block_on(seed_builtin_policies(&state)); // second call must be no-op
+            h.block_on(seed_builtin_policies(&state)).unwrap();
+            h.block_on(seed_builtin_policies(&state)).unwrap(); // second call must be no-op
         });
         let policies = state.policies.list().await.unwrap();
         let count = policies
@@ -1173,7 +1184,7 @@ pub mod tests {
         let state = test_state();
         tokio::task::block_in_place(|| {
             let h = tokio::runtime::Handle::current();
-            h.block_on(seed_builtin_policies(&state));
+            h.block_on(seed_builtin_policies(&state)).unwrap();
         });
 
         let policies = state.policies.list().await.unwrap();
@@ -1198,8 +1209,8 @@ pub mod tests {
         let state = test_state();
         tokio::task::block_in_place(|| {
             let h = tokio::runtime::Handle::current();
-            h.block_on(seed_builtin_policies(&state));
-            h.block_on(seed_builtin_policies(&state)); // idempotent
+            h.block_on(seed_builtin_policies(&state)).unwrap();
+            h.block_on(seed_builtin_policies(&state)).unwrap(); // idempotent
         });
 
         let policies = state.policies.list().await.unwrap();

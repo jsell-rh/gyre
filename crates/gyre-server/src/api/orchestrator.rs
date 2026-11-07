@@ -249,31 +249,6 @@ pub(crate) async fn spawn_workspace_orchestrator_core(
     .await
 }
 
-/// Tenant containment (task-093 F2/F3): the workspace whose orchestrator is
-/// being spawned must belong to the caller's tenant. The ABAC middleware
-/// evaluates policy for the route, but per-handler containment re-checks the
-/// loaded entity's tenant against the authenticated caller's tenant so a
-/// cross-tenant workspace id cannot be reached even with a valid token.
-async fn check_workspace_tenant(
-    state: &AppState,
-    workspace_id: &str,
-    auth: &AuthenticatedAgent,
-) -> Result<(), ApiError> {
-    let ws = state
-        .workspaces
-        .find_by_id(&Id::new(workspace_id.to_string()))
-        .await
-        .map_err(ApiError::Internal)?
-        .ok_or_else(|| ApiError::NotFound(format!("workspace {workspace_id} not found")))?;
-    if ws.tenant_id.to_string() != auth.tenant_id {
-        return Err(ApiError::Forbidden(format!(
-            "workspace {workspace_id} belongs to tenant {}, not caller tenant {}",
-            ws.tenant_id, auth.tenant_id
-        )));
-    }
-    Ok(())
-}
-
 /// POST /api/v1/workspaces/:id/orchestrator/spawn
 ///
 /// Spawn the single workspace orchestrator for a workspace.
@@ -284,8 +259,23 @@ pub async fn spawn_workspace_orchestrator(
     Path(workspace_id): Path<String>,
     Json(req): Json<SpawnOrchestratorRequest>,
 ) -> Result<(StatusCode, Json<SpawnOrchestratorResponse>), ApiError> {
-    // Tenant containment: the workspace must belong to the caller's tenant.
-    check_workspace_tenant(&state, &workspace_id, &auth).await?;
+    // Tenant containment (task-093 F2/F3, api/users.rs dismiss_notification
+    // pattern): the ABAC middleware evaluates policy for the route, but the
+    // handler re-checks the loaded entity's tenant against the authenticated
+    // caller's tenant so a cross-tenant workspace id cannot be reached even
+    // with a valid token.
+    let ws = state
+        .workspaces
+        .find_by_id(&Id::new(workspace_id.clone()))
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {workspace_id} not found")))?;
+    if ws.tenant_id.to_string() != auth.tenant_id {
+        return Err(ApiError::Forbidden(format!(
+            "workspace {workspace_id} belongs to tenant {}, not caller tenant {}",
+            ws.tenant_id, auth.tenant_id
+        )));
+    }
 
     let (agent, token) =
         spawn_workspace_orchestrator_core(&state, &workspace_id, req, &auth.agent_id).await?;
@@ -441,7 +431,18 @@ pub async fn spawn_repo_orchestrator(
         .await
         .map_err(ApiError::Internal)?
         .ok_or_else(|| ApiError::NotFound(format!("repo {repo_id} not found")))?;
-    check_workspace_tenant(&state, &repo.workspace_id.to_string(), &auth).await?;
+    let ws = state
+        .workspaces
+        .find_by_id(&repo.workspace_id)
+        .await
+        .map_err(ApiError::Internal)?
+        .ok_or_else(|| ApiError::NotFound(format!("workspace {} not found", repo.workspace_id)))?;
+    if ws.tenant_id.to_string() != auth.tenant_id {
+        return Err(ApiError::Forbidden(format!(
+            "repo {repo_id} belongs to tenant {}, not caller tenant {}",
+            ws.tenant_id, auth.tenant_id
+        )));
+    }
 
     let (agent, token) =
         spawn_repo_orchestrator_core(&state, &repo_id, req, &auth.agent_id).await?;

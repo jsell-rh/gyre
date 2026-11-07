@@ -121,7 +121,9 @@ async fn sqlite_url_wires_fts5_search_port() {
     );
 
     // ── Router-level: real API surface over the same wired port ───────────
-    abac_middleware::seed_builtin_policies(&state).await;
+    abac_middleware::seed_builtin_policies(&state)
+        .await
+        .unwrap();
     let app = build_router(Arc::clone(&state));
 
     // Real task-create callsite indexes into the same backend.
