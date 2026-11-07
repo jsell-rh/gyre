@@ -8,7 +8,7 @@ coverage_sections:
   - "ui-navigation.md §2 Workspace Home"
   - "ui-navigation.md §3 Repo Mode"
   - "ui-navigation.md §10 Cross-Workspace View"
-commits: ["084040ecc21bf806644630f653fdbeccdd31749d", "c38c8e00398862f4f49c526105b493cb9f9e922c", "7e5cdaba110cbc9de3f5a9f6ad79303897ce7776", "7c2b975731bfd631f3e6b91da5d40790c196108f", "796c800da477a8cd45aeb60ca9ec7665a11938b8", "45a3f5e4f2c9d844dd417401e4946ab0da85c857", "13d856c82e77a1cd2e414ff5383e843774ff028d"]
+commits: ["084040ecc21bf806644630f653fdbeccdd31749d", "c38c8e00398862f4f49c526105b493cb9f9e922c", "7e5cdaba110cbc9de3f5a9f6ad79303897ce7776", "7c2b975731bfd631f3e6b91da5d40790c196108f", "796c800da477a8cd45aeb60ca9ec7665a11938b8", "45a3f5e4f2c9d844dd417401e4946ab0da85c857", "13d856c82e77a1cd2e414ff5383e843774ff028d", "6cf4a22459fa8099e36df4296da9caddd17f8551"]
 ---
 
 ## Authority and Scope
@@ -127,48 +127,45 @@ is claimed here, per section, with the verifying evidence below.
 
 ### Verification
 
-- `/all` page-load entry repair (`084040ecc`, closing the review finding
-  from the `9ab2a0e0` round): a full page load at `/all` leaves
-  `currentWorkspace` null, and `goToEntityDetail`'s old
-  `if (!currentWorkspace) return;` made every entity-item click in the
-  `/all` dashboard a silent no-op. The owner is now resolved from the
-  caller's membership (`data.workspace_id ?? entityRepo.workspace_id`,
-  falling back to the current selection only when the item carries no
-  owner); an undeterminable owner surfaces the existing
-  "Workspace not found for this item" error toast. Regression
-  `web/src/__tests__/CrossWorkspaceEntry.test.js` (real App + real
-  CrossWorkspaceHome at the page-load `/all` path): a decision-item click
-  attributed to ws-2/repo-2 navigates to
-  `/workspaces/billing/r/billing-svc/tasks/t-1` with `wsId`/`repoName`/
-  `repoTab`/`entityId` history state and the persisted workspace
-  selection, and an owner outside the caller's membership surfaces the
-  rendered error toast (`role=alert`), stays at `/all`, and persists no
-  scope identity. Mutation probe — restoring the original early return
-  fails both tests.
-- Specs-scope repair (`c38c8e003`, closing review finding `1d994c8f`):
-  `list_specs` honors `?workspace_id=` (Rust test
-  `list_specs_honors_workspace_id_scope`: ws-a sees its own + repo-scoped
-  entries, ws-b only its own, unscoped listing unchanged; mutation probe —
-  disabling the filter fails exactly that test) and the `/all` Specs section
-  fetches per accessible workspace (vitest regression
-  `fetches specs per accessible workspace, not the unscoped list`; mutation
-  probe — reverting the component to `specsForWorkspace(null)` fails exactly
-  that test). Also renamed the mismatched `.rules-version` CSS to
-  `.rule-version` (finding 2, cosmetic).
-- Focused probes at the current head (`npx vitest run`, locked deps):
-  CrossWorkspaceHome → 38 passed / 0 failed; WorkspaceHome,
+- CI-gate repair (`6cf4a224`, closing the `9bb8899472` verification
+  finding): the two repo-wide gate failures in `api/specs.rs` were
+  pre-existing legacy-debt sites that `c38c8e003`'s 173 inserted lines had
+  shifted off their `path:line` exemption entries. Both sites are now
+  fixed for real and their exemption entries deleted (byte-slice list
+  shrinks by one; fabricated-scope list shrinks by one with
+  `FROZEN_EXEMPTION_COUNT` lowered 5 → 4, per each check's documented
+  procedure — no exemption was added or re-pinned):
+  `spec_index` truncates the sha via `chars().take(8)`
+  (check-byte-slice-truncation OK), and `reject_spec`'s notification
+  fanout resolves the tenant from the workspace record, skipping +
+  logging when unresolvable — the `emit_reconciliation_completed`
+  pattern (check-fabricated-scope-defaults OK). New Rust regressions:
+  `reject_spec_notification_uses_workspace_tenant` (notification carries
+  the workspace's real tenant, not the repo id or a fabricated
+  "default"; mutation probe — restoring the repo_id fallback fails
+  exactly this test) and
+  `reject_spec_skips_notifications_when_workspace_unresolvable`
+  (unresolvable workspace skips the fanout). Focused probe:
+  `cargo test -p gyre-server --lib api::specs::tests` → 54 passed /
+  0 failed (52 pre-existing + 2 new).
+- Earlier-round evidence (retained): `/all` page-load entry repair
+  (`084040ecc`) with regression
+  `web/src/__tests__/CrossWorkspaceEntry.test.js` (mutation probe —
+  restoring the original early return fails both tests); specs-scope
+  repair (`c38c8e003`) with Rust test `list_specs_honors_workspace_id_scope`
+  and vitest regression `fetches specs per accessible workspace, not the
+  unscoped list` (both with passing mutation probes). Focused vitest runs
+  at that head: CrossWorkspaceHome → 38 passed; WorkspaceHome,
   WorkspaceHomeSections, WorkspaceHomeArchitecture, WorkspaceHomeScopeDrill,
-  WorkspaceDrawerSectionNav, ScopeTransitions, SpecDashboard → 94 passed /
-  0 failed; AppShell, RepoMode, RepoModeHeader → 116 passed / 0 failed;
-  `cargo test -p gyre-server --lib api::specs::tests` → 52 passed /
-  0 failed. Earlier rounds' evidence (myNotifications envelope,
-  `?subTab` deep link, task-084 base rebase with the 9-tab
-  `WorkspaceSettings` union → 71 passed) is retained under
-  `/tmp/stage/review-evidence/README.md`.
-- `web/dist` was not rebuilt here (the executor restores generated assets
-  from the assignment base and final integration rebuilds them remotely);
-  full suites, all-target Clippy, and exact-head GitHub CI remain owned by
-  verification and publication.
+  WorkspaceDrawerSectionNav, ScopeTransitions, SpecDashboard → 94 passed;
+  AppShell, RepoMode, RepoModeHeader → 116 passed; all 0 failed. Earlier
+  evidence (myNotifications envelope, `?subTab` deep link, task-084 base
+  rebase with the 9-tab `WorkspaceSettings` union → 71 passed) is retained
+  under `/tmp/stage/review-evidence/README.md`.
+- `web/dist` was not rebuilt or committed here (the executor restores
+  generated assets from the assignment base and final integration
+  rebuilds them remotely); full suites, all-target Clippy, and exact-head
+  GitHub CI remain owned by verification and publication.
 
 Contract note for the reviewer: an earlier attempt ticked the acceptance
 checkboxes in this file, which the pipeline's `requirement_parts` treats as
