@@ -4,6 +4,7 @@
   import { api } from '../lib/api.js';
   import { entityName } from '../lib/entityNames.svelte.js';
   import { computeTimelineDeltaStats, computeTimelineGhostOverlays } from '../lib/timeline-utils.js';
+  import { traceStepTargetNode } from '../lib/trace-navigation.js';
   import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
   import ExplorerChat from '../lib/ExplorerChat.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -50,6 +51,11 @@
   let explorerSavedViews = $state([]);
   let detailNode = $state(null);
   let highlightedSpanId = $state(null);
+  // Causal trace step focus: clicking a step in the detail panel pans/zooms
+  // the canvas to that node (explorer-canvas.md §6 step 6). The nonce lets
+  // repeated clicks on the same step re-trigger the camera move.
+  let traceFocusRequest = $state(null);
+  let traceFocusNonce = 0;
 
   // ── Recent interactions (fed to LLM via canvas_state) ──────────────────
   // ExplorerCanvas tracks canvas-level interactions (click, drill) in
@@ -1440,6 +1446,7 @@
                 assertionResults={specAssertionResults}
                 assertionSpecPath={specEditorOpen ? specEditorPath : null}
                 {highlightedSpanId}
+                focusRequest={traceFocusRequest}
                 timeline={graphTimeline ?? []}
                 timelineActive={timelineScrubActive}
                 timelineScrubIndex={timelineScrubIndex}
@@ -1645,6 +1652,17 @@
                   edges={graph.edges ?? []}
                   onClose={() => { detailNode = null; highlightedSpanId = null; }}
                   onNavigate={(n) => { detailNode = n; }}
+                  onTraceStepNavigate={(step) => {
+                    // Show the step's node in the detail panel and pan/zoom
+                    // the canvas to it (explorer-canvas.md §6 step 6). The
+                    // step list is carried onto the target so the panel
+                    // keeps showing the full clickable trace across
+                    // navigation clicks.
+                    const target = traceStepTargetNode(detailNode, step, graph.nodes ?? []);
+                    if (target) detailNode = target;
+                    traceFocusNonce += 1;
+                    traceFocusRequest = { nodeId: step.nodeId, nonce: traceFocusNonce };
+                  }}
                   onInteractiveQuery={(q) => { activeViewQuery = q; pushInteraction({ action: 'query', detail: 'interactive' }); }}
                   lens={explorerLens}
                   traceSpans={traceData?.spans ?? []}
