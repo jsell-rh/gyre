@@ -51,3 +51,25 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 76 (2026-11-07) — recurring attribution clobber on candidate `091735ef2`; product surface re-verified clean
+
+Assignment: base `ca293ef64` (task-069 Explorer WebSocket), candidate `091735ef2` ("process: record task-208 branch commits"). Evidence: `/tmp/stage/review-evidence/r76/`.
+
+Findings:
+
+- [-] **Attribution clobber, 76th occurrence of the rounds 2–75 class.** The candidate's only change vs parent `396632c53` (the round-75 record on top of repair tip `124f93024`, which had restored the six-SHA list) rewrites `commits:` from six SHAs back to five, dropping `ea006d52bb42e96e6f176b02b5390b6cb56a3116` (`build(web): exempt generated dist bundles from whitespace gate (task-208)` — root `.gitattributes`, live effect `web/dist/** -whitespace` at line 4). Verified with exit codes: `git merge-base --is-ancestor ea006d52 HEAD` → 0, `--is-ancestor ea006d52 ca293ef64` → 1 — task-208-labeled branch product surface invisible to review scoping while unlisted, violating the AGENTS.md attribution invariant and contradicting the task's own Shipped record. Reproduce: `git show 091735ef2 -- specs/tasks/task-208.md`. Root cause re-confirmed: the executor-staged `/tmp/stage/dev-attribution.py` (sha256 `627fce91…`) was again the pre-fix version missing the `path == '.gitattributes' or` product-surface line (fixed in-repo `scripts/dev-attribution.py`, sha256 `c23f2505…`). The staged copy was replaced with the byte-identical fixed in-repo script this round (r74/r75 precedent) so this attempt's end-of-assignment checkpoint computes the six-SHA list; the durable fix must land wherever `/tmp/stage` is populated from (process owner). Repair is mechanical, product untouched: run the fixed in-repo pass (`python3 scripts/dev-attribution.py task-208 --commit`) — a read-only run this round computed exactly `e7c21825, aecd6847, a11cbf7e, ea006d52, ad1121c5, 98fd096e` (working tree restored to candidate state after capture).
+
+Product surface independently re-verified clean (zero drift since r75 candidate `8755fd71b`: `git diff 8755fd71b..HEAD` touches only `specs/tasks/task-069.md` + `specs/tasks/task-208.md`; every task-208 surface file — `crates/`, `web/src/`, `web/dist/`, `.gitattributes`, amended specs/coverage — byte-identical):
+
+- Dead-code grep (`get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs` over `crates/` + `web/src/`) → zero matches; the only `users/me/{agents,tasks,mrs}` URI literals in `crates/` are inside the 404 regression test (`users.rs:956-958`).
+- No route or ABAC registrations for the three URIs; remaining `users/me/*` endpoints keep the per-handler-auth ABAC-exempt model unchanged.
+- Exactly six compliant profile tabs (info, tokens, memberships, ledger, notif-prefs, notifications).
+- Spec amendment and coverage rows in place (user-management row 22 `n/a`, HSI row 54 `implemented`).
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server my_stuff_endpoints_are_removed` → 1/1 ok (`api::users::tests::my_stuff_endpoints_are_removed`).
+- `scripts/test_dev_attribution.py` → 2/2 OK; in-repo `scripts/check-task-commit-attribution.sh task-208` → exit 0.
+- `npm ci` + `npx vitest run src/__tests__/UserProfile.test.js` → 23/23 passed.
+
+Carried-forward verifier notes: full `cargo test --all` and `cd web && npm test` remain for the verifier; the branch-tip committed dist is the assignment base's stale pre-task-208 bundle (executor restore-to-base; `base..candidate` diff on `web/dist/` empty, and `HEAD:web/dist/assets/index-OYz0sZpf.js` still contains the forbidden my-stuff client) — final integration must rebuild and publish dist from the merged, clean `web/src`; not a candidate-introduced defect.
+
+Verdict: **not approved** — the candidate is itself the clobber; frontmatter restore required before approval.
