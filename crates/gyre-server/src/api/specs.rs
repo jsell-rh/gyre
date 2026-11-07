@@ -563,11 +563,9 @@ pub async fn approve_spec(
                 // Populate meta_spec_set_sha from the workspace's current
                 // meta-spec set (§2.2). When no set is configured, remains
                 // empty string (graceful fallback).
-                let meta_spec_set_sha = crate::compute_meta_spec_set_sha(
-                    &state,
-                    &gyre_common::Id::new(&workspace_id),
-                )
-                .await;
+                let meta_spec_set_sha =
+                    crate::compute_meta_spec_set_sha(&state, &gyre_common::Id::new(&workspace_id))
+                        .await;
 
                 let input_content = gyre_common::InputContent {
                     spec_path: spec_path.clone(),
@@ -1624,8 +1622,7 @@ pub async fn dry_run_constraints(
     });
 
     // Build a representative agent context from workspace state.
-    let meta_spec_set_sha =
-        crate::compute_meta_spec_set_sha(&state, &ws_id).await;
+    let meta_spec_set_sha = crate::compute_meta_spec_set_sha(&state, &ws_id).await;
 
     let agent_ctx = AgentContext {
         id: "dry-run-preview".to_string(),

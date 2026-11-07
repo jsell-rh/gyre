@@ -165,8 +165,8 @@ impl TenantMetaSpecSetRepository for SqliteStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sqlite::SqliteStorage;
     use gyre_ports::{MetaSpecSetRepository, TenantMetaSpecSetRepository};
-use crate::sqlite::SqliteStorage;
     use tempfile::NamedTempFile;
 
     fn setup() -> (NamedTempFile, SqliteStorage) {

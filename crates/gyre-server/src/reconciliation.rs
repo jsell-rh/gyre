@@ -629,10 +629,7 @@ fn tenant_set_paths(set: &TenantMetaSpecSet) -> BTreeSet<String> {
 /// merged set binds `P` exactly as the tenant set does (no workspace persona
 /// key collision removed a tenant pin of `P`, and the workspace pins `P`
 /// nowhere) — so "not overridden" always means "inherits the tenant pin".
-pub fn merge_meta_spec_sets(
-    tenant: &TenantMetaSpecSet,
-    workspace: &MetaSpecSet,
-) -> MetaSpecSet {
+pub fn merge_meta_spec_sets(tenant: &TenantMetaSpecSet, workspace: &MetaSpecSet) -> MetaSpecSet {
     let ws_paths = workspace_set_paths(workspace);
 
     let mut personas = BTreeMap::new();
@@ -724,10 +721,7 @@ pub async fn resolve_effective_meta_spec_set(
 /// Diff two tenant meta-spec sets and return the paths whose pinned version
 /// changed (same semantics as `diff_meta_spec_set`: new or re-pinned entries
 /// are changes; removals are not propagation triggers).
-pub fn diff_tenant_meta_spec_set(
-    old: &TenantMetaSpecSet,
-    new: &TenantMetaSpecSet,
-) -> Vec<String> {
+pub fn diff_tenant_meta_spec_set(old: &TenantMetaSpecSet, new: &TenantMetaSpecSet) -> Vec<String> {
     fn entries(set: &TenantMetaSpecSet) -> BTreeMap<String, String> {
         let mut m: BTreeMap<String, String> = set
             .personas
@@ -1521,8 +1515,7 @@ mod tests {
         // Bind a meta-spec set — this is the desired state.
         let set = make_set("ws-sweep-1", vec![pin("backend-developer", "a1")]);
         put_set(&state, "ws-sweep-1", &set).await;
-        let active_sha =
-            crate::compute_meta_spec_set_sha(&state, &ws.id).await;
+        let active_sha = crate::compute_meta_spec_set_sha(&state, &ws.id).await;
         assert!(!active_sha.is_empty());
 
         // Provenance under an OLD set SHA → drift.
@@ -1616,8 +1609,7 @@ mod tests {
 
         let set = make_set("ws-sweep-2", vec![pin("backend-developer", "a1")]);
         put_set(&state, "ws-sweep-2", &set).await;
-        let active_sha =
-            crate::compute_meta_spec_set_sha(&state, &ws.id).await;
+        let active_sha = crate::compute_meta_spec_set_sha(&state, &ws.id).await;
 
         // Provenance under the CURRENT set SHA → no drift.
         let att = sample_attestation(repo.id.as_str(), "ws-sweep-2", &active_sha, now());
@@ -2530,7 +2522,10 @@ mod tests {
 
         assert_eq!(summary.workspaces_scanned, 2);
         assert_eq!(summary.workspaces_skipped_override, 0);
-        assert_eq!(summary.tasks_created, 2, "one task per repo in each inheriting workspace");
+        assert_eq!(
+            summary.tasks_created, 2,
+            "one task per repo in each inheriting workspace"
+        );
 
         let tasks1 = reconciliation_tasks_for_workspace(&state, "ws-ten-1").await;
         assert_eq!(tasks1.len(), 1);
@@ -2542,7 +2537,10 @@ mod tests {
         assert_eq!(tasks2.len(), 1);
         // Cross-tenant workspace untouched.
         let tasks3 = reconciliation_tasks_for_workspace(&state, "ws-ten-other").await;
-        assert!(tasks3.is_empty(), "workspace in another tenant must not reconcile");
+        assert!(
+            tasks3.is_empty(),
+            "workspace in another tenant must not reconcile"
+        );
     }
 
     /// §8 step 3: a workspace that overrides the changed meta-spec with its
@@ -2581,7 +2579,10 @@ mod tests {
 
         assert_eq!(summary.workspaces_scanned, 2);
         assert_eq!(summary.workspaces_skipped_override, 1);
-        assert_eq!(summary.tasks_created, 1, "only the non-overriding workspace reconciles");
+        assert_eq!(
+            summary.tasks_created, 1,
+            "only the non-overriding workspace reconciles"
+        );
 
         let tasks1 = reconciliation_tasks_for_workspace(&state, "ws-ovr-1").await;
         assert!(
@@ -2628,7 +2629,10 @@ mod tests {
             summary.workspaces_skipped_override, 0,
             "force must not count the override as a skip"
         );
-        assert_eq!(summary.tasks_created, 1, "force propagates past the override");
+        assert_eq!(
+            summary.tasks_created, 1,
+            "force propagates past the override"
+        );
         let tasks1 = reconciliation_tasks_for_workspace(&state, "ws-force-1").await;
         assert_eq!(tasks1.len(), 1);
         assert_eq!(
@@ -2682,11 +2686,9 @@ mod tests {
             summary.tasks_created, 0,
             "override gate must fail closed — no propagation to a workspace with unknown overrides, even with force"
         );
-        assert!(
-            reconciliation_tasks_for_workspace(&state, "ws-err-1")
-                .await
-                .is_empty()
-        );
+        assert!(reconciliation_tasks_for_workspace(&state, "ws-err-1")
+            .await
+            .is_empty());
     }
 
     /// §8 step 1 (blast radius): only paths the tenant set pins propagate —
@@ -2713,11 +2715,9 @@ mod tests {
         .await;
         assert_eq!(summary.workspaces_scanned, 0);
         assert_eq!(summary.tasks_created, 0);
-        assert!(
-            reconciliation_tasks_for_workspace(&state, "ws-unb-1")
-                .await
-                .is_empty()
-        );
+        assert!(reconciliation_tasks_for_workspace(&state, "ws-unb-1")
+            .await
+            .is_empty());
     }
 
     /// §8 step 1: the blast-radius endpoint reports every workspace whose
@@ -2785,10 +2785,22 @@ mod tests {
             .iter()
             .map(|w| w["id"].as_str().unwrap().to_string())
             .collect();
-        assert!(affected.contains(&"ws-br-a".to_string()), "inheriting workspace (no own set) must be in the blast radius");
-        assert!(affected.contains(&"ws-br-b".to_string()), "overriding workspace binds the spec via its own pin");
-        assert!(affected.contains(&"ws-br-c".to_string()), "non-overriding workspace with its own set must be in the blast radius");
-        assert!(!affected.contains(&"ws-br-d".to_string()), "workspace in another tenant must not be affected");
+        assert!(
+            affected.contains(&"ws-br-a".to_string()),
+            "inheriting workspace (no own set) must be in the blast radius"
+        );
+        assert!(
+            affected.contains(&"ws-br-b".to_string()),
+            "overriding workspace binds the spec via its own pin"
+        );
+        assert!(
+            affected.contains(&"ws-br-c".to_string()),
+            "non-overriding workspace with its own set must be in the blast radius"
+        );
+        assert!(
+            !affected.contains(&"ws-br-d".to_string()),
+            "workspace in another tenant must not be affected"
+        );
 
         let repos = json["affected_repos"].as_array().unwrap();
         let reason_for = |rid: &str| {
@@ -2841,7 +2853,10 @@ mod tests {
 
         // Workspace override wins for the same path...
         assert_eq!(
-            effective.personas.values().find(|e| e.path == "backend-developer"),
+            effective
+                .personas
+                .values()
+                .find(|e| e.path == "backend-developer"),
             Some(&pin("backend-developer", "w9"))
         );
         // ...tenant defaults the workspace does not pin survive...
@@ -2851,7 +2866,10 @@ mod tests {
         );
         // ...and the workspace's own extra bindings are kept.
         assert_eq!(
-            effective.personas.values().find(|e| e.path == "custom-spec"),
+            effective
+                .personas
+                .values()
+                .find(|e| e.path == "custom-spec"),
             Some(&pin("custom-spec", "w1"))
         );
 
@@ -2859,7 +2877,10 @@ mod tests {
         let ws2 = make_workspace_in_tenant(&state, "ws-merge-2", "default").await;
         let effective2 = resolve_effective_meta_spec_set(&state, &ws2).await.unwrap();
         assert_eq!(
-            effective2.personas.values().find(|e| e.path == "backend-developer"),
+            effective2
+                .personas
+                .values()
+                .find(|e| e.path == "backend-developer"),
             Some(&pin("backend-developer", "t1"))
         );
         assert_eq!(effective2.workspace_id, "ws-merge-2");
@@ -2870,7 +2891,11 @@ mod tests {
             &state.meta_spec_sets.get(&ws.id).await.unwrap().unwrap(),
         )
         .unwrap();
-        assert!(workspace_overrides_path(&tenant, &ws1_set, "backend-developer"));
+        assert!(workspace_overrides_path(
+            &tenant,
+            &ws1_set,
+            "backend-developer"
+        ));
         assert!(!workspace_overrides_path(&tenant, &ws1_set, "reviewer"));
     }
 
@@ -2885,8 +2910,12 @@ mod tests {
         let ws2 = make_workspace_in_tenant(&state, "ws-sha-2", "other-tenant").await;
 
         // Neither workspace has any set: both unbound.
-        assert!(crate::compute_meta_spec_set_sha(&state, &ws1.id).await.is_empty());
-        assert!(crate::compute_meta_spec_set_sha(&state, &ws2.id).await.is_empty());
+        assert!(crate::compute_meta_spec_set_sha(&state, &ws1.id)
+            .await
+            .is_empty());
+        assert!(crate::compute_meta_spec_set_sha(&state, &ws2.id)
+            .await
+            .is_empty());
 
         // A tenant set binds ws1 (same tenant) but not ws2 (other tenant).
         put_tenant_set(
@@ -2896,9 +2925,14 @@ mod tests {
         )
         .await;
         let sha1 = crate::compute_meta_spec_set_sha(&state, &ws1.id).await;
-        assert!(!sha1.is_empty(), "inherited tenant defaults must bind the workspace");
         assert!(
-            crate::compute_meta_spec_set_sha(&state, &ws2.id).await.is_empty(),
+            !sha1.is_empty(),
+            "inherited tenant defaults must bind the workspace"
+        );
+        assert!(
+            crate::compute_meta_spec_set_sha(&state, &ws2.id)
+                .await
+                .is_empty(),
             "a tenant set must not leak across tenants"
         );
 
@@ -2910,7 +2944,10 @@ mod tests {
         )
         .await;
         let sha1_overridden = crate::compute_meta_spec_set_sha(&state, &ws1.id).await;
-        assert_ne!(sha1, sha1_overridden, "an override must change the effective SHA");
+        assert_ne!(
+            sha1, sha1_overridden,
+            "an override must change the effective SHA"
+        );
     }
 
     /// §8: GET /workspaces/{id}/meta-spec-set returns the EFFECTIVE set —
@@ -3074,7 +3111,9 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), http::StatusCode::OK);
         assert!(
-            open_tasks_with_label(&state, RECONCILIATION_LABEL).await.is_empty(),
+            open_tasks_with_label(&state, RECONCILIATION_LABEL)
+                .await
+                .is_empty(),
             "a Pending bind is not a rollout; the approval owns the wave"
         );
 
@@ -3089,7 +3128,7 @@ mod tests {
                     .uri(format!("/api/v1/meta-specs-registry/{ms_id}"))
                     .header("authorization", "Bearer test-token")
                     .header("content-type", "application/json")
-                .body(Body::from(
+                    .body(Body::from(
                         serde_json::json!({"approval_status": "Approved"}).to_string(),
                     ))
                     .unwrap(),
@@ -3099,7 +3138,11 @@ mod tests {
         assert_eq!(resp.status(), http::StatusCode::OK);
 
         let tasks = open_tasks_with_label(&state, RECONCILIATION_LABEL).await;
-        assert_eq!(tasks.len(), 1, "only the non-overriding workspace reconciles");
+        assert_eq!(
+            tasks.len(),
+            1,
+            "only the non-overriding workspace reconciles"
+        );
         assert_eq!(tasks[0].workspace_id.as_str(), ws_appr_1);
         assert_eq!(
             tasks[0].title,
@@ -3209,7 +3252,10 @@ mod tests {
         );
         assert_eq!(
             tasks1[0].title,
-            format!("Align code with updated meta:persona {} v{}", ms.name, ms.version)
+            format!(
+                "Align code with updated meta:persona {} v{}",
+                ms.name, ms.version
+            )
         );
         assert!(
             reconciliation_tasks_for_workspace(&state, "ws-put-2")

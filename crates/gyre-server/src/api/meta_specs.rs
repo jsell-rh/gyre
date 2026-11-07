@@ -450,7 +450,9 @@ pub async fn put_tenant_meta_spec_set(
     // override) bypasses the workspace-level overrides for urgent changes.
     let changed_paths = crate::reconciliation::diff_tenant_meta_spec_set(&old_set, &set);
     if !changed_paths.is_empty() {
-        crate::reconciliation::emit_tenant_meta_spec_set_updated(&state, &Id::new(&tenant_id),
+        crate::reconciliation::emit_tenant_meta_spec_set_updated(
+            &state,
+            &Id::new(&tenant_id),
             &changed_paths,
         )
         .await;
@@ -967,9 +969,7 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert_eq!(
-            json["personas"]["worker"]["path"], "backend-developer"
-        );
+        assert_eq!(json["personas"]["worker"]["path"], "backend-developer");
         assert_eq!(json["principles"][0]["path"], "security");
 
         // Persisted through the port (not an in-memory handler stand-in).
@@ -1539,9 +1539,7 @@ pub async fn create_meta_spec_registry(
             .tenants
             .find_by_id(&Id::new(tenant_id))
             .await?
-            .ok_or_else(|| {
-                ApiError::NotFound(format!("tenant '{tenant_id}' not found"))
-            })?;
+            .ok_or_else(|| ApiError::NotFound(format!("tenant '{tenant_id}' not found")))?;
     }
     let prompt = req.prompt.unwrap_or_default();
     let content_hash = sha256_hex(&prompt);
