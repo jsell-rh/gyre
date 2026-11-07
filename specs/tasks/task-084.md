@@ -3,7 +3,7 @@ title: "HSI Policies ↔ Trust Level Integration UI"
 spec_ref: "human-system-interface.md §2a"
 depends_on:
   - task-077
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "human-system-interface.md §2a Policies ↔ Trust Level Integration"
 commits: ["7271313c9bbec615e6ec5baad90715eab261a0a4"]
