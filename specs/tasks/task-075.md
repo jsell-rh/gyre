@@ -3,7 +3,7 @@ title: "LSP Call Graph — TypeScript tsserver Integration"
 spec_ref: "lsp-call-graph.md §5 TypeScript, §10 Phase 4"
 depends_on:
   - task-072
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "lsp-call-graph.md §5 Per-Language Implementation (TypeScript)"
   - "lsp-call-graph.md §10 Implementation Phases (Phase 4)"
