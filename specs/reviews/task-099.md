@@ -43,3 +43,23 @@ Findings:
 Summary: the happy path is genuinely good — a real 9-step REST orchestration with thoughtful resumability, a correct admin-gated user-creation endpoint with hashed keys, both fix commits legitimate and regression-tested, and 23 relevant tests green under this review. But the spec's bootstrap promise is undermined at its load-bearing points: the admin identity has no tenant (F1), the spawned orchestrator has neither its persona nor a running process (F2, F3), and the spec-registry step both skips its specced behavior (F4) and ships a starter manifest the server cannot parse (F5) — with the acceptance criterion checked regardless. Revision required.
 
 — Verifier, 2026-09-30
+
+## Round 6 (candidate 17f5976a, base 86a98a29)
+
+Scope: the round-5 finding (candidate-changed lines violated the repo's changed-lines rustfmt gate — `scripts/check-rustfmt-diff.py` exit 1 in 11 files, a deterministic CI failure at `ci.yml:44`) and confirmation of no behavior drift from the repair.
+
+Evidence (commands, exit codes, logs under `/tmp/stage/review-evidence/`):
+
+- `python3 scripts/check-rustfmt-diff.py 1ae18d1c` (the round-5 finding's reproduction base) → exit 0, "changed lines clean (48 Rust files checked)" (`rustfmt-gate.log`).
+- `python3 scripts/check-rustfmt-diff.py 86a98a29` (the assigned base / HEAD^1 the CI fmt job uses on merge) → exit 0, "changed lines clean (32 Rust files checked)".
+- Repair purity: commit `6131513c` is a pure rustfmt pass — for each of the 12 files it touched, the rustfmt-normalized parent and commit versions are byte-identical (`run-fmt-equivalence.sh`, `fmt-equivalence.log`: EQUIVALENT ×12, overall=0). No semantic change hides in the reformat.
+- Focused behavior suites, all green and matching the shipped counts (`focused-tests.log`): `cargo test -p gyre-cli` → 131 + 1 passed; `cargo test -p gyre-server --lib ws::` → 82 passed (including `ws_activity_event_emits_to_telemetry` and `ws_activity_event_without_tenant_workspace_skips_emission`, i.e. the round-5 regression fix `5d487f44` holds); `api::users` → 11 passed; `api::orchestrator` → 11 passed (wire/persona/spawn-name/truthful-launch tests).
+- Mechanical guards, all exit 0 (`check-scripts.log`): arch, abac-route-registry (`/api/v1/users` resolves), abac-exempt-handlers, forged-scope-fields, scope-literal-defaults, fabricated-scope-defaults, migration-versions, mem-port-contracts, lossy-secret-conversion, inert-enforcement, in-memory-state-stores, task-commit-attribution, forwarded-header-trust, unbounded-external-http, dead-message-kinds, byte-slice-truncation, relative-path-defaults, fail-open-ref-resolution, migration-sql-portability, mcp-write-tools.
+- Spot-check of `POST /api/v1/users` (`api/users.rs::create_user`): per-handler Admin-role check ahead of ABAC, tenant existence validated at creation (F1 closure), CSPRNG key with only the SHA-256 hash persisted, and `api_key_authenticates_through_full_router_with_tenant_binding` exercises the minted key through the real auth extractor with the tenant binding asserted (F7 closure).
+- The durable verification failure (`checks.sh` exit 1 at `a4518c37`, an ancestor head) predates the round-5 regression fix `5d487f44` and the base merge; the affected ws.rs suites pass on this candidate.
+
+The round-1 F1-F7 findings remain closed (verified in rounds 2-4 including live e2e; the relevant regression tests re-run green here). The single outstanding finding is fixed with mechanical evidence, and nothing else regressed.
+
+Verdict: **approved**.
+
+— Reviewer, round 6
