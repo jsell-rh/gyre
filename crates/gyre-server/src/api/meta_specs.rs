@@ -467,6 +467,7 @@ pub async fn put_tenant_meta_spec_set(
             force = req.force,
             workspaces_scanned = summary.workspaces_scanned,
             workspaces_skipped_override = summary.workspaces_skipped_override,
+            workspaces_skipped_error = summary.workspaces_skipped_error,
             created = summary.tasks_created,
             skipped = summary.tasks_skipped,
             "tenant meta-spec-set update triggered reconciliation"
@@ -1735,6 +1736,7 @@ pub async fn update_meta_spec_registry(
                     force,
                     workspaces_scanned = summary.workspaces_scanned,
                     workspaces_skipped_override = summary.workspaces_skipped_override,
+                    workspaces_skipped_error = summary.workspaces_skipped_error,
                     created = summary.tasks_created,
                     skipped = summary.tasks_skipped,
                     "tenant meta-spec approval triggered reconciliation"

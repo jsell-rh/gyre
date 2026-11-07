@@ -789,6 +789,11 @@ pub struct TenantReconciliationSummary {
     /// Workspaces skipped entirely because they override every changed
     /// meta-spec (their own rollout policy governs; §8 step 3).
     pub workspaces_skipped_override: usize,
+    /// Workspaces skipped because their own meta-spec set could not be read
+    /// (storage error or corrupt JSON). The override gate never fails open:
+    /// an unreadable set is not "no overrides", so the workspace is left to
+    /// its own §6 rollout until the set is readable again.
+    pub workspaces_skipped_error: usize,
     /// Reconciliation tasks created this run (summed across workspaces).
     pub tasks_created: usize,
     /// Repos already covered by an existing open reconciliation task.
@@ -803,6 +808,9 @@ pub struct TenantReconciliationSummary {
 ///   each workspace's rollout policy is applied individually (§8 step 3) —
 ///   unless `force` (tenant-admin override for urgent compliance-driven
 ///   changes, §8 step 4);
+/// - a workspace whose own set cannot be read (storage error or corrupt
+///   JSON) is skipped entirely — the override gate never fails open, so an
+///   unreadable set is not treated as "no overrides";
 /// - the remaining changed paths go through `run_reconciliation`, which
 ///   creates the per-repo reconciliation tasks for that workspace
 ///   (§8 step 2: per-workspace reconciliation plans).
@@ -854,7 +862,24 @@ pub async fn run_tenant_reconciliation(
 
     for ws in &workspaces {
         summary.workspaces_scanned += 1;
-        let ws_set = load_workspace_set(state, &ws.id).await.unwrap_or_default();
+        // Never fail open the override gate (standing repo rule): a workspace
+        // set that cannot be loaded is not "no overrides" — an empty-set
+        // fallback would drop the workspace's pins and let tenant
+        // propagation (including force) stomp a workspace that chose its own
+        // version. Fail closed: skip the workspace; its own §6 rollout
+        // governs until the set is readable again.
+        let ws_set = match load_workspace_set(state, &ws.id).await {
+            Ok(set) => set,
+            Err(e) => {
+                summary.workspaces_skipped_error += 1;
+                warn!(
+                    workspace_id = %ws.id,
+                    error = %e,
+                    "tenant reconciliation: failed to load workspace meta-spec set; skipping workspace (fail closed)"
+                );
+                continue;
+            }
+        };
 
         let mut apply: Vec<String> = Vec::new();
         let mut overridden: Vec<&String> = Vec::new();
@@ -891,6 +916,7 @@ pub async fn run_tenant_reconciliation(
         tenant_id = %tenant_id,
         scanned = summary.workspaces_scanned,
         skipped_override = summary.workspaces_skipped_override,
+        skipped_error = summary.workspaces_skipped_error,
         created = summary.tasks_created,
         dedup_skipped = summary.tasks_skipped,
         "tenant reconciliation: controller finished"
@@ -2611,6 +2637,58 @@ mod tests {
         );
     }
 
+    /// §8 step 3 fail-closed: a workspace whose own set cannot be read
+    /// (storage error / corrupt JSON) is NOT treated as "no overrides" —
+    /// an empty-set fallback would drop its pins and let tenant
+    /// propagation (including force) stomp a workspace that chose its own
+    /// version. The workspace is skipped; its own §6 rollout governs.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tenant_reconciliation_fails_closed_on_unreadable_workspace_set() {
+        let state = test_state();
+        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        put_tenant_set(
+            &state,
+            "default",
+            &make_tenant_set("default", vec![pin("backend-developer", "a1")]),
+        )
+        .await;
+
+        let _ws1 = make_workspace_in_tenant(&state, "ws-err-1", "default").await;
+        let _repo1 = make_repo(&state, "repo-err-1", "ws-err-1").await;
+        // Corrupt stored set: the override gate must not decode-fail-open
+        // into "this workspace overrides nothing".
+        state
+            .meta_spec_sets
+            .upsert(&Id::new("ws-err-1"), "{not valid json")
+            .await
+            .unwrap();
+
+        // force=true is the strongest case: an urgent compliance change must
+        // still not reach a workspace whose override state is unknown.
+        let summary = run_tenant_reconciliation(
+            &state,
+            &Id::new("default"),
+            std::slice::from_ref(&ms.name),
+            true,
+        )
+        .await;
+
+        assert_eq!(summary.workspaces_scanned, 1);
+        assert_eq!(
+            summary.workspaces_skipped_error, 1,
+            "unreadable workspace set must be counted as skipped, not decoded as empty"
+        );
+        assert_eq!(
+            summary.tasks_created, 0,
+            "override gate must fail closed — no propagation to a workspace with unknown overrides, even with force"
+        );
+        assert!(
+            reconciliation_tasks_for_workspace(&state, "ws-err-1")
+                .await
+                .is_empty()
+        );
+    }
+
     /// §8 step 1 (blast radius): only paths the tenant set pins propagate —
     /// a tenant-scoped change nothing binds has an empty blast radius.
     #[tokio::test(flavor = "multi_thread")]
@@ -3064,6 +3142,117 @@ mod tests {
         assert_eq!(
             overriding[0].title,
             "Align code with updated meta:persona secure-worker v2"
+        );
+    }
+
+    /// §8 trigger (set-diff path): PUTting a tenant set that pins an
+    /// APPROVED meta-spec propagates through the tenant controller — the
+    /// inheriting workspace gets a reconciliation task, the overriding one
+    /// is skipped, and a removal-only re-PUT creates nothing (removals are
+    /// not propagation triggers). This is the killing test for the
+    /// `run_tenant_reconciliation` call in `put_tenant_meta_spec_set`:
+    /// delete that call and the first assertion fails.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tenant_set_put_propagates_approved_pins_to_inheriting_workspaces() {
+        use axum::{body::Body, Router};
+        use tower::ServiceExt;
+
+        let state = test_state();
+        crate::bootstrap_default_tenant(&state).await;
+        let app: Router = crate::api::api_router().with_state(state.clone());
+
+        // APPROVED meta-spec: pinning it in the tenant set is a rollout
+        // (unlike a Pending bind, whose wave the approval transition owns).
+        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+
+        // Inheriting workspace (no set of its own) with a repo.
+        let _ws1 = make_workspace_in_tenant(&state, "ws-put-1", "default").await;
+        let _repo1 = make_repo(&state, "repo-put-1", "ws-put-1").await;
+        // Overriding workspace: its own rollout policy governs the path.
+        let _ws2 = make_workspace_in_tenant(&state, "ws-put-2", "default").await;
+        let _repo2 = make_repo(&state, "repo-put-2", "ws-put-2").await;
+        put_set(
+            &state,
+            "ws-put-2",
+            &make_set("ws-put-2", vec![pin("backend-developer", "own-sha")]),
+        )
+        .await;
+
+        // PUT the tenant set pinning the APPROVED spec — the set-diff
+        // trigger must propagate without any approval transition.
+        let resp = app
+            .clone()
+            .oneshot(
+                http::Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/tenants/default/meta-specs/set")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "personas": { "worker": {"path": "backend-developer", "sha": "a1"} },
+                            "principles": [], "standards": [], "process": []
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), http::StatusCode::OK);
+
+        let tasks1 = reconciliation_tasks_for_workspace(&state, "ws-put-1").await;
+        assert_eq!(
+            tasks1.len(),
+            1,
+            "tenant-set PUT pinning an APPROVED spec must create a reconciliation task in the inheriting workspace"
+        );
+        assert_eq!(
+            tasks1[0].title,
+            format!("Align code with updated meta:persona {} v{}", ms.name, ms.version)
+        );
+        assert!(
+            reconciliation_tasks_for_workspace(&state, "ws-put-2")
+                .await
+                .is_empty(),
+            "the PUT trigger must skip the overriding workspace like the approval trigger does"
+        );
+
+        // A fresh inheriting workspace added after the PUT: it has no task
+        // yet, so dedup cannot mask a spurious trigger below.
+        let _ws3 = make_workspace_in_tenant(&state, "ws-put-3", "default").await;
+        let _repo3 = make_repo(&state, "repo-put-3", "ws-put-3").await;
+
+        // Removal-only re-PUT (pin deleted, nothing added): removals are not
+        // propagation triggers — no new tasks anywhere.
+        let resp = app
+            .oneshot(
+                http::Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/tenants/default/meta-specs/set")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "personas": {}, "principles": [], "standards": [], "process": []
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), http::StatusCode::OK);
+        assert!(
+            reconciliation_tasks_for_workspace(&state, "ws-put-3")
+                .await
+                .is_empty(),
+            "a removal-only re-PUT must not propagate"
+        );
+        assert_eq!(
+            reconciliation_tasks_for_workspace(&state, "ws-put-1").await.len(),
+            1,
+            "the removal-only re-PUT must not fire a second wave for the already-reconciled workspace"
         );
     }
 }
