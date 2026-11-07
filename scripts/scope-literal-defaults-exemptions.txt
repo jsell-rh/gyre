@@ -16,8 +16,8 @@ crates/gyre-server/src/auth.rs:773
 crates/gyre-server/src/auth.rs:806
 crates/gyre-server/src/auth.rs:838
 crates/gyre-server/src/auth.rs:1173
-crates/gyre-server/src/lib.rs:502
-crates/gyre-server/src/lib.rs:546
+crates/gyre-server/src/lib.rs:503
+crates/gyre-server/src/lib.rs:547
 
 # Unowned legacy (record-conversion `From` impls fabricating tenant on the
 # wire; domain constructor defaults) — opportunistic fixes welcome:

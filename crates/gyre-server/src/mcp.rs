@@ -704,8 +704,24 @@ async fn validate_tool_scope(
     // workspace-scoped tools: the target workspace from `workspace_id`.
     match tool_name {
         // Worker tools — operate on the caller's own agent/task/branch.
+        // The token must carry a repo-write right, and when the tool
+        // addresses a target agent by id, that agent must live in the
+        // caller's own repo: heartbeat/record_activity accept a
+        // caller-chosen agent_id, and an unbound target would let a worker
+        // maintain (or keep alive against stale-agent reaping) a foreign
+        // repo/tenant's agent. The caller itself is always in scope;
+        // gyre_agent_complete additionally keeps its self-only identity
+        // check at dispatch.
         "gyre_agent_heartbeat" | "gyre_agent_complete" | "gyre_record_activity" => {
-            check_repo_write_scope(auth, None, "agent maintenance")
+            check_repo_write_scope(auth, None, "agent maintenance")?;
+            let target = args
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !target.is_empty() && target != auth.agent_id {
+                check_agent_target_scope(state, auth, target, tool_name).await?;
+            }
+            Ok(())
         }
         "gyre_create_mr" => {
             let repo = args
@@ -723,9 +739,23 @@ async fn validate_tool_scope(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             if repo.is_empty() {
-                return Ok(()); // handler rejects the missing field
+                // repository_id is OPTIONAL for this tool: with no explicit
+                // target the handler falls back to a listing, which for a
+                // scoped caller is clamped to its own repo (never the
+                // shared unfiltered store). A repo-tier token must carry
+                // its single repo scope; a workspace-tier token has no
+                // repo to clamp to and must address one explicitly.
+                if has_repo_scopes(auth) {
+                    check_repo_scope(auth, None, false, tool_name)
+                } else {
+                    Err(format!(
+                        "PERMISSION_DENIED: token scope {:?} carries no repo scope; pass repository_id to list merge requests",
+                        auth.scope
+                    ))
+                }
+            } else {
+                check_repo_read_target(state, auth, repo, tool_name).await
             }
-            check_repo_read_target(state, auth, repo, tool_name).await
         }
         // Repo-tier spawning (repo orchestrator persona). A token carrying
         // repo scopes must hold `repo:{target}:spawn` — a worker's
@@ -1092,6 +1122,64 @@ fn check_task_target(
             auth.scope, task.workspace_id
         )
     })
+}
+
+/// Agent-targeted action (`gyre_agent_heartbeat` / `gyre_agent_complete` /
+/// `gyre_record_activity` with a non-self agent_id): the target agent must
+/// live in the caller's own repo. The target's real repo is resolved from
+/// state — repo orchestrators carry `repo_id` directly, workers link their
+/// repo via their worktree, and the current task's repo is the final
+/// fallback. A target whose repo cannot be resolved fails closed (the
+/// handler's own not-found path still reports missing agents).
+async fn check_agent_target_scope(
+    state: &AppState,
+    auth: &AuthenticatedAgent,
+    agent_id: &str,
+    tool_name: &str,
+) -> Result<(), String> {
+    let id = Id::new(agent_id);
+    let agent = match state.agents.find_by_id(&id).await {
+        Ok(Some(agent)) => agent,
+        // Agent row missing: the heartbeat/complete handlers reject the id
+        // themselves ("Agent not found") — no write happens on a missing
+        // target, so there is no scope decision to make.
+        Ok(None) => return Ok(()),
+        Err(e) => {
+            return Err(format!(
+                "PERMISSION_DENIED: agent lookup failed, refusing {tool_name}: {e}"
+            ))
+        }
+    };
+    // Repo orchestrators carry repo_id directly; workers link their repo
+    // via their worktree; the current task's repo is the final fallback.
+    let target_repo: Option<String> = if let Some(repo) = agent.repo_id {
+        Some(repo.to_string())
+    } else if let Ok(worktrees) = state.worktrees.find_by_agent(&id).await {
+        worktrees.first().map(|wt| wt.repository_id.to_string())
+    } else {
+        None
+    };
+    let target_repo = match target_repo {
+        Some(repo) => Some(repo),
+        None => match agent.current_task_id {
+            Some(tid) => match state.tasks.find_by_id(&tid).await {
+                Ok(Some(task)) => Some(task.repo_id.to_string()),
+                _ => None,
+            },
+            None => None,
+        },
+    };
+    match target_repo {
+        Some(repo) => check_repo_target_by_id(auth, &repo, false, tool_name).map_err(|_| {
+            format!(
+                "PERMISSION_DENIED: token scope {:?} does not permit {tool_name} on agent {agent_id} (repo {repo})",
+                auth.scope
+            )
+        }),
+        None => Err(format!(
+            "PERMISSION_DENIED: cannot resolve repo for agent {agent_id}; refusing {tool_name}"
+        )),
+    }
 }
 
 /// `gyre_create_task` target validation: explicit repo_id/workspace_id
@@ -1737,9 +1825,25 @@ async fn handle_create_mr(state: &AppState, args: &Value) -> Value {
     }
 }
 
-async fn handle_list_mrs(state: &AppState, args: &Value) -> Value {
+async fn handle_list_mrs(state: &AppState, args: &Value, auth: &AuthenticatedAgent) -> Value {
     let mrs = if let Some(repo_id) = get_str(args, "repository_id") {
         state.merge_requests.list_by_repo(&Id::new(repo_id)).await
+    } else if is_agent_jwt(auth) {
+        // §1 Token Scoping: repository_id is optional, and the legacy
+        // fallback listed the shared unfiltered store — every MR across
+        // every tenant. A scoped caller's fallback listing is clamped to
+        // its own repo instead (the signed repo_id claim; the scope gate
+        // already rejected workspace-tier tokens, which carry no repo to
+        // clamp to). Unscoped callers (global token, API key) keep the
+        // ABAC-governed full listing.
+        match &auth.repo_id {
+            Some(own) => state.merge_requests.list_by_repo(&Id::new(own.as_str())).await,
+            None => {
+                return tool_error(
+                    "PERMISSION_DENIED: scoped token carries no repo claim; pass repository_id",
+                )
+            }
+        }
     } else {
         state.merge_requests.list().await
     };
@@ -3671,7 +3775,7 @@ pub async fn mcp_handler(
                 "gyre_list_tasks" => handle_list_tasks(&state, &args, &auth).await,
                 "gyre_update_task" => handle_update_task(&state, &args).await,
                 "gyre_create_mr" => handle_create_mr(&state, &args).await,
-                "gyre_list_mrs" => handle_list_mrs(&state, &args).await,
+                "gyre_list_mrs" => handle_list_mrs(&state, &args, &auth).await,
                 "gyre_record_activity" => handle_record_activity(&state, &args, &auth).await,
                 "gyre_agent_heartbeat" => handle_agent_heartbeat(&state, &args).await,
                 "gyre_agent_complete" => handle_agent_complete(&state, &args).await,
@@ -6617,6 +6721,195 @@ mod tests {
             !msg.contains("PERMISSION_DENIED"),
             "in-scope call must not be scope-denied: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn mcp_scope_worker_list_mrs_no_repo_clamped_to_own_repo() {
+        // task-130 review F1: gyre_list_mrs treats repository_id as
+        // optional and fell back to the shared unfiltered store — a worker
+        // scoped to a single repo received every MR across all
+        // workspaces/tenants. The fallback listing must be clamped to the
+        // caller's own repo.
+        let state = orch_state().await;
+        let seed_mr = |id: &str, repo: &str, ws: &str, title: &str| {
+            let mut mr = gyre_domain::MergeRequest::new(
+                gyre_common::Id::new(id),
+                gyre_common::Id::new(repo),
+                title,
+                "feat/a",
+                "main",
+                0,
+            );
+            mr.workspace_id = gyre_common::Id::new(ws);
+            mr
+        };
+        state
+            .merge_requests
+            .create(&seed_mr("mr-own", "r-1", "ws-1", "mr-own-r1"))
+            .await
+            .unwrap();
+        state
+            .merge_requests
+            .create(&seed_mr("mr-sibling", "r-2", "ws-1", "mr-sibling-r2"))
+            .await
+            .unwrap();
+        state
+            .merge_requests
+            .create(&seed_mr("mr-foreign", "r-x", "ws-2", "mr-foreign-rx"))
+            .await
+            .unwrap();
+        let (worker_id, token) = register_worker(&state, "w-lm", "r-1").await;
+        let app = crate::build_router(state.clone());
+
+        // No repository_id: the fallback listing is clamped to the
+        // caller's own repo (r-1) — not the shared unfiltered store.
+        let (_status, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call("gyre_list_mrs", json!({})),
+            &token,
+        )
+        .await;
+        assert!(
+            json["error"].is_null(),
+            "in-scope fallback listing must not be scope-denied: {json}"
+        );
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("mr-own-r1"), "own-repo MR missing: {text}");
+        assert!(
+            !text.contains("mr-sibling-r2"),
+            "same-workspace sibling repo MR leaked: {text}"
+        );
+        assert!(
+            !text.contains("mr-foreign-rx"),
+            "cross-workspace MR leaked: {text}"
+        );
+
+        // Explicit own repo stays allowed.
+        let (_status, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call("gyre_list_mrs", json!({ "repository_id": "r-1" })),
+            &token,
+        )
+        .await;
+        assert!(json["error"].is_null(), "explicit own repo must pass: {json}");
+
+        // Sanity: the caller really is the r-1 worker.
+        assert_eq!(worker_id, "worker-w-lm");
+    }
+
+    #[tokio::test]
+    async fn mcp_scope_workspace_orchestrator_list_mrs_requires_repo() {
+        // task-130 review F1: a workspace-tier token carries no repo scope
+        // to clamp the fallback listing to — it must address a repository
+        // explicitly instead of receiving the unfiltered store.
+        let state = orch_state().await;
+        let (_id, token) =
+            register_orchestrator(&state, "ws-orch-lm", "ws-1", None, "workspace_orchestrator")
+                .await;
+        let app = crate::build_router(state);
+
+        let (_status, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call("gyre_list_mrs", json!({})),
+            &token,
+        )
+        .await;
+        assert!(
+            json["error"].is_object(),
+            "workspace-tier fallback listing must be denied, got: {json}"
+        );
+        let msg = json["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("PERMISSION_DENIED"), "got: {msg}");
+        assert!(
+            msg.contains("repository_id"),
+            "error must tell the caller to pass repository_id: {msg}"
+        );
+
+        // Explicit repo inside the caller's workspace still passes the gate.
+        let (_status, json) = mcp_post_with_token(
+            app,
+            tool_call("gyre_list_mrs", json!({ "repository_id": "r-1" })),
+            &token,
+        )
+        .await;
+        assert!(
+            json["error"].is_null(),
+            "explicit in-workspace repo must pass: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_scope_worker_cannot_heartbeat_foreign_agent() {
+        // task-130 review F2: gyre_agent_heartbeat accepted a caller-chosen
+        // agent_id with no target binding — a worker scoped to r-1 could
+        // heartbeat any agent in any other repo/workspace/tenant, updating
+        // the foreign agent's last_seen and defeating stale-agent reaping.
+        let state = orch_state().await;
+        let (worker_id, token) = register_worker(&state, "w-hb", "r-1").await;
+        // Foreign target: a worker of r-x (workspace ws-2).
+        let (foreign_id, _foreign_token) = register_worker(&state, "w-hb-x", "r-x").await;
+        let app = crate::build_router(state.clone());
+
+        // Self heartbeat passes and records.
+        let (_status, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call("gyre_agent_heartbeat", json!({ "agent_id": worker_id })),
+            &token,
+        )
+        .await;
+        assert!(json["error"].is_null(), "self heartbeat must pass: {json}");
+        let text = json["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Heartbeat recorded"), "got: {text}");
+
+        // Foreign agent: denied pre-dispatch, naming the target.
+        let (_status, json) = mcp_post_with_token(
+            app.clone(),
+            tool_call(
+                "gyre_agent_heartbeat",
+                json!({ "agent_id": foreign_id }),
+            ),
+            &token,
+        )
+        .await;
+        assert!(
+            json["error"].is_object(),
+            "foreign-agent heartbeat must be a JSON-RPC error, got: {json}"
+        );
+        let msg = json["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("PERMISSION_DENIED"), "got: {msg}");
+        assert!(
+            msg.contains("r-x"),
+            "error must name the target repo: {msg}"
+        );
+
+        // The foreign agent's heartbeat must not have been touched.
+        let foreign = state
+            .agents
+            .find_by_id(&gyre_common::Id::new(&foreign_id))
+            .await
+            .unwrap()
+            .expect("foreign agent seeded");
+        assert!(
+            foreign.last_heartbeat.is_none(),
+            "denied heartbeat must not update the foreign agent's last_seen"
+        );
+
+        // Same binding covers gyre_record_activity's caller-chosen agent_id.
+        let (_status, json) = mcp_post_with_token(
+            app,
+            tool_call(
+                "gyre_record_activity",
+                json!({ "agent_id": foreign_id, "event_type": "RUN_STARTED", "description": "d" }),
+            ),
+            &token,
+        )
+        .await;
+        assert!(
+            json["error"].is_object(),
+            "foreign-agent record_activity must be a JSON-RPC error, got: {json}"
+        );
+        let msg = json["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("PERMISSION_DENIED"), "got: {msg}");
     }
 
     #[tokio::test]
