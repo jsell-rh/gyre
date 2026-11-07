@@ -13,6 +13,12 @@ COMMANDS = [['bash', '/tmp/stage/checks.sh'], ['cargo', 'test', '--all', '--quie
             ['npm', 'test', '--', '--no-file-parallelism']]
 
 
+def deadline_error():
+    error=Attention('Verification exhausted its deadline; inspect retained logs or raise the budget before retrying the same build')
+    error.category='verification_timeout'
+    return error
+
+
 def decode_poll(output):
     frames = [line.removeprefix('GYRE_VERIFY_POLL ') for line in output.splitlines()
               if line.startswith('GYRE_VERIFY_POLL ')]
@@ -81,11 +87,12 @@ def run(execution, path, identity, probe=None):
         image = store.setting('fullsend_image', json.loads((ROOT / '.fullsend/toolchain.json').read_text())['worker_image'])
         bundle = execution.directory / 'verification-input'
         bundle.mkdir(exist_ok=True)
-        for source in ('pipeline-verify.py', 'dev-static-gate.py', 'check-rustfmt-diff.py', 'check-clippy-diff.py', 'verifier-script-overlay.py', 'pipeline-artifacts.py'):
+        for source in ('pipeline-verify.py', 'dev-static-gate.py', 'check-rustfmt-diff.py', 'check-clippy-diff.py', 'verifier-script-overlay.py', 'pipeline-artifacts.py', 'pipeline-usage.py'):
             shutil.copyfile(ROOT / 'scripts' / source, bundle / source)
         gate = (ROOT / 'scripts/dev-check.sh').read_text().replace('/tmp/gyre', '/sandbox/workspace/checkout')
         (bundle / 'checks.sh').write_text(gate)
-        job = identity | {'image': image, 'repo_url': store.setting('repo_url', 'https://github.com/jsell-rh/gyre.git'),
+        timeout=store.setting('verification_timeout',14400)
+        job = identity | {'image': image, 'timeout_seconds':timeout, 'repo_url': store.setting('repo_url', 'https://github.com/jsell-rh/gyre.git'),
                           'task':execution.claim['task'],'publication_branch':f"pipeline/verified/{execution.claim['id']}-{execution.claim['token']}"}
         if probe is not None:
             job['probe'] = probe
@@ -95,10 +102,11 @@ def run(execution, path, identity, probe=None):
         execution.phase('Provisioning', sandbox=name, engine='verification')
         # The reservation precedes create, so even an uncertain response is
         # owned and charged. Readiness polling retains the same allocation.
-        resources=[]
-        for setting,flag in (('verification_cpu','--cpu'),('verification_memory','--memory')):
-            configured=store.setting(setting)
-            if configured is not None:resources.extend([flag,str(configured)])
+        from .compute import profile
+        budget=profile(store,execution.claim['task'],'verify')
+        resources=['--cpu',budget['cpu'],'--memory',budget['memory']]
+        record=store.db.execute('SELECT data,state FROM resources WHERE name=?',(name,)).fetchone()
+        store.resource_state(name,record['state'],json.loads(record['data']) | {'compute':budget})
         try:
             created = execution.os('sandbox', 'create', '--name', name, '--from', image,
                                   '--policy', str(ROOT / '.fullsend/policies/worker.yaml'),
@@ -131,18 +139,27 @@ def run(execution, path, identity, probe=None):
         # visible/Ready instead of deleting an allocation the autoscaler needs.
 
         execution.wait_ready(name)
+        from .runtime import ensure_workspace
+        ensure_workspace(execution,name)
         execution.remote(name, 'mkdir', '-p', '/tmp/stage', timeout=30)
         for source in sorted(bundle.iterdir()):
             execution.os('sandbox', 'upload', name, str(source), '/tmp/stage/' + source.name, '--no-git-ignore', timeout=180)
-        execution.remote(name, 'python3', '/tmp/stage/pipeline-verify.py', 'launch', timeout=30)
         execution.phase('Verifying', sandbox=name, engine='verification')
-        offset, failures = 0, 0
-        deadline = time.monotonic() + store.setting('verification_timeout', 10800)
+        offset, failures, launched = 0, 0, False
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             execution.current()
             try:
+                if not launched:
+                    execution.remote(name,'python3','/tmp/stage/pipeline-verify.py','launch',timeout=30)
+                    launched=True
                 result = execution.remote(name, 'python3', '/tmp/stage/pipeline-verify.py', 'poll', '--offset', str(offset), timeout=30)
                 value = decode_poll(result.stdout)
+                if value.get('usage'):
+                    (execution.directory/'remote-usage.json').write_text(json.dumps(value['usage']))
+                    from .compute import from_usage
+                    oom=from_usage(execution,name,value['usage'])
+                    if oom:raise oom
                 data = base64.b64decode(value['log'], validate=True)
                 if value['offset'] != offset + len(data):
                     raise ValueError('verification log offset mismatch')
@@ -168,17 +185,38 @@ def run(execution, path, identity, probe=None):
                 if not value.get('alive') and not data:
                     raise Retry('remote verifier exited without a complete receipt')
             except (subprocess.TimeoutExpired, RuntimeError) as exc:
+                (execution.directory/'transport-error.json').write_text(json.dumps({'kind':type(exc).__name__,'message':str(exc)[-2000:],'at':time.time()}))
                 if isinstance(exc, Retry):
                     raise
                 failures += 1
-                if failures >= 6:
-                    raise Retry('remote verification transport unavailable') from exc
+                # Keep the detached verifier and its build cache across RPC
+                # loss. Restart only an authoritatively stopped, owned sandbox.
+                if failures >= 2:
+                    from . import runtime
+                    def invoke(arguments, **kwargs):
+                        return execution.os(*arguments,check=False,**{('capture' if k=='capture_output' else k):v for k,v in kwargs.items() if k!='text'})
+                    value=runtime.snapshot(execution,name,invoke)
+                    phase=(value or {}).get('phase','').lower()
+                    if phase=='stopped':
+                        oom=runtime.failure(execution,name)
+                        if oom:raise oom
+                        if runtime.restart(execution,name,invoke):
+                            execution.remote(name,'mkdir','-p','/tmp/stage',timeout=30)
+                            for source in sorted(bundle.iterdir()):
+                                execution.os('sandbox','upload',name,str(source),'/tmp/stage/'+source.name,'--no-git-ignore',timeout=180)
+                            execution.remote(name,'python3','/tmp/stage/pipeline-verify.py','launch','--resume-after-stop',timeout=30)
+                            offset=0;failures=0
+                    elif phase in ('error','failed','deleted','deleting'):
+                        error=Attention('Verifier sandbox entered terminal phase '+phase);error.category='sandbox_stopped';raise error
+                    elif failures>=6 and phase!='ready':
+                        error=Attention('Cannot establish verifier health; retaining diagnostics instead of repeating builds blindly');error.category='gateway_transport';raise error
+
             except (ValueError, KeyError, TypeError) as exc:
                 failures += 1
                 if failures >= 6:
-                    raise Retry('invalid remote verification protocol response') from exc
+                    raise Attention('invalid remote verification protocol response; inspect retained diagnostics') from exc
             execution.cancelled.wait(min(30, 2 ** failures) if failures else 2)
-        raise Retry('remote verification exceeded its bounded deadline')
+        raise deadline_error()
     finally:
         try:
             retire(execution, name)
