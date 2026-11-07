@@ -3,7 +3,7 @@ title: "LSP Call Graph — Rust rust-analyzer Integration"
 spec_ref: "lsp-call-graph.md §5 Rust, §10 Phase 2"
 depends_on:
   - task-072
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "lsp-call-graph.md §5 Per-Language Implementation (Rust)"
   - "lsp-call-graph.md §10 Implementation Phases (Phase 2)"
