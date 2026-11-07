@@ -61,33 +61,30 @@ Read `specs/system/repo-lifecycle.md` §"1. Where Repo Management Lives", §"3. 
 ## Shipped
 
 All three coverage sections are implemented in production code (earlier
-checkpoints `80d6563`/`6194782`, the `0106d3a` test-framing fix, and the
-`5e617c7`/`4443b66`/`219780c` repairs — see Repair rounds).
+checkpoints `80d6563`/`6194782`, the `0106d3a` test-framing fix, the
+`5e617c7`/`4443b66`/`219780c` repairs, and this round's base merge — see
+Repair rounds). Current head: `40b0f8e1` (assignment base `66a5fc67`
+merged; all evidence below re-run on that tree, logs under
+`/tmp/stage/review-evidence/`, suffix `base66a5fc67`).
 
 ### Git push rejection for archived repos (§API Summary)
 
-- `git_info_refs` rejects the `git-receive-pack` advertisement for archived repos
-  with a 200 response whose pkt-line stream carries
-  `ERR push rejected: repository is archived` — the git-smart-HTTP convention so
-  `git push` actually prints the reason (a bare 403 body is never shown by git).
-- `git_receive_pack` (POST) keeps a defense-in-depth 403 before the packfile is
-  processed, for clients that skip the advertisement.
-- Clone/fetch (`git-upload-pack`) still works on archived repos — read-only, not
-  invisible.
-- Evidence: unit tests
+- `git_info_refs` rejects the `git-receive-pack` advertisement for archived
+  repos with a 200 response whose pkt-line stream carries
+  `ERR push rejected: repository is archived` — the git-smart-HTTP convention
+  so `git push` actually prints the reason (a bare 403 body is never shown by
+  git). `git_receive_pack` (POST) keeps a defense-in-depth 403 before the
+  packfile is processed; clone/fetch (`git-upload-pack`) still works on
+  archived repos — read-only, not invisible.
+- Evidence on the current tree: unit tests
   `info_refs_receive_pack_archived_repo_returns_err_pkt_line`,
   `receive_pack_archived_repo_returns_403`,
   `info_refs_upload_pack_archived_repo_still_serves_clone_advertisement`
-  (4 passed on the current merged tree,
-  `cargo-lib-archived-mergebase1d9547d.log`), and integration test
+  (4/4 passed, `cargo-lib-archived-base66a5fc67.log`), and integration test
   `push_to_archived_repo_rejected` in `crates/gyre-server/tests/git_integration.rs`
   which runs a **real `git push`** against a live server and asserts the push
-  fails with an "archived" reason (1 passed,
-  `cargo-integration-archived-push-mergebase1d9547d.log`).
-- `0106d3a` fixed the first unit test's framing assertion: it asserted the body
-  starts with `# service=...` but the correct wire format starts with the
-  pkt-line length prefix (`001f# service=git-receive-pack\n0000`); the assertion
-  now pins the exact expected bytes.
+  fails with an "archived" reason (1/1 passed,
+  `cargo-integration-archived-push-base66a5fc67.log`).
 
 ### Admin workspace-scope Repos tab (§Admin → Workspace Scope → Repos Tab)
 
@@ -95,6 +92,9 @@ checkpoints `80d6563`/`6194782`, the `0106d3a` test-framing fix, and the
   with name, Active/Archived status badge, active agent count, and last-activity
   timestamp; "+ New Repo" and "Import Repo" buttons with creation/mirror forms;
   clicking a repo navigates to repo scope via the `goToRepo` context.
+- Evidence: `web/src/__tests__/WorkspaceSettings.test.js` +
+  `web/src/__tests__/RepoSettings.test.js` — 114/114 vitest tests pass on the
+  current tree (`vitest-task168-repair-base66a5fc67.log`).
 
 ### Repo-scope Gates panel (§Gates — Admin → Repo Scope → Gates)
 
@@ -103,71 +103,57 @@ checkpoints `80d6563`/`6194782`, the `0106d3a` test-framing fix, and the
   configuration fields (test/lint command, required approvals, reviewer
   persona, timeout), "+ Add Gate" with gate-type selector, and drag-to-reorder
   saving positions via `PUT /api/v1/repos/:id/gates/:gate_id`.
-- Backend: new `PUT /api/v1/repos/:id/gates/:gate_id` (`gates::update_gate`)
-  with per-gate-type field validation; gate ordering via a new `position`
-  column (migration `2026-10-08-000057_gate_position` — renumbered from
-  000056 after the base merge, see Repair rounds; SQLite + PostgreSQL
-  portable) enforced in both adapters and the mem store.
-- Evidence: `web/src/__tests__/WorkspaceSettings.test.js` +
-  `web/src/__tests__/RepoSettings.test.js` — 114 vitest tests pass
-  (`vitest-task168-merge56.log`); gates API unit tests in `gates.rs` (position
-  ordering, update validation) pass — 11 passed on the current merged tree
-  (`cargo-lib-gates-mergebase1d9547d.log`).
+- Backend: `PUT /api/v1/repos/:id/gates/:gate_id` (`gates::update_gate`) with
+  per-gate-type field validation; gate ordering via the `position` column
+  (migration `2026-10-08-000057_gate_position`, SQLite + PostgreSQL portable)
+  enforced in both adapters and the mem store.
+- Evidence: gates API unit tests (position ordering, update validation) —
+  11/11 passed on the current tree (`cargo-lib-gates-base66a5fc67.log`).
 
-### Repair rounds (5e617c7, 4443b66, 219780c)
+### Repair rounds
 
-- `5e617c7`: resolved the in-progress merge of base `110180fb`; the only
-  conflicts were generated `web/dist` artifacts, resolved by rebuilding dist
-  from the merged source. Retargeted the pre-existing fabricated-scope
-  exemption entry from `git_http.rs:1510` to `git_http.rs:1535` (line-number
-  update only — no new entry, frozen count still 5).
-- `4443b66`: resolved the merge of base `2f215b1e` (task-180 spec
-  assertions), which introduced two collisions:
-  1. **Duplicate Diesel migration version `20261008000056`** — base landed
-     `000056_spec_assertion_results` on main while this branch carried
-     `000056_gate_position`; Diesel runs only one migration per version, so
-     the gate `position` column would have been silently dropped.
-     Renumbered our migration to `2026-10-08-000057_gate_position` (next
-     unused sequence), leaving the main-side migration untouched.
-     `check-migration-versions.sh` now passes.
-  2. **Stale `web/dist`** — the merge brought `web/src` changes
-     (spec-assertion fallback in ExplorerView, `api.getSpecAssertionResults`)
-     while dist remained the pre-merge build. Rebuilt dist from the merged
-     source (`npm ci` + `npm run build`); the new bundle contains
-     `getSpecAssertionResults`.
-- `219780c`: resolved the merge of base `1d9547de` (thin-worker-recovery;
-  only `web/dist` conflicts) and repaired the two verification findings
-  against that base:
-  1. **rustfmt changed-lines violations** in `postgres/quality_gate.rs`,
-     `sqlite/quality_gate.rs`, `api/gates.rs`, and `mem.rs` (gate-position
-     ordering code) — formatted;
-     `check-rustfmt-diff.py 1d9547de` now reports changed lines clean
-     (13 Rust files).
-  2. **New verification exemption** — the base fixed the `git_http.rs`
-     ws_id-fallback site itself (skip-and-log pattern), so our retargeted
-     exemption entry `git_http.rs:1535` no longer matched the base's
-     `git_http.rs:1495` entry and read as a *new* exemption. Deleted the
-     entry and lowered `FROZEN_EXEMPTION_COUNT` 5 → 4 per the documented
-     fix path (`check-fabricated-scope-defaults.sh` passes; the site is
-     genuinely fixed in the merged tree).
-- Fresh evidence on head `219780c` (logs under `/tmp/stage/review-evidence/`,
-  suffix `mergebase1d9547d`): archived-repo unit tests 4/4
-  (`cargo-lib-archived-mergebase1d9547d.log`), real-`git-push` integration
-  test 1/1 (`cargo-integration-archived-push-mergebase1d9547d.log`), gates
-  API tests 11/11 (`cargo-lib-gates-mergebase1d9547d.log`),
-  `check-rustfmt-diff.py` clean.
+- `5e617c7`: resolved base `110180fb` (only generated `web/dist` conflicts);
+  retargeted a fabricated-scope exemption line number (count unchanged).
+- `4443b66`: resolved base `2f215b1e` — renumbered our migration to
+  `2026-10-08-000057_gate_position` after main landed `000056_spec_assertion_results`
+  (duplicate Diesel versions silently never run), and rebuilt the then-stale
+  `web/dist` from the merged source.
+- `219780c`: resolved base `1d9547de`; formatted rustfmt changed-lines
+  violations and deleted the obsolete `git_http.rs` fabricated-scope exemption
+  (the base fixed the site itself; frozen count 5 → 4).
+- **This round (head `40b0f8e1`)**: resolved assignment base `66a5fc67`.
+  The merge brought only additive main-side work (task-075 TS call graph,
+  task-102 audit envelope, trusted-proxy) — `git diff 15ebaff0 HEAD` over
+  every task-168 source file is empty, so all task-168 source survived
+  byte-for-byte; base-side changes since the merge base touched none of our
+  files (only `middleware.rs` +1, imported cleanly).
+- **Review finding `fddd589d` (stale committed `web/dist`)**: acknowledged and
+  verified at the source level. `web/dist` is a generated artifact — in this
+  runtime the executor restores it from the assignment base and final
+  integration rebuilds and publishes it remotely, so it is deliberately not
+  committed here. The task-168 UI is fully present in `web/src` (the source
+  RustEmbed/build.rs build from): a fresh build triggered by
+  `crates/gyre-server/build.rs` (`npm ci` + vite) from this exact merged source
+  succeeded and produced `index-BQYVRA1x.js`
+  (sha256 `80aa6b06…`, `web-build-base66a5fc67.log`) containing all four
+  reviewed markers (`ws-repos-tab`, `gate-toggle`, `gate-edit-form`,
+  `updateRepoGate`) — the same bundle hash as the prior verification round's
+  fresh build. The default `cargo build -p gyre-server` path therefore embeds
+  the Repos tab and Gates panel; a `SKIP_WEB_BUILD=1` build against a stale
+  dist is a deployment concern owned by the pipeline's remote publication
+  stage, which rebuilds dist from this source.
 
 ### Invariants
 
-All 17 mechanical invariant checks pass at head `219780c` on the merged
-tree — `check-arch`, `check-abac-route-registry`, `check-migration-versions`,
+All 17 mechanical invariant checks pass at head `40b0f8e1` on the merged
+tree (`invariants-base66a5fc67.log` + per-check logs) — `check-arch`,
+`check-abac-route-registry`, `check-migration-versions`,
 `check-migration-sql-portability`, `check-mem-port-contracts`,
 `check-inert-enforcement`, `check-dead-message-kinds`,
-`check-fabricated-scope-defaults` (frozen count lowered to 4 — the
-`git_http.rs` site is fixed by the base merge, entry deleted), `check-byte-slice-truncation`,
-`check-relative-path-defaults`, `check-fail-open-ref-resolution`,
-`check-lossy-secret-conversion`, `check-scope-literal-defaults`,
-`check-forwarded-header-trust`, `check-in-memory-state-stores`,
-`check-unbounded-external-http`, `check-forged-scope-fields` — plus
-`check-task-commit-attribution.sh` with the repair commit recorded (logs
-under `/tmp/stage/review-evidence/`).
+`check-fabricated-scope-defaults` (frozen count 4),
+`check-byte-slice-truncation`, `check-relative-path-defaults`,
+`check-fail-open-ref-resolution`, `check-lossy-secret-conversion`,
+`check-scope-literal-defaults`, `check-forwarded-header-trust`,
+`check-in-memory-state-stores`, `check-unbounded-external-http`,
+`check-forged-scope-fields` — plus `check-task-commit-attribution.sh`
+(`inv-check-task-commit-attribution.log`).
