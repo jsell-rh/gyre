@@ -5,7 +5,7 @@ depends_on: [task-156]
 progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §7 Rollout Policy"
-commits: ["a1ff51f2cd964fa606e58eee76baaf73435a5be3"]
+commits: ["a1ff51f2cd964fa606e58eee76baaf73435a5be3", "e67c467191726aa1e3510cd15c2ea0ee044362b5"]
 ---
 
 ## Spec Excerpt
@@ -80,8 +80,10 @@ Real, production implementation of `meta-spec-reconciliation.md` §7 in commit
   `update_task`) — creates the next batch when the previous batch has no
   open reconciliation tasks, before the §11 wave-completion check, so
   `ReconciliationCompleted` fires exactly once at the end of the whole
-  rollout. A mid-rollout strategy switch flushes the remainder at once
-  (the admin's latest configuration governs). `Background` creates all
+  rollout. Every advance re-reads the live policy, so a mid-rollout
+  strategy switch flushes the remainder at once and a
+  `max_concurrent_agents` change applies to the next batch (the admin's
+  latest configuration governs). `Background` creates all
   tasks without `task_type`: they sit in Backlog and cannot trigger agent
   spawning (enforced by the existing `spawn_agent_core` task-type gate) —
   the repo orchestrator decides when to engage them.
@@ -126,9 +128,10 @@ sandbox; product commit `a1ff51f2cd964fa606e58eee76baaf73435a5be3`):
   only, does not advance while the batch is open, advances on completion,
   fires `ReconciliationCompleted` exactly once at rollout end, clears
   pending state; background leaves tasks in Backlog without task_type;
-  priority mapping; strategy-switch flush; auto_merge enqueues / default
-  does not / non-reconciliation MRs ignored; unset policy is the spec
-  default. Pre-existing §6/§10/§11 tests still green.
+  priority mapping; strategy-switch flush; batch-size change applies to
+  the next batch; auto_merge enqueues / default does not /
+  non-reconciliation MRs ignored; unset policy is the spec default.
+  Pre-existing §6/§10/§11 tests still green.
 - `cargo test -p gyre-server --lib api::meta_specs::` — 24 passed,
   including GET default, PUT round-trip, partial update, Admin-only 403,
   invalid strategy/priority/batch-size 400, unknown workspace 404.
