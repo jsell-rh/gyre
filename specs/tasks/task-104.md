@@ -62,18 +62,18 @@ The spec defines source control events (4) and access control events (6) that mu
 
 ## Acceptance Criteria
 
-- [x] All 10 event types added to `AuditEventType` enum
-- [x] `GitPushAccepted` emitted on successful push with gate results
-- [x] `GitPushRejected` emitted when push gate rejects
-- [x] `GitClone` emitted on clone operations
-- [x] `SpecChanged` emitted via spec lifecycle hook
-- [x] `AuthSuccess` emitted on valid token acceptance
-- [x] `AuthFailure` emitted on token rejection with reason
-- [x] `AbacDenied` emitted on ABAC policy denial
-- [x] `RbacDenied` emitted on role check failure
-- [x] `ImpersonationStarted`/`ImpersonationEnded` variants exist (emission wired in task-108)
-- [x] CEF severity mapping updated
-- [x] `cargo test --all` passes
+- [ ] All 10 event types added to `AuditEventType` enum
+- [ ] `GitPushAccepted` emitted on successful push with gate results
+- [ ] `GitPushRejected` emitted when push gate rejects
+- [ ] `GitClone` emitted on clone operations
+- [ ] `SpecChanged` emitted via spec lifecycle hook
+- [ ] `AuthSuccess` emitted on valid token acceptance
+- [ ] `AuthFailure` emitted on token rejection with reason
+- [ ] `AbacDenied` emitted on ABAC policy denial
+- [ ] `RbacDenied` emitted on role check failure
+- [ ] `ImpersonationStarted`/`ImpersonationEnded` variants exist (emission wired in task-108)
+- [ ] CEF severity mapping updated
+- [ ] `cargo test --all` passes
 
 ## Agent Instructions
 
@@ -103,15 +103,13 @@ All 10 event types from observability.md §Audit Event Types are implemented wit
 
 ### Test evidence
 
-- `cargo test --all`: 24 suites, all ok, 0 failed at the original candidate (evidence: /tmp/stage/review-evidence/task-104-cargo-test-all.txt, prior round).
-- Focused tests (59 passed at the original candidate, evidence: task-104-focused-tests.txt, prior round) drive real behavior: a real smart-HTTP push with a configured gate (accepted event asserts gate results), a gate-rejected push (403 + rollback + rejected event, no accepted event), a real `git clone` over a local listener (git_clone event), a spec-file push (spec_changed with task_id), invalid/revoked token rejections (auth_failure with reason), the per-request AuthSuccess dedupe, an ABAC policy denial (policy_id/resource/action/claims), and both RbacDenied paths (extractor + handler guard). All 10 CEF severities asserted field-by-field.
+Focused tests drive real behavior on the current merge head: a real smart-HTTP push with a configured gate (accepted event asserts gate results), a gate-rejected push (403 + rollback + rejected event, no accepted event), a real `git clone` over a local listener (git_clone event), a spec-file push (spec_changed with task_id), invalid/revoked token rejections (auth_failure with reason), the per-request AuthSuccess dedupe, an ABAC policy denial (policy_id/resource/action/claims), and both RbacDenied paths (extractor + handler guard). All 10 CEF severities asserted field-by-field.
+
+- `cargo test -p gyre-server --lib` with the 12 task-104 filters: 12 passed, 0 failed (evidence: `/tmp/stage/review-evidence/task-104-server-focused.log`).
+- `cargo test -p gyre-domain --lib audit`: 9 passed, 0 failed, including `source_control_and_access_control_event_types_roundtrip` (evidence: `/tmp/stage/review-evidence/task-104-domain-audit.log`).
+- `cargo test --all`: 24 suites, all ok, 0 failed at the original candidate (prior-round evidence; full workspace suites are owned by verification).
 - Pre-existing baseline note: `cargo clippy -p gyre-domain` fails on `never_loop` in rust_extractor.rs — reproduced on the base commit, file untouched by this task. Repo check scripts: failing set identical to base; the only touched exemption re-points the frozen auth.rs JWT tenant fallback entry (same unchanged code site, line 773 → 1041).
 
-### Round 2: post-merge re-verification (contract repair a5921cf7)
+### Round 3: post-merge re-verification (contract repair ce0e8d27)
 
-The executor merged base `a884329d` (task-076 LSP call-graph work, which also touched `abac_middleware.rs`, `git_http.rs`, and `api/audit.rs`) into this branch and restored the assigned task document. The task-104 production fix from `ac5f88365` is fully preserved in the merged tree: all 10 variants with as_str/from_str round-trips, every emission point (git push accepted/rejected, clone, spec-changed, auth success/failure, ABAC deny, RBAC deny), and the CEF severity mapping are present at merge head `54b58d889`. Re-ran the focused test set on the merged tree (evidence: /tmp/stage/review-evidence/task-104-post-merge-focused-tests.txt, task-104-server-focused.log, task-104-domain-audit.log):
-
-- `cargo test -p gyre-server --lib` with the 12 task-104 filters: 12 passed, 0 failed.
-- `cargo test -p gyre-domain --lib audit`: 9 passed, 0 failed (includes `source_control_and_access_control_event_types_roundtrip`).
-
-No code changes were required this round; the merge combined cleanly with no loss of task-104 behavior.
+The executor merged base `233664cf8` (task-087 HSI trace-capture work, which touched trace.rs/api/traces.rs/mem.rs/otlp_receiver.rs but none of the task-104 emission files) into this branch and restored the assigned task document. The task-104 production fix from `ac5f88365` is fully preserved at merge head `26760789b`: all 10 variants with as_str/from_str round-trips, every emission point (git push accepted/rejected, clone, spec-changed, auth success/failure, ABAC deny, RBAC deny), and the CEF severity mapping are present. Re-ran the focused set on the merged tree at the current working head: 12/12 server tests and 9/9 domain audit tests passed (logs above). No code changes were required this round.
