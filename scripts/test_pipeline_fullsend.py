@@ -399,6 +399,15 @@ else: print('fixture control operation')
         self.assertEqual(self.store.db.execute('select state from resources where name=?',(self.name,)).fetchone()[0],'deleting')
         self.assertEqual(len(json.loads((self.root/'backend.json').read_text())['pods']),1)
 
+    def test_failed_review_deletes_without_attempting_source_capture(self):
+        self.assertEqual(self.invoke('sandbox','create','--name',self.name,'--','sleep','infinity').returncode,0)
+        self.store.db.execute("UPDATE work SET stage='review' WHERE id=?",(self.work,))
+        result=self.invoke('sandbox','delete',self.name)
+        self.assertEqual(result.returncode,0,result.stderr)
+        calls=json.loads((self.root/'backend.json').read_text())['calls']
+        self.assertFalse(any(x[:2]==['sandbox','exec'] for x in calls))
+        self.assertFalse(json.loads((self.root/'backend.json').read_text())['pods'])
+
     def test_fenced_worker_cannot_invoke_gateway(self):
         self.store.finish(self.work,self.claim['token'],{})
         result=self.invoke('sandbox','create','--name',self.name,'--','sleep','infinity')
