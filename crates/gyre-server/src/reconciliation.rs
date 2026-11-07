@@ -558,7 +558,6 @@ pub async fn run_reconciliation(
             if !remaining.is_empty() {
                 let pending = PendingRollout {
                     workspace_id: ws_id.to_string(),
-                    batch_size: policy.max_concurrent_agents.max(1),
                     remaining,
                 };
                 persist_pending_rollout(state, &ws_id, &pending).await;
@@ -751,12 +750,13 @@ impl PendingRolloutTask {
     }
 }
 
-/// Persisted remainder of a rolling rollout (§7): the tasks not yet created,
-/// plus the batch size captured from the policy at trigger time.
+/// Persisted remainder of a rolling rollout (§7): the tasks not yet created.
+/// The batch size is deliberately NOT captured here — every advance re-reads
+/// the live policy, so an admin changing `max_concurrent_agents` (or the
+/// strategy) mid-rollout takes effect on the next batch.
 #[derive(Serialize, Deserialize)]
 struct PendingRollout {
     workspace_id: String,
-    batch_size: u32,
     remaining: Vec<PendingRolloutTask>,
 }
 
@@ -844,10 +844,12 @@ pub async fn maybe_advance_rolling_rollout(state: &Arc<AppState>, workspace_id: 
         return;
     }
 
-    // Re-read the policy: a mid-rollout strategy switch flushes the rest.
+    // Re-read the policy: the admin's live configuration governs every
+    // advance — a mid-rollout switch to a non-Rolling strategy flushes the
+    // rest at once, and a batch-size change applies to the next batch.
     let policy = get_workspace_rollout_policy(state, workspace_id).await;
     let batch_size = if policy.strategy == RolloutStrategy::Rolling {
-        pending.batch_size.max(1) as usize
+        policy.max_concurrent_agents.max(1) as usize
     } else {
         usize::MAX
     };
@@ -1835,6 +1837,57 @@ mod tests {
             .count();
         assert_eq!(open, 2, "strategy switch must flush the deferred remainder");
         assert!(pending_rollout_state(&state, "ws-switch").await.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rolling_batch_size_change_applies_to_next_batch() {
+        // The admin's live configuration governs every advance: a
+        // max_concurrent_agents change takes effect on the next batch.
+        let state = test_state();
+        let ws = make_workspace(&state, "ws-bsize").await;
+        for i in 0..4 {
+            make_repo(&state, &format!("repo-bs-{i}"), "ws-bsize").await;
+        }
+        let ms = make_meta_spec(&state, "backend-developer", 4).await;
+        set_policy(
+            &state,
+            "ws-bsize",
+            &gyre_domain::RolloutPolicy {
+                strategy: gyre_domain::RolloutStrategy::Rolling,
+                max_concurrent_agents: 1,
+                priority: gyre_domain::ReconciliationPriority::Normal,
+                auto_merge: false,
+            },
+        )
+        .await;
+
+        let summary = run_reconciliation(&state, &ws.id, std::slice::from_ref(&ms.name)).await;
+        assert_eq!(summary.tasks_created, 1);
+
+        // Admin widens the batch; batch 1 completes.
+        set_policy(
+            &state,
+            "ws-bsize",
+            &gyre_domain::RolloutPolicy {
+                strategy: gyre_domain::RolloutStrategy::Rolling,
+                max_concurrent_agents: 3,
+                priority: gyre_domain::ReconciliationPriority::Normal,
+                auto_merge: false,
+            },
+        )
+        .await;
+        finish_all_reconciliation_tasks(&state, "ws-bsize").await;
+        on_reconciliation_task_terminal(&state, &ws.id).await;
+
+        // The whole remaining 3-task remainder is created (new batch size),
+        // not just 1 (trigger-time size).
+        let open = open_tasks_with_label(&state, RECONCILIATION_LABEL)
+            .await
+            .into_iter()
+            .filter(|t| !matches!(t.status, TaskStatus::Done | TaskStatus::Cancelled))
+            .count();
+        assert_eq!(open, 3, "batch-size change must apply to the next batch");
+        assert!(pending_rollout_state(&state, "ws-bsize").await.is_none());
     }
 
     // -- §7: auto_merge ------------------------------------------------------
