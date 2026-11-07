@@ -1823,10 +1823,10 @@ mod tests {
             }],
         };
 
-        let persisted =
+        let outcome =
             extract_and_persist_call_graph(dir.path(), &nodes, &[], &repo_id, &store, &fake).await;
         assert_eq!(
-            persisted, 1,
+            outcome.edges_persisted, 1,
             "one cross-module Calls edge should be persisted"
         );
 
@@ -1838,6 +1838,14 @@ mod tests {
         assert_eq!(calls[0].source_id, caller.id);
         assert_eq!(calls[0].target_id, callee.id);
         assert_eq!(calls[0].edge_type, EdgeType::Calls);
+        // §7 (task-076): the TS leg emits the same EdgeType::Calls variant
+        // with the same provenance metadata tag as the Go leg — Pass 2 edge
+        // type consistency holds per language.
+        assert_eq!(
+            calls[0].metadata.as_deref(),
+            Some(gyre_common::call_graph::PASS2_EDGE_METADATA),
+            "Pass 2 Calls edge must carry the provenance metadata tag"
+        );
     }
 
     #[tokio::test]
