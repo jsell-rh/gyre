@@ -154,26 +154,27 @@ lens selection.
   the new tests install a queued (browser-ordered) rAF mock to draw frames
   deterministically. No production behavior change.
 
-### Re-verification after contract restore (round 7)
+### Re-verification after contract restore (round 8)
 
 The executor again restored the assigned task document (repair id
-bcc984bf254b47afa68055576953f109, assigned base ad417f8a5, candidate head
-7e7cde66) — this is the seventh such restore; each round the only
+c463b1a7715e4cd39e7616f08fd8515f, assigned base 2badce49, candidate head
+dd472421) — this is the eighth such restore; each round the only
 working-tree delta is the task document itself. Resolved this round:
 
 - **No production code changes.** The three-lens implementation
   (lens-rendering.js, ExplorerCanvas/ExplorerView evaluative overlays,
   gates.rs rejection fields) is intact at HEAD from product-surface commit
-  0766a167, which is an ancestor of this branch head. The only drift to
-  ExplorerCanvas since that commit is an unrelated span-status robustness
-  fix from another task; lens rendering is unchanged.
+  0766a167, which is an ancestor of this branch head (via merge 4d2635b).
+  The only drift to ExplorerCanvas since that commit is an unrelated
+  span-status robustness fix from another task; lens rendering is unchanged.
 - **Fresh focused probes on this branch after `npm ci`:**
   `npx vitest run` on the three lens test files — 189/189 passed
-  (task090-vitest-lenses-r7.log, exit 0);
+  (task090-vitest-lenses-r8.log, exit 0);
   `cargo test -p gyre-server --lib api::gates` — 7 passed
-  (task090-cargo-gates-r7.log, exit 0). Logs retained under
+  (task090-cargo-gates-r8.log, exit 0). Logs retained under
   /tmp/stage/review-evidence with exit codes.
 - Frontmatter re-verified (progress ready-for-review, acceptance boxes
-  checked, product-surface commit 0766a167 attributed); the working tree
-  is clean — the web/dist churn produced by the cargo build was restored
-  to HEAD, not committed.
+  checked, product-surface commit 0766a167 attributed;
+  scripts/check-task-commit-attribution.sh passes); the working tree is
+  clean — the web/dist churn produced by the cargo build was restored to
+  HEAD, not committed.
