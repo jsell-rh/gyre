@@ -4,6 +4,7 @@
   import { api } from '../lib/api.js';
   import { entityName } from '../lib/entityNames.svelte.js';
   import { computeTimelineDeltaStats, computeTimelineGhostOverlays } from '../lib/timeline-utils.js';
+  import { RECENT_CHANGE_WINDOW_MS } from '../lib/liveness.svelte.js';
   import ExplorerCanvas from '../lib/ExplorerCanvas.svelte';
   import ExplorerChat from '../lib/ExplorerChat.svelte';
   import Skeleton from '../lib/Skeleton.svelte';
@@ -187,6 +188,11 @@
   // HSI §3 Layer 1: MR gate evaluation records for the current repo —
   // [{ mrId, spec_ref, gates }] — drive the Evaluative-lens green/red edges.
   let gateRecords = $state([]);
+  // HSI §3 Layer 1: recent ArchitecturalDelta records (last hour only) for
+  // the fading highlight rings. Loaded on canvas load so the rings do not
+  // depend on the collapsed-by-default Architecture-Insights panel; the
+  // insights panel's full timeline (a superset) takes precedence once live.
+  let livenessTimeline = $state(null);
   let predictAffectedSpecs = $state([]);
   let predictEstimatedCost = $state(null);
   let predictConfidence = $state(null);
@@ -859,13 +865,14 @@
   }
 
   async function loadGraph(repoId) {
-    if (!repoId) { graph = null; traceData = null; gateRecords = []; return; }
+    if (!repoId) { graph = null; traceData = null; gateRecords = []; livenessTimeline = null; return; }
     loading = true;
     graph = null;
     graphError = null;
     selectedNode = null;
     traceData = null;
     gateRecords = [];
+    livenessTimeline = null;
     graphWarnings = [];
     graphWarningsDismissed = false;
     try {
@@ -880,6 +887,10 @@
       loadTraceData(repoId);
       // Load MR gate records for evaluative-lens edge colors (HSI §3 Layer 1)
       loadGateData(repoId);
+      // Load recent ArchitecturalDelta records for the fading change rings
+      // (HSI §3 Layer 1) — the canvas-load query the insights panel's lazy
+      // load must not gate.
+      loadLivenessTimeline(repoId);
     } catch (e) {
       showToast($t('explorer_view.graph_error', { values: { error: e.message } }), { type: 'error' });
       graphError = e.message;
@@ -961,6 +972,25 @@
       }
       gateRecords = records;
     } catch { /* gate loading is best-effort */ }
+  }
+
+  /**
+   * HSI §3 Layer 1: load the repo's recent ArchitecturalDelta records on
+   * canvas load so the fading highlight rings have a data source in the
+   * default view (the Architecture-Insights panel that owns the full
+   * timeline is collapsed by default). The query is bounded to the recent-
+   * change window (since = now − 1h, no until) so the payload stays small;
+   * computeRecentChanges re-applies the same window, and the insights
+   * panel's full timeline supersedes this slice once loaded. Best-effort
+   * and non-blocking, like trace/gate loading.
+   */
+  async function loadLivenessTimeline(repoId) {
+    try {
+      const since = Math.floor((Date.now() - RECENT_CHANGE_WINDOW_MS) / 1000);
+      const timeline = await api.repoGraphTimeline(repoId, since);
+      if (selectedRepoId !== repoId) return; // stale — user switched repos
+      livenessTimeline = Array.isArray(timeline) ? timeline : [];
+    } catch { /* recent-change rings are best-effort */ }
   }
 
   function onRepoChange(e) {
@@ -1470,7 +1500,7 @@
                 assertionResults={specAssertionResults}
                 assertionSpecPath={specEditorOpen ? specEditorPath : null}
                 {highlightedSpanId}
-                timeline={graphTimeline ?? []}
+                timeline={graphTimeline ?? livenessTimeline ?? []}
                 timelineActive={timelineScrubActive}
                 timelineScrubIndex={timelineScrubIndex}
                 {gateRecords}
