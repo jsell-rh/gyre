@@ -5,7 +5,7 @@ depends_on: [task-156]
 progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §9 Merge Gate Behavior"
-commits: ["abbcd4aadae36785f7dfe7efa4e4dec03ca73d95", "333030908ce0ff64b2810ea0003fc0e28598abf3"]
+commits: ["abbcd4aadae36785f7dfe7efa4e4dec03ca73d95", "333030908ce0ff64b2810ea0003fc0e28598abf3", "8a99bd80805f8659373f8e8d38382a2ad7039cd7"]
 ---
 
 ## Spec Excerpt
@@ -79,15 +79,22 @@ meta-spec set {old}, current is {new}. Reconciliation may be needed.` and
 `parse_meta_spec_drift_warning` round-trips it for the queue graph.
 
 **Merge-gate wiring (§9)** — `crates/gyre-server/src/merge_processor.rs`:
-both merge paths (`process_next` single-entry and `merge_atomic_group`)
-run the drift check before the transactional merge. Default (warn only):
-a gate result with id `meta-spec-drift`, `GateStatus::Passed` and the §9
-warning output is recorded on the MR (idempotent across retry cycles —
-an existing result is updated in place, not duplicated) and the merge
-proceeds. Strict policy (`require_current_meta_spec_set: true`): the entry
-returns to `Queued` carrying the drift reason and stays there until the
-code is reconciled under the current set or the policy is relaxed; every
-atomic-group member is re-queued the same way.
+the drift + merge-policy evaluation runs DURING candidate selection in
+`process_next` (step 4c'', `selection_meta_spec_drift_hold`), exactly like
+the task-077 trust hold. Default (warn only): a gate result with id
+`meta-spec-drift`, `GateStatus::Passed` and the §9 warning output is
+recorded on the MR (idempotent across retry cycles — an existing result is
+updated in place, not duplicated) and the merge proceeds. Strict policy
+(`require_current_meta_spec_set: true`): the entry is requeued carrying the
+drift reason and the processor continues to the next candidate in the SAME
+cycle, so a strictly-blocked drifted MR at the head of the shared queue
+cannot starve later entries — in its own workspace or in other workspaces.
+The entry stays Queued until the code is reconciled under the current set
+or the policy is relaxed. `selection_meta_spec_drift_hold` expands
+atomic-group candidates to all group members, so a drifted member holds
+the whole group (each member entry is requeued with the drift reason)
+without blocking later entries in that cycle; `merge_atomic_group` and
+the single-entry path no longer re-check drift after selection.
 
 **Workspace merge policy** — `crates/gyre-server/src/merge_policy.rs`:
 `WorkspaceMergePolicy { require_current_meta_spec_set }` persisted through
@@ -114,46 +121,51 @@ MR detail view reads, so the graph cannot disagree with gate results.
 - `cargo test -p gyre-server --lib meta_spec_drift` — 5 passed:
   warn-records-gate-result-and-merges, hard-block + policy-relax recovery,
   match-no-warning, no-attestation-skip, gate-result idempotency.
-- `cargo test -p gyre-server --lib merge_policy` — 4 passed: KV default /
-  roundtrip / corrupt-fallback + API test (default warn-only, Developer
+- `cargo test -p gyre-server --lib strict_drift_hold` — 2 passed (review
+  repair regression): clean MRs behind a strictly-blocked drifted head
+  merge in the same cycle (same-workspace and cross-workspace), and a
+  drift-held atomic group does not starve a later independent entry.
+  Kill-tested: with the old post-selection early-return shape restored,
+  both tests fail on "clean MR must merge in the same cycle".
+- `cargo test -p gyre-server --lib merge_policy` — 4 passed (KV default /
+  roundtrip / corrupt-fallback + API test: default warn-only, Developer
   PUT 403 with no state change, Admin PUT roundtrips, unknown workspace
   404).
-- `cargo test -p gyre-server --lib reconciliation::` — 24 passed
-  (drift match / mismatch + §9 format round-trip / no-attestation / no-set /
-  empty-sha / foreign-output parse rejection, plus the pre-existing
-  reconciliation suite).
-- `cargo test -p gyre-server --lib merge_processor` — 61 passed
-  (54 task-159 + 7 task-077 trust-gate tests merged in from the assigned
-  base), `merge_deps::` — 13 passed, `api::workspaces::` — 17 passed
-  (merge-policy API test + task-077 trust-transition tests from the base).
-- `cargo test -p gyre-server --lib` (full lib) — 1353 passed, 0 failed
-  (merge-correctness probe after combining base a884329d7 with the branch).
-- `npx vitest run src/__tests__/MergeQueueGraph.test.js` — 25 passed
-  (20 pre-existing + 5 drift badge/tooltip/legend tests); the merge touched
-  no web/ sources.
+- `cargo test -p gyre-server --lib reconciliation::` — 24 passed,
+  `merge_deps::` — 13 passed, `api::workspaces::` — 17 passed,
+  `merge_processor` — 67 passed (all selection/atomic-group/trust suites
+  included, since the selection loop changed).
+- `cargo test -p gyre-server --lib` (full lib) — 1365 passed, 0 failed
+  (merge-correctness probe after the repair).
+- `npx vitest run src/__tests__/MergeQueueGraph.test.js` — 25 passed in
+  the prior round (20 pre-existing + 5 drift badge/tooltip/legend tests);
+  this repair touched no web/ sources.
 - Mechanical checks green: check-inert-enforcement, check-arch,
-  check-abac-route-registry, check-abac-exempt-handlers (88 handlers),
+  check-abac-route-registry, check-abac-exempt-handlers,
   check-scope-literal-defaults, check-in-memory-state-stores,
-  check-forged-scope-fields, check-migration-versions.
+  check-forged-scope-fields, check-migration-versions,
+  check-lossy-secret-conversion, check-fail-open-ref-resolution,
+  check-forwarded-header-trust, check-unbounded-external-http,
+  check-fabricated-scope-defaults, check-relative-path-defaults,
+  check-mem-port-contracts, check-mcp-write-tools,
+  check-dead-message-kinds, check-migration-sql-portability,
+  check-task-commit-attribution.
 
-### Round note (review repair + base merge)
+### Round note (review repair)
 
-The backend, policy API, drift evaluation, UI, and tests shipped in
-recovered checkpoint 333030908 + feat(task-159) commit abbcd4aad. This
-round resolved the merge with the newly assigned base a884329d7 (merge
-commit c17c22498): both conflicted test modules keep BOTH sides' suites —
-the task-159 drift/merge-policy tests and the base's task-077 trust-gate
-and trust-transition tests. The CI repair finding
-(scripts/check-inert-enforcement.sh exiting 1 on the candidate because the
-task-159 diff had shifted the exemption-pinned `evaluate_attestation_abac`
-sites at merge_processor.rs:1457/:1479 to :1608/:1630) is resolved by the
-base itself, not by new exemptions: the base restructured both call sites
-to bind their result (`let attestation_eval = evaluate_attestation_abac(
-...)` with a real Deny-effect branch) and deleted the two stale
-merge_processor exemption entries — the exemption count went DOWN, the
-F5 hazards are actually fixed. `bash scripts/check-inert-enforcement.sh`
-now exits 0 on the merged tree. Focused evidence re-run after the merge:
-5 / 4 / 61 / 13 / 24 / 17 / 1353 (lib full) / 25 (vitest) — logs retained
+Original backend, policy API, drift evaluation, UI, and tests shipped in
+recovered checkpoint 333030908 + feat(task-159) commit abbcd4aad; the base
+merge repair round followed (merge with base a884329d7 keeping both sides'
+test suites, and the stale check-inert-enforcement exemption entries
+resolved by the base itself). This round (commit 8a99bd808) resolves the
+review finding that the strict-policy drift block starved the shared merge
+queue: the block was evaluated after candidate selection and returned
+early, so a strictly-blocked drifted head was re-selected and re-blocked
+every 5s tick (update_status does not rotate enqueued_at) and no later
+entry — including clean MRs in other workspaces — ever merged. Fixed by
+evaluating drift + policy during candidate selection (mirroring the
+in-tree trust-hold precedent), requeue-with-reason and continue, with the
+atomic-group mirror in the same helper. Focused evidence logs are retained
 under /tmp/stage/review-evidence/task-159-*.log. The acceptance-criteria
 checkboxes are left unchecked in the task body per the assigned contract;
 the criteria themselves are satisfied by the shipped behavior above.
