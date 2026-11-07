@@ -4,7 +4,7 @@ spec_ref: "explorer-implementation.md §Self-Check Loop"
 depends_on: []
 progress: ready-for-review
 coverage_sections: []
-commits: ["eff64e31d"]
+commits: ["eff64e31dd1d0b3fccb66d7ace299e7f32e42bbe"]
 ---
 
 ## Spec Excerpt
