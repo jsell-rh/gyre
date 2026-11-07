@@ -9,7 +9,7 @@ coverage_sections:
   - "platform-model.md §6 Post-Merge Validation"
   - "platform-model.md §6 Recovery Protocol"
   - "platform-model.md §6 Agent Behavior During Recovery"
-commits: ["3ef9e1b8222821f330942f3fbf13edab1b3497eb", "44a8187fe2c39c9884e2fe9c6ff0c8add233ee2f", "3a9b11f69c57cb576d2e3914ff7af7e54941b518", "5aaded213193d1af1cec693e729ac2872893b10b", "86c7d382312fae4fb52ae4effe40e021330f3ac2", "7c723298b41ee761067b15ae426651aa280fb75e"]
+commits: ["3ef9e1b8222821f330942f3fbf13edab1b3497eb", "44a8187fe2c39c9884e2fe9c6ff0c8add233ee2f", "3a9b11f69c57cb576d2e3914ff7af7e54941b518", "5aaded213193d1af1cec693e729ac2872893b10b", "86c7d382312fae4fb52ae4effe40e021330f3ac2", "7c723298b41ee761067b15ae426651aa280fb75e", "68342729f5209fac85cd1cad60c7eda540b0a35a"]
 ---
 
 ## Spec Excerpt
@@ -111,7 +111,40 @@ as squashed checkpoint `3ef9e1b8` on base `3c39ab1f` (pre-recovery
 SHAs retained above only for controller cross-reference — they are
 not resolvable in this object store).
 
-### Verification-repair round (this revision)
+### Merge-repair round (this revision)
+
+The controller merged base `4d6759a0` (task-075/076/077/084/087
+lineage) into this branch; six files conflicted and were resolved in
+merge commit `68342729f` (appended to `commits:`):
+
+- `abac_middleware.rs` — combined resolution: upstream's fail-closed
+  `seed_builtin_policies -> anyhow::Result<()>` (task-077 F6, required by
+  the auto-merged `main.rs` `.await?` call) is kept, with this task's
+  drift-refresh seeding (`builtin_policy_drifted`) preserved inside it;
+  the drift test's bare calls now `.expect("seed")` on the Result.
+- `merge_processor.rs` — the task-095 R3-F2/R4-F1 hardenings (spec_ref-
+  keyed circuit breaker, `RevertResult::Conflict` handling, spec_carry
+  remediation text) and the merge-time attestation-ABAC enforcement
+  (Deny fails the queue entry) are kept over upstream's older forms
+  (pre-R3 breaker signature, `Ok(revert_sha)`, audit-only logging);
+  upstream's task-077 F9 fail-closed supervised-trust gate and its two
+  tests arrived via the auto-merge and are preserved.
+- `api/recovery.rs` — the task-095 R3-F3 fail-closed `main_green`
+  reporting, R3-F1 repo-mismatch Forbidden check, and
+  merge-commit-sha-scoped manual revert are kept over upstream's older
+  target-branch-HEAD resolution; the HEAD-only test module is preserved.
+- scripts (`check-fail-open-ref-resolution.sh`, its exemptions file,
+  `inert-enforcement-exemptions.txt`) — comment-text conflicts only;
+  exemption entries are identical on both sides (0 / unchanged), HEAD's
+  comments kept.
+- `tests/search_wiring.rs` — the seed call now handles the
+  Result-returning signature.
+
+No behavioral change relative to the task-095 reviewed state except the
+intended combination in `seed_builtin_policies` (fail-closed Result AND
+drift refresh), which both pinning tests cover.
+
+### Prior verification-repair round
 
 The deterministic verification gate (`dev-check.sh`) failed with
 "new verification exemptions forbidden:
@@ -124,40 +157,42 @@ The entry was dead debt in both base and HEAD: push-event emission
 already resolves `ws_id` via `match state.repos.find_by_id(...)` with
 skip-and-log on lookup failure (the task-097 F3 compliant pattern),
 and the gate's matcher flags no site in `git_http.rs` at either ref.
-Repair (commit `7a0bd1db`, appended to `commits:`): delete the stale
-entry and lower `FROZEN_EXEMPTION_COUNT` 5 → 4, exactly as the
-exemption file's header instructs for fixed sites. No Rust code
-changed.
+Repair (commit `7a0bd1db`): delete the stale entry and lower
+`FROZEN_EXEMPTION_COUNT` 5 → 4, exactly as the exemption file's header
+instructs for fixed sites. No Rust code changed.
 
 ### Test evidence
 
-- This round: `check-fabricated-scope-defaults.sh` passes against this
-tree with both the candidate script (count 4) and the upstream/base
-script version (count 5) placed at its original path — the four
-remaining live flagged sites (`gate_executor.rs:111`,
-`api/specs.rs:959`, `auth.rs:773`, `speculative_merge.rs:372`) are all
-still exempted; the dev-check exemption-freeze set difference vs
-base `86a98a29` is empty (probe transcript under
-`/tmp/stage/review-evidence/`).
-- On the recovered tree (`3ef9e1b8`): `cargo fmt --check -p
-  gyre-server` clean; `check-arch.sh`, `check-abac-route-registry.sh`,
-  `check-dead-message-kinds.sh`, `check-migration-versions.sh`,
+- This round (merge repair, on the merged tree `68342729f`):
+  `cargo check -p gyre-server --all-targets` clean (no warnings);
+  `cargo fmt --check -p gyre-server` clean; focused suites:
+  `--lib merge_processor` 67 passed (includes upstream's task-077 F9
+  fail-closed trust-gate tests and this task's recovery-protocol
+  tests), `--lib recovery` filter 11 passed (includes the six
+  `api::recovery` R3/R4 pinning tests), `--lib abac_middleware` 11
+  passed including `seed_refreshes_drifted_builtin_policy` and
+  `builtin_policy_seeding_fails_closed_on_store_error` (the two sides
+  of the combined seed resolution). Mechanical gates green on the
+  merged tree: `check-arch.sh`, `check-abac-route-registry.sh`,
+  `check-abac-exempt-handlers.sh`, `check-dead-message-kinds.sh`,
+  `check-migration-versions.sh`, `check-mcp-write-tools.sh`,
   `check-byte-slice-truncation.sh`,
-  `check-fail-open-ref-resolution.sh`, and
-  `check-task-commit-attribution.sh` all pass; the Round-6 fix content
-  verified present.
+  `check-fail-open-ref-resolution.sh`, `check-inert-enforcement.sh`,
+  `check-fabricated-scope-defaults.sh`,
+  `check-forwarded-header-trust.sh`, `check-lossy-secret-conversion.sh`,
+  `check-scope-literal-defaults.sh`, `check-unbounded-external-http.sh`,
+  `check-relative-path-defaults.sh`, `check-in-memory-state-stores.sh`,
+  `check-mem-port-contracts.sh`, `check-task-commit-attribution.sh`.
+  Probe transcripts saved under `/tmp/stage/review-evidence/`.
+- Full-suite and cross-crate evidence from prior rounds (R2–R3,
+  pre-recovery lineage): `gyre-server` all suites 1273 passed;
+  `gyre-adapters` 324 passed / 12 ignored. The earlier recorded
+  no-crates-io-egress limitation did not hold for this runtime —
+  dependency builds and focused suites executed locally; full
+  workspace suites remain owned by deterministic verification.
 - Standalone rustc probe
   (`/tmp/stage/review-evidence/probe_policy_test_fix.rs`) replicating
   the engine verbatim: attested arm PASS (Allow,
   `builtin-attested-authorization`), unattested arm PASS (Deny,
   `builtin-require-signed-authorization`); the pre-fix construction
   reproduced the finding's failure signature as a regression guard.
-- Prior full-suite evidence (R2–R3 rounds, pre-recovery lineage):
-  `gyre-server --lib merge_processor` 45 passed; `gyre-server` all
-  suites 1273 passed; `gyre-adapters` 324 passed / 12 ignored.
-
-Sandbox limitation recorded for remote verification: this runtime has
-no crates.io egress, so `cargo test` suites cannot execute here; the
-full-suite green must be confirmed by CI/remote verification on the
-branch head. This round changed no Rust code — the scripts-only
-repair is fully covered by the deterministic gates above.
