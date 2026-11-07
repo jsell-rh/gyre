@@ -12,7 +12,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parent))
 from pipeline.execution import Execution, Retry, Wait, Attention
 from pipeline.store import Store
-from pipeline.verification import COMMANDS, decode_poll, run, retire, validate_receipt
+from pipeline.verification import COMMANDS, deadline_error, decode_poll, run, retire, validate_receipt
 
 spec = importlib.util.spec_from_file_location('remote_verify', Path(__file__).with_name('pipeline-verify.py'))
 remote = importlib.util.module_from_spec(spec)
@@ -20,6 +20,19 @@ spec.loader.exec_module(remote)
 
 
 class VerificationTests(unittest.TestCase):
+    def test_exhausted_budget_does_not_restart_the_same_build_on_main_advance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store=Store(directory);self.addCleanup(store.close)
+            store.put_task('task-001','g','body',{})
+            work=store.enqueue('verify','task-001','g',{'base':'old'})
+            claim=store.claim('verify','verifier')
+            error=deadline_error()
+            store.retry(work,claim['token'],{'category':error.category,'message':str(error)},attention=error.attention)
+            newer=store.enqueue('verify','task-001','g',{'base':'new'})
+            self.assertIsNone(store.claim('verify','verifier',ident=newer))
+            store.db.execute('DELETE FROM settings WHERE key=?',(store.runtime_hold_key('task-001','verify','g'),))
+            self.assertIsNotNone(store.claim('verify','verifier',ident=newer))
+
     def test_cli_diagnostics_do_not_corrupt_framed_poll(self):
         value = {'offset': 0, 'log': '', 'receipt': None, 'alive': True}
         frame = 'GYRE_VERIFY_POLL ' + json.dumps(value)

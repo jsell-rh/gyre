@@ -222,7 +222,10 @@ def verify(execution, task):
     if not remote['passed']:
         failed = next(record for record in records if record['exit_code'])
         code = failed['exit_code']
-        if code in (75, 77, 79, 124, 137) or code < 0:
+        if code == 124:
+            from .verification import deadline_error
+            raise deadline_error()
+        if code in (75, 77, 79, 137) or code < 0:
             raise Retry('verification infrastructure unavailable')
         if code == 81:
             observation = static_baseline_observation(execution.log, inp['base'])

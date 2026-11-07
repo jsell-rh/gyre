@@ -55,6 +55,11 @@ it does not restart the coding process at the insufficient tier. Verification
 also reconnects to its detached process and may resume after an owned restart.
 Infrastructure backoff releases the integration lane so another reviewed
 candidate can advance; claims and exact-source checks still gate publication.
+Cleanup salvages source only from implementation assignments; reviewers and
+exact-tree verifiers retain bounded logs and are purged without indexing their
+generated output. Verification defaults to four hours. Exhausting that budget
+requires inspection and an explicit retry, with a budget change if needed, rather than repeating the same cold
+build automatically, including when main advances.
 
 ## Scheduling priority and reserved capacity
 

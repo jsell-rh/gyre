@@ -13,6 +13,12 @@ COMMANDS = [['bash', '/tmp/stage/checks.sh'], ['cargo', 'test', '--all', '--quie
             ['npm', 'test', '--', '--no-file-parallelism']]
 
 
+def deadline_error():
+    error=Attention('Verification exhausted its deadline; inspect retained logs or raise the budget before retrying the same build')
+    error.category='verification_timeout'
+    return error
+
+
 def decode_poll(output):
     frames = [line.removeprefix('GYRE_VERIFY_POLL ') for line in output.splitlines()
               if line.startswith('GYRE_VERIFY_POLL ')]
@@ -85,7 +91,7 @@ def run(execution, path, identity, probe=None):
             shutil.copyfile(ROOT / 'scripts' / source, bundle / source)
         gate = (ROOT / 'scripts/dev-check.sh').read_text().replace('/tmp/gyre', '/sandbox/workspace/checkout')
         (bundle / 'checks.sh').write_text(gate)
-        timeout=store.setting('verification_timeout',10800)
+        timeout=store.setting('verification_timeout',14400)
         job = identity | {'image': image, 'timeout_seconds':timeout, 'repo_url': store.setting('repo_url', 'https://github.com/jsell-rh/gyre.git'),
                           'task':execution.claim['task'],'publication_branch':f"pipeline/verified/{execution.claim['id']}-{execution.claim['token']}"}
         if probe is not None:
@@ -208,7 +214,7 @@ def run(execution, path, identity, probe=None):
                 if failures >= 6:
                     raise Attention('invalid remote verification protocol response; inspect retained diagnostics') from exc
             execution.cancelled.wait(min(30, 2 ** failures) if failures else 2)
-        raise Retry('remote verification exceeded its bounded deadline')
+        raise deadline_error()
     finally:
         try:
             retire(execution, name)

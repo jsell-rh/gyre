@@ -144,7 +144,7 @@ def main():
                 time.sleep(min(60, 5 * 2 ** attempt))
         # The host bounds the complete assignment. A thin worker must not lose
         # its healthy compiler/cache to a shorter, hidden per-command deadline.
-        timeout=job.get('timeout_seconds',10800)
+        timeout=job.get('timeout_seconds',14400)
         commands = [(['bash', str(STAGE / 'checks.sh')], str(CHECKOUT), timeout),
                     (['cargo', 'test', '--all', '--quiet'], str(CHECKOUT), timeout),
                     (['npm', 'test', '--', '--no-file-parallelism'], str(CHECKOUT / 'web'), timeout)]
