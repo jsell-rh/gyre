@@ -148,6 +148,48 @@ describe('CrossWorkspaceHome', () => {
     }, { timeout: 3000 });
   });
 
+  // ── Regression: real server envelope for myNotifications ────────────
+  // users.rs get_my_notifications returns { notifications: [...], limit,
+  // offset }, NOT a bare array. Every other mock in this file resolves a
+  // bare array, so nothing pinned the real envelope: reverting the component
+  // to read `data?.items` (the pre-fix bug that always rendered an empty
+  // Decisions section) passed all of them. These tests fail under that
+  // revert.
+  it('renders decision items from the real {notifications:[...]} server envelope', async () => {
+    api.myNotifications.mockResolvedValue({
+      notifications: [
+        { id: 'n1', notification_type: 'gate_failure', message: 'Gate failed in payment-api', workspace_name: 'Payments' },
+        { id: 'n2', notification_type: 'spec_approval', message: 'Spec approval needed', workspace_name: 'Billing' },
+      ],
+      limit: 50,
+      offset: 0,
+    });
+    const { container } = render(CrossWorkspaceHome);
+    await waitFor(() => {
+      const section = container.querySelector('[data-testid="section-decisions"]');
+      expect(section?.textContent).toContain('Gate failed in payment-api');
+      expect(section?.textContent).toContain('Spec approval needed');
+    }, { timeout: 3000 });
+    const items = container.querySelectorAll('[data-testid="cwh-decision-item"]');
+    expect(items.length).toBe(2);
+  });
+
+  it('does not show the decisions empty state for a non-empty notifications envelope', async () => {
+    api.myNotifications.mockResolvedValue({
+      notifications: [
+        { id: 'n1', notification_type: 'spec_approval', message: 'Spec approval needed' },
+      ],
+      limit: 50,
+      offset: 0,
+    });
+    const { container } = render(CrossWorkspaceHome);
+    await waitFor(() => {
+      expect(container.querySelectorAll('[data-testid="cwh-decision-item"]').length).toBe(1);
+    }, { timeout: 3000 });
+    const section = container.querySelector('[data-testid="section-decisions"]');
+    expect(section?.textContent).not.toContain('No decisions needed');
+  });
+
   it('shows workspace badge on each decision', async () => {
     api.workspaces.mockResolvedValue([
       { id: 'ws-pay', name: 'Payments', slug: 'payments' },
