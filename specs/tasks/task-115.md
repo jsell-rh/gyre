@@ -10,7 +10,7 @@ coverage_sections:
   - "agent-runtime.md §Phase 1: Spec Approval Triggers Orchestration"
   - "agent-runtime.md §Phase 2: Workspace Orchestrator — Cross-Repo Coordination"
   - "agent-runtime.md §Phase 3: Repo Orchestrator — Task Decomposition"
-commits: ["147d82592bbd4feb5ac1d299de9d124d0f144366", "de294c12051b3c1fe1e295c9847ffc0608dd29e8", "f5df0c01b81a0e72ff454f34a6ac6ffa1620778a", "336dd201779aed45093e5b6fe49cbb6ab9bea85e", "2a6911885e0fbefa33c17ed912003f9ead0a3f52", "fc7939f7d647bb52b35fe53abed237739886b0f6", "30cc63e7bc35165d3841872c54cdf1492e880840", "d01c07d6fb7219f12157b3b49faf85d471cdc833", "79b06a7ae27ba9f1da101b8f824ecb08c831cca1", "7f9f113cf2c00c7ce2366d1204a1ed75893fe97d", "e62a9d7e8943ad0ece7495c2ae9b8f3e5ad57d78", "0a13a2ee8fd20987829dab377cebbe75e2edc768", "e2153b406a60c0565053e1792731eef3d1d1557c"]
+commits: ["86415e4bbe32a0e16de22cc5d9e08a43442c788d", "147d82592bbd4feb5ac1d299de9d124d0f144366", "de294c12051b3c1fe1e295c9847ffc0608dd29e8", "f5df0c01b81a0e72ff454f34a6ac6ffa1620778a", "336dd201779aed45093e5b6fe49cbb6ab9bea85e", "2a6911885e0fbefa33c17ed912003f9ead0a3f52", "fc7939f7d647bb52b35fe53abed237739886b0f6", "30cc63e7bc35165d3841872c54cdf1492e880840", "d01c07d6fb7219f12157b3b49faf85d471cdc833", "79b06a7ae27ba9f1da101b8f824ecb08c831cca1", "7f9f113cf2c00c7ce2366d1204a1ed75893fe97d", "e62a9d7e8943ad0ece7495c2ae9b8f3e5ad57d78", "0a13a2ee8fd20987829dab377cebbe75e2edc768", "e2153b406a60c0565053e1792731eef3d1d1557c"]
 ---
 
 ## Spec Excerpt
@@ -91,57 +91,42 @@ When a delegation task is created, the task scheduler spawns the repo orchestrat
 Read `specs/system/agent-runtime.md` §1 (all of it, Phases 1-8) for full context. The spec approval handler is in `gyre-server/src/api/specs.rs` — grep for `approve`. Message bus types are in `gyre-common/src/message.rs` (MessageKind::SpecApproved already exists). Agent spawning is in `gyre-server/src/api/spawn.rs`. Task types (Delegation, Coordination, Implementation) are defined in `gyre-domain/src/task.rs`. MCP tools are in `gyre-server/src/mcp.rs`. The existing `domain_events.rs` handles event emission patterns.
 
 ## Shipped
+Round-4 review repair (review checkpoint `829bba20`, fix commit `86415e4b`
+on `pipeline/task-115/813e9bfe4ae14ed197c8bf46b9104450-1`). The single
+finding of the round is fixed and verified against both failure modes it
+named.
 
-Round-3 review repair (review checkpoint `3f05f838`, fix commit `147d8259`
-on `pipeline/task-115/7f4735991bbd470c82b4084838fdc510-1`, assignment base
-`88bd81bf`). Both findings of the round are fixed, and each fix carries a
-regression test verified to fail deterministically against the pre-fix code.
+### F1 — duplicate Diesel migration version 20261010000056
 
-### F1 — TaskRepository::create dropped workspace_id (sqlite + postgres task adapters)
+Commit `336dd201` had added `2026-10-10-000056_task_spec_ref`, deriving the
+same Diesel version as the base's pre-existing
+`2026-10-10-000056_meta_spec_approved_content_hash`. Diesel runs only one
+migration per version, so on a fresh database the `meta_specs.approved_content_hash`
+column was never created and every meta-spec insert failed — the repo's
+migration-sequence invariant (AGENTS.md, `scripts/check-migration-versions.sh`)
+was violated. Renumbered the directory to the next unused sequence
+`2026-10-10-000057_task_spec_ref` (derived version `20261010000057`);
+migration body unchanged. Both storage backends embed the same
+`migrations/` dir, so SQLite and PostgreSQL pick up the fix together, and a
+database that ran the broken duplicate (which recorded `20261010000056` as
+the meta_spec migration, the alphabetical first) now runs the renumbered
+migration as a new version, creating the missing `tasks.spec_ref` column.
 
-Commit `336dd201` had displaced `workspace_id` from `NewTaskRow`, the insert
-row construction, and the upsert `DO UPDATE` set in BOTH the SQLite and
-Postgres task adapters (regression vs base `9bef21a4`). Because
-`tasks.workspace_id` is `TEXT NOT NULL DEFAULT 'default'`, every task INSERT
-silently landed in the fabricated `default` workspace scope — invisible to
-the mem-adapter-backed server tests. Restored all three spots in both
-adapters and added the adapter regression test
-`create_persists_workspace_scope` (sqlite), asserting create-persistence,
-`list_by_workspace` visibility, and the upsert DO UPDATE scope move.
-Kill-verified: with the fix reverted the test fails with
-`left: Id("default") / right: Id("ws-42")` — the exact fabricated scope from
-the finding.
+### Test evidence (head `86415e4b`, clean tree)
 
-### F2 — decompose_delegation fail-open on an empty-SHA spec_ref
-
-`decompose_delegation`'s `Some(r) if r.contains('@')` branch split
-`"path@"` into `(path, "")` without validating the SHA, fabricated sub-tasks
-pinned to the malformed `path@` spec_ref, and completed the delegation Done —
-the sibling branch of the prior no-ledger-SHA fix. An empty SHA in spec_ref
-(reachable via `POST /api/v1/tasks` or MCP `gyre_create_task`, which do not
-shape-validate spec_ref) now hard-fails the run: the claim is released to
-Blocked, no sub-tasks are created, and a later cycle retries once the ref is
-resolvable. The now-redundant `spec_sha.is_empty()` guard on the blob read
-was removed (the SHA is guaranteed non-empty by the resolution above).
-Mirrored regression test
-`delegation_with_empty_sha_spec_ref_stays_blocked`. Kill-verified: with the
-bail reverted the test fails with `left: Done / right: Blocked` — the exact
-fail-open completion from the finding.
-
-### Test evidence (head `7d75a98a`, clean tree)
-
-- `cargo test -p gyre-adapters --lib sqlite::task` → **11 passed, 0 failed**
-- `cargo test -p gyre-server --lib signal_chain` → **19 passed, 0 failed**
-- `--lib api::specs` → 74 passed; `--lib api::orchestrator` → 7 passed;
-  `--lib jobs` → 11 passed; `--lib mcp::` → 78 passed;
-  `cargo test -p gyre-adapters --lib llm::` → 23 passed, 2 ignored
-- `SKIP_WEB_BUILD=1 cargo build -p gyre-adapters -p gyre-server --lib` → clean
-- Invariant gates re-run OK: check-arch, check-fail-open-ref-resolution,
-  check-fabricated-scope-defaults, check-scope-literal-defaults,
-  check-mem-port-contracts, check-in-memory-state-stores,
-  check-inert-enforcement, check-unbounded-external-http,
-  check-task-commit-attribution, check-dead-message-kinds
-- Evidence: `/tmp/stage/review-evidence/task-115-round3-evidence.txt`
+- Pre-fix reproduction confirmed both named failure modes:
+  `check-migration-versions.sh` exit 1 naming the `20261010000056` pair;
+  `--lib sqlite::meta_spec` 6 failures (`table meta_specs has no column
+  named approved_content_hash`); `no_duplicate_migration_version_prefixes`
+  failure on the same pair.
+- Post-fix: `check-migration-versions.sh` OK; `check-migration-sql-portability.sh` OK;
+  `cargo test -p gyre-adapters --lib sqlite::` → **266 passed, 0 failed**
+  (broken-tree baseline: 258 passed / 7 failed), including `sqlite::meta_spec`
+  (10 passed), `sqlite::task` (11 passed, round-3 F1 regression intact), and
+  the duplicate-version guard; `cargo test -p gyre-server --lib signal_chain`
+  → **19 passed, 0 failed**; `check-task-commit-attribution` OK after the
+  frontmatter update.
+- Evidence: `/tmp/stage/review-evidence/task-115-round4-migration-renumber.txt`
 - Sandbox transport restriction (unchanged from base,
   `/tmp/stage/capabilities.json`): listener-bound tests (`tty::`, `ws::`,
   `otlp_receiver::`, `git_http::`, gyre-cli `ws_integration`) cannot run
@@ -159,6 +144,9 @@ ordered Implementation sub-tasks, coordination assessment). Repair rounds:
 scheduler double-processing guards (cycle run lock, re-read after repo
 mutex, LLM latency bounds — `de294c12`), false bulk-ack of the orchestrator
 inbox, decorative spec read consumed into the delegation description,
-no-ledger-SHA hard error, sub-task repo/workspace scoping, and the rebase
-repair (`88e97e0d`, import-list-only conflict in `main.rs` resolved as the
-union).
+no-ledger-SHA hard error, sub-task repo/workspace scoping, round-3
+(`147d8259`: TaskRepository::create workspace_id restoration in both task
+adapters + `create_persists_workspace_scope`; empty-SHA spec_ref hard-fail
+in `decompose_delegation` + `delegation_with_empty_sha_spec_ref_stays_blocked`),
+and the rebase repairs (`88e97e0d`, `e4a8e9b8` — import-list-only conflicts
+resolved as the union).
