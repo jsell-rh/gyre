@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §3 Design Principle: The Built Software Is Always Alive"
-commits: ["c17b6c95e66824fd3b72b21f95b9b95f2a284ec6"]
+commits: ["c17b6c95e66824fd3b72b21f95b9b95f2a284ec6", "a3ad5d0288d7404c5f7759f7103640ab495dfc5c"]
 ---
 
 ## Spec Excerpt
@@ -66,10 +66,8 @@ Read `specs/system/human-system-interface.md` §3 "Design Principle: The Built S
 ## Shipped
 
 Both liveness layers of HSI §3 are implemented in production frontend code
-(product surface in commit c17b6c95, frontend-only — no Rust changes; this
-round preserved that fix unchanged, restored the assigned task contract
-text, and re-verified the full chain against the real server surfaces; see
-Test evidence).
+(product surface in commit c17b6c95; review repair in commit a3ad5d02 —
+see the repo-scoping fix below).
 
 ### Layer 1 — SDLC activity
 
@@ -99,8 +97,9 @@ Test evidence).
   while unfaded rings exist (no per-frame timer).
 - **Gate status edges (Evaluative lens only)** — `ExplorerView` loads the
   repo's recent MRs and their gate results
-  (`GET /merge-requests/:id/gates`) best-effort into `gateRecords`
-  (`{ mrId, spec_ref, gates }`), passed to the canvas.
+  (`GET /merge-requests?repository_id=<repo>&per_page=10`, then
+  `GET /merge-requests/:id/gates` per spec_ref-carrying MR) best-effort
+  into `gateRecords` (`{ mrId, spec_ref, gates }`), passed to the canvas.
   `computeNodeGateStatus` maps each MR's `spec_ref` to the nodes its spec
   governs — a failed gate wins over passing ones; pending/running-only sets
   prove nothing and are ignored. In the Evaluative lens, edge drawing
@@ -109,6 +108,18 @@ Test evidence).
   is gated on `lens === 'evaluative'`, so the default Structural lens never
   computes or renders gate colors. The legend gains green/red gate entries
   only while gate data is live.
+- **Repo scoping of liveness MR queries (review repair, a3ad5d02)** — the
+  loaders originally sent `{ repo_id, per_page }`, but the server's
+  `ListMrsQuery` only recognizes `repository_id` (unknown keys are
+  silently dropped), so the MR list fell through to the tenant-wide set:
+  another repo's failed gate on a same-named spec could color this repo's
+  edges red, and the per-MR gates fan-out was unbounded. Both
+  `loadGateData` and `loadTraceData` now send `repository_id`, and
+  `per_page` is implemented server-side on `GET /merge-requests`: the
+  handler sorts by `created_at` descending (deterministic across adapters,
+  whose list ordering is not contractual) and truncates before the per-MR
+  enrichment, so dropped MRs cost no extra queries. As a side effect the
+  trace loader now genuinely sees the most recent MRs first.
 
 ### Layer 2 — trace play icon (scaffolding)
 
@@ -133,8 +144,18 @@ Test evidence).
   decreases with age and never snaps; gate edge colors appear only in the
   Evaluative lens (Structural stays structural-colored); ▶ play badge
   drawn on span-carrying nodes and its click starts playback.
-- Full suite: `npm test` in `web/` — 65 files, 1665 passed / 41 skipped,
-  exit 0 (this round, locked deps via `npm ci`). Focused liveness run:
-  42/42 passed.
+- `web/src/__tests__/ExplorerViewLivenessWiring.test.js` (2 tests) — the
+  liveness loaders' HTTP wiring: every MR list call carries
+  `repository_id` for the current repo (never `repo_id`) with a bounded
+  `per_page`, and gates are fetched for the current repo's spec_ref-carrying
+  MRs against a contract-faithful mock (returns MRs only when
+  `repository_id` matches). Mutation-checked: reverting the fix to
+  `repo_id` fails both tests.
+- Server: `api::merge_requests::tests::list_mrs_per_page_keeps_newest` —
+  `per_page` caps the list to the most recently created MRs, newest
+  first, with distinct pinned timestamps; full module
+  `api::merge_requests::` 31/31 passed.
+- Full suite: `npm test` in `web/` — 67 files, 1670 passed / 41 skipped,
+  exit 0 (locked deps via `npm ci`).
 - Evidence (commands, SHAs, exit codes, output) saved under
   `/tmp/stage/review-evidence/task-086-*.txt` for executor retention.
