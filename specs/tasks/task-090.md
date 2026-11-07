@@ -155,3 +155,16 @@ lens selection.
   redraws once the evaluative-lens early `scheduleRedraw` effect fires;
   the new tests install a queued (browser-ordered) rAF mock to draw frames
   deterministically. No production behavior change.
+
+### Re-verification after contract restore
+
+The checkout restored the assigned task document; the production fix
+(commits 0766a167, a112eda20, 89fa5633) survived the base merge intact —
+all 7 feature files and the coverage-matrix row 23 (implemented) are
+present at HEAD, and `web/` sources are untouched by the merge. Fresh
+focused probes on this branch: `npx vitest run` on the three lens test
+files — 189/189 passed; `cargo test -p gyre-server --lib api::gates` —
+7 passed (incl. `list_spec_approvals_includes_rejection_fields`).
+Logs retained under /tmp/stage/review-evidence (task090-lens-tests.log,
+task090-gates-tests.log). No production code changes were needed this
+round; only this task document was re-recorded.
