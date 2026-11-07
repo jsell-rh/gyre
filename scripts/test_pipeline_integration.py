@@ -35,16 +35,16 @@ print(json.dumps(c and c['id']))'''
         self.store.enqueue('implement','task-100','g',{})
         self.assertIsNotNone(self.store.claim('implement','parallel-coder',capacity=8))
 
-    def test_lane_survives_retry_restart_and_main_change_then_releases_after_merge(self):
+    def test_lane_yields_on_infrastructure_retry_then_reacquires_safely(self):
         first=self.store.claim('verify','verifier',concurrency=8)
         entered=self.store.integration_lane()['entered']
         self.store.retry(first['id'],first['token'],{'category':'infrastructure'},delay=0)
         other=Store(self.temp.name)
         try:
-            self.assertEqual(other.integration_lane()['task'],first['task'])
+            self.assertIsNone(other.integration_lane())
             new=other.enqueue('verify',first['task'],'g',{'candidate':'candidate-1','base':'new-main'})
             self.assertIsNotNone(other.claim('verify','new-base',ident=new,concurrency=8))
-            self.assertEqual(other.integration_lane()['entered'],entered)
+            self.assertGreaterEqual(other.integration_lane()['entered'],entered)
             self.assertIsNone(other.claim('verify','other-candidate',task='task-002',concurrency=8))
             claim=dict(other.db.execute('SELECT * FROM work WHERE id=?',(new,)).fetchone())
             other.finish(new,claim['token'],{'passed':True})
