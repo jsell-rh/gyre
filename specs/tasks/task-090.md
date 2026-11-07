@@ -154,12 +154,12 @@ lens selection.
   the new tests install a queued (browser-ordered) rAF mock to draw frames
   deterministically. No production behavior change.
 
-### Re-verification after contract restore (round 5)
+### Re-verification after contract restore (round 6)
 
 The executor again restored the assigned task document (repair id
-e71591e59f924bf4afa993fc13d4a9bc, assigned base ad417f8a5, merged into
-this branch as 224eb765) — this is the fifth such restore; each round the
-only working-tree delta is the task document itself. Resolved this round:
+fae16a8b494946ee9f50120ecc0e212e, assigned base ad417f8a5, candidate head
+f6fdaf90) — this is the sixth such restore; each round the only working-tree
+delta is the task document itself. Resolved this round:
 
 - **No production code changes.** The three-lens implementation
   (lens-rendering.js, ExplorerCanvas/ExplorerView evaluative overlays,
@@ -167,9 +167,9 @@ only working-tree delta is the task document itself. Resolved this round:
   0766a167, which is an ancestor of this branch head.
 - **Fresh focused probes on this branch after `npm ci`:**
   `npx vitest run` on the three lens test files — 189/189 passed
-  (task090-vitest-lens-r5.log, exit 0);
+  (task090-vitest-lenses-r6.log, exit 0);
   `cargo test -p gyre-server --lib api::gates` — 7 passed
-  (task090-cargo-gates-r5.log, exit 0). Logs retained under
+  (task090-cargo-gates-r6.log, exit 0). Logs retained under
   /tmp/stage/review-evidence with exit codes.
 - Frontmatter re-verified (progress ready-for-review, acceptance boxes
   checked, product-surface commit 0766a167 attributed); the working tree
