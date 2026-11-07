@@ -6,7 +6,7 @@ depends_on:
   - task-031
   - task-036
   - task-038
-progress: ready-for-review
+progress: complete
 review: specs/reviews/task-053.md
 coverage_sections: []
 commits: []
@@ -53,14 +53,14 @@ These are the two remaining Phase 4 items not covered by existing tasks (TASK-03
 
 ## Acceptance Criteria
 
-- [x] Explorer canvas renders 10k+ node graphs without dropping below 30fps during pan/zoom
-- [x] Off-screen nodes are culled from rendering
-- [x] Low-zoom levels use simplified node rendering (no text labels)
-- [x] On viewports <768px, layout adapts (stacked or overlay chat)
-- [x] Chat panel collapsible on medium viewports
-- [x] Touch gestures (pinch-to-zoom, drag) work on the canvas
-- [x] Performance benchmark with 10k nodes passes targets
-- [x] `npm test` passes
+- [ ] Explorer canvas renders 10k+ node graphs without dropping below 30fps during pan/zoom
+- [ ] Off-screen nodes are culled from rendering
+- [ ] Low-zoom levels use simplified node rendering (no text labels)
+- [ ] On viewports <768px, layout adapts (stacked or overlay chat)
+- [ ] Chat panel collapsible on medium viewports
+- [ ] Touch gestures (pinch-to-zoom, drag) work on the canvas
+- [ ] Performance benchmark with 10k nodes passes targets
+- [ ] `npm test` passes
 
 ## Agent Instructions
 
@@ -76,11 +76,10 @@ When working on this task:
 
 ## Git Commits
 
-Implemented via the explorer pipeline lineage and recovered into this
-branch's history by the checkpoint commits (`3fb05db28` et al.); the four
-commits from the original operational history are not ancestors of this
-branch. This assignment re-verified the recovered implementation on the
-current base and updated this record only (see `## Shipped`).
+- `feat(ui): add responsive layout and large graph performance (TASK-053)`
+- `fix(process): add JS/TS mirrored-logic and tautological assertion checks (TASK-053)`
+- `fix(ui): address R1 review findings — viewport sync, real tests (TASK-053)`
+- `fix(ui): address R2 review findings — comparative tests, dead code, edge assertions (TASK-053)`
 
 ## Shipped
 
@@ -88,10 +87,12 @@ The TASK-053 implementation (production code, benchmark/responsive tests,
 and all R1–R3 review fixes) is present in the assigned base tree — it was
 recovered into this branch's history by the pipeline checkpoint commits,
 and the review record at `specs/reviews/task-053.md` closes at
-"R3 — complete, 0 findings". This assignment made **no production code
-changes**: it re-verified the recovered implementation against the current
-base (which has since stacked task-036/038/065/087 work on the same files)
-and confirmed every acceptance criterion still holds.
+"R3 — complete, 0 findings". The assigned task document above is preserved
+verbatim per the contract repair; these notes record the shipped behavior
+only. This assignment made **no production code changes**: it re-verified
+the recovered implementation against the current base (which has since
+stacked task-036/038/065/087 work on the same files) and confirmed every
+acceptance criterion still holds.
 
 ### Behavior (Part A — large graph performance)
 
@@ -120,7 +121,8 @@ and confirmed every acceptance criterion still holds.
 ### Behavior (Part B — responsive layout)
 
 - **<768px**: stacked layout — canvas full-width on top, chat as a
-  full-screen overlay with its own collapse bar (`@media (max-width: 768px)`).
+  full-screen overlay with its own collapse bar (`@media (max-width: 768px)`
+  in `components/ExplorerView.svelte`).
 - **769–1024px**: chat panel collapsible via a toolbar collapse button;
   collapsed state shows a floating "Chat" expand button.
 - **Viewport-widen reset**: a `matchMedia('(min-width: 1025px)')` listener
@@ -132,9 +134,8 @@ and confirmed every acceptance criterion still holds.
 
 ### Test evidence
 
-Focused probes on this branch (head at the assigned base
-`213b4725b`, clean tree, `npm ci` with locked versions, evidence saved under
-`/tmp/stage/review-evidence/`):
+Focused probes on this branch (clean tree, `npm ci` with locked versions,
+evidence saved under `/tmp/stage/review-evidence/`):
 
 - `npx vitest run src/__tests__/ExplorerView-responsive.test.js
   src/__tests__/ExplorerCanvas-performance.test.js` — **23/23 pass**
@@ -143,8 +144,10 @@ Focused probes on this branch (head at the assigned base
   CPU-time guards, culling bounds, comparative LOD, edge bundling).
 - `npx vitest run src/__tests__/ExplorerCanvas.test.js
   src/__tests__/ExplorerCanvasDrillDown.test.js src/__tests__/ExplorerChat.test.js
-  src/__tests__/ExplorerChat-streaming.test.js` — **269/269 pass** (no
-  regressions from the later tasks stacked on these same files).
+  src/__tests__/ExplorerChat-streaming.test.js src/__tests__/ExplorerViewDrillUrl.test.js
+  src/__tests__/ExplorerViewScope.test.js src/__tests__/ExplorerViewShortcuts.test.js`
+  — **284/284 pass** (no regressions from the later tasks stacked on these
+  same files).
 
 Full workspace suites, architecture checks, and GitHub CI are owned by the
 verification and publication stages.
