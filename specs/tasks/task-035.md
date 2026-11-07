@@ -2,9 +2,9 @@
 title: "System Default Views Seeding"
 spec_ref: "explorer-implementation.md §System Default Views"
 depends_on: []
-progress: complete
+progress: ready-for-review
 coverage_sections: []
-commits: []
+commits: [2b092c2e4]
 ---
 
 ## Spec Excerpt
@@ -52,14 +52,26 @@ From `explorer-implementation.md` §System Default Views:
 > ]
 > ```
 
-## Current State
+## Shipped
 
-**Implemented.** All acceptance criteria met (6 default views, exceeding the spec's 4):
-- `saved_views.rs` lines 190-223: `system_default_views()` returns 6 views: Architecture Overview, Test Coverage Gaps, Hot Paths, Blast Radius (click), Spec Coverage, Ungoverned Risk
-- Lines 132-180: lazy seeding on first `ListViews` access with UNIQUE constraint protection (idempotent)
-- Line 161: `is_system: true` on all seeded views
-- Lines 454-459: delete endpoint rejects system views with "System default views cannot be deleted"
-- Test at line 501-508: `assert_eq!(defaults.len(), 6)`
+**System default views are seeded, protected, and surfaced in the UI.** The backend was already in place from the explorer-canvas branch; this assignment verified it end-to-end against the acceptance criteria and closed the one remaining gap (frontend "System" badge).
+
+### Backend (pre-existing, verified)
+
+- `crates/gyre-server/src/api/saved_views.rs` — `system_default_views()` returns 7 views: the spec's exact 4 (Architecture Overview, Test Coverage Gaps, Hot Paths, Blast Radius (click)) with query JSON matching the spec shapes, plus High-Risk Untested Code, Spec Coverage, and Ungoverned Risk.
+- Seeding is lazy on first `ListViews` access (repo-scoped `/repos/:id/views`, workspace-scoped `/workspaces/:id/explorer-views`, and the explorer WS path), name-reconciled and idempotent — existing system-view names are skipped, so re-listing never duplicates.
+- All seeded views carry `is_system: true` and `created_by: "system"`.
+- Delete endpoints reject system views with 403 "System default views cannot be deleted" (REST) and an error message on the WS path.
+
+### Frontend (this assignment)
+
+- `web/src/lib/ExplorerChat.svelte` — saved-views dropdown now renders a distinct **System** badge on system views (muted pill, uppercase) with a tooltip noting they cannot be deleted. Delete button was already hidden for system views; server-side 403 is the enforcement backstop.
+
+### Test evidence
+
+- Rust (`gyre-server` lib): `api::saved_views` 13 passed, `api::explorer_views` 16 passed (incl. `delete_builtin_view_forbidden`, `list_is_idempotent_for_builtins`), `explorer_ws::tests::test_system_default*` 5 passed — 34 total, 0 failed. All default queries pass `ViewQuery::validate` (`test_system_default_views_all_pass_validation`).
+- Web (vitest): `ExplorerChat.test.js` 110 passed, including 2 new rendering tests — badge present on system views / absent on user views, delete button hidden for system views / shown for user views. Mutation-checked: removing the badge markup fails the badge test.
+- Evidence retained at `/tmp/stage/review-evidence/task-035-verification.txt`.
 
 ## Implementation Plan
 
@@ -85,13 +97,13 @@ From `explorer-implementation.md` §System Default Views:
 
 ## Acceptance Criteria
 
-- [ ] 4 system default views are seeded after first graph extraction for a repo
-- [ ] Views have correct query JSON matching the spec
-- [ ] `is_system = true` on all seeded views
-- [ ] Seeding is idempotent (no duplicates on re-extraction)
-- [ ] Frontend shows system views in the saved views dropdown
-- [ ] System views cannot be deleted by users
-- [ ] Tests for seeding logic and query validity
+- [x] 4 system default views are seeded after first graph extraction for a repo
+- [x] Views have correct query JSON matching the spec
+- [x] `is_system = true` on all seeded views
+- [x] Seeding is idempotent (no duplicates on re-extraction)
+- [x] Frontend shows system views in the saved views dropdown
+- [x] System views cannot be deleted by users
+- [x] Tests for seeding logic and query validity
 
 ## Agent Instructions
 
@@ -105,4 +117,5 @@ When working on this task:
 
 ## Git Commits
 
-Implemented as part of the explorer-canvas branch prior to task decomposition.
+- `2b092c2e4` feat(task-035): System badge for system views in explorer saved-views dropdown (this assignment)
+- Backend seeding, delete protection, and validation tests predate task decomposition (explorer-canvas branch).
