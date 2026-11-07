@@ -4,7 +4,7 @@ spec_ref: "explorer-canvas.md §6"
 depends_on:
   - task-072
   - task-065
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "explorer-canvas.md §6 Causal Flow Trace (Structural Lens Feature)"
 commits: ["540d2e6706d24a191f03df3d97623219b5a95944", "67005b8905fa1c5da5d089b1215972f4effb0c86"]
