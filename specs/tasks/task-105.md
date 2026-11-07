@@ -51,13 +51,13 @@ Current state: Retention policy store exists (`retention.rs`) with defaults (act
 
 ## Acceptance Criteria
 
-- [x] Background job runs on configurable interval (default daily)
-- [x] Audit event details compressed after 7 days
-- [x] Events deleted after retention period (365d audit, 30d agent, 90d eBPF)
-- [x] Compressed events decompressed transparently on query
-- [x] SIEM forwarding handles compressed events
-- [x] Job logs deletion/compression counts
-- [x] `cargo test --all` passes
+- [ ] Background job runs on configurable interval (default daily)
+- [ ] Audit event details compressed after 7 days
+- [ ] Events deleted after retention period (365d audit, 30d agent, 90d eBPF)
+- [ ] Compressed events decompressed transparently on query
+- [ ] SIEM forwarding handles compressed events
+- [ ] Job logs deletion/compression counts
+- [ ] `cargo test --all` passes
 
 ## Agent Instructions
 
@@ -87,11 +87,15 @@ The `log-compression` background job is implemented end-to-end in commit `459733
 
 The forwarder reads through `since_timestamp`, which decompresses in the adapter, so forwarded syslog/webhook payloads carry the original detail. Proven at the wire level by `siem::tests::forward_cycle_sends_decompressed_detail_for_compressed_events` (local syslog TCP listener receives the decompressed JSON fields of a compressed event).
 
+### Round 2: contract repair + base merge
+
+- The assigned task document was restored by the executor (acceptance-criteria checkboxes left unchecked as assigned — protected text); the production fix above is preserved unchanged. Only source conflict resolved: merge of assignment base `a884329d7` (task-076) into this branch — one textual conflict in `crates/gyre-adapters/src/sqlite/audit.rs` (base had no counterpart for the new compression tests; kept our side). Merge commit `615182576`.
+
 ### Test evidence
 
-Focused suites, all green on branch head `4597330e95` (logs in `/tmp/stage/review-evidence/`):
+Post-merge probes on branch head `615182576` (command lines, exit codes, and output tails saved under `/tmp/stage/review-evidence/`):
 
-- `cargo test -p gyre-adapters` — 356 passed, incl. 4 new compression tests (round-trip transparency, byte-ratio reality, idempotency + limit bounding, since_timestamp decompression).
-- `cargo test -p gyre-server --lib` — 1326 passed, incl. 10 new `log_compression` tests (transparency + idempotency, incremental folding, unprefixed/multiline round-trip, whole-segment and mixed-segment purge, line cap, `run_once` end-to-end with the mem audit repo) and the SIEM wire test.
-- Mechanical checks: check-arch, check-migration-versions, check-migration-sql-portability, check-in-memory-state-stores, check-mem-port-contracts, check-abac-route-registry, check-inert-enforcement, check-task-commit-attribution — all OK.
-- One test-design note: an earlier draft of the SIEM test asserted tiny log lines shrink under zstd — they do not (frame overhead exceeds savings on ~30-byte inputs); the test now uses realistic repetitive payloads so the byte-ratio assertions reflect real compression.
+- `cargo test -p gyre-adapters --lib` — 356 passed, incl. the 4 compression tests (round-trip transparency, byte-ratio reality, idempotency + limit bounding, since_timestamp decompression).
+- `cargo test -p gyre-server --lib` — 1349 passed, incl. the 10 `log_compression` tests (transparency + idempotency, incremental folding, unprefixed/multiline round-trip, whole-segment and mixed-segment purge, line cap, `run_once` end-to-end with the mem audit repo) and the SIEM wire test.
+- Mechanical checks on the merged tree: check-arch, check-abac-route-registry, check-mcp-write-tools, check-dead-message-kinds, check-migration-versions, check-task-commit-attribution — all OK.
+- One test-design note (from round 1): an earlier draft of the SIEM test asserted tiny log lines shrink under zstd — they do not (frame overhead exceeds savings on ~30-byte inputs); the test uses realistic repetitive payloads so the byte-ratio assertions reflect real compression.
