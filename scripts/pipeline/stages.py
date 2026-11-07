@@ -222,7 +222,10 @@ def verify(execution, task):
     if not remote['passed']:
         failed = next(record for record in records if record['exit_code'])
         code = failed['exit_code']
-        if code in (75, 77, 79, 124, 137) or code < 0:
+        if code == 124:
+            from .verification import deadline_error
+            raise deadline_error()
+        if code in (75, 77, 79, 137) or code < 0:
             raise Retry('verification infrastructure unavailable')
         if code == 81:
             observation = static_baseline_observation(execution.log, inp['base'])
@@ -536,27 +539,45 @@ def cleanup(execution, task):
     old_directory = execution.store.directory / 'attempts' / owned['work'] / str(owned['token'])
     old_directory.mkdir(parents=True, exist_ok=True)
     if any(item['name'] == resource for item in inventory):
-        # Crash cleanup must preserve source too. Stop the old process group
-        # before capturing its index; its expired token cannot approve work.
-        code = """import json,os,pathlib,signal,time
-p=pathlib.Path('/tmp/stage/step.exit.process.json')
-if p.exists():
+        # Only implementers own source to salvage. Reviews and exact-tree
+        # verification must not spend minutes indexing generated build output.
+        # Stop durable agent supervisors before capturing an implementer's index.
+        code = """import json,os,pathlib,signal,time,subprocess,sys
+for root in pathlib.Path('/sandbox/workspace').glob('.gyre-agent-*'):
+ if root.is_dir() and (root/'identity.json').exists():
+  subprocess.run([sys.executable,'/tmp/stage/pipeline-agent.py','cancel',str(root)],check=True,timeout=12)
+pairs=[pathlib.Path('/tmp/stage/step.exit.process.json')]
+pairs.extend(pathlib.Path('/sandbox/workspace').glob('.gyre-agent-*/identity.json'))
+pairs.extend(pathlib.Path('/sandbox/workspace').glob('.gyre-agent-*/child.json'))
+for p in pairs:
+ if not p.exists(): continue
  value=json.loads(p.read_text()); pid=int(value['pid']); stat=pathlib.Path(f'/proc/{pid}/stat')
- if stat.exists() and stat.read_text().rsplit(')',1)[1].split()[19]==value['start'] and pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()==value['boot']:
-  os.killpg(pid,signal.SIGTERM); time.sleep(1)
-  if stat.exists(): os.killpg(pid,signal.SIGKILL)
+ def same_process():
+  try:
+   fields=stat.read_text().rsplit(')',1)[1].split()
+   return fields[0]!='Z' and fields[19]==value['start'] and pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()==value['boot']
+  except FileNotFoundError: return False
+ try:
+  if same_process():
+   os.killpg(pid,signal.SIGTERM); time.sleep(1)
+   if same_process(): os.killpg(pid,signal.SIGKILL)
+ except ProcessLookupError: pass
 """
         try:
             if item['phase'].lower() != 'ready' and not any(old_directory.parent.glob('*/remote.offset')):
                 raise RuntimeError('No agent was attached; skip unreachable source capture and purge the unready sandbox')
-            execution.remote(resource, 'python3', '-c', code, timeout=30, check=False)
+            if old_work and old_work['stage']=='implement':
+                execution.os('sandbox','upload',resource,str(ROOT/'scripts/pipeline-agent.py'),'/tmp/stage/pipeline-agent.py','--no-git-ignore',timeout=60)
+                stopped=execution.remote(resource, 'python3', '-c', code, timeout=30, check=False)
+                if stopped.returncode:raise RuntimeError('owned agent tools did not quiesce; source capture skipped')
             raw = execution.remote(resource, 'tail', '-c', '1048576', '/tmp/stage/step.log', timeout=30, check=False)
             (old_directory / 'orphan.log').write_text(raw.stdout)
-            try:
-                execution.command('env', 'GYRE_DEV_RECOVERY_REPO=' + json.loads(owned['data']).get('repo', '/tmp/gyre'), 'python3', str(ROOT / 'scripts/dev-recover.py'), resource,
-                                  str(old_directory / 'recovery.patch'), timeout=180, check=False)
-            except Exception as exc:
-                execution.store.event('orphan_capture_unavailable', {'resource': resource, 'error': str(exc)}, task['name'])
+            if old_work and old_work['stage']=='implement':
+                try:
+                    execution.command('env', 'GYRE_DEV_RECOVERY_REPO=' + json.loads(owned['data']).get('repo', '/tmp/gyre'), 'python3', str(ROOT / 'scripts/dev-recover.py'), resource,
+                                      str(old_directory / 'recovery.patch'), timeout=180, check=False)
+                except Exception as exc:
+                    execution.store.event('orphan_capture_unavailable', {'resource': resource, 'error': str(exc)}, task['name'])
         except Exception as exc:
             execution.store.event('orphan_capture_unavailable', {'resource': resource, 'error': str(exc)}, task['name'])
         execution.store.resource_state(resource, 'deleting')
