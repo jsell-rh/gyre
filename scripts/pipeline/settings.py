@@ -25,7 +25,7 @@ def configuration(store):
             help='1–1000, or empty to inherit total capacity. Global sandbox admission still applies. Running work is not canceled.')
     add('model_timeout', 'Agent deadline (seconds)', store.setting('model_timeout', DEFAULT_MODEL_TIMEOUT), 'New assignments',
         help='60–86400 seconds. Default four hours; running assignments keep their existing deadline.')
-    add('verification_timeout', 'Verification deadline (seconds)', store.setting('verification_timeout', 10800), 'New assignments',
+    add('verification_timeout', 'Verification deadline (seconds)', store.setting('verification_timeout', 14400), 'New assignments',
         help='60–86400 seconds. Bounds remote verification; running verifiers retain their deadline.')
     add('retry_base_seconds', 'Retry base (seconds)', store.setting('retry_base_seconds', 5), 'New retry schedules',
         help='1–3600 seconds. Exponential backoff with jitter; already scheduled retries keep their wake time.')

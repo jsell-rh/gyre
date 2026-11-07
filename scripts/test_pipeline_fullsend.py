@@ -346,7 +346,16 @@ else: print('fixture control operation')
         self.assertEqual(json.loads((self.root/'backend.json').read_text())['gateways'],[alias,alias])
         streamed=self.invoke('sandbox','upload',self.name,'fixture','/tmp/fixture')
         self.assertEqual(streamed.returncode,0,streamed.stderr)
-        self.assertEqual(json.loads((self.root/'backend.json').read_text())['gateways'],[alias,alias,alias])
+        self.assertEqual(set(json.loads((self.root/'backend.json').read_text())['gateways']),{alias})
+
+    def test_streamed_bootstrap_refreshes_auth_before_replacing_the_process(self):
+        result=self.invoke('sandbox','upload',self.name,'fixture','/tmp/fixture')
+        self.assertEqual(result.returncode,0,result.stderr)
+        calls=json.loads((self.root/'backend.json').read_text())['calls']
+        login=next(i for i,c in enumerate(calls) if c[:2]==['gateway','login'])
+        upload=next(i for i,c in enumerate(calls) if c[:2]==['sandbox','upload'])
+        self.assertLess(login,upload)
+        self.assertEqual(sum(c[:2]==['sandbox','upload'] for c in calls),1)
 
     def test_cancellation_allows_cleanup_transport_but_forbids_new_compute(self):
         self.store.set_setting(f"cancel:{self.work}:{self.claim['token']}",True)
@@ -389,6 +398,15 @@ else: print('fixture control operation')
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual(self.store.db.execute('select state from resources where name=?',(self.name,)).fetchone()[0],'deleting')
         self.assertEqual(len(json.loads((self.root/'backend.json').read_text())['pods']),1)
+
+    def test_failed_review_deletes_without_attempting_source_capture(self):
+        self.assertEqual(self.invoke('sandbox','create','--name',self.name,'--','sleep','infinity').returncode,0)
+        self.store.db.execute("UPDATE work SET stage='review' WHERE id=?",(self.work,))
+        result=self.invoke('sandbox','delete',self.name)
+        self.assertEqual(result.returncode,0,result.stderr)
+        calls=json.loads((self.root/'backend.json').read_text())['calls']
+        self.assertFalse(any(x[:2]==['sandbox','exec'] for x in calls))
+        self.assertFalse(json.loads((self.root/'backend.json').read_text())['pods'])
 
     def test_fenced_worker_cannot_invoke_gateway(self):
         self.store.finish(self.work,self.claim['token'],{})
