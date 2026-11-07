@@ -108,6 +108,11 @@ def main():
         source_valid = guard.returncode == 0
         valid = valid and source_valid
     run('python3', str(STAGE / 'dev-checkpoint.py'), branch)
+    if role == 'implement':
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('artifacts',STAGE/'pipeline-artifacts.py')
+        artifacts=importlib.util.module_from_spec(spec);spec.loader.exec_module(artifacts)
+        artifacts.restore_generated(checkout,job['input']['base'])
     run('git', 'add', '-A')
     if run('git', 'diff', '--cached', '--quiet', check=False).returncode:
         run('git', '-c', 'core.hooksPath=/dev/null', 'commit', '-m', f'{role}({task}): pipeline checkpoint')

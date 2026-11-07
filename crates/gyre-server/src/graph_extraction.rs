@@ -1597,6 +1597,56 @@ mod tests {
         assert_eq!(calls[0].edge_type, EdgeType::Calls);
     }
     #[tokio::test]
+    async fn sync_ts_repo_persists_calls_edges_in_graph_store() {
+        // Same pipeline as the Go test above, for the TypeScript leg
+        // (task-075): a repo with TS markers → detect_all_languages reports
+        // TypeScript → Pass 2 edges resolve against Pass 1 nodes. The raw
+        // edge qnames here are exactly the format the LSP driver
+        // (scripts/ts-callgraph.mjs) emits and typescript_extractor.rs
+        // indexes: "<repo-relative path without extension>.<Name>" — the
+        // driver test in gyre-adapters asserts that same format against a
+        // recorded real-server run, so this pins the two halves together.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("package.json"), "{\"name\":\"web\"}").unwrap();
+        std::fs::write(dir.path().join("tsconfig.json"), "{}").unwrap();
+
+        let repo_id = Id::new("repo-ts");
+        let caller = make_go_fn("src/app.compute", "src/app.ts", &repo_id);
+        let callee = make_go_fn("src/math.add", "src/math.ts", &repo_id);
+        let nodes = vec![caller.clone(), callee.clone()];
+
+        let store = MemGraphStore::new();
+        for n in &nodes {
+            store.create_node(n.clone()).await.unwrap();
+        }
+
+        // The cross-module call the LSP references pass reports for
+        // `compute` calling `add` through the "./math" import.
+        let fake = FakeCallGraphExtractor {
+            edges: vec![CallEdge {
+                from: "src/app.compute".to_string(),
+                to: "src/math.add".to_string(),
+            }],
+        };
+
+        let persisted =
+            extract_and_persist_call_graph(dir.path(), &nodes, &[], &repo_id, &store, &fake).await;
+        assert_eq!(
+            persisted, 1,
+            "one cross-module Calls edge should be persisted"
+        );
+
+        let calls = store
+            .list_edges(&repo_id, Some(EdgeType::Calls))
+            .await
+            .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].source_id, caller.id);
+        assert_eq!(calls[0].target_id, callee.id);
+        assert_eq!(calls[0].edge_type, EdgeType::Calls);
+    }
+
+    #[tokio::test]
     async fn push_check_persists_assertion_results_via_repo() {
         use crate::mem::MemSpecAssertionResultRepository;
         use gyre_common::graph::{SpecConfidence, Visibility};

@@ -123,39 +123,51 @@ branch history.
   (`gyre-server/src/graph_extraction.rs`): Cargo.toml repo → Rust Pass 2
   edges resolve and persist in the graph store.
 
-### Contract-repair round re-verification
+### Rebase-resolution round re-verification
 
-The executor restored the assigned task document (the previous
-checkpoint had changed protected task text); the production fix
-(0ae61233) was already in branch history and survived the base refresh
-(merge 4e304e5d touched no call-graph files), so this round re-verified
-rather than re-implemented. Evidence under
+The base refresh (merge of main @ 7da7bbff, carrying task-074's pyright
+Python driver) conflicted with this branch in two files; resolved and
+re-verified rather than re-implemented. Evidence under
 `/tmp/stage/review-evidence/task-073/`:
 
+- `crates/gyre-adapters/src/call_graph.rs`: kept the native rust-analyzer
+  client dispatch for Rust (the task-073 deliverable; the base's
+  rust-callgraph.sh arm pointed at scripts this branch deleted) and took
+  the base's Python arm (python-callgraph.sh → pyright LSP), matching the
+  merged tree where python-callgraph.py is gone.
+- `specs/coverage/system/lsp-call-graph.md`: rows merged per-language —
+  Rust facts from task-073 (native client, validated), Python facts from
+  task-074 (pyright, validated); Phase 2 and Phase 3 both recorded
+  complete in row 10.
+- Rust Pass 2 production code untouched by the rebase:
+  `call_graph_rust.rs`, `call_graph_resolve.rs`, `rust_extractor.rs`
+  byte-identical to the verified candidate e29b94db (git diff empty).
+  No dangling references to the deleted rust-callgraph/py scripts
+  anywhere in crates/, scripts/, .github/, docker/.
 - Sandbox again had no working rust-analyzer on PATH (rustup shim without
-  the component, rejected by the `--version` probe — skip path observed
-  explicitly; rustup component download unavailable). Rebuilt from source
-  at fde5133f7 (2026-11-05), same commit as prior rounds, via
-  `RUST_ANALYZER_BIN`.
-- `cargo test -p gyre-adapters --lib call_graph_rust`: 6/6 with the
-  real-binary integration test RAN (1.07s, no skip line) and asserted
-  the exact three fixture edges against the from-source binary.
-- `cargo test -p gyre-server graph_extraction`: 26/26 including
+  the component; component download and the release-asset CDN blocked).
+  Rebuilt from source at 55effabb (2026-11-06) and ran the real-binary
+  test via `RUST_ANALYZER_BIN`:
+  `cargo test -p gyre-adapters --lib call_graph_rust` — 6/6 in 6.01s with
+  `real_rust_analyzer_extracts_known_call_edges` RAN (no skip line),
+  asserting the exact three fixture edges.
+- `cargo test -p gyre-adapters --lib call_graph`: 13/13 (includes the
+  merged tree's pyright and TS driver tests from main).
+- `cargo test -p gyre-server graph_extraction`: 27/27 including
   `sync_rust_repo_persists_calls_edges_in_graph_store`, plus
   `test_push_triggers_graph_extraction` (integration target).
-- `cargo fmt --check -p gyre-adapters -p gyre-server`: no diffs in any
-  task-touched file (call_graph_rust.rs, call_graph.rs,
-  graph_extraction.rs); all reported drift is pre-existing at the main
-  base (git2_ops.rs, sqlite/audit.rs, merge_processor.rs, …).
+- `cargo fmt --check -p gyre-adapters -p gyre-server`: clean.
 
 ### Notes for review
 
 - Full workspace suites, all-target Clippy, architecture checks, and
-  GitHub CI are owned by the verification stage; the base-refresh merge
-  brought no changes to any call-graph-relevant file (verified via
-  `git diff f90a4af0..HEAD --stat` on the relevant crates).
-- Full-checkout extraction not re-run this round (debug rust-analyzer
-  needs more than the 180s budget to load the Gyre workspace); graceful
-  budget-bounded degradation plus the real-binary fixture edge assertions
-  cover the contract. Release binaries per spec §9 are not expected to
-  hit this.
+  GitHub CI are owned by the verification stage. The rebase merge brought
+  main's task-074/075-adjacent changes (pyright Python driver, TS driver
+  tests, Dockerfile toolchains) alongside this branch's Rust client; the
+  only Rust-relevant merge change was dispatch/doc-text reconciliation,
+  verified above.
+- Full-checkout extraction not re-run this round (from-source
+  rust-analyzer would need longer than the 180s budget to load the Gyre
+  workspace); graceful budget-bounded degradation plus the real-binary
+  fixture edge assertions cover the contract. Release binaries per spec
+  §9 are not expected to hit this.
