@@ -791,6 +791,10 @@ pub async fn git_receive_pack(
                 divergence_ports,
                 Arc::clone(&state_clone.spec_assertion_results),
                 notification_scope,
+                Arc::new(crate::graph_extraction::CallGraphTelemetry {
+                    kv: Arc::clone(&state_clone.kv_store),
+                    metrics: Arc::clone(&state_clone.metrics),
+                }),
             )
             .await;
         }
