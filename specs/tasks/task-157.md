@@ -5,7 +5,7 @@ depends_on: [task-156]
 progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §7 Rollout Policy"
-commits: ["a1ff51f2cd964fa606e58eee76baaf73435a5be3", "e67c467191726aa1e3510cd15c2ea0ee044362b5"]
+commits: ["e67c467191726aa1e3510cd15c2ea0ee044362b5", "a1ff51f2cd964fa606e58eee76baaf73435a5be3"]
 ---
 
 ## Spec Excerpt
