@@ -51,3 +51,28 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 63 (repair round 63) — attribution clobber recurs on candidate 724c8b1, product surfaces re-verified clean
+
+Assigned base `0f61b0bff` (task-034), candidate `724c8b118`. Evidence: `/tmp/stage/review-evidence/r63/` (fresh probes, all exit-coded).
+
+**Finding (53rd occurrence of the rounds 2–62 class, blocking):** the candidate commit `724c8b118` ("process: record task-208 branch commits") is itself the clobber — its only change vs parent `106c54d29` (the r62 repair that restored the six-SHA list) rewrites `commits:` in `specs/tasks/task-208.md` from six SHAs back to five, dropping `ea006d52bb42e96e6f176b02b5390b6cb56a3116` ("build(web): exempt generated dist bundles from whitespace gate (task-208)" — root `.gitattributes` `web/dist/** -whitespace`, live at `.gitattributes:4`). Verified with exit codes: `git merge-base --is-ancestor ea006d52 HEAD` → 0; `git merge-base --is-ancestor ea006d52 0f61b0bff` (assigned base) → 1. It is task-208-labeled branch product surface that becomes invisible to review scoping while unlisted, violating the AGENTS.md attribution invariant. Reproduce: `git diff 106c54d29..724c8b118 -- specs/tasks/task-208.md`.
+
+**Root cause re-confirmed on this attempt:** the executor-staged `/tmp/stage/dev-attribution.py` is the pre-fix version again — `diff` vs the fixed in-repo `scripts/dev-attribution.py` shows exactly the missing `path == '.gitattributes'` product-surface line (r63/04). Prior-round repairs replaced previous attempts' sandbox-local staged copies, which do not persist across attempts; the durable fix must land wherever `/tmp/stage` is populated from (process owner). A read-only replica of the fixed pass at this exact candidate computes exactly the six-SHA list `e7c21825, aecd6847, a11cbf7e, ea006d52, ad1121c5, 98fd096e` (r63/07). Repair is mechanical, product untouched: run the fixed in-repo pass (`scripts/dev-attribution.py task-208`) to restore the six-SHA list.
+
+**Merge/ancestry:** assigned base `0f61b0bff` merged at `0e27ed748` with zero task-208-surface drift — `git diff cbaea3a72..0e27ed748 --stat` touches only task-034 files (`crates/gyre-adapters/src/llm/mock.rs`, `crates/gyre-server/src/explorer_ws.rs`, `crates/gyre-server/tests/explorer_ws_integration.rs`, `specs/tasks/task-034.md`). Zero product-surface drift since the r62 repair tip: `git diff 106c54d29..HEAD` touches only `specs/tasks/task-208.md`; the candidate's only edit is the clobber itself. Working tree clean.
+
+**Product acceptance criteria re-verified clean at this candidate (fresh probes, r63/):**
+
+- Dead-code grep (`get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs` over `crates/` + `web/src/`) → zero matches (r63/05).
+- No route registrations in `api/mod.rs` and no ABAC mappings in `abac_middleware.rs` for `/api/v1/users/me/{agents,tasks,mrs}`; the only URI references in `crates/` are the literals inside the 404 regression test itself (`users.rs:956-958`) (r63/05).
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server my_stuff_endpoints_are_removed` → `api::users::tests::my_stuff_endpoints_are_removed ... ok`, 1/1 passed (r63/08); test body drives the real in-process router and asserts `StatusCode::NOT_FOUND` on all three URIs (r63/09).
+- `npm ci` + `npx vitest run src/__tests__/UserProfile.test.js` → 23/23 passed (r63/10, r63/11).
+- Exactly six compliant tabs in `UserProfile.svelte` (info, tokens, memberships, ledger, notif-prefs, notifications) (r63/06).
+- Spec amendment and coverage rows in place: user-management row 22 `n/a` with supersession note, HSI row 54 `implemented` (r63/06).
+- Remaining `users/me/*` endpoints keep the per-handler-auth ABAC-exempt model unchanged — exempt/resolver lists contain no agent/task/mrs entries (r63/06).
+- `scripts/test_dev_attribution.py` → 2/2 OK (r63/12).
+
+**Residuals for the verifier / integration:** `cargo test --all` and `cd web && npm test` still belong to the verifier; final integration must rebuild `web/dist` from the merged `web/src` before publishing (the branch-tip committed dist is the assignment base's output per the executor restore-to-base flow — not a code defect).
+
+**Verdict: not approved** — solely on the candidate's `commits:` frontmatter clobber (process). All product-side acceptance criteria hold at this tip.
