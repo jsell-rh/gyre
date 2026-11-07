@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §12 What the Profile Is"
-commits: ["ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b"]
+commits: ["ca1ac78e4d89ee095a144a492f74fec164b944ed", "f7f3b0810106d2f195012e6aa945cd9bba427d2b", "dc7ab7c7e64fe3b8b4285924e6af1541a898fe27"]
 ---
 
 ## Spec Excerpt
@@ -121,25 +121,21 @@ Do not duplicate task-208's work (My Tasks/MRs/Agents removal — different file
 
 ## Shipped
 
-All three HSI §12 gaps are implemented in production code. The
-implementation checkpoint (f7f3b081) landed earlier; subsequent rounds
-recovered interrupted assignments. This round: the previous run died on
-infrastructure before any agent work (GitHub API unreachable at
-pre-flight), and the executor's merge of the assigned base 1ae18d1c
-into the checkpoint (82821de2) left a semantic conflict — the base's
-`graph_extraction.rs` tests still called `NotificationRepository::
-list_for_user` with the pre-task-209 7-arg signature (missing the
-`exclude_types` slice) and `merge_requests.rs` carried a duplicate
-`use gyre_common::Id` — so `cargo test -p gyre-server --lib` did not
-compile. Fixed in ca1ac78e (4 call sites pass `&[]`, matching the
-background-check callers; redundant import dropped), every acceptance
-criterion re-verified against the merged tree, and the coverage matrix
-records the landing (row 53 → implemented).
+All three HSI §12 gaps are implemented in production code (checkpoint
+f7f3b081, call-site repair ca1ac78e). This round (dc7ab7c7) resolved the
+executor's rebase of the assigned base 2badce49 into the task-209
+branch: the merge combined task-209's §12 write paths with the base's
+registry admin gates, strict `TrustLevel::parse` (400 on typo),
+MetaSpecChanged/reconciliation triggers, and rustfmt'd test call sites —
+leaving conflicts in meta_specs.rs, workspaces.rs, merge_processor.rs,
+the ABAC exemption file, and the coverage matrix. Resolution kept BOTH
+sides' behavior (details below), re-verified every acceptance criterion
+on the merged tree, and recomputed the coverage-matrix header (18/35).
 
 ### Behavior shipped
 
 - **Spec amendment (Part 1)** — `specs/system/human-system-interface.md`
-  §12 Judgment Ledger now carries a concrete Sources table (category →
+  §12 Judgment Ledger carries a concrete Sources table (category →
   table → human-attribution column → workspace-attribution column), states
   when each event is written, and pins `?type=` values to
   `approval|rejection|gate|trust|meta-spec` (exactly the `JudgmentType`
@@ -147,12 +143,20 @@ records the landing (row 53 → implemented).
 - **Write paths (Part 3)** — `AuditEventType` gains `TrustChange` /
   `GateOverride` / `MetaSpecPublish`. Trust transition via
   `PUT /api/v1/workspaces/:id` writes a `trust_change` audit event
-  attributed to the acting user. A human approval review on an MR with
-  failed gate results writes one `gate_override` event per failed gate
+  attributed to the acting user — now composed with the base's strict
+  `TrustLevel::parse` (a typo'd level 400s before any transition or
+  event). A human approval review on an MR with failed gate results
+  writes one `gate_override` event per failed gate
   (mr_id/gate_id/gate_type/from/to); agent-token approvals do not
   qualify. Meta-spec registry create/update write `meta_spec_publish`
   events with kind/name/version/content_hash and workspace attribution
-  from scope; registry DELETE enforces per-handler authorization. JWT
+  from scope — now composed with the base's admin gates and
+  §6/§11 reconciliation triggers (both run; the audit write propagates
+  failure, reconciliation follows). Registry DELETE keeps task-209's
+  scope-aware authorization (agent-runtime §214: tenant Admin for
+  Global, workspace Owner/Admin + tenant containment for
+  Workspace-scoped) with the base's 403-before-404 ordering for
+  non-Admin callers, so a missing row is not an existence oracle. JWT
   validation records `oidc_issuer` + `last_login_at` via
   `UserRepository::record_login` (debounced; migration 000056 adds the
   users columns; SQLite/Postgres/mem parity).
@@ -164,38 +168,43 @@ records the landing (row 53 → implemented).
   merges, sorts reverse-chronologically (deterministic tie-break), and
   applies limit/offset to the merged stream only. Inbox:
   `NotificationRepository::list_for_user`/`count_unresolved` take
-  `exclude_types` applied in-query before pagination; users.rs inbox +
-  badge endpoints and the MCP `notifications://` tool load disabled types
-  from `user_notification_preferences` (no row = enabled; PUT rejects
-  unknown notification_type with 400); background de-dup callers pass
-  none. `GET /users/me` returns read-only `oidc_issuer`/`last_login_at`.
+  `exclude_types` applied in-query before pagination (the base's new
+  merge_processor/reconciliation test call sites now pass `&[]` too);
+  users.rs inbox + badge endpoints and the MCP `notifications://` tool
+  load disabled types from `user_notification_preferences` (no row =
+  enabled; PUT rejects unknown notification_type with 400); background
+  de-dup callers pass none. `GET /users/me` returns read-only
+  `oidc_issuer`/`last_login_at`.
+- **Exemption-file reconciliation** — the base removed the
+  meta-specs-registry entries from `abac-exempt-handlers-exemptions.txt`
+  because all registry handlers now enforce per-handler authorization
+  (base's admin gates + task-209's scope-aware DELETE); the merged tree
+  keeps the base's removal (file shrinks; no new exemptions).
 
-### Test evidence (post-fix ca1ac78e, on this branch)
+### Test evidence (merged tree, post-dc7ab7c7)
 
+- `cargo test -p gyre-server --lib`: 1356 passed, 0 failed — includes
+  the 5 §12 write-path tests, the base's registry
+  `registry_endpoints_reject_non_admin` (403-before-404),
+  `update_workspace_invalid_trust_level_returns_400_and_leaves_state`,
+  TASK-077 trust-transition tests, merge_processor (60) and
+  reconciliation (21) suites with the adapted `list_for_user` call
+  sites.
 - `cargo test -p gyre-adapters --lib user_profile`: 10 passed (ledger
-  merge/filter/pagination, notification exclusion, record_login debounce).
-- `cargo test -p gyre-server --lib` focused, after ca1ac78e restored
-  compilation of the merged tree: the 5 §12 write-path tests
-  (`human_approval_on_failed_gate_writes_gate_override_event`,
-  `trust_transition_writes_trust_change_audit_event`,
-  `publish_writes_meta_spec_publish_audit_event`,
-  `disabled_preference_excludes_type_from_inbox_and_count`,
-  `get_me_returns_recorded_auth_provider_info`) — 5 passed;
-  `graph_extraction` (the repaired call sites, incl.
-  `push_check_creates_priority9_notifications_for_failed_assertions`)
-  — 25 passed; `api::merge_requests` (incl. TASK-167 lineage tests that
-  share the module's `Id` import) — 31 passed.
-- `cd web && npm ci && npm test` (prior round, same merged web sources):
-  65 files, 1589 passed / 41 skipped.
-- `scripts/check-task-commit-attribution.sh`,
-  `scripts/check-migration-versions.sh`,
-  `scripts/check-abac-exempt-handlers.sh` (89 handlers),
-  `scripts/check-fabricated-scope-defaults.sh` OK. The two 000056
-  migration dirs are NOT duplicates under Diesel semantics (versions
-  20261007000056 vs 20261008000056 — full date prefix, see
-  check-migration-versions.sh header). Note:
-  `check-tenant-filter.sh` cannot execute under this sandbox's mawk
-  (gawk-only 3-arg `match()`); its logic was replicated manually —
-  findings identical to the assigned base 1ae18d1c (user-scoped tables),
-  i.e. no new violations from this task; CI runs it under gawk with
-  `|| true`.
+  merge/filter/pagination, notification exclusion, record_login
+  debounce).
+- `cd web && npm ci && npm test` on the merged web sources: 67 files,
+  1667 passed / 41 skipped.
+- Mechanical checks OK: check-arch, check-abac-exempt-handlers (88
+  handlers), check-migration-versions, check-fabricated-scope-defaults,
+  check-mcp-write-tools, check-dead-message-kinds,
+  check-inert-enforcement, check-forged-scope-fields,
+  check-lossy-secret-conversion, check-scope-literal-defaults,
+  check-relative-path-defaults, check-byte-slice-truncation,
+  check-forwarded-header-trust, check-in-memory-state-stores,
+  check-unbounded-external-http, check-fail-open-ref-resolution,
+  check-mem-port-contracts, check-abac-route-registry,
+  check-migration-sql-portability. Note: `check-tenant-filter.sh`
+  cannot execute under this sandbox's mawk (gawk-only 3-arg `match()`);
+  this round's hand-merge added no SQL (handler/test code only), so no
+  new tenant-filter surface exists; CI runs it under gawk.
