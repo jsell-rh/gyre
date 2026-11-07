@@ -36,7 +36,12 @@ pub const BUILTIN_PERSONAS: &[BuiltinPersona] = &[
         name: "Repo Orchestrator",
         slug: "repo-orchestrator",
         prompt: REPO_ORCHESTRATOR_PROMPT,
-        capabilities: &["task.create", "task.decompose", "agent.dispatch", "merge.queue"],
+        capabilities: &[
+            "task.create",
+            "task.decompose",
+            "agent.dispatch",
+            "merge.queue",
+        ],
         protocols: &["mcp", "ralph-loop", "escalation", "handoff"],
     },
     BuiltinPersona {
@@ -124,7 +129,10 @@ pub fn write_starter_kit(root: &Path) -> Result<(), std::io::Error> {
     if !index.exists() {
         std::fs::write(&index, STARTER_INDEX)?;
     }
-    let principles = root.join("specs").join("system").join("design-principles.md");
+    let principles = root
+        .join("specs")
+        .join("system")
+        .join("design-principles.md");
     if !principles.exists() {
         std::fs::write(&principles, STARTER_DESIGN_PRINCIPLES)?;
     }
@@ -263,8 +271,7 @@ pub async fn push_and_sync_specs(
 /// round-trip test (spec_registry tests) can consume the exact shipped
 /// bytes through the real `parse_manifest` — the F5 defect class was a
 /// template that parsed nowhere but the CLI's structural check.
-pub const STARTER_MANIFEST: &str =
-    include_str!("bootstrap/starter-manifest.yaml");
+pub const STARTER_MANIFEST: &str = include_str!("bootstrap/starter-manifest.yaml");
 
 const STARTER_INDEX: &str = r#"# Spec Index
 
@@ -364,12 +371,18 @@ impl BootstrapSummary {
     pub fn render(&self) -> String {
         let mut out = String::new();
         out.push_str("Bootstrap complete!\n\n");
-        out.push_str(&format!("  Tenant:     {} ({})\n", self.tenant_name, self.tenant_id));
+        out.push_str(&format!(
+            "  Tenant:     {} ({})\n",
+            self.tenant_name, self.tenant_id
+        ));
         out.push_str(&format!(
             "  Workspace:  {} ({})\n",
             self.workspace_name, self.workspace_id
         ));
-        out.push_str(&format!("  Repo:       {} ({})\n", self.repo_name, self.repo_id));
+        out.push_str(&format!(
+            "  Repo:       {} ({})\n",
+            self.repo_name, self.repo_id
+        ));
         if !self.personas_registered.is_empty() {
             out.push_str(&format!(
                 "  Personas:   {}\n",
@@ -393,7 +406,10 @@ impl BootstrapSummary {
         }
         // F3: the orchestrator status claim must match what actually
         // happened at launch — a persisted row is not "running".
-        match (&self.orchestrator_agent_id, self.orchestrator_launch_status.as_deref()) {
+        match (
+            &self.orchestrator_agent_id,
+            self.orchestrator_launch_status.as_deref(),
+        ) {
             (Some(agent), Some("running")) => {
                 out.push_str(&format!(
                     "\nYour repo orchestrator is running (agent {agent}).\n"
@@ -425,10 +441,7 @@ impl BootstrapSummary {
                 );
             }
         }
-        out.push_str(&format!(
-            "Visit {} for the dashboard.\n",
-            self.server_url
-        ));
+        out.push_str(&format!("Visit {} for the dashboard.\n", self.server_url));
         out
     }
 }
@@ -463,7 +476,11 @@ mod tests {
                 p.slug,
                 p.prompt.len()
             );
-            assert!(!p.capabilities.is_empty(), "persona {} needs capabilities", p.slug);
+            assert!(
+                !p.capabilities.is_empty(),
+                "persona {} needs capabilities",
+                p.slug
+            );
         }
     }
 
@@ -530,8 +547,7 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("specs")).unwrap();
         std::fs::write(tmp.path().join("specs").join("index.md"), "CUSTOM").unwrap();
         write_starter_kit(tmp.path()).unwrap();
-        let content =
-            std::fs::read_to_string(tmp.path().join("specs").join("index.md")).unwrap();
+        let content = std::fs::read_to_string(tmp.path().join("specs").join("index.md")).unwrap();
         assert_eq!(content, "CUSTOM");
     }
 

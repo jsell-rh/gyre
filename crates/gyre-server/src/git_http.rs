@@ -111,8 +111,8 @@ async fn resolve_repo_by_slug(
             .into_iter()
             .find(|ws| ws.slug == workspace_slug);
     }
-    let workspace = workspace
-        .ok_or_else(|| not_found(format!("workspace '{workspace_slug}' not found")))?;
+    let workspace =
+        workspace.ok_or_else(|| not_found(format!("workspace '{workspace_slug}' not found")))?;
 
     state
         .repos
@@ -175,11 +175,11 @@ pub async fn git_info_refs(
 
     let content_type = format!("application/x-{service}-advertisement");
 
-    let repo_path = match resolve_repo_path_by_slug(&state, &auth, &workspace_slug, &repo_name).await
-    {
-        Ok(p) => p,
-        Err(r) => return r,
-    };
+    let repo_path =
+        match resolve_repo_path_by_slug(&state, &auth, &workspace_slug, &repo_name).await {
+            Ok(p) => p,
+            Err(r) => return r,
+        };
 
     let git_bin = std::env::var("GYRE_GIT_PATH").unwrap_or_else(|_| "git".to_string());
 
@@ -228,11 +228,11 @@ pub async fn git_upload_pack(
     auth: AuthenticatedAgent,
     req: Request,
 ) -> Response {
-    let repo_path = match resolve_repo_path_by_slug(&state, &auth, &workspace_slug, &repo_name).await
-    {
-        Ok(p) => p,
-        Err(r) => return r,
-    };
+    let repo_path =
+        match resolve_repo_path_by_slug(&state, &auth, &workspace_slug, &repo_name).await {
+            Ok(p) => p,
+            Err(r) => return r,
+        };
 
     let body_bytes = match axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024).await {
         Ok(b) => b,
@@ -3627,12 +3627,7 @@ mod tests {
 
         // A user principal from an unrelated tenant is still contained.
         // (agent token path: Agent role, tenant "default".)
-        let mut user = gyre_domain::User::new(
-            Id::new("u-x"),
-            "ext-x",
-            "someone",
-            0,
-        );
+        let mut user = gyre_domain::User::new(Id::new("u-x"), "ext-x", "someone", 0);
         user.tenant_id = Some(Id::new("t-other"));
         state.users.create(&user).await.unwrap();
         let raw_key = "gyre_test_git_foreign_key";

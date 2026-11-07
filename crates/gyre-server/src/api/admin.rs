@@ -316,17 +316,19 @@ pub async fn admin_kill_agent(
     }
 
     let ws_id = agent.workspace_id.clone();
-    state.emit_telemetry(
-        ws_id,
-        gyre_common::message::MessageKind::AgentStatusChanged,
-        Some(serde_json::json!({
-            "event_id": uuid::Uuid::new_v4().to_string(),
-            "agent_id": agent.id.to_string(),
-            "status": "dead",
-            "description": format!("Agent {} force-killed by admin", agent.name),
-            "timestamp": now,
-        })),
-    ).await;
+    state
+        .emit_telemetry(
+            ws_id,
+            gyre_common::message::MessageKind::AgentStatusChanged,
+            Some(serde_json::json!({
+                "event_id": uuid::Uuid::new_v4().to_string(),
+                "agent_id": agent.id.to_string(),
+                "status": "dead",
+                "description": format!("Agent {} force-killed by admin", agent.name),
+                "timestamp": now,
+            })),
+        )
+        .await;
 
     // M23: Emit container_crashed audit event if this agent had a container.
     if let Ok(Some(rec)) = state.container_audits.find_by_agent_id(&id).await {
@@ -381,14 +383,16 @@ pub async fn admin_reassign_agent(
     }
 
     let ws_id = agent.workspace_id.clone();
-    state.emit_telemetry(
-        ws_id,
-        gyre_common::message::MessageKind::AgentStatusChanged,
-        Some(serde_json::json!({
-            "agent_id": agent.id.to_string(),
-            "description": format!("Agent {} tasks reassigned to {}", agent.name, target.name),
-        })),
-    ).await;
+    state
+        .emit_telemetry(
+            ws_id,
+            gyre_common::message::MessageKind::AgentStatusChanged,
+            Some(serde_json::json!({
+                "agent_id": agent.id.to_string(),
+                "description": format!("Agent {} tasks reassigned to {}", agent.name, target.name),
+            })),
+        )
+        .await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -689,17 +693,19 @@ pub async fn admin_seed(
         ),
     ];
     for (event_id, agent_id, event_type, description, timestamp) in events {
-        state.emit_telemetry(
-            gyre_common::Id::new("default"),
-            gyre_common::message::MessageKind::StateChanged,
-            Some(serde_json::json!({
-                "event_id": event_id,
-                "agent_id": agent_id,
-                "event_type": event_type,
-                "description": description,
-                "timestamp": timestamp,
-            })),
-        ).await;
+        state
+            .emit_telemetry(
+                gyre_common::Id::new("default"),
+                gyre_common::message::MessageKind::StateChanged,
+                Some(serde_json::json!({
+                    "event_id": event_id,
+                    "agent_id": agent_id,
+                    "event_type": event_type,
+                    "description": description,
+                    "timestamp": timestamp,
+                })),
+            )
+            .await;
     }
 
     Ok(Json(SeedResponse {
@@ -940,17 +946,19 @@ mod tests {
             0,
         );
         state.workspaces.create(&ws).await.unwrap();
-        state.emit_telemetry(
-            gyre_common::Id::new("default"),
-            gyre_common::message::MessageKind::StateChanged,
-            Some(serde_json::json!({
-                "event_id": "test-event-1",
-                "agent_id": "agent-1",
-                "event_type": "state_changed",
-                "description": "Test event",
-                "timestamp": 1000u64,
-            })),
-        ).await;
+        state
+            .emit_telemetry(
+                gyre_common::Id::new("default"),
+                gyre_common::message::MessageKind::StateChanged,
+                Some(serde_json::json!({
+                    "event_id": "test-event-1",
+                    "agent_id": "agent-1",
+                    "event_type": "state_changed",
+                    "description": "Test event",
+                    "timestamp": 1000u64,
+                })),
+            )
+            .await;
 
         let app = api_router().with_state(state);
         let resp = app
@@ -982,28 +990,32 @@ mod tests {
             0,
         );
         state.workspaces.create(&ws).await.unwrap();
-        state.emit_telemetry(
-            gyre_common::Id::new("default"),
-            gyre_common::message::MessageKind::StateChanged,
-            Some(serde_json::json!({
-                "event_id": "e1",
-                "agent_id": "agent-x",
-                "event_type": "run_started",
-                "description": "From agent-x",
-                "timestamp": 1000u64,
-            })),
-        ).await;
-        state.emit_telemetry(
-            gyre_common::Id::new("default"),
-            gyre_common::message::MessageKind::StateChanged,
-            Some(serde_json::json!({
-                "event_id": "e2",
-                "agent_id": "agent-y",
-                "event_type": "run_started",
-                "description": "From agent-y",
-                "timestamp": 2000u64,
-            })),
-        ).await;
+        state
+            .emit_telemetry(
+                gyre_common::Id::new("default"),
+                gyre_common::message::MessageKind::StateChanged,
+                Some(serde_json::json!({
+                    "event_id": "e1",
+                    "agent_id": "agent-x",
+                    "event_type": "run_started",
+                    "description": "From agent-x",
+                    "timestamp": 1000u64,
+                })),
+            )
+            .await;
+        state
+            .emit_telemetry(
+                gyre_common::Id::new("default"),
+                gyre_common::message::MessageKind::StateChanged,
+                Some(serde_json::json!({
+                    "event_id": "e2",
+                    "agent_id": "agent-y",
+                    "event_type": "run_started",
+                    "description": "From agent-y",
+                    "timestamp": 2000u64,
+                })),
+            )
+            .await;
 
         let app = api_router().with_state(state);
         let resp = app

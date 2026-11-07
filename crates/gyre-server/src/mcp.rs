@@ -1436,15 +1436,17 @@ async fn handle_agent_complete(state: &AppState, args: &Value) -> Value {
             }
 
             // ── Telemetry for real-time dashboard ────────────────────────────────────
-            state.emit_telemetry(
-                ws_id,
-                gyre_common::message::MessageKind::AgentStatusChanged,
-                Some(serde_json::json!({
-                    "agent_id": agent_id,
-                    "status": "idle",
-                    "reason": format!("Agent {} completed task", agent.name),
-                })),
-            ).await;
+            state
+                .emit_telemetry(
+                    ws_id,
+                    gyre_common::message::MessageKind::AgentStatusChanged,
+                    Some(serde_json::json!({
+                        "agent_id": agent_id,
+                        "status": "idle",
+                        "reason": format!("Agent {} completed task", agent.name),
+                    })),
+                )
+                .await;
 
             match state.agents.update(&agent).await {
                 Ok(()) => tool_result(format!("Agent {agent_id} marked complete")),

@@ -813,7 +813,13 @@ mod tests {
         assert!(ok, "git commit failed");
         let url = repo_path.to_str().unwrap().to_string();
         let ok = std::process::Command::new("git")
-            .args(["-C", work.path().to_str().unwrap(), "push", &url, "HEAD:refs/heads/main"])
+            .args([
+                "-C",
+                work.path().to_str().unwrap(),
+                "push",
+                &url,
+                "HEAD:refs/heads/main",
+            ])
             .status()
             .unwrap()
             .success();
@@ -836,12 +842,8 @@ mod tests {
         // match would treat this principal as the system token.
         let t2 = gyre_domain::Tenant::new(gyre_common::Id::new("t-2"), "Other", "other", 0);
         state.tenants.create(&t2).await.unwrap();
-        let mut user = gyre_domain::User::new(
-            gyre_common::Id::new("u-sys"),
-            "local:system",
-            "system",
-            0,
-        );
+        let mut user =
+            gyre_domain::User::new(gyre_common::Id::new("u-sys"), "local:system", "system", 0);
         user.roles = vec![gyre_domain::UserRole::Admin];
         user.tenant_id = Some(gyre_common::Id::new("t-2"));
         state.users.create(&user).await.unwrap();

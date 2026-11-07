@@ -202,7 +202,13 @@ async fn restart_orchestrator(state: &Arc<AppState>, dead: &gyre_domain::Agent, 
     // is not a running orchestrator; if the launch fails the replacement
     // will be declared Dead by this same detector and restarted again.
     if let Ok(t) = &token {
-        if let Some(workspace) = state.workspaces.find_by_id(&replacement.workspace_id).await.ok().flatten() {
+        if let Some(workspace) = state
+            .workspaces
+            .find_by_id(&replacement.workspace_id)
+            .await
+            .ok()
+            .flatten()
+        {
             let outcome = crate::api::orchestrator::launch_orchestrator_process(
                 state,
                 &replacement,

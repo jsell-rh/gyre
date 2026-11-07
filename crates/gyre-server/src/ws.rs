@@ -482,10 +482,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
 /// workspaces or the lookup fails — `emit_telemetry` derives the tenant scope
 /// from the workspace record, so an id that does not resolve would silently
 /// drop the message (task-099 F1 regression class).
-async fn tenant_default_workspace(
-    state: &AppState,
-    tenant_id: &str,
-) -> Option<gyre_common::Id> {
+async fn tenant_default_workspace(state: &AppState, tenant_id: &str) -> Option<gyre_common::Id> {
     let tenant = gyre_common::Id::new(tenant_id);
     match state.workspaces.list_by_tenant(&tenant).await {
         Ok(mut workspaces) if !workspaces.is_empty() => {
@@ -1080,9 +1077,10 @@ mod tests {
         // default (earliest-created, here: only) workspace — not dropped, and
         // not addressed to a fabricated `default-{tenant}` id that no lookup
         // can resolve.
-        let scoped = state
-            .telemetry_buffer
-            .list_since(&gyre_common::Id::new("ws-activity"), 0, 100);
+        let scoped =
+            state
+                .telemetry_buffer
+                .list_since(&gyre_common::Id::new("ws-activity"), 0, 100);
         assert_eq!(
             scoped.len(),
             1,

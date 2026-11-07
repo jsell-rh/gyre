@@ -1271,9 +1271,7 @@ mod tests {
                     .uri("/api/v1/users")
                     .header("Authorization", "Bearer test-token")
                     .header("Content-Type", "application/json")
-                    .body(Body::from(
-                        r#"{"username":"jsell","tenant_id":"t-1"}"#,
-                    ))
+                    .body(Body::from(r#"{"username":"jsell","tenant_id":"t-1"}"#))
                     .unwrap(),
             )
             .await
@@ -1366,9 +1364,9 @@ mod tests {
                     .uri("/api/v1/users")
                     .header("Authorization", "Bearer test-token")
                     .header("Content-Type", "application/json")
-                    .body(
-                    Body::from(r#"{"username":"x","tenant_id":"t-1","roles":["Superuser"]}"#),
-                )
+                    .body(Body::from(
+                        r#"{"username":"x","tenant_id":"t-1","roles":["Superuser"]}"#,
+                    ))
                     .unwrap(),
             )
             .await

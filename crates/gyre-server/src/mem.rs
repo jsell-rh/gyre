@@ -1637,9 +1637,10 @@ impl WorkspaceRepository for MemWorkspaceRepository {
         // Port contract: (tenant_id, slug) is unique — /git/:ws_slug/:repo
         // URL resolution must stay unambiguous. Guarded in code because the
         // mem adapter has no schema to enforce SQLite's UNIQUE constraint.
-        if let Some(existing) = store.values().find(|ws| {
-            ws.tenant_id == workspace.tenant_id && ws.slug == workspace.slug
-        }) {
+        if let Some(existing) = store
+            .values()
+            .find(|ws| ws.tenant_id == workspace.tenant_id && ws.slug == workspace.slug)
+        {
             if existing.id != workspace.id {
                 anyhow::bail!(
                     "workspace with slug '{}' already exists in tenant {}",
@@ -1714,9 +1715,10 @@ impl WorkspaceRepository for MemWorkspaceRepository {
         // reuse-by-name on the default in-memory dev server.
         {
             let store = self.store.lock().await;
-            if let Some(existing) = store.values().find(|ws| {
-                ws.tenant_id == workspace.tenant_id && ws.slug == workspace.slug
-            }) {
+            if let Some(existing) = store
+                .values()
+                .find(|ws| ws.tenant_id == workspace.tenant_id && ws.slug == workspace.slug)
+            {
                 if existing.id != workspace.id {
                     anyhow::bail!(
                         "workspace with slug '{}' already exists in tenant {}",
