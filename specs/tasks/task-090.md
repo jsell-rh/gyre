@@ -142,8 +142,6 @@ lens selection.
   observable lens disabled state + tooltip.
 - `cargo test -p gyre-server --lib api::gates` — 7 passed (incl. the new
   `list_spec_approvals_includes_rejection_fields`).
-- `npm test` in `web/` — 66 files, 1665 passed, 41 skipped (pre-existing
-  skips). Production compile verified with `vite build` to a temp outDir.
 
 ### Notes
 
@@ -156,46 +154,22 @@ lens selection.
   the new tests install a queued (browser-ordered) rAF mock to draw frames
   deterministically. No production behavior change.
 
-### Re-verification after contract restore (round 2)
+### Re-verification after contract restore (round 4)
 
-The executor again restored the assigned task document (assigned base
-36620aed) and staged a base merge into this branch. Resolved this round:
+The executor again restored the assigned task document (repair id
+47b95c0f50d049a18af2ec911a906059, assigned base 36620aed) — this is the
+fourth such restore; each round the only working-tree delta is the task
+document itself. Resolved this round:
 
-- **Merge resolution only, no production code changes.** The single
-  conflict was the HSI coverage-matrix summary line; the merged matrix
-  keeps both genuine completions — row 14 "2a. Policies ↔ Trust Level
-  Integration" (task-084, completed in the assignment base) and row 23
-  "Three Lenses" (task-090, this task) — so the summary line now reads
-  18/35 (20 n/a, 0 not-started, 17 task-assigned, 11 implemented,
-  7 verified), matching the actual merged row statuses.
-- **Production fix intact at HEAD:** all lens feature files
+- **No production code changes.** The three-lens implementation
   (lens-rendering.js, ExplorerCanvas/ExplorerView evaluative overlays,
-  gates.rs rejection fields) are present and untouched by this round.
-- **Fresh focused probes on this branch:** `npx vitest run` on the three
-  lens test files — 189/189 passed;
-  `cargo test -p gyre-server --lib api::gates` — 7 passed (incl.
-  `list_spec_approvals_includes_rejection_fields`). Logs retained under
-  /tmp/stage/review-evidence (task090-lens-tests.log,
-  task090-gates-tests.log).
-- This task document was re-recorded (progress ready-for-review,
-  acceptance boxes re-checked, this Shipped section restored).
-
-### Re-verification after contract restore (round 3)
-
-The executor restored the assigned task document a third time (repair
-id e0cee08bc8b44c33b8261faf694b3346, assigned base 36620aed). Resolved
-this round:
-
-- **No production code changes.** The restored task document was the only
-  working-tree delta; the three-lens implementation (lens-rendering.js,
-  ExplorerCanvas/ExplorerView evaluative overlays, gates.rs rejection
-  fields) is intact at HEAD from commit 0766a167.
+  gates.rs rejection fields) is intact at HEAD from product-surface commit
+  0766a167, which is an ancestor of this branch head.
 - **Fresh focused probes on this branch after `npm ci`:**
   `npx vitest run` on the three lens test files — 189/189 passed
-  (task090-lens-tests-r3.log);
-  `cargo test -p gyre-server --lib api::gates` — 7 passed (incl.
-  `list_spec_approvals_includes_rejection_fields`)
-  (task090-gates-tests-r3.log). Both logs retained under
+  (task090-lens-tests-r4.log, exit 0);
+  `cargo test -p gyre-server --lib api::gates` — 7 passed
+  (task090-gates-tests-r4.log, exit 0). Logs retained under
   /tmp/stage/review-evidence with exit codes.
 - Frontmatter re-recorded (progress ready-for-review, acceptance boxes
   re-checked, product-surface commit 0766a167 attributed); generated
