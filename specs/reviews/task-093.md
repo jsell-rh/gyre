@@ -82,3 +82,24 @@ What this round checked and found:
 No material gap remains. Round 2's ten findings stay resolved; the integration-blocking formatting defect is repaired with no behavioral change.
 
 — Verifier, 2026-10-09
+
+# Verification-repair review — task-093 (round 4)
+
+Candidate: `4015bc16296646de4e7b6518e8957ee01620b9f9` (base `66a5fc6791eeb259c247b9a96f2ea93668c999b1`). Scope: the round-4 verification-repair delta (commit `6f9af628` plus process/docs commits) on top of the round-2/3-approved orchestrator lifecycle. Verdict: **complete**.
+
+This round repairs the two retained-verification failures:
+
+- **Fail-open policy seeding — fixed at the root.** `seed_builtin_policies` now returns `anyhow::Result` and propagates create/lookup errors with context; `main.rs` aborts startup via `?` (running without the seeded default-deny policy would leave the server unrestricted — task-077 F6 class). Idempotency preserved by the existence check. The `warn-continue-creation-exemptions.txt` entry is deleted, not re-anchored. Mutation probe: reintroducing the historical `if let Err(e) = ... { tracing::warn!(...) }` pattern makes `check-warn-continue-creation.sh` exit 1, so the fix cannot silently regress.
+- **Inline tenant containment in both REST handlers.** `spawn_workspace_orchestrator` and `spawn_repo_orchestrator` each load the scoped entity and compare its tenant against `auth.tenant_id`, returning `Forbidden` on mismatch (the `dismiss_notification` exemplar pattern); the `check_workspace_tenant` helper is deleted. `check-abac-exempt-handlers.sh` passes (86 handlers) under the candidate's own scripts.
+
+Evidence (saved under the controller's review-evidence for this round):
+
+- Mechanical checks at the exact candidate: arch OK, ABAC route registry OK (exemptions 52→50, honest shrink — both orchestrator routes now resolver-registered with `Some("write")`), exempt-handlers OK (86), warn-continue-creation OK, mcp-write-tools OK (7 gated), inert-enforcement OK, task-commit attribution OK. `check-mcp-wrapper-parity.sh` fails with 35 violations — verified identical (line-drift only) at the base, pre-existing, not a candidate regression.
+- rustfmt changed-lines clean (22 files); clippy changed-lines clean (0 failures; replicated `check-clippy-diff.py` logic with the executor-allowed focused `cargo clippy -p gyre-server --lib --tests` invocation — the script's workspace-wide form is wrapper-rejected in this sandbox, evidence recorded).
+- Focused tests: `api::orchestrator` 24/24, `abac_middleware` 9/9, `mcp::` 80/80, `api::spawn` 34/34, `auth_integration` 21/21.
+- Kill-tests (mutations reverted, tree verified pristine at the candidate SHA): no-op `validate_persona` → both persona-enforcement tests fail; removed workspace tenant containment → `workspace_spawn_wrapper_forbids_cross_tenant` fails; removed `gyre_message_send` from the write gate → `mcp_message_send_denies_readonly_api_key` fails; removed `restart_orchestrator`'s one-live gate → `double_death_handling_entry_yields_one_live_orchestrator` fails. Every round-4-relevant guard is backed by a test that dies with the guard.
+- Exemption deltas base→candidate are deletion-only (the mcp-write-tools replacement line is a parser-stripped comment); no new exemptions.
+
+Non-blocking observations: the explicit-name conflict check keeps the pre-existing `if let Ok(Some(_))` fail-open-on-read-error shape (DB UNIQUE backstops; identical at base); coverage rows 15–17 in `specs/coverage/system/platform-model.md` still carry pre-implementation audit notes for the auditor's next cycle; the task-file Shipped label "reviewed complete through rounds 1–4" anticipated this record — rounds 1–3 were the prior file contents and this entry is the round-4 review (the earlier round-4 review attempt failed on an inference credential before producing a verdict).
+
+— Reviewer, 2026-10-12
