@@ -92,154 +92,73 @@ Read `specs/system/agent-runtime.md` §1 (all of it, Phases 1-8) for full contex
 
 ## Shipped
 
-Rebase repair (merge commit `88e97e0d` on
-`pipeline/task-115/e91537b9bc6c4ec99f465be1db7e52ad-6`, upstream base
-`9bef21a4`): the controller-initiated merge of upstream left one content
-conflict in `crates/gyre-server/src/main.rs` (import list only). Resolved as
-the union — upstream's `bootstrap_default_tenant` (default-Tenant
-materialization before tenant-scoped seeding, task-197) plus this branch's
-`signal_chain` (task-scheduler spawn, Phase 3). Both symbols verified used in
-the merged file and exported by the auto-merged `lib.rs`; `gyre-server` builds
-clean and all focused suites re-run green on the merged tree (see test
-evidence below). No other conflict; no product behavior changed beyond the
-mechanical union.
+Round-3 review repair (review checkpoint `3f05f838`, fix commit `147d8259`
+on `pipeline/task-115/7f4735991bbd470c82b4084838fdc510-1`, assignment base
+`88bd81bf`). Both findings of the round are fixed, and each fix carries a
+regression test verified to fail deterministically against the pre-fix code.
 
-Repair round (review finding `52d8b49d`, fix commit `de294c12` on
-`pipeline/task-115/86b8a34e24314f26a52dc202f5efbfc4-1`, assignment base
-`d81b0fe4`):
+### F1 — TaskRepository::create dropped workspace_id (sqlite + postgres task adapters)
 
-### F1 — scheduler double-processing (signal_chain.rs, rig_vertexai.rs)
+Commit `336dd201` had displaced `workspace_id` from `NewTaskRow`, the insert
+row construction, and the upsert `DO UPDATE` set in BOTH the SQLite and
+Postgres task adapters (regression vs base `9bef21a4`). Because
+`tasks.workspace_id` is `TEXT NOT NULL DEFAULT 'default'`, every task INSERT
+silently landed in the fabricated `default` workspace scope — invisible to
+the mem-adapter-backed server tests. Restored all three spots in both
+adapters and added the adapter regression test
+`create_persists_workspace_scope` (sqlite), asserting create-persistence,
+`list_by_workspace` visibility, and the upsert DO UPDATE scope move.
+Kill-verified: with the fix reverted the test fails with
+`left: Id("default") / right: Id("ws-42")` — the exact fabricated scope from
+the finding.
 
-The pre-fix claim protocol could process one Delegation task twice:
-`scheduler_run_once` had no cycle serialization (the 30 s loop plus
-`POST /admin/jobs/task_scheduler/run` — whose `JobRegistry::trigger` runs
-the handler unserialized — could both claim one Backlog task via the
-non-atomic list/transition/update read-modify-write), and its stale
-InProgress re-claim (60 s) could re-run a still-live decomposition whose
-LLM call was unbounded (`reqwest::Client::new()` in rig_vertexai.rs:103).
-Fixed by layering three real guards:
+### F2 — decompose_delegation fail-open on an empty-SHA spec_ref
 
-- **Cycle run lock** (`OrchestratorRegistry::scheduler_run_lock`):
-  `scheduler_run_once` holds one lock for the whole scan→claim→process
-  sequence, so concurrent cycles serialize and never race on the claim;
-  a mid-run task can never be re-selected because no cycle scans while
-  another executes. The stale InProgress re-selection remains purely as
-  crash recovery (task left claimed by a dead process).
-- **Re-read after the per-repo mutex** (defense in depth): the claimed
-  task is re-fetched after acquiring the repo lock and processed only
-  from the freshest snapshot; a task no longer InProgress (completed,
-  cancelled, or released by a prior run) is skipped instead of
-  re-decomposed.
-- **Latency bounds**: `LLM_CALL_TIMEOUT` (120 s `tokio::time::timeout`)
-  wraps both orchestrator `predict_json` calls (timeout degrades to the
-  same deterministic fallback as an LLM error), and every Vertex AI HTTP
-  client is now built with `.timeout(...)` (completion/streaming client
-  180 s, token-exchange clients 15 s, metadata server 2 s). All five
-  `unbounded-external-http` exemption entries are deleted and
-  `FROZEN_EXEMPTION_COUNT` lowered 5→0 — the invariant now passes with
-  zero exemptions.
+`decompose_delegation`'s `Some(r) if r.contains('@')` branch split
+`"path@"` into `(path, "")` without validating the SHA, fabricated sub-tasks
+pinned to the malformed `path@` spec_ref, and completed the delegation Done —
+the sibling branch of the prior no-ledger-SHA fix. An empty SHA in spec_ref
+(reachable via `POST /api/v1/tasks` or MCP `gyre_create_task`, which do not
+shape-validate spec_ref) now hard-fails the run: the claim is released to
+Blocked, no sub-tasks are created, and a later cycle retries once the ref is
+resolvable. The now-redundant `spec_sha.is_empty()` guard on the blob read
+was removed (the SHA is guaranteed non-empty by the resolution above).
+Mirrored regression test
+`delegation_with_empty_sha_spec_ref_stays_blocked`. Kill-verified: with the
+bail reverted the test fails with `left: Done / right: Blocked` — the exact
+fail-open completion from the finding.
 
-### F2 — false bulk-ack of the orchestrator inbox
+### Test evidence (head `7d75a98a`, clean tree)
 
-`run_workspace_orchestrator` ended with `messages.acknowledge_all`,
-recording EVERY inbox message as processed — including Escalations the
-stale-agent detector delivers to a live workspace orchestrator, which no
-consumer had seen; the documented crash-recovery poll
-(`GET /api/v1/agents/:id/messages?acknowledged=false`) then hid them. The
-run now acks only the `SpecApproved` message whose payload matches the
-signal it consumed (`list_unacked` + per-message `acknowledge`); other
-messages stay unacked for their real consumers.
-
-### F3 — decorative read and fail-open empty SHA
-
-- Phase 2 step 1's spec read discarded its result (a git subprocess per
-  approval for nothing). The read is now consumed: the delegation task's
-  description carries the spec's title/section-count/size summary derived
-  from the real blob (`summarize_spec_content`), and an unreadable blob
-  is warned, not silently ignored.
-- `decompose_delegation`'s ledger fallback mapped an unresolvable SHA to
-  `""` and completed the delegation with sub-tasks pinned to a malformed
-  `path@` spec_ref — the fail-open class the
-  `check-fail-open-ref-resolution` invariant bans for `resolve_ref`. A
-  missing ledger SHA is now a hard error: the run fails, the claim is
-  released to Blocked, and a later cycle retries once the ledger
-  resolves. ("Cannot determine the approved blob" is never "empty blob
-  is fine".)
-
-### Phase 3 step 2 — codebase state in decomposition (equivalent effect)
-
-Canonical §Phase 3 step 2 ("Reads the repo's current codebase state (via
-MCP tools)") is now implemented with equivalent effect: the repo
-orchestrator's decomposition reads the repo's tracked file tree at HEAD
-(`read_repo_tree`, real `git ls-tree`, bounded to 200 paths with an
-explicit truncation marker) and feeds it to the LLM decomposition prompt
-alongside the spec content. Disclosure: the mechanism is a server-side
-git read, not MCP-tool mediation — the orchestrator run is server-driven
-(likewise task creation goes through the task store rather than the
-`task.create` MCP tool, equivalent effect); no autonomous tool loop
-exists. With this, every Phase 3 step has a real implementation behind
-it, via equivalent-effect mechanisms for the tool-mediated wordings.
+- `cargo test -p gyre-adapters --lib sqlite::task` → **11 passed, 0 failed**
+- `cargo test -p gyre-server --lib signal_chain` → **19 passed, 0 failed**
+- `--lib api::specs` → 74 passed; `--lib api::orchestrator` → 7 passed;
+  `--lib jobs` → 11 passed; `--lib mcp::` → 78 passed;
+  `cargo test -p gyre-adapters --lib llm::` → 23 passed, 2 ignored
+- `SKIP_WEB_BUILD=1 cargo build -p gyre-adapters -p gyre-server --lib` → clean
+- Invariant gates re-run OK: check-arch, check-fail-open-ref-resolution,
+  check-fabricated-scope-defaults, check-scope-literal-defaults,
+  check-mem-port-contracts, check-in-memory-state-stores,
+  check-inert-enforcement, check-unbounded-external-http,
+  check-task-commit-attribution, check-dead-message-kinds
+- Evidence: `/tmp/stage/review-evidence/task-115-round3-evidence.txt`
+- Sandbox transport restriction (unchanged from base,
+  `/tmp/stage/capabilities.json`): listener-bound tests (`tty::`, `ws::`,
+  `otlp_receiver::`, `git_http::`, gyre-cli `ws_integration`) cannot run
+  here; `cargo test --all` and exact-head GitHub checks remain for the
+  verification gate.
 
 ### Prior rounds (context)
 
-Phase 1 (`api/specs.rs` approve handler: ledger record + bus
-`SpecApproved` emission + server-side routing via
-`signal_chain::on_spec_approved`), Phase 2 (`OrchestratorRegistry`
+Phase 1 (approve handler: ledger record + bus `SpecApproved` emission +
+`signal_chain::on_spec_approved` routing), Phase 2 (`OrchestratorRegistry`
 per-workspace/per-repo mutexes, spawn-on-demand workspace orchestrator,
-delegation + coordination tasks, cross-workspace p4 notifications), and
-Phase 3 (task scheduler, repo orchestrator spawn, spec-pinned
-decomposition into ordered Implementation sub-tasks with
-`spec_ref`/`parent_task_id`/`order`/`depends_on`, coordination
-assessment) — see commit `f5df0c01` and earlier. Prior repair fixed
-sub-task repo/workspace scoping (`f5df0c01`) and the
-`reject_spec` fabricated-tenant fallback (exemption deleted,
-`FROZEN_EXEMPTION_COUNT` 7→6).
-
-### Test evidence
-
-Re-run on the merged tree at `88e97e0d` (rebase repair):
-`cargo test -p gyre-server --lib signal_chain` → **18 passed, 0 failed**;
-`--lib api::specs` → 74 passed; `--lib api::orchestrator` → 7 passed.
-`SKIP_WEB_BUILD=1 cargo build -p gyre-server --bin gyre-server` → clean.
-Invariant gates re-run at `88e97e0d`: `check-arch.sh`,
-`check-fail-open-ref-resolution.sh`, `check-fabricated-scope-defaults.sh`,
-`check-scope-literal-defaults.sh`, `check-in-memory-state-stores.sh`,
-`check-inert-enforcement.sh`, `check-byte-slice-truncation.sh`,
-`check-dead-message-kinds.sh`, `check-unbounded-external-http.sh`, and
-`check-task-commit-attribution.sh` — all OK. Evidence file:
-`/tmp/stage/review-evidence/task-115-evidence.txt`.
-
-Originally run at `de294c12` (repair round):
-`cargo test -p gyre-server --lib signal_chain` → **18 passed, 0 failed**
-(6 new regression tests; two of them verified to fail deterministically
-against the pre-fix code by temporarily reverting the fixes:
-`orchestrator_run_does_not_ack_escalations` — escalation falsely acked;
-`delegation_without_resolvable_sha_stays_blocked` — task completed with
-a malformed empty-SHA spec_ref). New tests:
-`concurrent_scheduler_cycles_do_not_double_process` (end-to-end no
-duplicate sub-task sets from concurrently entered cycles),
-`scheduler_cycles_serialize_on_the_run_lock` (deterministic: a second
-cycle blocks while the first holds the run lock — fails if the
-acquisition is removed), `stale_claim_crash_recovery_processes_once`
-(crash-recovery re-claim processes exactly once),
-`delegation_description_carries_spec_summary` (real git repo; the
-delegation description carries the title/section count derived from the
-read blob), `read_repo_tree_lists_tracked_files` (real git repo;
-tracked-file listing, truncation marker, unreadable repo → None).
-Related suites: `--lib api::specs` → 74 passed; `--lib
-api::orchestrator` → 7 passed; `--lib jobs` → 11 passed; `--lib mcp::`
-→ 78 passed; `cargo test -p gyre-adapters --lib llm::` → 23 passed,
-0 failed. Invariant gates at `de294c12`: `check-arch.sh`,
-`check-fail-open-ref-resolution.sh`, `check-fabricated-scope-defaults.sh`,
-`check-scope-literal-defaults.sh`, `check-in-memory-state-stores.sh`,
-`check-inert-enforcement.sh`, `check-byte-slice-truncation.sh`,
-`check-dead-message-kinds.sh`,
-`check-unbounded-external-http.sh` (zero exemptions remaining) — all OK.
-Diff-scoped clippy (`check-clippy-diff.py`) and
-`check-task-commit-attribution.sh` run at this commit — see evidence
-file. Sandbox transport restriction (unchanged from base,
-`/tmp/stage/capabilities.json`): listener-bound tests (`tty::`, `ws::`,
-`otlp_receiver::`, `git_http::`, gyre-cli `ws_integration`) cannot run
-here; `cargo test --all` and exact-head GitHub checks remain for the
-verification gate. Evidence:
-`/tmp/stage/review-evidence/task-115-evidence.txt`.
+delegation + coordination tasks, cross-workspace p4 notifications), Phase 3
+(task scheduler, repo orchestrator spawn, spec-pinned decomposition into
+ordered Implementation sub-tasks, coordination assessment). Repair rounds:
+scheduler double-processing guards (cycle run lock, re-read after repo
+mutex, LLM latency bounds — `de294c12`), false bulk-ack of the orchestrator
+inbox, decorative spec read consumed into the delegation description,
+no-ledger-SHA hard error, sub-task repo/workspace scoping, and the rebase
+repair (`88e97e0d`, import-list-only conflict in `main.rs` resolved as the
+union).
