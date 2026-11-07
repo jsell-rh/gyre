@@ -471,7 +471,6 @@ mod tests {
         // forwarder reads through `since_timestamp`, which decompresses
         // in the adapter — this test proves the wire payload.
         use crate::mem::test_state;
-        use gyre_domain::AuditOutcome;
         use tokio::io::AsyncReadExt;
 
         let state = test_state();

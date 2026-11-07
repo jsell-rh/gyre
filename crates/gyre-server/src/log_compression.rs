@@ -195,6 +195,16 @@ pub(crate) fn line_timestamp(line: &str) -> Option<u64> {
         .and_then(|(ts, _)| ts.trim().parse::<u64>().ok())
 }
 
+impl ColdSegment {
+    /// Decode the cold segment into lines. A corrupt segment is a hard
+    /// error — log data must not silently vanish.
+    fn decode(&self) -> Result<Vec<String>> {
+        let raw = zstd::decode_all(self.bytes.as_slice())
+            .context("decompress agent log cold segment")?;
+        decode_frames(&raw)
+    }
+}
+
 impl AgentLogBuf {
     /// Total logical lines (cold + hot).
     fn len(&self) -> usize {
@@ -206,20 +216,59 @@ impl AgentLogBuf {
     fn cold_lines(&self) -> Result<Vec<String>> {
         match &self.cold {
             None => Ok(Vec::new()),
-            Some(seg) => {
-                let raw = zstd::decode_all(seg.bytes.as_slice())
-                    .context("decompress agent log cold segment")?;
-                decode_frames(&raw)
-            }
+            Some(seg) => seg.decode(),
         }
     }
 
-    /// Enforce the per-agent line cap by draining the oldest hot lines.
+    /// Enforce the per-agent line cap by evicting the OLDEST lines —
+    /// the same policy as the previous plain-`Vec<String>` buffer
+    /// (keep the newest `MAX_LINES_PER_AGENT`). Lines are evicted in
+    /// overall age order: from the front of the cold segment first
+    /// (it holds the oldest lines), then from the front of `hot`. This
+    /// keeps newly appended lines alive even when the cold segment
+    /// alone is at the cap. A corrupt segment is kept (with a warning)
+    /// rather than dropped — log data must not silently vanish.
     fn trim_to_cap(&mut self) {
         let surplus = self.len().saturating_sub(MAX_LINES_PER_AGENT);
-        if surplus > 0 {
-            let drain = surplus.min(self.hot.len());
-            self.hot.drain(0..drain);
+        if surplus == 0 {
+            return;
+        }
+        let cold_count = self.cold.as_ref().map_or(0, |c| c.line_count);
+        let from_cold = surplus.min(cold_count);
+        self.hot.drain(0..(surplus - from_cold));
+        if from_cold == 0 {
+            return;
+        }
+        let Some(cold) = self.cold.take() else {
+            return;
+        };
+        match cold.decode() {
+            Ok(lines) => {
+                let kept: Vec<String> = lines.into_iter().skip(from_cold).collect();
+                if kept.is_empty() {
+                    // The whole segment was surplus; drop it.
+                    return;
+                }
+                match build_cold(kept) {
+                    Ok((seg, _)) => self.cold = Some(seg),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "agent log cold segment rebuild failed while trimming; \
+                             keeping the previous segment"
+                        );
+                        self.cold = Some(cold);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "agent log cold segment decode failed while trimming; \
+                     keeping the segment"
+                );
+                self.cold = Some(cold);
+            }
         }
     }
 }
@@ -626,6 +675,49 @@ mod tests {
             .last()
             .unwrap()
             .contains(&format!("line {}", MAX_LINES_PER_AGENT + 4)));
+    }
+
+    #[tokio::test]
+    async fn line_cap_evicts_oldest_when_cold_segment_is_at_cap() {
+        // F2 regression: with a full cold segment (agent emitted >= cap
+        // lines, went quiet past the fold age, and the job folded the
+        // whole buffer), a newly appended line must survive and the
+        // OLDEST cold line must be evicted — not the fresh line.
+        let buf = AgentLogBuffer::new();
+        let t = now();
+        let old_ts = t - 10 * DAY;
+        for i in 0..MAX_LINES_PER_AGENT {
+            buf.append("agent-1".to_string(), format!["[{}] cold line {}", old_ts, i])
+                .await;
+        }
+        buf.compress_older_than(t - 7 * DAY).await.unwrap();
+        // Whole buffer is now one cold segment at the cap, hot is empty.
+
+        let fresh = format!("[{}] fresh line", t);
+        buf.append("agent-1".to_string(), fresh.clone()).await;
+
+        let lines = buf.replay("agent-1").await.unwrap();
+        assert_eq!(lines.len(), MAX_LINES_PER_AGENT);
+        // Newest line kept...
+        assert_eq!(lines.last().unwrap(), &fresh);
+        // ...oldest cold line evicted, the rest of the cold segment intact.
+        assert!(!lines[0].contains("cold line 0"), "oldest line must go");
+        assert!(lines[0].contains("cold line 1"));
+        assert!(lines[MAX_LINES_PER_AGENT - 2].contains(&format!(
+            "cold line {}",
+            MAX_LINES_PER_AGENT - 1
+        )));
+
+        // Appending more keeps evicting from the cold front: the cap
+        // holds and every fresh line survives.
+        for i in 0..50 {
+            buf.append("agent-1".to_string(), format!("[{}] newer line {}", t, i))
+                .await;
+        }
+        let lines = buf.replay("agent-1").await.unwrap();
+        assert_eq!(lines.len(), MAX_LINES_PER_AGENT);
+        assert!(lines.last().unwrap().contains("newer line 49"));
+        assert!(!lines.iter().any(|l| l.ends_with("cold line 49")));
     }
 
     #[tokio::test]
