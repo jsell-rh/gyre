@@ -11,6 +11,7 @@
 //! inbox notifications for all Admin and Developer workspace members.
 
 use gyre_common::{
+    call_graph::{CallGraphRunRecord, Language},
     graph::{ArchitecturalDelta, DeltaNodeEntry, EdgeType, FieldChange, GraphEdge, GraphNode},
     Id, Notification, NotificationType,
 };
@@ -18,7 +19,7 @@ use gyre_domain::{
     GoExtractor, LanguageExtractor, PythonExtractor, RustExtractor, TypeScriptExtractor,
     WorkspaceRole,
 };
-use gyre_ports::{GraphPort, NotificationRepository, WorkspaceMembershipRepository};
+use gyre_ports::{GraphPort, KvJsonStore, NotificationRepository, WorkspaceMembershipRepository};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -26,6 +27,34 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 use tracing::{info, warn};
 use uuid::Uuid;
+
+/// KV-store namespace for the durable Pass 2 completion marker
+/// (`CallGraphRunRecord`, keyed by repo id). Read by the `graph_summary` and
+/// `graph_query_dryrun` MCP tools to report call graph completeness
+/// (specs/system/lsp-call-graph.md §8).
+pub const CALL_GRAPH_STATUS_NAMESPACE: &str = "call_graph_status";
+
+/// Server-side telemetry sinks for the Pass 2 call graph extraction
+/// (task-076, lsp-call-graph.md §9): the Prometheus metrics registry and the
+/// KV store that holds the durable per-repo completion marker.
+pub struct CallGraphTelemetry {
+    pub kv: Arc<dyn KvJsonStore>,
+    pub metrics: Arc<crate::metrics::Metrics>,
+}
+
+/// Outcome of a Pass 2 run, consumed by the telemetry/marker path.
+#[derive(Debug, Default)]
+pub struct Pass2Outcome {
+    /// Positive evidence that at least one language toolchain actually ran
+    /// (non-empty raw output). Gates the completeness marker: a missing or
+    /// failed toolchain degrades to empty output and must NOT mark the call
+    /// graph complete.
+    pub extraction_ran: bool,
+    /// New `Calls` edges persisted by this run.
+    pub edges_persisted: usize,
+    /// Wall-clock duration of each language's extraction (§9 metric).
+    pub per_language: Vec<(Language, std::time::Duration)>,
+}
 
 /// Optional agent context attached to a push-triggered extraction.
 ///
@@ -86,6 +115,9 @@ pub struct DivergenceScope<'a> {
 /// spec-assertion-failure notifications (§9) — independent of `agent_ctx`, so
 /// notifications also fire for user and mirror pushes.
 ///
+/// `pass2_telemetry` receives the Pass 2 (call graph) duration metric and
+/// persists the durable per-repo completion marker (lsp-call-graph.md §8–9).
+///
 /// All errors are logged and swallowed — extraction must never fail a push.
 #[allow(clippy::too_many_arguments)]
 pub async fn extract_and_store_graph(
@@ -98,6 +130,7 @@ pub async fn extract_and_store_graph(
     divergence_ports: Option<DivergencePorts<'_>>,
     results_repo: Arc<dyn gyre_ports::SpecAssertionResultRepository>,
     notification_scope: Option<PushNotificationScope>,
+    pass2_telemetry: Arc<CallGraphTelemetry>,
 ) {
     if let Err(e) = do_extract(
         repo_path,
@@ -109,6 +142,7 @@ pub async fn extract_and_store_graph(
         divergence_ports,
         results_repo,
         notification_scope,
+        pass2_telemetry,
     )
     .await
     {
@@ -127,6 +161,7 @@ async fn do_extract(
     divergence_ports: Option<DivergencePorts<'_>>,
     results_repo: Arc<dyn gyre_ports::SpecAssertionResultRepository>,
     notification_scope: Option<PushNotificationScope>,
+    pass2_telemetry: Arc<CallGraphTelemetry>,
 ) -> anyhow::Result<()> {
     // --- Step 1: snapshot the commit tree into a temp directory ---------------
 
@@ -406,13 +441,18 @@ async fn do_extract(
         let pass2_repo_root = tmp.path().to_path_buf();
         let pass2_repo_id = repo_id_parsed.clone();
         let pass2_graph_store = Arc::clone(&graph_store);
+        let pass2_telemetry = Arc::clone(&pass2_telemetry);
 
         // Fire-and-forget: Pass 2 never blocks the push response. The `_tmp`
         // binding keeps the extracted tree alive until the analysis finishes.
         tokio::spawn(async move {
             let _tmp = tmp;
             let extractor = gyre_adapters::call_graph::SubprocessCallGraphExtractor::new();
-            extract_and_persist_call_graph(
+            // §9: measure Pass 2 duration — the spec's performance targets
+            // (go ~2–5s, rust ~20s, python/ts ~30s) are only checkable
+            // against an observed number.
+            let started = std::time::Instant::now();
+            let outcome = extract_and_persist_call_graph(
                 &pass2_repo_root,
                 &pass2_nodes,
                 &pass2_edges,
@@ -421,6 +461,9 @@ async fn do_extract(
                 &extractor,
             )
             .await;
+            let duration = started.elapsed();
+            record_pass2_telemetry(pass2_telemetry.as_ref(), &pass2_repo_id, &outcome, duration)
+                .await;
         });
     }
 
@@ -829,7 +872,9 @@ fn run_all_extractors(
 /// and becomes complete when Pass 2 finishes. Best-effort — logs and continues
 /// on any failure, never failing a push.
 ///
-/// Returns the number of new `Calls` edges persisted.
+/// Returns the run's [`Pass2Outcome`] (persisted-edge count, per-language
+/// durations, and whether a toolchain verifiably ran) for the §9 telemetry
+/// and the §8 completeness marker.
 pub async fn extract_and_persist_call_graph(
     repo_root: &Path,
     nodes: &[GraphNode],
@@ -837,20 +882,22 @@ pub async fn extract_and_persist_call_graph(
     repo_id: &Id,
     graph_store: &dyn GraphPort,
     extractor: &dyn gyre_ports::call_graph::CallGraphExtractor,
-) -> usize {
+) -> Pass2Outcome {
     use gyre_domain::call_graph_resolve::{detect_all_languages, resolve_call_edges};
+    let mut outcome = Pass2Outcome::default();
     let languages = detect_all_languages(repo_root);
     if languages.is_empty() {
-        return 0;
+        return outcome;
     }
 
     // Accumulate resolved edges so later languages dedup against earlier ones
     // (polyglot repos) as well as the Pass 1 edges.
     let mut known_edges = existing_edges.to_vec();
-    let mut persisted = 0usize;
 
-    let mut extraction_ran = false;
     for lang in languages {
+        // §9: per-language duration — the spec's performance targets are
+        // per-language (go ~2–5s, rust ~20s, python ~30s, ts ~30s).
+        let lang_started = std::time::Instant::now();
         let raw = match extractor.extract_call_edges(repo_root, lang).await {
             Ok(r) => r,
             Err(e) => {
@@ -860,22 +907,24 @@ pub async fn extract_and_persist_call_graph(
                     error = %e,
                     "Pass 2 call graph extraction failed — graph will be missing some call edges"
                 );
+                outcome.per_language.push((lang, lang_started.elapsed()));
                 continue;
             }
         };
+        outcome.per_language.push((lang, lang_started.elapsed()));
         if raw.is_empty() {
             continue;
         }
         // Non-empty raw output is positive evidence the toolchain ran (the
         // adapter degrades a missing tool to `Ok(vec![])`, which is
         // indistinguishable from a genuinely call-free repo).
-        extraction_ran = true;
+        outcome.extraction_ran = true;
 
         let edges = resolve_call_edges(lang, &raw, nodes, &known_edges, repo_id);
         for edge in edges {
             match graph_store.create_edge(edge.clone()).await {
                 Ok(_) => {
-                    persisted += 1;
+                    outcome.edges_persisted += 1;
                     known_edges.push(edge);
                 }
                 Err(e) => {
@@ -895,7 +944,7 @@ pub async fn extract_and_persist_call_graph(
     // produced raw output: a missing/failed toolchain degrades to empty
     // output, and deleting every Calls edge because the tool was unavailable
     // would wipe the graph's call data.
-    if extraction_ran {
+    if outcome.extraction_ran {
         let mut resolved: HashMap<(String, String), HashSet<String>> = HashMap::new();
         for e in known_edges
             .iter()
@@ -943,14 +992,115 @@ pub async fn extract_and_persist_call_graph(
         }
     }
 
-    if persisted > 0 {
+    if outcome.edges_persisted > 0 {
         tracing::info!(
             repo_id = %repo_id,
-            edges = persisted,
+            edges = outcome.edges_persisted,
             "LSP call graph extraction (Pass 2) complete"
         );
     }
-    persisted
+    outcome
+}
+
+/// Record Pass 2 telemetry and the durable completeness marker
+/// (task-076, lsp-call-graph.md §8–9).
+///
+/// - Observes the per-language durations on the
+///   `gyre_graph_pass2_duration_seconds` Prometheus histogram.
+/// - Logs the total duration against the spec's per-language targets
+///   (§9: go ~2–5s, rust ~20s, python ~30s, typescript ~30s) so regressions
+///   are visible in server logs.
+/// - Persists a [`CallGraphRunRecord`] in the KV store (namespace
+///   [`CALL_GRAPH_STATUS_NAMESPACE`], key = repo id) — but ONLY when the run
+///   has positive evidence a toolchain ran (`extraction_ran`). A missing or
+///   failed toolchain degrades to empty output; marking the call graph
+///   complete then would be a fabrication.
+pub async fn record_pass2_telemetry(
+    telemetry: &CallGraphTelemetry,
+    repo_id: &Id,
+    outcome: &Pass2Outcome,
+    total_duration: std::time::Duration,
+) {
+    for (lang, dur) in &outcome.per_language {
+        telemetry
+            .metrics
+            .observe_pass2_duration(&lang.to_string(), dur.as_secs_f64());
+    }
+
+    if !outcome.extraction_ran {
+        // No toolchain verifiably ran — do not fabricate a completeness marker.
+        tracing::warn!(
+            repo_id = %repo_id,
+            duration_secs = %total_duration.as_secs_f64(),
+            "Pass 2 call graph extraction finished without toolchain evidence — \
+             call graph remains incomplete (no marker written)"
+        );
+        return;
+    }
+
+    let record = CallGraphRunRecord {
+        completed_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        duration_secs: total_duration.as_secs_f64(),
+        edges_persisted: outcome.edges_persisted,
+        languages: outcome.per_language.iter().map(|(l, _)| *l).collect(),
+    };
+    let payload = match serde_json::to_string(&record) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(repo_id = %repo_id, error = %e, "Pass 2: failed to serialize run record");
+            return;
+        }
+    };
+    if let Err(e) = telemetry
+        .kv
+        .kv_set(CALL_GRAPH_STATUS_NAMESPACE, repo_id.as_str(), payload)
+        .await
+    {
+        tracing::warn!(
+            repo_id = %repo_id,
+            error = %e,
+            "Pass 2: failed to persist call graph completion marker"
+        );
+        return;
+    }
+    tracing::info!(
+        repo_id = %repo_id,
+        duration_secs = %record.duration_secs,
+        edges = record.edges_persisted,
+        languages = %record
+            .languages
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        "Pass 2 call graph telemetry recorded (spec §9 targets: go ~2-5s, rust ~20s, python ~30s, ts ~30s)"
+    );
+}
+
+/// Read the durable Pass 2 completion marker for a repo and decide whether
+/// the call graph is complete for the current graph state
+/// (lsp-call-graph.md §8). Used by the `graph_summary` and
+/// `graph_query_dryrun` tools (MCP + explorer agent).
+///
+/// A missing marker (Pass 2 never completed), an unreadable store, or a
+/// marker older than the latest Pass 1 extraction all resolve to `false` —
+/// blast-radius answers must under-claim rather than over-claim.
+pub async fn call_graph_complete_for_repo(
+    kv: &dyn KvJsonStore,
+    repo_id: &Id,
+    nodes: &[GraphNode],
+) -> bool {
+    let completed_at = kv
+        .kv_get(CALL_GRAPH_STATUS_NAMESPACE, repo_id.as_str())
+        .await
+        .ok()
+        .flatten()
+        .and_then(|payload| serde_json::from_str::<CallGraphRunRecord>(&payload).ok())
+        .map(|r| r.completed_at);
+    gyre_domain::view_query_resolver::is_call_graph_complete(completed_at, nodes)
 }
 
 /// Post-extraction spec assertion check.
@@ -1522,10 +1672,10 @@ mod tests {
             }],
         };
 
-        let persisted =
+        let outcome =
             extract_and_persist_call_graph(dir.path(), &nodes, &[], &repo_id, &store, &fake).await;
         assert_eq!(
-            persisted, 1,
+            outcome.edges_persisted, 1,
             "one cross-package Calls edge should be persisted"
         );
 
@@ -1539,6 +1689,106 @@ mod tests {
         assert_eq!(calls[0].source_id, caller.id);
         assert_eq!(calls[0].target_id, callee.id);
         assert_eq!(calls[0].edge_type, EdgeType::Calls);
+        // §7 (task-076): Pass 2 emits the SAME EdgeType::Calls variant as
+        // Pass 1 — provenance is carried in the metadata tag so
+        // `graph_summary` can report per-pass counts.
+        assert_eq!(
+            calls[0].metadata.as_deref(),
+            Some(gyre_common::call_graph::PASS2_EDGE_METADATA),
+            "Pass 2 Calls edge must carry the provenance metadata tag"
+        );
+        // §8 (task-076): a run with toolchain evidence must leave the call
+        // graph readable as complete.
+        assert!(outcome.extraction_ran);
+        assert_eq!(outcome.per_language.len(), 1);
+        assert_eq!(outcome.per_language[0].0, Language::Go);
+    }
+
+    /// task-076 (lsp-call-graph.md §8–9): the durable Pass 2 completion marker
+    /// and the §9 duration metric are written only on positive toolchain
+    /// evidence, and the marker drives `call_graph_complete_for_repo`.
+    #[tokio::test]
+    async fn pass2_telemetry_marker_gated_on_toolchain_evidence() {
+        use crate::mem::MemKvStore;
+        use crate::metrics::Metrics;
+
+        let kv = Arc::new(MemKvStore::default());
+        let metrics = Arc::new(Metrics::new().unwrap());
+        let telemetry = CallGraphTelemetry {
+            kv: Arc::clone(&kv) as Arc<dyn KvJsonStore>,
+            metrics: Arc::clone(&metrics),
+        };
+        let repo_id = Id::new("repo-t76");
+
+        // No toolchain evidence (adapter degraded to empty output) → no
+        // marker, no histogram observation. Marking the graph complete here
+        // would fabricate completeness.
+        let no_evidence = Pass2Outcome {
+            extraction_ran: false,
+            edges_persisted: 0,
+            per_language: vec![],
+        };
+        record_pass2_telemetry(
+            &telemetry,
+            &repo_id,
+            &no_evidence,
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert!(
+            kv.kv_get(CALL_GRAPH_STATUS_NAMESPACE, repo_id.as_str())
+                .await
+                .unwrap()
+                .is_none(),
+            "no toolchain evidence → no completion marker"
+        );
+        assert!(!metrics
+            .render()
+            .contains("gyre_graph_pass2_duration_seconds"));
+
+        // Toolchain ran → marker + duration metric recorded.
+        let with_evidence = Pass2Outcome {
+            extraction_ran: true,
+            edges_persisted: 3,
+            per_language: vec![(Language::Go, std::time::Duration::from_millis(2500))],
+        };
+        record_pass2_telemetry(
+            &telemetry,
+            &repo_id,
+            &with_evidence,
+            std::time::Duration::from_millis(2600),
+        )
+        .await;
+        let marker = kv
+            .kv_get(CALL_GRAPH_STATUS_NAMESPACE, repo_id.as_str())
+            .await
+            .unwrap()
+            .expect("toolchain evidence → completion marker");
+        let record: CallGraphRunRecord = serde_json::from_str(&marker).unwrap();
+        assert_eq!(record.edges_persisted, 3);
+        assert_eq!(record.languages, vec![Language::Go]);
+        assert!(record.duration_secs > 0.0);
+        let rendered = metrics.render();
+        assert!(
+            rendered.contains("gyre_graph_pass2_duration_seconds"),
+            "Pass 2 duration must be exposed as a metric, got:\n{rendered}"
+        );
+        assert!(rendered.contains("language=\"go\""));
+
+        // Fresh marker + nodes persisted at/before completion → complete.
+        let mut node = make_graph_node("fn_a", "crate::fn_a");
+        node.repo_id = repo_id.clone();
+        node.last_seen_at = record.completed_at;
+        assert!(call_graph_complete_for_repo(kv.as_ref(), &repo_id, &[node.clone()]).await);
+
+        // A newer Pass 1 extraction (last_seen_at after the marker) → the
+        // graph is call-incomplete until Pass 2 re-runs.
+        node.last_seen_at = record.completed_at + 1;
+        assert!(!call_graph_complete_for_repo(kv.as_ref(), &repo_id, &[node]).await);
+
+        // Stale marker (completed before the latest extraction) → incomplete.
+        // (Covered above; also check a repo with no marker at all.)
+        assert!(!call_graph_complete_for_repo(kv.as_ref(), &Id::new("repo-none"), &[]).await);
     }
 
     #[tokio::test]
@@ -1629,10 +1879,10 @@ mod tests {
             }],
         };
 
-        let persisted =
+        let outcome =
             extract_and_persist_call_graph(dir.path(), &nodes, &[], &repo_id, &store, &fake).await;
         assert_eq!(
-            persisted, 1,
+            outcome.edges_persisted, 1,
             "one cross-module Calls edge should be persisted"
         );
 
@@ -1644,6 +1894,14 @@ mod tests {
         assert_eq!(calls[0].source_id, caller.id);
         assert_eq!(calls[0].target_id, callee.id);
         assert_eq!(calls[0].edge_type, EdgeType::Calls);
+        // §7 (task-076): the TS leg emits the same EdgeType::Calls variant
+        // with the same provenance metadata tag as the Go leg — Pass 2 edge
+        // type consistency holds per language.
+        assert_eq!(
+            calls[0].metadata.as_deref(),
+            Some(gyre_common::call_graph::PASS2_EDGE_METADATA),
+            "Pass 2 Calls edge must carry the provenance metadata tag"
+        );
     }
 
     #[tokio::test]
@@ -2115,11 +2373,11 @@ mod tests {
             }],
         };
 
-        let persisted =
+        let outcome =
             extract_and_persist_call_graph(dir.path(), &nodes, &existing, &repo_id, &store, &fake)
                 .await;
         assert_eq!(
-            persisted, 0,
+            outcome.edges_persisted, 0,
             "duplicate of a Pass 1 Calls edge must be skipped"
         );
 
