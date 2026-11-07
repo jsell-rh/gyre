@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §3 Design Principle: The Built Software Is Always Alive"
-commits: ["a3ad5d0288d7404c5f7759f7103640ab495dfc5c", "c17b6c95e66824fd3b72b21f95b9b95f2a284ec6"]
+commits: ["a3ad5d0288d7404c5f7759f7103640ab495dfc5c", "c17b6c95e66824fd3b72b21f95b9b95f2a284ec6", "7da87564b9c37624847654040649a9405849c7ed"]
 ---
 
 ## Spec Excerpt
@@ -66,8 +66,8 @@ Read `specs/system/human-system-interface.md` §3 "Design Principle: The Built S
 ## Shipped
 
 Both liveness layers of HSI §3 are implemented in production frontend code
-(product surface in commit c17b6c95; review repair in commit a3ad5d02 —
-see the repo-scoping fix below).
+(product surface in commit c17b6c95; review repairs in commits a3ad5d02 —
+repo scoping — and 7da87564 — the canvas-load timeline query below).
 
 ### Layer 1 — SDLC activity
 
@@ -87,8 +87,7 @@ see the repo-scoping fix below).
   while a glowing node is actually on screen; the redraw is deferred to a
   macrotask so the mount flush is never drawn into synchronously.
 - **Recent-change fading ring** — `computeRecentChanges` folds the repo's
-  `ArchitecturalDelta` records (already loaded from
-  `GET /repos/:id/graph/timeline`) into a per-node map of change times for
+  `ArchitecturalDelta` records into a per-node map of change times for
   deltas within the last hour (delta timestamps are epoch seconds;
   `nodes_added`/`nodes_modified` entries matched by qualified_name;
   count-only and unparseable deltas skipped). Draw-time `recentChangeAlpha`
@@ -120,6 +119,20 @@ see the repo-scoping fix below).
   whose list ordering is not contractual) and truncates before the per-MR
   enrichment, so dropped MRs cost no extra queries. As a side effect the
   trace loader now genuinely sees the most recent MRs first.
+- **Canvas-load timeline query (review repair, 7da87564)** — the fading
+  ring was originally driven only by the `timeline` prop fed from
+  `graphTimeline`, which loads inside the lazy Architecture-Insights
+  effect — a panel collapsed by default — so in the default view the
+  canvas received `timeline=[]` and no ring was ever drawn. ExplorerView
+  now runs a dedicated liveness loader on canvas load:
+  `api.repoGraphTimeline(repoId, since)` with
+  `since = Math.floor((Date.now() − RECENT_CHANGE_WINDOW_MS)/1000)`,
+  exactly the `?since=<epoch-1h>` bound the implementation plan specifies,
+  keeping the payload small (no `until` — the window runs to the present).
+  The canvas `timeline` prop prefers the insights panel's full timeline
+  (a superset) once that panel loads and falls back to the liveness slice
+  otherwise; stale responses are dropped when the user switches repos
+  mid-fetch. Non-blocking and best-effort, like the trace/gate loaders.
 
 ### Layer 2 — trace play icon (scaffolding)
 
@@ -144,18 +157,27 @@ see the repo-scoping fix below).
   decreases with age and never snaps; gate edge colors appear only in the
   Evaluative lens (Structural stays structural-colored); ▶ play badge
   drawn on span-carrying nodes and its click starts playback.
-- `web/src/__tests__/ExplorerViewLivenessWiring.test.js` (2 tests) — the
+- `web/src/__tests__/ExplorerViewLivenessWiring.test.js` (4 tests) — the
   liveness loaders' HTTP wiring: every MR list call carries
   `repository_id` for the current repo (never `repo_id`) with a bounded
   `per_page`, and gates are fetched for the current repo's spec_ref-carrying
   MRs against a contract-faithful mock (returns MRs only when
-  `repository_id` matches). Mutation-checked: reverting the fix to
-  `repo_id` fails both tests.
+  `repository_id` matches); the canvas-load timeline query fires exactly
+  once with a `since` bound of one hour (epoch seconds) and no `until`;
+  and end-to-end through the real ExplorerView → ExplorerCanvas mount
+  with the insights panel collapsed (the default), the loaded delta draws
+  the amber fading ring. Mutation-checked: reverting the MR-query fix to
+  `repo_id`, removing the canvas-load `loadLivenessTimeline` call, or
+  reverting the canvas `timeline` prop wiring each fails the corresponding
+  tests. (The suite's rAF stub is queue-based — a synchronous stub leaves
+  a stale `animFrame` id that suppresses data-driven redraws — and the
+  beforeEach re-establishes default api mock implementations so per-test
+  overrides cannot leak.)
 - Server: `api::merge_requests::tests::list_mrs_per_page_keeps_newest` —
   `per_page` caps the list to the most recently created MRs, newest
   first, with distinct pinned timestamps; full module
   `api::merge_requests::` 31/31 passed.
-- Full suite: `npm test` in `web/` — 67 files, 1670 passed / 41 skipped,
+- Full suite: `npm test` in `web/` — 67 files, 1672 passed / 41 skipped,
   exit 0 (locked deps via `npm ci`).
 - Evidence (commands, SHAs, exit codes, output) saved under
   `/tmp/stage/review-evidence/task-086-*.txt` for executor retention.
