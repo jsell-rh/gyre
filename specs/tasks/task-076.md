@@ -3,7 +3,7 @@ title: "LSP Call Graph — Edge Types, LLM Integration & Performance"
 spec_ref: "lsp-call-graph.md §7–9, §12"
 depends_on:
   - task-072
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "lsp-call-graph.md §7 Edge Types Produced"
   - "lsp-call-graph.md §8 LLM Integration"
