@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "platform-model.md §Budget Tracking"
-commits: ["f4440a1ef3cbb3b70999dd1bf5b2bc35ac7805c0"]
+commits: ["f4440a1ef3cbb3b70999dd1bf5b2bc35ac7805c0", "be949f7b73e9c01532afbb912d65458a715f6aec"]
 ---
 
 ## Spec Excerpt
@@ -134,28 +134,25 @@ and never fails the caller's request.
   scope-literal-defaults, forged-scope-fields, lossy-secret-conversion,
   fabricated-scope-defaults, dead-message-kinds, inert-enforcement) all pass.
 
-**Recovery + merge reconciliation note.** This assignment recovered an interrupted checkpoint
-(durable finding `6674a54d`): the recovered implementation source is `f4440a1e` (pipeline-side
-predecessors `bada0644`/`25feb84e` are recorded above for history). The branch was then
-reconciled with the current main base `8d0625df` via merge `94122d74`. The merge's two
-conflicts were resolved by combining both sides, not picking one:
-- `explorer_views.rs` `generate_explorer_view`: kept this task's per-call budget recording block
-  AND main's LLM-output grammar/ownership validation (both now run, budget first, then
-  validation before `event: complete`). All 16 explorer_views tests — including main's
-  `generate_forwards_valid_llm_view_spec` / `generate_rejects_invalid_llm_view_spec_with_fallback`
-  / `generate_rejects_llm_spec_with_foreign_repo_id` — pass on the merged code.
-- `specs/tasks/task-200.md`: took main's commits list — our side's copy had a corrupted
-  (39-char, unresolved) `e44f1135…` SHA from the interrupted checkpoint; main's is the valid
-  full SHA.
-- Merge artifact fixed: duplicate `use std::sync::Arc;` in `spawn.rs` test module (test-only
-  compile error).
+**History + verification repair.** This assignment recovered an interrupted checkpoint
+(durable finding `6674a54d`, recovered source `f4440a1e`) and reconciled it with main via merge;
+the `explorer_views.rs` merge conflict was resolved by combining both sides (this task's per-call
+budget recording AND main's LLM-output grammar/ownership validation), and all 16 explorer_views
+tests pass on the merged code. The retained verification run (`checks.sh`, durable finding
+`dc0e86e5`) failed with two changed-line clippy lints in this task's files; both are fixed in
+`be949f7b7` (behavior-neutral):
+- `budget_call.rs` `clippy::double_must_use` — originates in the `async_trait` macro expansion
+  (the trait declares no `#[must_use]`); silenced with the same allow + comment used by sibling
+  port traits (`storage.rs`, `spec_assertion_result_repo.rs`, `meta_spec_repository.rs`).
+- `mem.rs` `MemBudgetCallRepository::list_by_workspace` `clippy::unnecessary_sort_by` — now
+  `sort_by_key(Reverse(timestamp))`; newest-first order and limit truncation unchanged.
 
-Post-merge verification (this sandbox, `SKIP_WEB_BUILD=1`, commands and exit codes in
-`/tmp/stage/review-evidence/task-190-evidence.md`): `cargo build -p gyre-server` exit 0;
-explorer_views 16/16, api::budget 9/9, api::spawn 35/35, graph 52/52, specs_assist 21/21,
-mcp 79/79 lib tests pass; `cargo test -p gyre-adapters budget_call` 3/3 pass;
-`scripts/check-arch.sh` passes.
+Post-repair verification (this sandbox, `SKIP_WEB_BUILD=1`, commands and exit codes in
+`/tmp/stage/review-evidence/task-190-evidence.md`): clippy emits zero diagnostics for
+`budget_call.rs` and none at the changed `mem.rs` line; `cargo fmt --check` clean;
+`api::budget` 9/9, `api::spawn` 36/36, `agent_usage_report` 1/1, `mem::` 13/13, adapters
+`budget_call` 3/3 pass; `scripts/check-arch.sh` passes.
 
 Pre-existing, unrelated: `scripts/check-task-commit-attribution.sh` fails at the base commit
-`8c2d1775` for task-210 (`a781ede2` missing from that task's frontmatter) — present before this
-branch, not introduced or widened by it.
+for task-210 (`a781ede2` missing from that task's frontmatter) — present before this branch,
+not introduced or widened by it.
