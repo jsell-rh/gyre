@@ -150,3 +150,83 @@ exemptions. Coverage row realized-model.md §4 re-audited to `implemented`.
   `ConceptView::project`); no new crate dependencies; 16 new tests including
   integration tests that a mutation probe confirms fail under substring
   revert.
+
+---
+
+## Round R2 (independent review, candidate 3aa5d3c860b80871c2298b7c046565fed272bdf1)
+
+**Reviewer:** Independent review agent
+**Comparison base:** 4d6759a0bfd637e899bbf65e725f91b07f745c69
+**Candidate:** 3aa5d3c860b80871c2298b7c046565fed272bdf1 (branch
+`pipeline/task-205/1edcc269f2294a9f90a9cc1a7c555506-1`; all 16 frontmatter
+commits verified present and ancestral)
+
+### Diff scope
+
+9 files: gyre-common/src/graph.rs (glob matcher + `ConceptView::project`),
+gyre-server spec_registry.rs (ConceptDef parsing), api/graph.rs (endpoint
+rewiring), mcp.rs (tool parity), graph_integration.rs (tests), gyre-cli
+client.rs (doc comment only), coverage matrix, task-205.md, this review file.
+No web/dist delta from base; no script, exemption-file, or port-trait changes;
+no new crate dependencies.
+
+### Probes run (evidence: /tmp/stage/review-evidence/task205-r2-*)
+
+- `cargo test -p gyre-common --lib concept` → 4/4 pass
+  (`glob_match_anchoring` proves `MergeRequest` ≠ `MergeRequestDependency`,
+  `Gate*` ≠ `LateGate`, case sensitivity).
+- `cargo test -p gyre-server --lib -- concept spec_registry` → 54/54 pass,
+  including the spec-example concept parses and no-`concepts:`-key parse.
+- `cargo test -p gyre-server --lib -- api::graph::tests::(graph_concept|
+  workspace_graph_concept) mcp::tests::mcp_graph_concept*` → 9/9 pass.
+- `cargo test -p gyre-server --test graph_integration -- concept` → 4/4 pass
+  on a real TCP listener (sandbox permits `accept(2)` this round).
+- **Mutation probe (temporary, restored byte-identical, sha1-verified):**
+  reverting `assemble_concept_projection` to the old case-insensitive
+  substring matching makes 3 tests FAIL
+  (`graph_concept_returns_manifest_projection_not_substring`,
+  `workspace_graph_concept_unions_manifest_projections`,
+  `mcp_graph_concept_manifest_projection_not_substring` — the last catches
+  the `user_authentication_service` substring decoy). The guards are real,
+  not self-confirming. `git status` clean after restore; tests re-run green.
+- Focused builds: gyre-common, gyre-server (test profile), gyre-cli all
+  compile. Workspace-wide `cargo build --all` is wrapper-rejected in this
+  sandbox (deferred to verification; the CLI delta is a doc comment and the
+  server/common deltas are covered by the test-profile compile).
+- Shell gates: check-arch, check-abac-route-registry, check-abac-exempt-
+  handlers, check-mcp-write-tools, check-task-commit-attribution,
+  check-mem-port-contracts, check-dead-message-kinds, check-in-memory-state-
+  stores, check-forged-scope-fields, check-byte-slice-truncation,
+  check-relative-path-defaults, check-fail-open-ref-resolution,
+  check-lossy-secret-conversion, check-fabricated-scope-defaults,
+  check-scope-literal-defaults, check-inert-enforcement,
+  check-forwarded-header-trust, check-migration-sql-portability,
+  check-migration-versions, check-unbounded-external-http — all pass.
+  check-unnamed-tuple-carriers and check-mcp-wrapper-parity fail with
+  byte-equivalent output at the base commit (worktree-verified: same 15 and
+  same 35 violations respectively, none in files this task touched) —
+  pre-existing, not candidate defects. Notably `handle_graph_concept` now
+  follows the mcp-parity-preferred pattern (serializes the shared domain
+  response).
+
+### Findings
+
+None material.
+
+- Authorization posture unchanged: the removed `require_repo` call was an
+  existence check only (repo found → 404 semantics preserved via
+  `find_by_id`); tenant/workspace ABAC for both concept routes is enforced
+  by the middleware registry (abac_middleware.rs:163, :413), identical to
+  sibling graph routes. MCP handler preserves prior scope semantics.
+- 404 for undefined concept names, no substring fallback — confirmed by
+  three tests plus the mutation probe. `?concept=` substring param on
+  `GET /graph` preserved (`test_full_graph_concept_query_param` passes).
+- Coverage row realized-model.md §7 flipped to `implemented` by implementer
+  commits within task scope (da4ad02a5/c88fc0962), re-anchored to this
+  branch's work; attribution gate passes at the 16-SHA frontmatter.
+
+### Verdict
+
+**approved.** Real manifest-driven projection in production code, real
+glob matching with anchoring, hard regression guards proven by mutation,
+no fakery, no gate weakening, no scope creep.
