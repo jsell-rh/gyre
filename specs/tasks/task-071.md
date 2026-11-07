@@ -4,7 +4,7 @@ spec_ref: "explorer-implementation.md §18–19, §26"
 depends_on:
   - task-069
   - task-070
-progress: ready-for-review
+progress: complete
 coverage_sections:
   - "explorer-implementation.md §18 ExplorerChat (Svelte)"
   - "explorer-implementation.md §19 ExplorerView (Svelte)"
