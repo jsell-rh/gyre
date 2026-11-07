@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "human-system-interface.md §2a Policies ↔ Trust Level Integration"
-commits: ["7271313c9c27a37818ae986413a52a9605414977"]
+commits: ["7271313c9bbec615e6ec5baad90715eab261a0a4"]
 ---
 
 ## Spec Excerpt
