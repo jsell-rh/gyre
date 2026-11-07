@@ -40,34 +40,40 @@
     return false;
   }
 
-  // Initial presence fetch when the editor opens.
-  $effect(() => {
+  // Shared presence refresh: initial state when the editor opens, and again
+  // when the WebSocket reconnects. Messages missed while the socket was down
+  // (departures included) leave the live map stale, so on (re)connect the
+  // client re-fetches the authoritative snapshot — HSI §7 Presence Awareness:
+  // "On WebSocket reconnection, the client fetches this endpoint to populate
+  // the initial presence state." A sequence number discards stale responses.
+  let fetchSeq = 0;
+  async function refreshPresence() {
     if (!workspaceId || !target) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const data = await api.workspacePresence(workspaceId);
-        if (cancelled || !Array.isArray(data)) return;
-        const next = new Map();
-        for (const e of data) {
-          if (isSelf(e)) continue;
-          next.set(e.session_id, {
-            session_id: e.session_id,
-            user_id: e.user_id,
-            editing_entity: e.editing_entity ?? null,
-          });
-        }
-        entries = next;
-      } catch {
-        /* presence endpoint unavailable — degrade to no banner */
+    const seq = ++fetchSeq;
+    try {
+      const data = await api.workspacePresence(workspaceId);
+      if (seq !== fetchSeq || !Array.isArray(data)) return;
+      const next = new Map();
+      for (const e of data) {
+        if (isSelf(e)) continue;
+        next.set(e.session_id, {
+          session_id: e.session_id,
+          user_id: e.user_id,
+          editing_entity: e.editing_entity ?? null,
+        });
       }
-    })();
-    return () => {
-      cancelled = true;
-    };
+      entries = next;
+    } catch {
+      /* presence endpoint unavailable — degrade to no banner */
+    }
+  }
+
+  // Initial presence fetch when the editor opens (re-runs on spec/workspace change).
+  $effect(() => {
+    refreshPresence();
   });
 
-  // Live presence updates over the WebSocket.
+  // Live presence updates over the WebSocket, plus reconnect re-seeding.
   $effect(() => {
     if (!wsStore?.onMessage) return;
     const unsub = wsStore.onMessage((msg) => {
@@ -93,7 +99,21 @@
         }
       }
     });
-    return unsub;
+    // Re-seed on WebSocket reconnect. The real store fires onStatus
+    // synchronously with the current status at registration — only a later
+    // transition to 'connected' counts as a reconnect.
+    let registered = false;
+    const unsubStatus = wsStore.onStatus?.((status) => {
+      if (!registered) {
+        registered = true;
+        return;
+      }
+      if (status === 'connected') refreshPresence();
+    });
+    return () => {
+      unsub();
+      unsubStatus?.();
+    };
   });
 </script>
 

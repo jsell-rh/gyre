@@ -20,6 +20,11 @@ class Retry(RuntimeError):
         self.fresh_model = fresh_model
 
 
+class Attention(Retry):
+    """A deterministic safety failure needs inspection rather than blind retry."""
+    attention = True
+
+
 class Wait(Retry):
     """An expected external observation is pending, rather than failing."""
     retry_delay = 30
@@ -67,6 +72,15 @@ class Execution:
         finally:
             self.stop.set()
             thread.join(timeout=20)
+
+    def log_tail(self, limit=16000):
+        try:
+            with self.log.open('rb') as source:
+                source.seek(0,2)
+                source.seek(max(0,source.tell()-limit))
+                return source.read(limit).decode('utf-8',errors='replace')
+        except FileNotFoundError:
+            return ''  # A resumed checkpoint need not have started a process.
 
     def command(self, *args, cwd=None, timeout=120, check=True, input=None, capture=True):
         self.current()
