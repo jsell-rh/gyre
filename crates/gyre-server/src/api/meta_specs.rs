@@ -988,7 +988,9 @@ mod tests {
         use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
         let state = make_test_state_with_jwt();
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
+            tokio::runtime::Handle::current()
+                .block_on(seed_builtin_policies(&state))
+                .expect("seed built-in policies")
         });
         crate::bootstrap_default_tenant(&state).await;
 
@@ -1748,8 +1750,28 @@ pub async fn update_meta_spec_registry(
             // binds this meta-spec reconciles.
             let workspaces = state.workspaces.list().await.unwrap_or_default();
             for ws in &workspaces {
-                let effective =
-                    crate::reconciliation::resolve_effective_meta_spec_set(&state, ws).await?;
+                // Never fail open the override gate (standing repo rule, same
+                // fail-closed-skip as the tenant controller in
+                // run_tenant_reconciliation): a workspace whose set cannot
+                // be read is skipped, not decoded as "binds nothing".
+                // Propagating the error with `?` would 500 the approval
+                // AFTER `state.meta_specs.update(&ms)` already persisted it
+                // and after workspaces listed earlier already received their
+                // reconciliation tasks — a persisted approval paired with a
+                // partially executed, error-terminated fan-out.
+                let resolved =
+                    crate::reconciliation::resolve_effective_meta_spec_set(&state, ws).await;
+                let effective = match resolved {
+                    Ok(set) => set,
+                    Err(e) => {
+                        tracing::warn!(
+                            workspace_id = %ws.id,
+                            error = %e,
+                            "meta-spec approval fan-out: failed to resolve effective meta-spec set; skipping workspace (fail closed)"
+                        );
+                        continue;
+                    }
+                };
                 let binds = effective.personas.values().any(|e| e.path == spec_path)
                     || effective.principles.iter().any(|e| e.path == spec_path)
                     || effective.standards.iter().any(|e| e.path == spec_path)
@@ -2309,6 +2331,189 @@ mod registry_tests {
             recon_count().await,
             2,
             "re-approval of unchanged content must not trigger reconciliation"
+        );
+    }
+
+    /// Review repair (fail-closed fan-out): a Global/Workspace-scoped
+    /// approval whose per-workspace set resolution hits an unreadable
+    /// (corrupt JSON / storage error) workspace set must SKIP that
+    /// workspace with a warn log and keep the approval response 200 —
+    /// the approval is already persisted at that point, so one corrupt
+    /// set anywhere in the deployment must not 500 every approval while
+    /// leaving a partially executed fan-out. Mirrors the tenant
+    /// controller's fail-closed override gate
+    /// (`tenant_reconciliation_fails_closed_on_unreadable_workspace_set`).
+    /// Killing test for the old `?` propagation: under it the approval
+    /// returned 500 (while persisted) and the healthy workspace listed
+    /// after the corrupt one never received its reconciliation task.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn global_spec_approval_skips_unreadable_workspace_set() {
+        let state = test_state();
+        let app: Router = crate::api::api_router().with_state(state.clone());
+
+        // Corrupt workspace, created FIRST so the fan-out reaches it before
+        // the healthy one (the strongest ordering for the old bug: the `?`
+        // aborted the loop before the healthy workspace was scanned).
+        let ws_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"name": "ws-corrupt", "slug": "ws-corrupt"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let corrupt_ws = body_json(ws_resp).await["id"].as_str().unwrap().to_string();
+        // Corrupt stored set: resolution must neither decode-fail-open into
+        // "binds nothing" nor abort the whole approval.
+        state
+            .meta_spec_sets
+            .upsert(&gyre_common::Id::new(&corrupt_ws), "{not valid json")
+            .await
+            .unwrap();
+
+        // Healthy workspace: set binds the spec; repo gives reconciliation
+        // scope.
+        let ws_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"name": "ws-ok", "slug": "ws-ok"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ws_resp.status(), StatusCode::CREATED);
+        let ok_ws = body_json(ws_resp).await["id"].as_str().unwrap().to_string();
+        let repo = gyre_domain::Repository::new(
+            gyre_common::Id::new("repo-fc-ok"),
+            gyre_common::Id::new(&ok_ws),
+            "repo-fc-ok".to_string(),
+            "/tmp/does-not-matter/repo-fc-ok".to_string(),
+            1_700_000_000,
+        );
+        state.repos.create(&repo).await.unwrap();
+
+        let create_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/meta-specs-registry")
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"kind":"meta:persona","name":"fc-worker","scope":"Global","prompt":"v1"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let id = body_json(create_resp).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let set_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{ok_ws}/meta-spec-set"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "personas": { "worker": { "path": "fc-worker", "sha": "a1" } },
+                            "principles": [], "standards": [], "process": []
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(set_resp.status(), StatusCode::OK);
+
+        // Approve: must succeed (200) even though one workspace's set is
+        // unreadable — the corrupt workspace is skipped, not propagated as
+        // a 500 after the approval already persisted.
+        let approve = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/meta-specs-registry/{id}"))
+                    .header("authorization", "Bearer test-token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"approval_status":"Approved"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            approve.status(),
+            StatusCode::OK,
+            "approval must not 500 because an unrelated workspace has an unreadable set"
+        );
+        assert_eq!(
+            body_json(approve).await["approval_status"].as_str(),
+            Some("Approved")
+        );
+        // The approval really persisted.
+        let stored = state
+            .meta_specs
+            .get_by_id(&gyre_common::Id::new(&id))
+            .await
+            .unwrap()
+            .expect("approved meta-spec must be persisted");
+        assert_eq!(
+            stored.approval_status,
+            gyre_domain::MetaSpecApprovalStatus::Approved
+        );
+
+        let recon_count = |ws: String| {
+            let state = state.clone();
+            async move {
+                state
+                    .tasks
+                    .list_by_workspace(&gyre_common::Id::new(&ws))
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .filter(|t| t.labels.iter().any(|l| l == "meta-spec-reconciliation"))
+                    .count()
+            }
+        };
+
+        // The healthy workspace (listed after the corrupt one) still got its
+        // reconciliation task: the skip continues the fan-out, it does not
+        // abort it.
+        assert_eq!(
+            recon_count(ok_ws.clone()).await,
+            1,
+            "healthy workspace must still reconcile when another workspace's set is unreadable"
+        );
+        // The unreadable workspace was skipped, not reconciled on a
+        // fail-open empty set.
+        assert_eq!(
+            recon_count(corrupt_ws).await,
+            0,
+            "workspace with unreadable set must be skipped, not reconciled"
         );
     }
 
