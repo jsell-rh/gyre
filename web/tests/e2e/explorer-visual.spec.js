@@ -535,6 +535,60 @@ test.describe('Filter presets visual regression', () => {
     });
   });
 
+  test('filter_preset_buttons_show_correct_subsets', async ({ page }) => {
+    await navigateToExplorer(page);
+
+    // Spec §32 visual test: "Filter presets show correct subsets" — click the
+    // actual toolbar preset buttons (not the query editor) and verify the
+    // canvas re-renders with the preset's subset.
+
+    // Zoom in so individual leaf nodes (and their per-preset dimming) are
+    // visible — at the fully zoomed-out package overview the leaves are too
+    // small to distinguish presets.
+    await page.evaluate(() => {
+      const canvas = document.querySelector('canvas.treemap-canvas');
+      if (canvas) {
+        for (let i = 0; i < 5; i++) {
+          canvas.dispatchEvent(new WheelEvent('wheel', {
+            deltaY: -100, clientX: 640, clientY: 360, bubbles: true,
+          }));
+        }
+      }
+    });
+    await page.waitForTimeout(500);
+
+    // Click the "Endpoints" preset button — endpoint nodes stay at full
+    // opacity, everything else dims.
+    const endpointsBtn = page.locator('.filter-preset-group button', {
+      hasText: 'Endpoints',
+    });
+    await expect(endpointsBtn).toBeVisible({ timeout: 5_000 });
+    await endpointsBtn.click();
+    await expect(endpointsBtn).toHaveAttribute('aria-pressed', 'true');
+    await page.waitForTimeout(500);
+
+    const canvasArea = page.locator('.treemap-canvas-area');
+    await expect(canvasArea).toHaveScreenshot('filter-preset-endpoints.png', {
+      maxDiffPixelRatio: 0.02,
+      timeout: 10_000,
+    });
+
+    // Click the "Types" preset button — the subset must change (type/
+    // interface/field nodes emphasized instead of endpoints).
+    const typesBtn = page.locator('.filter-preset-group button', {
+      hasText: 'Types',
+    });
+    await typesBtn.click();
+    await expect(typesBtn).toHaveAttribute('aria-pressed', 'true');
+    await expect(endpointsBtn).toHaveAttribute('aria-pressed', 'false');
+    await page.waitForTimeout(500);
+
+    await expect(canvasArea).toHaveScreenshot('filter-preset-types.png', {
+      maxDiffPixelRatio: 0.02,
+      timeout: 10_000,
+    });
+  });
+
   test('filter_types_shows_only_type_nodes', async ({ page }) => {
     await navigateToExplorer(page);
 
