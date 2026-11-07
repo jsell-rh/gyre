@@ -6,7 +6,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "observability.md §Log Retention & Compression"
-commits: ["eda138a7bcccf283512c072474e4dd07893a3640", "4597330e9528db2a379b420a8f07d2c8f8408038"]
+commits: ["eda138a7bcccf283512c072474e4dd07893a3640", "4597330e9528db2a379b420a8f07d2c8f8408038", "0ef762b86b7f4426f525dcece52bb71023dbedcb"]
 ---
 
 ## Spec Excerpt
@@ -87,22 +87,28 @@ The `log-compression` background job is implemented end-to-end in commit `459733
 
 The forwarder reads through `since_timestamp`, which decompresses in the adapter, so forwarded syslog/webhook payloads carry the original detail. Proven at the wire level by `siem::tests::forward_cycle_sends_decompressed_detail_for_compressed_events` (local syslog TCP listener receives the decompressed JSON fields of a compressed event).
 
-### Round 2: contract repair + base merge
+### Round 2: contract repair + base merges
 
-- The assigned task document was restored by the executor (acceptance-criteria checkboxes left unchecked as assigned — protected text); the production fix above is preserved unchanged. Only source conflict resolved: merge of assignment base `a884329d7` (task-076) into this branch — one textual conflict in `crates/gyre-adapters/src/sqlite/audit.rs` (base had no counterpart for the new compression tests; kept our side). Merge commit `615182576`. A later merge of assignment base `233664cf8` (task-087) was clean (merge commit `68dacd0ac`).
+- The assigned task document was restored by the executor (acceptance-criteria checkboxes left unchecked as assigned — protected text); the production fix above is preserved unchanged. Source conflicts resolved across assignment-base merges: base `a884329d7` (task-076, merge commit `615182576`, one textual conflict in `crates/gyre-adapters/src/sqlite/audit.rs` — kept our side), base `233664cf8` (task-087, clean, merge commit `68dacd0ac`), base `4d6759a0b` (task-084, clean, merge commit `cf1f047b0`).
 
 ### Round 3: review repair
 
-Commit `eda138a7b` fixes both review findings on the merged head:
+Commit `eda138a7b` fixed both round-2 review findings: removed an unused import in the SIEM wire test (CI clippy-diff gate), and made `AgentLogBuffer::trim_to_cap` evict lines in overall age order (cold-segment front first, then hot front) so a cold segment at the 10k cap no longer discards every newly appended line. Regression test: `line_cap_evicts_oldest_when_cold_segment_is_at_cap`.
 
-- **F1 (CI-blocking):** removed the unused `use gyre_domain::AuditOutcome;` import inside `forward_cycle_sends_decompressed_detail_for_compressed_events` (siem.rs) — the unused_imports warning sat on a changed line, which turns the CI clippy-diff gate red.
-- **F2 (eviction policy):** `AgentLogBuffer::trim_to_cap` now evicts lines in overall age order — from the front of the cold segment first (it holds the oldest lines), then from the front of `hot`. Previously it drained only hot lines, so with a cold segment at the 10k cap every newly appended line was immediately discarded and replay served only stale cold lines until the 30-day purge freed space. The cold rebuild reuses the length-prefixed frame machinery shared with `purge_older_than` (via `ColdSegment::decode`); a corrupt segment is kept with a warning rather than dropped. Regression test: `line_cap_evicts_oldest_when_cold_segment_is_at_cap` (fails on the pre-fix code — the first draft of this test caught a second facet of the same bug: draining hot first also discards the fresh line when hot is shorter than the surplus).
+### Round 4: review repair
+
+Commit `0ef762b86` fixes all three round-3 findings on the merged head (`cf1f047b0`):
+
+- **F1 (CI-blocking):** `format![...]` → `format!(...)` in the round-3 regression test — `clippy::nonstandard_macro_braces` on a changed line fails the CI clippy-diff gate.
+- **F2 (CI-blocking):** added the repo-established `#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.` above `AuditRepository` (same pattern as `storage.rs` / `meta_spec_repository.rs` / `spec_assertion_result_repo.rs`) — the new `compress_details_before` method's async_trait-generated warning span overlapped changed lines.
+- **F3 (observability):** `AgentLogBuffer::compress_older_than` counted the ENTIRE rebuilt cold segment, so every incremental pass re-counted already-cold lines (a daily run folding 1 line into a 10k-line segment reported 10k lines compressed, growing unboundedly over the 7–30 day window). All `AgentLogCompressionStats` fields (`lines`, `bytes_before`, `bytes_after`) now count only the lines newly folded THIS pass, matching the audit-event half of the report (which counts only newly compressed rows); field docs updated. `compress_folds_incrementally_and_keeps_new_lines_hot` now asserts the scoped counts (`lines == 1`, `bytes_before` == the new line's frame bytes) and FAILS on the pre-fix code (kill-check verified: reverting just the `lines` counting reproduces `left: 2, right: 1`).
 
 ### Test evidence
 
-Post-repair probes on branch head `eda138a7b` (command lines, exit codes, and output tails saved under `/tmp/stage/review-evidence/`):
+Post-repair probes on branch head `0ef762b86` (command lines, exit codes, and output tails saved under `/tmp/stage/review-evidence/`):
 
-- `cargo test -p gyre-server --lib` — 1360 passed, incl. the 11 `log_compression` tests (now also `line_cap_evicts_oldest_when_cold_segment_is_at_cap`) and the SIEM wire test.
-- `python3 scripts/check-clippy-diff.py 233664cf8` — exit 0 on the repaired head (the F1 warning class is gone).
-- Earlier post-merge probes on `615182576`: `cargo test -p gyre-adapters --lib` — 356 passed, incl. the 4 audit-detail compression tests; mechanical checks (check-arch, check-abac-route-registry, check-mcp-write-tools, check-dead-message-kinds, check-migration-versions, check-task-commit-attribution) — all OK.
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib` — 1360 passed, incl. the 11 `log_compression` tests (with the round-4 scoped-count assertions) and the SIEM wire test.
+- `python3 scripts/check-clippy-diff.py 4d6759a0b` (the actual CI gate script, workspace `--all-targets --all-features` clippy, changed-line rule vs the assignment base) — exit 0: "clippy: changed lines clean (14 Rust files, 1084 existing warnings outside changes)". Both round-3 CI-blocking findings (F1 braces, F2 double_must_use) are gone; two `cloned_ref_to_slice_refs` hits introduced by the first draft of the round-4 test assertions were also fixed (bind `vec![...]` and pass `&vec` instead of `&[x.clone()]` literals).
+- F3 kill-check: with only the old whole-segment `lines` counting temporarily restored, `compress_folds_incrementally_and_keeps_new_lines_hot` fails (`assertion left: 2 right: 1`); restored fix passes.
+- Earlier probes on prior heads stand: `cargo test -p gyre-adapters --lib` — 356 passed (incl. the 4 audit-detail compression tests) on `615182576`; mechanical checks (check-arch, check-abac-route-registry, check-mcp-write-tools, check-dead-message-kinds, check-migration-versions, check-task-commit-attribution) — all OK.
 - One test-design note (from round 1): an earlier draft of the SIEM test asserted tiny log lines shrink under zstd — they do not (frame overhead exceeds savings on ~30-byte inputs); the test uses realistic repetitive payloads so the byte-ratio assertions reflect real compression.
