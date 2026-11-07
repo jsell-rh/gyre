@@ -9,7 +9,7 @@ coverage_sections:
   - "platform-model.md §6 Post-Merge Validation"
   - "platform-model.md §6 Recovery Protocol"
   - "platform-model.md §6 Agent Behavior During Recovery"
-commits: ["3ef9e1b8222821f330942f3fbf13edab1b3497eb", "3a9b11f69c57cb576d2e3914ff7af7e54941b518", "5aaded213193d1af1cec693e729ac2872893b10b", "86c7d382312fae4fb52ae4effe40e021330f3ac2", "7c723298b41ee761067b15ae426651aa280fb75e"]
+commits: ["3ef9e1b8222821f330942f3fbf13edab1b3497eb", "3a9b11f69c57cb576d2e3914ff7af7e54941b518", "5aaded213193d1af1cec693e729ac2872893b10b", "86c7d382312fae4fb52ae4effe40e021330f3ac2", "7c723298b41ee761067b15ae426651aa280fb75e", "7a0bd1db7be685b423b82270a64fa143da4e5a4e"]
 ---
 
 ## Spec Excerpt
@@ -88,77 +88,76 @@ Read `specs/system/platform-model.md` §6 "Rollback & Recovery". The merge proce
 
 ## Shipped
 
-Round-6 revision, plus checkpoint recovery, on top of the §6
-Post-Merge Validation + Recovery Protocol work (Rounds 1–5: post-merge
-gates on merged HEAD via detached worktree at `head_sha`,
-`MrStatus::Reverted`, queue pause on failure, `git revert -m 1`
-three-way-merge semantics, remediation tasks + RevertNotification,
+The §6 Post-Merge Validation + Recovery Protocol is implemented end to
+end (Rounds 1–6, details in `specs/reviews/task-095.md`): post-merge
+gates run on the merged HEAD via a detached worktree at `head_sha`;
+`MrStatus::Reverted`; merge-queue pause on post-merge failure with
+pause/resume and workspace-orchestrator notification; automatic `git
+revert -m 1` (three-way-merge semantics) pushed to the default branch
+and gates re-run on the reverted HEAD, with human escalation if the
+revert itself fails; the original MR re-opened as `Reverted`; author
+agent RevertNotification; remediation task carrying the failure
+reason; MR gate results invalidated. Hardening across rounds:
 resubmission-stable circuit breaker keyed on source branch,
 merge-commit-sha-scoped manual revert, upstream-merge resolution,
 fail-closed `repo_status` ref resolution, enabled
-`builtin:attested-authorization` seed — details in
-`specs/reviews/task-095.md`).
+`builtin:attested-authorization` seed, and the Round-6 test fix for the
+unattested arm of
+`builtin_signed_authorization_satisfied_by_chain_presence` (the
+chain-less subject now sets `attestation_chain_present = false`
+explicitly; the engine stays fail-closed on missing attributes by
+design). After a worker-lease expiry, the full lineage was recovered
+as squashed checkpoint `3ef9e1b8` on base `3c39ab1f` (pre-recovery
+SHAs retained above only for controller cross-reference — they are
+not resolvable in this object store).
 
-### Round-6 fix (unattested test arm)
+### Verification-repair round (this revision)
 
-The unattested arm of
-`policy_engine::builtin_signed_authorization_satisfied_by_chain_presence`
-built its context without `subject.attestation_chain_present`, so under
-the engine's fail-closed missing-attribute semantics (`eval_condition`
-returns `false` when the attribute is absent) the immutable deny's
-`!= true` condition could not match and `evaluate` fell through to the
-anonymous default deny — `matched_policy: None` instead of
-`Some("builtin-require-signed-authorization")`, panicking the
-assertion. Fix is test-side: the chain-less subject now sets
-`attestation_chain_present = false` explicitly (with an in-test comment
-explaining why), matching the neighboring
-`not_equals_bool_condition_compares_booleans` test. The engine was
-deliberately left unchanged: production always sets the attribute
-explicitly whenever it runs the attestation-scoped evaluation
-(`git_http.rs` / `merge_processor.rs`), and loosening `NotEquals` for
-missing attributes would let any Allow policy with a `!=` condition
-match subjects lacking the attribute — fail-open. The production
-decision is Deny either way; only the matched-policy attribution was
-wrong.
-
-### Checkpoint recovery (this revision)
-
-The worker lease expired after Round 6; the source was recovered as a
-single squashed checkpoint commit `3ef9e1b8` on base `3c39ab1f`. The
-nine pre-recovery lineage SHAs previously listed in `commits:` are not
-resolvable in this repository's object store — they are retained above
-for cross-reference with `specs/reviews/task-095.md` and controller
-history. The full task work, including the Round-6 fix, now lives in
-`3ef9e1b8`, which has been appended to the `commits:` frontmatter so
-review scoping covers the recovered source (R3-F4 precedent: an
-unlisted task commit is invisible to review).
+The deterministic verification gate (`dev-check.sh`) failed with
+"new verification exemptions forbidden:
+scripts/fabricated-scope-defaults-exemptions.txt: [git_http.rs:1499]".
+Root cause: the task-095 lineage had renumbered the legacy
+`git_http.rs:1495` exemption entry to 1499 when merge drift shifted
+the file — the freeze gate compares exemption entries as a set
+against the base, so a renumbered replacement counts as a new entry.
+The entry was dead debt in both base and HEAD: push-event emission
+already resolves `ws_id` via `match state.repos.find_by_id(...)` with
+skip-and-log on lookup failure (the task-097 F3 compliant pattern),
+and the gate's matcher flags no site in `git_http.rs` at either ref.
+Repair (commit `7a0bd1db`, appended to `commits:`): delete the stale
+entry and lower `FROZEN_EXEMPTION_COUNT` 5 → 4, exactly as the
+exemption file's header instructs for fixed sites. No Rust code
+changed.
 
 ### Test evidence
 
+- This round: `check-fabricated-scope-defaults.sh` passes against this
+tree with both the candidate script (count 4) and the upstream/base
+script version (count 5) placed at its original path — the four
+remaining live flagged sites (`gate_executor.rs:111`,
+`api/specs.rs:959`, `auth.rs:773`, `speculative_merge.rs:372`) are all
+still exempted; the dev-check exemption-freeze set difference vs
+base `86a98a29` is empty (probe transcript under
+`/tmp/stage/review-evidence/`).
 - On the recovered tree (`3ef9e1b8`): `cargo fmt --check -p
   gyre-server` clean; `check-arch.sh`, `check-abac-route-registry.sh`,
   `check-dead-message-kinds.sh`, `check-migration-versions.sh`,
   `check-byte-slice-truncation.sh`,
   `check-fail-open-ref-resolution.sh`, and
   `check-task-commit-attribution.sh` all pass; the Round-6 fix content
-  verified present (`policy_engine.rs` unattested arm sets
-  `attestation_chain_present = false` with the rationale comment).
+  verified present.
 - Standalone rustc probe
   (`/tmp/stage/review-evidence/probe_policy_test_fix.rs`) replicating
-  the engine verbatim, running the fixed test's exact assertions:
-  attested arm PASS (Allow, attributed to
+  the engine verbatim: attested arm PASS (Allow,
   `builtin-attested-authorization`), unattested arm PASS (Deny,
-  attributed to `builtin-require-signed-authorization`); the pre-fix
-  absent-attribute construction reproduced the finding's failure
-  signature (Deny, `matched_policy: None`) as a regression guard.
-- Prior full-suite evidence (R2–R3 rounds, on the pre-recovery
-  lineage): `gyre-server --lib merge_processor` 45 passed;
-  `gyre-server` all suites 1273 passed; `gyre-adapters` 324 passed /
-  12 ignored.
+  `builtin-require-signed-authorization`); the pre-fix construction
+  reproduced the finding's failure signature as a regression guard.
+- Prior full-suite evidence (R2–R3 rounds, pre-recovery lineage):
+  `gyre-server --lib merge_processor` 45 passed; `gyre-server` all
+  suites 1273 passed; `gyre-adapters` 324 passed / 12 ignored.
 
 Sandbox limitation recorded for remote verification: this runtime has
-no crates.io egress (connection refused to crates.io and
-static.crates.io; no registry cache, no target dir), so `cargo test -p
-gyre-server --lib policy_engine` and the full suite cannot execute
-here. The deterministic repro and full-suite green must be confirmed
-by CI/remote verification on the branch head.
+no crates.io egress, so `cargo test` suites cannot execute here; the
+full-suite green must be confirmed by CI/remote verification on the
+branch head. This round changed no Rust code — the scripts-only
+repair is fully covered by the deterministic gates above.
