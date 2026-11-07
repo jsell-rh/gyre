@@ -51,3 +51,24 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 57 (assignment candidate `1de899d5f`) — attribution clobber recurs, 50th occurrence; product surface re-verified clean
+
+Assignment: base `4d6759a0b`, candidate `1de899d5f` ("process: record task-208 branch commits"). Evidence: `/tmp/stage/review-evidence/r57/`.
+
+Finding (blocking):
+
+- **F50 (process): the candidate is itself the clobber.** Its only change vs parent `f36383ea6` (the round-56 record commit, on top of the r56 repair `b111e8fbc` that restored the six-SHA list) rewrites `commits:` from six SHAs back to five, dropping `ea006d52bb42e96e6f176b02b5390b6cb56a3116` (`build(web): exempt generated dist bundles from whitespace gate (task-208)` — root `.gitattributes`, rule `web/dist/** -whitespace` live at `.gitattributes:4`). Verified with exit codes: `git merge-base --is-ancestor ea006d52 HEAD` → 0; vs assigned base `4d6759a0b` → 1. Branch product surface invisible to review scoping while unlisted — the AGENTS.md attribution invariant. Reproduce: `git diff f36383ea6..1de899d5f -- specs/tasks/task-208.md`.
+- **Root cause, refined:** the r56 repair made the then-sandbox's `/tmp/stage/dev-attribution.py` byte-identical to the fixed in-repo script — but this attempt's staged copy is the pre-fix version again (`diff` shows it still lacks the `path == '.gitattributes'` product-surface line, in-repo line 26). Each attempt stages a fresh copy from an unfixed source, so editing the sandbox-local staged script is NOT a durable fix. The durable fix must land wherever `/tmp/stage` is populated from (or staging must copy the in-repo fixed script). The fixed in-repo pass, run read-only at this exact candidate with byte-identical restore (md5 `a6a09b25…` before/after), computes exactly the six-SHA list `e7c21825, aecd6847, a11cbf7e, ea006d52, ad1121c5, 98fd096e`. Repair is mechanical, product untouched: restore the six-SHA list (run `scripts/dev-attribution.py task-208 --commit` or hand-edit the frontmatter).
+
+Product surface — all acceptance criteria re-verified clean at this candidate with fresh, exit-coded probes:
+
+- Dead-code grep (`get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs` over `crates/` + `web/src/`) → zero matches; routes and ABAC registrations for `/api/v1/users/me/{agents,tasks,mrs}` absent.
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server my_stuff_endpoints_are_removed` → 1/1 passed (`api::users::tests::my_stuff_endpoints_are_removed ... ok`) — the real in-process router 404s all three URIs with a bearer token.
+- `npm ci` → clean; `npx vitest run src/__tests__/UserProfile.test.js` → **23/23 passed**, including the exact-six-tab guard (`toEqual(['info','tokens','memberships','ledger','notif-prefs','notifications'])` + `not.toContain` for each forbidden id).
+- Spec amendment and coverage matrices in place: `user-management.md` supersession recorded, M22.8 row struck, coverage row 22 → `n/a`, row 23 task-assigned (task-114).
+- Working tree byte-identical after probes (`git status --porcelain` clean; task file md5 unchanged).
+
+For the verifier (not run here, focused-probe policy): `cargo test --all`; `cd web && npm test`; final integration must rebuild `web/dist` from merged `web/src` before publishing (branch-tip dist is the assignment base's stale pre-task-208 output per the executor restore-to-base flow — not a code defect in this assignment).
+
+Verdict: **not approved** — solely on the `commits:` frontmatter clobber (F50); the product implementation remains complete and guarded.
