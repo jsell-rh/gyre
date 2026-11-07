@@ -7,7 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "explorer-implementation.md §30 Unit Tests"
-commits: ["4058b618f", "e4dd7a627", "d3ccb81ad"]
+commits: ["e4dd7a62751896b1ad02fc978bc610e65dae134d", "4058b618fb52c49f2b4bbb7179526d415f7fe2c3"]
 ---
 
 ## Shipped
