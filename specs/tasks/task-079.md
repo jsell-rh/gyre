@@ -7,7 +7,7 @@ depends_on:
 progress: ready-for-review
 coverage_sections:
   - "explorer-implementation.md §30 Unit Tests"
-commits: ["4058b618fb52c49f2b4bbb7179526d415f7fe2c3"]
+commits: ["4058b618fb52c49f2b4bbb7179526d415f7fe2c3", "e4dd7a62751896b1ad02fc978bc610e65dae134d"]
 ---
 
 ## Shipped
@@ -21,10 +21,10 @@ Explorer unit tests for `explorer-implementation.md` §30, completing the source
 
 ### Test evidence
 
-- Source integrity this round: `git diff 93013f3d -- crates/ web/` is empty — the product surface is byte-identical to the checkpoint that the attempt-2 round verified; the only checkout change was the executor-restored assigned task document.
-- `cargo test -p gyre-domain --lib view_query_resolver` — **138 passed, 0 failed**, executed in the attempt-2 sandbox at this exact source state. In this round's sandbox it is **not executable**: crates.io egress (index.crates.io and static.crates.io) is connection-refused (curl exit 7) and the box has no cargo registry cache or vendored sources, so the dependency closure cannot be fetched — a selective block (github.com and registry.npmjs.org reachable), an infrastructure restriction for remote verification, not a code defect. Logs: `/tmp/stage/review-evidence/focused-tests.log`, `/tmp/stage/review-evidence/EVIDENCE.md`.
-- `cargo test -p gyre-server --test graph_integration test_saved_views` — not executable in either sandbox (same transport restriction). In lieu of execution, every assertion was cross-checked line-by-line against the `saved_views.rs` handlers (ownership/system-view 403 messages and ordering, `created_by` assignment, status codes, ABAC exemption + agent-token auth preconditions). Re-execution is deferred to the remote verification environment.
-- Web spot check re-executed this round (task adds no web code): `npm ci` then `vitest run ExplorerCanvas.test.js ExplorerViewScope.test.js` — **155 passed, 0 failed**, matching the attempt-2 result. Log: `/tmp/stage/review-evidence/web-spot-check.log`.
+- **Verification repair this round** (finding 1a62c878, `checks.sh` exit 1 at 112e98af): the only failing gate was the rustfmt changed-lines check — `assert!`/`assert_eq!` calls wider than rustfmt's default `fn_call_width=60` (no repo rustfmt.toml; `use_small_heuristics="Default"`) in the task-079 test additions. Fixed in commit e4dd7a62 by applying the rustfmt-formatted wrapping to exactly the flagged regions (whole-file rustfmt diff contained only those hunks; no token or behavior changes, no old debt touched). Reproduced exit 1 before, exit 0 after with `python3 scripts/check-rustfmt-diff.py 1d9547de`. All other gates in the same verification log already passed (clippy changed lines clean, all `scripts/check-*.sh` OK, web build succeeded; Svelte warnings are pre-existing noise unrelated to this task). Log: `/tmp/stage/review-evidence/rustfmt-repair.log`.
+- `cargo test -p gyre-domain --lib view_query_resolver` — **138 passed, 0 failed**, executed in the attempt-2 sandbox at this exact logical source state (the reformat moves no tokens, so the result carries over). In this round's sandbox it is **not executable**: crates.io egress (index.crates.io and static.crates.io) is connection-refused (curl exit 7) and the box has no cargo registry cache or vendored sources, so the dependency closure cannot be fetched — a selective block (github.com and registry.npmjs.org reachable), an infrastructure restriction for remote verification, not a code defect. Logs: `/tmp/stage/review-evidence/focused-tests.log`, `/tmp/stage/review-evidence/EVIDENCE.md`, `/tmp/stage/review-evidence/rustfmt-repair.log`.
+- `cargo test -p gyre-server --test graph_integration test_saved_views` — not executable in this sandbox (same transport restriction). Every assertion was cross-checked line-by-line against the `saved_views.rs` handlers (ownership/system-view 403 messages and ordering, `created_by` assignment, status codes, ABAC exemption + agent-token auth preconditions). Re-execution is deferred to the remote verification environment.
+- Web spot check (task adds no web code): `npm ci` then `vitest run ExplorerCanvas.test.js ExplorerViewScope.test.js` — **155 passed, 0 failed**, matching the attempt-2 result. Log: `/tmp/stage/review-evidence/web-spot-check.log`.
 - Full `cargo test --all` and `cd web && npm test` are verification-stage gates and were not repeated here.
 
 ## Spec Excerpt
