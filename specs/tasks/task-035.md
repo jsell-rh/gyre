@@ -4,7 +4,7 @@ spec_ref: "explorer-implementation.md §System Default Views"
 depends_on: []
 progress: ready-for-review
 coverage_sections: []
-commits: [2b092c2e4]
+commits: ["b0bb30824e81dd07705733f63ea7b8b3b152d91d"]
 ---
 
 ## Spec Excerpt
@@ -117,5 +117,5 @@ When working on this task:
 
 ## Git Commits
 
-- `2b092c2e4` feat(task-035): System badge for system views in explorer saved-views dropdown (this assignment)
+- `b0bb30824e81dd07705733f63ea7b8b3b152d91d` feat(task-035): System badge for system views in explorer saved-views dropdown (this assignment)
 - Backend seeding, delete protection, and validation tests predate task decomposition (explorer-canvas branch).
