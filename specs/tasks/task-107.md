@@ -125,56 +125,43 @@ rounds (F1-F19).
   sign/verify paths against a Fulcio built from upstream proto
   documentation.
 
-### This round (F19 repair + base merge, head `d7d341ca`)
+### This round (rebase repair onto base `66a5fc67`, head `c46c96579`)
 
-- **F19** (blocking, trust-bundle wire format): upstream Fulcio serves
-  the protojson of `message TrustBundle { repeated CertificateChain
-  chains = 1; }` — `{"chains": [{"certificates": ["<PEM>", ...]}]}`,
-  each chain an OBJECT with a `certificates` array (confirmed against
-  fulcio.proto, grpc_server.go `GetTrustBundle`, and sigstore-python's
-  REST client). The prior `chains: Vec<Vec<String>>` decode failed on
-  every real instance, so `verify_signature_fulcio` returned early with
-  `fulcio trust bundle response invalid` for EVERY fulcio-mode record —
-  the verification endpoint and provenance Phase 6 reported every
-  legitimate commit as FAILED. Fixed with `TrustBundleChainWire`, an
-  untagged enum that accepts the upstream object shape and tolerates the
-  legacy bare-array shape, normalized in `fetch_trust_bundle`; a chain
-  that is neither shape is rejected (the decode genuinely gates).
-- **Mock/probe shape correction** (the F1/F7 self-confirming-mock class):
-  `MockSigningStack::trust_bundle_json`, the hand-built F11 multi-chain
-  test bundle, and the independent upstream-conformance probe
-  (`UpstreamFulcio::trust_bundle_json`) now serve the upstream object
-  shape; the probe's shape guard asserts the object form itself so it
-  cannot silently drift back to bare arrays.
-- **New test** `verification_accepts_upstream_trust_bundle_object_shape`:
-  upstream object shape verifies end-to-end (`valid=true`), the legacy
-  bare-array shape stays tolerated, and a string chain (neither shape)
-  is rejected by `fetch_trust_bundle`.
-- **Base merge**: merged the assigned base `2115ae23` (task-064 view-query
-  grammar + verifier-script-overlay main) into the task branch; the only
-  conflicts were regenerated `web/dist` build artifacts, resolved to the
-  base's bundles to match its `web/src` (the task branch made no frontend
-  source changes).
-- F12-F17 from prior rounds (key persistence, `GYRE_AGENT_SIGNING_KEY`
-  docs, rogue-leaf/chain binding, fmt/clippy gate repairs, warn-continue
-  exemption line) remain in place and re-verified this round.
+- **Base merge resolution**: the assigned repair rebased the branch onto
+  the assignment base `66a5fc67` (task-075 LSP call graph + task-102
+  trusted-proxy main). Three conflicts, resolved in the task's favor
+  where the base carried the pre-task-107 stub:
+  - `crates/gyre-server/src/lib.rs` / `mem.rs` `AppState`: kept the
+    port-backed `commit_signatures: Arc<dyn CommitSignatureRepository>`
+    and `signing_config: SigningConfig` fields (the task-107
+    implementation) and dropped the base's stale in-memory
+    `CommitSignatureStore`/`sigstore_mode` duplicates — the base side
+    predates the task and its fields would have shadowed the real
+    implementation; took the base's new `trusted_proxies` field
+    (task-102, required by `trusted_proxy.rs`/`middleware.rs` merged
+    in from the base).
+  - `web/dist/assets/elk.bundled-DuGOUTHE.js`: regenerated build
+    artifact, resolved to the base's bundle (no frontend source changes
+    on this branch; the executor restores web/dist from the base and
+    final integration republishes).
+- `cargo check -p gyre-server -p gyre-adapters --all-targets` passes at
+  the merged head — the base's `middleware.rs`/`main.rs` trusted-proxy
+  wiring and the task's signing surface compile together with no
+  reference to the dropped stub fields.
+- F19 (upstream Fulcio trust-bundle protojson `CertificateChain` object
+  shape) and F12-F17 from prior rounds remain in place at the merged
+  head, re-verified by the focused suites below.
 
-### Verification evidence (head `d7d341ca`, under /tmp/stage/review-evidence/)
+### Verification evidence (head `c46c96579`, under /tmp/stage/review-evidence/)
 
-Focused suites: sigstore 17/17 (including the new F19 shape test),
-`task107_upstream_conformance` 3/3 — `production_verifies_against_
-upstream_pem_bundle` now drives production `verify_signature_fulcio`
-against a bundle encoded exactly as upstream serves it and passes —
-commit_signatures 6/6, api::provenance 5/5,
-`task107_signing_key_env` 1/1. Mechanical gates at the new head
-against the base `2115ae23`: `check-rustfmt-diff.py` exit 0
-(`f19-rustfmt-gate.txt`), `check-clippy-diff.py` exit 0 — 26 Rust files,
-1127 existing warnings outside changes (`f19-clippy-gate.txt`) — and
-`check-arch.sh`, `check-inert-enforcement.sh`,
-`check-fabricated-scope-defaults.sh`, `check-warn-continue-creation.sh`,
-`check-mem-port-contracts.sh`, `check-dead-message-kinds.sh`, and
-`check-task-commit-attribution.sh` all exit 0
-(`f19-gate-*.txt`). Live Fulcio interop remains blocked by sandbox
-network policy (fulcio.sigstore.dev:443 connect refused,
-`f19-live-verification.txt`); exact-head GitHub CI is mandatory after
-review.
+Focused suites at the merged head: `merge-focused-tests.txt` —
+sigstore 17/17 (including the F19 shape test), commit_signatures 6/6,
+api::provenance 5/5, `task107_signing_key_persistence` 1/1;
+`merge-focused-tests-integration.txt` — `task107_upstream_conformance`
+3/3 and `task107_signing_key_env` 1/1. `cargo check -p gyre-server -p
+gyre-adapters --all-targets` exits 0. Full workspace suites,
+architecture checks, all-target Clippy, and GitHub CI are owned by
+verification/publication; live Fulcio interop remains blocked by
+sandbox network policy (fulcio.sigstore.dev:443 connect refused,
+prior-round `f19-live-verification.txt`); exact-head GitHub CI is
+mandatory after review.
