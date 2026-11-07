@@ -121,6 +121,11 @@ Clicking a repo from Workspace Home enters Repo Mode. The top bar shows `[←] W
 - **Bidirectional nav**: clicking a node with a `spec_path` shows a "Go to spec" button that opens the Specs tab with that spec's detail panel. Spec → Architecture nav is via the Architecture mini canvas in the spec detail.
 - Controls: lens/view selector, LLM "Ask" SSE chat, filter panel (node type, complexity, churn), Code tab.
 - `POST /api/v1/repos/{id}/graph/predict` — structural predictions surfaced in canvas and mini canvas.
+- **Default views** (HSI §3, view-selector tabs in the Explorer control bar; Boundary is the default):
+  - **Boundary** — C4 progressive drill-down: Level 1 = workspace repo cards with type/endpoint counts (from the workspace knowledge graph) and cross-repo dependency chips; Levels 2–4 = the canvas drill-down (packages → modules → code items) with breadcrumb drill-up.
+  - **Spec Realization** — two-panel view: spec list (status badge, linked-node count, task progress) ↔ graph nodes linked via GovernedBy edges / `spec_path`. "Read / Edit Spec" opens the inline spec editor; clicking a node navigates to it in Boundary.
+  - **Change** — architectural deltas since your last visit (`GET /repos/{id}/graph/timeline?since=…`, `since` from the client-cached `X-Gyre-Last-Seen` response header; 24h fallback on first visit). Added (+) / Modified (~) / Removed (−) entries with type, containing module, spec ref, authoring agent; entries navigate to the node in Boundary.
+  - **System Trace** — MR SDLC timeline from `GET /api/v1/merge-requests/{id}/timeline`: MR selector, typed event rows, expandable gate pass/fail, and View Conversation / View Diff / View Attestation inline sections.
 
 ### Decisions Tab
 
@@ -145,6 +150,9 @@ Clicking a repo from Workspace Home enters Repo Mode. The top bar shows `[←] W
 | `WorkspaceHome.svelte` | Workspace home dashboard — 5 section cards |
 | `RepoMode.svelte` | Repo mode shell — horizontal tab routing |
 | `ExplorerCanvas.svelte` | Unified architecture canvas — semantic zoom treemap, lens toggle (structural/evaluative/observable), filter presets, view query rendering, minimap (replaces the former Graph/Flow tabs) |
+| `explorer/SpecRealizationView.svelte` | Explorer default view — spec ↔ realization two-panel (GovernedBy linkage) |
+| `explorer/ChangeView.svelte` | Explorer default view — architectural deltas since last visit |
+| `explorer/SystemTraceView.svelte` | Explorer default view — MR SDLC timeline with gate expansion and conversation/diff/attestation sections |
 | `ArchPreviewCanvas.svelte` | Architecture mini canvas in spec detail panel |
 | `EditorSplit.svelte` | Side-by-side spec editor + architecture canvas |
 | `DetailPanel.svelte` | Slide-in right panel for entity drill-in |
