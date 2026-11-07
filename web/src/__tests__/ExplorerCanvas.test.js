@@ -2137,3 +2137,218 @@ describe('ExplorerCanvas — scope drill-down', () => {
     await new Promise(r => setTimeout(r, 20));
   });
 });
+
+// ── HSI §3 Three Lenses — Evaluative overlay decorations ──────────────────
+//
+// The Evaluative lens composes on top of the Structural base: same layout,
+// same spec-governance coloring, plus coverage badges (green/yellow/red),
+// gate status rings/edge colors, and spec approval icons.
+
+const LENS_NODES = [
+  { id: 'pkg1', node_type: 'package', name: 'api', qualified_name: 'api', file_path: '', line_start: 0, line_end: 0, visibility: 'public', spec_confidence: 'none', test_node: false },
+  { id: 'fn1', node_type: 'function', name: 'create_user', qualified_name: 'api.create_user', file_path: 'api/handlers.py', line_start: 10, line_end: 30, visibility: 'public', spec_confidence: 'high', test_node: false, test_coverage: 0.85, spec_path: 'specs/system/auth.md' },
+  { id: 'spec1', node_type: 'module', name: 'specs/system/auth.md', qualified_name: 'specs/system/auth.md', file_path: 'specs/system/auth.md', line_start: 0, line_end: 0, visibility: 'public', spec_confidence: 'none', test_node: false },
+];
+
+const LENS_EDGES = [
+  { id: 'le1', source_id: 'pkg1', target_id: 'fn1', edge_type: 'contains' },
+  { id: 'le2', source_id: 'fn1', target_id: 'spec1', edge_type: 'governed_by' },
+];
+
+const APPROVAL_LEDGER = [
+  { id: 'ap1', spec_path: 'specs/system/auth.md', spec_sha: 'a'.repeat(40), approver_id: 'user:alice', approved_at: 100, active: true },
+];
+
+describe('ExplorerCanvas — HSI §3 Three Lenses (evaluative overlay)', () => {
+  /** Capture (text, x, y, fillStyle) for every fillText call. */
+  function captureDrawnText() {
+    const drawn = [];
+    mockCtx.fillText.mockImplementation((text, x, y) => {
+      drawn.push({ text: String(text), x, y, fillStyle: mockCtx.fillStyle });
+    });
+    return drawn;
+  }
+
+  /** Capture every strokeStyle assignment (edge/ring colors). */
+  function captureStrokes() {
+    const strokes = [];
+    let current = '';
+    Object.defineProperty(mockCtx, 'strokeStyle', {
+      configurable: true,
+      get: () => current,
+      set: (v) => { current = v; strokes.push(v); },
+    });
+    return strokes;
+  }
+
+  /** Install a QUEUED requestAnimationFrame mock and return a flush function.
+   *
+   *  The file-level beforeEach mock invokes the callback synchronously, which
+   *  re-enters animLoop: the nested pass sets `animFrame = null` and the
+   *  outer `animFrame = requestAnimationFrame(...)` assignment then clobbers
+   *  it back to a truthy id, permanently blocking redraws (browsers never
+   *  call rAF callbacks synchronously, so this only affects tests). Queuing
+   *  the callbacks and draining them explicitly reproduces browser ordering:
+   *  layout effects run before the first frame is drawn. */
+  function installQueuedRaf() {
+    const queue = [];
+    global.requestAnimationFrame = vi.fn((cb) => {
+      queue.push(cb);
+      return queue.length;
+    });
+    global.cancelAnimationFrame = vi.fn();
+    return () => {
+      let guard = 0;
+      while (queue.length > 0 && guard < 100) {
+        const cb = queue.shift();
+        cb(performance.now());
+        guard++;
+      }
+    };
+  }
+
+  it('evaluative lens legend includes coverage, gate, and approval entries', () => {
+    installQueuedRaf();
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: LENS_NODES, edges: LENS_EDGES, lens: 'evaluative' },
+    });
+    const legendLabels = [...container.querySelectorAll('.legend-label')].map(el => el.textContent);
+    expect(legendLabels).toContain('Coverage ok');
+    expect(legendLabels).toContain('Coverage partial');
+    expect(legendLabels).toContain('Coverage low');
+    expect(legendLabels).toContain('Gate pass');
+    expect(legendLabels).toContain('Gate fail');
+    expect(legendLabels).toContain('Approved');
+    expect(legendLabels).toContain('Pending');
+    expect(legendLabels).toContain('Rejected');
+  });
+
+  it('evaluative lens draws a color-coded coverage badge (green at 85%)', () => {
+    const flush = installQueuedRaf();
+    const drawn = captureDrawnText();
+    render(ExplorerCanvas, {
+      props: { nodes: LENS_NODES, edges: LENS_EDGES, lens: 'evaluative' },
+    });
+    flush();
+    // The leaf node is drawn at all (guards the fixture against silently
+    // testing nothing)
+    expect(drawn.some(d => d.text === 'create_user')).toBe(true);
+    const coverageBadges = drawn.filter(d => d.text === '85%');
+    expect(coverageBadges.length).toBeGreaterThan(0);
+    // High coverage (>= 70%) renders in green
+    expect(coverageBadges.every(d => d.fillStyle === '#86efac')).toBe(true);
+  });
+
+  it('structural lens does not draw the coverage badge (overlay is evaluative-only)', () => {
+    const flush = installQueuedRaf();
+    const drawn = captureDrawnText();
+    render(ExplorerCanvas, {
+      props: { nodes: LENS_NODES, edges: LENS_EDGES, lens: 'structural' },
+    });
+    flush();
+    expect(drawn.some(d => d.text === 'create_user')).toBe(true);
+    expect(drawn.some(d => d.text === '85%')).toBe(false);
+  });
+
+  it('evaluative lens colors edges and node ring red for a failed gate, green for a passed gate', () => {
+    // Baseline: no gate data → no gate red in stroke colors
+    const flush = installQueuedRaf();
+    const baseline = captureStrokes();
+    render(ExplorerCanvas, {
+      props: { nodes: LENS_NODES, edges: LENS_EDGES, lens: 'evaluative' },
+    });
+    flush();
+    expect(baseline.includes('#ef4444')).toBe(false);
+
+    // Failed gate → red edge + red ring appear
+    const failStrokes = captureStrokes();
+    render(ExplorerCanvas, {
+      props: { nodes: LENS_NODES, edges: LENS_EDGES, lens: 'evaluative', gateStatusBySpec: { 'specs/system/auth.md': 'fail' } },
+    });
+    flush();
+    expect(failStrokes.includes('#ef4444')).toBe(true);
+
+    // Passed gate → green ring/edges present (differential: more green
+    // stroke assignments than the gate-less baseline, which only has the
+    // structural spec border green)
+    const passStrokes = captureStrokes();
+    render(ExplorerCanvas, {
+      props: { nodes: LENS_NODES, edges: LENS_EDGES, lens: 'evaluative', gateStatusBySpec: { 'specs/system/auth.md': 'pass' } },
+    });
+    flush();
+    const countGreen = (arr) => arr.filter(c => c === '#22c55e').length;
+    expect(countGreen(passStrokes)).toBeGreaterThan(countGreen(baseline));
+  });
+
+  it('evaluative lens draws spec approval icons: ✓ approved, ⏳ pending, ✗ rejected', () => {
+    // Approved (active ledger record)
+    const flush = installQueuedRaf();
+    const approvedText = captureDrawnText();
+    render(ExplorerCanvas, {
+      props: { nodes: LENS_NODES, edges: LENS_EDGES, lens: 'evaluative', specApprovals: APPROVAL_LEDGER },
+    });
+    flush();
+    expect(approvedText.some(d => d.text === 'create_user')).toBe(true);
+    expect(approvedText.some(d => d.text === '\u2713' && d.fillStyle === '#22c55e')).toBe(true);
+
+    // Pending (spec-linked node, no ledger record at all)
+    const pendingText = captureDrawnText();
+    render(ExplorerCanvas, {
+      props: { nodes: LENS_NODES, edges: LENS_EDGES, lens: 'evaluative', specApprovals: [] },
+    });
+    flush();
+    expect(pendingText.some(d => d.text === '\u23F3' && d.fillStyle === '#eab308')).toBe(true);
+
+    // Rejected (ledger record rejected by a reviewer)
+    const rejectedText = captureDrawnText();
+    render(ExplorerCanvas, {
+      props: {
+        nodes: LENS_NODES, edges: LENS_EDGES, lens: 'evaluative',
+        specApprovals: [{ ...APPROVAL_LEDGER[0], active: false, rejected_at: 200, approved_at: 100 }],
+      },
+    });
+    flush();
+    expect(rejectedText.some(d => d.text === '\u2717' && d.fillStyle === '#ef4444')).toBe(true);
+  });
+
+  it('structural lens does not draw approval icons (overlay is evaluative-only)', () => {
+    const flush = installQueuedRaf();
+    const drawn = captureDrawnText();
+    render(ExplorerCanvas, {
+      props: { nodes: LENS_NODES, edges: LENS_EDGES, lens: 'structural', specApprovals: APPROVAL_LEDGER },
+    });
+    flush();
+    expect(drawn.some(d => d.text === 'create_user')).toBe(true);
+    expect(drawn.some(d => d.text === '\u2713' || d.text === '\u23F3' || d.text === '\u2717')).toBe(false);
+  });
+
+  it('switching lenses does not re-layout the graph — node label positions are identical', async () => {
+    const flush = installQueuedRaf();
+    const drawn = captureDrawnText();
+    const { container } = render(ExplorerCanvas, {
+      props: { nodes: LENS_NODES, edges: LENS_EDGES, lens: 'structural' },
+    });
+    flush();
+    const positionOf = (text) => {
+      const call = drawn.find(d => d.text === text);
+      return call ? { x: call.x, y: call.y } : null;
+    };
+    const structuralPos = positionOf('create_user');
+    expect(structuralPos).not.toBeNull(); // fixture guard: the node is drawn
+
+    drawn.length = 0;
+    const evaluativeBtn = Array.from(container.querySelectorAll('.lens-group .tb-btn'))
+      .find(b => b.textContent.trim() === 'Evaluative');
+    expect(evaluativeBtn).toBeTruthy();
+    await fireEvent.click(evaluativeBtn);
+    flush();
+
+    const evaluativePos = positionOf('create_user');
+    expect(evaluativePos).not.toBeNull(); // same node still drawn after the switch
+    // Same layout: only visual encodings changed, positions did not
+    expect(evaluativePos).toEqual(structuralPos);
+    // And the evaluative overlay is active (re-render really happened)
+    const legendLabels = [...container.querySelectorAll('.legend-label')].map(el => el.textContent);
+    expect(legendLabels).toContain('Gate pass');
+  });
+});
