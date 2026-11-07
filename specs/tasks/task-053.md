@@ -6,10 +6,10 @@ depends_on:
   - task-031
   - task-036
   - task-038
-progress: complete
+progress: ready-for-review
 review: specs/reviews/task-053.md
 coverage_sections: []
-commits: []
+commits: ["b1abc2225"]
 ---
 
 ## Spec Excerpt
@@ -80,19 +80,44 @@ When working on this task:
 - `fix(process): add JS/TS mirrored-logic and tautological assertion checks (TASK-053)`
 - `fix(ui): address R1 review findings — viewport sync, real tests (TASK-053)`
 - `fix(ui): address R2 review findings — comparative tests, dead code, edge assertions (TASK-053)`
+- `fix(ui): mutation-sensitive explorer perf tests, pinch anchor fix (TASK-053)` (`b1abc2225`, this branch)
 
 ## Shipped
 
-The TASK-053 implementation (production code, benchmark/responsive tests,
-and all R1–R3 review fixes) is present in the assigned base tree — it was
-recovered into this branch's history by the pipeline checkpoint commits,
-and the review record at `specs/reviews/task-053.md` closes at
-"R3 — complete, 0 findings". The assigned task document above is preserved
-verbatim per the contract repair; these notes record the shipped behavior
-only. This assignment made **no production code changes**: it re-verified
-the recovered implementation against the current base (which has since
-stacked task-036/038/065/087 work on the same files) and confirmed every
-acceptance criterion still holds.
+The TASK-053 implementation (production code, responsive/benchmark tests,
+and the R1–R3 review fixes) was recovered into this branch's history by the
+pipeline checkpoint commits. An independent mutation-analysis review (R4,
+`specs/reviews/task-053.md`) then found that the recovered performance
+tests were not mutation-sensitive — every Part A mechanism (viewport
+culling, LOD, edge bundling) could be individually disabled with the full
+suite still passing, and no test ever moved the camera. Commit `b1abc2225`
+on this branch repairs exactly that, plus one real production bug the new
+tests exposed.
+
+### What `b1abc2225` changed
+
+- **Test infrastructure**: the synchronous rAF mock wedged the component's
+  redraw loop (a stale truthy `animFrame` id made every later
+  `scheduleRedraw()` a no-op), which is why camera interaction could not
+  be simulated. Replaced with an explicit rAF queue + `flushFrames()`; the
+  camera pose is read back from the minimap viewport rectangle (stroked in
+  world coordinates once per frame).
+- **New mutation-sensitive tests** (each verified to fail under its
+  disabling mutation, logs under `/tmp/stage/review-evidence/task-053-r4/`):
+  culling under a deep-zoomed camera, LOD label suppression at mid zoom
+  (0.3–0.5) with labels reappearing at high zoom, semantic-zoom node-type
+  gates, edge bundling on both the >5000-edge and low-zoom branches.
+- **New interaction tests**: wheel zoom-in (world point under cursor
+  preserved), wheel zoom-out, mouse-drag pan, single-finger touch pan,
+  two-finger pinch.
+- **Pinch-zoom bug fix**: `onTouchMove` computed the midpoint correction
+  via `screenToWorld()`, which reads the lagging display camera — the
+  correction was identically zero, so pinch zoom anchored at the screen
+  center instead of the pinch midpoint. Now solved against `targetCam`,
+  the same math as `applyZoomAtMouse`.
+- **Removed superseded weak tests** (initial-fit draw-count bounds, the
+  small-vs-large fillText comparison); kept the honest total-work bounds
+  and CPU-time regression guards.
 
 ### Behavior (Part A — large graph performance)
 
@@ -101,22 +126,20 @@ acceptance criterion still holds.
   subtrees; `drawEdges` frustum-culls edges whose endpoints are both
   off-screen.
 - **Level-of-detail rendering**: leaf labels render only when
-  `sw > 30 && sh > 14 && cam.zoom >= 0.5` — at low zoom nodes are simple
-  colored rectangles; semantic zoom additionally gates node types
-  (packages → types → endpoints → functions → fields) at zoom 0.3/0.6/1.0/2.0.
+  `sw > 30 && sh > 14 && cam.zoom >= 0.5`; semantic zoom additionally gates
+  node types at zoom 0.3/0.6/1.0/2.0.
 - **Edge bundling/culling**: `drawEdges` switches to `drawBundledEdges`
-  (group-to-group aggregate arrows) when `cam.zoom < 0.5` or
-  `renderEdges.length > 5000`.
+  (group-to-group aggregate arrows with "N edges" count labels) when
+  `cam.zoom < 0.5` or `renderEdges.length > 5000`.
 - **Incremental layout**: the layout `$effect` recomputes only on
   graph-data/breadcrumb/filter changes; pan/zoom mutate the non-reactive
   `cam` and never trigger layout.
-- **Benchmark**: `ExplorerCanvas-performance.test.js` generates a 10k-node /
-  20k-edge hierarchical mock graph and asserts CPU-time regression guards,
-  culling-bounded draw calls, LOD text reduction (comparative small-vs-large
-  graph), and bundled-vs-individual edge rendering. The >30fps interaction
-  target cannot be measured in jsdom (no real frame loop/GPU); the test file
-  documents this limitation — the culling/LOD/bundling mechanisms it verifies
-  are what keep interaction above the target in a real browser.
+- **Benchmark**: 10k/15k-node renders with CPU-time regression guards. The
+  >30fps interaction target cannot be measured in jsdom (no real frame
+  loop/GPU); the interaction tests simulate real wheel/drag/pinch input
+  through the component's handlers and the culling/LOD/bundling tests
+  assert per-frame draw work stays bounded while the camera moves — the
+  mechanisms that keep interaction above the target in a real browser.
 
 ### Behavior (Part B — responsive layout)
 
@@ -130,24 +153,39 @@ acceptance criterion still holds.
   wide viewports (R1-F4 fix), with teardown on destroy.
 - **Touch**: `ontouchstart`/`ontouchmove`/`ontouchend` are wired on the
   canvas; single-finger drag pans, two-finger pinch zooms toward the pinch
-  midpoint (world point under the midpoint is preserved).
+  midpoint (world point under the midpoint preserved — now actually true
+  after the `b1abc2225` anchor fix).
 
 ### Test evidence
 
 Focused probes on this branch (clean tree, `npm ci` with locked versions,
-evidence saved under `/tmp/stage/review-evidence/`):
+evidence saved under `/tmp/stage/review-evidence/task-053-r4/`):
 
-- `npx vitest run src/__tests__/ExplorerView-responsive.test.js
-  src/__tests__/ExplorerCanvas-performance.test.js` — **23/23 pass**
-  (8 responsive: real collapse/expand click interactions, matchMedia
-  viewport-sync reset, aria labels; 15 performance: 10k/15k-node renders with
-  CPU-time guards, culling bounds, comparative LOD, edge bundling).
+- `npx vitest run src/__tests__/ExplorerCanvas-performance.test.js` —
+  **19/19 pass** (10k/15k CPU guards and total-work bounds; 5 camera
+  interaction tests; culling/LOD/semantic-zoom/bundling under real moved
+  cameras; individual-edge small-graph test).
+- **Mutation verification** (each mutation applied to
+  `ExplorerCanvas.svelte`, targeted test run, source restored):
+  - `isVisible()` → `return true`: culling test fails (4502 node fills per
+    frame at deep zoom vs ≤60 expected).
+  - leaf label guard → `if (true)`: LOD test fails (3471 leaf labels at mid
+    zoom vs 0 expected).
+  - semantic-zoom gates removed: semantic test fails (3473 fills for the
+    function-leaf graph vs ≤50 expected).
+  - edge bundling condition → `if (false)`: both bundling tests fail
+    (0 "N edges" bundle labels vs >0 expected).
+  - pinch midpoint anchoring removed: pinch test fails (19.5 world-unit
+    drift vs <0.5 expected).
 - `npx vitest run src/__tests__/ExplorerCanvas.test.js
   src/__tests__/ExplorerCanvasDrillDown.test.js src/__tests__/ExplorerChat.test.js
   src/__tests__/ExplorerChat-streaming.test.js src/__tests__/ExplorerViewDrillUrl.test.js
-  src/__tests__/ExplorerViewScope.test.js src/__tests__/ExplorerViewShortcuts.test.js`
-  — **284/284 pass** (no regressions from the later tasks stacked on these
-  same files).
+  src/__tests__/ExplorerViewScope.test.js src/__tests__/ExplorerViewShortcuts.test.js
+  src/__tests__/ExplorerView-responsive.test.js` — **292/292 pass** (no
+  regressions from this repair or the later tasks stacked on these files).
+- Mechanical checks pass: `check-mirrored-logic-tests-js.sh`,
+  `check-tautological-assertions-js.sh`, `check-assertionless-tests.sh`,
+  `check-task-commit-attribution.sh`.
 
 Full workspace suites, architecture checks, and GitHub CI are owned by the
 verification and publication stages.
