@@ -8,7 +8,7 @@ coverage_sections:
   - "ui-navigation.md §2 Workspace Home"
   - "ui-navigation.md §3 Repo Mode"
   - "ui-navigation.md §10 Cross-Workspace View"
-commits: ["796c800da477a8cd45aeb60ca9ec7665a11938b8", "45a3f5e4f2c9d844dd417401e4946ab0da85c857", "13d856c82e77a1cd2e414ff5383e843774ff028d"]
+commits: ["796c800da477a8cd45aeb60ca9ec7665a11938b8", "45a3f5e4f2c9d844dd417401e4946ab0da85c857", "13d856c82e77a1cd2e414ff5383e843774ff028d", "7c2b975731bfd631f3e6b91da5d40790c196108f", "7e5cdaba110cbc9de3f5a9f6ad79303897ce7776"]
 ---
 
 ## Authority and Scope
@@ -114,36 +114,38 @@ is claimed here, per section, with the verifying evidence below.
   error toasts/states (cross-workspace unknown-workspace toast, Agent Rules
   error + Retry, per-section load errors) rather than empty success.
 
-Verification (current round, verification-repair of the Clippy finding at
-head `796c800d` on merge `27151498f`, assigned base `a884329d`):
+Verification (current round, review-repair of the two findings on
+candidate `9af70150d` at review checkpoint `716f4c48`, assigned base
+`233664cf`):
 
-- The prior verification sandbox failed its checks script with exactly one
-  hard finding: `crates/gyre-server/src/api/graph.rs:2462:
-  unused_must_use` — the `briefing_ask_repo_scope_abac_denied_returns_403`
-  test discarded the `anyhow::Result` returned by `seed_builtin_policies`
-  via `block_in_place`. Everything else in that log (architecture/ABAC/mem
-  lints, cargo check, vite build) passed; the remaining output lines are
-  pre-existing Svelte build warnings, present on main as well.
-- Fix: commit `796c800d` expects the seed result inside the closure
-  (`.expect("seed built-in ABAC policies")`), matching the established
-  pattern in `api/release.rs`, so a failed policy seed fails the test
-  loudly instead of being silently discarded.
-- Probes (evidence retained under `/tmp/stage/review-evidence/`):
-  `python3 scripts/check-clippy-diff.py a884329d` → **changed lines clean**
-  (2 Rust files, 1094 pre-existing warnings outside changes) — the exact
-  gate that failed; `python3 scripts/check-rustfmt-diff.py HEAD^1` →
-  clean; `cargo test -p gyre-server --lib
-  briefing_ask_repo_scope_abac_denied_returns_403` → **1 passed / 0
-  failed** (seed succeeds, 403 assertion holds). The remaining
-  `unused Result` at `tests/search_wiring.rs:124` is pre-existing on main
-  and outside this task's changed files.
-- Earlier-round evidence still applies to the unchanged task-side source:
-  focused navigation probes 337 passed / 0 failed on the prior merge
-  round, full frontend suite 1598 passed / 0 failed, cargo
-  `api::graph::tests` 28, `briefing` 24, `graph_integration` 37, all 0
-  failed. Full suites, all-target Clippy, and exact-head GitHub CI remain
-  owned by verification and publication; `web/dist` was not rebuilt here
-  (final integration rebuilds it remotely).
+- Finding 1 (test gap): the myNotifications response-shape fix
+  (`{notifications:[...]}` envelope from `users.rs` get_my_notifications)
+  had no regression test — every mock in `CrossWorkspaceHome.test.js`
+  resolved a bare array, so the pre-fix `data?.items` read passed the
+  whole suite. Commit `7e5cdaba` adds two tests mocking the real envelope
+  (with `limit`/`offset`) that assert the decision items render and the
+  empty state is not shown for a non-empty array. Mutation probe
+  (evidence `/tmp/stage/review-evidence/README.md`): reverting the
+  component to `data?.items` fails exactly those 2 tests (2 failed | 36
+  passed).
+- Finding 2 (code): ExplorerView's initial-read `$effect` deleted the
+  `?subTab` param after seeding the Architecture sub-tab, so reload/copy
+  of a deep-linked `architecture?subTab=briefing` URL reopened the Graph
+  sub-tab. Commit `7c2b9757` removes the deletion (App's
+  `setRepoArchSubTab` already mirrors the rendered sub-tab into the URL,
+  per docs/ui.md "deep-linkable via ?subTab=briefing") and adds a
+  regression test rendering the real ExplorerView at repo scope with an
+  App-mimicking `onArchSubTabChange`; the param survives the mount.
+  Mutation probe: restoring the deletion fails exactly that test
+  (1 failed | 7 passed).
+- Fixed-state probes (`npx vitest run`, locked deps via `npm ci`):
+  `CrossWorkspaceHome` + `ExplorerViewScope` → 46 passed / 0 failed;
+  broader focused navigation suites (AppShell, CrossWorkspaceHome,
+  ExplorerViewScope, ExplorerViewDrillUrl, ExplorerView-responsive,
+  RepoMode, RepoModeHeader) → 174 passed / 0 failed. `web/dist` was not
+  rebuilt here (final integration rebuilds it remotely); full suites,
+  all-target Clippy, and exact-head GitHub CI remain owned by
+  verification and publication.
 
 Contract note for the reviewer: an earlier attempt ticked the acceptance
 checkboxes in this file, which the pipeline's `requirement_parts` treats as
