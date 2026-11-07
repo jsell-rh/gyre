@@ -4,7 +4,7 @@ spec_ref: "explorer-implementation.md §Phase 4: Polish"
 depends_on: []
 progress: ready-for-review
 coverage_sections: []
-commits: [d988af762]
+commits: ["d988af76230b318bf435a89bee9fdd9e6db04b2e"]
 ---
 
 ## Spec Excerpt
