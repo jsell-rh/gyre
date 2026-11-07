@@ -925,7 +925,7 @@
   async function loadTraceData(repoId) {
     try {
       // Find the most recent MR for this repo that has trace data
-      const mrs = await api.mergeRequests({ repo_id: repoId, per_page: 5 });
+      const mrs = await api.mergeRequests({ repository_id: repoId, per_page: 5 });
       const mrList = mrs?.merge_requests ?? mrs ?? [];
       for (const mr of mrList) {
         try {
@@ -947,7 +947,7 @@
    */
   async function loadGateData(repoId) {
     try {
-      const mrs = await api.mergeRequests({ repo_id: repoId, per_page: 10 });
+      const mrs = await api.mergeRequests({ repository_id: repoId, per_page: 10 });
       const mrList = mrs?.merge_requests ?? mrs ?? [];
       const records = [];
       for (const mr of mrList) {
