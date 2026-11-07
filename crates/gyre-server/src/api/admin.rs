@@ -429,6 +429,12 @@ pub async fn admin_seed(
         TaskPriority, TaskStatus, Tenant, Workspace,
     };
 
+    // non-atomic-create:ok - dev-bootstrap demo fixture: every seed record is
+    // an independent demo entity (no parent-child invariant ties the set
+    // together; tenant/workspace are find-or-create and the rest are
+    // first-boot fixtures whose creation errors propagate with `?`), and the
+    // whole endpoint is Admin-gated demo tooling, not a production path.
+
     // Scope: derived from the authenticated caller, never caller-supplied.
     // The global token resolves as tenant "default" with Admin role; JWT
     // callers seed their own tenant.

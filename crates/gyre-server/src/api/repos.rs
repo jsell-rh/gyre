@@ -540,6 +540,10 @@ pub async fn create_mirror_repo(
                         divergence_ports,
                         extract_results_repo,
                         notification_scope,
+                        Arc::new(crate::graph_extraction::CallGraphTelemetry {
+                            kv: Arc::clone(&state_for_extract.kv_store),
+                            metrics: Arc::clone(&state_for_extract.metrics),
+                        }),
                     )
                     .await;
                 }
@@ -631,6 +635,10 @@ pub async fn sync_mirror(
                 divergence_ports,
                 Arc::clone(&state.spec_assertion_results),
                 notification_scope,
+                Arc::new(crate::graph_extraction::CallGraphTelemetry {
+                    kv: Arc::clone(&state.kv_store),
+                    metrics: Arc::clone(&state.metrics),
+                }),
             )
             .await;
         }
