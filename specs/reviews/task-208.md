@@ -51,3 +51,19 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 3 (r80) — attribution clobber reproduced on candidate `42ce37321`; product surface re-verified clean
+
+Assignment: base `23d03e685`, candidate `42ce373219fb8556b70d6fe5a99daafd466bcdcc`. Evidence: `/tmp/stage/review-evidence/r80/` (files `01`–`18`).
+
+**Finding (recurring, rounds 2–41 + r77): the candidate is itself the clobber.** Its only change vs parent `825e4ad0c` rewrites `commits:` from the correct six-SHA list back to five, dropping `ea006d52bb42e96e6f176b02b5390b6cb56a3116` (`build(web): exempt generated dist bundles from whitespace gate (task-208)` — root `.gitattributes`, the change that lets the shipped dist bundle `ad1121c5` pass the whitespace gate). Verified: `git merge-base --is-ancestor ea006d52 HEAD` → 0 and `... 23d03e685` (assigned base) → 1, so it is task-208-labeled branch product surface that is invisible to review scoping while unlisted, violating the AGENTS.md attribution invariant. The fixed in-repo attribution pass (`python3 scripts/dev-attribution.py task-208`, working-tree run then restored) computes exactly the six-SHA list — the candidate's frontmatter contradicts the output of the root-cause fix shipped on its own branch. Root cause re-confirmed on this attempt: the executor-staged `/tmp/stage/dev-attribution.py` (sha256 `627fce91…`) is again the pre-fix version, missing the `path == '.gitattributes' or` product-surface line (in-repo fixed: `c23f2505…`). The durable fix must land wherever `/tmp/stage` is populated from — process-owner responsibility, not repairable in-repo without repeating the clobber cycle.
+
+Product surface re-verified fresh on the candidate (all pass, no new defects):
+- Dead-code grep (`get_my_agents|get_my_tasks|get_my_mrs|myAgents|myTasks|myMrs` over `crates/` + `web/src/`) → zero matches.
+- No route or ABAC registrations for `/api/v1/users/me/{agents,tasks,mrs}`; the only URI references in `crates/` are the 404-guard literals in `users.rs`'s regression test; `users.rs` diff vs base is pure handler deletion + the guard test; `abac_middleware.rs` diff removes exactly the three mappings — remaining `users/me/*` endpoints keep the per-handler-auth ABAC-exempt model unchanged.
+- `UserProfile.svelte` renders exactly the six compliant tabs (info, tokens, memberships, ledger, notif-prefs, notifications); forbidden-tab grep → zero.
+- `SKIP_WEB_BUILD=1 cargo test -p gyre-server my_stuff_endpoints_are_removed` → 1/1 ok; `npm ci` + `npx vitest run src/__tests__/UserProfile.test.js` → 23/23 passed; `scripts/test_dev_attribution.py` → 2/2 OK; in-repo `scripts/check-task-commit-attribution.sh task-208` → exit 0 (narrower legacy filter, documented residual).
+- Spec amendment, M22.8 strike (line 652), coverage rows (user-management row 22 `n/a`; HSI row 54 `implemented`) all present; `scripts/e2e-flow.sh` asserts 404 on the removed endpoints.
+- Working tree clean at candidate; the attribution-pass probe wrote the task file and was restored via `git checkout --` (diff captured as evidence first).
+
+Verdict: **needs-revision** — the product work remains complete and clean, but the candidate's frontmatter again drops `ea006d52` from `commits:`, so approval fails closed until the list is restored (mechanical: re-run the fixed in-repo attribution pass with `--commit`, and land the fixed staged script wherever `/tmp/stage` is populated from so the end-of-attempt checkpoint stops re-clobbering).
