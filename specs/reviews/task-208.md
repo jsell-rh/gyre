@@ -51,3 +51,38 @@ Revision commits: `ad1121c` (dist regen), `6bc4189` (M22 annotation + docs), `60
 - Frontmatter `progress: complete`; `## Shipped` section added to the task file per the merge-description contract.
 
 Verdict: **complete**. Every acceptance criterion holds; both rounds' findings are closed with code evidence.
+
+## Round 69 (assignment on candidate `3e29da03c`) — clobber recurrence, verdict needs-revision
+
+Consolidated; the round-43 through round-68 durable facts carry forward in the pipeline findings. All
+product-surface facts below were re-verified fresh at the assigned candidate `3e29da03c` (branch tip).
+
+- **Finding reproduced on the assigned candidate `3e29da03c`** ("process: record task-208 branch commits",
+  55th occurrence of the rounds 2-68 class): its only change vs parent `8ae814eb2` (the docs-only round-68
+  record on top of the r68 repair tip `f2e7c4249` that restored the six-SHA list) rewrites `commits:` from six
+  SHAs back to five, dropping `ea006d52bb42e96e6f176b02b5390b6cb56a3116` (`build(web): exempt generated dist
+  bundles from whitespace gate (task-208)` — root `.gitattributes` `web/dist/** -whitespace`, live at
+  `.gitattributes:4`). Verified with exit codes: `git merge-base --is-ancestor ea006d52 HEAD` → 0 and
+  `git merge-base --is-ancestor ea006d52 36620aedb` (assigned base) → 1 — task-208-labeled branch product
+  surface invisible to review scoping while unlisted, violating the AGENTS.md attribution invariant.
+  Reproduce: `git diff 8ae814eb2..3e29da03c -- specs/tasks/task-208.md`.
+- **Root cause re-confirmed on this attempt:** the executor-staged `/tmp/stage/dev-attribution.py`
+  (sha256 `627fce91…`) is again the pre-fix version — `diff` vs the fixed in-repo
+  `scripts/dev-attribution.py` (sha256 `c23f2505…`) shows exactly the missing
+  `path == '.gitattributes' or` product-surface line — so this attempt's checkpoint pass recomputed the
+  five-SHA list and clobbered the six-SHA list the r68 repair restored. The durable fix must land wherever
+  `/tmp/stage` is populated from (process owner). Repair: mechanical frontmatter-only restore of the
+  six-SHA list via the fixed in-repo pass (`scripts/dev-attribution.py task-208`).
+- **Product surface intact, zero drift since the r66-verified tip `669517d06`:** `git diff 669517d06..HEAD
+  --stat -- crates/ web/src/ specs/system specs/coverage scripts/` is empty (candidate and ancestors since
+  touch only `specs/tasks/task-208.md`). Fresh probes (evidence `/tmp/stage/review-evidence/r69/`):
+  dead-code grep over `crates/` + `web/src/` → zero matches; no route or ABAC registrations for
+  `/api/v1/users/me/{agents,tasks,mrs}` (only URI references are inside the 404 regression test,
+  `users.rs:956-958`); exactly six compliant tabs in `UserProfile.svelte` (info, tokens, memberships,
+  ledger, notif-prefs, notifications); spec amendment and coverage rows in place (user-management row 22
+  `n/a`, HSI row 54 `implemented`); `scripts/test_dev_attribution.py` → 2/2 OK; `npm ci` +
+  `npx vitest run src/__tests__/UserProfile.test.js` → 23/23 passed; `SKIP_WEB_BUILD=1 cargo test -p
+  gyre-server my_stuff_endpoints_are_removed` → 1/1 ok. Working tree clean after all probes.
+- **Verdict: needs-revision** (process finding only; no product defect). The verifier must still run
+  `cargo test --all` and `cd web && npm test`, and final integration must rebuild `web/dist` from the merged
+  `web/src` before publishing.
