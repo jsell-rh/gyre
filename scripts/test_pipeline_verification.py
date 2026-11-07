@@ -30,7 +30,9 @@ class VerificationTests(unittest.TestCase):
             store.retry(work,claim['token'],{'category':error.category,'message':str(error)},attention=error.attention)
             newer=store.enqueue('verify','task-001','g',{'base':'new'})
             self.assertIsNone(store.claim('verify','verifier',ident=newer))
-            store.db.execute('DELETE FROM settings WHERE key=?',(store.runtime_hold_key('task-001','verify','g'),))
+            from pipeline.catalog import helper
+            adapter=helper('dispatch-adapter')
+            adapter.control(store,{'scope':adapter.scope(store),'key':work,'run_id':f"{work}:{claim['token']}"})
             self.assertIsNotNone(store.claim('verify','verifier',ident=newer))
 
     def test_cli_diagnostics_do_not_corrupt_framed_poll(self):
