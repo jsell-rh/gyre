@@ -42,6 +42,11 @@
     assertionSpecPath = null, // spec path currently being edited (for assertion badge rendering)
     highlightedSpanId = null, // span_id to highlight on canvas (from evaluative tab click)
     focusRequest = null, // { nodeId, nonce } — pan/zoom camera to a node (e.g. detail-panel trace step click)
+    windowEscape = true, // install the window-level Escape-to-exit-trace listener (explorer-canvas.md §6).
+    //                     The embedding host (ExplorerView) owns a window-level Escape cascade that
+    //                     closes overlays most-recent-first and clears the trace query itself, so it opts
+    //                     out (false); a second window listener there would clear the trace on the same
+    //                     keypress that closes an overlay, breaking the cascade ordering.
     rootLabel = '',          // breadcrumb root segment label (repo name at repo scope)
     // Architectural timeline (system-explorer.md §6)
     timeline = [],             // ArchitecturalDelta records from graph/timeline endpoint
@@ -5216,7 +5221,12 @@
   // while focused — after clicking the toolbar Trace button or a detail-panel
   // trace step, focus is no longer on the canvas, so the affordance must be
   // window-level. Inputs (search box) keep their own Escape handling.
+  // Skipped when the host owns the window Escape cascade (windowEscape=false):
+  // ExplorerView's handler clears trace queries through its overlay cascade
+  // (spec editor → query editor → detail panel → active view query), so the
+  // trace must survive the Escape that closes an overlay above it.
   function onWindowKeyDown(e) {
+    if (!windowEscape) return;
     if (e.key !== 'Escape') return;
     if (!activeQuery?._trace) return;
     const tag = (e.target?.tagName ?? '').toLowerCase();

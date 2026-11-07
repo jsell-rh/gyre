@@ -1409,6 +1409,11 @@
                   </button>
                 </div>
               {/if}
+              <!-- windowEscape={false}: ExplorerView owns the window-level Escape
+                   cascade (onWindowKeydown: spec editor → query editor → detail panel →
+                   active view query) and already exits trace mode through it; a second
+                   window Escape listener in the canvas would clear the trace on the same
+                   keypress that closes an overlay above it. -->
               <ExplorerCanvas
                 repoId={selectedRepoId}
                 rootLabel={repos.find(r => r.id === selectedRepoId)?.name ?? ''}
@@ -1447,6 +1452,7 @@
                 assertionSpecPath={specEditorOpen ? specEditorPath : null}
                 {highlightedSpanId}
                 focusRequest={traceFocusRequest}
+                windowEscape={false}
                 timeline={graphTimeline ?? []}
                 timelineActive={timelineScrubActive}
                 timelineScrubIndex={timelineScrubIndex}
