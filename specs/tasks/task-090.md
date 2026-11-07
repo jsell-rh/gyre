@@ -143,11 +143,11 @@ lens selection.
 - `cargo test -p gyre-server --lib api::gates` — 7 passed (incl.
   `list_spec_approvals_includes_rejection_fields`).
 
-### Re-verification after contract restore (round 11)
+### Re-verification after contract restore (round 12)
 
 The executor again restored the assigned task document (repair id
-c5ffb5f779614efeb1c4c29af8cfb284, assigned base 30a14669, candidate head
-45516e43) — the only working-tree delta is the task document itself.
+f538a7adcf454b3f8531a0f9f7d6a60b, assigned base 30a14669, candidate head
+9daed13a) — the only working-tree delta is the task document itself.
 Resolved this round:
 
 - **No production code changes.** The three-lens implementation
@@ -158,11 +158,11 @@ Resolved this round:
   verified by inspection and by the full component suite below.
 - **Fresh focused probes on this branch after `npm ci`:**
   `npx vitest run` on the lens unit/URL test files — 32/32 passed
-  (lens-rendering 27, ExplorerViewLensUrl 5; task090-lens-tests-r11.log,
+  (lens-rendering 27, ExplorerViewLensUrl 5; task090-lens-tests-r12.log,
   exit 0); `ExplorerCanvas.test.js` — 157/157 passed
-  (task090-vitest-explorercanvas-r11.log, exit 0);
+  (task090-vitest-explorercanvas-r12.log, exit 0);
   `SKIP_WEB_BUILD=1 cargo test -p gyre-server --lib api::gates` — 7 passed
-  (task090-cargo-gates-r11.log, exit 0; no web/dist churn). Logs retained
+  (task090-cargo-gates-r12.log, exit 0; no web/dist churn). Logs retained
   under /tmp/stage/review-evidence with exit codes.
 - Frontmatter restored (progress ready-for-review, acceptance boxes
   checked, product-surface commit 0766a167 attributed;
