@@ -11,6 +11,7 @@ use gyre_domain::BudgetCallRecord;
 /// `BudgetUsageRepository` are the enforcement input; this table is the
 /// per-call audit trail behind them and the basis for later reporting and
 /// retention.
+#[allow(clippy::double_must_use)] // async_trait generates a must_use future for each method.
 #[async_trait]
 pub trait BudgetCallRepository: Send + Sync {
     /// Append a per-call record. Insert-only; duplicate `id` is an error.

@@ -2465,7 +2465,7 @@ impl BudgetCallRepository for MemBudgetCallRepository {
             .filter(|r| r.workspace_id.as_str() == workspace_id && r.timestamp >= since)
             .cloned()
             .collect();
-        records.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        records.sort_by_key(|r| std::cmp::Reverse(r.timestamp));
         if limit >= 0 {
             records.truncate(limit as usize);
         }
