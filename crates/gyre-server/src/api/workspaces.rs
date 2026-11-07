@@ -1050,7 +1050,7 @@ mod tests {
         use crate::abac_middleware::seed_builtin_policies;
         use crate::auth::test_helpers::{make_test_state_with_jwt, sign_test_jwt};
         let state = make_test_state_with_jwt();
-        tokio::task::block_in_place(|| {
+        let _ = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(seed_builtin_policies(&state))
         });
 
