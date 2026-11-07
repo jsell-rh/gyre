@@ -5,7 +5,7 @@ depends_on: []
 progress: ready-for-review
 coverage_sections:
   - "spec-lifecycle.md §Accountability Integration"
-commits: ["e0af55374d2601d7a89f37e210d94607220f9417", "d3b3c63a79898a1a7c73f9447d595ab93f76cf17", "61a6f222207f4671676682c6404c893983a239e8", "951880b6ba36750f8a4d58489dc20267b42ba03e", "def75ba6b2fa61e6a33661e0e9223bc3455e9562", "ead1d669b2f5743d2813b45e649b7e94163881cd", "56e77ec4ecd3588ab0b9ce6f355466f3c3ad5c4d", "40ded0602516a013f795654772898954c715d06a", "5147d645704a4445cb589f2b73a86cce70076d36", "91110a37bb67c2763763c405cad897058fcd81ec"]
+commits: ["e0af55374d2601d7a89f37e210d94607220f9417", "d3b3c63a79898a1a7c73f9447d595ab93f76cf17", "61a6f222207f4671676682c6404c893983a239e8", "951880b6ba36750f8a4d58489dc20267b42ba03e", "def75ba6b2fa61e6a33661e0e9223bc3455e9562", "ead1d669b2f5743d2813b45e649b7e94163881cd", "56e77ec4ecd3588ab0b9ce6f355466f3c3ad5c4d", "40ded0602516a013f795654772898954c715d06a", "5147d645704a4445cb589f2b73a86cce70076d36", "91110a37bb67c2763763c405cad897058fcd81ec", "4fb14234ce9a576709e6763e5db4a0699b300635"]
 ---
 
 ## Spec Excerpt
@@ -87,11 +87,20 @@ Every finding escalates to the workspace orchestrator as a REAL persisted
 (`spec` resource, write action) — real policy evaluation, no exemption file
 entry.
 
-This repair round removed a leftover kill-test mutant (`if true { return 0; }`
-stubbing `escalate_findings`) from the interrupted assignment's checkpoint.
+Repair rounds: (1) removed a leftover kill-test mutant (`if true { return 0; }`
+stubbing `escalate_findings`) from the interrupted assignment's checkpoint;
+(2) fixed the verification-stage rustfmt failure — the repo-scope guard in
+`spec_has_live_task` was hand-wrapped onto three lines; `rustfmt --check` is
+now clean on the file.
 
 ## Test evidence
 
+- Post-format-fix focused rerun (this round): `cargo test -p gyre-server --lib
+  spec_lifecycle_patrol` — 11 passed, 0 failed; `cargo test -p gyre-server
+  --lib api::specs::tests` — 53 passed, 0 failed.
+- `rustfmt --check crates/gyre-server/src/spec_lifecycle_patrol.rs` — clean
+  (was the failing check in the verification stage: lines 317–319 needed
+  formatting).
 - Kill-test (mutant in place, `escalate_findings` no-op): 3 tests fail with
   `every finding must be escalated, not merely logged` /
   `one escalation per finding` / `escalation must be emitted, not skipped` —
