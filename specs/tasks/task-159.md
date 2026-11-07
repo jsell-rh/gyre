@@ -2,7 +2,7 @@
 title: "Wire meta-spec drift warnings into merge gates"
 spec_ref: "meta-spec-reconciliation.md §9"
 depends_on: [task-156]
-progress: not-started
+progress: ready-for-review
 coverage_sections:
   - "meta-spec-reconciliation.md §9 Merge Gate Behavior"
 commits: ["333030908ce0ff64b2810ea0003fc0e28598abf3"]
@@ -48,12 +48,12 @@ From `meta-spec-reconciliation.md` §9 — Merge Gate Behavior:
 
 ## Acceptance Criteria
 
-- [ ] Merge processor checks meta_spec_set_sha on MRs with attestations
-- [ ] Mismatched SHA produces `[WARN] meta-spec-drift` in gate results
-- [ ] Warning does not block merge by default
-- [ ] `require_current_meta_spec_set: true` workspace setting converts warning to hard block
-- [ ] MRs without attestation skip the check gracefully
-- [ ] Tests cover match, mismatch, hard-block, and no-attestation cases
+- [x] Merge processor checks meta_spec_set_sha on MRs with attestations
+- [x] Mismatched SHA produces `[WARN] meta-spec-drift` in gate results
+- [x] Warning does not block merge by default
+- [x] `require_current_meta_spec_set: true` workspace setting converts warning to hard block
+- [x] MRs without attestation skip the check gracefully
+- [x] Tests cover match, mismatch, hard-block, and no-attestation cases
 
 ## Agent Instructions
 
@@ -63,3 +63,75 @@ From `meta-spec-reconciliation.md` §9 — Merge Gate Behavior:
 - Read `crates/gyre-server/src/constraint_check.rs` for existing constraint evaluation (meta_spec_set_sha constraint exists but may not be wired into gates)
 - The meta_spec_set_sha is already captured in attestations — the check is comparing it against the workspace's current set SHA
 - Follow the existing gate result pattern for adding the drift warning
+
+## Shipped
+
+**Drift evaluation (§9)** — `crates/gyre-server/src/reconciliation.rs`:
+`mr_meta_spec_drift(state, mr)` resolves the MR's provenance attestation (by
+source-branch head commit first, then the author agent's current task,
+walking derived nodes to the chain's root `SignedInput`) and compares the
+recorded `meta_spec_set_sha` against the workspace's current set SHA
+(`compute_meta_spec_set_sha`). Returns no drift when the workspace has no
+bound set, the MR has no attestation, or the attestation records an empty
+SHA — all skip the check gracefully. `format_meta_spec_drift_warning`
+produces the exact §9 text `[WARN] meta-spec-drift: code produced under
+meta-spec set {old}, current is {new}. Reconciliation may be needed.` and
+`parse_meta_spec_drift_warning` round-trips it for the queue graph.
+
+**Merge-gate wiring (§9)** — `crates/gyre-server/src/merge_processor.rs`:
+both merge paths (`process_next` single-entry and `merge_atomic_group`)
+run the drift check before the transactional merge. Default (warn only):
+a gate result with id `meta-spec-drift`, `GateStatus::Passed` and the §9
+warning output is recorded on the MR (idempotent across retry cycles —
+an existing result is updated in place, not duplicated) and the merge
+proceeds. Strict policy (`require_current_meta_spec_set: true`): the entry
+returns to `Queued` carrying the drift reason and stays there until the
+code is reconciled under the current set or the policy is relaxed; every
+atomic-group member is re-queued the same way.
+
+**Workspace merge policy** — `crates/gyre-server/src/merge_policy.rs`:
+`WorkspaceMergePolicy { require_current_meta_spec_set }` persisted through
+the port-backed KV store (namespace `workspace_merge_policies`, key =
+workspace id), default false. A corrupt stored policy surfaces as an error
+on direct lookup and degrades to the spec default (warn only) inside the
+merge processor so a policy-store outage cannot wedge the queue.
+Exposed as `GET/PUT /api/v1/workspaces/{id}/merge-policy` (partial update;
+PUT Admin-only, both handlers tenant-scoped; `crates/gyre-server/src/api/workspaces.rs`),
+registered in the ABAC resolver (`abac_middleware.rs`) and documented in
+`docs/api-reference.md`.
+
+**UI** — `web/src/components/MergeQueueGraph.svelte`: nodes carry a ⚠
+meta-spec drift badge (`data-drift`, `mq-drift-{mr_id}`) when the backend
+recorded a drift warning, the hover tooltip shows "Meta-spec drift:
+produced under v{old}, current is v{new}" (8-char SHA prefixes), and the
+legend lists "Meta-spec drift (warn only)". The graph API
+(`GET /api/v1/merge-queue/graph`, `crates/gyre-server/src/api/merge_deps.rs`)
+surfaces the recorded drift per node by parsing the same gate result the
+MR detail view reads, so the graph cannot disagree with gate results.
+
+### Test evidence
+
+- `cargo test -p gyre-server --lib meta_spec_drift` — 5 passed:
+  warn-records-gate-result-and-merges, hard-block + policy-relax recovery,
+  match-no-warning, no-attestation-skip, gate-result idempotency.
+- `cargo test -p gyre-server --lib merge_policy` — 4 passed: KV default /
+  roundtrip / corrupt-fallback + API test (default warn-only, Developer
+  PUT 403 with no state change, Admin PUT roundtrips, unknown workspace
+  404).
+- `cargo test -p gyre-server --lib reconciliation` drift tests — 7 passed
+  (match / mismatch + §9 format round-trip / no-attestation / no-set /
+  empty-sha / foreign-output parse rejection) from the recovered
+  checkpoint.
+- `cargo test -p gyre-server --lib merge_processor` — 54 passed,
+  `merge_deps` — 13 passed (no regressions in the touched modules).
+- `npx vitest run src/__tests__/MergeQueueGraph.test.js` — 25 passed
+  (20 pre-existing + 5 new drift badge/tooltip/legend tests).
+- Mechanical checks green: check-arch, check-abac-route-registry,
+  check-abac-exempt-handlers (88 handlers), check-scope-literal-defaults,
+  check-in-memory-state-stores, check-forged-scope-fields.
+
+The backend, policy API, and drift evaluation shipped in recovered
+checkpoint 33303090 (assignment interrupted pre-completion); this round
+added the merge-processor-level behavior tests (warn/hard-block/match/
+no-attestation/idempotency), the merge-policy API test, the UI drift
+badge + tests, and the docs/coverage/task bookkeeping.
