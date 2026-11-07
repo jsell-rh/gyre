@@ -41,7 +41,7 @@
 # scripts/migration-sql-portability-exemptions.txt (path:line form,
 # frozen count). Fix by rewriting the statement in portable SQL or
 # splitting per-backend migration directories; never add entries.
-FROZEN_EXEMPTION_COUNT=5
+FROZEN_EXEMPTION_COUNT=1
 #
 # Run by pre-commit and CI.
 

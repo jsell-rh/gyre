@@ -81,6 +81,8 @@ static_gates
 # runs full Rust and frontend suites next, on this same exact merge tree.
 gate timeout --signal=INT --kill-after=30s "${GYRE_DEV_GATE_TIMEOUT:-1800}" \
   bash -c 'cd web && npm ci && npm run build'
-git restore --worktree -- web/dist
-git clean -fd -- web/dist
+if [[ ${GYRE_VERIFY_KEEP_WEB_DIST:-0} != 1 ]]; then
+  git restore --worktree -- web/dist
+  git clean -fd -- web/dist
+fi
 exit "$FAILED"
